@@ -13,7 +13,30 @@ from jax_esm.components.base import (
     ComponentState,
 )
 
+from jax_esm.components.PhysicsState import PhysicsState
+import tree_math
 
+@tree_math.struct
+class SOMState(PhysicsState):
+    T : jnp.ndarray
+
+
+    @classmethod
+    def zeros(
+        self,
+        T = None,
+    ):
+        return SOMState(
+            T = jnp.zeros((1,)) if T is None else self.T,
+        )
+        
+    def copy(
+        self,
+        T = None,
+    ):
+        return SOMState(
+            self.T if T is None else T,
+        )    
 class SlabOceanModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
@@ -21,7 +44,10 @@ class SlabOceanModel(Component):
     and relaxes towards a prescribed climatology.
     """
     
-    def __init__(self, config: ComponentConfig):
+    def __init__(
+        self,
+        config: ComponentConfig,
+    ):
         """Initialize slab ocean model.
         
         Expected parameters in config:
@@ -30,10 +56,16 @@ class SlabOceanModel(Component):
         - sst_clim_file: Optional path to SST climatology
         """
         super().__init__(config)
-        
-        # Physical constants
-        self.rho_sw = 1025.0  # Seawater density (kg/m³)
+
+        self.state = SOMState.zeros()
+
+
+        self.mld = 50.0       # Mixed layer depth (m)
+        self.rho_sw = 1025.0  # Seawater density (kg/m^3)
         self.cp_sw = 3985.0   # Seawater specific heat capacity (J/kg/K)
+        
+        """
+        # Physical constants
         
         # Model parameters
         self.mixed_layer_depth = config.params.get("mixed_layer_depth", 50.0)  # m
@@ -49,7 +81,28 @@ class SlabOceanModel(Component):
         
         # Time factor for anomaly evolution (per day)
         self.time_factor_per_day = jnp.exp(-1.0 / self.relaxation_time)
-    
+        """
+
+    def run(self, master=None):
+
+        #print("Slab ocean run.")
+
+        flux_model = master.components["flx"]
+        time_step = master.config["time_step"]
+        
+        new_T = self.state.T + time_step * ( - (
+            flux_model.state.swflx_sfc +
+            flux_model.state.lhflx
+        ) / ( self.mld * self.rho_sw * self.cp_sw ) )
+        
+        self.state = self.state.copy(
+            T = new_T,
+        )
+
+    def report(self):
+       print("Ocean temperature = ", self.state.T[0]) 
+
+        
     def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
         """Initialize ocean state with climatological SST."""
         shape = (self.nlat, self.nlon)
@@ -87,7 +140,8 @@ class SlabOceanModel(Component):
                 "lon": jnp.linspace(0, 360, self.nlon),
             },
         )
-    
+
+
     def step(
         self,
         state: ComponentState,
@@ -198,7 +252,7 @@ class SlabOceanModel(Component):
         self,
         state: ComponentState,
         sst_clim: Array,
-        hflux_clim: Optional[Array] = None,
+        #hflux_clim: Optional[Array] = None,
     ) -> ComponentState:
         """Update climatological fields (e.g., for seasonal cycle).
         
@@ -214,8 +268,8 @@ class SlabOceanModel(Component):
         new_forcing["sst_clim"] = new_forcing["sst_clim_next"]
         new_forcing["sst_clim_next"] = sst_clim
         
-        if hflux_clim is not None:
-            new_forcing["hflux_clim"] = hflux_clim
+        #if hflux_clim is not None:
+        #    new_forcing["hflux_clim"] = hflux_clim
         
         return ComponentState(
             prognostic=state.prognostic,

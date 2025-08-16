@@ -11,7 +11,6 @@ from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 
 
 class Coupler:
-    
     """Main coupler for Earth system components."""
     
     def __init__(
