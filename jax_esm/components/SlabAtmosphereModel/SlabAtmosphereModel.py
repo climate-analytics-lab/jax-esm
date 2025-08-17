@@ -12,31 +12,16 @@ from jax_esm.components.base import (
     ComponentConfig,
     ComponentState,
 )
+from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
-from jax_esm.components.PhysicsState import PhysicsState
-import tree_math
+hor_nodal_shape = (1,)
+SAMState = CreatePhysicsStateClass(
+    cls_name = "SAMState",
+    fields = [
+        ("T", float, hor_nodal_shape),
+    ],
+)
 
-@tree_math.struct
-class SAMState(PhysicsState):
-    T : jnp.ndarray
-
-
-    @classmethod
-    def zeros(
-        self,
-        T = None,
-    ):
-        return SAMState(
-            T = jnp.zeros((1),) if T is None else self.T,
-        )
-
-    def copy(
-        self,
-        T = None,
-    ):
-        return SAMState(
-            self.T if T is None else T,
-        )    
     
 class SlabAtmosphereModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.

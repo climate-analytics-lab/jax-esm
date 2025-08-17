@@ -1,8 +1,6 @@
 # Physical constants used by the model regardless of Physics module
  
-p0 = 1e5 # Pressure normalization factor for PhysicsState (Pa)
-grav = 9.81 # Gravitational acceleration (m/s/s)
-
+g0 = 9.81  # Gravitational acceleration on Earth (m/s/s)
 
 stephan_boltzmann_const = 5.67e-8
 solar_const = 1367.0

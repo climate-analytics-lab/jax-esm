@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jax_esm import constants as constants
-
+from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
 from jax_esm.components.base import (
     BoundaryFluxes,
@@ -16,46 +16,18 @@ from jax_esm.components.base import (
     ComponentState,
 )
 
-from jax_esm.components.PhysicsState import PhysicsState
-import tree_math
 
-@tree_math.struct
-class FMState(PhysicsState):
-    lhflx     : jnp.ndarray
-    swflx_toa : jnp.ndarray
-    swflx_sfc : jnp.ndarray
-    lwflx_toa : jnp.ndarray
+hor_nodal_shape = (1,)
+FMState = CreatePhysicsStateClass(
+    cls_name = "FMState",
+    fields = [
+        ("lhflx", float, hor_nodal_shape),
+        ("swflx_toa", float, hor_nodal_shape),
+        ("swflx_sfc", float, hor_nodal_shape),
+        ("lwflx_toa", float, hor_nodal_shape),
 
-
-    @classmethod
-    def zeros(
-        self,
-        lhflx = None,
-        swflx_toa = None,
-        swflx_sfc = None,
-        lwflx_toa = None,
-    ):
-        return FMState(
-            lhflx     = jnp.zeros((1),) if lhflx is None else self.lhflx,
-            swflx_toa = jnp.zeros((1),) if swflx_toa is None else self.swflx_toa,
-            swflx_sfc = jnp.zeros((1),) if swflx_sfc is None else self.swflx_sfc,
-            lwflx_toa = jnp.zeros((1),) if lwflx_toa is None else self.lwflx_toa,
-        )
-
-
-    def copy(
-        self,
-        lhflx = None,
-        swflx_toa = None,
-        swflx_sfc = None,
-        lwflx_toa = None,
-    ):
-        return FMState(
-            self.lhflx if lhflx is None else lhflx,
-            self.swflx_toa if swflx_toa is None else swflx_toa,
-            self.swflx_sfc if swflx_sfc is None else swflx_sfc,
-            self.lwflx_toa if lwflx_toa is None else lwflx_toa,
-        )
+    ],
+)
 
 
 class FluxModel(Component):

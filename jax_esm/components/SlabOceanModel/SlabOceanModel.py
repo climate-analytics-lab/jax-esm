@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 from jax_esm import constants as constants
+from jax_esm.components.PhysicsState import CreatePhysicsStateClass
+
 
 from jax_esm.components.base import (
     BoundaryFluxes,
@@ -14,30 +16,15 @@ from jax_esm.components.base import (
     ComponentState,
 )
 
-from jax_esm.components.PhysicsState import PhysicsState
-import tree_math
+hor_nodal_shape = (1,)
+SOMState = CreatePhysicsStateClass(
+    cls_name = "SOMState",
+    fields = [
+        ("T", float, hor_nodal_shape),
+    ],
+)
 
-@tree_math.struct
-class SOMState(PhysicsState):
-    T : jnp.ndarray
 
-
-    @classmethod
-    def zeros(
-        self,
-        T = None,
-    ):
-        return SOMState(
-            T = jnp.zeros((1,)) if T is None else self.T,
-        )
-        
-    def copy(
-        self,
-        T = None,
-    ):
-        return SOMState(
-            self.T if T is None else T,
-        )    
 class SlabOceanModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
