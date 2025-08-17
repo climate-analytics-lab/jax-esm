@@ -5,7 +5,7 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
-
+from jax_esm import constants as constants
 from jax_esm.components.base import (
     BoundaryFluxes,
     Component,
@@ -60,8 +60,8 @@ class SlabAtmosphereModel(Component):
 
         self.state = SAMState.zeros()
 
-        self.column_mass = 1e4   # Mass of entire atmosphere column per unit area (kg / m^2)
-        self.cp = 1004.0         # Air specific heat capacity (J/kg/K)
+        self.column_mass = constants.atm_column_mass   # Mass of entire atmosphere column per unit area (kg / m^2)
+        self.cp = constants.atm_cp                    # Air specific heat capacity (J/kg/K)
 
 
     def run(self, master=None):

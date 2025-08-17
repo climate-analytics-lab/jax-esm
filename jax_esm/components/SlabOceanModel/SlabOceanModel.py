@@ -5,6 +5,7 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
+from jax_esm import constants as constants
 
 from jax_esm.components.base import (
     BoundaryFluxes,
@@ -60,9 +61,9 @@ class SlabOceanModel(Component):
         self.state = SOMState.zeros()
 
 
-        self.mld = 50.0       # Mixed layer depth (m)
-        self.rho_sw = 1025.0  # Seawater density (kg/m^3)
-        self.cp_sw = 3985.0   # Seawater specific heat capacity (J/kg/K)
+        self.mld = 50.0                 # Mixed layer depth (m)
+        self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
+        self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
         
         """
         # Physical constants
@@ -76,7 +77,7 @@ class SlabOceanModel(Component):
         self.nlon = config.grid["nlon"]
         
         # Precompute factors for efficiency
-        self.heat_capacity = self.rho_sw * self.cp_sw * self.mixed_layer_depth
+        self.heat_capacity = self.ocn_rho * self.ocn_cp * self.mixed_layer_depth
         self.cd_factor = 1.0 / self.heat_capacity  # K/(W/m²)/s
         
         # Time factor for anomaly evolution (per day)
@@ -93,7 +94,7 @@ class SlabOceanModel(Component):
         new_T = self.state.T + time_step * ( - (
             flux_model.state.swflx_sfc +
             flux_model.state.lhflx
-        ) / ( self.mld * self.rho_sw * self.cp_sw ) )
+        ) / ( self.mld * self.ocn_rho * self.ocn_cp ) )
         
         self.state = self.state.copy(
             T = new_T,

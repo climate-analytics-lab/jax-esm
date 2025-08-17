@@ -6,6 +6,9 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from jax_esm import constants as constants
+
+
 from jax_esm.components.base import (
     BoundaryFluxes,
     Component,
@@ -77,8 +80,8 @@ class FluxModel(Component):
         super().__init__(config)
 
         self.state = FMState.zeros()
-        self.stephan_boltzmann_const = 5.67e-8
-        self.solar_constant = 1367.0
+        self.stephan_boltzmann_const = constants.stephan_boltzmann_const
+        self.solar_const = constants.solar_const
 
     def run(self, master=None):
         #print("Flux model run: compute the fluxes")
@@ -92,7 +95,7 @@ class FluxModel(Component):
         new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_model.state.T - atm_model.state.T)
 
         # shortwave radiation
-        _tmp = - self.solar_constant * jnp.sin( 2 * jnp.pi * master.time / 86400.0 )
+        _tmp = - self.solar_const * jnp.sin( 2 * jnp.pi * master.time / 86400.0 )
         _tmp = jnp.where(_tmp > 0, 0, _tmp)
 
         new_swflx_toa = self.state.swflx_toa * 0 + _tmp
