@@ -51,11 +51,17 @@ class SlabAtmosphereModel(Component):
 
     def run(self, master=None):
         #print("Slab atmosphere run.")
+
+        dc = self.data_center
+        lwflx_toa = dc.getVariable(component="flx", varname="lwflx_toa", by_component="atm")
+        swflx_toa = dc.getVariable(component="flx", varname="swflx_toa", by_component="atm")
+        swflx_sfc = dc.getVariable(component="flx", varname="swflx_sfc", by_component="atm")
+        lhflx     = dc.getVariable(component="flx", varname="lhflx", by_component="atm")
         
-        flux_model = master.components["flx"]
+        #flux_model = master.components["flx"]
         time_step = master.config["time_step"]
         
-        new_T = self.state.T + time_step *( - (flux_model.state.lwflx_toa + flux_model.state.swflx_toa - flux_model.state.swflx_sfc - flux_model.state.lhflx) / ( self.column_mass * self.cp ) )       
+        new_T = self.state.T + time_step *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx) / ( self.column_mass * self.cp ) )       
         self.state = self.state.copy(
             T = new_T,
         )

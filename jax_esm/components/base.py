@@ -60,6 +60,7 @@ class Component(ABC):
         self.config = config
         self.name = config.name
         self.timestep = config.timestep
+        self.data_center = None
         
     @abstractmethod
     def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:

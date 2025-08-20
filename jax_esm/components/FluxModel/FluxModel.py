@@ -39,8 +39,7 @@ class FluxModel(Component):
     
     def __init__(
         self,
-        config: ComponentConfig,
-        
+        config: ComponentConfig,    
     ):
         """Initialize slab ocean model.
         
@@ -58,13 +57,18 @@ class FluxModel(Component):
     def run(self, master=None):
         #print("Flux model run: compute the fluxes")
 
-        ocn_model = master.components["ocn"]
-        atm_model = master.components["atm"]
+        #ocn_model = master.components["ocn"]
+        #atm_model = master.components["atm"]
+
+        dc = self.data_center
+        ocn_T = dc.getVariable(component="ocn", varname="T", by_component="flx")
+        atm_T = dc.getVariable(component="atm", varname="T", by_component="flx")
         
         u10 = 5.0 # m/s
         C_H = 1e-3
         rho_cp = 1.2 * 1004
-        new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_model.state.T - atm_model.state.T)
+        #new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_model.state.T - atm_model.state.T)
+        new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_T - atm_T)
 
         # shortwave radiation
         _tmp = - self.solar_const * jnp.sin( 2 * jnp.pi * master.time / 86400.0 )
@@ -73,7 +77,7 @@ class FluxModel(Component):
         new_swflx_toa = self.state.swflx_toa * 0 + _tmp
         new_swflx_sfc = new_swflx_toa * 0.80
 
-        new_lwflx_toa = self.state.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_model.state.T ** 4.0)
+        new_lwflx_toa = self.state.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
         
         self.state = self.state.copy(
             lhflx = new_lhflx,
@@ -87,7 +91,7 @@ class FluxModel(Component):
        print("Top-of-atmosphere shortwave rad flux = ", self.state.swflx_toa[0]) 
        print("Surface shortwave rad flux = ", self.state.swflx_sfc[0]) 
 
-        
+    
     def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
         """Initialize ocean state with climatological SST."""
         shape = (self.nlat, self.nlon)
