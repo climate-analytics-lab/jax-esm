@@ -35,6 +35,22 @@ class DataCenter:
     ):
         self.components = components
         self.permissions = permissions
+        self.varname_mapping = dict()
+
+
+
+    def registerAlias(
+        self,
+        varname_universal: str,
+        component: str,
+        varname_component: str,
+    ):
+
+        if varname_universal not in self.varname_mapping:
+            self.varname_mapping[varname_universal] = dict()
+
+        self.varname_mapping[varname_universal][component] = varname_component
+            
 
     
     def setAccessPermission(
@@ -61,17 +77,18 @@ class DataCenter:
                 p.remove(by_component)
             
     def getVariable(
-        self, 
+        self,
         component:    str,
         by_component: str,
-        varname:      str,
+        varname: str = None,
+        is_universal_name: bool = False,
         idx = None,
     ):
         result = None
-        #print(self.permissions)
         p = self.permissions[component].r
         if by_component in p:
-            variable = getattr(self.components[component].state, varname)
+            varname_component = self.varname_mapping[varname][component] if is_universal_name else varname
+            variable = getattr(self.components[component].state, varname_component)
             result = variable if idx is None else variable.at[idx]
 
         else:
@@ -85,16 +102,18 @@ class DataCenter:
         by_component: str,
         varname:      str,
         values: any,
+        is_universal_name: bool = False,
         idx = None,
     ):
         p = self.permissions[component].w
         if by_component in p:
-            old_data = getattr(self.components[component].state, varname)
+            varname_component = self.varname_mapping[varname][component] if is_universal_name else varname                            
+            old_data = getattr(self.components[component].state, varname_component)
             if idx is None:
                 old_data = old_data.at[idx]
             
             new_data = old_data.set(values)
-            result = setattr(self.components[component].state, varname, new_data)
+            result = setattr(self.components[component].state, varname_component, new_data)
         else:
             raise Exception("Permission denied.")
         

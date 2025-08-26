@@ -42,6 +42,7 @@ class Speedy(Component):
                 ("specific_humidity", float, D3_nodal_shape),
                 ("geopotential", float, D3_nodal_shape),
                 ("normalized_surface_pressure", float, D3_nodal_shape),
+                ("surface_temperature", float, D2_nodal_shape),
             ],
         )
     
@@ -49,12 +50,19 @@ class Speedy(Component):
     
     def __init__(
         self,
-        config_speedy: Dict,
         config: ComponentConfig,
     ):
 
         super().__init__(config)
 
+        config_speedy = dict(
+            time_step = config.timestep / config.substeps / 60.0, # in minutes
+            save_interval = config.save_interval / 86400.0,       # in days
+            total_time = config.timestep / 86400.0,               # in days
+        )
+
+
+        
         self.model = Model(**config_speedy)
         
         D3_nodal_shape = self.model.coords.nodal_shape
@@ -66,26 +74,20 @@ class Speedy(Component):
         
         self.state = self.stateClass.zeros()
 
+        self.speedy_holder = dict(
+            init_state = (state0 := self.model.get_initial_state()),
+            tmp_state = state0,
+            tmp_pred  = None,
+        )
+        
 
     def run(self, master=None):
 
-        if False:
-            #print("Slab atmosphere run.")
-    
-            dc = self.data_center
-            lwflx_toa = dc.getVariable(component="flx", varname="lwflx_toa", by_component="atm")
-            swflx_toa = dc.getVariable(component="flx", varname="swflx_toa", by_component="atm")
-            swflx_sfc = dc.getVariable(component="flx", varname="swflx_sfc", by_component="atm")
-            lhflx     = dc.getVariable(component="flx", varname="lhflx", by_component="atm")
-            
-            #flux_model = master.components["flx"]
-            time_step = master.config["time_step"]
-            
-            new_T = self.state.T + time_step *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx) / ( self.column_mass * self.cp ) )       
-            self.state = self.state.copy(
-                T = new_T,
-            )
+        final_state, pred = self.model.unroll(self.speedy_holder["tmp_state"])
+        self.speedy_holder["tmp_state"] = final_state
+        self.speedy_holder["tmp_pred"]  = pred
 
+    
     def report(self):
         pass
         #print("Atmoshpere temperature = ", self.state.T[0]) 

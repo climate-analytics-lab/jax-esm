@@ -62,7 +62,7 @@ class FluxModel(Component):
 
         dc = self.data_center
         ocn_T = dc.getVariable(component="ocn", varname="T", by_component="flx")
-        atm_T = dc.getVariable(component="atm", varname="T", by_component="flx")
+        atm_T = dc.getVariable(component="atm", varname="surface_air_temperature", by_component="flx", is_universal_name = True)
         
         u10 = 5.0 # m/s
         C_H = 1e-3
