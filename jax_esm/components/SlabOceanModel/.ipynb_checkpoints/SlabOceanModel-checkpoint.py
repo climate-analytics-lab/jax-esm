@@ -16,21 +16,30 @@ from jax_esm.components.base import (
     ComponentState,
 )
 
-hor_nodal_shape = (1,)
-SOMState = CreatePhysicsStateClass(
-    cls_name = "SOMState",
-    fields = [
-        ("T", float, hor_nodal_shape),
-    ],
-)
-
-
 class SlabOceanModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
     This model integrates SST anomalies based on surface heat fluxes
     and relaxes towards a prescribed climatology.
     """
+
+    @classmethod
+    def createStateClass(
+        cls,
+        D2_nodal_shape,
+        D3_nodal_shape,
+    ):
+        
+        SOMStateClass = CreatePhysicsStateClass(
+            cls_name = "SOMState",
+            fields = [
+                ("T", float, D2_nodal_shape),
+                ("mld", float, D2_nodal_shape),
+            ],
+        )
+    
+        return SOMStateClass
+
     
     def __init__(
         self,
@@ -45,12 +54,27 @@ class SlabOceanModel(Component):
         """
         super().__init__(config)
 
-        self.state = SOMState.zeros()
 
 
-        self.mld = 50.0                 # Mixed layer depth (m)
+        self.coords = config.params["coords"]
+        self.relaxation_time = config.params["relaxation_time"]
+
+        self.timestep = config.timestep
+        self.substeps = config.substeps
+        
+        D3_nodal_shape = self.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+        self.stateClass = self.__class__.createStateClass(
+            D2_nodal_shape = D2_nodal_shape,
+            D3_nodal_shape = D3_nodal_shape,
+        )
+
+        self.state = self.stateClass.zeros()
+        self.state.mld = self.state.mld * 0 + 50.0  # Mixed layer depth (m)
+
         self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
         self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
+
         
         """
         # Physical constants
@@ -73,19 +97,20 @@ class SlabOceanModel(Component):
 
     def run(self, master=None):
 
-        #print("Slab ocean run.")
-
         flux_model = master.components["flx"]
-        time_step = master.config["time_step"]
+        subtimestep = self.timestep / self.substeps
+
+        for step in range(subtimestep):
+            
+            new_T = self.state.T + time_step * ( - (
+                flux_model.state.swflx_sfc +
+                flux_model.state.lhflx
+            ) / ( self.state.mld * self.ocn_rho * self.ocn_cp ) )
         
-        new_T = self.state.T + time_step * ( - (
-            flux_model.state.swflx_sfc +
-            flux_model.state.lhflx
-        ) / ( self.mld * self.ocn_rho * self.ocn_cp ) )
-        
-        self.state = self.state.copy(
-            T = new_T,
-        )
+            self.state = self.state.copy(
+                T = new_T,
+            )
+            
 
     def report(self):
        print("Ocean temperature = ", self.state.T[0]) 

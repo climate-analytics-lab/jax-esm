@@ -17,25 +17,32 @@ from jax_esm.components.base import (
 )
 
 
-hor_nodal_shape = (1,)
-FMState = CreatePhysicsStateClass(
-    cls_name = "FMState",
-    fields = [
-        ("lhflx", float, hor_nodal_shape),
-        ("swflx_toa", float, hor_nodal_shape),
-        ("swflx_sfc", float, hor_nodal_shape),
-        ("lwflx_toa", float, hor_nodal_shape),
-
-    ],
-)
-
-
 class FluxModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
     This model integrates SST anomalies based on surface heat fluxes
     and relaxes towards a prescribed climatology.
     """
+
+    @classmethod
+    def createStateClass(
+        cls,
+        D2_nodal_shape,
+        D3_nodal_shape,
+    ):
+        
+        SOMStateClass = CreatePhysicsStateClass(
+            cls_name = "FMState",
+            fields = [
+                ("lhflx", float, hor_nodal_shape),
+                ("swflx_toa", float, hor_nodal_shape),
+                ("swflx_sfc", float, hor_nodal_shape),
+                ("lwflx_toa", float, hor_nodal_shape),
+            ],
+        )
+    
+        return SOMStateClass
+
     
     def __init__(
         self,
@@ -49,8 +56,20 @@ class FluxModel(Component):
         - sst_clim_file: Optional path to SST climatology
         """
         super().__init__(config)
+        
+        self.coords = config.params["coords"]
 
-        self.state = FMState.zeros()
+        self.timestep = config.timestep
+        self.substeps = config.substeps
+        
+        D3_nodal_shape = self.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+        self.stateClass = self.__class__.createStateClass(
+            D2_nodal_shape = D2_nodal_shape,
+            D3_nodal_shape = D3_nodal_shape,
+        )
+
+        self.state = self.stateClass.zeros()
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
 
@@ -61,13 +80,15 @@ class FluxModel(Component):
         #atm_model = master.components["atm"]
 
         dc = self.data_center
-        ocn_T = dc.getVariable(component="ocn", varname="T", by_component="flx")
+        ocn_T = dc.getVariable(component="ocn", varname="sea_surface_temperature", by_component="flx", is_universal_name = True)
         atm_T = dc.getVariable(component="atm", varname="surface_air_temperature", by_component="flx", is_universal_name = True)
-        
+
+
+        """
         u10 = 5.0 # m/s
         C_H = 1e-3
         rho_cp = 1.2 * 1004
-        #new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_model.state.T - atm_model.state.T)
+        
         new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_T - atm_T)
 
         # shortwave radiation
@@ -78,6 +99,10 @@ class FluxModel(Component):
         new_swflx_sfc = new_swflx_toa * 0.80
 
         new_lwflx_toa = self.state.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
+        """
+
+        
+
         
         self.state = self.state.copy(
             lhflx = new_lhflx,

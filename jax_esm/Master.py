@@ -82,12 +82,10 @@ class Master:
 
     def init(self):
         ...
-        
+
+    
     def run(self):
-        
-        #print("Run Model: ")
         for i, name in enumerate(self.execution_order):
-            #print(f"[{i+1:2d}] : {name:s} ")
             component = self.components[name]
             component.run(master=self)
             

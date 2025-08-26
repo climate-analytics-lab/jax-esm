@@ -16,6 +16,8 @@ from jax_esm.components.base import (
     ComponentConfig,
     ComponentState,
 )
+
+
 from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
    
@@ -27,13 +29,13 @@ class Speedy(Component):
     """
 
     @classmethod
-    def createSpeedyStateClass(
+    def createStateClass(
         cls,
         D2_nodal_shape,
         D3_nodal_shape,
     ):
         
-        SpeedyState = CreatePhysicsStateClass(
+        SpeedyStateClass = CreatePhysicsStateClass(
             cls_name = "SpeedyState",
             fields = [
                 ("u_wind", float, D3_nodal_shape),
@@ -43,10 +45,12 @@ class Speedy(Component):
                 ("geopotential", float, D3_nodal_shape),
                 ("normalized_surface_pressure", float, D3_nodal_shape),
                 ("surface_temperature", float, D2_nodal_shape),
+                ("sw_sfc", float, D2_nodal_shape),
+                ("lw_sfc", float, D2_nodal_shape),
             ],
         )
     
-        return SpeedyState
+        return SpeedyStateClass
     
     def __init__(
         self,
@@ -67,7 +71,7 @@ class Speedy(Component):
         
         D3_nodal_shape = self.model.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
-        self.stateClass = Speedy.createSpeedyStateClass(
+        self.stateClass = Speedy.createStateClass(
             D2_nodal_shape = D2_nodal_shape,
             D3_nodal_shape = D3_nodal_shape,
         )
@@ -86,6 +90,8 @@ class Speedy(Component):
         final_state, pred = self.model.unroll(self.speedy_holder["tmp_state"])
         self.speedy_holder["tmp_state"] = final_state
         self.speedy_holder["tmp_pred"]  = pred
+
+        print(dir(pred))
 
     
     def report(self):
