@@ -1,12 +1,15 @@
 """Slab ocean model component."""
 
 from typing import Dict, Tuple
+from collections import namedtuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.PhysicsState import CreatePhysicsStateClass
+
+
 
 
 from jax_esm.components.base import (
@@ -56,7 +59,8 @@ class SlabOceanModel(Component):
 
 
 
-        self.coords = config.params["coords"]
+        self.coords = namedtuple( "Coords", ["nodal_shape"] )(nodal_shape=(2,2,1))
+        #config.params["coords"]
         self.relaxation_time = config.params["relaxation_time"]
 
         self.timestep = config.timestep

@@ -11,8 +11,67 @@ from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 
 from jax_esm.DataCenter import DataCenter, DataPermission
 
+from dataclasses import make_dataclass
+import tree_math
+
 class Master:
     """Main coupler for Earth system components."""
+
+
+    @classmethod
+    def createCoupledClass(
+        cls,
+        cls_name,
+        name_cls_pairs,
+        bases = (),
+    ):
+        print("fields = ", name_cls_pairs)
+        cls = make_dataclass(
+            cls_name = cls_name,
+            fields = name_cls_pairs,
+            bases = bases,
+        )
+        
+        @classmethod
+        def zeros(_cls, **kwargs):
+            
+            init_args = dict()
+            for varname, cls in name_cls_pairs:
+                if (varname in kwargs) and (kwargs[varname] is not None):
+                    init_args[varname] = kwargs[varname]
+                else:
+                    init_args[varname] = cls.zeros()
+                    
+            return _cls(**init_args)
+    
+        @classmethod
+        def ones(_cls, **kwargs):
+            
+            init_args = dict()
+            for varname, cls in name_cls_pairs:
+                if (varname in kwargs) and (kwargs[varname] is not None):
+                    init_args[varname] = kwargs[varname]
+                else:
+                    init_args[varname] = cls.ones()
+    
+            return _cls(**init_args)
+    
+        def copy(self, **kwargs):
+            
+            init_args = dict()
+            for varname, cls in name_cls_pairs:
+                if (varname in kwargs) and (kwargs[varname] is not None):
+                    init_args[varname] = kwargs[varname]
+                else:
+                    init_args[varname] = getattr(self, varname)
+    
+            return type(self)(**init_args)
+    
+        cls.zeros = zeros
+        cls.ones = ones
+        cls.copy = copy
+        
+        return tree_math.struct(cls)
     
     def __init__(
         self,
@@ -46,6 +105,15 @@ class Master:
 
         for _, component in components.items():
             setattr(component, "data_center", self.data_center)
+
+        name_cls_pairs = [ (component_name, self.components[component_name].stateClass) for component_name in self.components.keys() ]
+        self.stateClass = self.__class__.createCoupledClass(
+            cls_name = "CoupledState",
+            name_cls_pairs = name_cls_pairs,
+        )
+
+        self.state = self.stateClass.zeros()
+        
         #self.component_names = list(components.keys())
         #self.coupling_timestep = coupling_timestep
 

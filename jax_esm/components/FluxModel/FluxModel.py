@@ -34,10 +34,10 @@ class FluxModel(Component):
         SOMStateClass = CreatePhysicsStateClass(
             cls_name = "FMState",
             fields = [
-                ("lhflx", float, hor_nodal_shape),
-                ("swflx_toa", float, hor_nodal_shape),
-                ("swflx_sfc", float, hor_nodal_shape),
-                ("lwflx_toa", float, hor_nodal_shape),
+                ("lhflx", float, D2_nodal_shape),
+                ("swflx_toa", float, D2_nodal_shape),
+                ("swflx_sfc", float, D2_nodal_shape),
+                ("lwflx_toa", float, D2_nodal_shape),
             ],
         )
     

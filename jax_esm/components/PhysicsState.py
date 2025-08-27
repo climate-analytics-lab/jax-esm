@@ -7,7 +7,6 @@ import tree_math
 from jax import tree_util
 from dataclasses import make_dataclass
 
-#@tree_math.struct
 
 class PhysicsState:
 
