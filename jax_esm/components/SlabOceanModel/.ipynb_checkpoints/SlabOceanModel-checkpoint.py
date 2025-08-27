@@ -75,8 +75,10 @@ class SlabOceanModel(Component):
         )
 
         self.state = self.stateClass.zeros()
-        self.state.mld = self.state.mld * 0 + 50.0  # Mixed layer depth (m)
-
+        self.state = self.state.copy(
+            mld = self.state.mld * 0 + 50.0  # Mixed layer depth (m)
+        )
+        
         self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
         self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
 
@@ -107,7 +109,7 @@ class SlabOceanModel(Component):
 
         for step in range(self.subtimestep):
             
-            new_T = self.state.T + time_step * ( - (
+            new_T = self.state.T + self.subtimestep * ( - (
                 flux_model.state.swflx_sfc +
                 flux_model.state.lhflx
             ) / ( self.state.mld * self.ocn_rho * self.ocn_cp ) )

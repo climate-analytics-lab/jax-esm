@@ -20,7 +20,10 @@ from jax_esm.components.base import (
 
 from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
-   
+from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
+from dinosaur import primitive_equations, primitive_equations_states
+from jcm.physics_interface import PhysicsState
+
 class Speedy(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
@@ -69,17 +72,28 @@ class Speedy(Component):
         
         self.model = Model(**config_speedy)
         
-        D3_nodal_shape = self.model.coords.nodal_shape
-        D2_nodal_shape = D3_nodal_shape[1:]
-        self.stateClass = Speedy.createStateClass(
-            D2_nodal_shape = D2_nodal_shape,
-            D3_nodal_shape = D3_nodal_shape,
-        )
+        #D3_nodal_shape = self.model.coords.nodal_shape
+        #D2_nodal_shape = D3_nodal_shape[1:]
+        #self.stateClass = Speedy.createStateClass(
+        #    D2_nodal_shape = D2_nodal_shape,
+        #    D3_nodal_shape = D3_nodal_shape,
+        #)
+
+        state00 = self.model.get_initial_state()
+        print("Type of state 00: ", type(state00))
         
-        self.state = self.stateClass.zeros()
+        state0 = dynamics_state_to_physics_state(
+            state00,
+            self.model.primitive,
+        )
+        print("Type of state0: ", type(state0))
+        self.stateClass = PhysicsState #primitive_equations.State
+        
+        self.state = state0
+        self.state0_dynamics = state00
 
         self.speedy_holder = dict(
-            init_state = (state0 := self.model.get_initial_state()),
+            init_state = state0,
             tmp_state = state0,
             tmp_pred  = None,
         )
@@ -93,6 +107,19 @@ class Speedy(Component):
 
         print(dir(pred))
 
+    def genForwardFunc(self):
+        
+        @jax.jit
+        def forward_func(atmstate, fmstate):
+
+            atmstate_dynamics = physics_state_to_dynamics_state(atmstate, self.model.primitive)
+            #final_state, pred = self.model.unroll(atmstate_dynamics)   # Bug in Speedy. Wait for them to fix
+            final_state, pred = self.model.unroll(self.state0_dynamics) # Just to let it pass
+            new_atmstate = dynamics_state_to_physics_state(final_state, self.model.primitive)
+            
+            return new_atmstate
+
+        return forward_func
     
     def report(self):
         pass

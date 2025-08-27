@@ -98,7 +98,8 @@ class SlabAtmosphereModel(Component):
 
             new_T = samstate.T
             for step in range(self.substeps):
-                new_T = new_T + self.subtimestep *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx) / ( self.column_mass * self.cp ) )      
+                #new_T = new_T + self.subtimestep *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx) / ( self.column_mass * self.cp ) )
+                new_T = new_T + self.subtimestep *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx ) / ( self.column_mass * self.cp ) )      
             
             new_samstate = samstate.copy(
                 T = new_T,

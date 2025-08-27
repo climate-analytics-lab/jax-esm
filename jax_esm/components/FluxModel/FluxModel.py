@@ -72,6 +72,11 @@ class FluxModel(Component):
         self.state = self.stateClass.zeros()
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
+        self.u10 = 5.0 # m/s
+        self.C_H = 1e-3
+        self.rho_cp = 1.2 * 1004
+        self.beta = 0.7
+            
 
     def genForwardFunc(self):
         
@@ -81,17 +86,13 @@ class FluxModel(Component):
             ocn_T = somstate.T
             atm_T = samstate.T
 
-            u10 = 5.0 # m/s
-            C_H = 1e-3
-            rho_cp = 1.2 * 1004
-            
-            new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_T - atm_T)
+            new_lhflx = (self.u10 * self.C_H * self.rho_cp) * (ocn_T - atm_T)
     
             # shortwave radiation
-            _tmp = - self.solar_const * 0.25
+            _tmp = - self.solar_const / 4
             
             new_swflx_toa = fmstate.swflx_toa * 0 + _tmp
-            new_swflx_sfc = new_swflx_toa * 0.80
+            new_swflx_sfc = new_swflx_toa * self.beta
     
             new_lwflx_toa = fmstate.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
 

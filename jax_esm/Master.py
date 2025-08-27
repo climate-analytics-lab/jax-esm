@@ -112,7 +112,11 @@ class Master:
             name_cls_pairs = name_cls_pairs,
         )
 
-        self.state = self.stateClass.zeros()
+        kwargs = {
+            component_name : self.components[component_name].state for component_name in self.components.keys()
+        }
+        
+        self.state = self.stateClass.zeros(**kwargs)
         
         #self.component_names = list(components.keys())
         #self.coupling_timestep = coupling_timestep
