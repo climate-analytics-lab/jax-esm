@@ -59,12 +59,13 @@ class SlabOceanModel(Component):
 
 
 
-        self.coords = namedtuple( "Coords", ["nodal_shape"] )(nodal_shape=(2,2,1))
-        #config.params["coords"]
+        self.coords = config.params["coords"]
+        #namedtuple( "Coords", ["nodal_shape"] )(nodal_shape=(2,2,1))
         self.relaxation_time = config.params["relaxation_time"]
 
         self.timestep = config.timestep
         self.substeps = config.substeps
+        self.subtimestep = self.timestep / self.substeps
         
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
@@ -104,7 +105,7 @@ class SlabOceanModel(Component):
         flux_model = master.components["flx"]
         subtimestep = self.timestep / self.substeps
 
-        for step in range(subtimestep):
+        for step in range(self.subtimestep):
             
             new_T = self.state.T + time_step * ( - (
                 flux_model.state.swflx_sfc +
@@ -116,6 +117,31 @@ class SlabOceanModel(Component):
             )
             
 
+    def genForwardFunc(self):
+        @jax.jit
+        def forward_func(somstate, fmstate):
+
+            new_T = somstate.T
+            
+            for step in range(self.substeps):
+                new_T = new_T + self.subtimestep * ( - (
+                    fmstate.swflx_sfc +
+                    fmstate.lhflx
+                ) / ( somstate.mld * self.ocn_rho * self.ocn_cp ) )
+            
+            new_somstate = somstate.copy(
+                T = new_T,
+            )
+
+            return new_somstate
+
+        return forward_func
+                
+
+
+
+
+    
     def report(self):
        print("Ocean temperature = ", self.state.T[0]) 
 

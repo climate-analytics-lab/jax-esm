@@ -151,6 +151,37 @@ class Master:
     def init(self):
         ...
 
+    def genForwardFunc(self):
+
+        atm_model = self.components["atm"]
+        flx_model = self.components["flx"]
+        ocn_model = self.components["ocn"]
+
+        sub_forward_func = {
+            component_name : self.components[component_name].genForwardFunc()
+            for component_name in self.components.keys()
+        }
+        
+        @jax.jit
+        def forward_func(cplstate):
+
+            flxstate = cplstate.flx
+            ocnstate = cplstate.ocn
+            atmstate = cplstate.atm
+            
+            new_atmstate = sub_forward_func["atm"](atmstate, flxstate)
+            new_flxstate = sub_forward_func["flx"](atmstate, ocnstate, flxstate)
+            new_ocnstate = sub_forward_func["ocn"](ocnstate, flxstate)
+
+            new_cplstate = cplstate.copy(
+                atm = new_atmstate,
+                flx = new_flxstate,
+                ocn = new_ocnstate,
+            )
+            
+            return new_cplstate
+            
+        return forward_func
     
     def run(self):
         for i, name in enumerate(self.execution_order):

@@ -73,6 +73,39 @@ class FluxModel(Component):
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
 
+    def genForwardFunc(self):
+        
+        @jax.jit
+        def forward_func(samstate, somstate, fmstate):
+
+            ocn_T = somstate.T
+            atm_T = samstate.T
+
+            u10 = 5.0 # m/s
+            C_H = 1e-3
+            rho_cp = 1.2 * 1004
+            
+            new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_T - atm_T)
+    
+            # shortwave radiation
+            _tmp = - self.solar_const * 0.25
+            
+            new_swflx_toa = fmstate.swflx_toa * 0 + _tmp
+            new_swflx_sfc = new_swflx_toa * 0.80
+    
+            new_lwflx_toa = fmstate.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
+
+            new_fmstate = fmstate.copy(
+                swflx_toa = new_swflx_toa,
+                swflx_sfc = new_swflx_sfc,
+                lwflx_toa = new_lwflx_toa,
+                lhflx = new_lhflx,
+            )
+            
+            return new_fmstate
+
+        return forward_func
+
     def run(self, master=None):
         #print("Flux model run: compute the fluxes")
 

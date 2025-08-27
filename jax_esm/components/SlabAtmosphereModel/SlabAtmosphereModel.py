@@ -14,15 +14,6 @@ from jax_esm.components.base import (
 )
 from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
-hor_nodal_shape = (1,)
-SAMState = CreatePhysicsStateClass(
-    cls_name = "SAMState",
-    fields = [
-        ("T", float, hor_nodal_shape),
-    ],
-)
-
-    
 class SlabAtmosphereModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
     
@@ -30,6 +21,23 @@ class SlabAtmosphereModel(Component):
     and relaxes towards a prescribed climatology.
     """
     
+    @classmethod
+    def createStateClass(
+        cls,
+        D2_nodal_shape,
+        D3_nodal_shape,
+    ):
+        
+        StateClass = CreatePhysicsStateClass(
+            cls_name = "SAMState",
+            fields = [
+                ("T", float, D2_nodal_shape),
+                ("U", float, D2_nodal_shape),
+            ],
+        )
+    
+        return StateClass
+
     def __init__(
         self,
         config: ComponentConfig,
@@ -42,8 +50,21 @@ class SlabAtmosphereModel(Component):
         - sst_clim_file: Optional path to SST climatology
         """
         super().__init__(config)
+        
+        self.coords = config.params["coords"]
+        
+        self.timestep = config.timestep
+        self.substeps = config.substeps
+        self.subtimestep = self.timestep / self.substeps
+        
+        D3_nodal_shape = self.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+        self.stateClass = self.__class__.createStateClass(
+            D2_nodal_shape = D2_nodal_shape,
+            D3_nodal_shape = D3_nodal_shape,
+        )
 
-        self.state = SAMState.zeros()
+        self.state = self.stateClass.zeros()
 
         self.column_mass = constants.atm_column_mass   # Mass of entire atmosphere column per unit area (kg / m^2)
         self.cp = constants.atm_cp                    # Air specific heat capacity (J/kg/K)
@@ -65,7 +86,29 @@ class SlabAtmosphereModel(Component):
         self.state = self.state.copy(
             T = new_T,
         )
+    
+    def genForwardFunc(self):
+    
+        @jax.jit
+        def forward_func(samstate, fmstate):
+            lwflx_toa = fmstate.lwflx_toa
+            swflx_toa = fmstate.swflx_toa
+            swflx_sfc = fmstate.swflx_sfc
+            lhflx     = fmstate.lhflx
 
+            new_T = samstate.T
+            for step in range(self.substeps):
+                new_T = new_T + self.subtimestep *( - (lwflx_toa + swflx_toa - swflx_sfc - lhflx) / ( self.column_mass * self.cp ) )      
+            
+            new_samstate = samstate.copy(
+                T = new_T,
+            )
+
+            return new_samstate
+
+        return forward_func
+
+            
     def report(self):
        print("Atmoshpere temperature = ", self.state.T[0]) 
         
