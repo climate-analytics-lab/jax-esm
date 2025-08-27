@@ -11,9 +11,26 @@ from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 
 from jax_esm.DataCenter import DataCenter, DataPermission
 
+
+
 class Master:
     """Main coupler for Earth system components."""
+
+    @classmethod
+    def createCoupledClass(
+        cls_name
+        name_cls_pairs,
+        bases = (),
+    ):
     
+        cls = make_dataclass(
+            cls_name = cls_name,
+            fields = dataclass_fields,
+            bases = bases,
+        )
+
+        return tree_math.struct(cls)
+
     def __init__(
         self,
         components: Dict[str, CoupledComponent],
