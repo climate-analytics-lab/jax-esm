@@ -14,7 +14,7 @@ from jax_esm.DataCenter import DataCenter, DataPermission
 from dataclasses import make_dataclass
 import tree_math
 
-class Master:
+class Coupler:
     """Main coupler for Earth system components."""
 
 
@@ -168,14 +168,10 @@ class Master:
         
         @jax.jit
         def forward_func(cplstate):
-
-            flxstate = cplstate.flx
-            ocnstate = cplstate.ocn
-            atmstate = cplstate.atm
             
-            new_atmstate = sub_forward_func["atm"](atmstate, flxstate)
-            new_flxstate = sub_forward_func["flx"](atmstate, ocnstate, flxstate)
-            new_ocnstate = sub_forward_func["ocn"](ocnstate, flxstate)
+            new_atmstate = sub_forward_func["atm"](cplstate)
+            new_flxstate = sub_forward_func["flx"](cplstate)
+            new_ocnstate = sub_forward_func["ocn"](cplstate)
 
             new_cplstate = cplstate.copy(
                 atm = new_atmstate,

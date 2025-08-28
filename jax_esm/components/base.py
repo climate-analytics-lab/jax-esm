@@ -75,62 +75,16 @@ class Component(ABC):
             Initial component state
         """
         pass
-    
-    @abstractmethod
-    def step(
-        self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-        dt: float,
-    ) -> Tuple[ComponentState, BoundaryFluxes]:
-        """Advance component state by one timestep.
-        
-        Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            dt: Time step size (seconds)
-            
-        Returns:
-            Tuple of (new_state, output_fluxes)
-        """
-        pass
-    
-    @abstractmethod
-    def compute_tendencies(
-        self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-    ) -> Dict[str, Array]:
-        """Compute tendencies for prognostic variables.
-        
-        Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            
-        Returns:
-            Dictionary of tendencies for each prognostic variable
-        """
-        pass
-    
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
-        """Extract boundary fields needed by other components.
-        
-        Args:
-            state: Current component state
-            
-        Returns:
-            Dictionary of boundary fields
-        """
-        return state.boundary
-    
-    def get_required_fluxes(self) -> List[str]:
-        """Return list of required flux names from other components."""
-        return ["heat", "moisture", "momentum_u", "momentum_v"]
-    
-    def get_provided_fluxes(self) -> List[str]:
-        """Return list of flux names provided to other components."""
-        return ["heat", "moisture", "momentum_u", "momentum_v"]
 
+    @abstractmethod
+    def genForwardFunc(
+        self,
+        state,
+    ):
+        pass
+
+
+    
 
 class CoupledComponent(Protocol):
     """Protocol for components that can be coupled."""

@@ -121,7 +121,10 @@ class SlabOceanModel(Component):
 
     def genForwardFunc(self):
         @jax.jit
-        def forward_func(somstate, fmstate):
+        def forward_func(cplstate):
+
+            somstate = cplstate.ocn
+            fmstate  = cplstate.flx
 
             new_T = somstate.T
             

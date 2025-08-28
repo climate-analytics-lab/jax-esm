@@ -81,10 +81,14 @@ class FluxModel(Component):
     def genForwardFunc(self):
         
         @jax.jit
-        def forward_func(samstate, somstate, fmstate):
+        def forward_func(cplstate):
 
-            ocn_T = somstate.T
-            atm_T = samstate.T
+            atmstate = cplstate.atm
+            fmstate  = cplstate.flx
+            ocnstate = cplstate.ocn
+            
+            ocn_T = ocnstate.T
+            atm_T = atmstate.T
 
             new_lhflx = (self.u10 * self.C_H * self.rho_cp) * (ocn_T - atm_T)
     

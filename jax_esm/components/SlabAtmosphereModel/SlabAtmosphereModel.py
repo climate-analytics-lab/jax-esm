@@ -90,7 +90,11 @@ class SlabAtmosphereModel(Component):
     def genForwardFunc(self):
     
         @jax.jit
-        def forward_func(samstate, fmstate):
+        def forward_func(cplstate):
+            
+            samstate = cplstate.atm
+            fmstate = cplstate.flx
+            
             lwflx_toa = fmstate.lwflx_toa
             swflx_toa = fmstate.swflx_toa
             swflx_sfc = fmstate.swflx_sfc

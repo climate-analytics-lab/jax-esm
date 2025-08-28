@@ -89,12 +89,7 @@ class Speedy(Component):
         )
         self.state_dynamics = state_dynamics
         
-        #self.speedy_holder = dict(
-        #    init_state = self.state,
-        #    tmp_state = state0,
-        #    tmp_pred  = None,
-        #)
-        
+ 
 
     def run(self, master=None):
 
@@ -109,10 +104,9 @@ class Speedy(Component):
         @jax.jit
         def forward_func(atmstate, fmstate):
 
-            new_atmstate = atmstate
+            #new_atmstate = atmstate
             #atmstate_dynamics = physics_state_to_dynamics_state(atmstate, self.model.primitive)
-            #final_state, pred = self.model.unroll(atmstate_dynamics)   # Bug in Speedy. Wait for them to fix
-            #final_state, pred = self.model.unroll(self.state0_dynamics) # Just to let it pass
+            final_state, pred = self.model.unroll(atmstate_dynamics)   # Error
             #new_atmstate = dynamics_state_to_physics_state(final_state, self.model.primitive)
             
             return new_atmstate
