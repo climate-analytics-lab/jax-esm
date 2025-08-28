@@ -65,18 +65,6 @@ class Component(ABC):
         self.data_center = None
         
     @abstractmethod
-    def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
-        """Initialize component state.
-        
-        Args:
-            rng_key: JAX random key for initialization
-            
-        Returns:
-            Initial component state
-        """
-        pass
-
-    @abstractmethod
     def genForwardFunc(
         self,
         state,
