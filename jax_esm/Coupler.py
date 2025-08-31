@@ -90,6 +90,7 @@ class Coupler:
             flux_mappings: Optional custom flux mappings between components
             flux_transformations: Optional flux transformation functions
         """
+        
         self.components = components
         self.execution_order = list(components.keys())
         self.config = config
@@ -155,32 +156,41 @@ class Coupler:
     def init(self):
         ...
 
-    def genForwardFunc(self):
-
-        atm_model = self.components["atm"]
-        flx_model = self.components["flx"]
-        ocn_model = self.components["ocn"]
+    def genForwardFunc(self, first_time=False):
 
         sub_forward_func = {
             component_name : self.components[component_name].genForwardFunc()
             for component_name in self.components.keys()
         }
-        
-        @jax.jit
-        def forward_func(cplstate):
-            
-            new_atmstate = sub_forward_func["atm"](cplstate)
-            new_flxstate = sub_forward_func["flx"](cplstate)
-            new_ocnstate = sub_forward_func["ocn"](cplstate)
 
-            new_cplstate = cplstate.copy(
-                atm = new_atmstate,
-                flx = new_flxstate,
-                ocn = new_ocnstate,
-            )
+        if first_time:
+            #@jax.jit
+            def forward_func(cplstate):
+                
+                new_atmstate = sub_forward_func["atm"](cplstate)
+    
+                new_cplstate = cplstate.copy(
+                    atm = new_atmstate,
+                )
             
-            return new_cplstate
-            
+                return new_cplstate
+        else:
+            # Consider meta-programming to dynamically generate `forward_fun`
+            #@jax.jit
+            def forward_func(cplstate):
+                
+                new_atmstate = sub_forward_func["atm"](cplstate)
+                new_flxstate = sub_forward_func["flx"](cplstate)
+                new_ocnstate = sub_forward_func["ocn"](cplstate)
+    
+                new_cplstate = cplstate.copy(
+                    atm = new_atmstate,
+                    flx = new_flxstate,
+                    ocn = new_ocnstate,
+                )
+                
+                return new_cplstate
+                
         return forward_func
     
     def run(self):

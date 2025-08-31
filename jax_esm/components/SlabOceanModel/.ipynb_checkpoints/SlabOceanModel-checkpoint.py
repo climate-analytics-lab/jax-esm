@@ -123,8 +123,9 @@ class SlabOceanModel(Component):
             
             for step in range(self.substeps):
                 new_T = new_T + self.subtimestep * ( - (
-                    fmstate.swflx_sfc +
-                    fmstate.lhflx
+ #                   fmstate.swflx_sfc +
+ #                   fmstate.lhflx
+                    fmstate.hfluxn[:, :, 0]
                 ) / ( somstate.mld * self.ocn_rho * self.ocn_cp ) )
             
             new_somstate = somstate.copy(
