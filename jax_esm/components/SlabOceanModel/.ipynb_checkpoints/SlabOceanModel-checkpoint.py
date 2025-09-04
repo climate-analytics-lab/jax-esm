@@ -10,6 +10,8 @@ from jax_esm import constants as constants
 from jax_esm.components.PhysicsState import CreatePhysicsStateClass
 
 
+from jcm.geometry import Geometry
+
 
 
 from jax_esm.components.base import (
@@ -52,9 +54,13 @@ class SlabOceanModel(Component):
         
         super().__init__(config)
 
+        self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
+        self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
+
         self.coords = config.params["coords"]
-        #namedtuple( "Coords", ["nodal_shape"] )(nodal_shape=(2,2,1))
+        self.geometry = config.params["geometry"]
         self.relaxation_time = config.params["relaxation_time"]
+
 
         self.timestep = config.timestep
         self.substeps = config.substeps
@@ -67,13 +73,27 @@ class SlabOceanModel(Component):
             D3_nodal_shape = D3_nodal_shape,
         )
 
+        # initialize mld
+        mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
+        mld_min = config.params["mld_min"] if "mld_min" in config.params else 40.0
+        mld = jnp.repeat(
+            jnp.expand_dims(
+                jnp.array(mld_max + (mld_min - mld_max) * self.geometry.coa**3),
+                axis = 0,
+            ),
+            repeats = D2_nodal_shape[0],
+            axis = 0,
+        )
+
+        print(mld.shape)
+        
         self.state = self.stateClass.zeros()
+
+        print(self.state.mld.shape)
         self.state = self.state.copy(
-            mld = self.state.mld * 0 + 50.0  # Mixed layer depth (m)
+            mld = mld,
         )
         
-        self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
-        self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
 
         
         """
