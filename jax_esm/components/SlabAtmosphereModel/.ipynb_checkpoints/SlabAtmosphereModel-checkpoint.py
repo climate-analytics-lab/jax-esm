@@ -12,7 +12,7 @@ from jax_esm.components.base import (
     ComponentConfig,
     ComponentState,
 )
-from jax_esm.components.PhysicsState import CreatePhysicsStateClass
+from jax_esm.components.util import CreatePhysicsStateClass
 
 class SlabAtmosphereModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
@@ -28,7 +28,7 @@ class SlabAtmosphereModel(Component):
         D3_nodal_shape,
     ):
         
-        StateClass = CreatePhysicsStateClass(
+        StateClass = createPhysicsStateClass(
             cls_name = "SAMState",
             fields = [
                 ("T", float, D2_nodal_shape),

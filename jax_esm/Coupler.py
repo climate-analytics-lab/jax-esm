@@ -14,6 +14,12 @@ from jax_esm.DataCenter import DataCenter, DataPermission
 from dataclasses import make_dataclass
 import tree_math
 
+def stack_objects(objs):
+    # objs is a list of pytrees with same structure
+    leaves = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
+    return leaves
+
+
 class Coupler:
     """Main coupler for Earth system components."""
 
@@ -107,20 +113,17 @@ class Coupler:
         for _, component in components.items():
             setattr(component, "data_center", self.data_center)
 
-        name_cls_pairs = [ (component_name, self.components[component_name].stateClass) for component_name in self.components.keys() ]
+        name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ]
         self.stateClass = self.__class__.createCoupledClass(
             cls_name = "CoupledState",
             name_cls_pairs = name_cls_pairs,
         )
 
         kwargs = {
-            component_name : self.components[component_name].state for component_name in self.components.keys()
+            component_name : self.components[component_name].state_diag for component_name in self.components.keys()
         }
         
         self.state = self.stateClass.zeros(**kwargs)
-        
-        #self.component_names = list(components.keys())
-        #self.coupling_timestep = coupling_timestep
 
     def checkConfig(self):
         ...
@@ -156,6 +159,11 @@ class Coupler:
     def init(self):
         ...
 
+    def record(self, cplstate):       
+        for component_name in self.components.keys():
+            self.components[component_name].record(getattr(cplstate, component_name))
+
+    
     def genForwardFunc(self, first_time=False):
 
         sub_forward_func = {
@@ -164,7 +172,7 @@ class Coupler:
         }
 
         if first_time:
-            #@jax.jit
+            @jax.jit
             def forward_func(cplstate):
                 
                 new_atmstate = sub_forward_func["atm"](cplstate)
@@ -176,18 +184,20 @@ class Coupler:
                 return new_cplstate
         else:
             # Consider meta-programming to dynamically generate `forward_fun`
-            #@jax.jit
+            @jax.jit
             def forward_func(cplstate):
                 
-                new_atmstate = sub_forward_func["atm"](cplstate)
-                new_flxstate = sub_forward_func["flx"](cplstate)
-                new_ocnstate = sub_forward_func["ocn"](cplstate)
-    
+                new_atm_sd = sub_forward_func["atm"](cplstate)
+                new_flx_sd = sub_forward_func["flx"](cplstate)
+                new_ocn_sd = sub_forward_func["ocn"](cplstate)
+
+                #print("New state updating...")
                 new_cplstate = cplstate.copy(
-                    atm = new_atmstate,
-                    flx = new_flxstate,
-                    ocn = new_ocnstate,
+                    atm = new_atm_sd,
+                    flx = new_flx_sd,
+                    ocn = new_ocn_sd,
                 )
+                #print("Return cplstate")
                 
                 return new_cplstate
                 

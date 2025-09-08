@@ -7,7 +7,9 @@ import jax.numpy as jnp
 from jax import Array
 
 from jax_esm import constants as constants
-from jax_esm.components.PhysicsState import CreatePhysicsStateClass
+from jax_esm.components.util import createPhysicsStateClass, createStateDiagClass
+
+from jax_esm.components.util import stack_objects
 
 from jax_esm.components.base import (
     BoundaryFluxes,
@@ -16,6 +18,7 @@ from jax_esm.components.base import (
     ComponentState,
 )
 
+import xarray as xr
 
 class FluxModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
@@ -31,7 +34,7 @@ class FluxModel(Component):
         D3_nodal_shape,
     ):
         
-        SOMStateClass = CreatePhysicsStateClass(
+        SOMStateClass = createPhysicsStateClass(
             cls_name = "FMState",
             fields = [
                 ("lhflx", float, D2_nodal_shape),
@@ -44,7 +47,23 @@ class FluxModel(Component):
     
         return SOMStateClass
 
+    @classmethod
+    def createDiagClass(
+        cls,
+        D2_nodal_shape,
+        D3_nodal_shape,
+        cls_name = "FMDiag",
+    ):
+        
+        new_cls = createPhysicsStateClass(
+            cls_name = cls_name,
+            fields = [
+                ("heatflx", float, D2_nodal_shape),
+            ],
+        )
     
+        return new_cls
+        
     def __init__(
         self,
         config: ComponentConfig,    
@@ -65,12 +84,26 @@ class FluxModel(Component):
         
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
+        
+        
         self.stateClass = self.__class__.createStateClass(
             D2_nodal_shape = D2_nodal_shape,
             D3_nodal_shape = D3_nodal_shape,
         )
 
-        self.state = self.stateClass.zeros()
+        self.diagClass = self.__class__.createDiagClass(
+            D2_nodal_shape = D2_nodal_shape,
+            D3_nodal_shape = D3_nodal_shape,
+        )
+        self.stateDiagClass = createStateDiagClass(
+            state_cls = self.stateClass,
+            diag_cls = self.diagClass,
+        )
+        self.state_diag = self.stateDiagClass.zeros()
+
+        self.trajectory = []
+        
+        
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
         self.u10 = 5.0 # m/s
@@ -78,44 +111,33 @@ class FluxModel(Component):
         self.rho_cp = 1.2 * 1004
         self.beta = 0.7
             
+    def initialize(self):
+        self.trajectory = []
 
+    def record(self, state_diag):
+        self.state_diag = state_diag
+        self.trajectory.append(state_diag.copy())
+
+    
     def genForwardFunc(self):
         
-        #@jax.jit
+        @jax.jit
         def forward_func(cplstate):
 
-            fmstate = cplstate.flx
-            """
-            atmstate = cplstate.atm
-            fmstate  = cplstate.flx
-            ocnstate = cplstate.ocn
-            
-            ocn_T = ocnstate.T
-            atm_T = atmstate.T
+            atmstate_diag = cplstate.atm
+            fmstate_diag = cplstate.flx
+            fmstate = fmstate_diag.state
 
-            new_lhflx = (self.u10 * self.C_H * self.rho_cp) * (ocn_T - atm_T)
-    
-            # shortwave radiation
-            _tmp = - self.solar_const / 4
-            
-            new_swflx_toa = fmstate.swflx_toa * 0 + _tmp
-            new_swflx_sfc = new_swflx_toa * self.beta
-    
-            new_lwflx_toa = fmstate.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
-            """
-            atmstate = cplstate.atm
-            #new_swflx_toa = jnp.mean(atmstate.physics.shortwave_rad.fsol, axis=0)
-            #print(atmstate.physics.surface_flux.hfluxn.shape)
-            new_hfluxn = - jnp.mean(atmstate.physics.surface_flux.hfluxn, axis=0)
-            new_fmstate = fmstate.copy(
+            new_hfluxn = - jnp.mean(atmstate_diag.physics.surface_flux.hfluxn, axis=0)
+            new_fmstate_diag = fmstate_diag.copy(
                 #swflx_toa = new_swflx_toa,
                 #swflx_sfc = new_swflx_sfc,
                 #lwflx_toa = new_lwflx_toa,
                 #lhflx = new_lhflx,
-                hfluxn = new_hfluxn,
+                state_kwargs = dict(hfluxn = new_hfluxn),
             )
-            
-            return new_fmstate
+
+            return new_fmstate_diag
 
         return forward_func
         
@@ -152,6 +174,23 @@ class FluxModel(Component):
 
         return forward_func
 
+    def convertTrajectoryToXarray(
+        self,
+        trajectory = None,
+    ):
+        if trajectory is None:
+            trajectory = self.trajectory
+        
+        stacked = stack_objects(trajectory)
+        ds = xr.Dataset(
+            data_vars = dict(
+                hfluxn  = (["time", "lon", "lat", "layer"], stacked.state.hfluxn),
+            ),
+        )
+        
+        return ds
+
+    
     def run(self, master=None):
         #print("Flux model run: compute the fluxes")
 

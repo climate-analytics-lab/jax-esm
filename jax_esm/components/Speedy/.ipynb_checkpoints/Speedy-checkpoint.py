@@ -21,12 +21,12 @@ from jax_esm.components.base import (
 )
 
 
-from jax_esm.components.PhysicsState import CreatePhysicsStateClass
+from jax_esm.components.util import createPhysicsStateClass
 
 from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
 from dinosaur import primitive_equations, primitive_equations_states
 from jcm.physics_interface import PhysicsState
-from jcm.model import Predictions
+from jcm.model import Predictions2
 
 class Speedy(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
@@ -35,29 +35,6 @@ class Speedy(Component):
     and relaxes towards a prescribed climatology.
     """
 
-    @classmethod
-    def createStateClass(
-        cls,
-        D2_nodal_shape,
-        D3_nodal_shape,
-    ):
-        
-        SpeedyStateClass = CreatePhysicsStateClass(
-            cls_name = "SpeedyState",
-            fields = [
-                ("u_wind", float, D3_nodal_shape),
-                ("v_wind", float, D3_nodal_shape),
-                ("temperature", float, D3_nodal_shape),
-                ("specific_humidity", float, D3_nodal_shape),
-                ("geopotential", float, D3_nodal_shape),
-                ("normalized_surface_pressure", float, D3_nodal_shape),
-                ("surface_temperature", float, D2_nodal_shape),
-                ("sw_sfc", float, D2_nodal_shape),
-                ("lw_sfc", float, D2_nodal_shape),
-            ],
-        )
-    
-        return SpeedyStateClass
     
     def __init__(
         self,
@@ -85,29 +62,16 @@ class Speedy(Component):
         #state_dynamics = self.model.get_initial_state()
         #print("Type of state_dynamics: ", type(state_dynamics))
         
-        self.stateClass = Predictions
-
+        self.stateDiagClass = Predictions2
         self.initialize()
-
-        """
-        init_dynamics_state = self.model._prepare_initial_state()
-
-        print("type of init_dynamics_state: ", type(init_dynamics_state))
-        init_state = dynamics_state_to_physics_state(init_dynamics_state, self.model.primitive)
-        """
+        self.trajectory = []
         
-        print("type of init_state: ", type(self.model._final_state_internal))
-        self.state = Predictions(
-            dynamics = self.model._final_state_internal,
+        self.state_diag = Predictions2(
+            modal_state = self.model._final_modal_state,
+            dynamics = self.model.initial_state,
             physics  = None,
             times = None,
         )
-
-    def run(self, master=None):
-
-        final_state, pred = self.model.unroll(self.speedy_holder["tmp_state"])
-        self.speedy_holder["tmp_state"] = final_state
-        self.speedy_holder["tmp_pred"]  = pred
 
     def initialize(
         self,
@@ -120,40 +84,51 @@ class Speedy(Component):
         # Copy from jax-gcm jcm/model.py
         if isinstance(initial_state, primitive_equations.State):
             model.initial_state = dynamics_state_to_physics_state(initial_state, model.primitive)
-            model._final_state_internal = initial_state
+            model._final_modal_state = initial_state
         else:
             model.initial_state = initial_state
-            model._final_state_internal = model._prepare_initial_state(initial_state)
+            model._final_modal_state = model._prepare_initial_modal_state(initial_state)
         
         model.start_date = start_date
         model.boundaries = model._prepare_boundaries()
-    
+        
+
+    def record(self, state_diag):
+        
+        self.state_diag = state_diag
+
+        copy_state_diag = Predictions2(
+            modal_state = state_diag.modal_state,
+            physics = state_diag.physics.copy(),
+            dynamics = state_diag.dynamics.copy(),
+            times = state_diag.times.copy(),
+        )
+
+        
+        self.trajectory.append(copy_state_diag)
+
+        
     def genForwardFunc(self):
 
-        #@jax.jit
+        @jax.jit
         def forward_func(cplstate):
             
-            atmstate = cplstate.atm
-            fmstate = cplstate.flx
-            ocnstate = cplstate.ocn
+            ocnstate = cplstate.ocn.state
             atm_boundary = self.model.boundaries.copy(
                 tsea = ocnstate.T,
             )
-                
-            #print("Begin type(_final_state_internal): ", type(self.model._final_state_internal))
-            #print(dir(self.model._final_state_internal))
-
-            #print("type(cplstate.atm.dynamics) = ", type(cplstate.atm.dynamics))
-            #self.model._final_state_internal = physics_state_to_dynamics_state(cplstate.atm.dynamics, self.model.primitive)
-            final_state = self.model.resume(
+            
+            integrate_fn = self.model.genIntegrateFn(
+                sim_time = cplstate.atm.modal_state.sim_time,
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
                 boundaries = atm_boundary,
             )
             
-            #print(dir(self.model._final_state_internal))
-            #print("End type(_final_state_internal): ", type(self.model._final_state_internal))
-            return final_state
+            predictions2 = integrate_fn(cplstate.atm)
+            
+            
+            return predictions2
                 
         return forward_func
     

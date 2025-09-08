@@ -1,18 +1,19 @@
 """Slab ocean model component."""
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 from collections import namedtuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 from jax_esm import constants as constants
-from jax_esm.components.PhysicsState import CreatePhysicsStateClass
-
+from jax_esm.components.util import createPhysicsStateClass, createStateDiagClass
+from jax_esm.components.util import stack_objects
 
 from jcm.geometry import Geometry
+import tree_math
 
-
+from dataclasses import make_dataclass
 
 from jax_esm.components.base import (
     BoundaryFluxes,
@@ -20,6 +21,9 @@ from jax_esm.components.base import (
     ComponentConfig,
     ComponentState,
 )
+
+import xarray as xr
+
 
 class SlabOceanModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
@@ -33,19 +37,39 @@ class SlabOceanModel(Component):
         cls,
         D2_nodal_shape,
         D3_nodal_shape,
+        cls_name = "SOMState",
     ):
         
-        SOMStateClass = CreatePhysicsStateClass(
-            cls_name = "SOMState",
+        new_cls = createPhysicsStateClass(
+            cls_name = cls_name,
             fields = [
                 ("T", float, D2_nodal_shape),
                 ("mld", float, D2_nodal_shape),
             ],
         )
     
-        return SOMStateClass
+        return new_cls
 
+
+    @classmethod
+    def createDiagClass(
+        cls,
+        D2_nodal_shape,
+        D3_nodal_shape,
+        cls_name = "SOMSDiag",
+    ):
+        
+        new_cls = createPhysicsStateClass(
+            cls_name = cls_name,
+            fields = [
+                ("heatflx", float, D2_nodal_shape),
+            ],
+        )
     
+        return new_cls
+
+
+        
     def __init__(
         self,
         config: ComponentConfig,
@@ -68,10 +92,22 @@ class SlabOceanModel(Component):
         
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
+        
         self.stateClass = self.__class__.createStateClass(
             D2_nodal_shape = D2_nodal_shape,
             D3_nodal_shape = D3_nodal_shape,
         )
+
+        self.diagClass = self.__class__.createDiagClass(
+            D2_nodal_shape = D2_nodal_shape,
+            D3_nodal_shape = D3_nodal_shape,
+        )
+
+        self.stateDiagClass = createStateDiagClass(
+            state_cls = self.stateClass,
+            diag_cls = self.diagClass,
+        )
+        self.state_diag = self.stateDiagClass.zeros()
 
         # initialize mld
         mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
@@ -85,14 +121,11 @@ class SlabOceanModel(Component):
             axis = 0,
         )
 
-        print(mld.shape)
-        
-        self.state = self.stateClass.zeros()
-
-        print(self.state.mld.shape)
-        self.state = self.state.copy(
-            mld = mld,
+        self.state_diag = self.state_diag.copy(
+            state_kwargs = dict(mld = mld),
         )
+        
+        self.trajectory = []
         
 
         
@@ -115,46 +148,58 @@ class SlabOceanModel(Component):
         self.time_factor_per_day = jnp.exp(-1.0 / self.relaxation_time)
         """
 
+    def initialize(self):
+        self.trajectory = []
+    
     def run(self, master=None):
+        pass            
 
-        flux_model = master.components["flx"]
-        subtimestep = self.timestep / self.substeps
-
-        for step in range(self.subtimestep):
-            
-            new_T = self.state.T + self.subtimestep * ( - (
-                flux_model.state.swflx_sfc +
-                flux_model.state.lhflx
-            ) / ( self.state.mld * self.ocn_rho * self.ocn_cp ) )
-        
-            self.state = self.state.copy(
-                T = new_T,
-            )
-            
-
+    def record(self, state_diag):
+        self.state_diag = state_diag
+        self.trajectory.append(state_diag.copy())
+    
     def genForwardFunc(self):
+        
         @jax.jit
-        def forward_func(cplstate):
+        def forward_func(cplinfo):
 
-            somstate = cplstate.ocn
-            fmstate  = cplstate.flx
+            somstate = cplinfo.ocn.state
+            fmstate  = cplinfo.flx.state
 
             new_T = somstate.T
-            
             for step in range(self.substeps):
                 new_T = new_T + self.subtimestep * ( - (
  #                   fmstate.swflx_sfc +
  #                   fmstate.lhflx
                     fmstate.hfluxn[:, :, 0]
                 ) / ( somstate.mld * self.ocn_rho * self.ocn_cp ) )
+
             
-            new_somstate = somstate.copy(
-                T = new_T,
+            new_state_diag = cplinfo.ocn.copy(
+                state_kwargs = dict(T = new_T),
             )
 
-            return new_somstate
-
+            return new_state_diag
+            
         return forward_func
-                
+
+    def convertTrajectoryToXarray(
+        self,
+        trajectory = None,
+    ):
+        if trajectory is None:
+            trajectory = self.trajectory
+        
+        stacked = stack_objects(trajectory)  
+        ds = xr.Dataset(
+            data_vars = dict(
+                T   = (["time", "lon", "lat"], stacked.state.T),
+                mld = (["time", "lon", "lat"], stacked.state.mld),
+            ),
+        )
+        
+        return ds
+        
+    
     def report(self):
        print("Ocean temperature = ", self.state.T[0]) 
