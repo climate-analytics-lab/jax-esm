@@ -117,27 +117,27 @@ class SlabOceanModel(Component):
         T_min = config.params["T_min"] if "T_min" in config.params else 273.15 + 5.0
 
 
-        lon_rad = self.coords.horizontal.longitudes
-        cos_llon = jnp.repeat(
+        llon_rad = jnp.repeat(
             jnp.expand_dims(
-                jnp.cos(lon_rad),
+                self.coords.horizontal.longitudes,
                 axis = 1,
             ),
             repeats = D2_nodal_shape[1],
             axis = 1,
         )
-        
-        coaa = jnp.repeat(
+
+        llat_rad = jnp.repeat(
             jnp.expand_dims(
-                self.geometry.coa**3,
+                self.coords.horizontal.latitudes,
                 axis = 0,
             ),
             repeats = D2_nodal_shape[0],
             axis = 0,
         )
+
         
-        init_mld = mld_max + (mld_min - mld_max) * coaa**3
-        init_T   = T_min + (T_max - T_min) * coaa**3 + 5.0 * cos_llon
+        init_mld = mld_max + (mld_min - mld_max) * jnp.cos(llat_rad)**3
+        init_T   = T_min + (T_max - T_min) * jnp.cos(llat_rad - 20 * jnp.pi / 180.0)**3 + 5.0 * jnp.cos(llon_rad)
         
         self.state_diag = self.state_diag.copy(
             state_kwargs = dict(
