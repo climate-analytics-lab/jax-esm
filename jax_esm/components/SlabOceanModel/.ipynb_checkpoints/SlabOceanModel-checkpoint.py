@@ -112,41 +112,42 @@ class SlabOceanModel(Component):
         # initialize mld
         mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
         mld_min = config.params["mld_min"] if "mld_min" in config.params else 40.0
-        mld = jnp.repeat(
+        
+        T_max = config.params["T_max"] if "T_max" in config.params else 273.15 + 30.0
+        T_min = config.params["T_min"] if "T_min" in config.params else 273.15 + 5.0
+
+
+        lon_rad = self.coords.horizontal.longitudes
+        cos_llon = jnp.repeat(
             jnp.expand_dims(
-                jnp.array(mld_max + (mld_min - mld_max) * self.geometry.coa**3),
+                jnp.cos(lon_rad),
+                axis = 1,
+            ),
+            repeats = D2_nodal_shape[1],
+            axis = 1,
+        )
+        
+        coaa = jnp.repeat(
+            jnp.expand_dims(
+                self.geometry.coa**3,
                 axis = 0,
             ),
             repeats = D2_nodal_shape[0],
             axis = 0,
         )
-
+        
+        init_mld = mld_max + (mld_min - mld_max) * coaa**3
+        init_T   = T_min + (T_max - T_min) * coaa**3 + 5.0 * cos_llon
+        
         self.state_diag = self.state_diag.copy(
-            state_kwargs = dict(mld = mld),
+            state_kwargs = dict(
+                mld = init_mld,
+                T = init_T,
+            ),
         )
         
         self.trajectory = []
         
-
-        
-        """
-        # Physical constants
-        
-        # Model parameters
-        self.mixed_layer_depth = config.params.get("mixed_layer_depth", 50.0)  # m
-        self.relaxation_time = config.params.get("relaxation_time", 30.0)  # days
-        
-        # Grid info
-        self.nlat = config.grid["nlat"]
-        self.nlon = config.grid["nlon"]
-        
-        # Precompute factors for efficiency
-        self.heat_capacity = self.ocn_rho * self.ocn_cp * self.mixed_layer_depth
-        self.cd_factor = 1.0 / self.heat_capacity  # K/(W/m²)/s
-        
-        # Time factor for anomaly evolution (per day)
-        self.time_factor_per_day = jnp.exp(-1.0 / self.relaxation_time)
-        """
 
     def initialize(self):
         self.trajectory = []
