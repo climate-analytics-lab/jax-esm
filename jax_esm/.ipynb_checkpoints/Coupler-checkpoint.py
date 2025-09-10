@@ -227,9 +227,10 @@ class Coupler:
             _start_time = time.time()
             print(f"Coupler Step: {step+1:d}/{total_steps:d}. ", end="")
 
-            if step <= 0:
-                cpl_forward_func = coupler.genForwardFunc(first_time=step==0)
+            #if step <= 0:
+            #    cpl_forward_func = coupler.genForwardFunc(first_time=step==0)
                 
+            cpl_forward_func = coupler.genForwardFunc(first_time=step==0)    
             cplstate = cpl_forward_func(cplstate)
 
             if step % save_interval_steps == 0:
