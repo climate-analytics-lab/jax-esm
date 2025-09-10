@@ -15,6 +15,8 @@ from dataclasses import make_dataclass
 import tree_math
 import time
 
+from jcm.date import DateData, Timestamp, Timedelta
+
 def stack_objects(objs):
     # objs is a list of pytrees with same structure
     leaves = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
@@ -32,7 +34,7 @@ class Coupler:
         name_cls_pairs,
         bases = (),
     ):
-        print("fields = ", name_cls_pairs)
+        
         cls = make_dataclass(
             cls_name = cls_name,
             fields = name_cls_pairs,
@@ -164,17 +166,17 @@ class Coupler:
         for component_name in self.components.keys():
             self.components[component_name].record(getattr(cplstate, component_name))
 
-        atm = getattr(cplstate, "atm")
-        item_keys = [
-            k for k, _ in atm.physics.__dict__.items()
-        ]
-        print("atm physics keys = ", item_keys)
+        #atm = getattr(cplstate, "atm")
+        #item_keys = [
+        #    k for k, _ in atm.physics.__dict__.items()
+        #]
+        #print("atm physics keys = ", item_keys)
         
     
-    def genForwardFunc(self, first_time=False):
+    def genForwardFunc(self, begin_time, first_time=False):
 
         sub_forward_func = {
-            component_name : self.components[component_name].genForwardFunc()
+            component_name : self.components[component_name].genForwardFunc(begin_time)
             for component_name in self.components.keys()
         }
 
@@ -213,6 +215,8 @@ class Coupler:
     def run(
         self,
         total_steps,
+        begin_time : Timestamp,
+        timestep   : Timedelta,
         save_interval_steps = 1,
     ):
 
@@ -221,22 +225,26 @@ class Coupler:
 
         cpl_forward_func = None
         
-        start_time = time.time()        
+        start_time = time.time()
+
+        time_now = begin_time
         for step in range(total_steps):
         
             _start_time = time.time()
-            print(f"Coupler Step: {step+1:d}/{total_steps:d}. ", end="")
-
-            #if step <= 0:
-            #    cpl_forward_func = coupler.genForwardFunc(first_time=step==0)
-                
-            cpl_forward_func = coupler.genForwardFunc(first_time=step==0)    
+            time_now_str = time_now.to_datetime64().astype('datetime64[us]').item().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}", end="")
+            
+            cpl_forward_func = coupler.genForwardFunc(
+                begin_time = begin_time,
+                first_time=step==0
+            )
             cplstate = cpl_forward_func(cplstate)
 
             if step % save_interval_steps == 0:
                 print("Save couple state. ", end="")
                 coupler.record(cplstate)
-                
+
+            time_now += timestep
             _end_time = time.time()
             _elapsed_time = _end_time - _start_time
             print(f"Execution time: {_elapsed_time:.1f} seconds.")

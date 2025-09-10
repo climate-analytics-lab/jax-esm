@@ -159,14 +159,14 @@ class SlabOceanModel(Component):
         self.state_diag = state_diag
         self.trajectory.append(state_diag.copy())
     
-    def genForwardFunc(self):
+    def genForwardFunc(self, begin_time):
         
         @jax.jit
         def forward_func(cplinfo):
 
             somstate = cplinfo.ocn.state
             fmstate  = cplinfo.flx.state
-
+            
             new_T = somstate.T
             for step in range(self.substeps):
                 new_T = new_T + self.subtimestep * ( - (

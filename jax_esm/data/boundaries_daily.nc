@@ -1,0 +1,1 @@
+../../../jax-gcm/jcm/data/bc/t30/clim/boundaries_daily.nc

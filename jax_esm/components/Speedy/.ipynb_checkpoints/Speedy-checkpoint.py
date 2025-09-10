@@ -108,7 +108,7 @@ class Speedy(Component):
         self.trajectory.append(copy_state_diag)
 
         
-    def genForwardFunc(self):
+    def genForwardFunc(self, begin_time):
 
         @jax.jit
         def forward_func(cplstate):

@@ -119,7 +119,7 @@ class FluxModel(Component):
         self.trajectory.append(state_diag.copy())
 
     
-    def genForwardFunc(self):
+    def genForwardFunc(self, begin_time):
         
         @jax.jit
         def forward_func(cplstate):
