@@ -13,6 +13,7 @@ from jax_esm.DataCenter import DataCenter, DataPermission
 
 from dataclasses import make_dataclass
 import tree_math
+import time
 
 def stack_objects(objs):
     # objs is a list of pytrees with same structure
@@ -163,6 +164,12 @@ class Coupler:
         for component_name in self.components.keys():
             self.components[component_name].record(getattr(cplstate, component_name))
 
+        atm = getattr(cplstate, "atm")
+        item_keys = [
+            k for k, _ in atm.physics.__dict__.items()
+        ]
+        print("atm physics keys = ", item_keys)
+        
     
     def genForwardFunc(self, first_time=False):
 
@@ -203,12 +210,42 @@ class Coupler:
                 
         return forward_func
     
-    def run(self):
-        for i, name in enumerate(self.execution_order):
-            component = self.components[name]
-            component.run(master=self)
-            
-        self.time += self.config["time_step"]           
+    def run(
+        self,
+        total_steps,
+        save_interval_steps = 1,
+    ):
+
+        coupler = self
+        cplstate = coupler.state.copy()
+
+        cpl_forward_func = None
+        
+        start_time = time.time()        
+        for step in range(total_steps):
+        
+            _start_time = time.time()
+            print(f"Coupler Step: {step+1:d}/{total_steps:d}. ", end="")
+
+            if step <= 0:
+                cpl_forward_func = coupler.genForwardFunc(first_time=step==0)
+                
+            cplstate = cpl_forward_func(cplstate)
+
+            if step % save_interval_steps == 0:
+                print("Save couple state. ", end="")
+                coupler.record(cplstate)
+                
+            _end_time = time.time()
+            _elapsed_time = _end_time - _start_time
+            print(f"Execution time: {_elapsed_time:.1f} seconds.")
+        
+        #record(recorder, step, cplstate, record_names)
+        
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
+        
     def reportComponents(self):
 
         for i, name in enumerate(self.execution_order):
