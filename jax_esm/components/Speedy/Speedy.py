@@ -122,7 +122,7 @@ class Speedy(Component):
                 tsea = ocnstate.T,
             )
             
-            integrate_fn = self.model.genIntegrateFn(
+            integrate_fn = self.model.genForwardFunc(
                 sim_time = cplstate.atm.modal_state.sim_time,
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
