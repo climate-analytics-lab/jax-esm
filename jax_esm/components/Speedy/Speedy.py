@@ -116,21 +116,24 @@ class Speedy(Component):
 
         @jax.jit
         def forward_func(cplstate):
-            
+
+            # This is where SST is passed
             ocnstate = cplstate.ocn.state
             atm_boundary = self.model.boundaries.copy(
                 tsea = ocnstate.T,
             )
-            
-            integrate_fn = self.model.genForwardFunc(
+
+            # The current `resume` function is not jittable
+            # Therefore, I create a function `genForwardFunc` that
+            # essentially is a jittable `resume` function.
+            speedy_forward_func = self.model.genForwardFunc(
                 sim_time = cplstate.atm.modal_state.sim_time,
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
                 boundaries = atm_boundary,
             )
             
-            predictions2 = integrate_fn(cplstate.atm)
-            
+            predictions2 = speedy_forward_func(cplstate.atm)
             
             return predictions2
                 
