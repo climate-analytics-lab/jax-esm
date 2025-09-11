@@ -185,7 +185,6 @@ class Coupler:
             def forward_func(cplstate):
                 
                 new_atmstate = sub_forward_func["atm"](cplstate)
-    
                 new_cplstate = cplstate.copy(
                     atm = new_atmstate,
                 )
@@ -200,13 +199,11 @@ class Coupler:
                 new_flx_sd = sub_forward_func["flx"](cplstate)
                 new_ocn_sd = sub_forward_func["ocn"](cplstate)
 
-                #print("New state updating...")
                 new_cplstate = cplstate.copy(
                     atm = new_atm_sd,
                     flx = new_flx_sd,
                     ocn = new_ocn_sd,
                 )
-                #print("Return cplstate")
                 
                 return new_cplstate
                 
