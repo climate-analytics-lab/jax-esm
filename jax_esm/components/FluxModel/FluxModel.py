@@ -110,6 +110,55 @@ class FluxModel(Component):
         self.C_H = 1e-3
         self.rho_cp = 1.2 * 1004
         self.beta = 0.7
+
+        if "boundaries" in config.params and config.params["boundaries"] is not None:
+
+            boundaries = config.params["boundaries"]
+            thrsh = 0.3
+
+            SST_clim = jnp.array(xr.open_dataset(config.params["boundary_file"])["sst"])
+            
+            # Fractional and binary land masks
+            fmask_lnd = boundaries.fmask
+            #bmask_lnd = jnp.where(fmask_lnd >= thrsh, 1.0, 0.0)
+    
+            # Update fmask_lnd based on the conditions
+            fmask_lnd = jnp.where(
+                fmask_lnd >= thrsh,
+                1.0,
+                0.0,
+            )
+
+            fmask_ocn = 1.0 - fmask_lnd
+
+            """
+            for varname in [
+                "lhflx",
+                "swflx_toa",
+                "swflx_sfc",
+                "lwflx_toa",
+            ]:
+                
+                self.state_diag = self.state_diag.copy(
+                    state = {
+                        varname: getattr(self.state_diag.state, varname).at[fmask_ocn == 0].set(jnp.nan)
+                    }
+                )
+                
+            self.state_diag = self.state_diag.copy(
+                state = {
+                    "hfluxn": self.state_diag.state.hfluxn.at[fmask_ocn == 0].set(jnp.nan)
+                }
+            )
+            
+            init_T = SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(jnp.nan)
+            
+            if jnp.any( jnp.isnan(init_T) == (fmask_ocn == 0) ):
+                print("fmask_ocn and init_T do share the same mask.")
+            else:
+                raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
+            """    
+
             
     def initialize(self):
         self.trajectory = []

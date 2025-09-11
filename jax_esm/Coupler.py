@@ -232,10 +232,10 @@ class Coupler:
         
             _start_time = time.time()
             time_now_str = time_now.to_datetime64().astype('datetime64[us]').item().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}", end="")
+            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}. ", end="")
             
             cpl_forward_func = coupler.genForwardFunc(
-                begin_time = begin_time,
+                begin_time = time_now,
                 first_time=step==0
             )
             cplstate = cpl_forward_func(cplstate)
@@ -248,9 +248,7 @@ class Coupler:
             _end_time = time.time()
             _elapsed_time = _end_time - _start_time
             print(f"Execution time: {_elapsed_time:.1f} seconds.")
-        
-        #record(recorder, step, cplstate, record_names)
-        
+      
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Elapsed Time: {elapsed_time:.1f} seconds.")

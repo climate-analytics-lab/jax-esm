@@ -50,6 +50,10 @@ class Speedy(Component):
             time_step = self.coupling_timestep / self.substeps / 60.0, # in minutes
         )
 
+        if "boundaries" in config.params and config.params["boundaries"] is not None:
+            boundaries = config.params["boundaries"]
+            config_speedy["orography"] = boundaries.orog
+
         self.model = Model(**config_speedy)
         
         #D3_nodal_shape = self.model.coords.nodal_shape
