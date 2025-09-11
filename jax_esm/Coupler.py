@@ -175,11 +175,14 @@ class Coupler:
     
     def genForwardFunc(self, begin_time, first_time=False):
 
+        # Collect forward functions from components
         sub_forward_func = {
             component_name : self.components[component_name].genForwardFunc(begin_time)
             for component_name in self.components.keys()
         }
 
+        # For some reason I cannot obtain a valid PhysicsState at the first time step
+        # So the flux and ocean model does not run until the second step
         if first_time:
             @jax.jit
             def forward_func(cplstate):
@@ -191,10 +194,12 @@ class Coupler:
             
                 return new_cplstate
         else:
-            # Consider meta-programming to dynamically generate `forward_fun`
+            
             @jax.jit
             def forward_func(cplstate):
                 
+                # Consider meta-programming to dynamically generate `forward_fun`
+                # Call forward functions of each component
                 new_atm_sd = sub_forward_func["atm"](cplstate)
                 new_flx_sd = sub_forward_func["flx"](cplstate)
                 new_ocn_sd = sub_forward_func["ocn"](cplstate)
