@@ -1,4 +1,4 @@
-"""Slab ocean model component."""
+"""Flux model component."""
 
 from typing import Dict, Tuple
 
@@ -19,7 +19,8 @@ from jax_esm.components.base import (
 import xarray as xr
 
 class FluxModel(Component):
-    """Simple slab ocean model with prescribed mixed layer depth.
+    """
+    FSimple slab ocean model with prescribed mixed layer depth.
     
     This model integrates SST anomalies based on surface heat fluxes
     and relaxes towards a prescribed climatology.
@@ -66,12 +67,8 @@ class FluxModel(Component):
         self,
         config: ComponentConfig,    
     ):
-        """Initialize slab ocean model.
-        
-        Expected parameters in config:
-        - mixed_layer_depth: Ocean mixed layer depth (m)
-        - relaxation_time: Relaxation timescale to climatology (days)
-        - sst_clim_file: Optional path to SST climatology
+        """
+        Initialize flux model.        
         """
         super().__init__(config)
         
@@ -165,7 +162,7 @@ class FluxModel(Component):
         self.state_diag = state_diag
         self.trajectory.append(state_diag.copy())
 
-    
+        
     def genForwardFunc(self, begin_time):
         
         @jax.jit
@@ -175,6 +172,7 @@ class FluxModel(Component):
             fmstate_diag = cplstate.flx
             fmstate = fmstate_diag.state
 
+            # In this flux model, we simply get the flux from atmosphere's calculation
             new_hfluxn = - jnp.mean(atmstate_diag.physics.surface_flux.hfluxn, axis=0)
             new_fmstate_diag = fmstate_diag.copy(
                 #swflx_toa = new_swflx_toa,
@@ -238,43 +236,6 @@ class FluxModel(Component):
         return ds
 
     
-    def run(self, master=None):
-        #print("Flux model run: compute the fluxes")
-
-        #ocn_model = master.components["ocn"]
-        #atm_model = master.components["atm"]
-
-        dc = self.data_center
-        ocn_T = dc.getVariable(component="ocn", varname="sea_surface_temperature", by_component="flx", is_universal_name = True)
-        atm_T = dc.getVariable(component="atm", varname="surface_air_temperature", by_component="flx", is_universal_name = True)
-
-
-        """
-        u10 = 5.0 # m/s
-        C_H = 1e-3
-        rho_cp = 1.2 * 1004
-        
-        new_lhflx = (u10 * 1e-3 * rho_cp) * (ocn_T - atm_T)
-
-        # shortwave radiation
-        _tmp = - self.solar_const * jnp.sin( 2 * jnp.pi * master.time / 86400.0 )
-        _tmp = jnp.where(_tmp > 0, 0, _tmp)
-
-        new_swflx_toa = self.state.swflx_toa * 0 + _tmp
-        new_swflx_sfc = new_swflx_toa * 0.80
-
-        new_lwflx_toa = self.state.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
-        """
-
-        
-
-        
-        self.state = self.state.copy(
-            lhflx = new_lhflx,
-            swflx_toa = new_swflx_toa,
-            swflx_sfc = new_swflx_sfc,
-            lwflx_toa = new_lwflx_toa,
-        )
 
     def report(self):
        print("Latent heat flux = ", self.state.lhflx[0]) 
