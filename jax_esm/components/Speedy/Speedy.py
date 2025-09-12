@@ -14,10 +14,8 @@ import jax.numpy as jnp
 from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.base import (
-    BoundaryFluxes,
     Component,
     ComponentConfig,
-    ComponentState,
 )
 
 
@@ -29,10 +27,9 @@ from jcm.physics_interface import PhysicsState
 from jcm.model import Predictions2
 
 class Speedy(Component):
-    """Simple slab ocean model with prescribed mixed layer depth.
     
-    This model integrates SST anomalies based on surface heat fluxes
-    and relaxes towards a prescribed climatology.
+    """
+    This is a class wrapping Speedy.
     """
 
     
@@ -40,6 +37,9 @@ class Speedy(Component):
         self,
         config: ComponentConfig,
     ):
+        """
+        config: Configuration of Speedy.
+        """
 
         super().__init__(config)
 
@@ -55,16 +55,6 @@ class Speedy(Component):
             config_speedy["orography"] = boundaries.orog
 
         self.model = Model(**config_speedy)
-        
-        #D3_nodal_shape = self.model.coords.nodal_shape
-        #D2_nodal_shape = D3_nodal_shape[1:]
-        #self.stateClass = Speedy.createStateClass(
-        #    D2_nodal_shape = D2_nodal_shape,
-        #    D3_nodal_shape = D3_nodal_shape,
-        #)
-
-        #state_dynamics = self.model.get_initial_state()
-        #print("Type of state_dynamics: ", type(state_dynamics))
         
         self.stateDiagClass = Predictions2
         self.initialize()

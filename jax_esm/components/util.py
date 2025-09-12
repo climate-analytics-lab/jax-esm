@@ -1,7 +1,7 @@
 
 #from collections import abc
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 
 import jax
 import jax.numpy as jnp
@@ -13,17 +13,47 @@ from dataclasses import make_dataclass
 from jax_esm.components.PhysicsState import PhysicsState
 
 
-def stack_objects(objs):
+def stack_objects(
+    objs : List
+):
+    """
+    A tool function that stack dataclasses together.
+
+    Args:
+
+        objs : A list of objects that need to be stacked
+
+    Returns:
+
+        stacked : Stacked object.
+        
+    """
     # objs is a list of pytrees with same structure
-    leaves = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
-    return leaves
+    stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
+    return stacked
 
 
 def createStateDiagClass(
-    state_cls,
-    diag_cls,
-    model_name = "",
+    state_cls  : type,
+    diag_cls   : type,
+    model_name : str = "",
 ):
+    """
+    A tool function that creates a state-diag class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`. 
+    
+    Args:
+
+        state_cls  : The state class.
+        diag_cls   : The diag class.
+        model_name : Name of the model. The class name will be "StateDiagClass_{model_name}".
+
+    Returns:
+
+        stateDiagClass: The resulting state-diag class.
+    
+    """
+    
     new_cls = make_dataclass(
         f"StateDiagClass_{model_name:s}",
         [
@@ -39,6 +69,13 @@ def createStateDiagClass(
             diag = diag_cls.zeros(),
         )
 
+    @classmethod
+    def ones(_cls):
+        return _cls(
+            state = state_cls.ones(),
+            diag = diag_cls.ones(),
+        )
+
 
     def copy(self, state_kwargs = {}, diag_kwargs = {}):
         o = new_cls(
@@ -49,46 +86,32 @@ def createStateDiagClass(
         return o
         
     new_cls.zeros = zeros
+    new_cls.ones = ones
     new_cls.copy = copy
     
     new_cls = tree_math.struct(new_cls)
     
     return new_cls
 
-
-def createResultClass(
-    state_cls,
-    model_name = "",
-):
-    result_cls = make_dataclass(
-        f"ResultClass_{model_name:s}",
-        [
-            ("state", state_cls),
-            ("predictions", Any),
-            ("times", Any),
-        ]
-    )
-
-    @classmethod
-    def empty(_cls):
-        
-        return _cls(
-            state = state_cls.zeros(),
-            predictions = [],
-            times = [],
-        )
-
-    result_cls.empty = empty
-    result_cls = tree_math.struct(result_cls)
-    
-    return result_cls
-
-
 def createPhysicsStateClass(
-    cls_name,
-    fields,   # A list of (varname, jnp_dtype, shape) tuples.
+    cls_name: str,
+    fields: Tuple,   
 ):
+    
+    """
+    A tool function that creates a state class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`. 
+    
+    Args:
 
+        cls_name : Name of the state class
+        fields   : A list of (varname, data type, shape) tuples.
+
+    Returns:
+
+        class : The resulting state class.
+    
+    """
     dataclass_fields = [ (varname, dtype) for varname, dtype, _ in fields ]
     
     cls = make_dataclass(
@@ -137,28 +160,3 @@ def createPhysicsStateClass(
     cls.copy = copy
     
     return tree_math.struct(cls)
-
-
-"""
-def convertTrajectoryToXarray(
-    trajectory
-):
-
-    stacked = stack_objects(trajectory)
-    test_obj = trajectory[0]
-    
-    for super_name in ["state", "diag"]:
-        super_obj = getattr(test_obj, super_name)
-        for varname, _ in super_obj.__dataclass_fields__.items():
-            value = getattr(x, varname)
-            
-    
-    ds = xr.Dataset(
-        data_vars = dict(
-            T   = (["time", "lon", "lat"], stacked.state.T),
-            mld = (["time", "lon", "lat"], stacked.state.mld),
-        ),
-    )
-    
-    return ds
-"""

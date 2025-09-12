@@ -16,34 +16,45 @@ import tree_math
 from dataclasses import make_dataclass
 
 from pathlib import Path
-
+import xarray as xr
 import pandas as pd
 import numpy as np
 
 from jax_esm.components.base import (
-    BoundaryFluxes,
     Component,
     ComponentConfig,
-    ComponentState,
 )
 
-import xarray as xr
 
 
 class SlabOceanModel(Component):
-    """Simple slab ocean model with prescribed mixed layer depth.
+    """
     
-    This model integrates SST anomalies based on surface heat fluxes
-    and relaxes towards a prescribed climatology.
+    Slab ocean model with prescribed mixed layer depth and climatology.
+
     """
 
     @classmethod
     def createStateClass(
         cls,
-        D2_nodal_shape,
-        D3_nodal_shape,
-        cls_name = "SOMState",
+        D2_nodal_shape: Tuple,
+        D3_nodal_shape: Tuple,
+        cls_name      : str = "SOMState",
     ):
+        """
+        It creates a state class dynamically with given dimension.
+        This class will have the following methods: `zeros`, `ones`, and `copy`. 
+
+        Args:
+        
+            D2_nodal_shape: Two-dimension shape tuple (y, x).
+            D3_nodal_shape: Three-dimension shape tuple (z, y, x).
+
+        Returns:
+
+            stateClass: The resulting state class.
+        
+        """
         
         new_cls = createPhysicsStateClass(
             cls_name = cls_name,
@@ -64,6 +75,20 @@ class SlabOceanModel(Component):
         cls_name = "SOMSDiag",
     ):
         
+        """
+        It creates a diag class dynamically with given dimension.
+        This class will have the following methods: `zeros`, `ones`, and `copy`. 
+
+        Args:
+        
+            D2_nodal_shape: Two-dimension shape tuple (y, x).
+            D3_nodal_shape: Three-dimension shape tuple (z, y, x).
+
+        Returns:
+
+            stateClass: The resulting state class.
+        
+        """        
         new_cls = createPhysicsStateClass(
             cls_name = cls_name,
             fields = [
@@ -216,14 +241,15 @@ class SlabOceanModel(Component):
         self.state_diag = state_diag
         self.trajectory.append(state_diag.copy())
     
-    def genForwardFunc(self, begin_time):
+    def genForwardFunc(
+        self,
+        begin_time,
+    ):
 
         # Find day of the year to locate climatology
         begin_time_dt = pd.Timestamp(begin_time.to_datetime64())
         ref_dt = pd.Timestamp(year=begin_time_dt.year, month=begin_time_dt.month, day=1)
         day_of_year = int(np.floor( ( begin_time_dt - ref_dt ) / pd.Timedelta(days=1) ))
-        #print("begin_time_dt = ", begin_time_dt)
-        #print("day_of_year = ", day_of_year)
         snapshot_SST_clim = self.SST_clim[:, :, day_of_year].at[self.fmask_ocn == 0].set(273.15+15)
         
         @jax.jit
@@ -235,8 +261,6 @@ class SlabOceanModel(Component):
             new_Tanom = somstate.T - snapshot_SST_clim
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
- #                   fmstate.swflx_sfc +
- #                   fmstate.lhflx
                     fmstate.hfluxn[:, :, 0]
                 )))
             
@@ -254,6 +278,17 @@ class SlabOceanModel(Component):
         self,
         trajectory = None,
     ):
+        """
+        A tool function that convert a trajectory into an xarray Dataset.
+
+        Args:
+        
+            trajectory : A list of object of class `self.stateDiagClass`. If None is given, then use `self.trajectory`. 
+
+        Returns:
+
+            ds : The resulting xarray dataset.
+        """
         if trajectory is None:
             trajectory = self.trajectory
         

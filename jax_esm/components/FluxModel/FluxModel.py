@@ -12,10 +12,8 @@ from jax_esm.components.util import createPhysicsStateClass, createStateDiagClas
 from jax_esm.components.util import stack_objects
 
 from jax_esm.components.base import (
-    BoundaryFluxes,
     Component,
     ComponentConfig,
-    ComponentState,
 )
 
 import xarray as xr
@@ -50,8 +48,8 @@ class FluxModel(Component):
     @classmethod
     def createDiagClass(
         cls,
-        D2_nodal_shape,
-        D3_nodal_shape,
+        D2_nodal_shape: Tuple,
+        D3_nodal_shape: Tuple,
         cls_name = "FMDiag",
     ):
         

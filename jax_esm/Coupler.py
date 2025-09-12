@@ -5,27 +5,16 @@ from typing import Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, CoupledComponent
-from jax_esm.coupling.flux_exchange import FluxExchanger
-from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
-
-from jax_esm.DataCenter import DataCenter, DataPermission
-
 from dataclasses import make_dataclass
 import tree_math
 import time
 
 from jcm.date import DateData, Timestamp, Timedelta
 
-def stack_objects(objs):
-    # objs is a list of pytrees with same structure
-    leaves = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
-    return leaves
-
+from jax_esm.components.base import Component
 
 class Coupler:
     """Main coupler for Earth system components."""
-
 
     @classmethod
     def createCoupledClass(
@@ -84,12 +73,8 @@ class Coupler:
     
     def __init__(
         self,
-        components: Dict[str, CoupledComponent],
+        components: Dict[str, Component],
         config: Dict[str, any],
-        permissions = None,
-        #coupling_timestep: float = 3600.0,  # 1 hour default
-        #flux_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
-        #flux_transformations: Optional[Dict[Tuple[str, str, str], callable]] = None,
     ):
         """Initialize the coupler.
         
@@ -104,17 +89,6 @@ class Coupler:
         self.execution_order = list(components.keys())
         self.config = config
         self.time = 0.0 # time in sec
-
-        if permissions is None:
-            permissions = DataPermission.getTemplatePermission(list(components.keys()))
-
-        self.data_center = DataCenter(
-            components = components,
-            permissions = permissions,
-        )
-
-        for _, component in components.items():
-            setattr(component, "data_center", self.data_center)
 
         name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ]
         self.stateClass = self.__class__.createCoupledClass(
