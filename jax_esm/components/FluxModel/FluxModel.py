@@ -173,7 +173,7 @@ class FluxModel(Component):
             fmstate = fmstate_diag.state
 
             # In this flux model, we simply get the flux from atmosphere's calculation
-            new_hfluxn = - jnp.mean(atmstate_diag.physics.surface_flux.hfluxn, axis=0)
+            new_hfluxn = - jnp.mean(atmstate_diag.diag.surface_flux.hfluxn, axis=0)
             new_fmstate_diag = fmstate_diag.copy(
                 #swflx_toa = new_swflx_toa,
                 #swflx_sfc = new_swflx_sfc,

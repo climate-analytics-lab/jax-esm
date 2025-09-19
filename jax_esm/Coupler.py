@@ -99,8 +99,10 @@ class Coupler:
         kwargs = {
             component_name : self.components[component_name].state_diag for component_name in self.components.keys()
         }
-        
+
+        # Initialize 
         self.state = self.stateClass.zeros(**kwargs)
+
 
     def checkConfig(self):
         ...
@@ -159,32 +161,32 @@ class Coupler:
         # So the flux and ocean model does not run until the second step
         if first_time:
             @jax.jit
-            def forward_func(cplstate):
+            def forward_func(cpl):
                 
-                new_atmstate = sub_forward_func["atm"](cplstate)
-                new_cplstate = cplstate.copy(
-                    atm = new_atmstate,
+                new_atm = sub_forward_func["atm"](cpl)
+                new_cpl = cpl.copy(
+                    atm = new_atm,
                 )
             
-                return new_cplstate
+                return new_cpl
         else:
             
             @jax.jit
-            def forward_func(cplstate):
+            def forward_func(cpl):
                 
                 # Consider meta-programming to dynamically generate `forward_fun`
                 # Call forward functions of each component
-                new_atm_sd = sub_forward_func["atm"](cplstate)
-                new_flx_sd = sub_forward_func["flx"](cplstate)
-                new_ocn_sd = sub_forward_func["ocn"](cplstate)
+                new_atm = sub_forward_func["atm"](cpl)
+                new_flx = sub_forward_func["flx"](cpl)
+                new_ocn = sub_forward_func["ocn"](cpl)
 
-                new_cplstate = cplstate.copy(
-                    atm = new_atm_sd,
-                    flx = new_flx_sd,
-                    ocn = new_ocn_sd,
+                new_cpl = cpl.copy(
+                    atm = new_atm,
+                    flx = new_flx,
+                    ocn = new_ocn,
                 )
                 
-                return new_cplstate
+                return new_cpl
                 
         return forward_func
     
