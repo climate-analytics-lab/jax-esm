@@ -68,11 +68,11 @@ class Speedy(Component):
 
         self.model = Model(**config_speedy)
         
-        self.stateDiagClass = WrappedSpeedyState
+        self.stateDiagClass = WrappedSpeedyStateDiag
         self.initialize()
         self.trajectory = []
         
-        self.state_diag = WrappedSpeedyState(
+        self.state_diag = WrappedSpeedyStateDiag(
             snapshot_modal_state = self.model._final_modal_state,
             state = self.model.initial_state,
             diag  = None,
@@ -107,7 +107,7 @@ class Speedy(Component):
         
         self.state_diag = state_diag
 
-        copy_state_diag = WrappedSpeedyState(
+        copy_state_diag = WrappedSpeedyStateDiag(
             snapshot_modal_state = state_diag.snapshot_modal_state,
             state = state_diag.state.copy(),
             diag = state_diag.diag.copy(),
