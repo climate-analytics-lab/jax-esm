@@ -12,74 +12,19 @@ import time
 from jcm.date import DateData, Timestamp, Timedelta
 
 from jax_esm.components.base import Component
-from jax_esm.SystemWatch import SystemWatch
 
-import dinosaur.time_integration as dino_ti
+from jax_esm.components.util import createPhysicalFieldsClass, createBundledClass
+
+import pandas as pd
 
 
 class Coupler:
     """Main coupler for Earth system components."""
-
-    @classmethod
-    def createCoupledClass(
-        cls,
-        cls_name,
-        name_cls_pairs,
-        bases = (),
-    ):
-        
-        cls = make_dataclass(
-            cls_name = cls_name,
-            fields = name_cls_pairs,
-            bases = bases,
-        )
-        
-        @classmethod
-        def zeros(_cls, **kwargs):
-            
-            init_args = dict()
-            for varname, cls in name_cls_pairs:
-                if (varname in kwargs) and (kwargs[varname] is not None):
-                    init_args[varname] = kwargs[varname]
-                else:
-                    init_args[varname] = cls.zeros()
-                    
-            return _cls(**init_args)
-    
-        @classmethod
-        def ones(_cls, **kwargs):
-            
-            init_args = dict()
-            for varname, cls in name_cls_pairs:
-                if (varname in kwargs) and (kwargs[varname] is not None):
-                    init_args[varname] = kwargs[varname]
-                else:
-                    init_args[varname] = cls.ones()
-    
-            return _cls(**init_args)
-    
-        def copy(self, **kwargs):
-            
-            init_args = dict()
-            for varname, cls in name_cls_pairs:
-                if (varname in kwargs) and (kwargs[varname] is not None):
-                    init_args[varname] = kwargs[varname]
-                else:
-                    init_args[varname] = getattr(self, varname)
-    
-            return type(self)(**init_args)
-    
-        cls.zeros = zeros
-        cls.ones = ones
-        cls.copy = copy
-        
-        return tree_math.struct(cls)
     
     def __init__(
         self,
         components: Dict[str, Component],
         config: Dict[str, any],
-        time: str | pd.Timestamp,
     ):
         
         """Initialize the coupler.
@@ -95,20 +40,21 @@ class Coupler:
         self.execution_order = list(components.keys())
         self.config = config
 
-        name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ]
-        self.stateClass = self.__class__.createCoupledClass(
+        self.stateClass = createBundledClass(
             cls_name = "CoupledState",
-            name_cls_pairs = name_cls_pairs,
+            name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ],
         )
 
         kwargs = {
             component_name : self.components[component_name].state_diag for component_name in self.components.keys()
         }
 
-        # Initialize 
-        self.state = self.stateClass.zeros(**kwargs)
+        
+        # Initialize
+        self.state = self.stateClass.zeros(**{
+            component_name : self.components[component_name].state_diag for component_name in self.components.keys()
+        })
 
-        self.sys_watch = SystemWatch(time)
 
     def checkConfig(self):
         ...
@@ -147,29 +93,21 @@ class Coupler:
     def record(self, cplstate):       
         for component_name in self.components.keys():
             self.components[component_name].record(getattr(cplstate, component_name))
-
-        #atm = getattr(cplstate, "atm")
-        #item_keys = [
-        #    k for k, _ in atm.physics.__dict__.items()
-        #]
-        #print("atm physics keys = ", item_keys)
         
-    
     def genForwardFunc(
         self,
-        begin_time,
-        first_time: bool = False,
+        first_time: bool,
     ):
 
         # Collect forward functions from components
         sub_forward_func = {
-            component_name : self.components[component_name].genForwardFunc(begin_time)
+            component_name : self.components[component_name].genForwardFunc()
             for component_name in self.components.keys()
         }
 
         # For some reason I cannot obtain a valid PhysicsState at the first time step
         # So the flux and ocean model does not run until the second step
-        if first_time:
+        if False and first_time:
             @jax.jit
             def forward_func(cpl):
                 
@@ -200,22 +138,8 @@ class Coupler:
                 
         return forward_func
 
-        integrate_fn = jax.jit(dino_ti.trajectory_from_step(
-            jax.checkpoint(step_fn),
-            outer_steps=outer_steps,
-            inner_steps=inner_steps,
-            start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries),
-        ))
-
-
-
-
-
-
-
     
-    def run2(
+    def run_without_using_scan(
         self,
         total_steps,
         begin_time : Timestamp,
@@ -238,8 +162,7 @@ class Coupler:
             print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}. ", end="")
             
             cpl_forward_func = coupler.genForwardFunc(
-                begin_time = time_now,
-                first_time=step==0
+                first_time = step == 0
             )
             cplstate = cpl_forward_func(cplstate)
 
@@ -257,7 +180,7 @@ class Coupler:
         print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
 
 
-    def run(
+    def run_using_scan(
         self,
         total_steps,
         begin_time : Timestamp,
@@ -273,6 +196,10 @@ class Coupler:
         start_time = time.time()
 
         time_now = begin_time
+
+        #final_state, traj = jax.lax.scan(f, init, xs, length=None)
+
+        
         for step in range(total_steps):
         
             _start_time = time.time()

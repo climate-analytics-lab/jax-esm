@@ -10,7 +10,7 @@ from jax import tree_util
 
 from dataclasses import make_dataclass
 
-from jax_esm.components.PhysicsState import PhysicsState
+#from jax_esm.components.PhysicsState import PhysicsState
 
 
 def stack_objects(
@@ -93,7 +93,7 @@ def createStateDiagClass(
     
     return new_cls
 
-def createPhysicsStateClass(
+def createPhysicalFieldsClass(
     cls_name: str,
     fields: Tuple,   
 ):
@@ -117,7 +117,7 @@ def createPhysicsStateClass(
     cls = make_dataclass(
         cls_name = cls_name,
         fields = dataclass_fields,
-        bases = ( PhysicsState, ),
+        bases = (),
     )
 
     
@@ -160,3 +160,120 @@ def createPhysicsStateClass(
     cls.copy = copy
     
     return tree_math.struct(cls)
+
+
+def createBundledClass(
+    cls_name,
+    name_cls_pairs,
+    bases = (),
+):
+    
+    cls = make_dataclass(
+        cls_name = cls_name,
+        fields = name_cls_pairs,
+        bases = bases,
+    )
+    
+    @classmethod
+    def zeros(_cls, **kwargs):
+        
+        init_args = dict()
+        for varname, cls in name_cls_pairs:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = cls.zeros()
+                
+        return _cls(**init_args)
+
+    @classmethod
+    def ones(_cls, **kwargs):
+        
+        init_args = dict()
+        for varname, cls in name_cls_pairs:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = cls.ones()
+
+        return _cls(**init_args)
+
+    def copy(self, **kwargs):
+        
+        init_args = dict()
+        for varname, cls in name_cls_pairs:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = getattr(self, varname)
+
+        return type(self)(**init_args)
+
+    cls.zeros = zeros
+    cls.ones = ones
+    cls.copy = copy
+    
+    return tree_math.struct(cls)
+
+
+
+# Not necessary. Might subject to deletion.
+def createStateDiagClass(
+    state_cls  : type,
+    diag_cls   : type,
+    model_name : str = "",
+):
+    """
+    A tool function that creates a state-diag class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`. 
+    
+    Args:
+
+        state_cls  : The state class.
+        diag_cls   : The diag class.
+        model_name : Name of the model. The class name will be "StateDiagClass_{model_name}".
+
+    Returns:
+
+        stateDiagClass: The resulting state-diag class.
+    
+    """
+    
+    new_cls = make_dataclass(
+        f"StateDiagClass_{model_name:s}",
+        [
+            ("state", state_cls),
+            ("diag", diag_cls),
+        ]
+    )
+
+    @classmethod
+    def zeros(_cls):
+        return _cls(
+            state = state_cls.zeros(),
+            diag = diag_cls.zeros(),
+        )
+
+    @classmethod
+    def ones(_cls):
+        return _cls(
+            state = state_cls.ones(),
+            diag = diag_cls.ones(),
+        )
+
+
+    def copy(self, state_kwargs = {}, diag_kwargs = {}):
+        o = new_cls(
+            state = self.state.copy(**state_kwargs),
+            diag = self.diag.copy(**diag_kwargs),
+        )
+
+        return o
+        
+    new_cls.zeros = zeros
+    new_cls.ones = ones
+    new_cls.copy = copy
+    
+    new_cls = tree_math.struct(new_cls)
+    
+    return new_cls

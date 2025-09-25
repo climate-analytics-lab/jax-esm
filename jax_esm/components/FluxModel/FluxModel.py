@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from jax_esm import constants as constants
-from jax_esm.components.util import createPhysicsStateClass, createStateDiagClass
+from jax_esm.components.util import createPhysicalFieldsClass, createStateDiagClass
 
 from jax_esm.components.util import stack_objects
 
@@ -26,43 +26,6 @@ class FluxModel(Component):
     and relaxes towards a prescribed climatology.
     """
 
-    @classmethod
-    def createStateClass(
-        cls,
-        D2_nodal_shape,
-        D3_nodal_shape,
-    ):
-        
-        SOMStateClass = createPhysicsStateClass(
-            cls_name = "FMState",
-            fields = [
-                ("lhflx", float, D2_nodal_shape),
-                ("swflx_toa", float, D2_nodal_shape),
-                ("swflx_sfc", float, D2_nodal_shape),
-                ("lwflx_toa", float, D2_nodal_shape),
-                ("hfluxn",    float, D2_nodal_shape + (2,)),
-            ],
-        )
-    
-        return SOMStateClass
-
-    @classmethod
-    def createDiagClass(
-        cls,
-        D2_nodal_shape: Tuple,
-        D3_nodal_shape: Tuple,
-        cls_name = "FMDiag",
-    ):
-        
-        new_cls = createPhysicsStateClass(
-            cls_name = cls_name,
-            fields = [
-                ("heatflx", float, D2_nodal_shape),
-            ],
-        )
-    
-        return new_cls
-        
     def __init__(
         self,
         config: ComponentConfig,    
@@ -81,24 +44,32 @@ class FluxModel(Component):
         D2_nodal_shape = D3_nodal_shape[1:]
         
         
-        self.stateClass = self.__class__.createStateClass(
-            D2_nodal_shape = D2_nodal_shape,
-            D3_nodal_shape = D3_nodal_shape,
+        self.stateClass = createPhysicalFieldsClass(
+            cls_name = "FM_state",
+            fields = [
+                ("lhflx", float, D2_nodal_shape),
+                ("swflx_toa", float, D2_nodal_shape),
+                ("swflx_sfc", float, D2_nodal_shape),
+                ("lwflx_toa", float, D2_nodal_shape),
+                ("hfluxn",    float, D2_nodal_shape + (2,)),
+            ],
         )
 
-        self.diagClass = self.__class__.createDiagClass(
-            D2_nodal_shape = D2_nodal_shape,
-            D3_nodal_shape = D3_nodal_shape,
+        self.diagClass = createPhysicalFieldsClass(
+            cls_name = "FM_diag",
+            fields = [
+                ("heatflx", float, D2_nodal_shape),
+            ],
         )
+        
         self.stateDiagClass = createStateDiagClass(
             state_cls = self.stateClass,
             diag_cls = self.diagClass,
         )
+        
         self.state_diag = self.stateDiagClass.zeros()
 
-        self.trajectory = []
-        
-        
+        self.trajectory = []        
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
         self.u10 = 5.0 # m/s
@@ -126,34 +97,6 @@ class FluxModel(Component):
 
             fmask_ocn = 1.0 - fmask_lnd
 
-            """
-            for varname in [
-                "lhflx",
-                "swflx_toa",
-                "swflx_sfc",
-                "lwflx_toa",
-            ]:
-                
-                self.state_diag = self.state_diag.copy(
-                    state = {
-                        varname: getattr(self.state_diag.state, varname).at[fmask_ocn == 0].set(jnp.nan)
-                    }
-                )
-                
-            self.state_diag = self.state_diag.copy(
-                state = {
-                    "hfluxn": self.state_diag.state.hfluxn.at[fmask_ocn == 0].set(jnp.nan)
-                }
-            )
-            
-            init_T = SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(jnp.nan)
-            
-            if jnp.any( jnp.isnan(init_T) == (fmask_ocn == 0) ):
-                print("fmask_ocn and init_T do share the same mask.")
-            else:
-                raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
-            """    
-
             
     def initialize(self):
         self.trajectory = []
@@ -163,7 +106,7 @@ class FluxModel(Component):
         self.trajectory.append(state_diag.copy())
 
         
-    def genForwardFunc(self, begin_time):
+    def genForwardFunc(self):
         
         @jax.jit
         def forward_func(cplstate):
@@ -234,8 +177,6 @@ class FluxModel(Component):
         )
         
         return ds
-
-    
 
     def report(self):
        print("Latent heat flux = ", self.state.lhflx[0]) 

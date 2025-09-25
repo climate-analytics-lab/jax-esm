@@ -7,13 +7,10 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 from jax_esm import constants as constants
-from jax_esm.components.util import createPhysicsStateClass, createStateDiagClass
+from jax_esm.components.util import createPhysicalFieldsClass, createStateDiagClass
 from jax_esm.components.util import stack_objects
 
 from jcm.geometry import Geometry
-import tree_math
-
-from dataclasses import make_dataclass
 
 from pathlib import Path
 import xarray as xr
@@ -33,72 +30,6 @@ class SlabOceanModel(Component):
     Slab ocean model with prescribed mixed layer depth and climatology.
 
     """
-
-    @classmethod
-    def createStateClass(
-        cls,
-        D2_nodal_shape: Tuple,
-        D3_nodal_shape: Tuple,
-        cls_name      : str = "SOMState",
-    ):
-        """
-        It creates a state class dynamically with given dimension.
-        This class will have the following methods: `zeros`, `ones`, and `copy`. 
-
-        Args:
-        
-            D2_nodal_shape: Two-dimension shape tuple (y, x).
-            D3_nodal_shape: Three-dimension shape tuple (z, y, x).
-
-        Returns:
-
-            stateClass: The resulting state class.
-        
-        """
-        
-        new_cls = createPhysicsStateClass(
-            cls_name = cls_name,
-            fields = [
-                ("T", float, D2_nodal_shape),
-                ("mld", float, D2_nodal_shape),
-            ],
-        )
-    
-        return new_cls
-
-
-    @classmethod
-    def createDiagClass(
-        cls,
-        D2_nodal_shape,
-        D3_nodal_shape,
-        cls_name = "SOMSDiag",
-    ):
-        
-        """
-        It creates a diag class dynamically with given dimension.
-        This class will have the following methods: `zeros`, `ones`, and `copy`. 
-
-        Args:
-        
-            D2_nodal_shape: Two-dimension shape tuple (y, x).
-            D3_nodal_shape: Three-dimension shape tuple (z, y, x).
-
-        Returns:
-
-            stateClass: The resulting state class.
-        
-        """        
-        new_cls = createPhysicsStateClass(
-            cls_name = cls_name,
-            fields = [
-                ("heatflx", float, D2_nodal_shape),
-            ],
-        )
-    
-        return new_cls
-
-
         
     def __init__(
         self,
@@ -115,28 +46,35 @@ class SlabOceanModel(Component):
         self.geometry = config.params["geometry"]
         self.relaxation_time = config.params["relaxation_time"]
 
+        self.start_dt = config.start_dt
         self.timestep = config.timestep
         self.substeps = config.substeps
         self.subtimestep = self.timestep / self.substeps
-
         
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
         
-        self.stateClass = self.__class__.createStateClass(
-            D2_nodal_shape = D2_nodal_shape,
-            D3_nodal_shape = D3_nodal_shape,
+        self.stateClass = createPhysicalFieldsClass(
+            cls_name = "SOM_state",
+            fields = [
+                ("sim_time", float, ()),
+                ("T", float, D2_nodal_shape),
+                ("mld", float, D2_nodal_shape),
+            ],
         )
 
-        self.diagClass = self.__class__.createDiagClass(
-            D2_nodal_shape = D2_nodal_shape,
-            D3_nodal_shape = D3_nodal_shape,
+        self.diagClass =  createPhysicalFieldsClass(
+            cls_name = "SOM_diag",
+            fields = [
+                ("heatflx", float, D2_nodal_shape),
+            ],
         )
 
         self.stateDiagClass = createStateDiagClass(
             state_cls = self.stateClass,
             diag_cls = self.diagClass,
         )
+
         self.state_diag = self.stateDiagClass.zeros()
 
         # =========================================================================
@@ -176,8 +114,12 @@ class SlabOceanModel(Component):
         self.SST_clim = None
         self.fmask_ocn = jnp.ones_like(init_mld)
         
+        
         if "boundaries" in config.params and config.params["boundaries"] is not None:
 
+            print("Boundary exists. ")
+            print("Boundary file: ", config.params["boundary_file"])
+            
             boundaries = config.params["boundaries"]
             thrsh = 0.3
 
@@ -212,6 +154,7 @@ class SlabOceanModel(Component):
             T_min = config.params["T_min"] if "T_min" in config.params else 273.15 + 5.0            
             init_T   = T_min + (T_max - T_min) * jnp.cos(llat_rad - 20 * jnp.pi / 180.0)**3 + 5.0 * jnp.cos(llon_rad)
 
+        
         # Compute cd and time factor
         
         cd = self.ocn_rho * self.ocn_cp * init_mld 
@@ -226,8 +169,8 @@ class SlabOceanModel(Component):
                 T = init_T,
             ),
         )
-
         
+        print("Sum of init_T at the end: ", jnp.sum(self.state_diag.state.T))
         self.trajectory = []
         
 
@@ -240,17 +183,17 @@ class SlabOceanModel(Component):
     def record(self, state_diag):
         self.state_diag = state_diag
         self.trajectory.append(state_diag.copy())
+
+        print("HEE")
+        print(self.trajectory[-1].state.sim_time)
     
     def genForwardFunc(
         self,
-        begin_time,
     ):
 
         # Find day of the year to locate climatology
-        begin_time_dt = pd.Timestamp(begin_time.to_datetime64())
-        ref_dt = pd.Timestamp(year=begin_time_dt.year, month=begin_time_dt.month, day=1)
-        day_of_year = int(np.floor( ( begin_time_dt - ref_dt ) / pd.Timedelta(days=1) ))
-        snapshot_SST_clim = self.SST_clim[:, :, day_of_year].at[self.fmask_ocn == 0].set(273.15+15)
+        ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
+        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
         
         @jax.jit
         def forward_func(cplinfo):
@@ -258,11 +201,19 @@ class SlabOceanModel(Component):
             somstate = cplinfo.ocn.state
             fmstate  = cplinfo.flx.state
 
+            days_after_start = jnp.floor( somstate.sim_time / 86400.0 ).astype(jnp.int32)
+            
+            # This snapshot SST will be frozen
+            snapshot_SST_clim = self.SST_clim[:, :, start_dt_offset + days_after_start]
+            snapshot_SST_clim = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim, 273.15+15)
+
             new_Tanom = somstate.T - snapshot_SST_clim
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
                     fmstate.hfluxn[:, :, 0]
                 )))
+
+                somstate.sim_time += self.subtimestep
             
             new_T = new_Tanom + snapshot_SST_clim
             
@@ -279,11 +230,11 @@ class SlabOceanModel(Component):
         trajectory = None,
     ):
         """
-        A tool function that convert a trajectory into an xarray Dataset.
+        A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
         
-            trajectory : A list of object of class `self.stateDiagClass`. If None is given, then use `self.trajectory`. 
+            trajectory : A list of objects of class `self.stateDiagClass`. If None is given, then use `self.trajectory`. 
 
         Returns:
 
@@ -295,6 +246,7 @@ class SlabOceanModel(Component):
         stacked = stack_objects(trajectory)  
         ds = xr.Dataset(
             data_vars = dict(
+                sim_time = (["time",], stacked.state.sim_time),
                 T   = (["time", "lon", "lat"], stacked.state.T),
                 mld = (["time", "lon", "lat"], stacked.state.mld),
             ),

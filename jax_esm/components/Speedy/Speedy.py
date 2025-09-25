@@ -19,8 +19,6 @@ from jax_esm.components.base import (
 )
 
 
-from jax_esm.components.util import createPhysicsStateClass
-
 from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
 from dinosaur import primitive_equations, primitive_equations_states
 from jcm.physics_interface import PhysicsState
@@ -30,7 +28,7 @@ import tree_math
 from typing import Any
 
 @tree_math.struct
-class WrappedSpeedyState:
+class WrappedSpeedyStateDiag:
     times : Any
     state : PhysicsState
     diag  : Any 
@@ -97,9 +95,13 @@ class Speedy(Component):
         else:
             model.initial_state = initial_state
             model._final_modal_state = model._prepare_initial_modal_state(initial_state)
+            #model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
+            
         
         model.start_date = start_date
         model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
+
+
 
         
 
@@ -118,8 +120,9 @@ class Speedy(Component):
         self.trajectory.append(copy_state_diag)
 
         
-    def genForwardFunc(self, begin_time):
+    def genForwardFunc(self):
 
+       
         @jax.jit
         def forward_func(cpl):
 
