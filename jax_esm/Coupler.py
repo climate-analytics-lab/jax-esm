@@ -12,6 +12,10 @@ import time
 from jcm.date import DateData, Timestamp, Timedelta
 
 from jax_esm.components.base import Component
+from jax_esm.SystemWatch import SystemWatch
+
+import dinosaur.time_integration as dino_ti
+
 
 class Coupler:
     """Main coupler for Earth system components."""
@@ -75,7 +79,9 @@ class Coupler:
         self,
         components: Dict[str, Component],
         config: Dict[str, any],
+        time: str | pd.Timestamp,
     ):
+        
         """Initialize the coupler.
         
         Args:
@@ -88,7 +94,6 @@ class Coupler:
         self.components = components
         self.execution_order = list(components.keys())
         self.config = config
-        self.time = 0.0 # time in sec
 
         name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ]
         self.stateClass = self.__class__.createCoupledClass(
@@ -103,6 +108,7 @@ class Coupler:
         # Initialize 
         self.state = self.stateClass.zeros(**kwargs)
 
+        self.sys_watch = SystemWatch(time)
 
     def checkConfig(self):
         ...
@@ -149,7 +155,11 @@ class Coupler:
         #print("atm physics keys = ", item_keys)
         
     
-    def genForwardFunc(self, begin_time, first_time=False):
+    def genForwardFunc(
+        self,
+        begin_time,
+        first_time: bool = False,
+    ):
 
         # Collect forward functions from components
         sub_forward_func = {
@@ -189,7 +199,64 @@ class Coupler:
                 return new_cpl
                 
         return forward_func
+
+        integrate_fn = jax.jit(dino_ti.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries),
+        ))
+
+
+
+
+
+
+
     
+    def run2(
+        self,
+        total_steps,
+        begin_time : Timestamp,
+        timestep   : Timedelta,
+        save_interval_steps = 1,
+    ):
+
+        coupler = self
+        cplstate = coupler.state.copy()
+
+        cpl_forward_func = None
+        
+        start_time = time.time()
+
+        time_now = begin_time
+        for step in range(total_steps):
+        
+            _start_time = time.time()
+            time_now_str = time_now.to_datetime64().astype('datetime64[us]').item().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}. ", end="")
+            
+            cpl_forward_func = coupler.genForwardFunc(
+                begin_time = time_now,
+                first_time=step==0
+            )
+            cplstate = cpl_forward_func(cplstate)
+
+            if step % save_interval_steps == 0:
+                print("Save couple state. ", end="")
+                coupler.record(cplstate)
+
+            time_now += timestep
+            _end_time = time.time()
+            _elapsed_time = _end_time - _start_time
+            print(f"Execution time: {_elapsed_time:.1f} seconds.")
+      
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
+
+
     def run(
         self,
         total_steps,
@@ -230,7 +297,17 @@ class Coupler:
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
-        
+
+        integrate_fn = jax.jit(dino_ti.trajectory_from_step(
+            jax.checkpoint(step_fn),
+            outer_steps=outer_steps,
+            inner_steps=inner_steps,
+            start_with_input=True,
+            post_process_fn=lambda state: self._post_process(state, boundaries),
+        ))
+
+
+    
     def reportComponents(self):
 
         for i, name in enumerate(self.execution_order):
