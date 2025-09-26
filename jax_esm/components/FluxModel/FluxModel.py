@@ -5,6 +5,8 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
+import tree_math
+from dataclasses import make_dataclass
 
 from jax_esm import constants as constants
 from jax_esm.components.util import createPhysicalFieldsClass, createStateDiagClass
@@ -55,21 +57,16 @@ class FluxModel(Component):
             ],
         )
 
-        self.diagClass = createPhysicalFieldsClass(
+        self.phydataClass = createPhysicalFieldsClass(
             cls_name = "FM_diag",
             fields = [
                 ("heatflx", float, D2_nodal_shape),
             ],
         )
         
-        self.stateDiagClass = createStateDiagClass(
-            state_cls = self.stateClass,
-            diag_cls = self.diagClass,
-        )
-        
-        self.state_diag = self.stateDiagClass.zeros()
+        self.init_state = self.stateClass.zeros()
+        self.init_phydata = self.phydataClass.zeros()
 
-        self.trajectory = []        
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
         self.u10 = 5.0 # m/s
@@ -97,35 +94,37 @@ class FluxModel(Component):
 
             fmask_ocn = 1.0 - fmask_lnd
 
+
+        self.first_call = True
+        
+    def getInitState(self):
+        return dict(state=self.init_state, phydata=self.init_phydata)
             
     def initialize(self):
-        self.trajectory = []
-
-    def record(self, state_diag):
-        self.state_diag = state_diag
-        self.trajectory.append(state_diag.copy())
-
+        ...
         
     def genForwardFunc(self):
-        
+
         @jax.jit
-        def forward_func(cplstate):
+        def forward_func(cplstate, t):
 
-            atmstate_diag = cplstate.atm
-            fmstate_diag = cplstate.flx
-            fmstate = fmstate_diag.state
+            atm_phydata = cplstate["atm"]["phydata"]
 
+            
             # In this flux model, we simply get the flux from atmosphere's calculation
-            new_hfluxn = - jnp.mean(atmstate_diag.diag.surface_flux.hfluxn, axis=0)
-            new_fmstate_diag = fmstate_diag.copy(
+            new_hfluxn = atm_phydata.surface_flux.hfluxn * (-1)
+            
+            new_state = cplstate["flx"]["state"].copy(
                 #swflx_toa = new_swflx_toa,
                 #swflx_sfc = new_swflx_sfc,
                 #lwflx_toa = new_lwflx_toa,
                 #lhflx = new_lhflx,
-                state_kwargs = dict(hfluxn = new_hfluxn),
+                hfluxn = new_hfluxn,
             )
+            
+            new_phydata = cplstate["flx"]["phydata"].copy()
 
-            return new_fmstate_diag
+            return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
 
         return forward_func
         
@@ -164,15 +163,22 @@ class FluxModel(Component):
 
     def convertTrajectoryToXarray(
         self,
-        trajectory = None,
+        trajectory,
     ):
-        if trajectory is None:
-            trajectory = self.trajectory
         
-        stacked = stack_objects(trajectory)
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
+
+        Args:
+            trajectory : The stacked prediction
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        st = trajectory["state"]
         ds = xr.Dataset(
             data_vars = dict(
-                hfluxn  = (["time", "lon", "lat", "layer"], stacked.state.hfluxn),
+                hfluxn  = (["time", "lon", "lat", "layer"], st.hfluxn),
             ),
         )
         

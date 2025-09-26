@@ -1,16 +1,20 @@
 """Slab ocean model component."""
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 from collections import namedtuple
 
 import jax
 import jax.numpy as jnp
+import tree_math
+from dataclasses import make_dataclass
+
 from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.util import createPhysicalFieldsClass, createStateDiagClass
 from jax_esm.components.util import stack_objects
 
 from jcm.geometry import Geometry
+
 
 from pathlib import Path
 import xarray as xr
@@ -63,19 +67,15 @@ class SlabOceanModel(Component):
             ],
         )
 
-        self.diagClass =  createPhysicalFieldsClass(
+        self.phydataClass =  createPhysicalFieldsClass(
             cls_name = "SOM_diag",
             fields = [
                 ("heatflx", float, D2_nodal_shape),
             ],
         )
 
-        self.stateDiagClass = createStateDiagClass(
-            state_cls = self.stateClass,
-            diag_cls = self.diagClass,
-        )
-
-        self.state_diag = self.stateDiagClass.zeros()
+        self.init_state = self.stateClass.zeros()
+        self.init_phydata = self.phydataClass.zeros()
 
         # =========================================================================
         # Initialize slab ocean model boundary conditions
@@ -163,29 +163,17 @@ class SlabOceanModel(Component):
         self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
         self.cd_factor = self.subtimestep / cd
 
-        self.state_diag = self.state_diag.copy(
-            state_kwargs = dict(
-                mld = init_mld,
-                T = init_T,
-            ),
+        self.init_state = self.init_state.copy(
+            mld = init_mld,
+            T = init_T,
         )
-        
-        print("Sum of init_T at the end: ", jnp.sum(self.state_diag.state.T))
-        self.trajectory = []
-        
+                
+    def getInitState(self):
+        return dict(state=self.init_state, phydata=self.init_phydata)
 
-    def initialize(self):
-        self.trajectory = []
     
-    def run(self, master=None):
-        pass            
-
-    def record(self, state_diag):
-        self.state_diag = state_diag
-        self.trajectory.append(state_diag.copy())
-
-        print("HEE")
-        print(self.trajectory[-1].state.sim_time)
+    def initialize(self):
+        ...
     
     def genForwardFunc(
         self,
@@ -196,10 +184,10 @@ class SlabOceanModel(Component):
         start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
         
         @jax.jit
-        def forward_func(cplinfo):
+        def forward_func(cpl, t):
 
-            somstate = cplinfo.ocn.state
-            fmstate  = cplinfo.flx.state
+            somstate = cpl["ocn"]["state"]
+            fmstate  = cpl["flx"]["state"]
 
             days_after_start = jnp.floor( somstate.sim_time / 86400.0 ).astype(jnp.int32)
             
@@ -208,6 +196,7 @@ class SlabOceanModel(Component):
             snapshot_SST_clim = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim, 273.15+15)
 
             new_Tanom = somstate.T - snapshot_SST_clim
+            
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
                     fmstate.hfluxn[:, :, 0]
@@ -216,39 +205,37 @@ class SlabOceanModel(Component):
                 somstate.sim_time += self.subtimestep
             
             new_T = new_Tanom + snapshot_SST_clim
-            
-            new_state_diag = cplinfo.ocn.copy(
-                state_kwargs = dict(T = new_T),
-            )
 
-            return new_state_diag
+            new_state = somstate.copy(
+                T = new_T,
+            )
+            
+            new_phydata = cpl["ocn"]["phydata"].copy()
+            
+            return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
             
         return forward_func
 
     def convertTrajectoryToXarray(
         self,
-        trajectory = None,
+        trajectory,
     ):
+        
         """
         A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
-        
-            trajectory : A list of objects of class `self.stateDiagClass`. If None is given, then use `self.trajectory`. 
-
+            trajectory : The stacked prediction
+            
         Returns:
-
             ds : The resulting xarray dataset.
         """
-        if trajectory is None:
-            trajectory = self.trajectory
-        
-        stacked = stack_objects(trajectory)  
+        st = trajectory["state"]
         ds = xr.Dataset(
             data_vars = dict(
-                sim_time = (["time",], stacked.state.sim_time),
-                T   = (["time", "lon", "lat"], stacked.state.T),
-                mld = (["time", "lon", "lat"], stacked.state.mld),
+                sim_time = (["time",], st.sim_time),
+                T   = (["time", "lon", "lat"], st.T),
+                mld = (["time", "lon", "lat"], st.mld),
             ),
         )
         

@@ -22,18 +22,12 @@ from jax_esm.components.base import (
 from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
 from dinosaur import primitive_equations, primitive_equations_states
 from jcm.physics_interface import PhysicsState
-#from jcm.model import Predictions2
+from jcm.model import Predictions
+from jax_esm.components.util import stack_objects
+
 
 import tree_math
 from typing import Any
-
-@tree_math.struct
-class WrappedSpeedyStateDiag:
-    times : Any
-    state : PhysicsState
-    diag  : Any 
-    snapshot_modal_state : primitive_equations.State
-
 
 
 class Speedy(Component):
@@ -64,20 +58,12 @@ class Speedy(Component):
             boundaries = config.params["boundaries"]
             config_speedy["orography"] = boundaries.orog
 
-        self.model = Model(**config_speedy)
-        
-        self.stateDiagClass = WrappedSpeedyStateDiag
-        self.initialize()
-        self.trajectory = []
-        
-        self.state_diag = WrappedSpeedyStateDiag(
-            snapshot_modal_state = self.model._final_modal_state,
-            state = self.model.initial_state,
-            diag  = None,
-            times = None,
-        )
+        self.orog = boundaries.orog
 
-        print("Is snapshot None? ", self.state_diag.snapshot_modal_state is None)
+        self.model = Model(**config_speedy) 
+        self.initialize()
+
+        
     
     def initialize(
         self,
@@ -93,68 +79,59 @@ class Speedy(Component):
             model.initial_state = dynamics_state_to_physics_state(initial_state, model.primitive)
             model._final_modal_state = initial_state
         else:
+
             model.initial_state = initial_state
             model._final_modal_state = model._prepare_initial_modal_state(initial_state)
-            #model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
+
+            if initial_state is None:
+                model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
             
         
         model.start_date = start_date
         model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
 
 
-
+    def getInitState(self):
         
-
-    def record(self, state_diag):
-        
-        self.state_diag = state_diag
-
-        copy_state_diag = WrappedSpeedyStateDiag(
-            snapshot_modal_state = state_diag.snapshot_modal_state,
-            state = state_diag.state.copy(),
-            diag = state_diag.diag.copy(),
-            times = state_diag.times.copy(),
+        D3_nodal_shape = self.model.geometry.nodal_shape
+        #print("self.model.initial_state = ", self.model.initial_state)
+        return_obj = dict(
+            modal_state = self.model._final_modal_state,
+            state = self.model.initial_state,
+            phydata = jcm.physics.speedy.physics_data.PhysicsData.zeros(nodal_shape=D3_nodal_shape[1:], node_levels=D3_nodal_shape[0]),
         )
-
         
-        self.trajectory.append(copy_state_diag)
-
+        return return_obj
         
     def genForwardFunc(self):
 
        
         @jax.jit
-        def forward_func(cpl):
+        def forward_func(cpl, t):
 
             # This is where SST is passed
-            ocnstate = cpl.ocn.state
+            ocnstate = cpl["ocn"]["state"]
                         
             atm_boundary = self.model.boundaries.copy(
                 tsea = ocnstate.T,
             )
 
-            # The current `resume` function is not jittable
-            # Therefore, I create a function `genForwardFunc` that
-            # essentially is a jittable `resume` function.
-            new_snapshot_modal_state, predictions = self.model.run_from_state(
-                initial_state = cpl.atm.snapshot_modal_state,
+            new_atm_modal_state, predictions = self.model.run_from_state(
+                initial_state = cpl["atm"]["modal_state"],
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
                 boundaries = atm_boundary,
             )
+
             
-            new_atm = self.stateDiagClass(
-                times = predictions.times,
+            return dict(
+                modal_state = new_atm_modal_state,
                 state = predictions.dynamics,
-                diag  = predictions.physics,
-                snapshot_modal_state = new_snapshot_modal_state,
-            )
+                phydata = jax.tree.map(lambda arr: jnp.mean(arr, axis=0), predictions.physics),
+            ), predictions
             
-            return new_atm
-                
         return forward_func
     
     def report(self):
         pass
-        #print("Atmoshpere temperature = ", self.state.T[0]) 
         

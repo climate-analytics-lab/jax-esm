@@ -48,9 +48,9 @@ class Component(ABC):
     ):
         pass
 
-    @abstractmethod
-    def record(
-        self,
-        state_diag,
-    ):
-        pass
+#    @abstractmethod
+#    def record(
+#        self,
+#        state_diag,
+#    ):
+#        pass

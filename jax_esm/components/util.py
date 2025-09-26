@@ -10,11 +10,8 @@ from jax import tree_util
 
 from dataclasses import make_dataclass
 
-#from jax_esm.components.PhysicsState import PhysicsState
-
-
 def stack_objects(
-    objs : List
+    objs : List,
 ):
     """
     A tool function that stack dataclasses together.
@@ -31,6 +28,33 @@ def stack_objects(
     # objs is a list of pytrees with same structure
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
     return stacked
+
+def concat_objects(
+    objs : List,
+    axis : int,
+):
+    """
+    A tool function that concats dataclasses together.
+
+    Args:
+
+        objs : A list of objects that need to be concat
+
+    Returns:
+
+        concatenated : Concatenated object.
+        
+    """
+    def c(*xs):
+        #for i, x in enumerate(xs):
+        #    print(f"{i:d} => ", type(x), ";" ,x.shape)
+        return jnp.concatenate(xs, axis=axis)
+    
+    # objs is a list of pytrees with same structure
+    concatenated = jax.tree_util.tree_map(c, *objs)
+    return concatenated
+
+
 
 
 def createStateDiagClass(
@@ -92,6 +116,7 @@ def createStateDiagClass(
     new_cls = tree_math.struct(new_cls)
     
     return new_cls
+
 
 def createPhysicalFieldsClass(
     cls_name: str,

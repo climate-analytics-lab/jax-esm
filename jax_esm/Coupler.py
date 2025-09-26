@@ -16,6 +16,24 @@ from jax_esm.components.base import Component
 from jax_esm.components.util import createPhysicalFieldsClass, createBundledClass
 
 import pandas as pd
+import numpy as np
+
+def adhoc_scan(f, init, xs=None, length=None):
+
+    from jax_esm.components.util import stack_objects, concat_objects
+    
+    if xs is None:
+        xs = [1] * length
+    carry = init
+    ys = []
+    for i, x in enumerate(xs):
+        print(f"The {i:d}-th iteration. ")
+        carry, y = f(carry, x)
+        ys.append(y)
+
+    #return carry, np.stack(ys)
+
+    return carry, concat_objects(ys, axis=0)
 
 
 class Coupler:
@@ -39,21 +57,6 @@ class Coupler:
         self.components = components
         self.execution_order = list(components.keys())
         self.config = config
-
-        self.stateClass = createBundledClass(
-            cls_name = "CoupledState",
-            name_cls_pairs = [ (component_name, self.components[component_name].stateDiagClass) for component_name in self.components.keys() ],
-        )
-
-        kwargs = {
-            component_name : self.components[component_name].state_diag for component_name in self.components.keys()
-        }
-
-        
-        # Initialize
-        self.state = self.stateClass.zeros(**{
-            component_name : self.components[component_name].state_diag for component_name in self.components.keys()
-        })
 
 
     def checkConfig(self):
@@ -86,7 +89,16 @@ class Coupler:
         for i, name in enumerate(self.execution_order):
             print(f"[{i+1:2d}] : {name:s} ")
 
+    def genInitState(self):
+        # Collect initial states from components
+        init_cplstate = {
+            component_name : self.components[component_name].getInitState()
+            for component_name in self.components.keys()
+        }
 
+        return init_cplstate
+
+        
     def init(self):
         ...
 
@@ -96,7 +108,6 @@ class Coupler:
         
     def genForwardFunc(
         self,
-        first_time: bool,
     ):
 
         # Collect forward functions from components
@@ -104,135 +115,69 @@ class Coupler:
             component_name : self.components[component_name].genForwardFunc()
             for component_name in self.components.keys()
         }
-
-        # For some reason I cannot obtain a valid PhysicsState at the first time step
-        # So the flux and ocean model does not run until the second step
-        if False and first_time:
-            @jax.jit
-            def forward_func(cpl):
-                
-                new_atm = sub_forward_func["atm"](cpl)
-                new_cpl = cpl.copy(
-                    atm = new_atm,
-                )
+        
+        @jax.jit
+        def forward_func(cplstate, t):
             
-                return new_cpl
-        else:
-            
-            @jax.jit
-            def forward_func(cpl):
-                
-                # Consider meta-programming to dynamically generate `forward_fun`
-                # Call forward functions of each component
-                new_atm = sub_forward_func["atm"](cpl)
-                new_flx = sub_forward_func["flx"](cpl)
-                new_ocn = sub_forward_func["ocn"](cpl)
+            # Consider meta-programming to dynamically generate `forward_fun`
+            # Call forward functions of each component
 
-                new_cpl = cpl.copy(
-                    atm = new_atm,
-                    flx = new_flx,
-                    ocn = new_ocn,
-                )
-                
-                return new_cpl
-                
+            new_atmstate, atm_predictions = sub_forward_func["atm"](cplstate, t)
+            new_flxstate, flx_predictions = sub_forward_func["flx"](cplstate, t)
+            new_ocnstate, ocn_predictions = sub_forward_func["ocn"](cplstate, t)
+
+            new_cplstate = dict(
+                atm = new_atmstate,
+                flx = new_flxstate,
+                ocn = new_ocnstate,
+            )
+
+            cpl_predictions = dict(
+                atm = atm_predictions,
+                flx = flx_predictions,
+                ocn = ocn_predictions,
+            )
+
+            return new_cplstate, cpl_predictions
+
         return forward_func
 
-    
-    def run_without_using_scan(
+
+    def run(
         self,
         total_steps,
-        begin_time : Timestamp,
         timestep   : Timedelta,
         save_interval_steps = 1,
+        jax_scan: bool = True,
     ):
 
         coupler = self
-        cplstate = coupler.state.copy()
-
-        cpl_forward_func = None
         
-        start_time = time.time()
-
-        time_now = begin_time
-        for step in range(total_steps):
+        # Collect initial states from components
+        init_cplstate = {
+            component_name : self.components[component_name].getInitState()
+            for component_name in self.components.keys()
+        }
         
-            _start_time = time.time()
-            time_now_str = time_now.to_datetime64().astype('datetime64[us]').item().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}. ", end="")
+        _start_time = time.time()
+
+        def step_fn(_cplstate, t):
+            return coupler.genForwardFunc()(_cplstate, t)
             
-            cpl_forward_func = coupler.genForwardFunc(
-                first_time = step == 0
-            )
-            cplstate = cpl_forward_func(cplstate)
 
-            if step % save_interval_steps == 0:
-                print("Save couple state. ", end="")
-                coupler.record(cplstate)
-
-            time_now += timestep
-            _end_time = time.time()
-            _elapsed_time = _end_time - _start_time
-            print(f"Execution time: {_elapsed_time:.1f} seconds.")
-      
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
-
-
-    def run_using_scan(
-        self,
-        total_steps,
-        begin_time : Timestamp,
-        timestep   : Timedelta,
-        save_interval_steps = 1,
-    ):
-
-        coupler = self
-        cplstate = coupler.state.copy()
-
-        cpl_forward_func = None
+        scan_func = jax.lax.scan if jax_scan else adhoc_scan
         
-        start_time = time.time()
+        final_state, traj = scan_func(
+            step_fn,
+            init_cplstate,
+            length=total_steps,
+        )
 
-        time_now = begin_time
+        _end_time = time.time()
+        _elapsed_time = _end_time - _start_time
+        print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-        #final_state, traj = jax.lax.scan(f, init, xs, length=None)
-
-        
-        for step in range(total_steps):
-        
-            _start_time = time.time()
-            time_now_str = time_now.to_datetime64().astype('datetime64[us]').item().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Coupler Step: {step+1:d}/{total_steps:d}. DateTime = {time_now_str:s}. ", end="")
-            
-            cpl_forward_func = coupler.genForwardFunc(
-                begin_time = time_now,
-                first_time=step==0
-            )
-            cplstate = cpl_forward_func(cplstate)
-
-            if step % save_interval_steps == 0:
-                print("Save couple state. ", end="")
-                coupler.record(cplstate)
-
-            time_now += timestep
-            _end_time = time.time()
-            _elapsed_time = _end_time - _start_time
-            print(f"Execution time: {_elapsed_time:.1f} seconds.")
-      
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Elapsed Time: {elapsed_time:.1f} seconds.")
-
-        integrate_fn = jax.jit(dino_ti.trajectory_from_step(
-            jax.checkpoint(step_fn),
-            outer_steps=outer_steps,
-            inner_steps=inner_steps,
-            start_with_input=True,
-            post_process_fn=lambda state: self._post_process(state, boundaries),
-        ))
-
+        return final_state, traj
 
     
     def reportComponents(self):
