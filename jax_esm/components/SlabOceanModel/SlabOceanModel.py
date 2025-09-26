@@ -9,9 +9,10 @@ import tree_math
 from dataclasses import make_dataclass
 
 from jax import Array
+
 from jax_esm import constants as constants
-from jax_esm.components.util import createPhysicalFieldsClass, createStateDiagClass
-from jax_esm.components.util import stack_objects
+from jax_esm.utils.meta_prog_class import createFieldsClass
+from jax_esm.utils.bulk_op import stack_objects
 
 from jcm.geometry import Geometry
 
@@ -58,7 +59,7 @@ class SlabOceanModel(Component):
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
         
-        self.stateClass = createPhysicalFieldsClass(
+        self.stateClass = createFieldsClass(
             cls_name = "SOM_state",
             fields = [
                 ("sim_time", float, ()),
@@ -67,7 +68,7 @@ class SlabOceanModel(Component):
             ],
         )
 
-        self.phydataClass =  createPhysicalFieldsClass(
+        self.phydataClass =  createFieldsClass(
             cls_name = "SOM_diag",
             fields = [
                 ("heatflx", float, D2_nodal_shape),
