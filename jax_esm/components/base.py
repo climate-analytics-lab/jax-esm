@@ -85,7 +85,13 @@ class Component(ABC):
     ):
         pass
 
-   
+    @abstractmethod
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        pass
+        
     #@abstractmethod
     def step(
         self,
