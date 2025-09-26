@@ -123,7 +123,7 @@ class Speedy(Component):
                 boundaries = atm_boundary,
             )
 
-            
+            # phydata is a stacked object. What do I do?
             return dict(
                 modal_state = new_atm_modal_state,
                 state = predictions.dynamics,
@@ -131,6 +131,12 @@ class Speedy(Component):
             ), predictions
             
         return forward_func
+
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        return self.model.predictions_to_xarray(predictions)
     
     def report(self):
         pass

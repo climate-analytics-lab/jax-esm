@@ -15,22 +15,30 @@ from jax_esm.components.base import Component
 import pandas as pd
 import numpy as np
 
+import xarray as xr
+
 def adhoc_scan(f, init, xs=None, length=None):
 
-    from jax_esm.utils.bulk_op import concat_objects
+    #from jax_esm.utils.bulk_op import concat_objects
     
     if xs is None:
         xs = [1] * length
     carry = init
     ys = []
     for i, x in enumerate(xs):
-        print(f"The {i:d}-th iteration. ")
+        
+        print(f"The {i:d}-th iteration. ", end="")
+        _start_time = time.time()
+        
         carry, y = f(carry, x)
         ys.append(y)
+        
+        _end_time = time.time()
+        _elapsed_time = _end_time - _start_time
+        print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-    #return carry, np.stack(ys)
 
-    return carry, concat_objects(ys, axis=0)
+    return carry, ys #concat_objects(ys, axis=0)
 
 
 class Coupler:
@@ -158,25 +166,72 @@ class Coupler:
         
         _start_time = time.time()
 
-        def step_fn(_cplstate, t):
-            return coupler.genForwardFunc()(_cplstate, t)
-            
 
         scan_func = jax.lax.scan if jax_scan else adhoc_scan
-        
-        final_state, traj = scan_func(
+
+        # The goal should be generate forward function once
+        # and reuse it all the time.
+
+        # ====================================================
+        # Currently, atmosphere model output will have strange
+        # shape if reuse the forward function. This causes the
+        # error during post-processing. Therefore for now, I 
+        # fall back to generate forward function every time.
+        #
+        # cpl_forward_func = coupler.genForwardFunc()
+        # final_state, predictions = scan_func(
+        #     cpl_forward_func,
+        #     init_cplstate,
+        #     length=total_steps,
+        # )
+        # ====================================================
+
+        # ====================================================
+        # This is the fall-back version
+        def step_fn(_cplstate, t):
+            return coupler.genForwardFunc()(_cplstate, t)
+        final_state, predictions = scan_func(
             step_fn,
             init_cplstate,
             length=total_steps,
         )
+        # ====================================================
 
+        
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-        return final_state, traj
+        return final_state, predictions
+        
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
 
-    
+        Args:
+            predictions : The predictions returned from `forward_func`
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        d = dict()
+        for component_name in self.components.keys():
+            component = self.components[component_name]
+            merge_ds = []
+            
+            for i, pred in enumerate(predictions):
+                merge_ds.append(
+                    component.predictions_to_xarray(pred[component_name])
+                )
+            
+            d[component_name] = xr.concat(merge_ds, dim="time")
+
+        return d
+            
     def reportComponents(self):
 
         for i, name in enumerate(self.execution_order):

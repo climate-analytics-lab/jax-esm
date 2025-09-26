@@ -203,7 +203,9 @@ class SlabOceanModel(Component):
                     fmstate.hfluxn[:, :, 0]
                 )))
 
-                somstate.sim_time += self.subtimestep
+                somstate = somstate.copy(
+                    sim_time = somstate.sim_time + self.subtimestep
+                )
             
             new_T = new_Tanom + snapshot_SST_clim
 
@@ -217,26 +219,28 @@ class SlabOceanModel(Component):
             
         return forward_func
 
-    def convertTrajectoryToXarray(
+    def predictions_to_xarray(
         self,
-        trajectory,
+        predictions,
     ):
         
         """
         A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
-            trajectory : The stacked prediction
+            predictions : The predictions returned from `forward_func`
             
         Returns:
             ds : The resulting xarray dataset.
         """
-        st = trajectory["state"]
+        st = predictions["state"]
         ds = xr.Dataset(
             data_vars = dict(
-                sim_time = (["time",], st.sim_time),
                 T   = (["time", "lon", "lat"], st.T),
                 mld = (["time", "lon", "lat"], st.mld),
+            ), 
+            coords = dict(
+                time = (["time",], st.sim_time),
             ),
         )
         

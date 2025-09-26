@@ -50,6 +50,7 @@ class FluxModel(Component):
         self.stateClass = createFieldsClass(
             cls_name = "FM_state",
             fields = [
+                ("sim_time", float, ()),
                 ("lhflx", float, D2_nodal_shape),
                 ("swflx_toa", float, D2_nodal_shape),
                 ("swflx_sfc", float, D2_nodal_shape),
@@ -111,9 +112,9 @@ class FluxModel(Component):
 
             atm_phydata = cplstate["atm"]["phydata"]
 
-            
             # In this flux model, we simply get the flux from atmosphere's calculation
             new_hfluxn = atm_phydata.surface_flux.hfluxn * (-1)
+
             
             new_state = cplstate["flx"]["state"].copy(
                 #swflx_toa = new_swflx_toa,
@@ -121,6 +122,7 @@ class FluxModel(Component):
                 #lwflx_toa = new_lwflx_toa,
                 #lhflx = new_lhflx,
                 hfluxn = new_hfluxn,
+                sim_time = cplstate["flx"]["state"].sim_time + self.timestep,
             )
             
             new_phydata = cplstate["flx"]["phydata"].copy()
@@ -162,24 +164,28 @@ class FluxModel(Component):
 
         return forward_func
 
-    def convertTrajectoryToXarray(
+    def predictions_to_xarray(
         self,
-        trajectory,
+        predictions,
     ):
         
         """
         A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
-            trajectory : The stacked prediction
+            predictions : The predictions returned from `forward_func`
             
         Returns:
             ds : The resulting xarray dataset.
         """
-        st = trajectory["state"]
+        
+        st = predictions["state"]
         ds = xr.Dataset(
             data_vars = dict(
                 hfluxn  = (["time", "lon", "lat", "layer"], st.hfluxn),
+            ),
+             coords = dict(
+                time = (["time",], st.sim_time),
             ),
         )
         
