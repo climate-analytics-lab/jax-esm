@@ -121,7 +121,7 @@ class Coupler:
             for component_name in self.components.keys()
         }
         
-        @jax.jit
+        #@jax.jit
         def forward_func(cplstate, t):
             
             # Consider meta-programming to dynamically generate `forward_fun`
@@ -131,6 +131,20 @@ class Coupler:
             new_flxstate, flx_predictions = sub_forward_func["flx"](cplstate, t)
             new_ocnstate, ocn_predictions = sub_forward_func["ocn"](cplstate, t)
 
+            """
+            print("Checking")
+            print(type(atm_predictions))
+            print(type(atm_predictions.dynamics))
+            print(jax.tree.structure(atm_predictions.physics))
+            print(len(atm_predictions.times))
+
+            def printShape(leaf,):
+                print(leaf.shape)
+                return leaf
+
+            jax.tree.map(printShape, atm_predictions.physics)
+            """
+            
             new_cplstate = dict(
                 atm = new_atmstate,
                 flx = new_flxstate,
@@ -178,23 +192,23 @@ class Coupler:
         # error during post-processing. Therefore for now, I 
         # fall back to generate forward function every time.
         #
-        # cpl_forward_func = coupler.genForwardFunc()
-        # final_state, predictions = scan_func(
-        #     cpl_forward_func,
-        #     init_cplstate,
-        #     length=total_steps,
-        # )
+        cpl_forward_func = coupler.genForwardFunc()
+        final_state, predictions = scan_func(
+            cpl_forward_func,
+            init_cplstate,
+            length=total_steps,
+        )
         # ====================================================
 
         # ====================================================
         # This is the fall-back version
-        def step_fn(_cplstate, t):
-            return coupler.genForwardFunc()(_cplstate, t)
-        final_state, predictions = scan_func(
-            step_fn,
-            init_cplstate,
-            length=total_steps,
-        )
+        #def step_fn(_cplstate, t):
+        #    return coupler.genForwardFunc()(_cplstate, t)
+        #final_state, predictions = scan_func(
+        #    step_fn,
+        #    init_cplstate,
+        #    length=total_steps,
+        #)
         # ====================================================
 
         
