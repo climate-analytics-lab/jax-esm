@@ -76,7 +76,15 @@ class Component(ABC):
             Initial component state
         """
         pass
-    
+ 
+    @abstractmethod
+    def genForwardFunc(
+        self,
+        begin_time,
+    ):
+        pass
+
+   
     @abstractmethod
     def step(
         self,
