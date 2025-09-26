@@ -47,9 +47,13 @@ class BoundaryFluxes(NamedTuple):
 class ComponentConfig:
     """Configuration for a component."""
     name: str
-    timestep: float  # seconds
-    grid: Dict[str, Any]  # Grid specification
+    start_dt: pd.Timestamp
+    timestep: float         # seconds
+    substeps: int           # count
+    save_interval: float    # seconds
+    grid: Dict[str, Any]    # Grid specification
     params: Dict[str, Any]  # Component-specific parameters
+
 
 
 class Component(ABC):
