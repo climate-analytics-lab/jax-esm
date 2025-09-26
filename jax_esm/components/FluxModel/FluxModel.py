@@ -14,8 +14,6 @@ from jax_esm.utils.meta_prog_class import createFieldsClass
 from jax_esm.utils.bulk_op import stack_objects
 
 
-from jax_esm.components.util import stack_objects
-
 from jax_esm.components.base import (
     Component,
     ComponentConfig,
