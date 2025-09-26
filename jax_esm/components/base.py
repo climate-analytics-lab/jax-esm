@@ -85,7 +85,7 @@ class Component(ABC):
         pass
 
    
-    @abstractmethod
+    #@abstractmethod
     def step(
         self,
         state: ComponentState,
@@ -104,7 +104,7 @@ class Component(ABC):
         """
         pass
     
-    @abstractmethod
+    #@abstractmethod
     def compute_tendencies(
         self,
         state: ComponentState,
