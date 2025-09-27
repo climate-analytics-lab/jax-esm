@@ -17,9 +17,8 @@ import numpy as np
 
 import xarray as xr
 
+# Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
-
-    #from jax_esm.utils.bulk_op import concat_objects
     
     if xs is None:
         xs = [1] * length
@@ -36,10 +35,9 @@ def adhoc_scan(f, init, xs=None, length=None):
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
-
-
-    return carry, ys #concat_objects(ys, axis=0)
-
+        
+    return carry, ys
+    
 
 class Coupler:
     """Main coupler for Earth system components."""
