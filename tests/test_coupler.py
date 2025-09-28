@@ -217,15 +217,15 @@ class TestCoupler(unittest.TestCase):
         )
         
         # Should have 4 coupling steps
-        assert len(history) == 4
+        assert len(history.time) == 4
         assert final_states["atmosphere"].metadata["time"] == 7200.0
         assert final_states["ocean"].metadata["time"] == 7200.0
         
         # Check history
-        assert history[0].time == 1800.0
-        assert history[1].time == 3600.0
-        assert history[2].time == 5400.0
-        assert history[3].time == 7200.0
+        assert history.time[0] == 1800.0
+        assert history.time[1] == 3600.0
+        assert history.time[2] == 5400.0
+        assert history.time[3] == 7200.0
     
     def test_add_remove_component(self):
         """Test adding and removing components."""
