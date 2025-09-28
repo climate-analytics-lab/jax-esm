@@ -1,6 +1,6 @@
 """Slab ocean model component."""
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import jax
 import jax.numpy as jnp
