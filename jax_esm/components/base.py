@@ -7,7 +7,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
-
+import tree_math
 
 @dataclass
 class Axis:
@@ -19,14 +19,43 @@ class Axis:
         long_name : long name of the coordinate
         unit      : unit of the coordinate
     """
-    name : str
-    long_name : str
-    unit : str
+    name      : str = ""
+    long_name : str = ""
+    unit      : str = ""
+    values    : Array
+
+    def __len__(self):
+        return len(Array)
+
 
 @dataclass
-class Coordinate:
-    axes : List[Axis]
+class CoordinateSystem(dict):
+    pass
+ 
+@dataclass
+class ComponentStateShape:
     
+    """Description of shape of `ComponentState` for Earth system components.
+    
+    Attributes:
+        prognostic : Prognostic variables that evolve with time
+        diagnostic : Diagnostic variables computed from prognostic state
+        boundary   : Boundary conditions and surface properties
+        forcing    : External forcing fields
+
+    """
+    coord_sys  : CoordinateSystem
+    prognostic : Dict[str, List[str]] = {}
+    diagnostic : Dict[str, List[str]] = {}
+    boundary   : Dict[str, List[str]] = {}
+    forcing    : Dict[str, List[str]] = {}
+
+    def get_shape(var_group, varname):
+        axis_names = getattr(self, var_group)[varname]
+        return [ len(self.coord_sys[axis_name]) for axis_name in axis_names ]
+        
+
+@math_util.struct
 @dataclass
 class ComponentState:
     
@@ -37,17 +66,37 @@ class ComponentState:
         diagnostic : Diagnostic variables computed from prognostic state
         boundary   : Boundary conditions and surface properties
         forcing    : External forcing fields
-        coord      : Coordinates of the system.
         metadata   : Additional metadata
 
     """
-    prognostic: Dict[str, Array]
-    diagnostic: Dict[str, Array]
-    boundary: Dict[str, Array]
-    forcing: Dict[str, Array]
-    coordinate : Coordinate
-    metadata: Additional metadata
+    prognostic: Dict[str, Array] = {}
+    diagnostic: Dict[str, Array] = {}
+    boundary:   Dict[str, Array] = {}
+    forcing:    Dict[str, Array] = {}
+    metadata:   Dict[str, Array] = {}
 
+    @classmethod
+    def zeros(
+        cls,
+        comp_state_shp: ComponentStateShape,
+    ):
+
+        comp_state = ComponentState()
+        
+        for var_group, field_info in comp_state.__dataclass_fields__.items():
+            
+            d = getattr(comp_state, var_group)
+            varnames = getattr(comp_state_shp, var_group)
+
+            for varname in varnames:
+                
+                d[varname] = jnp.zeros(
+                    comp_state_shp.get_shape(var_group, varname)
+                )
+
+        return comp_state 
+
+        
 
 
 class BoundaryFluxes(NamedTuple):
@@ -77,6 +126,18 @@ class ComponentConfig:
     save_interval: float    # seconds
     grid: Dict[str, Any]  # Grid specification
     params: Dict[str, Any]  # Component-specific parameters
+
+
+
+
+
+
+
+
+
+
+
+
 
 class Component(ABC):
     """Abstract base class for Earth system components."""
