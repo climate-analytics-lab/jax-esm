@@ -3,6 +3,7 @@
 from jax_esm.components.base import Component, ComponentConfig, ComponentState, BoundaryFluxes
 from jax_esm.components.slab_ocean import SlabOceanModel
 from jax_esm.coupling.coupler import Coupler
+from jax_esm.coupling.coupler import CouplerConfig
 from jax_esm.coupling.flux_exchange import FluxExchanger
 from jax_esm.coupling.time_integration import TimeIntegrator
 
@@ -15,6 +16,7 @@ __all__ = [
     "BoundaryFluxes",
     "SlabOceanModel",
     "Coupler",
+    "CouplerConfig",
     "FluxExchanger",
     "TimeIntegrator",
 ]

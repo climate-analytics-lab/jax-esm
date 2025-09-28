@@ -1,13 +1,15 @@
 """Base component interface for Earth system models."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 import tree_math
+
+import pandas as pd
 
 @dataclass
 class Axis:
@@ -19,10 +21,11 @@ class Axis:
         long_name : long name of the coordinate
         unit      : unit of the coordinate
     """
+    values    : Array
     name      : str = ""
     long_name : str = ""
     unit      : str = ""
-    values    : Array
+
 
     def __len__(self):
         return len(Array)
@@ -45,17 +48,17 @@ class ComponentStateShape:
 
     """
     coord_sys  : CoordinateSystem
-    prognostic : Dict[str, List[str]] = {}
-    diagnostic : Dict[str, List[str]] = {}
-    boundary   : Dict[str, List[str]] = {}
-    forcing    : Dict[str, List[str]] = {}
+    prognostic : Dict[str, List[str]] = field(default_factory=lambda: {})
+    diagnostic : Dict[str, List[str]] = field(default_factory=lambda: {})
+    boundary   : Dict[str, List[str]] = field(default_factory=lambda: {})
+    forcing    : Dict[str, List[str]] = field(default_factory=lambda: {})
 
     def get_shape(var_group, varname):
         axis_names = getattr(self, var_group)[varname]
         return [ len(self.coord_sys[axis_name]) for axis_name in axis_names ]
         
 
-@math_util.struct
+@tree_math.struct
 @dataclass
 class ComponentState:
     
@@ -69,11 +72,11 @@ class ComponentState:
         metadata   : Additional metadata
 
     """
-    prognostic: Dict[str, Array] = {}
-    diagnostic: Dict[str, Array] = {}
-    boundary:   Dict[str, Array] = {}
-    forcing:    Dict[str, Array] = {}
-    metadata:   Dict[str, Array] = {}
+    prognostic: Dict[str, Array] = field(default_factory=lambda: {})
+    diagnostic: Dict[str, Array] = field(default_factory=lambda: {})
+    boundary:   Dict[str, Array] = field(default_factory=lambda: {})
+    forcing:    Dict[str, Array] = field(default_factory=lambda: {})
+    metadata:   Dict[str, Array] = field(default_factory=lambda: {})
 
     @classmethod
     def zeros(
@@ -126,16 +129,6 @@ class ComponentConfig:
     save_interval: float    # seconds
     grid: Dict[str, Any]  # Grid specification
     params: Dict[str, Any]  # Component-specific parameters
-
-
-
-
-
-
-
-
-
-
 
 
 

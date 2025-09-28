@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jax_esm.components.base import ComponentState, CoupledComponent
 from jax_esm.coupling.flux_exchange import FluxExchanger
 from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
-
+from dataclasses import dataclass
 
 
 @dataclass
@@ -181,7 +181,7 @@ class Coupler:
             n: c.timestep for n, c in self.components.items()
         }
         self.time_integrator = TimeIntegrator(
-            coupling_timestep=self.coupling_timestep,
+            coupling_timestep=self.config.timestep,
             component_timesteps=component_timesteps,
         )
         
@@ -203,6 +203,6 @@ class Coupler:
                 n: c.timestep for n, c in self.components.items()
             }
             self.time_integrator = TimeIntegrator(
-                coupling_timestep=self.coupling_timestep,
+                coupling_timestep=self.config.timestep,
                 component_timesteps=component_timesteps,
             )
