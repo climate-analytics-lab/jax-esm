@@ -50,7 +50,7 @@ class TimeIntegrator:
         for name, dt in self.component_timesteps.items():
             # Ensure component timestep divides coupling timestep evenly
             subcycles = int(self.coupling_timestep / dt)
-            if not jnp.allclose(subcycles * dt, self.coupling_timestep):
+            if subcycles * dt != self.coupling_timestep):
                 raise ValueError(
                     f"Component {name} timestep {dt} does not divide "
                     f"coupling timestep {self.coupling_timestep} evenly"
@@ -63,7 +63,7 @@ class TimeIntegrator:
             )
         
         return timestep_info
-    
+     
     def integrate_step(
         self,
         components: Dict[str, CoupledComponent],
