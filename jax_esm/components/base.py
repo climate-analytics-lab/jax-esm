@@ -9,21 +9,45 @@ import jax.numpy as jnp
 from jax import Array
 
 
-class ComponentState(NamedTuple):
+@dataclass
+class Axis:
+    
+    """Axis
+    
+    Attributes:
+        name      : name of the coordinate
+        long_name : long name of the coordinate
+        unit      : unit of the coordinate
+    """
+    name : str
+    long_name : str
+    unit : str
+
+@dataclass
+class Coordinate:
+    axes : List[Axis]
+    
+@dataclass
+class ComponentState:
+    
     """State container for Earth system components.
     
     Attributes:
-        prognostic: Prognostic variables that evolve with time
-        diagnostic: Diagnostic variables computed from prognostic state
-        boundary: Boundary conditions and surface properties
-        forcing: External forcing fields
-        metadata: Additional metadata (e.g., time, coordinates)
+        prognostic : Prognostic variables that evolve with time
+        diagnostic : Diagnostic variables computed from prognostic state
+        boundary   : Boundary conditions and surface properties
+        forcing    : External forcing fields
+        coord      : Coordinates of the system.
+        metadata   : Additional metadata
+
     """
     prognostic: Dict[str, Array]
     diagnostic: Dict[str, Array]
     boundary: Dict[str, Array]
     forcing: Dict[str, Array]
-    metadata: Dict[str, Any]
+    coordinate : Coordinate
+    metadata: Additional metadata
+
 
 
 class BoundaryFluxes(NamedTuple):
