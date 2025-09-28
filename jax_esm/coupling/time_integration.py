@@ -91,7 +91,7 @@ class TimeIntegrator:
             current_fluxes[name] = self._fields_to_fluxes(boundary_fields)
         
         # Exchange fluxes between components
-        input_fluxes = flux_exchanger(current_fluxes)
+        input_fluxes = flux_exchanger(states, current_fluxes)
         
         # Integrate each component with subcycling
         new_states = {}
@@ -143,7 +143,7 @@ class TimeIntegrator:
         )
         
         # Average fluxes over subcycles
-        avg_fluxes = jax.tree_map(lambda x: jnp.mean(x, axis=0), flux_history)
+        avg_fluxes = jax.tree.map(lambda x: jnp.mean(x, axis=0), flux_history)
         
         return final_state, avg_fluxes
     
