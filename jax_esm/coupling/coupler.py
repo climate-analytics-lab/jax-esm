@@ -10,13 +10,21 @@ from jax_esm.coupling.flux_exchange import FluxExchanger
 from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 
 
+
+@dataclass
+class CouplerConfig:
+    """Configuration for coupler."""
+    timestep: float  # seconds
+
+
+
 class Coupler:
     """Main coupler for Earth system components."""
     
     def __init__(
         self,
         components: Dict[str, CoupledComponent],
-        coupling_timestep: float = 3600.0,  # 1 hour default
+        config: CouplerConfig,
         flux_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
         flux_transformations: Optional[Dict[Tuple[str, str, str], callable]] = None,
     ):
@@ -30,7 +38,7 @@ class Coupler:
         """
         self.components = components
         self.component_names = list(components.keys())
-        self.coupling_timestep = coupling_timestep
+        self.config = config
         
         # Extract component timesteps
         component_timesteps = {
@@ -46,7 +54,7 @@ class Coupler:
         
         # Initialize time integrator
         self.time_integrator = TimeIntegrator(
-            coupling_timestep=coupling_timestep,
+            coupling_timestep=config.timestep,
             component_timesteps=component_timesteps,
         )
         
