@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
-
+import unittest
 from jax_esm import Component, ComponentConfig, ComponentState, Coupler, BoundaryFluxes
 
 
@@ -89,7 +89,7 @@ class MockOcean(Component):
         return {"temperature": forcing.heat / 1e6}
 
 
-class TestCoupler:
+class TestCoupler(unittest.TestCase):
     """Test coupler functionality."""
     
     def test_coupler_initialization(self):

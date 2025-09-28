@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
+import unittest
 
 from jax_esm import Component, ComponentConfig, ComponentState, BoundaryFluxes
 
@@ -46,7 +47,7 @@ class MockComponent(Component):
         return {"temperature": jnp.ones_like(state.prognostic["temperature"]) * 0.1}
 
 
-class TestComponent:
+class TestComponent(unittest.TestCase):
     """Test component interface."""
     
     def test_component_initialization(self):
