@@ -10,6 +10,27 @@ from jax_esm.coupling.flux_exchange import FluxExchanger
 from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 from dataclasses import dataclass
 
+# Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
+def adhoc_scan(f, init, xs=None, length=None):
+    
+    if xs is None:
+        xs = [1] * length
+    carry = init
+    ys = []
+    for i, x in enumerate(xs):
+        
+        print(f"The {i:d}-th iteration. ", end="")
+        _start_time = time.time()
+        
+        carry, y = f(carry, x)
+        ys.append(y)
+        
+        _end_time = time.time()
+        _elapsed_time = _end_time - _start_time
+        print(f"Execution time: {_elapsed_time:.1f} seconds.")
+        
+    return carry, ys
+    
 
 @dataclass
 class CouplerConfig:
@@ -143,63 +164,50 @@ class Coupler:
             return new_cplstate, cpl_predictions
 
         return step_fn
-        
- 
-     
-    def step(
-        self,
-        states: Dict[str, ComponentState],
-        time: float,
-    ) -> Dict[str, ComponentState]:
-        """Advance coupled system by one coupling timestep.
-        
-        Args:
-            states: Current states of all components
-            time: Current simulation time
-            
-        Returns:
-            New states after one coupling timestep
-        """
-        new_states, _ = self.time_integrator.integrate_step(
-            components=self.components,
-            states=states,
-            flux_exchanger=self.flux_exchanger.couple_components,
-            time=time,
-        )
-        
-        return new_states
-     
+
+
     def run(
         self,
-        initial_states: Dict[str, ComponentState],
-        start_time: float,
-        end_time: float,
-        save_frequency: Optional[int] = None,
-    ) -> Tuple[Dict[str, ComponentState], List[IntegrationState]]:
-        """Run coupled simulation from start to end time.
+        init_cplstate : Dict[str, ComponentState],
+        start_time    : float,
+        end_time      : float,
+        timestep      : float,
+        jax_scan: bool = True,
+        save_interval_steps : int = 1,
+    ):
+
+        coupler = self
         
-        Args:
-            initial_states: Initial states for all components
-            start_time: Start time in seconds
-            end_time: End time in seconds
-            save_frequency: Save state every N coupling steps (None = save all)
-            
-        Returns:
-            Tuple of (final_states, history)
-        """
-        final_states, history = self.time_integrator.integrate(
-            components=self.components,
-            initial_states=initial_states,
-            flux_exchanger=self.flux_exchanger.couple_components,
-            start_time=start_time,
-            end_time=end_time,
+        _start_time = time.time()
+        scan_func = jax.lax.scan if jax_scan else adhoc_scan
+
+        total_time = end_time - start_time
+        total_steps = int(total_time / timestep)
+        
+        if total_steps * timestep != total_time:
+            raise Exception("timestep has to exactly divide (end_time - start_time).")
+
+        # The goal should be generate forward function once
+        # and reuse it all the time.
+
+        # Currently, atmosphere model output will have strange
+        # shape if reuse the forward function. This causes the
+        # error during post-processing. Therefore for now, I 
+        # fall back to generate forward function every time.
+        #
+        cpl_step_fn = coupler.gen_step_fn()
+        final_state, predictions = scan_func(
+            cpl_step_fn,
+            init_cplstate,
+            length=total_steps,
         )
+
+        _end_time = time.time()
+        _elapsed_time = _end_time - _start_time
+        print(f"Execution time: {_elapsed_time:.1f} seconds.")
+
+        return final_state, predictions
         
-        # Filter history based on save frequency
-        if save_frequency is not None and save_frequency > 1:
-            history = [h for i, h in enumerate(history) if i % save_frequency == 0]
-        
-        return final_states, history
     
     def add_component(
         self,
