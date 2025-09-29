@@ -10,13 +10,13 @@ from dataclasses import make_dataclass
 
 from jax_esm import constants as constants
 
-from jax_esm.utils.meta_prog_class import createFieldsClass
 from jax_esm.utils.bulk_op import stack_objects
-
 
 from jax_esm.components.base import (
     Component,
     ComponentConfig,
+    create_component_state_class,
+    create_field_group_class,
 )
 
 import xarray as xr
@@ -40,35 +40,32 @@ class FluxModel(Component):
         
         self.coords = config.params["coords"]
 
-        self.timestep = config.timestep
-        self.substeps = config.substeps
-        
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
-        
-        
-        self.stateClass = createFieldsClass(
-            cls_name = "FM_state",
-            fields = [
-                ("sim_time", float, ()),
-                ("lhflx", float, D2_nodal_shape),
-                ("swflx_toa", float, D2_nodal_shape),
-                ("swflx_sfc", float, D2_nodal_shape),
-                ("lwflx_toa", float, D2_nodal_shape),
-                ("hfluxn",    float, D2_nodal_shape + (2,)),
-            ],
+ 
+        self.component_state_class = create_component_state_class(
+            prog_cls = create_field_group_class(
+                cls_name = "state",
+                fields = [
+                    ("sim_time", float, ()),
+                ],
+            ),
+
+            phydata_cls =  create_field_group_class(
+                cls_name = "phydata",
+                fields = [
+                    ("heatflx", float, D2_nodal_shape),
+                    ("lhflx", float, D2_nodal_shape),
+                    ("swflx_toa", float, D2_nodal_shape),
+                    ("swflx_sfc", float, D2_nodal_shape),
+                    ("lwflx_toa", float, D2_nodal_shape),
+                    ("hfluxn",    float, D2_nodal_shape + (2,)),
+                ],
+            ),
         )
 
-        self.phydataClass = createFieldsClass(
-            cls_name = "FM_diag",
-            fields = [
-                ("heatflx", float, D2_nodal_shape),
-            ],
-        )
+       
         
-        self.init_state = self.stateClass.zeros()
-        self.init_phydata = self.phydataClass.zeros()
-
         self.stephan_boltzmann_const = constants.stephan_boltzmann_const
         self.solar_const = constants.solar_const
         self.u10 = 5.0 # m/s
@@ -99,35 +96,29 @@ class FluxModel(Component):
 
         self.first_call = True
         
-    def getInitState(self):
-        return dict(state=self.init_state, phydata=self.init_phydata)
-            
+ 
     def initialize(self):
-        ...
-        
+        return self.component_state_class.zeros()
+            
     def gen_step_fn(self):
 
         @jax.jit
         def step_fn(cplstate, t):
 
-            atm_phydata = cplstate["atm"]["phydata"]
+            atm_phydata = cplstate.atm.phydata
 
             # In this flux model, we simply get the flux from atmosphere's calculation
-            new_hfluxn = atm_phydata.surface_flux.hfluxn * (-1)
-
-            
-            new_state = cplstate["flx"]["state"].copy(
-                #swflx_toa = new_swflx_toa,
-                #swflx_sfc = new_swflx_sfc,
-                #lwflx_toa = new_lwflx_toa,
-                #lhflx = new_lhflx,
-                hfluxn = new_hfluxn,
-                sim_time = cplstate["flx"]["state"].sim_time + self.timestep,
+            new_flx_state = cplstate.flx.copy(
+                prog_kwargs = dict(
+                    sim_time = cplstate.flx.prog.sim_time + self.config.timestep,
+                ),
+                phydata_kwargs = dict(
+                    hfluxn = - atm_phydata.surface_flux.hfluxn,
+                ),
             )
-            
-            new_phydata = cplstate["flx"]["phydata"].copy()
+           
 
-            return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
+            return new_flx_state, stack_objects( [ dict(prog=new_flx_state.prog, phydata=new_flx_state.phydata) , ] )
 
         return step_fn
         

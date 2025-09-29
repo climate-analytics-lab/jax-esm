@@ -17,7 +17,10 @@ import numpy as np
 from jax_esm.components.base import (
     Component,
     ComponentConfig,
+    create_component_state_class,
+    create_field_group_class,
 )
+
 
 class SlabOceanModel(Component):
     """
@@ -43,33 +46,42 @@ class SlabOceanModel(Component):
         self.timestep = config.timestep
         self.substeps = config.substeps
         self.subtimestep = self.timestep / self.substeps
-        
+
+         
         D3_nodal_shape = self.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
         
-        self.stateClass = createFieldsClass(
-            cls_name = "SOM_state",
-            fields = [
-                ("sim_time", float, ()),
-                ("T", float, D2_nodal_shape),
-                ("mld", float, D2_nodal_shape),
-            ],
+        self.component_state_class = create_component_state_class(
+            prog_cls = create_field_group_class(
+                cls_name = "state",
+                fields = [
+                    ("sim_time", float, ()),
+                    ("T", float, D2_nodal_shape),
+                    ("mld", float, D2_nodal_shape),
+
+                ],
+            ),
+
+            phydata_cls =  create_field_group_class(
+                cls_name = "phydata",
+                fields = [
+                    ("heatflx", float, D2_nodal_shape),
+                ],
+            ),
         )
 
-        self.phydataClass =  createFieldsClass(
-            cls_name = "SOM_diag",
-            fields = [
-                ("heatflx", float, D2_nodal_shape),
-            ],
-        )
 
-        self.init_state = self.stateClass.zeros()
-        self.init_phydata = self.phydataClass.zeros()
+                
+    def initialize(self):
 
         # =========================================================================
         # Initialize slab ocean model boundary conditions
         # =========================================================================
-
+        
+        D3_nodal_shape = self.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+        config = self.config
+        
         llon_rad = jnp.repeat(
             jnp.expand_dims(
                 self.coords.horizontal.longitudes,
@@ -145,17 +157,14 @@ class SlabOceanModel(Component):
         self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
         self.cd_factor = self.subtimestep / cd
 
-        self.init_state = self.init_state.copy(
-            mld = init_mld,
-            T = init_T,
+        return self.component_state_class.zeros().copy(
+            prog_kwargs = dict(
+                mld = init_mld,
+                T = init_T,
+            ),
         )
-                
-    def getInitState(self):
-        return dict(state=self.init_state, phydata=self.init_phydata)
 
-    def initialize(self):
-        ...
-    
+        
     def gen_step_fn(
         self,
     ):

@@ -1,6 +1,7 @@
 """Speedy Wrapper Class"""
 
 from typing import Dict, Tuple
+from dataclasses import dataclass
 
 import jcm
 from jcm.model import Model, get_coords
@@ -16,6 +17,7 @@ from jax_esm import constants as constants
 from jax_esm.components.base import (
     Component,
     ComponentConfig,
+    AbstractComponentState,
 )
 
 
@@ -29,6 +31,11 @@ from jax_esm.utils.bulk_op import stack_objects
 import tree_math
 from typing import Any
 
+@dataclass
+class SpeedyState(AbstractComponentState):
+    prog    : PhysicsState
+    phydata : Any
+    meta    : primitive_equations_states
 
 class Speedy(Component):
     
@@ -47,6 +54,9 @@ class Speedy(Component):
 
         super().__init__(config)
 
+
+        self.component_state_class = SpeedyState
+
         self.coupling_timestep = config.timestep  # in secs
         self.save_interval = config.save_interval # in secs
         self.substeps = config.substeps
@@ -59,9 +69,7 @@ class Speedy(Component):
             config_speedy["orography"] = boundaries.orog
 
         self.orog = boundaries.orog
-
         self.model = Model(**config_speedy) 
-        self.initialize()
 
         
     
@@ -89,22 +97,16 @@ class Speedy(Component):
         
         model.start_date = start_date
         model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
-
-
-    def getInitState(self):
-        
         D3_nodal_shape = self.model.geometry.nodal_shape
-        #print("self.model.initial_state = ", self.model.initial_state)
-        return_obj = dict(
-            modal_state = self.model._final_modal_state,
-            state = self.model.initial_state,
-            phydata = jcm.physics.speedy.physics_data.PhysicsData.zeros(nodal_shape=D3_nodal_shape[1:], node_levels=D3_nodal_shape[0]),
-        )
-        
-        return return_obj
-        
-    def gen_step_fn(self):
 
+        return SpeedyState(
+            prog = model.initial_state,
+            phydata = jcm.physics.speedy.physics_data.PhysicsData.zeros(nodal_shape=D3_nodal_shape[1:], node_levels=D3_nodal_shape[0]),
+            meta = model._final_modal_state,
+              
+        )
+
+    def gen_step_fn(self):
        
         @jax.jit
         def step_fn(cpl, t):

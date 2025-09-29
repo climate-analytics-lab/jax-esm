@@ -16,8 +16,8 @@ class AbstractFieldGroup:
     pass
 
 class AbstractComponentState:
-    prog     : AbstractFieldGroup
-    phydata  : AbstractFieldGroup
+    prog     : AbstractFieldGroup | Any
+    phydata  : AbstractFieldGroup | Any
 
 def create_field_group_class(
     cls_name: str,
