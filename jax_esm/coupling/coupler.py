@@ -87,7 +87,11 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
+<<<<<<< HEAD
         return self.coupled_state_class(**{
+=======
+        return CoupledState(**{
+>>>>>>> f9434e7 (Add a dynamically generated component state class.)
             name : component.initialize() 
             for name, component in self.components.items()
         })
@@ -113,6 +117,7 @@ class Coupler:
         @jax.jit
         def step_fn(cplstate, t):
             
+<<<<<<< HEAD
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 name: step_fn(cplstate, t) 
@@ -125,6 +130,27 @@ class Coupler:
             
             new_cplstate = {name: state for name, (state, _) in results.items()}
             cpl_predictions = {name: pred for name, (_, pred) in results.items()}
+=======
+            # Consider meta-programming to dynamically generate `stepforward_fun`
+            # Call forward functions of each component
+
+            new_atmstate, atm_predictions = sub_step_fn["atm"](cplstate, t)
+            new_flxstate, flx_predictions = sub_step_fn["flx"](cplstate, t)
+            new_ocnstate, ocn_predictions = sub_step_fn["ocn"](cplstate, t)
+
+       
+            new_cplstate = CoupledState(
+                atm = new_atmstate,
+                flx = new_flxstate,
+                ocn = new_ocnstate,
+            )
+
+            cpl_predictions = dict(
+                atm = atm_predictions,
+                flx = flx_predictions,
+                ocn = ocn_predictions,
+            )
+>>>>>>> f9434e7 (Add a dynamically generated component state class.)
 
             return new_cplstate, cpl_predictions
 
