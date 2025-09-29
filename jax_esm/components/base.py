@@ -171,7 +171,7 @@ class Component(ABC):
         self.timestep = config.timestep
         
     @abstractmethod
-    def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
+    def initialize(self) -> AbstractComponentState:
         """Initialize component state.
         
         Args:
@@ -195,7 +195,7 @@ class Component(ABC):
         """
         pass
     
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
+    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
         """Extract boundary fields needed by other components.
         
         Args:
@@ -221,18 +221,18 @@ class CoupledComponent(Protocol):
     name: str
     timestep: float
     
-    def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
+    def initialize(self) -> AbstractComponentState:
         ...
     
     def step(
         self,
-        state: ComponentState,
+        state: AbstractComponentState,
         forcing: BoundaryFluxes,
         dt: float,
-    ) -> Tuple[ComponentState, BoundaryFluxes]:
+    ) -> Tuple[AbstractComponentState, BoundaryFluxes]:
         ...
     
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
+    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
         ...
     
     def get_required_fluxes(self) -> List[str]:

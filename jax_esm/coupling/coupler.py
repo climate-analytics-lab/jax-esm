@@ -6,8 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, CoupledComponent
-from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
+from jax_esm.components.base import CoupledComponent, AbstractComponentState
 from dataclasses import dataclass
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
@@ -65,8 +64,7 @@ class Coupler:
     
     def initialize(
         self,
-        rng_key: jax.random.PRNGKey,
-    ) -> Dict[str, ComponentState]:
+    ) -> Dict[str, AbstractComponentState]:
         """Initialize all components.
         
         Args:
@@ -78,10 +76,8 @@ class Coupler:
         states = {}
         
         # Split random key for each component
-        keys = jax.random.split(rng_key, len(self.components))
-        
-        for (name, component), key in zip(self.components.items(), keys):
-            states[name] = component.initialize(key)
+        for name, component in self.components.items():
+            states[name] = component.initialize()
         
         return states
    
@@ -126,7 +122,7 @@ class Coupler:
 
     def run(
         self,
-        init_cplstate : Dict[str, ComponentState],
+        init_cplstate : Dict[str, AbstractComponentState],
         start_time    : float,
         end_time      : float,
         timestep      : float,
