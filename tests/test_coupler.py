@@ -310,6 +310,7 @@ class TestCoupler(unittest.TestCase):
         assert component_results["ocean"][1].metadata["time"] == 7200.0
 
         # Check history
+<<<<<<< HEAD
         assert component_results[atmosphere][1].history.time[0] == 1800.0
         assert component_results[atmosphere][1].history.time[1] == 3600.0
         assert component_results[atmosphere][1].history.time[2] == 5400.0
@@ -362,3 +363,8 @@ class TestCoupler(unittest.TestCase):
         assert len(coupler.components) == 1
         assert "atmosphere" not in coupler.components
         assert "ocean" in coupler.components
+=======
+        for i in range(10):
+            assert history["ocn"]["state"].prog.sim_time[i] == (i+1) * 86400.0
+    
+>>>>>>> ea88967 (Removing component is not very important rn. Drop the test)
