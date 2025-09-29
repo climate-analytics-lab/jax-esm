@@ -31,11 +31,12 @@ from jax_esm.utils.bulk_op import stack_objects
 import tree_math
 from typing import Any
 
+@tree_math.struct
 @dataclass
 class SpeedyState(AbstractComponentState):
     prog    : PhysicsState
     phydata : Any
-    meta    : primitive_equations_states
+    metadata    : primitive_equations_states
 
 class Speedy(Component):
     
@@ -102,7 +103,7 @@ class Speedy(Component):
         return SpeedyState(
             prog = model.initial_state,
             phydata = jcm.physics.speedy.physics_data.PhysicsData.zeros(nodal_shape=D3_nodal_shape[1:], node_levels=D3_nodal_shape[0]),
-            meta = model._final_modal_state,
+            metadata = model._final_modal_state,
               
         )
 
@@ -111,24 +112,22 @@ class Speedy(Component):
         @jax.jit
         def step_fn(cpl, t):
 
-            # This is where SST is passed
-            ocnstate = cpl["ocn"]["state"]
-                        
+           
             atm_boundary = self.model.boundaries.copy(
-                tsea = ocnstate.T,
+                tsea = cpl.ocn.prog.T,
             )
 
             new_atm_modal_state, predictions = self.model.run_from_state(
-                initial_state = cpl["atm"]["modal_state"],
+                initial_state = cpl.atm.metadata,
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
                 boundaries = atm_boundary,
             )
 
             # phydata is a stacked object. What do I do?
-            return dict(
-                modal_state = new_atm_modal_state,
-                state = predictions.dynamics,
+            return SpeedyState(
+                prog = predictions.dynamics,
+                metadata = new_atm_modal_state,
                 phydata = jax.tree.map(lambda arr: jnp.mean(arr, axis=0), predictions.physics),
             ), predictions
             
