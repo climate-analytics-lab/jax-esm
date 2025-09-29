@@ -76,7 +76,6 @@ class Coupler:
 
 
         
-    
     def initialize(
         self,
     ) -> Dict[str, AbstractComponentState]:
