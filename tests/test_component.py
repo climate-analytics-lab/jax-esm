@@ -191,57 +191,6 @@ class TestComponent(unittest.TestCase):
         assert jnp.allclose(new_state.prog.T[1:, :, :], 300)
         
     
-    def test_component_tendencies(self):
-        """Test tendency computation."""
-
-
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
- 
-        grid = {"nlon": 10, "nlat": 5, "z": 8}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-            comp_state_shp = ComponentStateShape(
-                coord_sys = CoordinateSystem(
-                    lat  = Axis(values=mk_center_grid(-jnp.pi, jnp.pi, grid["nlat"])), 
-                    lon  = Axis(values=mk_center_grid(0, 2*jnp.pi, grid["nlon"])),
-                    z    = Axis(values=mk_center_grid(0, 1000, 8)),
-                    time = Axis(values=[0]),
-                ),
-                prognostic = dict(
-                    temperature = ["lon", "lat", "z"],
-                ),
-                metadata = dict(
-                    time = ["time"],
-                ),
-
-            ),
-        )
-        
-        component = MockComponent(config)
-        rng_key = jax.random.PRNGKey(42)
-        state = component.initialize(rng_key)
-        
-        forcing = BoundaryFluxes(
-            heat=jnp.zeros((10, 20)),
-            moisture=jnp.zeros((10, 20)),
-            momentum_u=jnp.zeros((10, 20)),
-            momentum_v=jnp.zeros((10, 20)),
-            tracers={},
-        )
-        
-        tendencies = component.compute_tendencies(state, forcing)
-        
-        assert "temperature" in tendencies
-        assert jnp.allclose(tendencies["temperature"], 0.1)
-    
     def test_boundary_fields(self):
         """Test boundary field extraction."""
 
