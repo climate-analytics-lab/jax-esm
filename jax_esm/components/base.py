@@ -12,15 +12,15 @@ from dataclasses import make_dataclass
 
 import pandas as pd
 
-class AbstractField:
+class AbstractFieldGroup:
     pass
 
 class AbstractComponentState:
-    prog     : AbstractField
-    phydata : AbstractField
+    prog     : AbstractFieldGroup
+    phydata  : AbstractFieldGroup
 
 
-def create_field_class(
+def create_field_group_class(
     cls_name: str,
     fields: Tuple,
 ):
@@ -44,7 +44,7 @@ def create_field_class(
     cls = make_dataclass(
         cls_name = cls_name,
         fields = dataclass_fields,
-        bases = (AbstractField,),
+        bases = (AbstractFieldGroup,),
     )
 
     

@@ -9,7 +9,7 @@ from jax_esm.components.base import (
     Component, ComponentState, BoundaryFluxes,
     ComponentConfig,
     create_component_state_class,
-    create_field_class,
+    create_field_group_class,
 )
 
 from jax_esm.utils.bulk_op import stack_objects
@@ -34,7 +34,7 @@ class MockComponent(Component):
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = create_component_state_class(
-            prog_cls = create_field_class(
+            prog_cls = create_field_group_class(
                 cls_name = "state",
                 fields = [
                     ("sim_time", float, ()),
@@ -42,7 +42,7 @@ class MockComponent(Component):
                 ],
             ),
 
-            phydata_cls =  create_field_class(
+            phydata_cls =  create_field_group_class(
                 cls_name = "phydata",
                 fields = [
                     ("heatflx", float, D2_nodal_shape),
