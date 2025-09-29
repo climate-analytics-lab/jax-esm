@@ -4,11 +4,15 @@ import jax
 import jax.numpy as jnp
 import unittest
 import pandas as pd
-from jax_esm import (
-    Component,
+
+from jax_esm.components.base import (
+    Component, ComponentState, BoundaryFluxes,
     ComponentConfig,
-    BoundaryFluxes,
+    create_component_state_class,
+    create_field_class,
 )
+
+from jax_esm.utils.bulk_op import stack_objects
 
 class MockComponent(Component):
 
@@ -24,25 +28,21 @@ class MockComponent(Component):
         
         super().__init__(config)
 
-        self.coords = config.params["coords"]
-        self.start_dt = config.start_dt
-        self.timestep = config.timestep
-        self.substeps = config.substeps
-        self.subtimestep = self.timestep / self.substeps
+        self.subtimestep = config.timestep / config.substeps
         
-        D3_nodal_shape = self.coords.nodal_shape
+        D3_nodal_shape = (config.grid["z"], config.grid["lon"], config.grid["lat"])
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = create_component_state_class(
-            prog_cls = createFieldsClass(
+            prog_cls = create_field_class(
                 cls_name = "state",
                 fields = [
                     ("sim_time", float, ()),
-                    ("T", float, D2_nodal_shape),
+                    ("T", float, D3_nodal_shape),
                 ],
             ),
 
-            phydata_cls =  createFieldsClass(
+            phydata_cls =  create_field_class(
                 cls_name = "phydata",
                 fields = [
                     ("heatflx", float, D2_nodal_shape),
@@ -54,11 +54,6 @@ class MockComponent(Component):
 
         init_state = self.component_state_class.zeros()
 
-        init_state = init_state.copy(
-            prog_kwargs = dict(T = init_state.prog.T + 300.0),
-            phydata_kwargs = dict(heatflx = init_state.phydata.heatflx + 500.0),
-        )
-
 
         return init_state
  
@@ -66,42 +61,29 @@ class MockComponent(Component):
         self,
     ):
 
-        # Find day of the year to locate climatology
-        ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
-        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
-        
         @jax.jit
-        def step_fn(cpl, t):
+        def step_fn(state, t):
 
-            somstate = cpl["ocn"]["state"]
-            fmstate  = cpl["flx"]["state"]
 
-            days_after_start = jnp.floor( somstate.sim_time / 86400.0 ).astype(jnp.int32)
+            T = state.prog.T
+            sim_time = state.prog.sim_time
+           
+            hist = [] 
+            for step in range(self.config.substeps):
             
-            # This snapshot SST will be frozen
-            snapshot_SST_clim = self.SST_clim[:, :, start_dt_offset + days_after_start]
-            snapshot_SST_clim = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim, 273.15+15)
+                T = T.at[0, :, :].set(T[0, :, :] + self.subtimestep * state.phydata.heatflx / self.config.params["heat_capacity"])
+                sim_time += self.subtimestep
 
-            new_Tanom = somstate.T - snapshot_SST_clim
-            
-            for step in range(self.substeps):
-                new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
-                    fmstate.hfluxn[:, :, 0]
-                )))
-
-                somstate = somstate.copy(
-                    sim_time = somstate.sim_time + self.subtimestep
-                )
-            
-            new_T = new_Tanom + snapshot_SST_clim
-
-            new_state = somstate.copy(
-                T = new_T,
+            state = state.copy(
+                prog_kwargs = dict(
+                    sim_time = sim_time,
+                    T = T,
+                ),
             )
+
+            hist.append(dict(state=state))
             
-            new_phydata = cpl["ocn"]["phydata"].copy()
-            
-            return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
+            return state, stack_objects( hist )
             
         return step_fn
 
@@ -132,141 +114,82 @@ class MockComponent(Component):
         
         return ds
         
-    
+
+
+
 class TestComponent(unittest.TestCase):
     """Test component interface."""
     
+    def gen_test_component(self):
+
+        grid = {"lat": 5, "lon": 10, "z": 8}
+        config = ComponentConfig(
+            name = "test",
+            start_dt = pd.Timestamp("2001-01-01"),
+            timestep = 1800.0,
+            substeps = 2,
+            save_interval = 1800.0,
+            grid = grid,
+            params = {"heat_capacity": 1000.0},
+        )
+        
+        return MockComponent(config) 
+
     def test_component_initialization(self):
         """Test component initialization."""
  
-
-        
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
-        
-        grid = {"nlat": 5, "nlon": 10, "z": 8, "time": 0}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-        )
-        
-        component = MockComponent(config)
+        component = self.gen_test_component()
         
         assert component.name == "test"
         assert component.timestep == 1800.0
-        assert component.config.params["test_param"] == 42
+        assert component.config.params["heat_capacity"] == 1000.0
     
     def test_component_initialize_state(self):
+
         """Test state initialization."""
-
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
         
-        grid = {"nlon": 10, "nlat": 5, "z": 8}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-            comp_state_shp = ComponentStateShape(
-                coord_sys = CoordinateSystem(
-                    lat  = Axis(values=mk_center_grid(-jnp.pi, jnp.pi, grid["nlat"])), 
-                    lon  = Axis(values=mk_center_grid(0, 2*jnp.pi, grid["nlon"])),
-                    z    = Axis(values=mk_center_grid(0, 1000, 8)),
-                    time = Axis(values=[0]),
-                ),
-                prognostic = dict(
-                    temperature = ["lon", "lat", "z"],
-                ),
-                metadata = dict(
-                    time = ["time"],
-                ),
+        component = self.gen_test_component()
 
-            ),
+        state = component.initialize()
+
+        state = state.copy(
+            prog_kwargs = dict(T = state.prog.T + 300.0),
+            phydata_kwargs = dict(heatflx = state.phydata.heatflx + 500.0),
         )
- 
-        component = MockComponent(config)
-        
 
-        rng_key = jax.random.PRNGKey(42)
-        state = component.initialize(rng_key)
-        state.prognostic["temperature"] = state.prognostic["temperature"].at[:].set(280.0) 
-        state.metadata["time"] = state.metadata["time"].at[:].set(155.0) 
 
-        assert "temperature" in state.prognostic
-        assert state.prognostic["temperature"].shape == (10, 5, 8)
-        assert jnp.allclose(state.prognostic["temperature"], 280.0)
-        assert state.metadata["time"] == jnp.array([155.0,])
+        assert hasattr(state.prog, "T")
+        assert state.prog.T.shape == (8, 10, 5)
+        assert jnp.allclose(state.prog.T, 300.0)
+        assert jnp.allclose(state.phydata.heatflx, 500.0)
         
 
 
     def test_component_step(self):
         """Test component stepping."""
 
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
- 
-        grid = {"nlon": 10, "nlat": 5, "z": 8}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-            comp_state_shp = ComponentStateShape(
-                coord_sys = CoordinateSystem(
-                    lat  = Axis(values=mk_center_grid(-jnp.pi, jnp.pi, grid["nlat"])), 
-                    lon  = Axis(values=mk_center_grid(0, 2*jnp.pi, grid["nlon"])),
-                    z    = Axis(values=mk_center_grid(0, 1000, 8)),
-                    time = Axis(values=[0]),
-                ),
-                prognostic = dict(
-                    temperature = ["lon", "lat", "z"],
-                ),
-                metadata = dict(
-                    time = ["time"],
-                ),
+        component = self.gen_test_component()
 
-            ),
+        state = component.initialize()
+
+        state = state.copy(
+            prog_kwargs = dict(T = state.prog.T.at[:].set(300.0)),
+            phydata_kwargs = dict(heatflx = state.phydata.heatflx.at[:].set(500.0)),
         )
         
-        component = MockComponent(config)
-        rng_key = jax.random.PRNGKey(42)
-        state = component.initialize(rng_key)
-        
-        state.prognostic["temperature"] = state.prognostic["temperature"].at[:].set(280.0) 
-        
-        forcing = BoundaryFluxes(
-            heat=jnp.ones((5, 10)) * 100.0,
-            moisture=jnp.ones((5, 10)) * 0.001,
-            momentum_u=jnp.zeros((5, 10)),
-            momentum_v=jnp.zeros((5, 10)),
-            tracers=jnp.ones((5, 10)) * 100.0,
-        )
-        
-        new_state, output_fluxes = component.step(state, forcing, 1800.0)
-        
+        step_fn = component.gen_step_fn()
+
+        new_state, hist = step_fn(state, 0)
+
         # Check state update
-        assert new_state.metadata["time"] == 1800.0
-        expected_temp = 280.0 + 0.1 * 1800.0
-        assert jnp.allclose(new_state.prognostic["temperature"], expected_temp)
+        assert new_state.prog.sim_time == 1800.0
+
+        expected_temp = 300 + 500 * 1800.0 / 1000.0
+        assert jnp.allclose(new_state.prog.T[0, :, :], expected_temp)
         
-        # Check output fluxes
-        assert jnp.allclose(output_fluxes.heat, 100.0)
-        assert jnp.allclose(output_fluxes.moisture, 0.001)
+
+        assert jnp.allclose(new_state.prog.T[1:, :, :], 300)
+        
     
     def test_component_tendencies(self):
         """Test tendency computation."""
