@@ -17,7 +17,7 @@ class AbstractField:
 
 class AbstractComponentState:
     prog     : AbstractField
-    physdata : AbstractField
+    phydata : AbstractField
 
 
 def create_field_class(
@@ -90,7 +90,7 @@ def create_field_class(
 
 def create_component_state_class(
     prog_cls       : type,
-    physdata_cls   : type,
+    phydata_cls   : type,
     name : str = "",
 ):
     """
@@ -110,7 +110,7 @@ def create_component_state_class(
     """
 
     new_cls = make_dataclass(
-        f"StateDiagClass_{model_name:s}",
+        f"{name:s}",
         [
             ("prog",     prog_cls),
             ("phydata",  phydata_cls),
@@ -293,38 +293,15 @@ class Component(ABC):
         pass
     
     @abstractmethod
-    def step(
+    def gen_step_fn(
         self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-        dt: float,
-    ) -> Tuple[ComponentState, BoundaryFluxes]:
+    ) -> callable:
         """Advance component state by one timestep.
         
         Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            dt: Time step size (seconds)
-            
+           
         Returns:
-            Tuple of (new_state, output_fluxes)
-        """
-        pass
-    
-    @abstractmethod
-    def compute_tendencies(
-        self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-    ) -> Dict[str, Array]:
-        """Compute tendencies for prognostic variables.
-        
-        Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            
-        Returns:
-            Dictionary of tendencies for each prognostic variable
+            A function that accepts (init_state, time) and returns (final_state, predictions)
         """
         pass
     
