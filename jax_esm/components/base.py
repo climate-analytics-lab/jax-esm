@@ -19,7 +19,6 @@ class AbstractComponentState:
     prog     : AbstractFieldGroup
     phydata  : AbstractFieldGroup
 
-
 def create_field_group_class(
     cls_name: str,
     fields: Tuple,
@@ -90,7 +89,7 @@ def create_field_group_class(
 
 def create_component_state_class(
     prog_cls       : type,
-    phydata_cls   : type,
+    physdata_cls   : type,
     name : str = "",
 ):
     """
@@ -110,7 +109,7 @@ def create_component_state_class(
     """
 
     new_cls = make_dataclass(
-        f"{name:s}",
+        f"StateDiagClass_{model_name:s}",
         [
             ("prog",     prog_cls),
             ("phydata",  phydata_cls),
@@ -148,23 +147,6 @@ def create_component_state_class(
     new_cls = tree_math.struct(new_cls)
 
     return new_cls
-
-class BoundaryFluxes(NamedTuple):
-    """Container for boundary fluxes between components.
-    
-    Attributes:
-        heat: Heat flux (W/m²)
-        moisture: Moisture flux (kg/m²/s)
-        momentum_u: Zonal momentum flux (N/m²)
-        momentum_v: Meridional momentum flux (N/m²)
-        tracers: Dictionary of tracer fluxes
-    """
-    heat: Array
-    moisture: Array
-    momentum_u: Array
-    momentum_v: Array
-    tracers: Dict[str, Array]
-
 
 @dataclass
 class ComponentConfig:
