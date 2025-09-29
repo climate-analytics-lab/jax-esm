@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from jax_esm.components.base import CoupledComponent, AbstractComponentState
-from dataclasses import dataclass
+from dataclasses import dataclass, make_dataclass
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
@@ -36,6 +36,10 @@ class CouplerConfig:
     """Configuration for coupler."""
     timestep: float  # seconds
 
+class AbstractCoupledState:
+    ...
+
+
 class Coupler:
     """Main coupler for Earth system components."""
     
@@ -60,6 +64,14 @@ class Coupler:
         component_timesteps = {
             name: comp.timestep for name, comp in components.items()
         }
+
+        self.coupled_state_class = dataclass(make_dataclass(
+            cls_name = "CoupledState",
+            fields = [ (component_name, component.component_state_class) for component_name, component in components.items() ],
+            bases = (AbstractCoupledState,),
+        ))
+
+
         
     
     def initialize(
@@ -73,13 +85,10 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
-        states = {}
-        
-        # Split random key for each component
-        for name, component in self.components.items():
-            states[name] = component.initialize()
-        
-        return states
+        return CoupledState(**{
+            name : component.initialize() 
+            for name, component in self.components.items()
+        })
    
 
     def gen_step_fn(
@@ -102,6 +111,7 @@ class Coupler:
         @jax.jit
         def step_fn(cplstate, t):
             
+<<<<<<< HEAD
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 name: step_fn(cplstate, t) 
@@ -114,6 +124,27 @@ class Coupler:
             
             new_cplstate = {name: state for name, (state, _) in results.items()}
             cpl_predictions = {name: pred for name, (_, pred) in results.items()}
+=======
+            # Consider meta-programming to dynamically generate `stepforward_fun`
+            # Call forward functions of each component
+
+            new_atmstate, atm_predictions = sub_step_fn["atm"](cplstate, t)
+            new_flxstate, flx_predictions = sub_step_fn["flx"](cplstate, t)
+            new_ocnstate, ocn_predictions = sub_step_fn["ocn"](cplstate, t)
+
+       
+            new_cplstate = CoupledState(
+                atm = new_atmstate,
+                flx = new_flxstate,
+                ocn = new_ocnstate,
+            )
+
+            cpl_predictions = dict(
+                atm = atm_predictions,
+                flx = flx_predictions,
+                ocn = ocn_predictions,
+            )
+>>>>>>> f9434e7 (Add a dynamically generated component state class.)
 
             return new_cplstate, cpl_predictions
 
@@ -175,6 +206,12 @@ class Coupler:
             component: Component instance
             flux_mappings: Optional flux mappings from this component to others
         """
+
+        if not hasattr(CoupledState, name):
+            raise Exception("Unable to add {name:s}. It has to be one of the attribute names of CoupledState.".format(
+                name = name,
+            ))
+
         self.components[name] = component
         self.component_names = list(self.components.keys())
         
