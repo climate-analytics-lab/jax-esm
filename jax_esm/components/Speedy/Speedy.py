@@ -4,7 +4,7 @@ from typing import Dict, Tuple
 
 import jcm
 from jcm.model import Model, get_coords
-from jcm.boundaries import initialize_boundaries
+from jcm.boundaries import boundaries_from_file
 from jcm.date import DateData, Timestamp, Timedelta
 from datetime import datetime
 from jcm.boundaries import BoundaryData, default_boundaries
