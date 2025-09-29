@@ -71,12 +71,6 @@ class Coupler:
             transformations=flux_transformations,
         )
         
-        # Initialize time integrator
-        self.time_integrator = TimeIntegrator(
-            coupling_timestep=config.timestep,
-            component_timesteps=component_timesteps,
-        )
-        
         # Validate component compatibility
         self._validate_components()
     
@@ -173,7 +167,7 @@ class Coupler:
         end_time      : float,
         timestep      : float,
         jax_scan: bool = True,
-        save_interval_steps : int = 1,
+        save_interval_steps = 1,
     ):
 
         coupler = self
@@ -234,10 +228,6 @@ class Coupler:
         component_timesteps = {
             n: c.timestep for n, c in self.components.items()
         }
-        self.time_integrator = TimeIntegrator(
-            coupling_timestep=self.config.timestep,
-            component_timesteps=component_timesteps,
-        )
         
         # Revalidate
         self._validate_components()
@@ -256,7 +246,3 @@ class Coupler:
             component_timesteps = {
                 n: c.timestep for n, c in self.components.items()
             }
-            self.time_integrator = TimeIntegrator(
-                coupling_timestep=self.config.timestep,
-                component_timesteps=component_timesteps,
-            )
