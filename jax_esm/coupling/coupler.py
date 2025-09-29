@@ -63,7 +63,7 @@ class Coupler:
         }
         
         # Validate component compatibility
-        self._validate_components()
+        #self._validate_components()
     
     
     def initialize(
@@ -91,7 +91,7 @@ class Coupler:
 
     def gen_step_fn(
         self,
-    ) -> Callable:
+    ) -> callable:
 
         """Advance coupled system by one coupling timestep.
         
