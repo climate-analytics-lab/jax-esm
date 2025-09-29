@@ -168,7 +168,7 @@ class Coupler:
             length=total_steps,
         )
 
-        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
+        #predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
@@ -220,3 +220,32 @@ class Coupler:
             component_timesteps = {
                 n: c.timestep for n, c in self.components.items()
             }
+
+
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
+
+        Args:
+            predictions : The predictions returned from `forward_func`
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        d = dict()
+        for component_name in self.components.keys():
+            component = self.components[component_name]
+            merge_ds = []
+            
+            for i, pred in enumerate(predictions):
+                merge_ds.append(
+                    component.predictions_to_xarray(pred[component_name])
+                )
+            
+            d[component_name] = xr.concat(merge_ds, dim="time")
+
+        return d

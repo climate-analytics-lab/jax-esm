@@ -137,13 +137,14 @@ class FluxModel(Component):
             ds : The resulting xarray dataset.
         """
         
-        st = predictions["state"]
+        phydata = predictions["phydata"]
+        prog    = predictions["prog"]
         ds = xr.Dataset(
             data_vars = dict(
-                hfluxn  = (["time", "lon", "lat", "layer"], st.hfluxn),
+                hfluxn  = (["time", "lon", "lat", "layer"], phydata.hfluxn),
             ),
              coords = dict(
-                time = (["time",], st.sim_time),
+                time = (["time",], prog.sim_time),
             ),
         )
         

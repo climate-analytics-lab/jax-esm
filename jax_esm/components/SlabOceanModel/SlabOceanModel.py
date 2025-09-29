@@ -221,14 +221,14 @@ class SlabOceanModel(Component):
         Returns:
             ds : The resulting xarray dataset.
         """
-        st = predictions["state"]
+        prog    = predictions["prog"]
         ds = xr.Dataset(
             data_vars = dict(
-                T   = (["time", "lon", "lat"], st.T),
-                mld = (["time", "lon", "lat"], st.mld),
+                T   = (["time", "lon", "lat"], prog.T),
+                mld = (["time", "lon", "lat"], prog.mld),
             ), 
             coords = dict(
-                time = (["time",], st.sim_time),
+                time = (["time",], prog.sim_time),
             ),
         )
         
