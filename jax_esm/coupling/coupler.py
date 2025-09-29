@@ -16,8 +16,6 @@ class CouplerConfig:
     """Configuration for coupler."""
     timestep: float  # seconds
 
-
-
 class Coupler:
     """Main coupler for Earth system components."""
     
@@ -99,7 +97,55 @@ class Coupler:
             states[name] = component.initialize(key)
         
         return states
-    
+   
+
+    def gen_step_fn(
+        self,
+    ) -> Callable:
+
+        """Advance coupled system by one coupling timestep.
+        
+        Args:
+            
+        Returns:
+            New states after one coupling timestep
+        """
+
+        # Collect forward functions from components
+        sub_forward_func = {
+            component_name : self.components[component_name].gen_step_fn()
+            for component_name in self.components.keys()
+        }
+
+        @jax.jit
+        def step_fn(cplstate, t):
+            
+            # Consider meta-programming to dynamically generate `stepforward_fun`
+            # Call forward functions of each component
+
+            new_atmstate, atm_predictions = sub_step_fn["atm"](cplstate, t)
+            new_flxstate, flx_predictions = sub_step_fn["flx"](cplstate, t)
+            new_ocnstate, ocn_predictions = sub_step_fn["ocn"](cplstate, t)
+
+       
+            new_cplstate = dict(
+                atm = new_atmstate,
+                flx = new_flxstate,
+                ocn = new_ocnstate,
+            )
+
+            cpl_predictions = dict(
+                atm = atm_predictions,
+                flx = flx_predictions,
+                ocn = ocn_predictions,
+            )
+
+            return new_cplstate, cpl_predictions
+
+        return step_fn
+        
+ 
+     
     def step(
         self,
         states: Dict[str, ComponentState],
@@ -122,7 +168,7 @@ class Coupler:
         )
         
         return new_states
-    
+     
     def run(
         self,
         initial_states: Dict[str, ComponentState],
