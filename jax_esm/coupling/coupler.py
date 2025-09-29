@@ -10,6 +10,8 @@ from jax_esm.components.base import CoupledComponent, AbstractComponentState
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
+from jax_esm.utils.bulk_op import unwrap_leading_dims
+
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
     
@@ -165,6 +167,8 @@ class Coupler:
             init_cplstate,
             length=total_steps,
         )
+
+        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time

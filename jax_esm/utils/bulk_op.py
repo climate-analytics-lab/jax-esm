@@ -4,6 +4,29 @@ import jax
 import jax.numpy as jnp
 from jax import tree_util
 
+def unwrap_leading_dims(
+    obj,
+    first_n_dim = 2,
+):
+    """
+    A tool function that unwraps the leading dimensions of jax arrays
+
+    Args:
+
+        obj : A structure containining jax arrays
+
+    Returns:
+
+        unwrapped object.
+        
+    """
+    def _unwrap(arr):
+        new_shape = (-1,) + arr.shape[first_n_dim:]
+        return jnp.reshape(arr, new_shape)
+
+    return jax.tree_util.tree_map(_unwrap, obj)
+
+
 def stack_objects(
     objs : List,
 ):
