@@ -103,11 +103,11 @@ class Speedy(Component):
         
         return return_obj
         
-    def genForwardFunc(self):
+    def gen_step_fn(self):
 
        
         @jax.jit
-        def forward_func(cpl, t):
+        def step_fn(cpl, t):
 
             # This is where SST is passed
             ocnstate = cpl["ocn"]["state"]
@@ -130,7 +130,7 @@ class Speedy(Component):
                 phydata = jax.tree.map(lambda arr: jnp.mean(arr, axis=0), predictions.physics),
             ), predictions
             
-        return forward_func
+        return step_fn
 
     def predictions_to_xarray(
         self,
