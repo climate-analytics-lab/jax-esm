@@ -176,35 +176,34 @@ class SlabOceanModel(Component):
         @jax.jit
         def step_fn(cpl, t):
 
-            somstate = cpl["ocn"]["state"]
-            fmstate  = cpl["flx"]["state"]
 
-            days_after_start = jnp.floor( somstate.sim_time / 86400.0 ).astype(jnp.int32)
+            days_after_start = jnp.floor( cpl.ocn.prog.sim_time / 86400.0 ).astype(jnp.int32)
             
             # This snapshot SST will be frozen
             snapshot_SST_clim = self.SST_clim[:, :, start_dt_offset + days_after_start]
             snapshot_SST_clim = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim, 273.15+15)
 
-            new_Tanom = somstate.T - snapshot_SST_clim
+            new_Tanom = cpl.ocn.prog.T - snapshot_SST_clim
+
             
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
-                    fmstate.hfluxn[:, :, 0]
+                    cpl.flx.phydata.hfluxn[:, :, 0]
                 )))
 
-                somstate = somstate.copy(
-                    sim_time = somstate.sim_time + self.subtimestep
+                cpl.ocn.prog = cpl.ocn.prog.copy(
+                    sim_time = cpl.ocn.prog.sim_time + self.subtimestep
                 )
             
             new_T = new_Tanom + snapshot_SST_clim
 
-            new_state = somstate.copy(
-                T = new_T,
+            new_state = cpl.ocn.copy(
+                prog_kwargs = dict(
+                    T = new_T,
+                ),
             )
             
-            new_phydata = cpl["ocn"]["phydata"].copy()
-            
-            return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
+            return new_state, stack_objects( [ dict(prog=new_state.prog) , ] )
             
         return step_fn
 
