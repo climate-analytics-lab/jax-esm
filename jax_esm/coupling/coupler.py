@@ -144,31 +144,6 @@ class Coupler:
 
         return step_fn
         
- 
-     
-    def step(
-        self,
-        states: Dict[str, ComponentState],
-        time: float,
-    ) -> Dict[str, ComponentState]:
-        """Advance coupled system by one coupling timestep.
-        
-        Args:
-            states: Current states of all components
-            time: Current simulation time
-            
-        Returns:
-            New states after one coupling timestep
-        """
-        new_states, _ = self.time_integrator.integrate_step(
-            components=self.components,
-            states=states,
-            flux_exchanger=self.flux_exchanger.couple_components,
-            time=time,
-        )
-        
-        return new_states
-     
     def run(
         self,
         initial_states: Dict[str, ComponentState],
