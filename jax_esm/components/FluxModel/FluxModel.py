@@ -105,10 +105,10 @@ class FluxModel(Component):
     def initialize(self):
         ...
         
-    def genForwardFunc(self):
+    def gen_step_fn(self):
 
         @jax.jit
-        def forward_func(cplstate, t):
+        def step_fn(cplstate, t):
 
             atm_phydata = cplstate["atm"]["phydata"]
 
@@ -129,41 +129,8 @@ class FluxModel(Component):
 
             return dict(state=new_state, phydata=new_phydata), stack_objects( [ dict(state=new_state, phydata=new_phydata) , ] )
 
-        return forward_func
+        return step_fn
         
-    def genForwardFunc_SLAB(self):
-        
-        @jax.jit
-        def forward_func(cplstate):
-
-            atmstate = cplstate.atm
-            fmstate  = cplstate.flx
-            ocnstate = cplstate.ocn
-            
-            ocn_T = ocnstate.T
-            atm_T = atmstate.T
-
-            new_lhflx = (self.u10 * self.C_H * self.rho_cp) * (ocn_T - atm_T)
-    
-            # shortwave radiation
-            _tmp = - self.solar_const / 4
-            
-            new_swflx_toa = fmstate.swflx_toa * 0 + _tmp
-            new_swflx_sfc = new_swflx_toa * self.beta
-    
-            new_lwflx_toa = fmstate.lwflx_toa * 0 + self.stephan_boltzmann_const * (atm_T ** 4.0)
-
-            new_fmstate = fmstate.copy(
-                swflx_toa = new_swflx_toa,
-                swflx_sfc = new_swflx_sfc,
-                lwflx_toa = new_lwflx_toa,
-                lhflx = new_lhflx,
-            )
-            
-            return new_fmstate
-
-        return forward_func
-
     def predictions_to_xarray(
         self,
         predictions,
@@ -173,7 +140,7 @@ class FluxModel(Component):
         A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
-            predictions : The predictions returned from `forward_func`
+            predictions : The predictions returned from `step_fn`
             
         Returns:
             ds : The resulting xarray dataset.
@@ -191,7 +158,3 @@ class FluxModel(Component):
         
         return ds
 
-    def report(self):
-       print("Latent heat flux = ", self.state.lhflx[0]) 
-       print("Top-of-atmosphere shortwave rad flux = ", self.state.swflx_toa[0]) 
-       print("Surface shortwave rad flux = ", self.state.swflx_sfc[0]) 
