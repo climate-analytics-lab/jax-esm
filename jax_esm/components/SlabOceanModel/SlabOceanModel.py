@@ -179,9 +179,16 @@ class SlabOceanModel(Component):
 
             days_after_start = jnp.floor( cpl.ocn.prog.sim_time / 86400.0 ).astype(jnp.int32)
             
-            # This snapshot SST will be frozen
-            snapshot_SST_clim = self.SST_clim[:, :, start_dt_offset + days_after_start]
-            snapshot_SST_clim = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim, 273.15+15)
+            clim_day_beg = start_dt_offset + days_after_start
+            clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
+            
+            snapshot_SST_clim_beg = self.SST_clim[:, :, clim_day_beg]
+            snapshot_SST_clim_beg = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim_beg, 273.15+15)
+            
+            snapshot_SST_clim_end = self.SST_clim[:, :, clim_day_end]
+            snapshot_SST_clim_end = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim_end, 273.15+15)
+
+            SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0
 
             new_Tanom = cpl.ocn.prog.T - snapshot_SST_clim
 
@@ -195,7 +202,7 @@ class SlabOceanModel(Component):
                     sim_time = cpl.ocn.prog.sim_time + self.subtimestep
                 )
             
-            new_T = new_Tanom + snapshot_SST_clim
+            new_T = new_Tanom + snapshot_SST_clim_beg + SST_clim_trend * self.config.timestep
 
             new_state = cpl.ocn.copy(
                 prog_kwargs = dict(
