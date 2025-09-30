@@ -190,26 +190,24 @@ class SlabOceanModel(Component):
 
             SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0
 
-            new_Tanom = cpl.ocn.prog.T - snapshot_SST_clim
+            new_Tanom = cpl.ocn.prog.T - snapshot_SST_clim_beg
 
-            
+            new_sim_time = cpl.ocn.prog.sim_time
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
-                    cpl.flx.phydata.hfluxn[:, :, 0]
+                    cpl.flx.phydata.heatflx
                 )))
-
-                cpl.ocn.prog = cpl.ocn.prog.copy(
-                    sim_time = cpl.ocn.prog.sim_time + self.subtimestep
-                )
-            
+                new_sim_time += self.subtimestep
+                
+                
             new_T = new_Tanom + snapshot_SST_clim_beg + SST_clim_trend * self.config.timestep
 
             new_state = cpl.ocn.copy(
                 prog_kwargs = dict(
                     T = new_T,
+                    sim_time = new_sim_time,
                 ),
             )
-            
             return new_state, stack_objects( [ dict(prog=new_state.prog) , ] )
             
         return step_fn
