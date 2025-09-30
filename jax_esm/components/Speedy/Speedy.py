@@ -26,7 +26,7 @@ from dinosaur import primitive_equations, primitive_equations_states
 from jcm.physics_interface import PhysicsState
 from jcm.model import Predictions
 
-from jax_esm.utils.bulk_op import stack_objects
+from jax_esm.utils.bulk_op import stack_objects, mean_leaf
 
 import tree_math
 from typing import Any
@@ -95,26 +95,36 @@ class Speedy(Component):
             if initial_state is None:
                 model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
             
-        
         model.start_date = start_date
         model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
         D3_nodal_shape = self.model.geometry.nodal_shape
+            
+        _, init_phydata = self.model.physics.compute_tendencies(
+            state      = model.initial_state,
+            boundaries = model.boundaries,
+            geometry   = model.geometry,
+            date       = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
+        )
 
+        #init_state   = stack_objects([model.initial_state,] * self.config.substeps)
+        #init_phydata = stack_objects([init_phydata,] * self.config.substeps)
+
+        def asfloat32(tree):
+            return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float32), tree)
+        
         return SpeedyState(
-            prog = model.initial_state,
-            phydata = jcm.physics.speedy.physics_data.PhysicsData.zeros(nodal_shape=D3_nodal_shape[1:], node_levels=D3_nodal_shape[0]),
+            prog     = asfloat32(model.initial_state),
+            phydata  = asfloat32(init_phydata),
             metadata = model._final_modal_state,
-              
         )
 
     def gen_step_fn(self):
        
         @jax.jit
         def step_fn(cpl, t):
-
            
             atm_boundary = self.model.boundaries.copy(
-                tsea = cpl.ocn.prog.T,
+                tsea = cpl.ocn.prog.T
             )
 
             new_atm_modal_state, predictions = self.model.run_from_state(
@@ -126,9 +136,9 @@ class Speedy(Component):
 
             # phydata is a stacked object. What do I do?
             return SpeedyState(
-                prog = predictions.dynamics,
+                prog    = mean_leaf(predictions.dynamics, axis=0),
+                phydata = mean_leaf(predictions.physics, axis=0),
                 metadata = new_atm_modal_state,
-                phydata = jax.tree.map(lambda arr: jnp.mean(arr, axis=0), predictions.physics),
             ), predictions
             
         return step_fn
