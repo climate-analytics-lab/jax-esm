@@ -10,7 +10,7 @@ from jax_esm.components.base import CoupledComponent, AbstractComponentState
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
-from jax_esm.utils.bulk_op import unwrap_leading_dims
+from jax_esm.utils.bulk_op import unwrap_leading_dims, mean_leaf
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
@@ -165,10 +165,10 @@ class Coupler:
         final_state, predictions = scan_func(
             cpl_step_fn,
             init_cplstate,
-            length=total_steps,
+            xs=jnp.arange(total_steps),
         )
 
-        #predictions = unwrap_leading_dims(predictions, first_n_dim=2)
+        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
@@ -239,13 +239,14 @@ class Coupler:
         d = dict()
         for component_name in self.components.keys():
             component = self.components[component_name]
-            merge_ds = []
+            #merge_ds = []
             
-            for i, pred in enumerate(predictions):
-                merge_ds.append(
-                    component.predictions_to_xarray(pred[component_name])
-                )
-            
-            d[component_name] = xr.concat(merge_ds, dim="time")
+            #for i, pred in enumerate(predictions):
+            #    merge_ds.append(
+            #        component.predictions_to_xarray(pred[component_name])
+            #    )
+            #
+            #d[component_name] = xr.concat(merge_ds, dim="time")
+            d[component_name] = component.predictions_to_xarray(predictions[component_name])
 
         return d
