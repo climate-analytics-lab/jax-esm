@@ -113,7 +113,7 @@ class FluxModel(Component):
                     sim_time = cplstate.flx.prog.sim_time + self.config.timestep,
                 ),
                 phydata_kwargs = dict(
-                    hfluxn = - atm_phydata.surface_flux.hfluxn,
+                    heatflx = - atm_phydata.surface_flux.hfluxn.sum(axis=-1),
                 ),
             )
            
@@ -141,7 +141,7 @@ class FluxModel(Component):
         prog    = predictions["prog"]
         ds = xr.Dataset(
             data_vars = dict(
-                hfluxn  = (["time", "lon", "lat", "layer"], phydata.hfluxn),
+                heatflx  = (["time", "lon", "lat",], phydata.heatflx),
             ),
              coords = dict(
                 time = (["time",], prog.sim_time),
