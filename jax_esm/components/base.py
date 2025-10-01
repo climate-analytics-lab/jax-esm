@@ -11,50 +11,6 @@ import tree_math
 
 import pandas as pd
 
-@tree_math.struct
-@dataclass
-class ComponentState:
-    
-    """State container for Earth system components.
-    
-    Attributes:
-        prognostic : Prognostic variables that evolve with time
-        diagnostic : Diagnostic variables computed from prognostic state
-        boundary   : Boundary conditions and surface properties
-        forcing    : External forcing fields
-        metadata   : Additional metadata
-
-    """
-    prognostic: Dict[str, Array] = field(default_factory=lambda: {})
-    diagnostic: Dict[str, Array] = field(default_factory=lambda: {})
-    boundary:   Dict[str, Array] = field(default_factory=lambda: {})
-    forcing:    Dict[str, Array] = field(default_factory=lambda: {})
-    metadata:   Dict[str, Array] = field(default_factory=lambda: {})
-
-    @classmethod
-    def zeros(
-        cls,
-        comp_state_shp: ComponentStateShape,
-    ):
-
-        comp_state = ComponentState()
-        
-        for var_group, field_info in comp_state.__dataclass_fields__.items():
-            
-            d = getattr(comp_state, var_group)
-            varnames = getattr(comp_state_shp, var_group)
-
-            for varname in varnames:
-                
-                d[varname] = jnp.zeros(
-                    comp_state_shp.get_shape(var_group, varname)
-                )
-
-        return comp_state 
-
-        
-
-
 class BoundaryFluxes(NamedTuple):
     """Container for boundary fluxes between components.
     
