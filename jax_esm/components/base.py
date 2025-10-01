@@ -11,53 +11,6 @@ import tree_math
 
 import pandas as pd
 
-@dataclass
-class Axis:
-    
-    """Axis
-    
-    Attributes:
-        name      : name of the coordinate
-        long_name : long name of the coordinate
-        unit      : unit of the coordinate
-    """
-    values    : Array
-    name      : str = ""
-    long_name : str = ""
-    unit      : str = ""
-
-
-    def __len__(self):
-        return len(Array)
-
-
-@dataclass
-class CoordinateSystem(dict):
-    pass
- 
-@dataclass
-class ComponentStateShape:
-    
-    """Description of shape of `ComponentState` for Earth system components.
-    
-    Attributes:
-        prognostic : Prognostic variables that evolve with time
-        diagnostic : Diagnostic variables computed from prognostic state
-        boundary   : Boundary conditions and surface properties
-        forcing    : External forcing fields
-
-    """
-    coord_sys  : CoordinateSystem
-    prognostic : Dict[str, List[str]] = field(default_factory=lambda: {})
-    diagnostic : Dict[str, List[str]] = field(default_factory=lambda: {})
-    boundary   : Dict[str, List[str]] = field(default_factory=lambda: {})
-    forcing    : Dict[str, List[str]] = field(default_factory=lambda: {})
-
-    def get_shape(var_group, varname):
-        axis_names = getattr(self, var_group)[varname]
-        return [ len(self.coord_sys[axis_name]) for axis_name in axis_names ]
-        
-
 @tree_math.struct
 @dataclass
 class ComponentState:
