@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 
 from jax_esm.components.base import ComponentState, CoupledComponent
-#from jax_esm.coupling.flux_exchange import FluxExchanger
 from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
 from dataclasses import dataclass
 
@@ -44,8 +43,6 @@ class Coupler:
         self,
         components: Dict[str, CoupledComponent],
         config: CouplerConfig,
-        #flux_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
-        #flux_transformations: Optional[Dict[Tuple[str, str, str], callable]] = None,
     ):
         """Initialize the coupler.
         
@@ -64,33 +61,9 @@ class Coupler:
             name: comp.timestep for name, comp in components.items()
         }
         
-        # Initialize flux exchanger
-        #self.flux_exchanger = FluxExchanger(
-        #    component_names=self.component_names,
-        #    flux_mappings=flux_mappings,
-        #    transformations=flux_transformations,
-        #)
-        
         # Validate component compatibility
         self._validate_components()
     
-    
-    #def _validate_components(self) -> None:
-    #    """Validate that components can be coupled."""
-    #    # Check that all required fluxes are provided
-    #    for name, component in self.components.items():
-    #        required = set(component.get_required_fluxes())
-    #        
-    #        # Check if required fluxes can be provided by other components
-    #        provided = set()
-    #        for other_name, other_comp in self.components.items():
-    #            if other_name != name:
-    #                provided.update(other_comp.get_provided_fluxes())
-    #        
-    #        missing = required - provided
-    #        if missing and len(self.components) > 1:
-    #            print(f"Warning: Component {name} requires fluxes {missing} "
-    #                  f"that are not provided by other components")
     
     def initialize(
         self,
@@ -208,7 +181,6 @@ class Coupler:
         self,
         name: str,
         component: CoupledComponent,
-        #flux_mappings: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> None:
         """Add a new component to the coupler.
         
@@ -219,11 +191,6 @@ class Coupler:
         """
         self.components[name] = component
         self.component_names = list(self.components.keys())
-        
-        # Update flux mappings if provided
-        #if flux_mappings:
-        #    for target, mapping in flux_mappings.items():
-        #        self.flux_exchanger.add_flux_mapping(name, target, mapping)
         
         # Recreate time integrator with new component
         component_timesteps = {
