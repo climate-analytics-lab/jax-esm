@@ -1,30 +1,15 @@
 """Base component interface for Earth system models."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
+import tree_math
 
-
-class ComponentState(NamedTuple):
-    """State container for Earth system components.
-    
-    Attributes:
-        prognostic: Prognostic variables that evolve with time
-        diagnostic: Diagnostic variables computed from prognostic state
-        boundary: Boundary conditions and surface properties
-        forcing: External forcing fields
-        metadata: Additional metadata (e.g., time, coordinates)
-    """
-    prognostic: Dict[str, Array]
-    diagnostic: Dict[str, Array]
-    boundary: Dict[str, Array]
-    forcing: Dict[str, Array]
-    metadata: Dict[str, Any]
-
+import pandas as pd
 
 class BoundaryFluxes(NamedTuple):
     """Container for boundary fluxes between components.
@@ -47,9 +32,13 @@ class BoundaryFluxes(NamedTuple):
 class ComponentConfig:
     """Configuration for a component."""
     name: str
+    start_dt: pd.Timestamp
     timestep: float  # seconds
+    substeps: int           # count
+    save_interval: float    # seconds
     grid: Dict[str, Any]  # Grid specification
     params: Dict[str, Any]  # Component-specific parameters
+
 
 
 class Component(ABC):
