@@ -1,6 +1,7 @@
 """Main coupler class for Earth system model coupling."""
 
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -100,36 +101,25 @@ class Coupler:
             New states after one coupling timestep
         """
 
-        # Collect forward functions from components
-        sub_forward_func = {
-            component_name : self.components[component_name].gen_step_fn()
-            for component_name in self.components.keys()
-        }
+        # Get step functions for the three components
+        atm_step_fn = self.components["atm"].gen_step_fn()
+        flx_step_fn = self.components["flx"].gen_step_fn()
+        ocn_step_fn = self.components["ocn"].gen_step_fn()
 
         @jax.jit
         def step_fn(cplstate, t):
             
-            # Consider meta-programming to dynamically generate `stepforward_fun`
-            # Call forward functions of each component
-
-            new_atmstate, atm_predictions = sub_step_fn["atm"](cplstate, t)
-            new_flxstate, flx_predictions = sub_step_fn["flx"](cplstate, t)
-            new_ocnstate, ocn_predictions = sub_step_fn["ocn"](cplstate, t)
-
-       
-            new_cplstate = dict(
-                atm = new_atmstate,
-                flx = new_flxstate,
-                ocn = new_ocnstate,
-            )
-
-            cpl_predictions = dict(
-                atm = atm_predictions,
-                flx = flx_predictions,
-                ocn = ocn_predictions,
-            )
-
-            return new_cplstate, cpl_predictions
+            # Call forward functions and unpack results directly into dictionaries
+            results = {
+                name: step_fn(cplstate, t) 
+                for name, step_fn in [
+                    ("atm", atm_step_fn),
+                    ("flx", flx_step_fn), 
+                    ("ocn", ocn_step_fn)
+                ]
+            }
+            
+            return results
 
         return step_fn
 
@@ -164,7 +154,7 @@ class Coupler:
         # fall back to generate forward function every time.
         #
         cpl_step_fn = coupler.gen_step_fn()
-        final_state, predictions = scan_func(
+        component_results = scan_func(
             cpl_step_fn,
             init_cplstate,
             length=total_steps,
@@ -174,9 +164,8 @@ class Coupler:
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-        return final_state, predictions
+        return component_results
         
-    
     def add_component(
         self,
         name: str,
