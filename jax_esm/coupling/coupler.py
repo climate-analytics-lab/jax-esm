@@ -119,7 +119,10 @@ class Coupler:
                 ]
             }
             
-            return results
+            new_cplstate = {name: state for name, (state, _) in results.items()}
+            cpl_predictions = {name: pred for name, (_, pred) in results.items()}
+
+            return new_cplstate, cpl_predictions
 
         return step_fn
 
@@ -154,7 +157,7 @@ class Coupler:
         # fall back to generate forward function every time.
         #
         cpl_step_fn = coupler.gen_step_fn()
-        component_results = scan_func(
+        final_state, predictions = scan_func(
             cpl_step_fn,
             init_cplstate,
             length=total_steps,
@@ -164,8 +167,9 @@ class Coupler:
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-        return component_results
+        return final_state, predictions
         
+    
     def add_component(
         self,
         name: str,
