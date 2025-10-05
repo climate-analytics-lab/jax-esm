@@ -267,7 +267,7 @@ def main():
     print(f"Coupling timestep: {coupler.coupling_timestep / 3600:.1f} hours")
     
     # Run simulation
-    final_states, history = coupler.run(
+    component_results = coupler.run(
         initial_states=initial_states,
         start_time=start_time,
         end_time=end_time,
@@ -279,14 +279,14 @@ def main():
     print(f"Number of saved states: {len(history)}")
     
     # Print final SST statistics
-    final_sst = final_states["ocean"].prognostic["temperature"]
+    final_sst = component_results["ocean"][0].prognostic["temperature"]
     print(f"\nFinal SST statistics:")
     print(f"  Mean: {jnp.mean(final_sst) - 273.15:.2f}°C")
     print(f"  Min:  {jnp.min(final_sst) - 273.15:.2f}°C")
     print(f"  Max:  {jnp.max(final_sst) - 273.15:.2f}°C")
     
     # Print final atmosphere surface temperature
-    final_atm_temp = final_states["atmosphere"].prognostic["temperature"][0]
+    final_atm_temp = component_results["atmosphere"][0].prognostic["temperature"]
     print(f"\nFinal atmosphere surface temperature:")
     print(f"  Mean: {jnp.mean(final_atm_temp) - 273.15:.2f}°C")
     print(f"  Min:  {jnp.min(final_atm_temp) - 273.15:.2f}°C")

@@ -298,23 +298,23 @@ class TestCoupler(unittest.TestCase):
         initial_states = coupler.initialize(rng_key)
         
         # Run for 2 hours
-        final_states, history = coupler.run(
+        component_results = coupler.run(
             initial_states=initial_states,
             start_time=0.0,
             end_time=7200.0,  # 2 hours
         )
         
         # Should have 4 coupling steps
-        assert len(history.time) == 4
-        assert final_states["atmosphere"].metadata["time"] == 7200.0
-        assert final_states["ocean"].metadata["time"] == 7200.0
-        
+        assert len(component_results[atmosphere][1].time) == 4
+        assert component_results["atmosphere"][1].metadata["time"] == 7200.0
+        assert component_results["ocean"][1].metadata["time"] == 7200.0
+
         # Check history
-        assert history.time[0] == 1800.0
-        assert history.time[1] == 3600.0
-        assert history.time[2] == 5400.0
-        assert history.time[3] == 7200.0
-    
+        assert component_results[atmosphere][1].history.time[0] == 1800.0
+        assert component_results[atmosphere][1].history.time[1] == 3600.0
+        assert component_results[atmosphere][1].history.time[2] == 5400.0
+        assert component_results[atmosphere][1].history.time[3] == 7200.0
+
     def test_add_remove_component(self):
         
         """Test adding and removing components."""
