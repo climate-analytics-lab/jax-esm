@@ -19,7 +19,6 @@ class AbstractComponentState:
     prog     : AbstractFieldGroup
     phydata  : AbstractFieldGroup
 
-
 def create_field_group_class(
     cls_name: str,
     fields: Tuple,
@@ -90,7 +89,7 @@ def create_field_group_class(
 
 def create_component_state_class(
     prog_cls       : type,
-    phydata_cls   : type,
+    physdata_cls   : type,
     name : str = "",
 ):
     """
@@ -149,23 +148,6 @@ def create_component_state_class(
 
     return new_cls
 
-class BoundaryFluxes(NamedTuple):
-    """Container for boundary fluxes between components.
-    
-    Attributes:
-        heat: Heat flux (W/m²)
-        moisture: Moisture flux (kg/m²/s)
-        momentum_u: Zonal momentum flux (N/m²)
-        momentum_v: Meridional momentum flux (N/m²)
-        tracers: Dictionary of tracer fluxes
-    """
-    heat: Array
-    moisture: Array
-    momentum_u: Array
-    momentum_v: Array
-    tracers: Dict[str, Array]
-
-
 @dataclass
 class ComponentConfig:
     """Configuration for a component."""
@@ -189,7 +171,7 @@ class Component(ABC):
         self.timestep = config.timestep
         
     @abstractmethod
-    def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
+    def initialize(self) -> AbstractComponentState:
         """Initialize component state.
         
         Args:
@@ -213,7 +195,7 @@ class Component(ABC):
         """
         pass
     
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
+    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
         """Extract boundary fields needed by other components.
         
         Args:
@@ -239,18 +221,18 @@ class CoupledComponent(Protocol):
     name: str
     timestep: float
     
-    def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
+    def initialize(self) -> AbstractComponentState:
         ...
     
     def step(
         self,
-        state: ComponentState,
+        state: AbstractComponentState,
         forcing: BoundaryFluxes,
         dt: float,
-    ) -> Tuple[ComponentState, BoundaryFluxes]:
+    ) -> Tuple[AbstractComponentState, BoundaryFluxes]:
         ...
     
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
+    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
         ...
     
     def get_required_fluxes(self) -> List[str]:

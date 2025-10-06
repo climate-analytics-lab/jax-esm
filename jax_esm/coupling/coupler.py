@@ -6,9 +6,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, CoupledComponent
-from jax_esm.coupling.time_integration import IntegrationState, TimeIntegrator
-from dataclasses import dataclass
+from jax_esm.components.base import CoupledComponent, AbstractComponentState
+from dataclasses import dataclass, make_dataclass
+import tree_math
+
+from jax_esm.utils.bulk_op import unwrap_leading_dims
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
@@ -37,6 +39,10 @@ class CouplerConfig:
     """Configuration for coupler."""
     timestep: float  # seconds
 
+class AbstractCoupledState:
+    ...
+
+
 class Coupler:
     """Main coupler for Earth system components."""
     
@@ -61,12 +67,19 @@ class Coupler:
         component_timesteps = {
             name: comp.timestep for name, comp in components.items()
         }
+
+        self.coupled_state_class = tree_math.struct(make_dataclass(
+            cls_name = "CoupledState",
+            fields = [ (component_name, component.component_state_class) for component_name, component in components.items() ],
+            bases = (AbstractCoupledState,),
+        ))
+
+
         
     
     def initialize(
         self,
-        rng_key: jax.random.PRNGKey,
-    ) -> Dict[str, ComponentState]:
+    ) -> Dict[str, AbstractComponentState]:
         """Initialize all components.
         
         Args:
@@ -75,15 +88,10 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
-        states = {}
-        
-        # Split random key for each component
-        keys = jax.random.split(rng_key, len(self.components))
-        
-        for (name, component), key in zip(self.components.items(), keys):
-            states[name] = component.initialize(key)
-        
-        return states
+        return self.coupled_state_class(**{
+            name : component.initialize() 
+            for name, component in self.components.items()
+        })
    
 
     def gen_step_fn(
@@ -126,7 +134,7 @@ class Coupler:
 
     def run(
         self,
-        init_cplstate : Dict[str, ComponentState],
+        init_cplstate : Dict[str, AbstractComponentState],
         start_time    : float,
         end_time      : float,
         timestep      : float,
@@ -160,6 +168,8 @@ class Coupler:
             length=total_steps,
         )
 
+        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
+
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
@@ -179,6 +189,12 @@ class Coupler:
             component: Component instance
             flux_mappings: Optional flux mappings from this component to others
         """
+
+        if not hasattr(CoupledState, name):
+            raise Exception("Unable to add {name:s}. It has to be one of the attribute names of CoupledState.".format(
+                name = name,
+            ))
+
         self.components[name] = component
         self.component_names = list(self.components.keys())
         
