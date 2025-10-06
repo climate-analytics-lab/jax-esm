@@ -106,9 +106,9 @@ class Speedy(Component):
             date       = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
         )
 
-        #init_state   = stack_objects([model.initial_state,] * self.config.substeps)
-        #init_phydata = stack_objects([init_phydata,] * self.config.substeps)
-
+        # This is a temporary solution to jcm's problem: some of the array's initiated
+        # by jcm is int32, but it will change to float32 after step_fn. This causes
+        # jax.lax.scan to fail due to data type inconsistency.
         def asfloat32(tree):
             return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float32), tree)
         
