@@ -8,8 +8,146 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 import tree_math
+from dataclasses import make_dataclass
 
 import pandas as pd
+
+class AbstractFieldGroup:
+    pass
+
+class AbstractComponentState:
+    prog     : AbstractFieldGroup
+    phydata  : AbstractFieldGroup
+
+
+def create_field_group_class(
+    cls_name: str,
+    fields: Tuple,
+):
+    
+    """
+    A tool function that creates a state class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`. 
+    
+    Args:
+
+        cls_name : Name of the state class
+        fields   : A list of (varname, data type, shape) tuples.
+
+    Returns:
+
+        class : The resulting state class.
+    
+    """
+    dataclass_fields = [ (varname, dtype) for varname, dtype, _ in fields ]
+    
+    cls = make_dataclass(
+        cls_name = cls_name,
+        fields = dataclass_fields,
+        bases = (AbstractFieldGroup,),
+    )
+
+    
+    @classmethod
+    def zeros(_cls, **kwargs):
+        
+        init_args = dict()
+        for varname, dtype, shape in fields:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = jnp.zeros(shape, dtype=dtype)
+
+        return _cls(**init_args)
+
+    @classmethod
+    def ones(_cls, **kwargs):
+        
+        init_args = dict()
+        for varname, dtype, shape in fields:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = jnp.ones(shape, dtype=dtype)
+
+        return _cls(**init_args)
+
+    def copy(self, **kwargs):
+        init_args = dict()
+        for varname, dtype, shape in fields:
+            if (varname in kwargs) and (kwargs[varname] is not None):
+                init_args[varname] = kwargs[varname]
+            else:
+                init_args[varname] = getattr(self, varname)
+
+        return type(self)(**init_args)
+
+    cls.zeros = zeros
+    cls.ones = ones
+    cls.copy = copy
+    
+    return tree_math.struct(cls)
+
+def create_component_state_class(
+    prog_cls       : type,
+    phydata_cls   : type,
+    name : str = "",
+):
+    """
+    A tool function that creates a ComponentState class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`.
+
+    Args:
+
+        prog      : The prog class.
+        phydata   : The phydata class.
+        name      : Name of the class.
+
+    Returns:
+
+        The resulting class.
+
+    """
+
+    new_cls = make_dataclass(
+        f"{name:s}",
+        [
+            ("prog",     prog_cls),
+            ("phydata",  phydata_cls),
+        ],
+        bases=(AbstractComponentState,),
+    )
+
+    @classmethod
+    def zeros(_cls):
+        return _cls(
+            prog = prog_cls.zeros(),
+            phydata = phydata_cls.zeros(),
+        )
+
+    @classmethod
+    def ones(_cls):
+        return _cls(
+            prog = prog_cls.ones(),
+            phydata = phydata_cls.ones(),
+        )
+
+
+    def copy(self, prog_kwargs = {}, phydata_kwargs = {}):
+        o = new_cls(
+            prog = self.prog.copy(**prog_kwargs),
+            phydata = self.phydata.copy(**phydata_kwargs),
+        )
+
+        return o
+
+    new_cls.zeros = zeros
+    new_cls.ones = ones
+    new_cls.copy = copy
+
+    new_cls = tree_math.struct(new_cls)
+
+    return new_cls
 
 class BoundaryFluxes(NamedTuple):
     """Container for boundary fluxes between components.
@@ -63,38 +201,15 @@ class Component(ABC):
         pass
     
     @abstractmethod
-    def step(
+    def gen_step_fn(
         self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-        dt: float,
-    ) -> Tuple[ComponentState, BoundaryFluxes]:
+    ) -> callable:
         """Advance component state by one timestep.
         
         Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            dt: Time step size (seconds)
-            
+           
         Returns:
-            Tuple of (new_state, output_fluxes)
-        """
-        pass
-    
-    @abstractmethod
-    def compute_tendencies(
-        self,
-        state: ComponentState,
-        forcing: BoundaryFluxes,
-    ) -> Dict[str, Array]:
-        """Compute tendencies for prognostic variables.
-        
-        Args:
-            state: Current component state
-            forcing: Boundary fluxes from other components
-            
-        Returns:
-            Dictionary of tendencies for each prognostic variable
+            A function that accepts (init_state, time) and returns (final_state, predictions)
         """
         pass
     
