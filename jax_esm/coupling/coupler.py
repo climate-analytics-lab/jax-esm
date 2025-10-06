@@ -10,7 +10,7 @@ from jax_esm.components.base import CoupledComponent, AbstractComponentState
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
-from jax_esm.utils.bulk_op import unwrap_leading_dims, mean_leaf
+from jax_esm.utils.bulk_op import unwrap_leading_dims
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
