@@ -62,9 +62,6 @@ class Coupler:
             name: comp.timestep for name, comp in components.items()
         }
         
-        # Validate component compatibility
-        #self._validate_components()
-    
     
     def initialize(
         self,
