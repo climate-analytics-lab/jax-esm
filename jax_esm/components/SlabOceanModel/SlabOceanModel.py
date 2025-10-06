@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 
 from jax_esm import constants as constants
-from jax_esm.utils.meta_prog_class import createFieldsClass
 from jax_esm.utils.bulk_op import stack_objects
 
 from pathlib import Path

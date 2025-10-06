@@ -89,8 +89,8 @@ def create_field_group_class(
 
 def create_component_state_class(
     prog_cls       : type,
-    physdata_cls   : type,
-    name : str = "",
+    phydata_cls    : type,
+    cls_name       : str = "",
 ):
     """
     A tool function that creates a ComponentState class dynamically with given dimension.
@@ -100,7 +100,7 @@ def create_component_state_class(
 
         prog      : The prog class.
         phydata   : The phydata class.
-        name      : Name of the class.
+        cls_name  : Name of the class.
 
     Returns:
 
@@ -109,7 +109,7 @@ def create_component_state_class(
     """
 
     new_cls = make_dataclass(
-        f"{name:s}",
+        f"{cls_name:s}",
         [
             ("prog",     prog_cls),
             ("phydata",  phydata_cls),
@@ -213,30 +213,3 @@ class Component(ABC):
     def get_provided_fluxes(self) -> List[str]:
         """Return list of flux names provided to other components."""
         return ["heat", "moisture", "momentum_u", "momentum_v"]
-
-
-class CoupledComponent(Protocol):
-    """Protocol for components that can be coupled."""
-    
-    name: str
-    timestep: float
-    
-    def initialize(self) -> AbstractComponentState:
-        ...
-    
-    def step(
-        self,
-        state: AbstractComponentState,
-        forcing: BoundaryFluxes,
-        dt: float,
-    ) -> Tuple[AbstractComponentState, BoundaryFluxes]:
-        ...
-    
-    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
-        ...
-    
-    def get_required_fluxes(self) -> List[str]:
-        ...
-    
-    def get_provided_fluxes(self) -> List[str]:
-        ...

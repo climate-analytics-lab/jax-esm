@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import CoupledComponent, AbstractComponentState
+from jax_esm.components.base import AbstractComponentState, Component
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
@@ -48,7 +48,7 @@ class Coupler:
     
     def __init__(
         self,
-        components: Dict[str, CoupledComponent],
+        components: Dict[str, Component],
         config: CouplerConfig,
     ):
         """Initialize the coupler.
@@ -124,7 +124,7 @@ class Coupler:
                 ]
             }
             
-            new_cplstate = {name: state for name, (state, _) in results.items()}
+            new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
             cpl_predictions = {name: pred for name, (_, pred) in results.items()}
 
             return new_cplstate, cpl_predictions
@@ -180,7 +180,7 @@ class Coupler:
     def add_component(
         self,
         name: str,
-        component: CoupledComponent,
+        component: Component,
     ) -> None:
         """Add a new component to the coupler.
         
