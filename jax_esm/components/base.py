@@ -109,7 +109,7 @@ def create_component_state_class(
     """
 
     new_cls = make_dataclass(
-        f"StateDiagClass_{model_name:s}",
+        f"{name:s}",
         [
             ("prog",     prog_cls),
             ("phydata",  phydata_cls),
