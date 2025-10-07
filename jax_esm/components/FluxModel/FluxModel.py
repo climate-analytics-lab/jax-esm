@@ -71,7 +71,7 @@ class FluxModel(Component):
             
             # Update fmask_lnd based on the conditions
             fmask_lnd = jnp.where(
-                fmask_lnd >= thrsh,
+                boundaries.fmask >= thrsh,
                 1.0,
                 0.0,
             )
