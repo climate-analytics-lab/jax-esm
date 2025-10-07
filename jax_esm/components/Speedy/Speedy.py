@@ -134,7 +134,8 @@ class Speedy(Component):
                 boundaries = atm_boundary,
             )
 
-            # phydata is a stacked object. What do I do?
+            # phydata is a stacked object, so I take the mean here.
+            # Howwever, this action will be done by jcm in the new jcm PR.
             return SpeedyState(
                 prog    = mean_leaf(predictions.dynamics, axis=0),
                 phydata = mean_leaf(predictions.physics, axis=0),
