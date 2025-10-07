@@ -58,11 +58,6 @@ class FluxModel(Component):
                 cls_name = "phydata",
                 fields = [
                     ("heatflx", float, D2_nodal_shape),
-                    ("lhflx", float, D2_nodal_shape),
-                    ("swflx_toa", float, D2_nodal_shape),
-                    ("swflx_sfc", float, D2_nodal_shape),
-                    ("lwflx_toa", float, D2_nodal_shape),
-                    ("hfluxn",    float, D2_nodal_shape + (2,)),
                 ],
             ),
         )
