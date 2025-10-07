@@ -239,14 +239,6 @@ class Coupler:
         d = dict()
         for component_name in self.components.keys():
             component = self.components[component_name]
-            #merge_ds = []
-            
-            #for i, pred in enumerate(predictions):
-            #    merge_ds.append(
-            #        component.predictions_to_xarray(pred[component_name])
-            #    )
-            #
-            #d[component_name] = xr.concat(merge_ds, dim="time")
             d[component_name] = component.predictions_to_xarray(predictions[component_name])
 
         return d
