@@ -1,4 +1,4 @@
-"""Speedy Wrapper Class"""
+"""JCM Wrapper Class"""
 
 from typing import Dict, Tuple
 from dataclasses import dataclass
@@ -33,15 +33,15 @@ from typing import Any
 
 @tree_math.struct
 @dataclass
-class SpeedyState(AbstractComponentState):
+class JCMState(AbstractComponentState):
     prog    : PhysicsState
     phydata : Any
     metadata    : primitive_equations_states
 
-class Speedy(Component):
+class JCM(Component):
     
     """
-    This is a class wrapping Speedy.
+    This is a class wrapping JCM.
     """
 
     
@@ -50,13 +50,13 @@ class Speedy(Component):
         config: ComponentConfig,
     ):
         """
-        config: Configuration of Speedy.
+        config: Configuration of JCM.
         """
 
         super().__init__(config)
 
 
-        self.component_state_class = SpeedyState
+        self.component_state_class = JCMState
 
         self.coupling_timestep = config.timestep  # in secs
         self.save_interval = config.save_interval # in secs
@@ -112,7 +112,7 @@ class Speedy(Component):
         def asfloat32(tree):
             return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float32), tree)
         
-        return SpeedyState(
+        return JCMState(
             prog     = asfloat32(model.initial_state),
             phydata  = asfloat32(init_phydata),
             metadata = model._final_modal_state,
@@ -136,7 +136,7 @@ class Speedy(Component):
 
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
-            return SpeedyState(
+            return JCMState(
                 prog    = mean_leaf(predictions.dynamics, axis=0),
                 phydata = mean_leaf(predictions.physics, axis=0),
                 metadata = new_atm_modal_state,
