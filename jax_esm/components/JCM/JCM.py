@@ -97,8 +97,9 @@ class JCM(Component):
             
         model.start_date = start_date
         model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
-        D3_nodal_shape = self.model.geometry.nodal_shape
-            
+
+        # The following code is a solution to have an initial value for phydata by stepping the model one time.
+        # The returned phydata is then used for the initial value.
         _, init_phydata = self.model.physics.compute_tendencies(
             state      = model.initial_state,
             boundaries = model.boundaries,
