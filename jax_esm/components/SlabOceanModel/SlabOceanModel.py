@@ -143,11 +143,9 @@ class SlabOceanModel(Component):
             init_T = gen_idealized_sst(self.coords.horizontal)
 
         
-        # Compute cd and time factor
-        
+        # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = self.ocn_rho * self.ocn_cp * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
-    
         self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
         self.cd_factor = self.subtimestep / cd
 
