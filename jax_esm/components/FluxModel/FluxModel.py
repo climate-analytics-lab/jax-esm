@@ -23,10 +23,13 @@ import xarray as xr
 
 class FluxModel(Component):
     """
-    FSimple slab ocean model with prescribed mixed layer depth.
-    
-    This model integrates SST anomalies based on surface heat fluxes
-    and relaxes towards a prescribed climatology.
+
+    A flux model with the simpliest implementation.
+
+    This flux model computes the total heat flux from
+    the atmosphere model. The resulting heat fluxes are 
+    positive upward.
+
     """
 
     def __init__(
