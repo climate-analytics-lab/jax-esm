@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import CoupledComponent, AbstractComponentState
+from jax_esm.components.base import AbstractComponentState, Component
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
@@ -48,7 +48,7 @@ class Coupler:
     
     def __init__(
         self,
-        components: Dict[str, CoupledComponent],
+        components: Dict[str, Component],
         config: CouplerConfig,
     ):
         """Initialize the coupler.
@@ -76,7 +76,6 @@ class Coupler:
 
 
         
-    
     def initialize(
         self,
     ) -> Dict[str, AbstractComponentState]:
@@ -88,6 +87,7 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
+        
         return self.coupled_state_class(**{
             name : component.initialize() 
             for name, component in self.components.items()
@@ -124,7 +124,7 @@ class Coupler:
                 ]
             }
             
-            new_cplstate = {name: state for name, (state, _) in results.items()}
+            new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
             cpl_predictions = {name: pred for name, (_, pred) in results.items()}
 
             return new_cplstate, cpl_predictions
@@ -165,7 +165,7 @@ class Coupler:
         final_state, predictions = scan_func(
             cpl_step_fn,
             init_cplstate,
-            length=total_steps,
+            xs=jnp.arange(total_steps),
         )
 
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
@@ -180,7 +180,7 @@ class Coupler:
     def add_component(
         self,
         name: str,
-        component: CoupledComponent,
+        component: Component,
     ) -> None:
         """Add a new component to the coupler.
         
@@ -220,3 +220,25 @@ class Coupler:
             component_timesteps = {
                 n: c.timestep for n, c in self.components.items()
             }
+
+
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
+
+        Args:
+            predictions : The predictions returned from `forward_func`
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        d = dict()
+        for component_name in self.components.keys():
+            component = self.components[component_name]
+            d[component_name] = component.predictions_to_xarray(predictions[component_name])
+
+        return d
