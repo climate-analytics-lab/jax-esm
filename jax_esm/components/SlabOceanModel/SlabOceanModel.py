@@ -12,6 +12,8 @@ from pathlib import Path
 import xarray as xr
 import pandas as pd
 import numpy as np
+from jcm.boundaries import _fixed_ssts as gen_idealized_sst
+
 
 from jax_esm.components.base import (
     Component,
@@ -131,8 +133,7 @@ class SlabOceanModel(Component):
 
             fmask_ocn = 1.0 - fmask_lnd
             
-            #init_mld = init_mld.at[fmask_ocn == 0].set(jnp.nan)
-            init_T = self.SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(273.15+15)#.set(jnp.nan)
+            init_T = self.SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(273.15+15)
             
             if jnp.any( jnp.isnan(init_T) == (fmask_ocn == 0) ):
                 print("fmask_ocn and init_T do share the same mask.")
@@ -142,10 +143,8 @@ class SlabOceanModel(Component):
             self.fmask_ocn = fmask_ocn
             
         else:
-            
-            T_max = config.params["T_max"] if "T_max" in config.params else 273.15 + 30.0
-            T_min = config.params["T_min"] if "T_min" in config.params else 273.15 + 5.0            
-            init_T   = T_min + (T_max - T_min) * jnp.cos(llat_rad - 20 * jnp.pi / 180.0)**3 + 5.0 * jnp.cos(llon_rad)
+
+            init_T = gen_idealized_sst(self.coords.horizontal)
 
         
         # Compute cd and time factor
