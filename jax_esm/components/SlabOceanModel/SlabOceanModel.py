@@ -112,21 +112,17 @@ class SlabOceanModel(Component):
         
         if "boundaries" in config.params and config.params["boundaries"] is not None:
 
-            print("Boundary exists. ")
+            print("Boundary exists. The given initial SST will be used.")
             print("Boundary file: ", config.params["boundary_file"])
             
             boundaries = config.params["boundaries"]
             thrsh = 0.3
 
             self.SST_clim = jnp.array(xr.open_dataset(config.params["boundary_file"])["sst"])
-            
-            # Fractional and binary land masks
-            fmask_lnd = boundaries.fmask
-            #bmask_lnd = jnp.where(fmask_lnd >= thrsh, 1.0, 0.0)
-    
+                            
             # Update fmask_lnd based on the conditions
             fmask_lnd = jnp.where(
-                fmask_lnd >= thrsh,
+                boundaries.fmask >= thrsh,
                 1.0,
                 0.0,
             )
@@ -143,7 +139,7 @@ class SlabOceanModel(Component):
             self.fmask_ocn = fmask_ocn
             
         else:
-
+            print("Boundary does not exist. Idealized initial SST will be used.")
             init_T = gen_idealized_sst(self.coords.horizontal)
 
         
