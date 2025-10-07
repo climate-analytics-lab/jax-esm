@@ -62,15 +62,6 @@ class FluxModel(Component):
             ),
         )
 
-       
-        
-        self.stephan_boltzmann_const = constants.stephan_boltzmann_const
-        self.solar_const = constants.solar_const
-        self.u10 = 5.0 # m/s
-        self.C_H = 1e-3
-        self.rho_cp = 1.2 * 1004
-        self.beta = 0.7
-
         if "boundaries" in config.params and config.params["boundaries"] is not None:
 
             boundaries = config.params["boundaries"]
@@ -78,10 +69,6 @@ class FluxModel(Component):
 
             SST_clim = jnp.array(xr.open_dataset(config.params["boundary_file"])["sst"])
             
-            # Fractional and binary land masks
-            fmask_lnd = boundaries.fmask
-            #bmask_lnd = jnp.where(fmask_lnd >= thrsh, 1.0, 0.0)
-    
             # Update fmask_lnd based on the conditions
             fmask_lnd = jnp.where(
                 fmask_lnd >= thrsh,
