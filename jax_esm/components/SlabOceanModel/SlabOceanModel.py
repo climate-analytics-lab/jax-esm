@@ -168,7 +168,6 @@ class SlabOceanModel(Component):
         @jax.jit
         def step_fn(cpl, t):
 
-
             days_after_start = jnp.floor( cpl.ocn.prog.sim_time / 86400.0 ).astype(jnp.int32)
             
             clim_day_beg = start_dt_offset + days_after_start
@@ -180,7 +179,7 @@ class SlabOceanModel(Component):
             snapshot_SST_clim_end = self.SST_clim[:, :, clim_day_end]
             snapshot_SST_clim_end = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim_end, 273.15+15)
 
-            SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0
+            SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0  # convert to per second
 
             new_Tanom = cpl.ocn.prog.T - snapshot_SST_clim_beg
 
