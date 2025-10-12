@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 
 from jax_esm.components.base import (
-    Component, BoundaryFluxes,
+    Component,
     ComponentConfig,
     create_component_state_class,
     create_field_group_class,
@@ -38,7 +38,8 @@ class MockComponent(Component):
                 cls_name = "state",
                 fields = [
                     ("sim_time", float, ()),
-                    ("T", float, D3_nodal_shape),
+                    ("T", float, D2_nodal_shape),
+                    ("mld", float, D2_nodal_shape),
                 ],
             ),
 
@@ -71,7 +72,7 @@ class MockComponent(Component):
             hist = [] 
             for step in range(self.config.substeps):
             
-                T = T.at[0, :, :].set(T[0, :, :] + self.subtimestep * state.phydata.heatflx / self.config.params["heat_capacity"])
+                T = T + self.subtimestep * state.phydata.heatflx / self.config.params["heat_capacity"]
                 sim_time += self.subtimestep
 
             state = state.copy(
@@ -118,6 +119,7 @@ class MockComponent(Component):
 
 
 class TestComponent(unittest.TestCase):
+    
     """Test component interface."""
     
     def gen_test_component(self):
@@ -159,7 +161,7 @@ class TestComponent(unittest.TestCase):
 
 
         assert hasattr(state.prog, "T")
-        assert state.prog.T.shape == (8, 10, 5)
+        assert state.prog.T.shape == (10, 5)
         assert jnp.allclose(state.prog.T, 300.0)
         assert jnp.allclose(state.phydata.heatflx, 500.0)
         
@@ -185,104 +187,6 @@ class TestComponent(unittest.TestCase):
         assert new_state.prog.sim_time == 1800.0
 
         expected_temp = 300 + 500 * 1800.0 / 1000.0
-        assert jnp.allclose(new_state.prog.T[0, :, :], expected_temp)
+        assert jnp.allclose(new_state.prog.T, expected_temp)
         
 
-        assert jnp.allclose(new_state.prog.T[1:, :, :], 300)
-        
-    """    
-    def test_boundary_fields(self):
-
-
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
- 
-        grid = {"nlon": 10, "nlat": 5, "z": 8}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-            comp_state_shp = ComponentStateShape(
-                coord_sys = CoordinateSystem(
-                    lat  = Axis(values=mk_center_grid(-jnp.pi, jnp.pi, grid["nlat"])), 
-                    lon  = Axis(values=mk_center_grid(0, 2*jnp.pi, grid["nlon"])),
-                    z    = Axis(values=mk_center_grid(0, 1000, 8)),
-                    time = Axis(values=[0]),
-                ),
-                prognostic = dict(
-                    temperature = ["lon", "lat", "z"],
-                ),
-                boundary = dict(
-                    surface_temp = ["lon", "lat"],
-                ),
-                metadata = dict(
-                    time = ["time"],
-                ),
-
-            ),
-        )
-        
-        component = MockComponent(config)
-        rng_key = jax.random.PRNGKey(42)
-        state = component.initialize(rng_key)
-
-        state.boundary["surface_temp"] = state.boundary["surface_temp"].at[:].set(288.0)
- 
-        boundary_fields = component.get_boundary_fields(state)
-        assert "surface_temp" in boundary_fields
-        assert jnp.allclose(boundary_fields["surface_temp"], 288.0)
-    """
-
-    """
-    def test_flux_requirements(self):
-
-
-        def mk_center_grid(bnd_l, bnd_r, n):
-            tmp = jnp.linspace(bnd_l, bnd_r, n+1)
-            return (tmp[1:] + tmp[:-1])/2 
- 
-        grid = {"nlon": 10, "nlat": 5, "z": 8}
-        config = ComponentConfig(
-            name = "test",
-            start_dt = pd.Timestamp("2001-01-01"),
-            timestep = 1800.0,
-            substeps = 2,
-            save_interval = 1800.0,
-            grid = grid,
-            params = {"test_param": 42},
-            comp_state_shp = ComponentStateShape(
-                coord_sys = CoordinateSystem(
-                    lat  = Axis(values=mk_center_grid(-jnp.pi, jnp.pi, grid["nlat"])), 
-                    lon  = Axis(values=mk_center_grid(0, 2*jnp.pi, grid["nlon"])),
-                    z    = Axis(values=mk_center_grid(0, 1000, 8)),
-                    time = Axis(values=[0]),
-                ),
-                prognostic = dict(
-                    temperature = ["lon", "lat", "z"],
-                ),
-                boundary = dict(
-                    surface_temp = ["lon", "lat"],
-                ),
-                metadata = dict(
-                    time = ["time"],
-                ),
-
-            ),
-        )
-        
-        component = MockComponent(config)
- 
-        required = component.get_required_fluxes()
-        provided = component.get_provided_fluxes()
-        
-        assert "heat" in required
-        assert "moisture" in required
-        assert "heat" in provided
-        assert "moisture" in provided
-
-    """
