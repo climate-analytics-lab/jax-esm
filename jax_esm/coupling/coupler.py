@@ -7,10 +7,15 @@ import jax
 import jax.numpy as jnp
 
 from jax_esm.components.base import AbstractComponentState, Component
+from jax_esm.coupling.flux_exchange import FluxExchanger
+
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
 from jax_esm.utils.bulk_op import unwrap_leading_dims
+
+
+
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
@@ -39,7 +44,10 @@ class CouplerConfig:
     """Configuration for coupler."""
     timestep: float  # seconds
 
-class AbstractCoupledState:
+class CoupledState:
+    ...
+
+class CoupledForcing:
     ...
 
 
@@ -49,6 +57,7 @@ class Coupler:
     def __init__(
         self,
         components: Dict[str, Component],
+        flux_changer: FluxExchanger,
         config: CouplerConfig,
     ):
         """Initialize the coupler.
@@ -69,11 +78,18 @@ class Coupler:
         }
 
         self.coupled_state_class = tree_math.struct(make_dataclass(
-            cls_name = "CoupledState",
+            cls_name = "JESMCoupledState",
             fields = [ (component_name, component.component_state_class) for component_name, component in components.items() ],
-            bases = (AbstractCoupledState,),
+            bases = (CoupledState,),
         ))
 
+        self.coupled_state_class = tree_math.struct(make_dataclass(
+            cls_name = "JESMCoupledForcing",
+            fields = [ (component_name, component.component_forcing_class) for component_name, component in components.items() ],
+            bases = (CoupledForcing,),
+        ))
+
+        self.flux_changer = flux_changer
 
         
     def initialize(
@@ -107,27 +123,28 @@ class Coupler:
         """
 
         # Get step functions for the three components
-        atm_step_fn = self.components["atm"].gen_step_fn()
-        flx_step_fn = self.components["flx"].gen_step_fn()
-        ocn_step_fn = self.components["ocn"].gen_step_fn()
+        step_functions = { component_name : component.gen_step_fn() for component_name, component in self.components.item() }
+        transformations = self.flux_exchanger.transformations
 
         @jax.jit
-        def step_fn(cplstate, t):
+        def step_fn(cpl_carry, t):
+            
+            cpl_state = cpl_carry["state"]
+            cpl_forcing = cpl_carry["forcing"]
             
             # Call forward functions and unpack results directly into dictionaries
+            for transformation in transformations:
+                cpl_forcing = transformation(cplstate)
+            
             results = {
                 name: step_fn(cplstate, t) 
-                for name, step_fn in [
-                    ("atm", atm_step_fn),
-                    ("flx", flx_step_fn), 
-                    ("ocn", ocn_step_fn)
-                ]
+                for name, step_fn in step_functions.item()
             }
             
             new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
             cpl_predictions = {name: pred for name, (_, pred) in results.items()}
 
-            return new_cplstate, cpl_predictions
+            return dict(state=new_cplstate, forcing=cpl_forcing), cpl_predictions
 
         return step_fn
 
