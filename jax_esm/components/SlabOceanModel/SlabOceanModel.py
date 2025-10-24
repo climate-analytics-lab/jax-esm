@@ -46,6 +46,7 @@ class SlabOceanModel(Component):
     """
     Slab ocean model with prescribed mixed layer depth and climatology.
     """
+
     @classmethod
     def generate_default_configuration(cls, horizontal_resolution:int = 31, dict_form = False):
 
@@ -65,6 +66,14 @@ class SlabOceanModel(Component):
             return config_dict
         else:
             return ComponentConfig(**config_dict)
+
+
+    @classmethod
+    def generate_default_model(cls, horizontal_resolution:int = 31):
+
+        return SlabOceanModel(
+            SlabOceanModel.generate_default_configuration(horizontal_resolution=horizontal_resolution)
+        )
 
     def __init__(
         self,
