@@ -18,18 +18,24 @@ from jax_esm.components.base import (
     Component,
     ComponentConfig,
     AbstractComponentState,
+    create_component_forcing_class,
+    create_field_group_class,
 )
 
 
 from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
-from dinosaur import primitive_equations, primitive_equations_states
 from jcm.physics_interface import PhysicsState
 from jcm.model import Predictions
+
+import dinosaur
+from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import stack_objects, mean_leaf
 
 import tree_math
 from typing import Any
+
+from jcm.geometry import get_coords
 
 @tree_math.struct
 @dataclass
@@ -43,6 +49,34 @@ class JCM(Component):
     """
     This is a class wrapping JCM.
     """
+
+    @classmethod
+    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False):
+
+        config_dict = dict(
+            name="default_config",
+            timestep = (timestep := 86400.0),
+            start_dt = datetime(year=2025, month=1, day=1),
+            substeps = (substeps := 2),
+            save_interval = timestep / substeps,
+            coords=get_coords(layers=layers, spectral_truncation=horizontal_resolution),
+            params=dict(
+            ),
+        )
+
+        if dict_form:
+            return config_dict
+        else:
+            return ComponentConfig(**config_dict)
+
+
+    @classmethod
+    def generate_default_model(cls, horizontal_resolution:int = 31, layers:int = 8):
+
+        return cls(
+            cls.generate_default_configuration(horizontal_resolution=horizontal_resolution)
+        )
+
 
     
     def __init__(
@@ -65,14 +99,10 @@ class JCM(Component):
             time_step = self.coupling_timestep / self.substeps / 60.0, # in minutes
         )
 
-        if "boundaries" in config.params and config.params["boundaries"] is not None:
-            boundaries = config.params["boundaries"]
-            config_speedy["orography"] = boundaries.orog
-
-        self.orog = boundaries.orog
+        
         self.model = Model(**config_speedy) 
 
-        D3_nodal_shape = model.coords.nodal_shape
+        D3_nodal_shape = self.model.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
  
         self.component_forcing_class = create_component_forcing_class(
@@ -115,7 +145,7 @@ class JCM(Component):
                 model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
             
         model.start_date = start_date
-        model.boundaries = default_boundaries(self.model.coords.horizontal, self.model.orography)
+        model.boundaries = boundaries or default_boundaries(self.model.coords.horizontal)
 
         # The following code is a solution to have an initial value for phydata by stepping the model one time.
         # The returned phydata is then used for the initial value.
@@ -144,9 +174,9 @@ class JCM(Component):
         def step_fn(state, forcing, t):
            
             atm_boundary = self.model.boundaries.copy(
-                tsea = forcing.scalar.sea_surface_skin_temperature,
+                tsea = jnp.repeat(jnp.expand_dims(forcing.scalar.sea_surface_skin_temperature, axis=2), axis=2, repeats=365),
             )
-
+                
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state = state.metadata,
                 save_interval = self.save_interval / 86400.0, # in days
