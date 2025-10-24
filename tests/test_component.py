@@ -49,7 +49,7 @@ class MockComponent(Component):
 
         self.subtimestep = config.timestep / config.substeps
        
-        D3_nodal_shape = config.coord.nodal_shape
+        D3_nodal_shape = config.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = create_component_state_class(
@@ -143,7 +143,7 @@ class TestComponent(unittest.TestCase):
     
     def gen_test_component(self, horizontal_resolution:int = 31):
 
-        coord = get_coords(horizontal_resolution=horizontal_resolution)
+        coords = get_coords(horizontal_resolution=horizontal_resolution)
 
         config = ComponentConfig(
             name = "test",
@@ -151,7 +151,7 @@ class TestComponent(unittest.TestCase):
             timestep = 1800.0,
             substeps = 2,
             save_interval = 1800.0,
-            coord = coord,
+            coords = coords,
             params = {"heat_capacity": 1000.0},
         )
         
