@@ -15,6 +15,10 @@ import pandas as pd
 class AbstractFieldGroup:
     pass
 
+
+class AbstractComponentForcing:
+    pass
+
 class AbstractComponentState:
     prog     : AbstractFieldGroup | Any
     phydata  : AbstractFieldGroup | Any
@@ -148,6 +152,20 @@ def create_component_state_class(
 
     return new_cls
 
+
+def create_component_forcing_class(
+    cls_name: str,
+    fields: Tuple,
+):
+
+    # Reuse what create_field_group_class but inherit from AbstractComponentForcing
+    return create_field_group_class(
+        cls_name = cls_name,
+        fields = fields,
+        base_cls = AbstractComponentForcing,
+    )
+
+
 @dataclass
 class ComponentConfig:
     """Configuration for a component."""
@@ -156,7 +174,7 @@ class ComponentConfig:
     timestep: float  # seconds
     substeps: int           # count
     save_interval: float    # seconds
-    coord: Any               # Coordinate specification
+    coords: Any               # Coordinate specification
     params: Dict[str, Any]  # Component-specific parameters
 
 
