@@ -10,7 +10,7 @@ from jax import Array
 import tree_math
 from dataclasses import make_dataclass
 
-import pandas as pd
+from datetime import datetime
 
 class AbstractFieldGroup:
     pass
@@ -170,7 +170,7 @@ def create_component_forcing_class(
 class ComponentConfig:
     """Configuration for a component."""
     name: str
-    start_dt: pd.Timestamp
+    start_dt: datetime
     timestep: float  # seconds
     substeps: int           # count
     save_interval: float    # seconds
