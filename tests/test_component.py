@@ -5,6 +5,9 @@ import jax.numpy as jnp
 import unittest
 import pandas as pd
 
+import dinosaur
+from dinosaur.coordinate_systems import CoordinateSystem
+
 from jax_esm.components.base import (
     Component,
     ComponentConfig,
@@ -13,6 +16,22 @@ from jax_esm.components.base import (
 )
 
 from jax_esm.utils.bulk_op import stack_objects
+
+
+
+def get_coords(horizontal_resolution=31) -> CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    """
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+    
+    return dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
+    )
 
 class MockComponent(Component):
 
@@ -29,8 +48,8 @@ class MockComponent(Component):
         super().__init__(config)
 
         self.subtimestep = config.timestep / config.substeps
-        
-        D3_nodal_shape = (config.grid["z"], config.grid["lon"], config.grid["lat"])
+       
+        D3_nodal_shape = config.grid.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = create_component_state_class(
@@ -122,9 +141,10 @@ class TestComponent(unittest.TestCase):
     
     """Test component interface."""
     
-    def gen_test_component(self):
+    def gen_test_component(self, horizontal_resolution:int = 31):
 
-        grid = {"lat": 5, "lon": 10, "z": 8}
+        grid = get_coords(horizontal_resolution=horizontal_resolution)
+
         config = ComponentConfig(
             name = "test",
             start_dt = pd.Timestamp("2001-01-01"),
@@ -161,7 +181,7 @@ class TestComponent(unittest.TestCase):
 
 
         assert hasattr(state.prog, "T")
-        assert state.prog.T.shape == (10, 5)
+        assert state.prog.T.shape == (96, 48)
         assert jnp.allclose(state.prog.T, 300.0)
         assert jnp.allclose(state.phydata.heatflx, 500.0)
         
