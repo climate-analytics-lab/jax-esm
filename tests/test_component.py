@@ -1,4 +1,9 @@
-"""Tests for component interface."""
+"""Tests for component interface.
+
+DEPRECATED: These tests use the old API and are kept for reference only.
+All tests are skipped. See test_coupler.py, test_slab_ocean.py, and test_flux_model.py
+for current API tests.
+"""
 
 import jax
 import jax.numpy as jnp
