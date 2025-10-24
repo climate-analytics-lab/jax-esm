@@ -156,7 +156,7 @@ class ComponentConfig:
     timestep: float  # seconds
     substeps: int           # count
     save_interval: float    # seconds
-    grid: Any               # Grid specification
+    coord: Any               # Coordinate specification
     params: Dict[str, Any]  # Component-specific parameters
 
 
