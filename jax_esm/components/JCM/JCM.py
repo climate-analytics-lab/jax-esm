@@ -72,7 +72,26 @@ class JCM(Component):
         self.orog = boundaries.orog
         self.model = Model(**config_speedy) 
 
-        
+        D3_nodal_shape = model.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+ 
+        self.component_forcing_class = create_component_forcing_class(
+            cls_name = "forcing",
+            flux_cls = create_field_group_class(
+                cls_name = "flux",
+                fields = [
+                    ("sensible_heat_flux", float, D2_nodal_shape),
+                    ("latent_heat_flux", float, D2_nodal_shape),
+                ],
+            ),
+            scalar_cls = create_field_group_class(
+                cls_name = "scalar",
+                fields = [
+                    ("sea_surface_skin_temperature", float, D2_nodal_shape),
+                ],
+            ),
+        )
+       
     
     def initialize(
         self,
@@ -122,14 +141,14 @@ class JCM(Component):
     def gen_step_fn(self):
        
         @jax.jit
-        def step_fn(cpl, t):
+        def step_fn(state, forcing, t):
            
             atm_boundary = self.model.boundaries.copy(
-                tsea = cpl.ocn.prog.T
+                tsea = forcing.scalar.sea_surface_skin_temperature,
             )
 
             new_atm_modal_state, predictions = self.model.run_from_state(
-                initial_state = cpl.atm.metadata,
+                initial_state = state.metadata,
                 save_interval = self.save_interval / 86400.0, # in days
                 total_time = self.coupling_timestep / 86400.0, # in days
                 boundaries = atm_boundary,
