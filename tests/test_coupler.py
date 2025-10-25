@@ -1,583 +1,431 @@
-"""Tests for the coupler."""
-
+"""Tests for coupler"""
+import unittest
+from typing import Callable, Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
-import pytest
-import pandas as pd
+import dinosaur
+from datetime import datetime
+from jax_esm.coupling.flux_exchange import FluxExchanger
+from jax_esm.coupling.coupler import (
+    Coupler,
+    CouplerConfig,
+)
 
-from jax_esm import ComponentConfig
-from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import Component, create_component_state_class, create_field_group_class
+from jax_esm.components.base import (
+    Component,
+    ComponentConfig,
+    create_field_group_class,
+    create_component_state_class,
+    create_component_forcing_class,
+)
+
 from jax_esm.utils.bulk_op import stack_objects
+
+def get_coords(horizontal_resolution=31) -> dinosaur.coordinate_systems.CoordinateSystem:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    """
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
+    
+    return dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
+    )
+
+
+exchange_coefficient_of_heat = 1e-3
+air_density = 1.2 # kg/m^3
+air_heat_capacity_under_constant_pressure = 1004.0 # J / K / kg
 
 
 class MockAtmosphere(Component):
-    """Mock atmosphere component for testing."""
 
-    def __init__(self, config: ComponentConfig):
+    """
+    Mock atmosphere model
+    """
+        
+    def __init__(
+        self,
+        config: ComponentConfig,
+    ):
+        """Initialize mock atmosphere model."""
+        
         super().__init__(config)
 
-        # Create state class
+        self.subtimestep = config.timestep / config.substeps
+       
+        D3_nodal_shape = config.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+
         self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="AtmProg",
-                fields=[
-                    ("temperature", float, (5, 10)),
+            prog_cls = create_field_group_class(
+                cls_name = "state",
+                fields = [
                     ("sim_time", float, ()),
+                    ("air_temperature", float, D2_nodal_shape),
+                    ("wind_speed", float, D2_nodal_shape),
                 ],
             ),
-            phydata_cls=create_field_group_class(
-                cls_name="AtmPhydata",
-                fields=[
-                    ("surface_flux", float, (5, 10)),
+
+            phydata_cls =  create_field_group_class(
+                cls_name = "phydata",
+                fields = [
+                    ("heat_flux", float, D2_nodal_shape),
                 ],
             ),
         )
 
-    def initialize(self):
-        return self.component_state_class.zeros().copy(
-            prog_kwargs={"temperature": jnp.ones((5, 10)) * 280.0},
+
+        self.component_forcing_class = create_component_forcing_class(
+            flux_cls =  create_field_group_class(
+                cls_name = "flux",
+                fields = [
+                    ("heat_flux", float, D2_nodal_shape),
+                ],
+            ),
+            scalar_cls =  create_field_group_class(
+                cls_name = "scalar",
+                fields = [
+                    ("sea_surface_temperature", float, D2_nodal_shape),
+                ],
+            ),
+
         )
 
-    def gen_step_fn(self):
-        @jax.jit
-        def step_fn(cpl, t):
-            # Simple coupling: atmosphere responds to ocean SST
-            sst = cpl.ocn.prog.T
-            temp_effect = 0.01 * jnp.mean(sst)
-            new_temp = cpl.atm.prog.temperature + temp_effect
-
-            new_state = cpl.atm.copy(
-                prog_kwargs={
-                    "temperature": new_temp,
-                    "sim_time": cpl.atm.prog.sim_time + self.timestep,
-                }
-            )
-
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
-
-            return new_state, predictions
-
-        return step_fn
-
-
-class MockFlux(Component):
-    """Mock flux component for testing."""
-
-    def __init__(self, config: ComponentConfig):
-        super().__init__(config)
-
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="FluxProg",
-                fields=[("sim_time", float, ())],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="FluxPhydata",
-                fields=[("heatflx", float, (5, 10))],
-            ),
-        )
 
     def initialize(self):
-        return self.component_state_class.zeros()
 
-    def gen_step_fn(self):
-        @jax.jit
-        def step_fn(cpl, t):
-            # Compute heat flux from atmosphere temperature
-            heat_flux = cpl.atm.prog.temperature * 0.1
+        init_state = self.component_state_class.zeros()
 
-            new_state = cpl.flx.copy(
-                prog_kwargs={"sim_time": cpl.flx.prog.sim_time + self.timestep},
-                phydata_kwargs={"heatflx": heat_flux},
+
+        return init_state
+ 
+    def gen_step_fn(
+        self,
+        jitted : bool = True,
+    ):
+
+        heat_capacity = self.config.params["heat_capacity"]
+
+        def step_fn(state, forcing, t):
+
+
+            T = state.prog.air_temperature
+            sim_time = state.prog.sim_time
+           
+            hist = [] 
+            for step in range(self.config.substeps):
+                T = T + self.subtimestep * forcing.flux.heat_flux / heat_capacity
+                sim_time += self.subtimestep
+
+            state = state.copy(
+                prog_kwargs = dict(
+                    sim_time = sim_time,
+                    air_temperature = T,
+                ),
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            print("Air_temp = ", T[0, 0])
 
-            return new_state, predictions
+            hist.append(dict(
+                sim_time = sim_time,
+                air_temperature = T,
+                heat_flux = forcing.flux.heat_flux,
+                sea_surface_temperature = forcing.scalar.sea_surface_temperature,
+            ))
+            
+            return state, stack_objects( hist )
+            
+        return jax.jit(step_fn) if jitted else step_fn
 
-        return step_fn
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
 
+        Args:
+            predictions : The predictions returned from `forward_func`
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        st = predictions["state"]
+        ds = xr.Dataset(
+            data_vars = dict(
+                T   = (["time", "lon", "lat"], st.T),
+                mld = (["time", "lon", "lat"], st.mld),
+            ), 
+            coords = dict(
+                time = (["time",], st.sim_time),
+            ),
+        )
+        
+        return ds
+        
 
 class MockOcean(Component):
-    """Mock ocean component for testing."""
 
-    def __init__(self, config: ComponentConfig):
+    """
+    Mock ocean model
+    """
+        
+    def __init__(
+        self,
+        config: ComponentConfig,
+    ):
+        """Initialize slab ocean model."""
+        
         super().__init__(config)
 
+        self.subtimestep = config.timestep / config.substeps
+       
+        D3_nodal_shape = config.coords.nodal_shape
+        D2_nodal_shape = D3_nodal_shape[1:]
+
         self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="OceanProg",
-                fields=[
-                    ("T", float, (5, 10)),
+            prog_cls = create_field_group_class(
+                cls_name = "state",
+                fields = [
                     ("sim_time", float, ()),
+                    ("sea_surface_temperature", float, D2_nodal_shape),
+                    ("mld", float, D2_nodal_shape),
                 ],
             ),
-            phydata_cls=create_field_group_class(
-                cls_name="OceanPhydata",
-                fields=[("dummy", float, ())],
+
+            phydata_cls =  create_field_group_class(
+                cls_name = "phydata",
+                fields = [
+                ],
             ),
         )
 
-    def initialize(self):
-        return self.component_state_class.zeros().copy(
-            prog_kwargs={"T": jnp.ones((5, 10)) * 288.0},
+
+        self.component_forcing_class = create_component_forcing_class(
+            flux_cls =  create_field_group_class(
+                cls_name = "flux",
+                fields = [
+                    ("heat_flux", float, D2_nodal_shape),
+                ],
+            ),
+            scalar_cls =  create_field_group_class(
+                cls_name = "scalar",
+                fields = [
+                ],
+            ),
+
         )
 
-    def gen_step_fn(self):
-        @jax.jit
-        def step_fn(cpl, t):
-            # Ocean responds to heat flux
-            heat_tendency = cpl.flx.phydata.heatflx / 1e6
-            new_temp = cpl.ocn.prog.T + heat_tendency * self.timestep
 
-            new_state = cpl.ocn.copy(
-                prog_kwargs={
-                    "T": new_temp,
-                    "sim_time": cpl.ocn.prog.sim_time + self.timestep,
-                }
+    def initialize(self):
+
+        init_state = self.component_state_class.zeros()
+
+
+        return init_state
+ 
+    def gen_step_fn(
+        self,
+        jitted : bool = True,
+    ):
+        
+        heat_capacity = self.config.params["heat_capacity"]
+
+        def step_fn(state, forcing, t):
+
+            T = state.prog.sea_surface_temperature
+            sim_time = state.prog.sim_time
+           
+            hist = [] 
+            for step in range(self.config.substeps):
+            
+                T = T + self.subtimestep * forcing.flux.heat_flux / heat_capacity
+                sim_time += self.subtimestep
+
+            state = state.copy(
+                prog_kwargs = dict(
+                    sim_time = sim_time,
+                    sea_surface_temperature = T,
+                    heat_flux = forcing.flux.heat_flux,
+                ),
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            hist.append(dict(
+                sim_time = sim_time,
+                sea_surface_temperature = T,
+                air_temperature = T,
+                heat_flux = forcing.flux.heat_flux,
+            ))
+ 
+            return state, stack_objects( hist )
+            
+        return jax.jit(step_fn) if jitted else step_fn
 
-            return new_state, predictions
+    def predictions_to_xarray(
+        self,
+        predictions,
+    ):
+        
+        """
+        A tool function that converts a trajectory into an xarray Dataset.
 
-        return step_fn
+        Args:
+            predictions : The predictions returned from `forward_func`
+            
+        Returns:
+            ds : The resulting xarray dataset.
+        """
+        st = predictions["state"]
+        ds = xr.Dataset(
+            data_vars = dict(
+                T   = (["time", "lon", "lat"], st.T),
+                mld = (["time", "lon", "lat"], st.mld),
+            ), 
+            coords = dict(
+                time = (["time",], st.sim_time),
+            ),
+        )
+        
+        return ds
 
 
-class TestCoupler:
+
+
+class TestCoupler(unittest.TestCase):
+
     """Test coupler functionality."""
 
-    def test_coupler_initialization(self):
-        """Test coupler initialization."""
+
+    def generate_atm_ocn_flux_exchanger(
+        self,
+        components,
+    ):
+
+        def transformation(state_group, forcing_group):
+            
+            atm = state_group["atm"] 
+            ocn = state_group["ocn"] 
+            
+            heat_flux = air_density * air_heat_capacity_under_constant_pressure * exchange_coefficient_of_heat * ( ocn.prog.sea_surface_temperature - atm.prog.air_temperature ) * atm.prog.wind_speed
+            
+            forcing_group["atm"].scalar.sea_surface_temperature = ocn.prog.sea_surface_temperature
+            forcing_group["atm"].flux.heat_flux = heat_flux
+            forcing_group["ocn"].flux.heat_flux = heat_flux
+
+
+            return forcing_group
+
+
+        return FluxExchanger(
+            components = components,
+            forcing_classes = dict( atm = components["atm"].component_forcing_class ),
+            source_variables = dict(
+                atm = [ ("prog", "air_temperature"), ("prog", "wind_speed") ], 
+                ocn = [ ("prog", "sea_surface_temperature") ], 
+            ),
+            target_variables = dict(
+                 atm = [ ("flux", "heat_flux"), ("scalar", "sea_surface_temperature") ], 
+                 ocn = [ ("flux", "heat_flux"), ], 
+            ),
+            transformation = transformation,
+        )
+
+
+    def generate_coupler(
+        self,
+        atm_horizontal_resolution:int = 31,
+        ocn_horizontal_resolution:int = 31,
+        flux_exchanger_names : List[ str ] = [ "atm_ocn_flux_exchanger" ],
+    ):
+ 
         atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=900.0,
-            substeps=2,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
+            name = "test",
+            start_dt = datetime(year=2001, month=1, day=1),
+            timestep = 1800.0,
+            substeps = 2,
+            save_interval = 1800.0,
+            coords = get_coords(horizontal_resolution=atm_horizontal_resolution),
+            params = dict( heat_capacity = 1004.0 * 1e4 ), # Cp * total mass in air column ( 1e4 kg / m^2)
         )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=900.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
+ 
+        ocn_config = ComponentConfig(
+            name = "test",
+            start_dt = datetime(year=2001, month=1, day=1),
+            timestep = 1800.0,
+            substeps = 2,
+            save_interval = 1800.0,
+            coords = get_coords(horizontal_resolution=ocn_horizontal_resolution),
+            params = dict( heat_capacity = 1029 * 4996 * 50 ), # 50 meter thick ocean water
         )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=2,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
+ 
+        components = dict(
+            atm = MockAtmosphere(atm_config),
+            ocn = MockOcean(ocn_config),
         )
+     
+        flux_exchangers = [ getattr(self, f"generate_{flux_exchanger_name:s}")(components) for flux_exchanger_name in flux_exchanger_names ]
 
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        assert len(coupler.components) == 3
-        assert "atm" in coupler.components
-        assert "flx" in coupler.components
-        assert "ocn" in coupler.components
-
-    def test_coupler_initialize_states(self):
-        """Test state initialization through coupler."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=900.0,
-            substeps=2,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=900.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=2,
-            save_interval=1800.0,
-            grid={"nlat": 5, "nlon": 10},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        states = coupler.initialize()
-
-        # Check that states were created
-        assert hasattr(states, 'atm')
-        assert hasattr(states, 'flx')
-        assert hasattr(states, 'ocn')
-
-        # Check initial values
-        assert jnp.allclose(states.atm.prog.temperature, 280.0)
-        assert jnp.allclose(states.ocn.prog.T, 288.0)
-        assert states.atm.prog.sim_time == 0.0
-        assert states.ocn.prog.sim_time == 0.0
-
-    def test_step_function_generation(self):
-        """Test step function generation."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        step_fn = coupler.gen_step_fn()
-        assert callable(step_fn)
-
-    def test_single_coupled_step(self):
-        """Test single coupling step."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        initial_state = coupler.initialize()
-        step_fn = coupler.gen_step_fn()
-
-        new_state, predictions = step_fn(initial_state, 0)
-
-        # Check that all components advanced
-        assert new_state.atm.prog.sim_time == 1800.0
-        assert new_state.flx.prog.sim_time == 1800.0
-        assert new_state.ocn.prog.sim_time == 1800.0
-
-        # Check that coupling occurred (states changed)
-        # Atmosphere should change (responds to ocean SST)
-        assert not jnp.allclose(
-            initial_state.atm.prog.temperature,
-            new_state.atm.prog.temperature
-        )
-        # Ocean may not change much in one timestep with weak coupling
-        # Just check that flux was computed
-        assert not jnp.allclose(new_state.flx.phydata.heatflx, 0.0)
-
-    def test_coupler_run(self):
-        """Test running full simulation."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        initial_states = coupler.initialize()
-
-        # Run for 2 hours (4 timesteps of 1800s)
-        final_state, predictions = coupler.run(
-            init_cplstate=initial_states,
-            start_time=0.0,
-            end_time=7200.0,
-            timestep=1800.0,
-            jax_scan=True,
-        )
-
-        # Check final times
-        assert jnp.allclose(final_state.atm.prog.sim_time, 7200.0)
-        assert jnp.allclose(final_state.flx.prog.sim_time, 7200.0)
-        assert jnp.allclose(final_state.ocn.prog.sim_time, 7200.0)
-
-        # Check predictions structure
-        assert "atm" in predictions
-        assert "flx" in predictions
-        assert "ocn" in predictions
-
-    def test_coupler_run_without_jit(self):
-        """Test running without JIT compilation (debugging mode)."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        initial_states = coupler.initialize()
-
-        # Run without JIT (adhoc_scan)
-        final_state, predictions = coupler.run(
-            init_cplstate=initial_states,
-            start_time=0.0,
-            end_time=3600.0,  # Just 2 steps for speed
-            timestep=1800.0,
-            jax_scan=False,
-        )
-
-        # Should still produce correct results
-        assert jnp.allclose(final_state.atm.prog.sim_time, 3600.0)
-
-    def test_timestep_validation(self):
-        """Test that coupler validates timestep divides total time."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-
-        atmosphere = MockAtmosphere(atm_config)
-        flux = MockFlux(flux_config)
-        ocean = MockOcean(ocean_config)
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        initial_states = coupler.initialize()
-
-        # This should raise an exception (1700 doesn't divide evenly into 1800)
-        with pytest.raises(Exception):
-            coupler.run(
-                init_cplstate=initial_states,
-                start_time=0.0,
-                end_time=1700.0,
-                timestep=1800.0,
+ 
+        return Coupler(
+            components = components,
+            flux_exchangers = flux_exchangers,
+            config = CouplerConfig(
+                timestep = 86400.0,
             )
-
-    def test_predictions_to_xarray(self):
-        """Test conversion of predictions to xarray."""
-        atm_config = ComponentConfig(
-            name="atm",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        flux_config = ComponentConfig(
-            name="flx",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
-        )
-        ocean_config = ComponentConfig(
-            name="ocn",
-            start_dt=pd.Timestamp("2001-01-01"),
-            timestep=1800.0,
-            substeps=1,
-            save_interval=1800.0,
-            grid={},
-            params={},
         )
 
-        # Add predictions_to_xarray method to mock components
-        def mock_to_xarray(predictions):
-            import xarray as xr
-            return xr.Dataset()
 
-        atmosphere = MockAtmosphere(atm_config)
-        atmosphere.predictions_to_xarray = mock_to_xarray
+ 
+    def test_coupler_initialization(self):
+        
+        """Test coupler initialization."""
+        
+        coupler = self.generate_coupler()
+        
+ 
+    def test_coupler_stepping(self):
+        
+        """Test flux exchanger transformation."""
+ 
+        coupler = self.generate_coupler()
+        
+        init_state = coupler.initialize()
+       
+        air_temperature = 273.15+20
+        sea_surface_temperature = 273.15+25
+        wind_speed = 8.0
 
-        flux = MockFlux(flux_config)
-        flux.predictions_to_xarray = mock_to_xarray
+        expected_flux = air_density * exchange_coefficient_of_heat * air_heat_capacity_under_constant_pressure * (sea_surface_temperature - air_temperature) * wind_speed
 
-        ocean = MockOcean(ocean_config)
-        ocean.predictions_to_xarray = mock_to_xarray
-
-        coupler = Coupler(
-            components={"atm": atmosphere, "flx": flux, "ocn": ocean},
-            config=CouplerConfig(timestep=1800.0),
-        )
-
-        initial_states = coupler.initialize()
+        init_state.ocn.prog.sea_surface_temperature = init_state.ocn.prog.sea_surface_temperature * 0 + sea_surface_temperature
+        init_state.atm.prog.air_temperature = init_state.atm.prog.air_temperature * 0 + air_temperature
+        init_state.atm.prog.wind_speed = init_state.atm.prog.wind_speed * 0 + wind_speed
 
         final_state, predictions = coupler.run(
-            init_cplstate=initial_states,
-            start_time=0.0,
-            end_time=3600.0,
-            timestep=1800.0,
-        )
+            init_cplstate = init_state,
+            start_time = 0.0,
+            end_time = 86400.0 * 5,
+            jax_scan = False,
+        )  
+        
+        assert jnp.allclose( predictions["atm"]["sea_surface_temperature"][0, :, :], sea_surface_temperature)
+        assert jnp.allclose( predictions["atm"]["heat_flux"][0, :, :], expected_flux)
+        assert jnp.allclose( predictions["ocn"]["heat_flux"][0, :, :], expected_flux)
 
-        # Convert to xarray
-        datasets = coupler.predictions_to_xarray(predictions)
+        nrecord = predictions["ocn"]["heat_flux"].shape[0]
 
-        assert "atm" in datasets
-        assert "flx" in datasets
-        assert "ocn" in datasets
+
+        # Test SST evolves 
+        assert jnp.all( (predictions["ocn"]["sea_surface_temperature"][:-1, :, :] - predictions["ocn"]["sea_surface_temperature"][1:, :, :]) != 0.0)
+
+
+        # Test SST is passed to atmosphere in the next time step 
+        assert jnp.all( (predictions["ocn"]["sea_surface_temperature"][:-1, :, :] - predictions["atm"]["sea_surface_temperature"][1:, :, :]) == 0.0)
+
+
+
