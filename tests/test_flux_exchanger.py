@@ -111,7 +111,7 @@ class MockAtmosphere(Component):
             hist = [] 
             for step in range(self.config.substeps):
             
-                T = T + self.subtimestep * state.phydata.heatflx / heat_capacity
+                T = T + self.subtimestep * state.phydata.heat_flux / heat_capacity
                 sim_time += self.subtimestep
 
             state = state.copy(
@@ -231,7 +231,7 @@ class MockOcean(Component):
             hist = [] 
             for step in range(self.config.substeps):
             
-                T = T + self.subtimestep * state.phydata.heatflx / heat_capacity
+                T = T + self.subtimestep * state.phydata.heat_flux / heat_capacity
                 sim_time += self.subtimestep
 
             state = state.copy(
