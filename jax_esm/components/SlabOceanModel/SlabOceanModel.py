@@ -57,10 +57,10 @@ class SlabOceanModel(Component):
 
 
     @classmethod
-    def generate_default_model(cls, horizontal_resolution:int = 31):
+    def generate_default_model(cls, horizontal_resolution:int = 31, topo_file=None):
 
         return SlabOceanModel(
-            SlabOceanModel.generate_default_configuration(horizontal_resolution=horizontal_resolution)
+            SlabOceanModel.generate_default_configuration(horizontal_resolution=horizontal_resolution, topo_file=topo_file)
         )
 
     def __init__(
@@ -206,6 +206,7 @@ class SlabOceanModel(Component):
 
     def gen_step_fn(
         self,
+        jitted: bool = True,
     ):
 
         # Find day of the year to locate climatology
@@ -213,7 +214,6 @@ class SlabOceanModel(Component):
         start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
         has_climatology = self.has_climatology
         
-        @jax.jit
         def step_fn(state, forcing, t):
 
             new_Tanom = state.prog.T
@@ -257,7 +257,7 @@ class SlabOceanModel(Component):
             )
             return new_state, stack_objects( [ dict(prog=new_state.prog) , ] )
             
-        return step_fn
+        return jax.jit(step_fn) if jitted else step_fn
         
     def predictions_to_xarray(
         self,

@@ -184,9 +184,8 @@ class JCM(Component):
             metadata = model._final_modal_state,
         )
 
-    def gen_step_fn(self):
+    def gen_step_fn(self, jitted: bool = True):
        
-        @jax.jit
         def step_fn(state, forcing, t):
            
             atm_boundary = self.model.boundaries.copy(
@@ -208,7 +207,7 @@ class JCM(Component):
                 metadata = new_atm_modal_state,
             ), predictions
             
-        return step_fn
+        return jax.jit(step_fn) if jitted else step_fn
 
     def predictions_to_xarray(
         self,
