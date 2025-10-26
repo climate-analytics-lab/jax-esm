@@ -215,7 +215,11 @@ def create_component_forcing_class(
 
     return new_cls
 
-
+@dataclass
+class Domain:
+    coord      : any
+    mask       : jnp.array
+    topography : jnp.array
 
 @dataclass
 class ComponentConfig:
@@ -225,10 +229,8 @@ class ComponentConfig:
     timestep: float  # seconds
     substeps: int           # count
     save_interval: float    # seconds
-    coords: Any               # Coordinate specification
+    domain: Any             # Coordinate specification
     params: Dict[str, Any]  # Component-specific parameters
-
-
 
 class Component(ABC):
     """Abstract base class for Earth system components."""
