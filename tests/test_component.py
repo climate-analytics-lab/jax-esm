@@ -64,12 +64,12 @@ class MockComponent(Component):
 
         return init_state
  
-    def gen_step_fn(
+    def generate_step_function(
         self,
     ):
 
         @jax.jit
-        def step_fn(state, t):
+        def step_function(state, t):
 
 
             T = state.prog.T
@@ -92,7 +92,7 @@ class MockComponent(Component):
             
             return state, stack_objects( hist )
             
-        return step_fn
+        return step_function
 
     def predictions_to_xarray(
         self,
@@ -128,7 +128,7 @@ class TestComponent(unittest.TestCase):
     
     """Test component interface."""
     
-    def gen_test_component(self, horizontal_resolution:int = 31):
+    def generate_test_component(self, horizontal_resolution:int = 31):
 
         domain = Domain.from_resolution_all_ocean(horizontal_resolution)
 
@@ -147,7 +147,7 @@ class TestComponent(unittest.TestCase):
     def test_component_initialization(self):
         """Test component initialization."""
  
-        component = self.gen_test_component()
+        component = self.generate_test_component()
         
         assert component.name == "test"
         assert component.timestep == 1800.0
@@ -157,7 +157,7 @@ class TestComponent(unittest.TestCase):
 
         """Test state initialization."""
         
-        component = self.gen_test_component()
+        component = self.generate_test_component()
 
         state = component.initialize()
 
@@ -177,7 +177,7 @@ class TestComponent(unittest.TestCase):
     def test_component_step(self):
         """Test component stepping."""
 
-        component = self.gen_test_component()
+        component = self.generate_test_component()
 
         state = component.initialize()
 
@@ -186,9 +186,9 @@ class TestComponent(unittest.TestCase):
             phydata_kwargs = dict(heatflx = state.phydata.heatflx.at[:].set(500.0)),
         )
         
-        step_fn = component.gen_step_fn()
+        step_function = component.generate_step_function()
 
-        new_state, hist = step_fn(state, 0)
+        new_state, hist = step_function(state, 0)
 
         # Check state update
         assert new_state.prog.sim_time == 1800.0

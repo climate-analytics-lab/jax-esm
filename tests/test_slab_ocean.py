@@ -142,9 +142,9 @@ class TestSlabOceanModel:
     def test_step_function_generation(self, basic_config):
         """Test step function can be generated and is callable."""
         ocean = SlabOceanModel(basic_config)
-        step_fn = ocean.gen_step_fn()
+        step_function = ocean.generate_step_function()
 
-        assert callable(step_fn)
+        assert callable(step_function)
 
     def test_single_timestep_no_forcing(self, basic_config):
         """Test single timestep with zero heat flux."""
@@ -163,8 +163,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = flx_phydata
 
         # Generate and run step function
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Check time advanced
         assert new_state.prog.sim_time == state.prog.sim_time + ocean.timestep
@@ -193,8 +193,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = flx_phydata
 
         # Run step
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Temperature should increase (heat flux is positive upward in FluxModel,
         # so negative sign in ocean model makes it heat the ocean)
@@ -220,8 +220,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = flx_phydata
 
         # Run step
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Temperature should change
         assert new_state.prog.T.shape == initial_T.shape
@@ -253,8 +253,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = Mock()
         cpl.flx.phydata.heatflx = jnp.zeros((32, 64))
 
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Predictions should be a dict with 'prog' key (from stack_objects)
         assert isinstance(predictions, dict)
@@ -278,8 +278,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = Mock()
         cpl.flx.phydata.heatflx = jnp.zeros((32, 64))
 
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Convert to xarray
         ds = ocean.predictions_to_xarray(predictions)
@@ -308,8 +308,8 @@ class TestSlabOceanModel:
         cpl.flx.phydata = Mock()
         cpl.flx.phydata.heatflx = jnp.ones((32, 64)) * 100.0
 
-        step_fn = ocean.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = ocean.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Mixed layer depth should not change (in this simple model)
         assert jnp.allclose(new_state.prog.mld, initial_mld)
@@ -327,11 +327,11 @@ class TestSlabOceanModel:
         cpl.flx.phydata = Mock()
         cpl.flx.phydata.heatflx = jnp.ones((32, 64)) * 1000.0  # Extreme heat flux
 
-        step_fn = ocean.gen_step_fn()
+        step_function = ocean.generate_step_function()
 
         # Run for several steps
         for i in range(10):
-            cpl.ocn, predictions = step_fn(cpl, i)
+            cpl.ocn, predictions = step_function(cpl, i)
 
         # Temperature should still be physical (though may be high)
         assert jnp.all(cpl.ocn.prog.T > 200.0)  # Above any realistic minimum
@@ -351,13 +351,13 @@ class TestSlabOceanModel:
         cpl.flx.phydata = Mock()
         cpl.flx.phydata.heatflx = jnp.zeros((32, 64))
 
-        step_fn = ocean.gen_step_fn()
+        step_function = ocean.generate_step_function()
 
         # Should be JIT compiled already, but test it works
         # Run twice to ensure compiled version is used
-        new_state1, pred1 = step_fn(cpl, 0)
+        new_state1, pred1 = step_function(cpl, 0)
         cpl.ocn = new_state1
-        new_state2, pred2 = step_fn(cpl, 1)
+        new_state2, pred2 = step_function(cpl, 1)
 
         # Should produce consistent results
         assert new_state1.prog.T.shape == new_state2.prog.T.shape

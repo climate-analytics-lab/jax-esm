@@ -85,10 +85,10 @@ class FluxModel(Component):
     def initialize(self):
         return self.component_state_class.zeros()
             
-    def gen_step_fn(self):
+    def generate_step_function(self):
 
         @jax.jit
-        def step_fn(cplstate, t):
+        def step_function(cplstate, t):
 
             atm_phydata = cplstate.atm.phydata
 
@@ -105,7 +105,7 @@ class FluxModel(Component):
 
             return new_flx_state, stack_objects( [ dict(prog=new_flx_state.prog, phydata=new_flx_state.phydata) , ] )
 
-        return step_fn
+        return step_function
         
     def predictions_to_xarray(
         self,
@@ -116,7 +116,7 @@ class FluxModel(Component):
         A tool function that converts a trajectory into an xarray Dataset.
 
         Args:
-            predictions : The predictions returned from `step_fn`
+            predictions : The predictions returned from `step_function`
             
         Returns:
             ds : The resulting xarray dataset.

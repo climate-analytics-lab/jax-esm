@@ -89,14 +89,14 @@ class MockAtmosphere(Component):
 
         return init_state
  
-    def gen_step_fn(
+    def generate_step_function(
         self,
         jitted : bool = True,
     ):
 
         heat_capacity = self.config.params["heat_capacity"]
 
-        def step_fn(state, forcing, t):
+        def step_function(state, forcing, t):
 
 
             T = state.prog.air_temperature
@@ -125,7 +125,7 @@ class MockAtmosphere(Component):
             
             return state, stack_objects( hist )
             
-        return jax.jit(step_fn) if jitted else step_fn
+        return jax.jit(step_function) if jitted else step_function
 
     def predictions_to_xarray(
         self,
@@ -215,14 +215,14 @@ class MockOcean(Component):
 
         return init_state
  
-    def gen_step_fn(
+    def generate_step_function(
         self,
         jitted : bool = True,
     ):
         
         heat_capacity = self.config.params["heat_capacity"]
 
-        def step_fn(state, forcing, t):
+        def step_function(state, forcing, t):
 
             T = state.prog.sea_surface_temperature
             sim_time = state.prog.sim_time
@@ -250,7 +250,7 @@ class MockOcean(Component):
  
             return state, stack_objects( hist )
             
-        return jax.jit(step_fn) if jitted else step_fn
+        return jax.jit(step_function) if jitted else step_function
 
     def predictions_to_xarray(
         self,

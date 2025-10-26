@@ -62,7 +62,7 @@ class TestSlabOceanModel(unittest.TestCase):
         expected_temp = init_state.prog.T + model.config.timestep * (-total_heat_flux) / ( init_state.prog.mld * model.ocn_rho * model.ocn_cp )
 
 
-        step_function = model.gen_step_fn() 
+        step_function = model.generate_step_function() 
         
         new_state, predictions = step_function(init_state, forcing, 0.0)
        

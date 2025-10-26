@@ -173,7 +173,7 @@ class JCM(Component):
         )
 
         # This is a temporary solution to jcm's problem: some of the array's initiated
-        # by jcm is int32, but it will change to float32 after step_fn. This causes
+        # by jcm is int32, but it will change to float32 after step_function. This causes
         # jax.lax.scan to fail due to data type inconsistency.
         def asfloat32(tree):
             return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float32), tree)
@@ -184,9 +184,9 @@ class JCM(Component):
             metadata = model._final_modal_state,
         )
 
-    def gen_step_fn(self, jitted: bool = True):
+    def generate_step_function(self, jitted: bool = True):
        
-        def step_fn(state, forcing, t):
+        def step_function(state, forcing, t):
            
             atm_boundary = self.model.boundaries.copy(
                 tsea = jnp.repeat(jnp.expand_dims(forcing.scalar.sea_surface_skin_temperature, axis=2), axis=2, repeats=365),
@@ -207,7 +207,7 @@ class JCM(Component):
                 metadata = new_atm_modal_state,
             ), predictions
             
-        return jax.jit(step_fn) if jitted else step_fn
+        return jax.jit(step_function) if jitted else step_function
 
     def predictions_to_xarray(
         self,

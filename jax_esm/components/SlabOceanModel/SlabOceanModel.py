@@ -13,7 +13,7 @@ from pathlib import Path
 import xarray as xr
 import pandas as pd
 import numpy as np
-from jcm.boundaries import _fixed_ssts as gen_idealized_sst
+from jcm.boundaries import _fixed_ssts as generate_idealized_sst
 
 
 from jax_esm.components.base import (
@@ -165,7 +165,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = gen_idealized_sst(self.config.domain.coords.horizontal)
+            init_T = generate_idealized_sst(self.config.domain.coords.horizontal)
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)
@@ -187,7 +187,7 @@ class SlabOceanModel(Component):
             ),
         )
 
-    def gen_step_fn(
+    def generate_step_function(
         self,
         jitted: bool = True,
     ):
@@ -196,7 +196,7 @@ class SlabOceanModel(Component):
         ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
         start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
         
-        def step_fn(state, forcing, t):
+        def step_function(state, forcing, t):
             new_Tanom = state.prog.T
             if self.has_climatology:
                 
@@ -236,7 +236,7 @@ class SlabOceanModel(Component):
             )
             return new_state, stack_objects( [ dict(prog=new_state.prog, forcing=forcing) ] )
             
-        return jax.jit(step_fn) if jitted else step_fn
+        return jax.jit(step_function) if jitted else step_function
         
     def predictions_to_xarray(
         self,

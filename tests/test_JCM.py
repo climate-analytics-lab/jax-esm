@@ -58,7 +58,7 @@ class TestJCM(unittest.TestCase):
         
         assert jnp.allclose(forcing.scalar.sea_surface_skin_temperature, SST)
         
-        step_function = model.gen_step_fn() 
+        step_function = model.generate_step_function() 
         new_state, predictions = step_function(init_state, forcing, 0.0)
         assert predictions.physics.surface_flux.tskin.shape[0] == model.config.substeps
         assert jnp.allclose(predictions.physics.surface_flux.tskin, SST)

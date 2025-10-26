@@ -70,9 +70,9 @@ class TestFluxModel:
     def test_step_function_generation(self, basic_config):
         """Test step function can be generated and is callable."""
         flux_model = FluxModel(basic_config)
-        step_fn = flux_model.gen_step_fn()
+        step_function = flux_model.generate_step_function()
 
-        assert callable(step_fn)
+        assert callable(step_function)
 
     def test_heat_flux_computation(self, basic_config):
         """Test heat flux is computed from atmosphere surface fluxes."""
@@ -98,8 +98,8 @@ class TestFluxModel:
         cpl.atm.phydata = atm_phydata
 
         # Generate and run step function
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Heat flux should be negative sum of hfluxn (sign convention)
         # Expected: -(4 * 25.0) = -100.0 W/m²
@@ -124,8 +124,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Time should advance by timestep
         expected_time = state.prog.sim_time + flux_model.config.timestep
@@ -148,13 +148,13 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
+        step_function = flux_model.generate_step_function()
 
         # Run 5 timesteps
         times = []
         fluxes = []
         for i in range(5):
-            cpl.flx, predictions = step_fn(cpl, i)
+            cpl.flx, predictions = step_function(cpl, i)
             times.append(cpl.flx.prog.sim_time)
             fluxes.append(cpl.flx.phydata.heatflx)
 
@@ -183,8 +183,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Predictions should be a dict with 'prog' and 'phydata' keys
         assert isinstance(predictions, dict)
@@ -211,8 +211,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Convert to xarray
         ds = flux_model.predictions_to_xarray(predictions)
@@ -242,8 +242,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Result should be zero
         assert jnp.allclose(new_state.phydata.heatflx, 0.0)
@@ -265,8 +265,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # FluxModel computes: -hfluxn.sum(axis=-1)
         # So positive hfluxn (heat leaving surface) becomes negative flux
@@ -289,12 +289,12 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
+        step_function = flux_model.generate_step_function()
 
         # Run twice to ensure compiled version is used
-        new_state1, pred1 = step_fn(cpl, 0)
+        new_state1, pred1 = step_function(cpl, 0)
         cpl.flx = new_state1
-        new_state2, pred2 = step_fn(cpl, 1)
+        new_state2, pred2 = step_function(cpl, 1)
 
         # Should produce consistent results
         assert jnp.allclose(new_state1.phydata.heatflx, new_state2.phydata.heatflx)
@@ -308,7 +308,7 @@ class TestFluxModel:
         cpl = Mock()
         cpl.flx = state
 
-        step_fn = flux_model.gen_step_fn()
+        step_function = flux_model.generate_step_function()
 
         # Test with different flux magnitudes
         flux_values = [10.0, 50.0, 100.0, 0.0, -50.0]
@@ -322,7 +322,7 @@ class TestFluxModel:
             cpl.atm = Mock()
             cpl.atm.phydata = atm_phydata
 
-            new_state, predictions = step_fn(cpl, 0)
+            new_state, predictions = step_function(cpl, 0)
             results.append(new_state.phydata.heatflx.mean())
 
         # Results should vary with input
@@ -358,8 +358,8 @@ class TestFluxModel:
         cpl.atm = Mock()
         cpl.atm.phydata = atm_phydata
 
-        step_fn = flux_model.gen_step_fn()
-        new_state, predictions = step_fn(cpl, 0)
+        step_function = flux_model.generate_step_function()
+        new_state, predictions = step_function(cpl, 0)
 
         # Output should preserve spatial structure
         # Should be -(sum of 4 identical fields) = -4 * spatial_flux

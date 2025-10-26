@@ -132,14 +132,14 @@ class TimeIntegrator:
         Returns:
             Tuple of (final_state, average_fluxes)
         """
-        def step_fn(carry, _):
+        def step_function(carry, _):
             state = carry
             new_state, fluxes = component.step(state, forcing, dt)
             return new_state, fluxes
         
         # Use lax.scan for efficient subcycling
         final_state, flux_history = jax.lax.scan(
-            step_fn, initial_state, None, length=n_steps
+            step_function, initial_state, None, length=n_steps
         )
         
         # Average fluxes over subcycles

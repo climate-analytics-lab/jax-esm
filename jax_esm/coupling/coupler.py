@@ -107,7 +107,7 @@ class Coupler:
         })
    
 
-    def gen_step_fn(
+    def generate_step_function(
         self,
         jitted: bool = True,
     ) -> callable:
@@ -121,9 +121,9 @@ class Coupler:
         """
 
         # Get step functions for the three components
-        step_functions = { component_name : component.gen_step_fn(jitted = jitted) for component_name, component in self.components.items() }
+        step_functions = { component_name : component.generate_step_function(jitted = jitted) for component_name, component in self.components.items() }
 
-        def step_fn(cpl_state, t):
+        def step_function(cpl_state, t):
             
 
             # Compute forcing
@@ -136,8 +136,8 @@ class Coupler:
             
             # Call forward functions and unpack results directly into dictionaries
             results = {
-                component_name: step_fn(getattr(cpl_state, component_name), forcing_group[component_name], t) 
-                for component_name, step_fn in step_functions.items()
+                component_name: step_function(getattr(cpl_state, component_name), forcing_group[component_name], t) 
+                for component_name, step_function in step_functions.items()
             }
             
             new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
@@ -145,7 +145,7 @@ class Coupler:
 
             return new_cplstate, cpl_predictions
 
-        return jax.jit(step_fn) if jitted else step_fn
+        return jax.jit(step_function) if jitted else step_function
 
 
     def run(
@@ -177,9 +177,9 @@ class Coupler:
         # error during post-processing. Therefore for now, I 
         # fall back to generate forward function every time.
         #
-        cpl_step_fn = coupler.gen_step_fn(jitted=jax_scan)
+        cpl_step_function = coupler.generate_step_function(jitted=jax_scan)
         final_state, predictions = scan_func(
-            cpl_step_fn,
+            cpl_step_function,
             init_cplstate,
             xs=jnp.arange(total_steps),
         )

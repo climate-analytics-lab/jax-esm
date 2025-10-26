@@ -48,9 +48,9 @@ class SimplifiedAtmosphere(Component):
             },
         )
 
-    def gen_step_fn(self):
+    def generate_step_function(self):
         @jax.jit
-        def step_fn(cpl, t):
+        def step_function(cpl, t):
             # Atmosphere responds to ocean SST
             sst = cpl.ocn.prog.T
             T_diff = sst - cpl.atm.prog.T_surface
@@ -79,7 +79,7 @@ class SimplifiedAtmosphere(Component):
 
             return new_state, predictions
 
-        return step_fn
+        return step_function
 
 
 class SimplifiedFluxModel(Component):
@@ -102,9 +102,9 @@ class SimplifiedFluxModel(Component):
     def initialize(self):
         return self.component_state_class.zeros()
 
-    def gen_step_fn(self):
+    def generate_step_function(self):
         @jax.jit
-        def step_fn(cpl, t):
+        def step_function(cpl, t):
             # Get heat flux from atmosphere
             heat_flux = cpl.atm.phydata.surface_flux
 
@@ -120,7 +120,7 @@ class SimplifiedFluxModel(Component):
 
             return new_state, predictions
 
-        return step_fn
+        return step_function
 
 
 class SimplifiedOcean(Component):
@@ -149,9 +149,9 @@ class SimplifiedOcean(Component):
             prog_kwargs={"T": jnp.ones((16, 32)) * 288.0},  # 15°C
         )
 
-    def gen_step_fn(self):
+    def generate_step_function(self):
         @jax.jit
-        def step_fn(cpl, t):
+        def step_function(cpl, t):
             # Ocean temperature responds to heat flux
             heat_flux = cpl.flx.phydata.heatflx
             dT = (heat_flux * self.timestep) / self.heat_capacity
@@ -175,7 +175,7 @@ class SimplifiedOcean(Component):
 
             return new_state, predictions
 
-        return step_fn
+        return step_function
 
 
 class TestIntegration:

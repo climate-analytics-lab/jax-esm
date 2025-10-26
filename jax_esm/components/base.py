@@ -249,7 +249,7 @@ class Component(ABC):
         pass
     
     @abstractmethod
-    def gen_step_fn(
+    def generate_step_function(
         self,
     ) -> callable:
         """Advance component state by one timestep.
