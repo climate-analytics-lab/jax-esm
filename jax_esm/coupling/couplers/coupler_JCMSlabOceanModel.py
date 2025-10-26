@@ -58,8 +58,8 @@ class CoupledJCMSlabOceanModel(Coupler):
             ),
         )
 
-        atm_model = JCM.generate_default_model(layers=layers, topo_file=topo_file)
-        ocn_model = SlabOceanModel.generate_default_model(topo_file=topo_file)
+        atm_model = JCM(**JCM_config_dict)
+        ocn_model = SlabOceanModel(**SlabOceanModel_config_dict)
         
         components = dict(
             atm = atm_model,
