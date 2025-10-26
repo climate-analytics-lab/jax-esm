@@ -3,9 +3,6 @@ import xarray as xr
 import dinosaur
 from dataclasses import dataclass
 
-fmask_threshold = 0.5
-
-
 def get_coords(horizontal_resolution) -> dinosaur.coordinate_systems.CoordinateSystem:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -40,14 +37,14 @@ class Domain:
 
         # land-sea mask
         fmask = jnp.asarray(ds["lsm"])
-       
         topography = jnp.asarray(ds["orog"])
         
         # Apply some sanity checks -- might want to check this shape against the model shape?
         assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-        
-        # Set values close to 0 or 1 to exactly 0 or 1
-        bmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+
+        # It is land (mask = 1) only if fmask == 1
+        # If there is a bit of water ( fmask < 1 ), then bmask = 0
+        bmask = jnp.where(fmask == 1, 1.0, 0.0)
 
         for shape in [ fmask.shape, topography.shape ]:
             if coords.horizontal.nodal_shape != shape:
