@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from jax_esm import constants as constants
 from jax_esm.utils.bulk_op import stack_objects
-
+from jax_esm.components.domain import Domain
 from pathlib import Path
 import xarray as xr
 import pandas as pd
@@ -24,31 +24,19 @@ from jax_esm.components.base import (
     create_field_group_class,
 )
 
-import dinosaur
-
-def get_coords(horizontal_resolution=31) -> dinosaur.coordinate_systems.CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
-    )
-
-
-
 class SlabOceanModel(Component):
     """
     Slab ocean model with prescribed mixed layer depth and climatology.
     """
 
     @classmethod
-    def generate_default_configuration(cls, horizontal_resolution:int = 31, dict_form = False):
+    def generate_default_configuration(cls, horizontal_resolution:int = 31, dict_form = False, topo_file=None):
+
+    
+        if topo_file is None:
+            domain = Domain.from_resolution_all_ocean(horizontal_resolution = horizontal_resolution)
+        else:
+            domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
 
         config_dict = dict(
             name="default_config",
@@ -56,7 +44,7 @@ class SlabOceanModel(Component):
             start_dt = datetime(year=2025, month=1, day=1),
             substeps = 2,
             save_interval = 5,
-            coords=get_coords(horizontal_resolution),
+            domain=Domain.from_resolution_all_ocean(horizontal_resolution),
             params=dict(
                 relaxation_time = 60 * 86400.0,
             ),
@@ -93,7 +81,7 @@ class SlabOceanModel(Component):
         self.substeps = config.substeps
         self.subtimestep = self.timestep / self.substeps
 
-        D3_nodal_shape = config.coords.nodal_shape
+        D3_nodal_shape = config.domain.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
         
         self.component_state_class = create_component_state_class(
@@ -135,13 +123,13 @@ class SlabOceanModel(Component):
         # Initialize slab ocean model boundary conditions
         # =========================================================================
         
-        D3_nodal_shape = self.config.coords.nodal_shape
+        D3_nodal_shape = self.config.domain.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
         config = self.config
         
         llon_rad = jnp.repeat(
             jnp.expand_dims(
-                self.config.coords.horizontal.longitudes,
+                self.config.domain.coords.horizontal.longitudes,
                 axis = 1,
             ),
             repeats = D2_nodal_shape[1],
@@ -150,7 +138,7 @@ class SlabOceanModel(Component):
 
         llat_rad = jnp.repeat(
             jnp.expand_dims(
-                self.config.coords.horizontal.latitudes,
+                self.config.domain.coords.horizontal.latitudes,
                 axis = 0,
             ),
             repeats = D2_nodal_shape[0],
@@ -200,7 +188,7 @@ class SlabOceanModel(Component):
             
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = gen_idealized_sst(self.config.coords.horizontal)
+            init_T = gen_idealized_sst(self.config.domain.coords.horizontal)
 
         
         # Compute heat capacity cd, and time factor for Euler backward scheme

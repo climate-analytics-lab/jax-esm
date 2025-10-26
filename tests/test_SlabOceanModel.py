@@ -8,6 +8,9 @@ import unittest
 from jax_esm.components.SlabOceanModel import SlabOceanModel
 from jax_esm.components.base import ComponentConfig
 
+import jcm
+from pathlib import Path
+
 class TestSlabOceanModel(unittest.TestCase):
     
     """Test component interface."""
@@ -16,6 +19,11 @@ class TestSlabOceanModel(unittest.TestCase):
         """Test component initialization."""
         model = SlabOceanModel( SlabOceanModel.generate_default_configuration(horizontal_resolution = 31) )
         
+ 
+    def test_slab_ocean_model_initialization_with_topo_file(self):
+        """Test component initialization with vertical layers and topography file."""
+        model = SlabOceanModel( SlabOceanModel.generate_default_configuration(horizontal_resolution = 31, topo_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc"))
+
     
     def test_slab_ocean_model_initialize_state(self):
         """Test state initialization."""

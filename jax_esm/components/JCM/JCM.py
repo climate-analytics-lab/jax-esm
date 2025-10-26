@@ -31,6 +31,7 @@ import dinosaur
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import stack_objects, mean_leaf
+from jax_esm.components.domain import Domain
 
 import tree_math
 from typing import Any
@@ -51,7 +52,13 @@ class JCM(Component):
     """
 
     @classmethod
-    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False):
+    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False, topo_file=None):
+
+        if topo_file is None:
+            domain = Domain.from_resolution_all_ocean(horizontal_resolution = horizontal_resolution)
+        else:
+            domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
+
 
         config_dict = dict(
             name="default_config",
@@ -59,8 +66,9 @@ class JCM(Component):
             start_dt = datetime(year=2025, month=1, day=1),
             substeps = (substeps := 2),
             save_interval = timestep / substeps,
-            coords=get_coords(layers=layers, spectral_truncation=horizontal_resolution),
+            domain = domain,
             params=dict(
+                
             ),
         )
 
@@ -71,10 +79,14 @@ class JCM(Component):
 
 
     @classmethod
-    def generate_default_model(cls, horizontal_resolution:int = 31, layers:int = 8):
+    def generate_default_model(cls, horizontal_resolution:int = 31, layers:int = 8, topo_file=None):
 
         return cls(
-            cls.generate_default_configuration(horizontal_resolution=horizontal_resolution)
+            cls.generate_default_configuration(
+                horizontal_resolution=horizontal_resolution,
+                layers = layers,
+                topo_file=topo_file,
+            )
         )
 
 

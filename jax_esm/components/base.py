@@ -215,11 +215,6 @@ def create_component_forcing_class(
 
     return new_cls
 
-@dataclass
-class Domain:
-    coord      : any
-    mask       : jnp.array
-    topography : jnp.array
 
 @dataclass
 class ComponentConfig:

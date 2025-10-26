@@ -50,7 +50,7 @@ class CoupledForcing:
 
 class Coupler:
     """Main coupler for Earth system components."""
-    
+
     def __init__(
         self,
         config: CouplerConfig,
