@@ -65,6 +65,19 @@ class TestCoupledJCMSlabOceanModel(unittest.TestCase):
         flux_exchanger_names : List[ str ] = [ "atm_ocn_flux_exchanger" ],
     ):
        
+        class CoupledJCMSlabOceanModel(Coupler):
+
+
+    def __init__(
+        self,
+        topo_file: Optional[str] = None,
+        horizontal_resolution: int = 31,
+        layers: int = 8,
+        coupling_timestep: float = 86400.0, 
+        JCM_substeps = 24,
+        SlabOceanModel_substeps = 1,
+        start_datetime = datetime(year=2025, month=1, day=1),
+    ):
          
         shared_topo_file = Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc"
         atm_model = JCM.generate_default_model(layers=8, topo_file=shared_topo_file)
