@@ -59,6 +59,7 @@ class JCM(Component):
         else:
             domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
 
+        domain.meta["layers"] = layers
 
         config_dict = dict(
             name="default_config",
@@ -107,12 +108,15 @@ class JCM(Component):
         self.coupling_timestep = config.timestep  # in secs
         self.save_interval = config.save_interval # in secs
         self.substeps = config.substeps
-        config_speedy = dict(
+        config_jcm = dict(
             time_step = self.coupling_timestep / self.substeps / 60.0, # in minutes
+            orography = self.config.domain.topography,
+            spectral_truncation = self.config.domain.meta["horizontal_resolution"],
+            layers = self.config.domain.meta["layers"],
         )
 
         
-        self.model = Model(**config_speedy) 
+        self.model = Model(**config_jcm) 
 
         D3_nodal_shape = self.model.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
