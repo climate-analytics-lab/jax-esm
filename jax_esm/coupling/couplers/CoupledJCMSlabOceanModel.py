@@ -1,6 +1,6 @@
 
 from datetime import datetime
-from typing import List 
+from typing import List, Optional 
 from jax_esm.components.domain import Domain
 from jax_esm.components.JCM import JCM
 from jax_esm.components.SlabOceanModel import SlabOceanModel
@@ -22,10 +22,11 @@ class CoupledJCMSlabOceanModel(Coupler):
         self,
         topo_file: Optional[str] = None,
         horizontal_resolution: int = 31,
-        layers: int = 8,
+        JCM_layers: int = 8,
         coupling_timestep: float = 86400.0, 
         JCM_substeps = 24,
         SlabOceanModel_substeps = 1,
+        SlabOceanModel_relaxation_time = 60 * 86400.0,
         start_datetime = datetime(year=2025, month=1, day=1),
     ):
         
@@ -34,9 +35,9 @@ class CoupledJCMSlabOceanModel(Coupler):
         else:
             domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
 
-        domain.meta["layers"] = layers
+        domain.meta["layers"] = JCM_layers
 
-        JCM_config_dict = dict(
+        JCM_config = ComponentConfig(
             name="JCM_config",
             timestep = coupling_timestep,
             start_dt = start_datetime,
@@ -47,7 +48,7 @@ class CoupledJCMSlabOceanModel(Coupler):
             ),
         )
 
-        SlabOceanModel_config_dict = dict(
+        SlabOceanModel_config = ComponentConfig(
             name="SlabOceanModel_config",
             timestep = coupling_timestep,
             start_dt = start_datetime,
@@ -55,12 +56,14 @@ class CoupledJCMSlabOceanModel(Coupler):
             save_interval = coupling_timestep / SlabOceanModel_substeps,
             domain = domain,
             params=dict(
+                relaxation_time = SlabOceanModel_relaxation_time,
+                SST_clim_file = topo_file,
             ),
         )
 
         components = dict(
-            atm = JCM(**JCM_config_dict),
-            ocn = SlabOceanModel(**SlabOceanModel_config_dict),
+            atm = JCM(JCM_config),
+            ocn = SlabOceanModel(SlabOceanModel_config),
         )
      
         flux_exchangers = [ self.generate_atm_ocn_flux_exchanger(components), ]
@@ -69,7 +72,7 @@ class CoupledJCMSlabOceanModel(Coupler):
             components = components,
             flux_exchangers = flux_exchangers,
             config = CouplerConfig(
-                timestep = coupling_time,
+                timestep = coupling_timestep,
             ),
         )
 
@@ -81,12 +84,12 @@ class CoupledJCMSlabOceanModel(Coupler):
     ):
 
         def transformation(state_group, forcing_group):
-            
+
             atm = state_group["atm"] 
             ocn = state_group["ocn"] 
            
             forcing_group["atm"].scalar.sea_surface_skin_temperature = ocn.prog.T
-            forcing_group["ocn"].flux.heat_flux = atm.phydata.surface_flux.hfluxn.sum(axis=-1)
+            forcing_group["ocn"].flux.total_heat_flux = atm.phydata.surface_flux.hfluxn.sum(axis=-1)
 
             return forcing_group
 
