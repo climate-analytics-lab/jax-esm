@@ -58,12 +58,9 @@ class CoupledJCMSlabOceanModel(Coupler):
             ),
         )
 
-        atm_model = JCM(**JCM_config_dict)
-        ocn_model = SlabOceanModel(**SlabOceanModel_config_dict)
-        
         components = dict(
-            atm = atm_model,
-            ocn = ocn_model,
+            atm = JCM(**JCM_config_dict),
+            ocn = SlabOceanModel(**SlabOceanModel_config_dict),
         )
      
         flux_exchangers = [ self.generate_atm_ocn_flux_exchanger(components), ]
