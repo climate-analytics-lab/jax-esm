@@ -25,101 +25,38 @@ pip install -e ".[dev]"
 ## Quick Start
 
 ```python
-import jax
-import jax.numpy as jnp
-import pandas as pd
-from jax_esm import Component, ComponentConfig
-from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import create_component_state_class, create_field_group_class
-from jax_esm.utils.bulk_op import stack_objects
 
-# Define a custom component
-class MyOcean(Component):
-    def __init__(self, config: ComponentConfig):
-        super().__init__(config)
+import jcm
+topo_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
 
-        # Create state class dynamically
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="OceanProg",
-                fields=[
-                    ("T", float, (64, 128)),      # SST
-                    ("sim_time", float, ()),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="OceanPhydata",
-                fields=[
-                    ("heat_content", float, (64, 128)),
-                ],
-            ),
-        )
+from jax_esm.coupling.couplers.CoupledJCMSlabOceanModel import CoupledJCMSlabOceanModel
+from datetime import datetime
 
-    def initialize(self):
-        return self.component_state_class.zeros().copy(
-            prog_kwargs={"T": jnp.ones((64, 128)) * 288.0}  # 15°C
-        )
-
-    def gen_step_fn(self):
-        @jax.jit
-        def step_fn(cpl, t):
-            # Access other components: cpl.atm, cpl.flx, cpl.ocn
-            heat_flux = cpl.flx.phydata.heatflx
-
-            # Update temperature
-            new_T = cpl.ocn.prog.T + heat_flux * self.timestep / 1e8
-
-            new_state = cpl.ocn.copy(
-                prog_kwargs={
-                    "T": new_T,
-                    "sim_time": cpl.ocn.prog.sim_time + self.timestep,
-                }
-            )
-
-            # Return (new_state, predictions)
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
-
-            return new_state, predictions
-
-        return step_fn
-
-# Configure component (requires atm, flx, ocn)
-ocean_config = ComponentConfig(
-    name="ocn",
-    start_dt=pd.Timestamp("2000-01-01"),
-    timestep=3600.0,      # 1 hour
-    substeps=4,           # Internal sub-stepping
-    save_interval=3600.0,
-    grid={},
-    params={},
+# Creating model
+model = CoupledJCMSlabOceanModel(
+    topo_file = topo_file,
+    horizontal_resolution = 31,
+    JCM_layers = 8,
+    coupling_timestep = 86400.0,
+    JCM_substeps = 24,
+    SlabOceanModel_substeps = 1,
+    start_datetime = datetime(year=2001, month=1, day=1),
 )
 
-# Create components (need all 3: atm, flx, ocn)
-ocean = MyOcean(ocean_config)
-# ... create atmosphere and flux model ...
+# Obtain initial condition
+initial_state = model.initialize()
 
-# Create coupler (hardcoded to use "atm", "flx", "ocn" keys)
-coupler = Coupler(
-    components={"atm": atmosphere, "flx": flux_model, "ocn": ocean},
-    config=CouplerConfig(timestep=3600.0),
+# Run coupled model 
+final_state, predictions = model.run(
+    init_cplstate = initial_state,
+    start_time = 0.0,
+    end_time = 86400.0 * 5,  # 5 days
+    jax_scan = True,
 )
 
-# Initialize and run
-initial_state = coupler.initialize()
-final_state, predictions = coupler.run(
-    init_cplstate=initial_state,
-    start_time=0.0,
-    end_time=86400.0,  # 1 day
-    timestep=3600.0,
-    jax_scan=True,     # Use JAX scan (False for debugging)
-)
-
-# Convert to xarray
-datasets = coupler.predictions_to_xarray(predictions)
-# Access: datasets["atm"], datasets["flx"], datasets["ocn"]
+# Convert output into xarray
+ds_output = model.predictions_to_xarray(predictions)
+     
 ```
 
 ## Architecture
