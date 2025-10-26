@@ -91,7 +91,6 @@ class SlabOceanModel(Component):
                     ("sim_time", float, ()),
                     ("T", float, D2_nodal_shape),
                     ("mld", float, D2_nodal_shape),
-
                 ],
             ),
 
@@ -111,7 +110,7 @@ class SlabOceanModel(Component):
                 ],
             ),
             scalar_cls = create_field_group_class(
-                cls_name = "flux",
+                cls_name = "scalar",
                 fields = [
                 ],
             ),
@@ -144,53 +143,37 @@ class SlabOceanModel(Component):
             repeats = D2_nodal_shape[0],
             axis = 0,
         )
-
+        
+        lnd_idx = config.domain.bmask == 1
+        ocn_idx = config.domain.bmask == 0
+        
         # initialize mld
         mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
         mld_min = config.params["mld_min"] if "mld_min" in config.params else 40.0
 
         init_mld = mld_max + (mld_min - mld_max) * jnp.cos(llat_rad)**3
         init_T = None
-        self.SST_clim = None
-        self.fmask_ocn = jnp.ones_like(init_mld)
-       
+
         self.has_climatology = False
- 
-        if "boundaries" in config.params and config.params["boundaries"] is not None:
+        self.SST_clim = None
 
-            print("Boundary exists. The given initial SST will be used.")
-            print("Boundary file: ", config.params["boundary_file"])
-            
-            boundaries = config.params["boundaries"]
-            thrsh = 0.3
-
-            self.SST_clim = jnp.array(xr.open_dataset(config.params["boundary_file"])["sst"])
-                            
-            # Update fmask_lnd based on the conditions
-            fmask_lnd = jnp.where(
-                boundaries.fmask >= thrsh,
-                1.0,
-                0.0,
-            )
-
-            fmask_ocn = 1.0 - fmask_lnd
-            
-            init_T = self.SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(273.15+15)
-            
-            if jnp.any( jnp.isnan(init_T) == (fmask_ocn == 0) ):
-                print("fmask_ocn and init_T do share the same mask.")
-            else:
-                raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
-
-            self.fmask_ocn = fmask_ocn
-        
+        if "SST_clim_file" in config.params and config.params["SST_clim_file"] is not None:
+            print("SST climatology file. The given initial SST will be used.")
+            print("SST climatology file: ", config.params["SST_clim_file"])            
+            self.SST_clim = jnp.array(xr.open_dataset(config.params["SST_clim_file"])["sst"])
             self.has_climatology = True
-            
+            init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_T = gen_idealized_sst(self.config.domain.coords.horizontal)
 
         
+        init_T = init_T.at[lnd_idx].set(273.15+15)
+        if jnp.sum( jnp.isnan(init_T) ) == 0:
+            print("domain.bmask and SST_clim do share the same mask.")
+        else:
+            raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
+
         # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = self.ocn_rho * self.ocn_cp * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
@@ -212,50 +195,46 @@ class SlabOceanModel(Component):
         # Find day of the year to locate climatology
         ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
         start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
-        has_climatology = self.has_climatology
         
         def step_fn(state, forcing, t):
-
             new_Tanom = state.prog.T
-
-            if has_climatology:
-
+            if self.has_climatology:
+                
                 days_after_start = jnp.floor( state.prog.sim_time / 86400.0 ).astype(jnp.int32)
                 
                 clim_day_beg = start_dt_offset + days_after_start
                 clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
                 
+                ocn_idx = self.config.domain.bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_day_beg]
-                snapshot_SST_clim_beg = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim_beg, 273.15+15)
+                snapshot_SST_clim_beg = jnp.where(ocn_idx, snapshot_SST_clim_beg, 273.15+15)
                 
                 snapshot_SST_clim_end = self.SST_clim[:, :, clim_day_end]
-                snapshot_SST_clim_end = jnp.where(self.fmask_ocn != 0, snapshot_SST_clim_end, 273.15+15)
-
+                snapshot_SST_clim_end = jnp.where(ocn_idx, snapshot_SST_clim_end, 273.15+15)
+                
                 SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0  # convert to per second
-
+                
                 new_Tanom = state.prog.T - snapshot_SST_clim_beg
-
-            
+                
             new_sim_time = state.prog.sim_time
             for step in range(self.substeps):
                 new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
                     forcing.flux.total_heat_flux
                 )))
                 new_sim_time += self.subtimestep
-                
+            
             new_T = new_Tanom 
-
-            if has_climatology:
+            
+            if self.has_climatology:
                 new_T += snapshot_SST_clim_beg + SST_clim_trend * self.config.timestep
                 
-
             new_state = state.copy(
                 prog_kwargs = dict(
                     T = new_T,
                     sim_time = new_sim_time,
                 ),
             )
-            return new_state, stack_objects( [ dict(prog=new_state.prog) , ] )
+            return new_state, stack_objects( [ dict(prog=new_state.prog, forcing=forcing) ] )
             
         return jax.jit(step_fn) if jitted else step_fn
         
@@ -274,10 +253,12 @@ class SlabOceanModel(Component):
             ds : The resulting xarray dataset.
         """
         prog    = predictions["prog"]
+        forcing = predictions["forcing"]
         ds = xr.Dataset(
             data_vars = dict(
                 T   = (["time", "lon", "lat"], prog.T),
                 mld = (["time", "lon", "lat"], prog.mld),
+                total_heat_flux = (["time", "lon", "lat"], forcing.flux.total_heat_flux),
             ), 
             coords = dict(
                 time = (["time",], prog.sim_time),
