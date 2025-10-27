@@ -1,0 +1,23 @@
+Claude AI (Sonnet 4.5)
+
+I am developing a coupler for earth system modeling in Python computer language.
+
+First, I need a generic interpolator class `Remapping` that has the following requirement:
+
+1. An interpolator object interpolates only between two specified grids.
+2. An interpolator object interpolates can provide flux conservative and non-conservative remappings. Each can be in uni- or bi-directional.
+3. The interpolation function is generated through a function generator. The generated function `f` has the following properties:
+   a) `f` receives the input variable from source grid and output the remapped variable on the destination grid.
+   b) `f` must be jittable by python package jax.
+4. The interpolation is achieved through matrix multiplication.
+5. The matrix is given from the constructor.
+6. The constructor checks if the dimension of the remapping matrix matches the input and output grids. That is, if the input has a length of `N_in` and output has a length of `N_out`, then the matrix converting from input to output grid should be `N_out` by `N_in`.
+
+Second, I need a 2-D interpolator class `Remapping2D` that utilizes the class `Remapping` previously defined. `Remapping2D` has the following behavior:
+
+1. The interpolation function is generated through a function generator that takes advantage of the function generator in `Remapping` (i.e. wrapping it). The generated function `f` is generate has the following properties:
+   a) `f` receives 2-dimensional input. If the input is 3-dimensional, treat the first dimension as a "slice": apply remapping through each slice.
+   b) If `f` receives 2-dimensional input. Then `f` output 2-dimensional output. Same of 3-dimension.
+
+
+Can you generate such classes?
