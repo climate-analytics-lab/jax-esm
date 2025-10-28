@@ -1,0 +1,8 @@
+Claude AI (Sonnet 4.5)
+
+Can you generate code in python that parse a string `grid_specification`? 
+The format is "<grid_type>::<grid_name>".
+
+For `grid_type` == "JCM", the `grid_name`  is of the format "T<truncation_number>", where `truncation_number` is an int.
+
+Please use python package re.
