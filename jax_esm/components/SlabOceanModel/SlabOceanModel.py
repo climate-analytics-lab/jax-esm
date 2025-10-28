@@ -25,12 +25,13 @@ from jax_esm.components.base import (
 )
 
 class SlabOceanModel(Component):
+    
     """
     Slab ocean model with prescribed mixed layer depth and climatology.
     """
 
     @classmethod
-    def generate_default_configuration(cls, horizontal_resolution:int = 31, dict_form = False, topo_file=None):
+    def generate_default_configuration(cls, grid_specification: str, horizontal_resolution:int = 31, dict_form = False, topo_file=None):
 
     
         if topo_file is None:
