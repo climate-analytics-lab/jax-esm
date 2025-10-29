@@ -4,7 +4,7 @@ if __name__ == "__main__":
 
     from pathlib import Path       
     import jcm
-    topo_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
+    topo_file = (Path(jcm.__file__).parent / "data/bc/boundaries_daily_t31.nc").resolve()
     
     from jax_esm.coupling.couplers.CoupledJCMSlabOceanModel import CoupledJCMSlabOceanModel
     from datetime import datetime
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     final_state, predictions = model.run(
         init_cplstate = initial_state,
         start_time = 0.0,
-        end_time = 86400.0 * 10,
+        end_time = 86400.0 * 5,
         jax_scan = False,
     )
 
