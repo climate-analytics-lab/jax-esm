@@ -32,7 +32,7 @@ if __name__ == "__main__":
     final_state, predictions = model.run(
         init_cplstate = initial_state,
         start_time = 0.0,
-        end_time = 86400.0 * 20,
+        end_time = 86400.0 * 10,
         jax_scan = False,
     )
 
