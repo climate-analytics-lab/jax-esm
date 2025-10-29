@@ -70,8 +70,7 @@ class Domain:
         # Apply some sanity checks -- might want to check this shape against the model shape?
         assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
         
-        # Set values close to 0 or 1 to exactly 0 or 1
-        bmask = jnp.where(fmask <= fmask_threshold, 0.0, jnp.where(fmask >= 1.0 - fmask_threshold, 1.0, fmask))
+        bmask = jnp.where(fmask < 1.0, 0.0, 1.0)
 
         for shape in [ fmask.shape, topography.shape ]:
             if coords.horizontal.nodal_shape != shape:
