@@ -52,12 +52,13 @@ class JCM(Component):
     """
 
     @classmethod
-    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False, topo_file=None):
+    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False, topography_file=None, mask_file=None):
 
-        if topo_file is None:
-            domain = Domain.from_resolution_all_ocean(horizontal_resolution = horizontal_resolution)
-        else:
-            domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
+        domain = Domain.from_grid_specification(
+            f"JCM::T{horizontal_resolution:d}",
+            topography_file = topography_file,
+            mask_file = mask_file,
+        )
 
         domain.meta["layers"] = layers
 
@@ -80,13 +81,13 @@ class JCM(Component):
 
 
     @classmethod
-    def generate_default_model(cls, horizontal_resolution:int = 31, layers:int = 8, topo_file=None):
+    def generate_default_model(cls, horizontal_resolution:int=31, layers:int=8, topography_file=None, mask_file=None):
 
         return cls(
             cls.generate_default_configuration(
                 horizontal_resolution=horizontal_resolution,
                 layers = layers,
-                topo_file=topo_file,
+                topography_file=topography_file,
             )
         )
 
