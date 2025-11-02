@@ -6,108 +6,43 @@ import re
 import jax_esm
 from pathlib import Path
 
-def get_jcm_coords(horizontal_resolution) -> dinosaur.coordinate_systems.CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, horizontal_resolution)
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal grid name: {horizontal_resolution:s}. Must be one of: T21, T31, T42, T85, T106, T119, T170, T213, T340, or T425.")
-    
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
-    )
+@dataclass
+class Grid:
+    nodal_shape : Tuple[int]
+    axis_names  : Tuple[str]
+    axis_values : Tuple[List[float]]
 
-def parse_grid_specification(grid_specification):
-    """
-    Parse a grid specification string of format "<grid_type>::<grid_name>".
-    
-    For grid_type == "JCM", grid_name should be "T<truncation_number>" 
-    where truncation_number is an integer.
- 
-    For grid_type == "Veros", grid_name should be "<resolution>" 
-    where resolution is a float.
-    
-    Args:
-        grid_specification (str): String in format "<grid_type>::<grid_name>"
-    
-    Returns:
-        dict: Dictionary with keys 'grid_type', 'grid_name', and if applicable,
-              'truncation_number'
-    
-    Raises:
-        ValueError: If the format is invalid
-    """
-    # Parse the basic format: <grid_type>::<grid_name>
-    match = re.match(r'^([^:]+)::(.+)$', grid_specification)
-    
-    if not match:
-        raise ValueError(f"Invalid grid specification format: '{grid_specification}'. "
-                        f"Expected format: '<grid_type>::<grid_name>'")
-    
-    grid_type = match.group(1)
-    grid_name = match.group(2)
-    
-    result = {
-        'grid_type': grid_type,
-        'grid_name': grid_name,
-    }
-
-def get_veros_coords(grid_name):
-
-    coords = dict()
-    try:
-        ds = Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc"
-        coords["lon"] = ds["xt"].to_numpy()
-        coords["lat"] = ds["yt"].to_numpy()
-        setattr(coords, nodal_shape, (1, len(coords["lat"]), len(coords["lon"]))
-            
-    except Exception as e:
-
-        import traceback
-        traceback.print_exc()    
-
-    return coords
-
-
-def get_coords(grid_specification: str) -> Any:
-    """
-    Returns a coordinate object based on grid specification.
-    """
-
-    grid_specification = parse_grid_specification(grid_specification)
-    
-    if grid_specification["grid_type"] == "JCM":    
-
-        return get_jcm_coords(grid_specification["grid_name"])
-
-    elif grid_specification["grid_type"] == "Veros": 
+    @classmethod
+    def from_latitude_longitude(
+        cls, 
+        lat : List[float],
+        lon : List[float],
+        order : str ="lat_lon",
+    ) -> Grid :
         
-        return get_veros_coords(grid_specification["grid_name"])
-        
-
-
-
-
-
-
-
-
-
-
-
-
+        if order == "lat_lon":
+            return cls(
+                nodal_shape = (len(lat), len(lon)),
+                axis_names = ("lat", "lon"),
+                axis_values = (lat, lon),
+            )
+        elif order == "lon_lat":
+            return cls(
+                nodal_shape = (len(lon), len(lat)),
+                axis_names = ("lon", "lat"),
+                axis_values = (lon, lat),
+            )
+        else:
+            raise ValueError(f"Error: `order` has to be either `lon_lat` or `lat_lon`. User here input `{str(order):s}`")
 
 @dataclass
 class Domain:
-
+    
+    grids                 : Dict[str, Grid]
     fmask                 : jnp.array   # fractional mask
     bmask                 : jnp.array   # binary mask
     topography            : jnp.array
     horizontal_grid_name  : str
-    coords                : any         # This is just a one layer coordinate describing horizontal lat lon
     meta                  : dict        # Component dependent information
 
 
@@ -167,4 +102,181 @@ class Domain:
             meta = dict(horizontal_resolution=horizontal_resolution),
             horizontal_grid_name = f"T{horizontal_resolution:d}",
         )
+
+
+    @classmethod
+    def from_grid_specification(
+        grid_specification: str,
+        mask_file : Optional[str],
+        topography_file : Optional[str],
+    ) -> Domain:
+        """
+        Returns a coordinate object based on grid specification.
+        """
+
+        grid_specification = parse_grid_specification(grid_specification)
+        
+        if grid_specification["grid_type"] == "JCM":    
+
+            return get_jcm_domain(
+                grid_specification["grid_name"],
+                mask_file = mask_file,
+                topography_file = topography_file,
+            )
+
+        elif grid_specification["grid_type"] == "Veros": 
+            
+            return get_veros_domain(
+                grid_specification["grid_name"],
+                mask_file = mask_file,
+                topography_file = topography_file,
+            )
+
+def parse_grid_specification(grid_specification):
+    """
+    Parse a grid specification string of format "<grid_type>::<grid_name>".
+    
+    For grid_type == "JCM", grid_name should be "T<truncation_number>" 
+    where truncation_number is an integer.
+ 
+    For grid_type == "Veros", grid_name should be "<resolution>" 
+    where resolution is a float.
+    
+    Args:
+        grid_specification (str): String in format "<grid_type>::<grid_name>"
+    
+    Returns:
+        dict: Dictionary with keys 'grid_type', 'grid_name', and if applicable,
+              'truncation_number'
+    
+    Raises:
+        ValueError: If the format is invalid
+    """
+    # Parse the basic format: <grid_type>::<grid_name>
+    match = re.match(r'^([^:]+)::(.+)$', grid_specification)
+    
+    if not match:
+        raise ValueError(f"Invalid grid specification format: '{grid_specification}'. "
+                        f"Expected format: '<grid_type>::<grid_name>'")
+    
+    grid_type = match.group(1)
+    grid_name = match.group(2)
+    
+    result = {
+        'grid_type': grid_type,
+        'grid_name': grid_name,
+    }
+
+
+def load_jcm_mask(mask_file):
+    
+    ds = xr.open_dataset(filename, engine="netcdf4")
+
+    # land-sea mask
+    fmask = jnp.asarray(ds["lsm"])
+    topography = jnp.asarray(ds["orog"])
+    
+    # Apply some sanity checks -- might want to check this shape against the model shape?
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
+
+    # It is land (mask = 1) only if fmask == 1
+    # If there is a bit of water ( fmask < 1 ), then bmask = 0
+    bmask = jnp.where(fmask == 1, 1.0, 0.0)
+   
+    return fmask, bmak 
+
+
+def get_jcm_domain(
+    horizontal_resolution,
+    mask_file: Optional[str],
+    topography_file: Optional[str],
+) -> Domain:
+    """
+    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    """
+    try:
+        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, horizontal_resolution)
+    except AttributeError:
+        raise ValueError(f"Invalid horizontal grid name: {horizontal_resolution:s}. Must be one of: T21, T31, T42, T85, T106, T119, T170, T213, T340, or T425.")
+ 
+    meta = dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
+    )
+ 
+    grid = dict(
+        T = Grid.from_latitude_longitude(
+            lat = meta.horizontal.longitudes,
+            lon = meta.horizontal.latitudes),
+            order = "lat_lon",
+        )
+    )
+
+    if mask_file is None:
+        fmask = jnp.zeros(grid.nodal_shape["T"])
+        bmask = jnp.zeros(grid.nodal_shape["T"])
+    else:
+        fmask, bmask = load_jcm_mask(mask_file)
+ 
+    if topography_file is None:
+        topography = jnp.zeros(grid.nodal_shape["T"])
+    else:
+        topography = load_jcm_topography_file(topography_file)
+
+    return Domain(
+        grid = dict(
+            T = Grid.from_latitude_longitude(
+                lat = meta.horizontal.longitudes,
+                lon = meta.horizontal.latitudes),
+                order = "lat_lon",
+            )
+        ),
+        fmask = fmask,
+        bmask = bmask,
+        topography = topography,
+        meta = meta,
+    )
+
+def get_veros_coords(
+    grid_name: str,
+    mask_file: Optional[str],
+    topography_file: Optional[str],
+) -> Coordinates:
+
+    try:
+
+        ds = Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc"
+        lon = ds["xt"].to_numpy()
+        lat = ds["yt"].to_numpy()
+            
+    except Exception as e:
+
+        import traceback
+        traceback.print_exc()    
+
+    if mask_file is None:
+        fmask = jnp.zeros(grid.nodal_shape["T"])
+        bmask = jnp.zeros(grid.nodal_shape["T"])
+    else:
+        fmask, bmask = load_veros_mask(mask_file)
+ 
+    if topography_file is None:
+        topography = jnp.zeros(grid.nodal_shape["T"])
+    else:
+        topography = load_veros_topography_file(topography_file)
+
+
+    return Coordinates(
+        grid = dict(
+            T = Grid.from_latitude_longitude(
+                lat = lat,
+                lon = lon,
+                order = "lat_lon",
+            )
+        ),
+        fmask = fmask,
+        bmask = bmask,
+        topography = topography,
+    )
+
 
