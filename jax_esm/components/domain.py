@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional, Self, Dict
+from typing import List, Tuple, Optional, Dict
 import jax.numpy as jnp
 import xarray as xr
 import dinosaur
@@ -24,7 +24,7 @@ class Grid:
         latitude : List[float],
         longitude : List[float],
         order : str ="latitude_longitude",
-    ) -> Self:
+    ) -> "Grid":
         
         if order == "latitude_longitude":
             return cls(
@@ -56,7 +56,7 @@ class Domain:
         grid_specification: str,
         mask_file : Optional[str] = None,
         topography_file : Optional[str] = None,
-    ) -> Self:
+    ) -> "Domain":
         """
         Returns a coordinate object based on grid specification.
         """
