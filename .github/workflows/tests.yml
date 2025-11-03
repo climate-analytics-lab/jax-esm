@@ -23,6 +23,7 @@ jobs:
       with:
         repository: climate-analytics-lab/jax-gcm
         token: ${{ secrets.GITHUB_TOKEN }}
+        ref: 08b87fe
         path: jax-gcm
 
     - name: Show Working directory
