@@ -54,8 +54,8 @@ class FluxExchanger:
             
             single_source = len(source_component_names) == 1 and len(source_variables[source_component_names[0]]) == 1
             
-            source_grid = self.components[source_component_names[0]].config.coords.horizontal.nodal_shape
-            same_grid = all([source_grid == self.components[target_component_name].config.coords.horizontal.nodal_shape for target_component_name in target_component_names])
+            source_grid = self.components[source_component_names[0]].config.domain.grids["T"].nodal_shape
+            same_grid = all([source_grid == self.components[target_component_name].config.domain.grids["T"].nodal_shape for target_component_name in target_component_names])
 
             if not (single_source and same_grid):
                 raise Exception("Error: transformations can only be None when it is single source and on the same grid.")

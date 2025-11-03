@@ -36,8 +36,7 @@ class MockComponent(Component):
 
         self.subtimestep = config.timestep / config.substeps
        
-        D3_nodal_shape = config.domain.coords.nodal_shape
-        D2_nodal_shape = D3_nodal_shape[1:]
+        D2_nodal_shape = config.domain.grids["T"].nodal_shape
 
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
@@ -130,7 +129,7 @@ class TestComponent(unittest.TestCase):
     
     def generate_test_component(self, horizontal_resolution:int = 31):
 
-        domain = Domain.from_resolution_all_ocean(horizontal_resolution)
+        domain = Domain.from_grid_specification(f"JCM::T{horizontal_resolution:d}")
 
         config = ComponentConfig(
             name = "test",

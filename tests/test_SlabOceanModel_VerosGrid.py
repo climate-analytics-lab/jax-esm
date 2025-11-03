@@ -11,6 +11,8 @@ from jax_esm.components.base import ComponentConfig
 import jcm
 from pathlib import Path
 
+import jax_esm.constants as constants
+
 class TestSlabOceanModel(unittest.TestCase):
     
     """Test component interface."""
@@ -63,7 +65,7 @@ class TestSlabOceanModel(unittest.TestCase):
         assert jnp.allclose(forcing.flux.total_heat_flux, total_heat_flux)
 
         # Check state update
-        expected_temp = init_state.prog.T + model.config.timestep * (-total_heat_flux) / ( init_state.prog.mld * model.ocn_rho * model.ocn_cp )
+        expected_temp = init_state.prog.T + model.config.timestep * (-total_heat_flux) / ( init_state.prog.mld * constants.ocean_density * constants.ocean_specific_heat_capacity )
 
 
         step_function = model.generate_step_function() 
