@@ -52,7 +52,14 @@ class JCM(Component):
     """
 
     @classmethod
-    def generate_default_configuration(cls, grid_specification:str="JCM::T31", layers:int = 8, dict_form = False, topography_file=None, mask_file=None):
+    def generate_default_configuration(
+        cls,
+        grid_specification:str="JCM::T31",
+        layers:int = 8,
+        dict_form = False,
+        topography_file=None,
+        mask_file=None,
+    ):
 
         domain = Domain.from_grid_specification(
             grid_specification,
@@ -78,8 +85,8 @@ class JCM(Component):
             return config_dict
         else:
             return ComponentConfig(**config_dict)
-
-
+        
+        
     @classmethod
     def generate_default_model(cls, grid_specification:str="JCM::T31", layers:int=8, topography_file=None, mask_file=None):
 

@@ -4,8 +4,8 @@ if __name__ == "__main__":
 
     from pathlib import Path       
     import jcm
-    topo_file = (Path(jcm.__file__).parent / "data/bc/boundaries_daily_t31.nc").resolve()
-    
+    topography_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
+    mask_file = topography_file
     from jax_esm.coupling.couplers.CoupledJCMSlabOceanModel import CoupledJCMSlabOceanModel
     from datetime import datetime
     
@@ -16,8 +16,9 @@ if __name__ == "__main__":
 
     # Creating model
     model = CoupledJCMSlabOceanModel(
-        topo_file = topo_file,
-        horizontal_resolution = 31,
+        topography_file = topography_file,
+        mask_file = mask_file,
+        grid_specification = "JCM::T31",
         JCM_layers = 8,
         coupling_timestep = 86400.0,
         JCM_substeps = 48,

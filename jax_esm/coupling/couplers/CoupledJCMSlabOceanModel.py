@@ -1,6 +1,6 @@
 
 from datetime import datetime
-from typing import List, Optional 
+from typing import List, Optional, Dict 
 from jax_esm.components.domain import Domain
 from jax_esm.components.JCM import JCM
 from jax_esm.components.SlabOceanModel import SlabOceanModel
@@ -20,21 +20,22 @@ class CoupledJCMSlabOceanModel(Coupler):
 
     def __init__(
         self,
-        topo_file: Optional[str] = None,
-        horizontal_resolution: int = 31,
+        grid_specification: str = "JCM::T31",
         JCM_layers: int = 8,
         coupling_timestep: float = 86400.0, 
         JCM_substeps = 24,
         SlabOceanModel_substeps = 1,
         SlabOceanModel_relaxation_time = 60 * 86400.0,
         start_datetime = datetime(year=2025, month=1, day=1),
+        topography_file: Optional[str] = None,
+        mask_file: Optional[str] = None,
     ):
-        
-        if topo_file is None:
-            domain = Domain.from_resolution_all_ocean(horizontal_resolution = horizontal_resolution)
-        else:
-            domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
-
+ 
+        domain = Domain.from_grid_specification(
+            grid_specification,
+            topography_file = topography_file,
+            mask_file = mask_file,
+        )
         domain.meta["layers"] = JCM_layers
 
         JCM_config = ComponentConfig(
@@ -57,7 +58,7 @@ class CoupledJCMSlabOceanModel(Coupler):
             domain = domain,
             params=dict(
                 relaxation_time = SlabOceanModel_relaxation_time,
-                SST_clim_file = topo_file,
+                SST_clim_file = topography_file,
             ),
         )
 
