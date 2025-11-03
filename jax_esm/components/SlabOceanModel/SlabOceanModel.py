@@ -88,9 +88,6 @@ class SlabOceanModel(Component):
         
         super().__init__(config)
 
-        self.ocn_rho = constants.ocn_rho # Seawater density (kg / m^3)
-        self.ocn_cp = constants.ocn_cp   # Seawater specific heat capacity (J/kg/K)
-
         self.relaxation_time = config.params["relaxation_time"]
 
         self.start_dt = config.start_dt
@@ -142,25 +139,27 @@ class SlabOceanModel(Component):
         D2_nodal_shape = T_grid.nodal_shape
         config = self.config
 
+        lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
+        lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
 
-        llat_rad = jnp.repeat(
+        self.llat_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[0],
-                axis = 1,
+                T_grid.axis_values[lat_dim_idx],
+                axis = lon_dim_idx,
             ),
-            repeats = D2_nodal_shape[1],
-            axis = 1,
+            repeats = D2_nodal_shape[lon_dim_idx],
+            axis = lon_dim_idx,
         )
        
-        llon_rad = jnp.repeat(
+        self.llon_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[1],
-                axis = 0,
+                T_grid.axis_values[lon_dim_idx],
+                axis = lat_dim_idx,
             ),
-            repeats = D2_nodal_shape[0],
-            axis = 0,
+            repeats = D2_nodal_shape[lat_dim_idx],
+            axis = lat_dim_idx,
         )
-        
+
         lnd_idx = config.domain.bmask == 1
         ocn_idx = config.domain.bmask == 0
         
@@ -168,7 +167,7 @@ class SlabOceanModel(Component):
         mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
         mld_min = config.params["mld_min"] if "mld_min" in config.params else 40.0
 
-        init_mld = mld_max + (mld_min - mld_max) * jnp.cos(llat_rad)**3
+        init_mld = mld_max + (mld_min - mld_max) * jnp.cos(self.llat_rad)**3
         init_T = None
 
         self.has_climatology = False
@@ -182,7 +181,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = generate_idealized_sst(llat_rad, llon_rad)
+            init_T = generate_idealized_sst(self.llat_rad, self.llon_rad)
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)
@@ -192,7 +191,7 @@ class SlabOceanModel(Component):
             raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
 
         # Compute heat capacity cd, and time factor for Euler backward scheme
-        cd = self.ocn_rho * self.ocn_cp * init_mld 
+        cd = constants.ocean_density * constants.ocean_specific_heat_capacity * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
         self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
         self.cd_factor = self.subtimestep / cd
@@ -271,14 +270,20 @@ class SlabOceanModel(Component):
         """
         prog    = predictions["prog"]
         forcing = predictions["forcing"]
+
+        T_grid_axis_names = self.config.domain.grids["T"].axis_names
+        T_grid_dims = ("time",) + T_grid_axis_names
+
         ds = xr.Dataset(
             data_vars = dict(
-                T   = (["time", "lon", "lat"], prog.T),
-                mld = (["time", "lon", "lat"], prog.mld),
-                total_heat_flux = (["time", "lon", "lat"], forcing.flux.total_heat_flux),
+                T   = (T_grid_dims, prog.T),
+                mld = (T_grid_dims, prog.mld),
+                total_heat_flux = (T_grid_dims, forcing.flux.total_heat_flux),
             ), 
             coords = dict(
                 time = (["time",], prog.sim_time),
+                latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
+                longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
             ),
         )
         
