@@ -86,8 +86,8 @@ class SlabAtmosphereModel(Component):
         
         super().__init__(config)
 
-        self.total_air_column_mass = constants.air_column_mass        # kg / m^2
-        self.heat_capacity_under_constant_pressure = constants.atm_cp # J / kg / K
+        self.total_air_column_mass = constants.atmosphere_column_mass
+        self.heat_capacity_under_constant_pressure = constants.atmosphere_specific_heat_capacity_under_constant_pressure
 
         self.start_dt = config.start_dt
         self.timestep = config.timestep
@@ -139,35 +139,40 @@ class SlabAtmosphereModel(Component):
         D2_nodal_shape = T_grid.nodal_shape
         config = self.config
 
-        llat_rad = jnp.repeat(
+        lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
+        lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
+
+        self.llat_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[0],
-                axis = 1,
+                T_grid.axis_values[lat_dim_idx],
+                axis = lon_dim_idx,
             ),
-            repeats = D2_nodal_shape[1],
-            axis = 1,
+            repeats = D2_nodal_shape[lon_dim_idx],
+            axis = lon_dim_idx,
         )
        
-        llon_rad = jnp.repeat(
+        self.llon_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[1],
-                axis = 0,
+                T_grid.axis_values[lon_dim_idx],
+                axis = lat_dim_idx,
             ),
-            repeats = D2_nodal_shape[0],
-            axis = 0,
+            repeats = D2_nodal_shape[lat_dim_idx],
+            axis = lat_dim_idx,
         )
-        
-        init_mean_air_temperature = generate_idealized_mean_air_temperature(llat_rad, llon_rad)
+
+        init_mean_air_temperature = generate_idealized_mean_air_temperature(self.llat_rad, self.llon_rad)
+        init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
+        init_mean_meridional_wind_velocity = jnp.zeros_like(self.llat_rad)
 
         # Compute heat capacity cd, and time factor for Euler backward scheme
-        cd = total_air_column_mass * heat_capacity_under_constant_pressure 
+        cd = constants.atmosphere_column_mass * constants.atmosphere_specific_heat_capacity_under_constant_pressure 
         self.cd_factor = self.subtimestep / cd
 
         return self.component_state_class.zeros().copy(
             prog_kwargs = dict(
                 mean_air_temperature = init_mean_air_temperature,
-                mean_zonal_wind_velocity = mean_zonal_wind_velocity,
-                mean_meridional_wind_velocity = mean_meridional_wind_velocity,
+                mean_zonal_wind_velocity = init_mean_zonal_wind_velocity,
+                mean_meridional_wind_velocity = init_mean_meridional_wind_velocity,
             ),
         )
 
@@ -213,15 +218,21 @@ class SlabAtmosphereModel(Component):
         """
         prog    = predictions["prog"]
         forcing = predictions["forcing"]
+        T_grid_axis_names = self.config.domain.grids["T"].axis_names
+        T_grid_dims = ("time",) + T_grid_axis_names
+
+
         ds = xr.Dataset(
             data_vars = dict(
-                mean_air_temperature = (["time", "lon", "lat"], prog.mean_air_temperature),
-                mean_zonal_wind_velocity = (["time", "lon", "lat"], prog.mean_zonal_wind_velocity),
-                mean_meridional_wind_velocity = (["time", "lon", "lat"], prog.mean_meridional_wind_velocity),
-                total_heat_flux = (["time", "lon", "lat"], forcing.flux.total_heat_flux),
+                mean_air_temperature = (["time", "longitude", "latitude"], prog.mean_air_temperature),
+                mean_zonal_wind_velocity = (["time", "longitude", "latitude"], prog.mean_zonal_wind_velocity),
+                mean_meridional_wind_velocity = (["time", "longitude", "latitude"], prog.mean_meridional_wind_velocity),
+                total_heat_flux = (["time", "longitude", "latitude"], forcing.flux.total_heat_flux),
             ), 
             coords = dict(
                 time = (["time",], prog.sim_time),
+                latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
+                longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
             ),
         )
         
