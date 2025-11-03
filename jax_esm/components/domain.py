@@ -21,25 +21,25 @@ class Grid:
     @classmethod
     def from_latitude_longitude(
         cls, 
-        lat : List[float],
-        lon : List[float],
-        order : str ="lat_lon",
+        latitude : List[float],
+        longitude : List[float],
+        order : str ="latitude_longitude",
     ) -> Self:
         
-        if order == "lat_lon":
+        if order == "latitude_longitude":
             return cls(
-                nodal_shape = (len(lat), len(lon)),
-                axis_names = ("lat", "lon"),
-                axis_values = (lat, lon),
+                nodal_shape = (len(latitude), len(longitude)),
+                axis_names = ("latitude", "longitude"),
+                axis_values = (latitude, longitude),
             )
-        elif order == "lon_lat":
+        elif order == "longitude_latitude":
             return cls(
-                nodal_shape = (len(lon), len(lat)),
-                axis_names = ("lon", "lat"),
-                axis_values = (lon, lat),
+                nodal_shape = (len(longitude), len(latitude)),
+                axis_names = ("longitude", "latitude"),
+                axis_values = (longitude, latitude),
             )
         else:
-            raise ValueError(f"Error: `order` has to be either `lon_lat` or `lat_lon`. User here input `{str(order):s}`")
+            raise ValueError(f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`")
 
 @dataclass
 class Domain:
@@ -161,9 +161,9 @@ def get_jcm_domain(
     hgrid = meta["one_layer_coords"].horizontal 
     grids = dict(
         T = Grid.from_latitude_longitude(
-            lat = hgrid.longitudes,
-            lon = hgrid.latitudes,
-            order = "lat_lon",
+            latitude = hgrid.latitudes,
+            longitude = hgrid.longitudes,
+            order = "longitude_latitude",
         )
     )
 
@@ -198,14 +198,14 @@ def get_veros_domain(
     try:
 
         ds = xr.open_dataset(Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc")
-        lon = ds["xt"].to_numpy() * jnp.pi / 180.0
-        lat = ds["yt"].to_numpy() * jnp.pi / 180.0
- 
+        longitude = ds["xt"].to_numpy() * jnp.pi / 180.0
+        latitude = ds["yt"].to_numpy() * jnp.pi / 180.0
+
         grids = dict(
             T = Grid.from_latitude_longitude(
-                lat = lat,
-                lon = lon,
-                order = "lat_lon",
+                latitude = latitude,
+                longitude = longitude,
+                order = "latitude_longitude",
             )
         )
                
