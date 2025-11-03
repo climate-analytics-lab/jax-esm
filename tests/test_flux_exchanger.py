@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import dinosaur
 from datetime import datetime
 from jax_esm.coupling.flux_exchange import FluxExchanger
+from jax_esm.components.domain import Domain
 
 from jax_esm.components.base import (
     Component,
@@ -12,21 +13,6 @@ from jax_esm.components.base import (
     create_component_state_class,
     create_component_forcing_class,
 )
-
-def get_coords(horizontal_resolution=31) -> dinosaur.coordinate_systems.CoordinateSystem:
-    """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
-    """
-    try:
-        horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f'T{horizontal_resolution}')
-    except AttributeError:
-        raise ValueError(f"Invalid horizontal resolution: {horizontal_resolution}. Must be one of: 21, 31, 42, 85, 106, 119, 170, 213, 340, or 425.")
-    
-    return dinosaur.coordinate_systems.CoordinateSystem(
-        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
-        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
-    )
-
 
 exchange_coefficient_of_heat = 1e-3
 air_density = 1.2 # kg/m^3
@@ -289,7 +275,7 @@ class TestFluxExchanger(unittest.TestCase):
             timestep = 1800.0,
             substeps = 2,
             save_interval = 1800.0,
-            coords = get_coords(horizontal_resolution=atm_horizontal_resolution),
+            coords = Domain.from_grid_specification(f"JCM::T{atm_horizontal_resolution:d}"),
             params = {},
         )
  
@@ -299,7 +285,7 @@ class TestFluxExchanger(unittest.TestCase):
             timestep = 1800.0,
             substeps = 2,
             save_interval = 1800.0,
-            coords = get_coords(horizontal_resolution=ocn_horizontal_resolution),
+            coords = Domain.from_grid_specification(f"JCM::T{atm_horizontal_resolution:d}"),
             params = {},
         )
        
