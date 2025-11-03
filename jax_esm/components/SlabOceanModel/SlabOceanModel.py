@@ -13,8 +13,6 @@ from pathlib import Path
 import xarray as xr
 import pandas as pd
 import numpy as np
-from jcm.boundaries import _fixed_ssts as generate_idealized_sst
-
 
 from jax_esm.components.base import (
     Component,
@@ -23,6 +21,12 @@ from jax_esm.components.base import (
     create_component_forcing_class,
     create_field_group_class,
 )
+
+
+# Copied from jax-gcm  
+def generate_idealized_sst(llat, llon):
+    return jnp.where(jnp.abs(llat) < jnp.pi/3, 27*jnp.cos(3*llat/2)**2, 0) + 273.15
+
 
 class SlabOceanModel(Component):
     
@@ -178,7 +182,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = generate_idealized_sst(self.config.domain.meta["one_layer_coords"].horizontal)
+            init_T = generate_idealized_sst(llat_rad, llon_rad)
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)

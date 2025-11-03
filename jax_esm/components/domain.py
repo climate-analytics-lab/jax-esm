@@ -50,65 +50,6 @@ class Domain:
     topography            : jnp.array
     meta                  : dict        # Component dependent information
 
-
-    @classmethod
-    def from_file_and_resolution(cls, filename, horizontal_resolution: int):
-        
-        coords = get_coords(horizontal_resolution)
-
-        ds = xr.open_dataset(filename, engine="netcdf4")
-
-        # land-sea mask
-        fmask = jnp.asarray(ds["lsm"])
-        topography = jnp.asarray(ds["orog"])
-        
-        # Apply some sanity checks -- might want to check this shape against the model shape?
-        assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-
-        # It is land (mask = 1) only if fmask == 1
-        # If there is a bit of water ( fmask < 1 ), then bmask = 0
-        bmask = jnp.where(fmask == 1, 1.0, 0.0)
-
-        for shape in [ fmask.shape, topography.shape ]:
-            if coords.horizontal.nodal_shape != shape:
-                raise Exception("The shape from file and coords must be identical.")
-        
-        return Domain(
-            coords = coords,
-            fmask = fmask,
-            bmask = bmask,
-            topography = topography,
-            meta = dict(horizontal_resolution=horizontal_resolution),
-            horizontal_grid_name = f"T{horizontal_resolution:d}",
-        )
-
-    @classmethod
-    def from_resolution_all_ocean(cls, horizontal_resolution: int):
-        
-        coords = get_coords(horizontal_resolution)
-
-        fmask = jnp.zeros(coords.horizontal.nodal_shape)
-        topography = jnp.zeros_like(fmask) - 4000.0
-        
-        # Apply some sanity checks -- might want to check this shape against the model shape?
-        assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
-        
-        bmask = jnp.where(fmask < 1.0, 0.0, 1.0)
-
-        for shape in [ fmask.shape, topography.shape ]:
-            if coords.horizontal.nodal_shape != shape:
-                raise Exception("The shape from file and coords must be identical.")
-        
-        return Domain(
-            coords = coords,
-            fmask = fmask,
-            bmask = bmask,
-            topography = topography,
-            meta = dict(horizontal_resolution=horizontal_resolution),
-            horizontal_grid_name = f"T{horizontal_resolution:d}",
-        )
-
-
     @classmethod
     def from_grid_specification(
         cls,
@@ -246,46 +187,53 @@ def get_jcm_domain(
         meta = meta,
     )
 
-def get_veros_coords(
+def get_veros_domain(
     grid_name: str,
     mask_file: Optional[str],
     topography_file: Optional[str],
 ) -> Domain:
 
+
+    grids = None
     try:
 
-        ds = Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc"
-        lon = ds["xt"].to_numpy()
-        lat = ds["yt"].to_numpy()
-            
-    except Exception as e:
-
-        import traceback
-        traceback.print_exc()    
-
-    if mask_file is None:
-        fmask = jnp.zeros(grid.nodal_shape["T"])
-        bmask = jnp.zeros(grid.nodal_shape["T"])
-    else:
-        fmask, bmask = load_veros_mask(mask_file)
+        ds = xr.open_dataset(Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc")
+        lon = ds["xt"].to_numpy() * jnp.pi / 180.0
+        lat = ds["yt"].to_numpy() * jnp.pi / 180.0
  
-    if topography_file is None:
-        topography = jnp.zeros(grid.nodal_shape["T"])
-    else:
-        topography = load_veros_topography_file(topography_file)
-
-
-    return Domain(
-        grid = dict(
+        grids = dict(
             T = Grid.from_latitude_longitude(
                 lat = lat,
                 lon = lon,
                 order = "lat_lon",
             )
-        ),
+        )
+               
+    except Exception as e:
+        import traceback
+        traceback.print_exc()    
+        raise e
+    
+
+    if mask_file is None:
+        fmask = jnp.zeros(grids["T"].nodal_shape)
+        bmask = jnp.zeros(grids["T"].nodal_shape)
+    else:
+        fmask, bmask = load_veros_mask(mask_file)
+ 
+    if topography_file is None:
+        topography = jnp.zeros(grids["T"].nodal_shape)
+    else:
+        topography = load_veros_topography_file(topography_file)
+
+
+    return Domain(
+        grid_specification = f"Veros::{grid_name:s}",
+        grids = grids,
         fmask = fmask,
         bmask = bmask,
         topography = topography,
+        meta = dict(),
     )
 
 
