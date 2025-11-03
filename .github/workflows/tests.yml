@@ -22,7 +22,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        token: ${{ secrets.my_pat }}
+        token: ${{ secrets.GITHUB_TOKEN }}
         path: jax-gcm
 
     - name: Show Working directory
