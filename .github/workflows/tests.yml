@@ -22,7 +22,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.TOKEN_TO_CLONE }}
         ref: 08b87fe
         path: jax-gcm
 
