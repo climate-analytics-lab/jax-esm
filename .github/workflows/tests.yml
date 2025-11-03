@@ -43,6 +43,7 @@ jobs:
 
     - name: Run tests with pytest
       run: |
+        export PYTHONPATH=./jax-gcm:$PYTHONPATH
         pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
