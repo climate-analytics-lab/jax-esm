@@ -31,26 +31,30 @@ class SlabOceanModel(Component):
     """
 
     @classmethod
-    def generate_default_configuration(cls, grid_specification: str, horizontal_resolution:int = 31, dict_form = False, topo_file=None):
-
-    
-        if topo_file is None:
-            domain = Domain.from_resolution_all_ocean(horizontal_resolution = horizontal_resolution)
-        else:
-            domain = Domain.from_file_and_resolution(filename=topo_file, horizontal_resolution = horizontal_resolution)
-
+    def generate_default_configuration(
+        cls,
+        grid_specification:str="JCM::T31",
+        dict_form = False,
+        topography_file: Optional[str] = None,
+        mask_file: Optional[str] = None,
+    ):
+        
         config_dict = dict(
             name="default_config",
             timestep=1800.0,
             start_dt = datetime(year=2025, month=1, day=1),
             substeps = 2,
             save_interval = 5,
-            domain=Domain.from_resolution_all_ocean(horizontal_resolution),
+            domain = Domain.from_grid_specification(
+                grid_specification,
+                topography_file = topography_file,
+                mask_file = mask_file,
+            ),
             params=dict(
                 relaxation_time = 60 * 86400.0,
             ),
         )
-
+        
         if dict_form:
             return config_dict
         else:
@@ -58,11 +62,19 @@ class SlabOceanModel(Component):
 
 
     @classmethod
-    def generate_default_model(cls, horizontal_resolution:int = 31, topo_file=None):
+    def generate_default_model(
+        cls,
+        grid_specification:str="JCM::T31",
+        topography_file:Optional[str]=None,
+        mask_file:Optional[str]=None,
+    ):
 
         return SlabOceanModel(
-            SlabOceanModel.generate_default_configuration(horizontal_resolution=horizontal_resolution, topo_file=topo_file)
-        )
+            SlabOceanModel.generate_default_configuration(
+                grid_specification=grid_specification,
+                topography_file = topography_file,
+                mask_file = mask_file,
+        ))
 
     def __init__(
         self,
@@ -82,8 +94,7 @@ class SlabOceanModel(Component):
         self.substeps = config.substeps
         self.subtimestep = self.timestep / self.substeps
 
-        D3_nodal_shape = config.domain.coords.nodal_shape
-        D2_nodal_shape = D3_nodal_shape[1:]
+        D2_nodal_shape = config.domain.grids["T"].nodal_shape
         
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
@@ -122,23 +133,24 @@ class SlabOceanModel(Component):
         # =========================================================================
         # Initialize slab ocean model boundary conditions
         # =========================================================================
-        
-        D3_nodal_shape = self.config.domain.coords.nodal_shape
-        D2_nodal_shape = D3_nodal_shape[1:]
+       
+        T_grid = self.config.domain.grids["T"] 
+        D2_nodal_shape = T_grid.nodal_shape
         config = self.config
-        
-        llon_rad = jnp.repeat(
+
+
+        llat_rad = jnp.repeat(
             jnp.expand_dims(
-                self.config.domain.coords.horizontal.longitudes,
+                T_grid.axis_values[0],
                 axis = 1,
             ),
             repeats = D2_nodal_shape[1],
             axis = 1,
         )
-
-        llat_rad = jnp.repeat(
+       
+        llon_rad = jnp.repeat(
             jnp.expand_dims(
-                self.config.domain.coords.horizontal.latitudes,
+                T_grid.axis_values[1],
                 axis = 0,
             ),
             repeats = D2_nodal_shape[0],
@@ -166,7 +178,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = generate_idealized_sst(self.config.domain.coords.horizontal)
+            init_T = generate_idealized_sst(self.config.domain.meta["one_layer_coords"].horizontal)
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)

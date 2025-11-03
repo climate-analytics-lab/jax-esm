@@ -173,11 +173,10 @@ def parse_grid_specification(grid_specification):
 
 def load_jcm_mask(mask_file):
     
-    ds = xr.open_dataset(filename, engine="netcdf4")
+    ds = xr.open_dataset(mask_file, engine="netcdf4")
 
     # land-sea mask
     fmask = jnp.asarray(ds["lsm"])
-    topography = jnp.asarray(ds["orog"])
     
     # Apply some sanity checks -- might want to check this shape against the model shape?
     assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
@@ -186,12 +185,15 @@ def load_jcm_mask(mask_file):
     # If there is a bit of water ( fmask < 1 ), then bmask = 0
     bmask = jnp.where(fmask == 1, 1.0, 0.0)
    
-    return fmask, bmak 
+    return fmask, bmask 
 
 
 def load_jcm_topography_file(
     topography_file : str,
 ):
+    return jnp.asarray(xr.open_dataset(topography_file, engine="netcdf4")["orog"])
+
+
     return None
 
 def get_jcm_domain(
@@ -233,7 +235,6 @@ def get_jcm_domain(
     if topography_file is None:
         topography = jnp.zeros(grids["T"].nodal_shape)
     else:
-        print("TOPO FILE: ", topography_file)
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(

@@ -17,17 +17,17 @@ class TestSlabOceanModel(unittest.TestCase):
    
     def test_slab_ocean_model_initialization(self):
         """Test component initialization."""
-        model = SlabOceanModel( SlabOceanModel.generate_default_configuration(horizontal_resolution = 31) )
+        model = SlabOceanModel( SlabOceanModel.generate_default_configuration("JCM::T31") )
         
  
-    def test_slab_ocean_model_initialization_with_topo_file(self):
+    def test_slab_ocean_model_initialization_with_topography_file(self):
         """Test component initialization with vertical layers and topography file."""
-        model = SlabOceanModel( SlabOceanModel.generate_default_configuration(horizontal_resolution = 31, topo_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc"))
+        model = SlabOceanModel( SlabOceanModel.generate_default_configuration("JCM::T31", mask_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc"))
 
     
     def test_slab_ocean_model_initialize_state(self):
         """Test state initialization."""
-        model = SlabOceanModel( SlabOceanModel.generate_default_configuration(horizontal_resolution = 31) )
+        model = SlabOceanModel( SlabOceanModel.generate_default_configuration("JCM::T31") )
         
         state = model.initialize()
         assert hasattr(state.prog, "T")
@@ -35,7 +35,7 @@ class TestSlabOceanModel(unittest.TestCase):
     
     def test_component_step(self):
         """Test component stepping."""
-        config_dict = SlabOceanModel.generate_default_configuration(horizontal_resolution = 31, dict_form=True)
+        config_dict = SlabOceanModel.generate_default_configuration("JCM::T31", dict_form=True)
         config_dict["substeps"] = 1
         config_dict["params"]["relaxation_time"] = jnp.inf
         

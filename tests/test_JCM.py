@@ -26,7 +26,11 @@ class TestJCM(unittest.TestCase):
  
     def test_JCM_initialization_with_layers_and_topography_file(self):
         """Test component initialization with vertical layers and topography file."""
-        model = JCM.generate_default_model(layers=8, mask_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc")
+        model = JCM.generate_default_model(
+            layers=8,
+            topography_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc",
+            mask_file=Path(jcm.__file__).parent / "data" / "bc" / "t30" / "clim" / "boundaries.nc",
+        )
         assert model.model.coords.nodal_shape[0] == 8
          
     def test_slab_ocean_model_initialize_state(self):

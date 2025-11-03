@@ -52,10 +52,10 @@ class JCM(Component):
     """
 
     @classmethod
-    def generate_default_configuration(cls, horizontal_resolution:int=31, layers:int = 8, dict_form = False, topography_file=None, mask_file=None):
+    def generate_default_configuration(cls, grid_specification:str="JCM::T31", layers:int = 8, dict_form = False, topography_file=None, mask_file=None):
 
         domain = Domain.from_grid_specification(
-            f"JCM::T{horizontal_resolution:d}",
+            grid_specification,
             topography_file = topography_file,
             mask_file = mask_file,
         )
@@ -81,11 +81,11 @@ class JCM(Component):
 
 
     @classmethod
-    def generate_default_model(cls, horizontal_resolution:int=31, layers:int=8, topography_file=None, mask_file=None):
+    def generate_default_model(cls, grid_specification:str="JCM::T31", layers:int=8, topography_file=None, mask_file=None):
 
         return cls(
             cls.generate_default_configuration(
-                horizontal_resolution=horizontal_resolution,
+                grid_specification=grid_specification,
                 layers = layers,
                 topography_file=topography_file,
             )
