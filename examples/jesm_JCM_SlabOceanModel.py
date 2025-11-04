@@ -2,13 +2,24 @@
 
 if __name__ == "__main__":
 
-    from pathlib import Path       
-    import jcm
-    JCM_topography_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
-    JCM_mask_file = topography_file
+    import jax_esm, jcm 
+    from pathlib import Path
+ 
 
-    SlabOceanModel_topography_file = JCM_topography_file
-    SlabOceanModel_mask_file = JCM_mask_file
+    JCM_grid_specification = "JCM::T31"
+    JCM_topography_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
+    JCM_mask_file = JCM_topography_file
+
+    SlabOceanModel_grid_specification = "Veros::4deg"
+    SlabOceanModel_topography_file = None
+
+    if SlabOceanModel_grid_specification[:5] == "JCM::": 
+        SlabOceanModel_mask_file = JCM_mask_file
+        SlabOceanModel_SST_clim_file = JCM_topography_file
+
+    elif SlabOceanModel_grid_specification[:7] == "Veros::":
+        SlabOceanModel_mask_file = (Path(jax_esm.__file__).parent / "data/veros/veros_4deg.nc").resolve()
+        SlabOceanModel_SST_clim_file = None
 
 
     from jax_esm.coupling.couplers.CoupledJCMSlabOceanModel import CoupledJCMSlabOceanModel
@@ -26,8 +37,9 @@ if __name__ == "__main__":
         SlabOceanModel_topography_file = SlabOceanModel_topography_file,
         SlabOceanModel_mask_file = SlabOceanModel_mask_file,
         SlabOceanModel_SST_clim_file = SlabOceanModel_SST_clim_file,
-        JCM_grid_specification = "JCM::T31",
-        SlabOceanModel_grid_specification = "JCM::T31",
+        JCM_grid_specification = JCM_grid_specification,
+        SlabOceanModel_grid_specification = SlabOceanModel_grid_specification,
+
         JCM_layers = 8,
         coupling_timestep = 86400.0,
         JCM_substeps = 48,
@@ -43,7 +55,7 @@ if __name__ == "__main__":
         init_cplstate = initial_state,
         start_time = 0.0,
         end_time = 86400.0 * 5,
-        jax_scan = False,
+        jax_scan = True,
     )
 
     # Convert output into xarray

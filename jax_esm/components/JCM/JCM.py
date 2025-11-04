@@ -38,6 +38,12 @@ from typing import Any
 
 from jcm.geometry import get_coords
 
+# This is a temporary solution to jcm's problem: some of the array's initiated
+# by jcm is int32, but it will change to float32 after step_function. This causes
+# jax.lax.scan to fail due to data type inconsistency.
+def asfloat64(tree):
+    return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float64), tree)
+
 @tree_math.struct
 @dataclass
 class JCMState(AbstractComponentState):
@@ -180,22 +186,17 @@ class JCM(Component):
             date       = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
         )
 
-        # This is a temporary solution to jcm's problem: some of the array's initiated
-        # by jcm is int32, but it will change to float32 after step_function. This causes
-        # jax.lax.scan to fail due to data type inconsistency.
-        def asfloat32(tree):
-            return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float32), tree)
         
         return JCMState(
-            prog     = asfloat32(model.initial_state),
-            phydata  = asfloat32(init_phydata),
+            prog     = asfloat64(model.initial_state),
+            phydata  = asfloat64(init_phydata),
             metadata = model._final_modal_state,
         )
 
     def generate_step_function(self, jitted: bool = True):
        
         def step_function(state, forcing, t):
-           
+          
             atm_boundary = self.model.boundaries.copy(
                 tsea = jnp.repeat(jnp.expand_dims(forcing.scalar.sea_surface_skin_temperature, axis=2), axis=2, repeats=365),
             )
@@ -210,8 +211,8 @@ class JCM(Component):
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
             return JCMState(
-                prog    = mean_leaf(predictions.dynamics, axis=0),
-                phydata = mean_leaf(predictions.physics, axis=0),
+                prog    = asfloat64(mean_leaf(predictions.dynamics, axis=0)),
+                phydata = asfloat64(mean_leaf(predictions.physics, axis=0)),
                 metadata = new_atm_modal_state,
             ), predictions
             
