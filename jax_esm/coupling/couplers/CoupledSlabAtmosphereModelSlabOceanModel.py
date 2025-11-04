@@ -21,49 +21,58 @@ class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
-        coupling_timestep: float = 86400.0, 
-        SlabAtmosphereModel_substeps = 24,
-        SlabOceanModel_substeps = 1,
-        SlabOceanModel_relaxation_time = 60 * 86400.0,
         start_datetime = datetime(year=2025, month=1, day=1),
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
+        atmosphere_grid_specification: str = "JCM::T31",
+        ocean_grid_specification: str = "JCM::T31",
+        coupling_timestep: float = 86400.0, 
+        atmosphere_substeps = 24,
+        ocean_substeps = 1,
+        ocean_relaxation_time = 60 * 86400.0,
+        atmosphere_topography_file: Optional[str] = None,
+        atmosphere_mask_file: Optional[str] = None,
+        ocean_topography_file: Optional[str] = None,
+        ocean_mask_file: Optional[str] = None,
     ):
  
-        domain = Domain.from_grid_specification(
-            grid_specification,
-            topography_file = topography_file,
-            mask_file = mask_file,
+        atmosphere_domain = Domain.from_grid_specification(
+            atmosphere_grid_specification,
+            topography_file = atmosphere_topography_file,
+            mask_file = atmosphere_mask_file,
         )
 
-        SlabAtmosphereModel_config = ComponentConfig(
-            name="SlabAtmosphereModel_config",
+        atmosphere_config = ComponentConfig(
+            name="atmosphere_config",
             timestep = coupling_timestep,
             start_dt = start_datetime,
-            substeps = SlabAtmosphereModel_substeps,
-            save_interval = coupling_timestep / SlabAtmosphereModel_substeps,
-            domain = domain,
+            substeps = atmosphere_substeps,
+            save_interval = coupling_timestep / atmosphere_substeps,
+            domain = atmosphere_domain,
             params=dict(
             ),
         )
 
-        SlabOceanModel_config = ComponentConfig(
-            name="SlabOceanModel_config",
+        ocean_domain = Domain.from_grid_specification(
+            ocean_grid_specification,
+            topography_file = ocean_topography_file,
+            mask_file = ocean_mask_file,
+        )
+
+        ocean_config = ComponentConfig(
+            name="ocean_config",
             timestep = coupling_timestep,
             start_dt = start_datetime,
-            substeps = SlabOceanModel_substeps,
-            save_interval = coupling_timestep / SlabOceanModel_substeps,
-            domain = domain,
+            substeps = ocean_substeps,
+            save_interval = coupling_timestep / ocean_substeps,
+            domain = ocean_domain,
             params=dict(
-                relaxation_time = SlabOceanModel_relaxation_time,
-                SST_clim_file = topography_file,
+                relaxation_time = ocean_relaxation_time,
+                SST_clim_file = ocean_topography_file,
             ),
         )
 
         components = dict(
-            atm = SlabAtmosphereModel(SlabAtmosphereModel_config),
-            ocn = SlabOceanModel(SlabOceanModel_config),
+            atm = SlabAtmosphereModel(atmosphere_config),
+            ocn = SlabOceanModel(ocean_config),
         )
      
         flux_exchangers = [ self.generate_atm_ocn_flux_exchanger(components), ]

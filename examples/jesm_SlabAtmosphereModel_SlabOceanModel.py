@@ -13,11 +13,12 @@ if __name__ == "__main__":
 
     # Creating model
     model = CoupledSlabAtmosphereModelSlabOceanModel(
-        grid_specification = "JCM::T31",
-        coupling_timestep = 86400.0,
-        SlabAtmosphereModel_substeps = 24,
-        SlabOceanModel_substeps = 1,
         start_datetime = datetime(year=2001, month=1, day=1),
+        atmosphere_grid_specification = "JCM::T31",
+        ocean_grid_specification = "JCM::T31",
+        coupling_timestep = 86400.0,
+        atmosphere_substeps = 24,
+        ocean_substeps = 1,
     )
     
     # Obtain initial condition
