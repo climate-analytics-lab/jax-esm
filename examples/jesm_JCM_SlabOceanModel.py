@@ -4,8 +4,13 @@ if __name__ == "__main__":
 
     from pathlib import Path       
     import jcm
-    topography_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
-    mask_file = topography_file
+    JCM_topography_file = (Path(jcm.__file__).parent / "data/bc/t30/clim/boundaries_daily.nc").resolve()
+    JCM_mask_file = topography_file
+
+    SlabOceanModel_topography_file = JCM_topography_file
+    SlabOceanModel_mask_file = JCM_mask_file
+
+
     from jax_esm.coupling.couplers.CoupledJCMSlabOceanModel import CoupledJCMSlabOceanModel
     from datetime import datetime
     
@@ -16,9 +21,13 @@ if __name__ == "__main__":
 
     # Creating model
     model = CoupledJCMSlabOceanModel(
-        topography_file = topography_file,
-        mask_file = mask_file,
-        grid_specification = "JCM::T31",
+        JCM_topography_file = JCM_topography_file,
+        JCM_mask_file = JCM_mask_file,
+        SlabOceanModel_topography_file = SlabOceanModel_topography_file,
+        SlabOceanModel_mask_file = SlabOceanModel_mask_file,
+        SlabOceanModel_SST_clim_file = SlabOceanModel_SST_clim_file,
+        JCM_grid_specification = "JCM::T31",
+        SlabOceanModel_grid_specification = "JCM::T31",
         JCM_layers = 8,
         coupling_timestep = 86400.0,
         JCM_substeps = 48,

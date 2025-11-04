@@ -20,15 +20,18 @@ class CoupledJCMSlabOceanModel(Coupler):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        JCM_grid_specification: str = "JCM::T31",
+        SlabOceanModel_grid_specification: str = "JCM::T31",
         JCM_layers: int = 8,
         coupling_timestep: float = 86400.0, 
         JCM_substeps = 24,
         SlabOceanModel_substeps = 1,
         SlabOceanModel_relaxation_time = 60 * 86400.0,
         start_datetime = datetime(year=2025, month=1, day=1),
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
+        JCM_topography_file: Optional[str] = None,
+        JCM_mask_file: Optional[str] = None,
+        SlabOceanModel_topography_file: Optional[str] = None,
+        SlabOceanModel_mask_file: Optional[str] = None,
     ):
  
         domain = Domain.from_grid_specification(
