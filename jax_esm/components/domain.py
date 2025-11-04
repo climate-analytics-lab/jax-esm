@@ -194,6 +194,25 @@ def get_jcm_domain(
         meta = meta,
     )
 
+def load_veros_mask(mask_file):
+    
+    ds = xr.open_dataset(mask_file, engine="netcdf4")
+    surface_grid_idx = int(jnp.argmax(ds["zt"].to_numpy()))
+    proxy = jnp.array(ds["temp"].isel(zt=surface_grid_idx, Time=0).to_numpy())
+
+    # land-sea mask
+    fmask = jnp.where(jnp.isnan(proxy), 1.0, 0.0)
+    
+    # Apply some sanity checks -- might want to check this shape against the model shape?
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), "Land-sea mask must be between 0 and 1"
+
+    # It is land (mask = 1) only if fmask == 1
+    # If there is a bit of water ( fmask < 1 ), then bmask = 0
+    bmask = jnp.where(fmask == 1.0, 1.0, 0.0)
+   
+    return fmask, bmask 
+
+
 def get_veros_domain(
     grid_name: str,
     mask_file: Optional[str],
