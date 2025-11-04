@@ -109,8 +109,8 @@ class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
                 
                 T_grid = domain.grids["T"] 
 
-                lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
-                lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
+                lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude"  )
+                lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude" )
 
                 return T_grid.axis_values[lat_dim_idx], T_grid.axis_values[lon_dim_idx] 
             
@@ -139,26 +139,34 @@ class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
                 fill_value = 0.0,
             )
             
+            atm_latlon = atm_domain.grid_specification.grid_type == "Veros"
+            ocn_latlon = ocn_domain.grid_specification.grid_type == "Veros"
+ 
         else:
             raise Exception("Currently only support grids in JCM and Veros.")
          
 
+        def conditional_transpose(a, flag):
+            return jnp.transpose(a) if flag else a
+ 
         def transformation(state_group, forcing_group):
 
             atm = state_group["atm"] 
             ocn = state_group["ocn"] 
           
-            SST_on_atmosphere_grid = jnp.transpose(interpolator_ocn_to_atm.apply_scalar(ocn.prog.T))
+            SST_on_atmosphere_grid = conditional_transpose( interpolator_ocn_to_atm.apply_scalar(ocn.prog.T), not atm_latlon )
  
             surface_air_density = 1.22 # kg / m^3
             drag_coefficient = 1e-3 # scalar
 
             # Simple bulk formula
             flux = surface_air_density * drag_coefficient * ((atm.prog.mean_zonal_wind_velocity ** 2 + atm.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (SST_on_atmosphere_grid - atm.prog.mean_air_temperature)
-
-
+            
             forcing_group["atm"].flux.total_heat_flux = flux
-            forcing_group["ocn"].flux.total_heat_flux = interpolator_atm_to_ocn.apply_scalar(jnp.transpose(flux))
+            forcing_group["ocn"].flux.total_heat_flux = conditional_transpose(
+                interpolator_atm_to_ocn.apply_scalar(conditional_transpose(flux, not atm_latlon )),
+                not ocn_latlon
+            )
 
             return forcing_group
 
