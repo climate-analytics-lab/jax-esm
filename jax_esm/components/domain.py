@@ -12,6 +12,10 @@ class GridSpecification:
     grid_type : str
     grid_name : str
 
+    def __str__(self):
+        return f"{self.grid_type:s}::{self.grid_name:s}"
+
+
 @dataclass
 class Grid:
     nodal_shape : Tuple[int]
@@ -145,6 +149,9 @@ def get_jcm_domain(
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
+
+    grid_name = f"T{horizontal_resolution:d}"
+
     try:
         horizontal_grid = getattr(dinosaur.spherical_harmonic.Grid, f"T{horizontal_resolution:d}")
     except AttributeError:
@@ -179,7 +186,7 @@ def get_jcm_domain(
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(
-        grid_specification = "JCM::T{horizontal_resolution:s}",
+        grid_specification = GridSpecification(grid_type = "JCM", grid_name = grid_name),
         grids = grids,
         fmask = fmask,
         bmask = bmask,
@@ -228,7 +235,7 @@ def get_veros_domain(
 
 
     return Domain(
-        grid_specification = f"Veros::{grid_name:s}",
+        grid_specification = GridSpecification(grid_type = "Veros", grid_name = grid_name),
         grids = grids,
         fmask = fmask,
         bmask = bmask,

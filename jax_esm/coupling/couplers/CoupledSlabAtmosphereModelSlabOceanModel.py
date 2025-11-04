@@ -13,7 +13,10 @@ from jax_esm.coupling.coupler import (
 )
 
 from jax_esm import constants as constants
+from jax_esm.utils.bilinear_interp import BilinearInterpolator
 from pathlib import Path
+
+import jax.numpy as jnp
 
 
 class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
@@ -92,19 +95,70 @@ class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
         components,
     ):
 
+        
+        atm_model = components["atm"]
+        ocn_model = components["ocn"]
+        
+        atm_domain = atm_model.config.domain
+        ocn_domain = ocn_model.config.domain
+
+
+        if atm_domain.grid_specification.grid_type in ["JCM", "Veros"] and ocn_domain.grid_specification.grid_type in ["JCM", "Veros"]:
+ 
+            def find_latitude_longitude(domain: Domain):
+                
+                T_grid = domain.grids["T"] 
+
+                lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
+                lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
+
+                return T_grid.axis_values[lat_dim_idx], T_grid.axis_values[lon_dim_idx] 
+            
+            atm_latitude, atm_longitude = find_latitude_longitude(atm_domain)
+            ocn_latitude, ocn_longitude = find_latitude_longitude(ocn_domain)
+  
+            interpolator_atm_to_ocn = BilinearInterpolator(
+                longitude_source_deg = atm_longitude,
+                latitude_source_deg = atm_latitude,
+                longitude_target_deg = ocn_longitude,
+                latitude_target_deg = ocn_latitude,
+                periodic_longitude = True,
+                #target_mask: Optional[Array] = None,
+                #source_mask: Optional[Array] = None,
+                fill_value = 0.0,
+            )
+ 
+            interpolator_ocn_to_atm = BilinearInterpolator(
+                longitude_target_deg = atm_longitude,
+                latitude_target_deg = atm_latitude,
+                longitude_source_deg = ocn_longitude,
+                latitude_source_deg = ocn_latitude,
+                periodic_longitude = True,
+                #target_mask: Optional[Array] = None,
+                #source_mask: Optional[Array] = None,
+                fill_value = 0.0,
+            )
+            
+        else:
+            raise Exception("Currently only support grids in JCM and Veros.")
+         
+
         def transformation(state_group, forcing_group):
 
             atm = state_group["atm"] 
             ocn = state_group["ocn"] 
-           
+          
+            SST_on_atmosphere_grid = jnp.transpose(interpolator_ocn_to_atm.apply_scalar(ocn.prog.T))
+ 
             surface_air_density = 1.22 # kg / m^3
             drag_coefficient = 1e-3 # scalar
 
             # Simple bulk formula
-            flux = surface_air_density * drag_coefficient * ((atm.prog.mean_zonal_wind_velocity ** 2 + atm.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (ocn.prog.T - atm.prog.mean_air_temperature)
+            flux = surface_air_density * drag_coefficient * ((atm.prog.mean_zonal_wind_velocity ** 2 + atm.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (SST_on_atmosphere_grid - atm.prog.mean_air_temperature)
+
 
             forcing_group["atm"].flux.total_heat_flux = flux
-            forcing_group["ocn"].flux.total_heat_flux = flux
+            forcing_group["ocn"].flux.total_heat_flux = interpolator_atm_to_ocn.apply_scalar(jnp.transpose(flux))
 
             return forcing_group
 
@@ -115,8 +169,14 @@ class CoupledSlabAtmosphereModelSlabOceanModel(Coupler):
                 ocn = components["ocn"].component_forcing_class,
             ),
             source_variables = dict(
-                atm = [ ("prog", "mean_air_temperature"), ("prog", "mean_zonal_wind_velocity"), ("prog", "mean_meridional_wind_velocity") ], 
-                ocn = [ ("prog", "T") ], 
+                atm = [
+                    ("prog", "mean_air_temperature"),
+                    ("prog", "mean_zonal_wind_velocity"),
+                    ("prog", "mean_meridional_wind_velocity"),
+                ], 
+                ocn = [
+                     ("prog", "T"),
+                ], 
             ),
             target_variables = dict(
                  atm = [ ("flux", "heat_flux") ], 

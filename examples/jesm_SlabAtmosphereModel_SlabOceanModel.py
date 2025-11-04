@@ -15,7 +15,7 @@ if __name__ == "__main__":
     model = CoupledSlabAtmosphereModelSlabOceanModel(
         start_datetime = datetime(year=2001, month=1, day=1),
         atmosphere_grid_specification = "JCM::T31",
-        ocean_grid_specification = "JCM::T31",
+        ocean_grid_specification = "Veros::4deg",
         coupling_timestep = 86400.0,
         atmosphere_substeps = 24,
         ocean_substeps = 1,
