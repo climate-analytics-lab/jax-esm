@@ -6,37 +6,80 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from jax_esm.components.base import BoundaryFluxes, ComponentState
-
+from jax_esm.components.base import (
+    Component,
+    AbstractComponentState,
+    AbstractComponentForcing,
+)
 
 class FluxExchanger:
-    """Manages flux exchange and boundary condition translation between components."""
+    
+    """Manages mapping variables between grids of target components with flux computation involved. """
     
     def __init__(
         self,
-        component_names: List[str],
-        flux_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
-        transformations: Optional[Dict[Tuple[str, str, str], Callable]] = None,
+        components             : Dict[ str, Component ],
+        forcing_classes        : Dict[ str, AbstractComponentForcing ],
+        source_variables       : Dict[ str, List[ Tuple[str, str] ] ],
+        target_variables       : Dict[ str, List[ Tuple[str, str] ] ],
+        transformation         : Optional[ Callable ] = None,
     ):
         """Initialize flux exchanger.
         
         Args:
-            component_names: List of component names
-            flux_mappings: Optional mapping of flux names between components.
-                          Keys are (source, target) component pairs,
-                          values are dicts mapping source flux names to target names.
-            transformations: Optional transformations for fluxes.
-                           Keys are (source, target, flux_name) tuples,
-                           values are transformation functions.
+            components : A dictionary of components
+            forcing_classes: A dictionary of output ComponentForcing classes.
+            source_variables: A dictionary of what variables will be involved.
+                               Keys are component names, values are variables involved.
+            target_variables: A dictionary of what forcing will be output.
+                              Keys are target component names, and value is a list of forcing names.
+            transformations: Optional transformations for fluxes. It takes the source variables and output target forcing.
+                             If there is only one source_component and one source variable, and the grids from source and target components have the same grid, then `None` can be given, and the variable will be directly transfer from source to target forcing
         """
-        self.component_names = component_names
-        self.flux_mappings = flux_mappings or {}
-        self.transformations = transformations or {}
+        source_component_names = list(source_variables.keys())
+        target_component_names = list(target_variables.keys())
+
+        _components = {}
+        _components.update({ component_name : components[component_name] for component_name in source_component_names})
+        _components.update({ component_name : components[component_name] for component_name in target_component_names})
+
+        self.components = _components
+        self.source_variables = source_variables
+        self.target_variables = target_variables
+        self.forcing_classes  = forcing_classes
+
+        # TODO: check if same destination flux being output twice
+
+        if transformation is None:
+            
+            single_source = len(source_component_names) == 1 and len(source_variables[source_component_names[0]]) == 1
+            
+            source_grid = self.components[source_component_names[0]].config.domain.grids["T"].nodal_shape
+            same_grid = all([source_grid == self.components[target_component_name].config.domain.grids["T"].nodal_shape for target_component_name in target_component_names])
+
+            if not (single_source and same_grid):
+                raise Exception("Error: transformations can only be None when it is single source and on the same grid.")
+             
+            only_source_component_name = source_component_names[0]
+            only_source_variable_name  = source_variables[only_source_component_name][0]
+            def default_transformation(
+                state_group   : Dict[str, AbstractComponentState],
+                forcing_group : Dict[str, AbstractComponentForcing],
+            ):
+                source_data = getattr( getattr( state_group[only_source_component_name], only_source_variable_name[0]) , only_source_variable_name[1] )
+                # send information to different components
+                for target_component_name, target_variable_names in target_variables.items():
+                    target_component_forcing = forcing_group[target_component_name]
+                    for target_variable_name in target_variable_names:
+                        field_group = getattr( target_component_forcing, target_variable_name[0] )
+                        setattr( field_group, target_variable_name[1], source_data )
+                return forcing_group
+
+        self.transformation = transformation or default_transformation
+
         
-        # Build connectivity graph
-        self.connections = self._build_connections()
-    
     def _build_connections(self) -> Dict[str, List[str]]:
+        
         """Build connectivity graph between components."""
         connections = {name: [] for name in self.component_names}
         
@@ -46,10 +89,17 @@ class FluxExchanger:
         
         return connections
     
+    
+    def generate_empty_forcing_group(self):
+        return { component_name : forcing_class.zeros() for component_name, forcing_class in self.forcing_classes.items() }
+
+
+ 
     def exchange_fluxes(
         self,
-        component_fluxes: Dict[str, BoundaryFluxes],
-    ) -> Dict[str, BoundaryFluxes]:
+        component_fluxes, #: Dict[str, BoundaryFluxes],
+    ):# -> Dict[str, BoundaryFluxes]:
+
         """Exchange fluxes between components.
         
         Args:
@@ -117,9 +167,9 @@ class FluxExchanger:
     
     def couple_components(
         self,
-        states: Dict[str, ComponentState],
-        output_fluxes: Dict[str, BoundaryFluxes],
-    ) -> Dict[str, BoundaryFluxes]:
+        states: Dict[str, AbstractComponentState],
+        output_fluxes,#: Dict[str, BoundaryFluxes],
+    ):# -> Dict[str, BoundaryFluxes]:
         """Couple components by exchanging fluxes with conservation checks.
         
         Args:
@@ -139,8 +189,8 @@ class FluxExchanger:
     
     def _check_conservation(
         self,
-        output_fluxes: Dict[str, BoundaryFluxes],
-        input_fluxes: Dict[str, BoundaryFluxes],
+        output_fluxes,#: Dict[str, BoundaryFluxes],
+        input_fluxes,#: Dict[str, BoundaryFluxes],
     ) -> None:
         """Check conservation of fluxes (placeholder for conservation checks)."""
         # This could check that total heat/moisture/momentum is conserved
