@@ -10,9 +10,12 @@ from jax import Array
 import tree_math
 from dataclasses import make_dataclass
 
-import pandas as pd
+from datetime import datetime
 
 class AbstractFieldGroup:
+    pass
+
+class AbstractComponentForcing:
     pass
 
 class AbstractComponentState:
@@ -22,6 +25,7 @@ class AbstractComponentState:
 def create_field_group_class(
     cls_name: str,
     fields: Tuple,
+    base_cls = AbstractFieldGroup,
 ):
     
     """
@@ -43,7 +47,7 @@ def create_field_group_class(
     cls = make_dataclass(
         cls_name = cls_name,
         fields = dataclass_fields,
-        bases = (AbstractFieldGroup,),
+        bases = (base_cls,),
     )
 
     
@@ -148,18 +152,80 @@ def create_component_state_class(
 
     return new_cls
 
+
+
+def create_component_forcing_class(
+    flux_cls       : type,
+    scalar_cls     : type,
+    cls_name       : str = "",
+):
+    """
+    A tool function that creates a ComponentState class dynamically with given dimension.
+    The created class will have the following methods: `zeros`, `ones`, and `copy`.
+
+    Args:
+
+        flux      : The flux class.
+        scalar    : The scalar class.
+        cls_name  : Name of the class.
+
+    Returns:
+
+        The resulting class.
+
+    """
+
+    new_cls = make_dataclass(
+        f"{cls_name:s}",
+        [
+            ("flux",   flux_cls),
+            ("scalar", scalar_cls),
+        ],
+        bases=(AbstractComponentForcing,),
+    )
+
+    @classmethod
+    def zeros(_cls):
+        return _cls(
+            flux = flux_cls.zeros(),
+            scalar = scalar_cls.zeros(),
+        )
+
+    @classmethod
+    def ones(_cls):
+        return _cls(
+            flux = flux_cls.ones(),
+            scalar = scalar_cls.ones(),
+        )
+
+
+    def copy(self, flux_kwargs = {}, scalar_kwargs = {}):
+        o = new_cls(
+            flux   = self.flux.copy(**flux_kwargs),
+            scalar = self.scalar.copy(**scalar_kwargs),
+        )
+
+        return o
+
+    new_cls.zeros = zeros
+    new_cls.ones = ones
+    new_cls.copy = copy
+
+    new_cls = tree_math.struct(new_cls)
+
+    return new_cls
+
+
 @dataclass
 class ComponentConfig:
     """Configuration for a component."""
     name: str
-    start_dt: pd.Timestamp
+    start_dt: datetime
     timestep: float  # seconds
     substeps: int           # count
     save_interval: float    # seconds
-    grid: Dict[str, Any]  # Grid specification
+    domain: Any             # Coordinate specification
     params: Dict[str, Any]  # Component-specific parameters
-
-
 
 class Component(ABC):
     """Abstract base class for Earth system components."""
@@ -183,7 +249,7 @@ class Component(ABC):
         pass
     
     @abstractmethod
-    def gen_step_fn(
+    def generate_step_function(
         self,
     ) -> callable:
         """Advance component state by one timestep.
