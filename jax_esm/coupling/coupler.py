@@ -7,10 +7,12 @@ import jax
 import jax.numpy as jnp
 
 from jax_esm.components.base import AbstractComponentState, Component
+from jax_esm.coupling.flux_exchange import FluxExchanger
+
 from dataclasses import dataclass, make_dataclass
 import tree_math
 
-from jax_esm.utils.bulk_op import unwrap_leading_dims
+from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
@@ -31,7 +33,7 @@ def adhoc_scan(f, init, xs=None, length=None):
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
         
-    return carry, ys
+    return carry, stack_objects(ys)
     
 
 @dataclass
@@ -39,25 +41,29 @@ class CouplerConfig:
     """Configuration for coupler."""
     timestep: float  # seconds
 
-class AbstractCoupledState:
+class CoupledState:
+    ...
+
+class CoupledForcing:
     ...
 
 
 class Coupler:
     """Main coupler for Earth system components."""
-    
+
     def __init__(
         self,
-        components: Dict[str, Component],
         config: CouplerConfig,
+        components: Dict[str, Component],
+        flux_exchangers: Optional[ List[ FluxExchanger ] ] = [],
     ):
         """Initialize the coupler.
         
         Args:
             components: Dictionary of components to couple
-            coupling_timestep: Coupling time step in seconds
-            flux_mappings: Optional custom flux mappings between components
-            flux_transformations: Optional flux transformation functions
+            flux_exchangers: A list of flux_exchangers.
+            config: CouplerConfig object
+
         """
         self.components = components
         self.component_names = list(components.keys())
@@ -69,11 +75,18 @@ class Coupler:
         }
 
         self.coupled_state_class = tree_math.struct(make_dataclass(
-            cls_name = "CoupledState",
+            cls_name = "JESMCoupledState",
             fields = [ (component_name, component.component_state_class) for component_name, component in components.items() ],
-            bases = (AbstractCoupledState,),
+            bases = (CoupledState,),
         ))
 
+        self.coupled_forcing_class = tree_math.struct(make_dataclass(
+            cls_name = "JESMCoupledForcing",
+            fields = [ (component_name, component.component_forcing_class) for component_name, component in components.items() ],
+            bases = (CoupledForcing,),
+        ))
+
+        self.flux_exchangers = flux_exchangers
 
         
     def initialize(
@@ -94,8 +107,9 @@ class Coupler:
         })
    
 
-    def gen_step_fn(
+    def generate_step_function(
         self,
+        jitted: bool = True,
     ) -> callable:
 
         """Advance coupled system by one coupling timestep.
@@ -107,21 +121,23 @@ class Coupler:
         """
 
         # Get step functions for the three components
-        atm_step_fn = self.components["atm"].gen_step_fn()
-        flx_step_fn = self.components["flx"].gen_step_fn()
-        ocn_step_fn = self.components["ocn"].gen_step_fn()
+        step_functions = { component_name : component.generate_step_function(jitted = jitted) for component_name, component in self.components.items() }
 
-        @jax.jit
-        def step_fn(cplstate, t):
+        def step_function(cpl_state, t):
+            
+
+            # Compute forcing
+            forcing_group = { component_name : component.component_forcing_class.zeros() for component_name, component in self.components.items() }
+            for flux_exchanger in self.flux_exchangers:
+                
+                # Only certain information is collected
+                state_group = { component_name : getattr(cpl_state, component_name) for component_name, _ in flux_exchanger.components.items() }
+                forcing_group = flux_exchanger.transformation(state_group, forcing_group)
             
             # Call forward functions and unpack results directly into dictionaries
             results = {
-                name: step_fn(cplstate, t) 
-                for name, step_fn in [
-                    ("atm", atm_step_fn),
-                    ("flx", flx_step_fn), 
-                    ("ocn", ocn_step_fn)
-                ]
+                component_name: step_function(getattr(cpl_state, component_name), forcing_group[component_name], t) 
+                for component_name, step_function in step_functions.items()
             }
             
             new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
@@ -129,7 +145,7 @@ class Coupler:
 
             return new_cplstate, cpl_predictions
 
-        return step_fn
+        return jax.jit(step_function) if jitted else step_function
 
 
     def run(
@@ -137,7 +153,6 @@ class Coupler:
         init_cplstate : Dict[str, AbstractComponentState],
         start_time    : float,
         end_time      : float,
-        timestep      : float,
         jax_scan: bool = True,
         save_interval_steps = 1,
     ):
@@ -147,6 +162,7 @@ class Coupler:
         _start_time = time.time()
         scan_func = jax.lax.scan if jax_scan else adhoc_scan
 
+        timestep = self.config.timestep
         total_time = end_time - start_time
         total_steps = int(total_time / timestep)
         
@@ -161,9 +177,9 @@ class Coupler:
         # error during post-processing. Therefore for now, I 
         # fall back to generate forward function every time.
         #
-        cpl_step_fn = coupler.gen_step_fn()
+        cpl_step_function = coupler.generate_step_function(jitted=jax_scan)
         final_state, predictions = scan_func(
-            cpl_step_fn,
+            cpl_step_function,
             init_cplstate,
             xs=jnp.arange(total_steps),
         )
