@@ -10,7 +10,7 @@ if __name__ == "__main__":
     JCM_topography_file = (Path(jcm.__file__).parent / "data/bc/boundaries_daily_t31.nc").resolve()
     JCM_mask_file = JCM_topography_file
 
-    SlabOceanModel_grid_specification = "Veros::4deg"
+    SlabOceanModel_grid_specification = "JCM::T31"
     SlabOceanModel_topography_file = None
 
     if SlabOceanModel_grid_specification[:5] == "JCM::": 
