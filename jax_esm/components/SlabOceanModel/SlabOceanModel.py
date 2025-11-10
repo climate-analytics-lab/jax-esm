@@ -228,15 +228,20 @@ class SlabOceanModel(Component):
                 
                 new_Tanom = state.prog.T - snapshot_SST_clim_beg
                 
-            new_sim_time = state.prog.sim_time
-            for step in range(self.substeps):
-                new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
-                    forcing.flux.total_heat_flux
-                )))
-                new_sim_time += self.subtimestep
+            def sub_step_function(T, sim_time):
+                return self.time_factor * ( T + self.cd_factor * ( - (
+                     forcing.flux.total_heat_flux
+                ))), None
+
+            sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
+            new_sim_time = state.prog.sim_time + self.timestep
+            new_Tanom, _ = jax.lax.scan(
+                sub_step_function,
+                new_Tanom,
+                xs = sub_sim_times,    
+            )
             
             new_T = new_Tanom 
-            
             if self.has_climatology:
                 new_T += snapshot_SST_clim_beg + SST_clim_trend * self.config.timestep
                 

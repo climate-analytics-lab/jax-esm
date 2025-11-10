@@ -181,14 +181,16 @@ class SlabAtmosphereModel(Component):
 
         def step_function(state, forcing, t):
             
-            new_MAT = state.prog.mean_air_temperature
-                
-            new_sim_time = state.prog.sim_time
-            for step in range(self.substeps):
-                new_MAT = new_MAT + self.cd_factor * (
-                    forcing.flux.total_heat_flux
-                )
-                new_sim_time += self.subtimestep
+            def sub_step_function(T, sim_time):
+                return T + self.cd_factor * forcing.flux.total_heat_flux, None
+
+            sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
+            new_sim_time = state.prog.sim_time + self.timestep
+            new_MAT, _ = jax.lax.scan(
+                sub_step_function,
+                state.prog.mean_air_temperature,
+                xs = sub_sim_times,    
+            )
             
             new_state = state.copy(
                 prog_kwargs = dict(
