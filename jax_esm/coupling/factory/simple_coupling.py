@@ -1,9 +1,12 @@
-from datetime import datetime
+import jax_datetime as jdt
 from typing import List, Optional, Dict 
 from jax_esm.components.domain import Domain
 from jax_esm.components.base import Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 from jax_esm.coupling.coupler import Coupler
+
+from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
+from jax_esm.components.JCM import JCM
 
 import jcm
 from pathlib import Path
@@ -15,7 +18,7 @@ def couple_atm_ocn(
     atm : Component,
     ocn : Component,
     coupling_timestep: float = 86400.0, 
-    start_datetime = datetime(year=2025, month=1, day=1),
+    start_datetime : jdt.Datetime = jdt.to_datetime("2025-01-01"),
 ):
 
     components = dict(
@@ -23,10 +26,18 @@ def couple_atm_ocn(
         ocn = ocn,
     )
 
+    surface_flux_name = None
+    if isinstance(atm, JCM):
+        surface_flux_name = "phydata.surface_flux.hfluxn"
+    elif isinstance(atm, SlabAtmosphereModel):
+        surface_flux_name = "phydata.hfluxn"
+    else:
+        raise ValueError("Currently only deal with JCM and SlabAtmosphereModel.")
+
     interpolators = generate_atm_ocn_interpolators(dict(atm=atm.domain, ocn=ocn.domain))
     forcing_mapper = ForcingMapper(components=components)
     forcing_mapper.add_forcing_mapping("atm", "ocn", {
-        "phydata.total_heat_flux" : "flux.total_heat_flux", 
+        surface_flux_name : "flux.total_heat_flux", 
     })
 
     forcing_mapper.add_forcing_mapping("ocn", "atm", {
@@ -34,7 +45,7 @@ def couple_atm_ocn(
     })
 
     forcing_mapper.add_transformation("ocn", "atm", "prog.T", "scalar.sea_surface_temperature", interpolators["ocn_to_atm"])
-    forcing_mapper.add_transformation("atm", "ocn", "phydata.total_heat_flux", "flux.total_heat_flux", interpolators["atm_to_ocn"])
+    forcing_mapper.add_transformation("atm", "ocn", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_ocn_hfluxn"])
 
     return Coupler(
         components = components,
@@ -45,6 +56,7 @@ def couple_atm_ocn(
 
 def generate_atm_ocn_interpolators(
     domain : Dict[str, Domain],
+    atm_is_JCM : bool = False,
 ):
     interpolators = {}
 
@@ -74,8 +86,8 @@ def generate_atm_ocn_interpolators(
             longitude_target_deg = ocn_longitude,
             latitude_target_deg = ocn_latitude,
             periodic_longitude = True,
-            #target_mask: Optional[Array] = None,
-            #source_mask: Optional[Array] = None,
+            target_mask = None,
+            source_mask = None,
             fill_value = 0.0,
         )
 
@@ -85,15 +97,16 @@ def generate_atm_ocn_interpolators(
             longitude_source_deg = ocn_longitude,
             latitude_source_deg = ocn_latitude,
             periodic_longitude = True,
-            #target_mask: Optional[Array] = None,
-            #source_mask: Optional[Array] = None,
+            target_mask = None,
+            source_mask = None,
             fill_value = 0.0,
         )
         
         def conditional_transpose(a, flag):
             return jnp.transpose(a) if flag else a
  
-        def atm_to_ocn(in_array):
+        def atm_to_ocn_hfluxn(in_array):
+            in_array = in_array.sum(axis=-1)
             return conditional_transpose(
                 interpolator_atm_to_ocn.apply_scalar(conditional_transpose(in_array, not atm_latlon)),
                 not ocn_latlon
@@ -105,7 +118,7 @@ def generate_atm_ocn_interpolators(
                 not atm_latlon
             )
         interpolators["ocn_to_atm"] = ocn_to_atm
-        interpolators["atm_to_ocn"] = atm_to_ocn
+        interpolators["atm_to_ocn_hfluxn"] = atm_to_ocn_hfluxn
     else:
         raise Exception("Currently only support grids in JCM and Veros.")
 
