@@ -16,7 +16,7 @@ import numpy as np
 
 from jax_esm.components.base import (
     Component,
-    ComponentConfig,
+    CoupledComponentConfig,
     create_component_state_class,
     create_component_forcing_class,
     create_field_group_class,
@@ -34,7 +34,6 @@ class SlabAtmosphereModel(Component):
     def generate_default_configuration(
         cls,
         grid_specification:str="Veros::4deg",
-        dict_form = False,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
     ):
@@ -55,11 +54,7 @@ class SlabAtmosphereModel(Component):
             ),
         )
         
-        if dict_form:
-            return config_dict
-        else:
-            return ComponentConfig(**config_dict)
-
+        return config_dict
 
     @classmethod
     def generate_default_model(
@@ -70,7 +65,7 @@ class SlabAtmosphereModel(Component):
     ):
 
         return SlabAtmosphereModel(
-            SlabAtmosphereModel.generate_default_configuration(
+            **SlabAtmosphereModel.generate_default_configuration(
                 grid_specification=grid_specification,
                 topography_file = topography_file,
                 mask_file = mask_file,
@@ -78,21 +73,27 @@ class SlabAtmosphereModel(Component):
 
     def __init__(
         self,
-        config: ComponentConfig,
+        start_dt : datetime,
+        timestep : float,
+        substeps : int,
+        save_interval : float,
+        domain : Domain,
     ):
         """Initialize slab ocean model."""
         
-        super().__init__(config)
+        super().__init__(CoupledComponentConfig(name="SlabOceanModel", timestep=timestep))
 
         self.total_air_column_mass = constants.atmosphere_column_mass
         self.heat_capacity_under_constant_pressure = constants.atmosphere_specific_heat_capacity_under_constant_pressure
 
-        self.start_dt = config.start_dt
-        self.timestep = config.timestep
-        self.substeps = config.substeps
-        self.subtimestep = self.timestep / self.substeps
+        self.start_dt = start_dt
+        self.timestep = timestep
+        self.substeps = substeps
+        self.subtimestep = timestep / substeps
+        self.save_interval = save_interval
+        self.domain = domain
 
-        D2_nodal_shape = config.domain.grids["T"].nodal_shape
+        D2_nodal_shape = domain.grids["T"].nodal_shape
         
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
@@ -134,9 +135,8 @@ class SlabAtmosphereModel(Component):
         # Initialize slab ocean model boundary conditions
         # =========================================================================
        
-        T_grid = self.config.domain.grids["T"] 
+        T_grid = self.domain.grids["T"] 
         D2_nodal_shape = T_grid.nodal_shape
-        config = self.config
 
         lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
         lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
@@ -230,7 +230,7 @@ class SlabAtmosphereModel(Component):
         prog      = predictions["prog"]
         phydata   = predictions["phydata"]
         forcing   = predictions["forcing"]
-        T_grid_axis_names = self.config.domain.grids["T"].axis_names
+        T_grid_axis_names = self.domain.grids["T"].axis_names
         T_grid_dims = ("time",) + T_grid_axis_names
 
 

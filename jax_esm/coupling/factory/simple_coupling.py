@@ -23,7 +23,7 @@ def couple_atm_ocn(
         ocn = ocn,
     )
 
-    interpolators = generate_atm_ocn_interpolators(dict(atm=atm.config.domain, ocn=ocn.config.domain))
+    interpolators = generate_atm_ocn_interpolators(dict(atm=atm.domain, ocn=ocn.domain))
     forcing_mapper = ForcingMapper(components=components)
     forcing_mapper.add_forcing_mapping("atm", "ocn", {
         "phydata.total_heat_flux" : "flux.total_heat_flux", 

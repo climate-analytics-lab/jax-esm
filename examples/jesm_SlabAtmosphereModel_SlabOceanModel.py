@@ -5,7 +5,7 @@ if __name__ == "__main__":
     from pathlib import Path       
     from jax_esm.components.SlabOceanModel import SlabOceanModel
     from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
-    from jax_esm.components.base import ComponentConfig
+    from jax_esm.components.base import CoupledComponentConfig
     from jax_esm.components.domain import Domain
     from datetime import datetime
 
@@ -28,8 +28,7 @@ if __name__ == "__main__":
 
     # Creating model
     components = dict(
-        atm = SlabAtmosphereModel(ComponentConfig(
-            name="atmosphere",
+        atm = SlabAtmosphereModel(
             timestep = coupling_timestep,
             start_dt = start_datetime,
             substeps = 24,
@@ -39,10 +38,8 @@ if __name__ == "__main__":
                 topography_file = atmosphere_topography_file,
                 mask_file = atmosphere_mask_file,
             ),
-            params = dict(),
-        )),
-        ocn = SlabOceanModel(ComponentConfig(
-            name="ocean",
+        ),
+        ocn = SlabOceanModel(
             timestep = coupling_timestep,
             start_dt = start_datetime,
             substeps = 1,
@@ -52,11 +49,9 @@ if __name__ == "__main__":
                 topography_file = ocean_topography_file,
                 mask_file = ocean_mask_file,
             ),
-            params=dict(
-                relaxation_time = jnp.inf,
-                SST_clim_file = ocean_topography_file,
-            ),
-        )),
+            relaxation_time = jnp.inf,
+            SST_clim_file = ocean_topography_file,
+        ),
     )
 
     model = couple(**components) 

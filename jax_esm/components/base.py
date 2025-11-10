@@ -217,24 +217,17 @@ def create_component_forcing_class(
 
 
 @dataclass
-class ComponentConfig:
+class CoupledComponentConfig:
     """Configuration for a component."""
     name: str
-    start_dt: datetime
-    timestep: float  # seconds
-    substeps: int           # count
-    save_interval: float    # seconds
-    domain: Any             # Coordinate specification
-    params: Dict[str, Any]  # Component-specific parameters
+    timestep: float    # seconds
 
 class Component(ABC):
     """Abstract base class for Earth system components."""
     
-    def __init__(self, config: ComponentConfig):
+    def __init__(self, config: CoupledComponentConfig):
         """Initialize component with configuration."""
         self.config = config
-        self.name = config.name
-        self.timestep = config.timestep
         
     @abstractmethod
     def initialize(self) -> ComponentState:
