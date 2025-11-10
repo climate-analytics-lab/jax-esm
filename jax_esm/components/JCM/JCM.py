@@ -3,12 +3,11 @@
 from typing import Dict, Tuple
 from dataclasses import dataclass
 
+import jax_datetime as jdt
 import jcm
-from jcm.model import Model, get_coords
-from jcm.boundaries import boundaries_from_file
-from jcm.date import DateData, Timestamp, Timedelta
-from datetime import datetime
-from jcm.boundaries import BoundaryData, default_boundaries
+from jcm.model import Model as RawJCMModel
+from jcm.model import get_coords
+from jcm.forcing import ForcingData, default_forcing
 
 import jax
 import jax.numpy as jnp
@@ -16,8 +15,8 @@ from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.base import (
     Component,
-    ComponentConfig,
-    AbstractComponentState,
+    CoupledComponentConfig,
+    ComponentState,
     create_component_forcing_class,
     create_field_group_class,
 )
@@ -31,7 +30,7 @@ import dinosaur
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import stack_objects, mean_leaf
-from jax_esm.components.domain import Domain
+from jax_esm.components.domain import Domain 
 
 import tree_math
 from typing import Any
@@ -46,7 +45,7 @@ def asfloat64(tree):
 
 @tree_math.struct
 @dataclass
-class JCMState(AbstractComponentState):
+class JCMState(ComponentState):
     prog    : PhysicsState
     phydata : Any
     metadata    : primitive_equations_states
@@ -56,108 +55,53 @@ class JCM(Component):
     """
     This is a class wrapping JCM.
     """
-
-    @classmethod
-    def generate_default_configuration(
-        cls,
-        grid_specification:str="JCM::T31",
-        layers:int = 8,
-        dict_form = False,
-        topography_file=None,
-        mask_file=None,
-    ):
-
-        domain = Domain.from_grid_specification(
-            grid_specification,
-            topography_file = topography_file,
-            mask_file = mask_file,
-        )
-
-        domain.meta["layers"] = layers
-
-        config_dict = dict(
-            name="default_config",
-            timestep = (timestep := 86400.0),
-            start_dt = datetime(year=2025, month=1, day=1),
-            substeps = (substeps := 2),
-            save_interval = timestep / substeps,
-            domain = domain,
-            params=dict(
-                
-            ),
-        )
-
-        if dict_form:
-            return config_dict
-        else:
-            return ComponentConfig(**config_dict)
-        
-        
-    @classmethod
-    def generate_default_model(cls, grid_specification:str="JCM::T31", layers:int=8, topography_file=None, mask_file=None):
-
-        return cls(
-            cls.generate_default_configuration(
-                grid_specification=grid_specification,
-                layers = layers,
-                topography_file=topography_file,
-            )
-        )
-
-
-    
     def __init__(
         self,
-        config: ComponentConfig,
+        model : RawJCMModel,
+        save_interval: float = 86400.0,
     ):
         """
         config: Configuration of JCM.
         """
-
-        super().__init__(config)
-
-
-        self.component_state_class = JCMState
-
-        self.coupling_timestep = config.timestep  # in secs
-        self.save_interval = config.save_interval # in secs
-        self.substeps = config.substeps
-        config_jcm = dict(
-            time_step = self.coupling_timestep / self.substeps / 60.0, # in minutes
-            orography = self.config.domain.topography,
-            spectral_truncation = self.config.domain.meta["horizontal_resolution"],
-            layers = self.config.domain.meta["layers"],
-        )
-
         
-        self.model = Model(**config_jcm) 
+        self.model = model
+        print("Model dt = ", model.dt)
+        super().__init__(CoupledComponentConfig(
+            name = "JCM",
+            timestep = model.dt,
+        ))
+        
+        self.domain = Domain.from_grid_specification(f"JCM::T{model.coords.horizontal.total_wavenumbers-2}") 
+        self.save_interval = save_interval
+       
+        if self.save_interval > self.model.dt:
+            raise ValueError("Error: `save_interval` is larger than model timestep. ")
 
+ 
         D3_nodal_shape = self.model.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
  
+        self.component_state_class = JCMState
         self.component_forcing_class = create_component_forcing_class(
             cls_name = "forcing",
             flux_cls = create_field_group_class(
                 cls_name = "flux",
                 fields = [
-                    ("sensible_heat_flux", float, D2_nodal_shape),
-                    ("latent_heat_flux", float, D2_nodal_shape),
                 ],
             ),
             scalar_cls = create_field_group_class(
                 cls_name = "scalar",
                 fields = [
-                    ("sea_surface_skin_temperature", float, D2_nodal_shape),
+                    ("sea_surface_temperature", float, D2_nodal_shape),
                 ],
             ),
         )
-       
     
     def initialize(
         self,
         initial_state: PhysicsState | primitive_equations.State = None,
-        boundaries: BoundaryData = None,
-        start_date: Timestamp = Timestamp.from_datetime(datetime(2000, 1, 1)),
+        forcing: ForcingData = None,
+        start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
     ):
 
         model = self.model
@@ -175,17 +119,16 @@ class JCM(Component):
                 model.initial_state = dynamics_state_to_physics_state(model._final_modal_state, model.primitive)
             
         model.start_date = start_date
-        model.boundaries = boundaries or default_boundaries(self.model.coords.horizontal)
+        model.forcing = forcing or default_forcing(self.model.coords.horizontal)
 
         # The following code is a solution to have an initial value for phydata by stepping the model one time.
         # The returned phydata is then used for the initial value.
         _, init_phydata = self.model.physics.compute_tendencies(
             state      = model.initial_state,
-            boundaries = model.boundaries,
+            forcing = model.forcing,
             geometry   = model.geometry,
             date       = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
         )
-
         
         return JCMState(
             prog     = asfloat64(model.initial_state),
@@ -197,17 +140,16 @@ class JCM(Component):
        
         def step_function(state, forcing, t):
           
-            atm_boundary = self.model.boundaries.copy(
-                tsea = jnp.repeat(jnp.expand_dims(forcing.scalar.sea_surface_skin_temperature, axis=2), axis=2, repeats=365),
+            atm_forcing = self.model.forcing.copy(
+                sea_surface_temperature = forcing.scalar.sea_surface_temperature,
             )
-                
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state = state.metadata,
                 save_interval = self.save_interval / 86400.0, # in days
-                total_time = self.coupling_timestep / 86400.0, # in days
-                boundaries = atm_boundary,
+                total_time = self.config.timestep  / 86400.0, # in days
+                forcing = atm_forcing,
             )
-
+            
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
             return JCMState(
