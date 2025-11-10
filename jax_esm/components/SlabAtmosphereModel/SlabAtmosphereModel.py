@@ -22,9 +22,7 @@ from jax_esm.components.base import (
     create_field_group_class,
 )
 
-def generate_idealized_mean_air_temperature(llat, llon):
-    return jnp.where(jnp.abs(llat) < jnp.pi/3, 27*jnp.cos(3*llat/2)**2, 0) + 273.15
-
+from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
 class SlabAtmosphereModel(Component):
     
@@ -160,7 +158,7 @@ class SlabAtmosphereModel(Component):
             axis = lat_dim_idx,
         )
 
-        init_mean_air_temperature = generate_idealized_mean_air_temperature(self.llat_rad, self.llon_rad)
+        init_mean_air_temperature = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15
         init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
         init_mean_meridional_wind_velocity = jnp.zeros_like(self.llat_rad)
 

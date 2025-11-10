@@ -22,11 +22,7 @@ from jax_esm.components.base import (
     create_field_group_class,
 )
 
-
-# Copied from jax-gcm  
-def generate_idealized_sst(llat, llon):
-    return jnp.where(jnp.abs(llat) < jnp.pi/3, 27*jnp.cos(3*llat/2)**2, 0) + 273.15
-
+from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
 class SlabOceanModel(Component):
     
@@ -181,7 +177,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = generate_idealized_sst(self.llat_rad, self.llon_rad)
+            init_T = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)
