@@ -203,8 +203,9 @@ class SlabOceanModel(Component):
     ):
 
         # Find day of the year to locate climatology
-        #ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
-        #start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
+        ref_year = self.start_dt.to_pydatetime().year
+        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
+        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / jdt.to_timedelta(1, "day") ))
         
         def step_function(state, forcing, t):
             new_Tanom = state.prog.T
@@ -212,7 +213,7 @@ class SlabOceanModel(Component):
                 
                 days_after_start = jnp.floor( state.prog.sim_time / 86400.0 ).astype(jnp.int32)
                 
-                clim_day_beg = 0#start_dt_offset + days_after_start
+                clim_day_beg = start_dt_offset + days_after_start
                 clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
                 
                 ocn_idx = self.domain.bmask == 0
