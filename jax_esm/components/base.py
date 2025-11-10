@@ -15,10 +15,10 @@ from datetime import datetime
 class AbstractFieldGroup:
     pass
 
-class AbstractComponentForcing:
+class ComponentForcing:
     pass
 
-class AbstractComponentState:
+class ComponentState:
     prog     : AbstractFieldGroup | Any
     phydata  : AbstractFieldGroup | Any
 
@@ -118,7 +118,7 @@ def create_component_state_class(
             ("prog",     prog_cls),
             ("phydata",  phydata_cls),
         ],
-        bases=(AbstractComponentState,),
+        bases=(ComponentState,),
     )
 
     @classmethod
@@ -181,7 +181,7 @@ def create_component_forcing_class(
             ("flux",   flux_cls),
             ("scalar", scalar_cls),
         ],
-        bases=(AbstractComponentForcing,),
+        bases=(ComponentForcing,),
     )
 
     @classmethod
@@ -237,7 +237,7 @@ class Component(ABC):
         self.timestep = config.timestep
         
     @abstractmethod
-    def initialize(self) -> AbstractComponentState:
+    def initialize(self) -> ComponentState:
         """Initialize component state.
         
         Args:
@@ -261,7 +261,7 @@ class Component(ABC):
         """
         pass
     
-    def get_boundary_fields(self, state: AbstractComponentState) -> Dict[str, Array]:
+    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
         """Extract boundary fields needed by other components.
         
         Args:

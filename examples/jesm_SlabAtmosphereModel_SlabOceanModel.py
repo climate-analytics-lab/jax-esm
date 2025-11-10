@@ -3,27 +3,63 @@
 if __name__ == "__main__":
 
     from pathlib import Path       
-    from jax_esm.coupling.couplers.CoupledSlabAtmosphereModelSlabOceanModel import CoupledSlabAtmosphereModelSlabOceanModel
+    from jax_esm.components.SlabOceanModel import SlabOceanModel
+    from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
+    from jax_esm.components.base import ComponentConfig
+    from jax_esm.components.domain import Domain
     from datetime import datetime
+
+    from jax_esm.coupling.coupled_model_generator.coupled_SlabAtmosphereModel_SlabOceanModel import couple_SlabAtmosphereModel_and_SlabOceanModel
     
     output_dir = Path("output").resolve()
 
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True) 
 
+    coupling_timestep = 86400.0
+    start_datetime = datetime(2025, 1, 1)
+
+    atmosphere_topography_file = None
+    atmosphere_mask_file = None
+    ocean_topography_file = None
+    ocean_mask_file = None
+
     # Creating model
-    model = CoupledSlabAtmosphereModelSlabOceanModel(
-        start_datetime = datetime(year=2001, month=1, day=1),
-        atmosphere_grid_specification = "JCM::T31",
-        ocean_grid_specification = "Veros::4deg",
-        coupling_timestep = 86400.0,
-        atmosphere_substeps = 24,
-        ocean_substeps = 1,
+    components = dict(
+        atm = SlabAtmosphereModel(ComponentConfig(
+            name="atmosphere",
+            timestep = coupling_timestep,
+            start_dt = start_datetime,
+            substeps = 24,
+            save_interval = coupling_timestep,
+            domain = Domain.from_grid_specification(
+                "JCM::T31",
+                topography_file = atmosphere_topography_file,
+                mask_file = atmosphere_mask_file,
+            ),
+            params = dict(),
+        )),
+        ocn = SlabOceanModel(ComponentConfig(
+            name="ocean",
+            timestep = coupling_timestep,
+            start_dt = start_datetime,
+            substeps = 1,
+            save_interval = coupling_timestep,
+            domain =  Domain.from_grid_specification(
+                "Veros::4deg",
+                topography_file = ocean_topography_file,
+                mask_file = ocean_mask_file,
+            ),
+            params=dict(
+                relaxation_time = 60 * 86400.0,
+                SST_clim_file = ocean_topography_file,
+            ),
+        )),
     )
-    
+
+    model = couple_SlabAtmosphereModel_and_SlabOceanModel(**components) 
     # Obtain initial condition
     initial_state = model.initialize()
-
     # Run coupled model 
     final_state, predictions = model.run(
         init_cplstate = initial_state,

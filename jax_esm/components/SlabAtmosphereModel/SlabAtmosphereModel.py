@@ -108,6 +108,7 @@ class SlabAtmosphereModel(Component):
             phydata_cls =  create_field_group_class(
                 cls_name = "phydata",
                 fields = [
+                    ("total_heat_flux", float, D2_nodal_shape),
                 ],
             ),
         )
@@ -117,12 +118,12 @@ class SlabAtmosphereModel(Component):
             flux_cls = create_field_group_class(
                 cls_name = "flux",
                 fields = [
-                    ("total_heat_flux", float, D2_nodal_shape),
                 ],
             ),
             scalar_cls = create_field_group_class(
                 cls_name = "scalar",
                 fields = [
+                    ("sea_surface_temperature", float, D2_nodal_shape),
                 ],
             ),
         )
@@ -180,9 +181,16 @@ class SlabAtmosphereModel(Component):
     ):
 
         def step_function(state, forcing, t):
-            
+ 
+            # Simple bulk formula
+            surface_air_density = 1.22 # kg / m^3
+            drag_coefficient = 1e-3 # scalar
+            sensible_heat_flux = surface_air_density * drag_coefficient * ((state.prog.mean_zonal_wind_velocity ** 2 + state.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (forcing.scalar.sea_surface_temperature - state.prog.mean_air_temperature)
+
+            total_heat_flux = sensible_heat_flux
+
             def sub_step_function(T, sim_time):
-                return T + self.cd_factor * forcing.flux.total_heat_flux, None
+                return T + self.cd_factor * total_heat_flux, None
 
             sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
             new_sim_time = state.prog.sim_time + self.timestep
@@ -191,14 +199,17 @@ class SlabAtmosphereModel(Component):
                 state.prog.mean_air_temperature,
                 xs = sub_sim_times,    
             )
-            
+
             new_state = state.copy(
                 prog_kwargs = dict(
                     mean_air_temperature = new_MAT,
                     sim_time = new_sim_time,
                 ),
+                phydata_kwargs = dict(
+                    total_heat_flux = total_heat_flux,
+                ),
             )
-            return new_state, stack_objects( [ dict(prog=new_state.prog, forcing=forcing) ] )
+            return new_state, stack_objects( [ dict(prog=new_state.prog, phydata=new_state.phydata, forcing=forcing) ] )
             
         return jax.jit(step_function) if jitted else step_function
         
@@ -216,8 +227,9 @@ class SlabAtmosphereModel(Component):
         Returns:
             ds : The resulting xarray dataset.
         """
-        prog    = predictions["prog"]
-        forcing = predictions["forcing"]
+        prog      = predictions["prog"]
+        phydata   = predictions["phydata"]
+        forcing   = predictions["forcing"]
         T_grid_axis_names = self.config.domain.grids["T"].axis_names
         T_grid_dims = ("time",) + T_grid_axis_names
 
@@ -227,7 +239,7 @@ class SlabAtmosphereModel(Component):
                 mean_air_temperature = (["time", "longitude", "latitude"], prog.mean_air_temperature),
                 mean_zonal_wind_velocity = (["time", "longitude", "latitude"], prog.mean_zonal_wind_velocity),
                 mean_meridional_wind_velocity = (["time", "longitude", "latitude"], prog.mean_meridional_wind_velocity),
-                total_heat_flux = (["time", "longitude", "latitude"], forcing.flux.total_heat_flux),
+                total_heat_flux = (["time", "longitude", "latitude"], phydata.total_heat_flux),
             ), 
             coords = dict(
                 time = (["time",], prog.sim_time),
