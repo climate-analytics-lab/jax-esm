@@ -9,7 +9,7 @@ if __name__ == "__main__":
     from jax_esm.components.domain import Domain
     from datetime import datetime
 
-    from jax_esm.coupling.coupled_model_generator.coupled_SlabAtmosphereModel_SlabOceanModel import couple_SlabAtmosphereModel_and_SlabOceanModel
+    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
 
     import jax.numpy as jnp
     
@@ -59,7 +59,7 @@ if __name__ == "__main__":
         )),
     )
 
-    model = couple_SlabAtmosphereModel_and_SlabOceanModel(**components) 
+    model = couple(**components) 
     # Obtain initial condition
     initial_state = model.initialize()
     # Run coupled model 
