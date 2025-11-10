@@ -68,9 +68,7 @@ class ForcingMapper:
         forcings = {}
         
         for target_component_name, target_component_forcing_class in self.component_forcing_classes.items():
-
             forcing = target_component_forcing_class.zeros()
-
             for source_component_name, source_component_state in component_states.items():
                 if source_component_name == target_component_name:
                     continue
@@ -84,17 +82,10 @@ class ForcingMapper:
                 for source_variable_name, target_variable_name in mapping.items():
                     
                     source_variable = strget(source_component_state, source_variable_name)
-
                     # Apply transformation if defined
                     transform_key = (source_component_name, target_component_name, source_variable_name, target_variable_name)
-
                     if transform_key in self.transformations:
                         source_variable = self.transformations[transform_key](source_variable)
-
-
-                    #print(transform_key)
-                    #print(source_variable.shape)
-                    #print(strget(forcing, target_variable_name).shape)
 
                     # Accumulate flux or scalar (for multiple sources)
                     strset(

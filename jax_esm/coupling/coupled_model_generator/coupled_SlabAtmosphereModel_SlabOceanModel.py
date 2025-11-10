@@ -26,6 +26,8 @@ def couple_SlabAtmosphereModel_and_SlabOceanModel(
         ocn = ocn,
     )
 
+    interpolators = generate_atm_ocn_interpolators(dict(atm=atm.config.domain, ocn=ocn.config.domain))
+
     forcing_mapper = ForcingMapper(components=components)
 
     forcing_mapper.add_forcing_mapping("atm", "ocn", {
@@ -36,9 +38,8 @@ def couple_SlabAtmosphereModel_and_SlabOceanModel(
         "prog.T" : "scalar.sea_surface_temperature",
     })
 
-
-
-
+    forcing_mapper.add_transformation("ocn", "atm", "prog.T", "scalar.sea_surface_temperature", interpolators["ocn_to_atm"])
+    forcing_mapper.add_transformation("atm", "ocn", "phydata.total_heat_flux", "flux.total_heat_flux", interpolators["atm_to_ocn"])
 
     return Coupler(
         components = components,
@@ -47,16 +48,13 @@ def couple_SlabAtmosphereModel_and_SlabOceanModel(
     )
 
 
-def generate_atm_ocn_flux_exchanger(
-    self,
-    components,
+def generate_atm_ocn_interpolators(
+    domain : Dict[str, Domain],
 ):
+    interpolators = {}
 
-    atm_model = components["atm"]
-    ocn_model = components["ocn"]
-    
-    atm_domain = atm_model.config.domain
-    ocn_domain = ocn_model.config.domain
+    atm_domain = domain["atm"]
+    ocn_domain = domain["ocn"]
 
     if atm_domain.grid_specification.grid_type in ["JCM", "Veros"] and ocn_domain.grid_specification.grid_type in ["JCM", "Veros"]:
 
@@ -71,6 +69,9 @@ def generate_atm_ocn_flux_exchanger(
         
         atm_latitude, atm_longitude = find_latitude_longitude(atm_domain)
         ocn_latitude, ocn_longitude = find_latitude_longitude(ocn_domain)
+
+        atm_latlon = atm_domain.grid_specification.grid_type == "Veros"
+        ocn_latlon = ocn_domain.grid_specification.grid_type == "Veros"
 
         interpolator_atm_to_ocn = BilinearInterpolator(
             longitude_source_deg = atm_longitude,
@@ -93,49 +94,24 @@ def generate_atm_ocn_flux_exchanger(
             #source_mask: Optional[Array] = None,
             fill_value = 0.0,
         )
+        
+        def conditional_transpose(a, flag):
+            return jnp.transpose(a) if flag else a
+ 
+        def atm_to_ocn(in_array):
+            return conditional_transpose(
+                interpolator_atm_to_ocn.apply_scalar(conditional_transpose(in_array, not atm_latlon)),
+                not ocn_latlon
+            )
 
-        atm_latlon = atm_domain.grid_specification.grid_type == "Veros"
-        ocn_latlon = ocn_domain.grid_specification.grid_type == "Veros"
-       
+        def ocn_to_atm(in_array):
+            return conditional_transpose(
+                interpolator_ocn_to_atm.apply_scalar(conditional_transpose(in_array, not ocn_latlon)),
+                not atm_latlon
+            )
+        interpolators["ocn_to_atm"] = ocn_to_atm
+        interpolators["atm_to_ocn"] = atm_to_ocn
     else:
         raise Exception("Currently only support grids in JCM and Veros.")
 
-
-    def conditional_transpose(a, flag):
-        return jnp.transpose(a) if flag else a
-
-    def transformation(state_group, forcing_group):
-
-        atm = state_group["atm"]
-        ocn = state_group["ocn"]
-       
-        forcing_group["atm"].scalar.sea_surface_skin_temperature = conditional_transpose(
-            interpolator_ocn_to_atm.apply_scalar( conditional_transpose( ocn.prog.T, not ocn_latlon ) ),
-            not atm_latlon
-        )
-        
-        forcing_group["ocn"].flux.total_heat_flux = conditional_transpose(
-            interpolator_atm_to_ocn.apply_scalar( conditional_transpose( atm.phydata.surface_flux.hfluxn.sum(axis=-1), not atm_latlon) ),
-            not ocn_latlon
-        )
-
-        return forcing_group
-
-    return FluxExchanger(
-        components = components,
-        forcing_classes = dict(
-            atm = components["atm"].component_forcing_class,
-            ocn = components["ocn"].component_forcing_class,
-        ),
-        source_variables = dict(
-            atm = [ ("phydata", "air_temperature"), ("prog", "wind_speed") ], 
-            ocn = [ ("prog", "T") ], 
-        ),
-        target_variables = dict(
-             atm = [ ("scalar", "sea_surface_skin_temperature") ], 
-             ocn = [ ("flux", "heat_flux"), ], 
-        ),
-        transformation = transformation,
-    )
-
-
+    return interpolators

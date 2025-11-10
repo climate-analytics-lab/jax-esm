@@ -177,7 +177,7 @@ class SlabOceanModel(Component):
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15
+            init_T = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15 + 15
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)

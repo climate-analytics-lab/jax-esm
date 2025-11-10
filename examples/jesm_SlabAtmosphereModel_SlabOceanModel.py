@@ -10,6 +10,8 @@ if __name__ == "__main__":
     from datetime import datetime
 
     from jax_esm.coupling.coupled_model_generator.coupled_SlabAtmosphereModel_SlabOceanModel import couple_SlabAtmosphereModel_and_SlabOceanModel
+
+    import jax.numpy as jnp
     
     output_dir = Path("output").resolve()
 
@@ -51,7 +53,7 @@ if __name__ == "__main__":
                 mask_file = ocean_mask_file,
             ),
             params=dict(
-                relaxation_time = 60 * 86400.0,
+                relaxation_time = jnp.inf,
                 SST_clim_file = ocean_topography_file,
             ),
         )),
@@ -64,8 +66,8 @@ if __name__ == "__main__":
     final_state, predictions = model.run(
         init_cplstate = initial_state,
         start_time = 0.0,
-        end_time = 86400.0 * 5,
-        jax_scan = False,
+        end_time = 86400.0 * 20 * 1,
+        jax_scan = True,
     )
 
     # Convert output into xarray
