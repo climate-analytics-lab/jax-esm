@@ -10,8 +10,6 @@ from jax import Array
 import tree_math
 from dataclasses import make_dataclass
 
-from datetime import datetime
-
 class AbstractFieldGroup:
     pass
 
