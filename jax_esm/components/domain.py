@@ -52,7 +52,6 @@ class Domain:
     fmask                 : jnp.array   # fractional mask
     bmask                 : jnp.array   # binary mask
     topography            : jnp.array
-    meta                  : dict        # Component dependent information
 
     @classmethod
     def from_grid_specification(
@@ -157,15 +156,12 @@ def get_jcm_domain(
     except AttributeError:
         raise ValueError(f"Invalid horizontal grid name: {horizontal_resolution:s}. Must be one of: T21, T31, T42, T85, T106, T119, T170, T213, T340, or T425.")
  
-    meta = dict(
-        one_layer_coords = dinosaur.coordinate_systems.CoordinateSystem(
-            horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
-            vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
-        ),
-        horizontal_resolution=horizontal_resolution,
+    one_layer_coords = dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=horizontal_grid(radius=1.0),#PHYSICS_SPECS.radius),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0])
     )
 
-    hgrid = meta["one_layer_coords"].horizontal 
+    hgrid = one_layer_coords.horizontal 
     grids = dict(
         T = Grid.from_latitude_longitude(
             latitude = hgrid.latitudes,
@@ -191,7 +187,6 @@ def get_jcm_domain(
         fmask = fmask,
         bmask = bmask,
         topography = topography,
-        meta = meta,
     )
 
 def load_veros_mask(mask_file):
@@ -259,7 +254,6 @@ def get_veros_domain(
         fmask = fmask,
         bmask = bmask,
         topography = topography,
-        meta = dict(),
     )
 
 
