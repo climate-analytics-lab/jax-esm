@@ -29,9 +29,8 @@ if __name__ == "__main__":
     # Creating model
     components = dict(
         atm = SlabAtmosphereModel(
-            timestep = coupling_timestep,
+            timestep = 3600.0,
             start_dt = start_datetime,
-            substeps = 24,
             save_interval = coupling_timestep,
             domain = Domain.from_grid_specification(
                 "JCM::T31",
@@ -40,12 +39,12 @@ if __name__ == "__main__":
             ),
         ),
         ocn = SlabOceanModel(
-            timestep = coupling_timestep,
+            timestep = 3600 * 6,
             start_dt = start_datetime,
-            substeps = 1,
             save_interval = coupling_timestep,
             domain =  Domain.from_grid_specification(
-                "Veros::4deg",
+                #"Veros::4deg",
+                "JCM::T31",
                 topography_file = ocean_topography_file,
                 mask_file = ocean_mask_file,
             ),
@@ -59,9 +58,9 @@ if __name__ == "__main__":
     initial_state = model.initialize()
     # Run coupled model 
     final_state, predictions = model.run(
-        init_cplstate = initial_state,
+        init_coupled_state = initial_state,
         start_time = 0.0,
-        end_time = 86400.0 * 20 * 1,
+        end_time = 86400.0 * 5,
         jax_scan = True,
     )
 
