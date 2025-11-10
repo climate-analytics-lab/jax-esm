@@ -2,7 +2,7 @@
 
 from typing import Dict, Tuple, Any, List, Optional
 
-from datetime import datetime
+import jax_datetime as jdt
 import jax
 import jax.numpy as jnp
 
@@ -11,7 +11,6 @@ from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.components.domain import Domain
 from pathlib import Path
 import xarray as xr
-import pandas as pd
 import numpy as np
 
 from jax_esm.components.base import (
@@ -41,8 +40,7 @@ class SlabAtmosphereModel(Component):
         config_dict = dict(
             name="default_config",
             timestep=1800.0,
-            start_dt = datetime(year=2025, month=1, day=1),
-            substeps = 24,
+            start_dt = jdt.to_datetime("2025-01-01"),
             save_interval = 5,
             domain = Domain.from_grid_specification(
                 grid_specification,
@@ -73,9 +71,8 @@ class SlabAtmosphereModel(Component):
 
     def __init__(
         self,
-        start_dt : datetime,
+        start_dt : jdt.Datetime,
         timestep : float,
-        substeps : int,
         save_interval : float,
         domain : Domain,
     ):
@@ -88,8 +85,6 @@ class SlabAtmosphereModel(Component):
 
         self.start_dt = start_dt
         self.timestep = timestep
-        self.substeps = substeps
-        self.subtimestep = timestep / substeps
         self.save_interval = save_interval
         self.domain = domain
 
@@ -109,7 +104,7 @@ class SlabAtmosphereModel(Component):
             phydata_cls =  create_field_group_class(
                 cls_name = "phydata",
                 fields = [
-                    ("total_heat_flux", float, D2_nodal_shape),
+                    ("hfluxn", float, D2_nodal_shape + (2,)),
                 ],
             ),
         )
@@ -165,7 +160,7 @@ class SlabAtmosphereModel(Component):
 
         # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = constants.atmosphere_column_mass * constants.atmosphere_specific_heat_capacity_under_constant_pressure 
-        self.cd_factor = self.subtimestep / cd
+        self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
             prog_kwargs = dict(
@@ -187,18 +182,16 @@ class SlabAtmosphereModel(Component):
             drag_coefficient = 1e-3 # scalar
             sensible_heat_flux = surface_air_density * drag_coefficient * ((state.prog.mean_zonal_wind_velocity ** 2 + state.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (forcing.scalar.sea_surface_temperature - state.prog.mean_air_temperature)
 
-            total_heat_flux = sensible_heat_flux
+            latent_heat_flux = 0.0
+
+            total_heat_flux = sensible_heat_flux + latent_heat_flux
 
             def sub_step_function(T, sim_time):
                 return T + self.cd_factor * total_heat_flux, None
 
-            sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
             new_sim_time = state.prog.sim_time + self.timestep
-            new_MAT, _ = jax.lax.scan(
-                sub_step_function,
-                state.prog.mean_air_temperature,
-                xs = sub_sim_times,    
-            )
+            new_MAT = state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+            new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
 
             new_state = state.copy(
                 prog_kwargs = dict(
@@ -206,7 +199,7 @@ class SlabAtmosphereModel(Component):
                     sim_time = new_sim_time,
                 ),
                 phydata_kwargs = dict(
-                    total_heat_flux = total_heat_flux,
+                    hfluxn = new_hfluxn,
                 ),
             )
             return new_state, stack_objects( [ dict(prog=new_state.prog, phydata=new_state.phydata, forcing=forcing) ] )
@@ -239,7 +232,7 @@ class SlabAtmosphereModel(Component):
                 mean_air_temperature = (["time", "longitude", "latitude"], prog.mean_air_temperature),
                 mean_zonal_wind_velocity = (["time", "longitude", "latitude"], prog.mean_zonal_wind_velocity),
                 mean_meridional_wind_velocity = (["time", "longitude", "latitude"], prog.mean_meridional_wind_velocity),
-                total_heat_flux = (["time", "longitude", "latitude"], phydata.total_heat_flux),
+                hfluxn = (["time", "longitude", "latitude", "two"], phydata.hfluxn),
             ), 
             coords = dict(
                 time = (["time",], prog.sim_time),

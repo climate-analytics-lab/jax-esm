@@ -2,7 +2,7 @@
 
 from typing import Dict, Tuple, Any, List, Optional
 
-from datetime import datetime
+import jax_datetime as jdt
 import jax
 import jax.numpy as jnp
 
@@ -11,7 +11,6 @@ from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.components.domain import Domain
 from pathlib import Path
 import xarray as xr
-import pandas as pd
 import numpy as np
 
 from jax_esm.components.base import (
@@ -43,8 +42,7 @@ class SlabOceanModel(Component):
         config_dict = dict(
             name="default_config",
             timestep=1800.0,
-            start_dt = datetime(year=2025, month=1, day=1),
-            substeps = 2,
+            start_dt = jdt.to_datetime('2000-01-01'),
             save_interval = 5,
             domain = Domain.from_grid_specification(
                 grid_specification,
@@ -75,9 +73,8 @@ class SlabOceanModel(Component):
 
     def __init__(
         self,
-        start_dt : datetime,
+        start_dt : jdt.Datetime,
         timestep : float,
-        substeps : int,
         save_interval : float,
         domain : Domain,
         relaxation_time : float,
@@ -90,11 +87,8 @@ class SlabOceanModel(Component):
         super().__init__(CoupledComponentConfig(name="SlabOceanModel", timestep=timestep))
 
         self.relaxation_time = relaxation_time
-
         self.start_dt = start_dt
         self.timestep = timestep
-        self.substeps = substeps
-        self.subtimestep = self.timestep / self.substeps
         self.domain = domain
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
@@ -193,8 +187,8 @@ class SlabOceanModel(Component):
         # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = constants.ocean_density * constants.ocean_specific_heat_capacity * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
-        self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
-        self.cd_factor = self.subtimestep / cd
+        self.time_factor = ( 1.0 + self.timestep / tau )**(-1)
+        self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
             prog_kwargs = dict(
@@ -209,8 +203,8 @@ class SlabOceanModel(Component):
     ):
 
         # Find day of the year to locate climatology
-        ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
-        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
+        #ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
+        #start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
         
         def step_function(state, forcing, t):
             new_Tanom = state.prog.T
@@ -218,7 +212,7 @@ class SlabOceanModel(Component):
                 
                 days_after_start = jnp.floor( state.prog.sim_time / 86400.0 ).astype(jnp.int32)
                 
-                clim_day_beg = start_dt_offset + days_after_start
+                clim_day_beg = 0#start_dt_offset + days_after_start
                 clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
                 
                 ocn_idx = self.domain.bmask == 0
@@ -232,18 +226,10 @@ class SlabOceanModel(Component):
                 
                 new_Tanom = state.prog.T - snapshot_SST_clim_beg
                 
-            def sub_step_function(T, sim_time):
-                return self.time_factor * ( T + self.cd_factor * ( - (
-                     forcing.flux.total_heat_flux
-                ))), None
-
-            sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
             new_sim_time = state.prog.sim_time + self.timestep
-            new_Tanom, _ = jax.lax.scan(
-                sub_step_function,
-                new_Tanom,
-                xs = sub_sim_times,    
-            )
+            new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
+                     forcing.flux.total_heat_flux
+            )))
             
             new_T = new_Tanom 
             if self.has_climatology:
