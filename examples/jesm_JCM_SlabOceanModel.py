@@ -46,7 +46,7 @@ if __name__ == "__main__":
             start_dt = start_datetime,
             save_interval = coupling_timestep,
             domain =  Domain.from_grid_specification(
-                "Veros::4deg",
+                SlabOceanModel_grid_specification,
                 topography_file = SlabOceanModel_topography_file,
                 mask_file = SlabOceanModel_mask_file,
             ),

@@ -43,8 +43,7 @@ if __name__ == "__main__":
             start_dt = start_datetime,
             save_interval = coupling_timestep,
             domain =  Domain.from_grid_specification(
-                #"Veros::4deg",
-                "JCM::T31",
+                "Veros::4deg",
                 topography_file = ocean_topography_file,
                 mask_file = ocean_mask_file,
             ),

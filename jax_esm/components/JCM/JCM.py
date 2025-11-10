@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import jax_datetime as jdt
 import jcm
 from jcm.model import Model as RawJCMModel
-from jcm.model import get_coords
 from jcm.forcing import ForcingData, default_forcing
 
 import jax
@@ -34,8 +33,6 @@ from jax_esm.components.domain import Domain
 
 import tree_math
 from typing import Any
-
-from jcm.geometry import get_coords
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
 # by jcm is int32, but it will change to float32 after step_function. This causes
@@ -65,7 +62,6 @@ class JCM(Component):
         """
         
         self.model = model
-        print("Model dt = ", model.dt)
         super().__init__(CoupledComponentConfig(
             name = "JCM",
             timestep = model.dt,
