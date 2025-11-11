@@ -151,6 +151,10 @@ class SlabOceanModel(Component):
         else:
             raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
 
+        if not self.has_climatology:
+            print("Climaology SST does not exist. Set relaxation time to inifinity.")
+            self.relaxation_time = jnp.inf
+        
         # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = constants.ocean_density * constants.ocean_specific_heat_capacity * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
