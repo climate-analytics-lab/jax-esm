@@ -29,58 +29,18 @@ class SlabOceanModel(Component):
     Slab ocean model with prescribed mixed layer depth and climatology.
     """
 
-    @classmethod
-    def generate_default_configuration(
-        cls,
-        grid_specification:str="JCM::T31",
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
-        SST_clim_file : Optional[str] = None,
-        relaxation_time : float = 60 * 86400.0,
-    ):
-        
-        config_dict = dict(
-            name="default_config",
-            timestep=1800.0,
-            start_dt = jdt.to_datetime('2000-01-01'),
-            save_interval = 5,
-            domain = Domain.from_grid_specification(
-                grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-            ),
-            relaxation_time = relaxation_time,
-            SST_clim_file = SST_clim_file,
-        )
-        
-        return config_dict
-
-
-    @classmethod
-    def generate_default_model(
-        cls,
-        grid_specification:str="JCM::T31",
-        topography_file:Optional[str]=None,
-        mask_file:Optional[str]=None,
-    ):
-
-        return SlabOceanModel(
-            SlabOceanModel.generate_default_configuration(
-                grid_specification=grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-        ))
-
     def __init__(
         self,
-        start_dt : jdt.Datetime,
-        timestep : float,
-        save_interval : float,
-        domain : Domain,
-        relaxation_time : float,
-        SST_clim_file : Optional[str] = None,
+        grid_specification:str="JCM::T31",
+        start_dt : jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        timestep : float = 86400.0,
+        save_interval : float = 86400.0,
+        relaxation_time : float = 60 * 86400.0,
         mixed_layer_depth_min : float = 40.0,
         mixed_layer_depth_max : float = 60.0,
+        topography_file:Optional[str]=None,
+        mask_file:Optional[str]=None,
+        SST_clim_file : Optional[str] = None,
     ):
         """Initialize slab ocean model."""
         
@@ -89,12 +49,19 @@ class SlabOceanModel(Component):
         self.relaxation_time = relaxation_time
         self.start_dt = start_dt
         self.timestep = timestep
-        self.domain = domain
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
+        self.topography_file = topography_file
+        self.mask_file = mask_file
         self.SST_clim_file = SST_clim_file
+        self.domain = Domain.from_grid_specification(
+            grid_specification,
+            topography_file = topography_file,
+            mask_file = mask_file,
+        )
+
+
         D2_nodal_shape = self.domain.grids["T"].nodal_shape
-        
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
                 cls_name = "state",
