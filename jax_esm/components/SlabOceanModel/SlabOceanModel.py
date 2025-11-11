@@ -203,7 +203,7 @@ class SlabOceanModel(Component):
                      forcing.flux.total_heat_flux
             )))
             
-            new_T = new_Tanom * 0 
+            new_T = new_Tanom 
             if self.has_climatology:
                 new_T += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 
