@@ -55,6 +55,7 @@ class JCM(Component):
     def __init__(
         self,
         model : RawJCMModel,
+        coupling_timestep: float = 86400.0,
         save_interval: float = 86400.0,
     ):
         """
@@ -64,16 +65,15 @@ class JCM(Component):
         self.model = model
         super().__init__(CoupledComponentConfig(
             name = "JCM",
-            timestep = model.dt,
+            timestep = coupling_timestep,
         ))
         
         self.domain = Domain.from_grid_specification(f"JCM::T{model.coords.horizontal.total_wavenumbers-2}") 
         self.save_interval = save_interval
        
-        if self.save_interval > self.model.dt:
+        if save_interval > coupling_timestep:
             raise ValueError("Error: `save_interval` is larger than model timestep. ")
 
- 
         D3_nodal_shape = self.model.coords.nodal_shape
         D2_nodal_shape = D3_nodal_shape[1:]
  
@@ -120,10 +120,10 @@ class JCM(Component):
         # The following code is a solution to have an initial value for phydata by stepping the model one time.
         # The returned phydata is then used for the initial value.
         _, init_phydata = self.model.physics.compute_tendencies(
-            state      = model.initial_state,
-            forcing = model.forcing,
-            geometry   = model.geometry,
-            date       = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
+            state       = model.initial_state,
+            forcing     = model.forcing,
+            geometry    = model.geometry,
+            date        = model._date_from_sim_time(jnp.array(model._final_modal_state.sim_time)),
         )
         
         return JCMState(
