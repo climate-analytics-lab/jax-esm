@@ -103,14 +103,11 @@ class Coupler:
         
         scan_func = jax.lax.scan if jitted else adhoc_scan
 
-        # Get step functions for the three components
-        step_functions = { component_name : component.generate_step_function(jitted = jitted) for component_name, component in self.components.items() }
-
-
+        # Get step functions of each component
         step_functions = {}
         for component_name, component in self.components.items():
             step_function = component.generate_step_function(jitted=jitted)
-            # Closure in a loop is used. Using partial together.
+            # Closure in a loop is used. Using functools.partial to cache.
             def looped_step_function(state, forcing, t, step_function, component):
                 ts = t + component.config.timestep * jnp.arange(int(self.coupling_timestep / component.config.timestep))
                 def wrapped_step_function(bundle, t):
