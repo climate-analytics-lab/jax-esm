@@ -1,16 +1,10 @@
-import jax_datetime as jdt
 from typing import List, Optional, Dict 
 from jax_esm.components.domain import Domain
 from jax_esm.components.base import Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 from jax_esm.coupling.coupler import Coupler
-
 from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
 from jax_esm.components.JCM import JCM
-
-import jcm
-from pathlib import Path
-
 from jax_esm.utils.bilinear_interp import BilinearInterpolator
 import jax.numpy as jnp
 
@@ -18,7 +12,6 @@ def couple_atm_ocn(
     atm : Component,
     ocn : Component,
     coupling_timestep: float = 86400.0, 
-    start_datetime : jdt.Datetime = jdt.to_datetime("2025-01-01"),
 ):
 
     components = dict(
