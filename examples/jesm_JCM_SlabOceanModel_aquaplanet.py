@@ -26,7 +26,7 @@ if __name__ == "__main__":
         ocn = SlabOceanModel(
             grid_specification = "Veros::4deg",
             timestep = coupling_timestep,
-            start_dt = start_datetime,
+            start_datetime = start_datetime,
             save_interval = coupling_timestep,
         ),
     )
@@ -37,11 +37,16 @@ if __name__ == "__main__":
     # Obtain initial condition
     initial_state = model.initialize()
 
+    print("Add Gaussian noise to break symmetry...")
+    import jax
+    initial_state["ocn"].prog.T += 0.1 * jax.numpy.array(jax.random.normal(jax.random.key(1000), shape=initial_state["ocn"].prog.T.shape))
+
     # Run coupled model 
+    print("Running model...")
     final_state, predictions = model.run(
         init_coupled_state = initial_state,
         start_time = 0.0,
-        end_time = 86400.0 * 10,
+        end_time = 86400.0 * 360,
     )
 
     # Convert output into xarray
