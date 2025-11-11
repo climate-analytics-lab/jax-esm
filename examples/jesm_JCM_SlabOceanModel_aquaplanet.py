@@ -7,7 +7,6 @@ if __name__ == "__main__":
     from jax_esm.components.JCM import JCM
     from jax_esm.components.SlabOceanModel import SlabOceanModel
     from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
-    from jax_esm.components.domain import Domain
     from pathlib import Path
     
     output_dir = Path("output").resolve()
@@ -20,8 +19,12 @@ if __name__ == "__main__":
     
     # Creating components
     components = dict(
-        atm = JCM(model = jcm.model.Model()),
+        atm = JCM(
+            model = jcm.model.Model(start_date = start_datetime),
+            coupling_timestep = coupling_timestep,
+        ),
         ocn = SlabOceanModel(
+            grid_specification = "Veros::4deg",
             timestep = coupling_timestep,
             start_dt = start_datetime,
             save_interval = coupling_timestep,
