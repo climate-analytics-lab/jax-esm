@@ -56,7 +56,6 @@ def couple_atm_ocn(
 
 def generate_atm_ocn_interpolators(
     domain : Dict[str, Domain],
-    atm_is_JCM : bool = False,
 ):
     interpolators = {}
 
