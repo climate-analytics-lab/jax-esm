@@ -26,59 +26,19 @@ from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_
 class SlabAtmosphereModel(Component):
     
     """
-    Slab ocean model with prescribed mixed layer depth and climatology.
+    Slab atmosphere model
     """
-
-    @classmethod
-    def generate_default_configuration(
-        cls,
-        grid_specification:str="Veros::4deg",
+    def __init__(
+        self,
+        grid_specification:str="JCM::T31",
+        timestep : float = 3600.0 * 6,
+        start_dt : jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        save_interval : float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
     ):
         
-        config_dict = dict(
-            name="default_config",
-            timestep=1800.0,
-            start_dt = jdt.to_datetime("2025-01-01"),
-            save_interval = 5,
-            domain = Domain.from_grid_specification(
-                grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-            ),
-            params=dict(
-                relaxation_time = 60 * 86400.0,
-            ),
-        )
-        
-        return config_dict
-
-    @classmethod
-    def generate_default_model(
-        cls,
-        grid_specification:str="JCM::T31",
-        topography_file:Optional[str]=None,
-        mask_file:Optional[str]=None,
-    ):
-
-        return SlabAtmosphereModel(
-            **SlabAtmosphereModel.generate_default_configuration(
-                grid_specification=grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-        ))
-
-    def __init__(
-        self,
-        start_dt : jdt.Datetime,
-        timestep : float,
-        save_interval : float,
-        domain : Domain,
-    ):
-        """Initialize slab ocean model."""
-        
-        super().__init__(CoupledComponentConfig(name="SlabOceanModel", timestep=timestep))
+        super().__init__(CoupledComponentConfig(name="SlabAtmosphereModel", timestep=timestep))
 
         self.total_air_column_mass = constants.atmosphere_column_mass
         self.heat_capacity_under_constant_pressure = constants.atmosphere_specific_heat_capacity_under_constant_pressure
@@ -86,9 +46,16 @@ class SlabAtmosphereModel(Component):
         self.start_dt = start_dt
         self.timestep = timestep
         self.save_interval = save_interval
-        self.domain = domain
+        self.topography_file = topography_file
+        self.mask_file = mask_file
+        self.domain = Domain.from_grid_specification(
+            grid_specification,
+            topography_file = topography_file,
+            mask_file = mask_file,
+        )
 
-        D2_nodal_shape = domain.grids["T"].nodal_shape
+
+        D2_nodal_shape = self.domain.grids["T"].nodal_shape
         
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
