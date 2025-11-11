@@ -32,7 +32,7 @@ class SlabOceanModel(Component):
     def __init__(
         self,
         grid_specification:str="JCM::T31",
-        start_dt : jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime : jdt.Datetime = jdt.to_datetime("2001-01-01"),
         timestep : float = 86400.0,
         save_interval : float = 86400.0,
         relaxation_time : float = 60 * 86400.0,
@@ -47,7 +47,7 @@ class SlabOceanModel(Component):
         super().__init__(CoupledComponentConfig(name="SlabOceanModel", timestep=timestep))
 
         self.relaxation_time = relaxation_time
-        self.start_dt = start_dt
+        self.start_datetime = start_datetime
         self.timestep = timestep
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
@@ -174,24 +174,24 @@ class SlabOceanModel(Component):
     ):
 
         # Find day of the year to locate climatology
-        ref_year = self.start_dt.to_pydatetime().year
+        ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / jdt.to_timedelta(1, "day") ))
+        start_day_offset = ( self.start_datetime - ref_dt ) / jdt.to_timedelta(1, "second")
         
         def step_function(state, forcing, t):
             new_Tanom = state.prog.T
             if self.has_climatology:
                 
-                days_after_start = jnp.floor( state.prog.sim_time / 86400.0 ).astype(jnp.int32)
-                
-                clim_day_beg = start_dt_offset + days_after_start
-                clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
+                # Compute SST clim at begin and end time
+                length_of_a_cycle = self.SST_clim.shape[2]
+                clim_beg_idx = jnp.mod(jnp.int_( jnp.floor( (start_day_offset + t                ) / 86400.0) ), length_of_a_cycle)
+                clim_end_idx = jnp.mod(jnp.int_( jnp.floor( (start_day_offset + t + self.timestep) / 86400.0) ), length_of_a_cycle)
                 
                 ocn_idx = self.domain.bmask == 0
-                snapshot_SST_clim_beg = self.SST_clim[:, :, clim_day_beg]
+                snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(ocn_idx, snapshot_SST_clim_beg, 273.15+15)
                 
-                snapshot_SST_clim_end = self.SST_clim[:, :, clim_day_end]
+                snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
                 snapshot_SST_clim_end = jnp.where(ocn_idx, snapshot_SST_clim_end, 273.15+15)
                 
                 SST_clim_trend = (snapshot_SST_clim_end - snapshot_SST_clim_beg) / 86400.0  # convert to per second
@@ -203,7 +203,7 @@ class SlabOceanModel(Component):
                      forcing.flux.total_heat_flux
             )))
             
-            new_T = new_Tanom 
+            new_T = new_Tanom * 0 
             if self.has_climatology:
                 new_T += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 
@@ -236,6 +236,7 @@ class SlabOceanModel(Component):
 
         T_grid_axis_names = self.domain.grids["T"].axis_names
         T_grid_dims = ("time",) + T_grid_axis_names
+        start_datetime_str = self.start_datetime.to_pydatetime().strftime("%Y-%m-%d %H:%M:%S")
 
         ds = xr.Dataset(
             data_vars = dict(
@@ -244,7 +245,7 @@ class SlabOceanModel(Component):
                 total_heat_flux = (T_grid_dims, forcing.flux.total_heat_flux),
             ), 
             coords = dict(
-                time = (["time",], prog.sim_time),
+                time = (["time",], prog.sim_time/3600.0, {"units": f"hours since {start_datetime_str:s}"}),
                 latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
                 longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
             ),

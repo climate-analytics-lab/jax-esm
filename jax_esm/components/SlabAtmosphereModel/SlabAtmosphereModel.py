@@ -32,7 +32,7 @@ class SlabAtmosphereModel(Component):
         self,
         grid_specification:str="JCM::T31",
         timestep : float = 3600.0 * 6,
-        start_dt : jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime : jdt.Datetime = jdt.to_datetime("2001-01-01"),
         save_interval : float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
@@ -43,7 +43,7 @@ class SlabAtmosphereModel(Component):
         self.total_air_column_mass = constants.atmosphere_column_mass
         self.heat_capacity_under_constant_pressure = constants.atmosphere_specific_heat_capacity_under_constant_pressure
 
-        self.start_dt = start_dt
+        self.start_datetime = start_datetime
         self.timestep = timestep
         self.save_interval = save_interval
         self.topography_file = topography_file
@@ -192,7 +192,7 @@ class SlabAtmosphereModel(Component):
         forcing   = predictions["forcing"]
         T_grid_axis_names = self.domain.grids["T"].axis_names
         T_grid_dims = ("time",) + T_grid_axis_names
-
+        start_datetime_str = self.start_datetime.to_pydatetime().strftime("%Y-%m-%d %H:%M:%S")
 
         ds = xr.Dataset(
             data_vars = dict(
@@ -202,7 +202,7 @@ class SlabAtmosphereModel(Component):
                 hfluxn = (["time", "longitude", "latitude", "two"], phydata.hfluxn),
             ), 
             coords = dict(
-                time = (["time",], prog.sim_time),
+                time = (["time",], prog.sim_time/3600.0, {"units": f"hours since {start_datetime_str:s}"}),
                 latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
                 longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
             ),
