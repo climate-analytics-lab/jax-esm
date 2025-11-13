@@ -2,7 +2,7 @@
 
 from typing import Dict, Tuple, Any, List, Optional
 
-from datetime import datetime
+import jax_datetime as jdt
 import jax
 import jax.numpy as jnp
 
@@ -11,12 +11,11 @@ from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.components.domain import Domain
 from pathlib import Path
 import xarray as xr
-import pandas as pd
 import numpy as np
 
 from jax_esm.components.base import (
     Component,
-    ComponentConfig,
+    CoupledComponentConfig,
     create_component_state_class,
     create_component_forcing_class,
     create_field_group_class,
@@ -30,69 +29,39 @@ class SlabOceanModel(Component):
     Slab ocean model with prescribed mixed layer depth and climatology.
     """
 
-    @classmethod
-    def generate_default_configuration(
-        cls,
-        grid_specification:str="JCM::T31",
-        dict_form = False,
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
-    ):
-        
-        config_dict = dict(
-            name="default_config",
-            timestep=1800.0,
-            start_dt = datetime(year=2025, month=1, day=1),
-            substeps = 2,
-            save_interval = 5,
-            domain = Domain.from_grid_specification(
-                grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-            ),
-            params=dict(
-                relaxation_time = 60 * 86400.0,
-            ),
-        )
-        
-        if dict_form:
-            return config_dict
-        else:
-            return ComponentConfig(**config_dict)
-
-
-    @classmethod
-    def generate_default_model(
-        cls,
-        grid_specification:str="JCM::T31",
-        topography_file:Optional[str]=None,
-        mask_file:Optional[str]=None,
-    ):
-
-        return SlabOceanModel(
-            SlabOceanModel.generate_default_configuration(
-                grid_specification=grid_specification,
-                topography_file = topography_file,
-                mask_file = mask_file,
-        ))
-
     def __init__(
         self,
-        config: ComponentConfig,
+        grid_specification:str="JCM::T31",
+        start_dt : jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        timestep : float = 86400.0,
+        save_interval : float = 86400.0,
+        relaxation_time : float = 60 * 86400.0,
+        mixed_layer_depth_min : float = 40.0,
+        mixed_layer_depth_max : float = 60.0,
+        topography_file:Optional[str]=None,
+        mask_file:Optional[str]=None,
+        SST_clim_file : Optional[str] = None,
     ):
         """Initialize slab ocean model."""
         
-        super().__init__(config)
+        super().__init__(CoupledComponentConfig(name="SlabOceanModel", timestep=timestep))
 
-        self.relaxation_time = config.params["relaxation_time"]
+        self.relaxation_time = relaxation_time
+        self.start_dt = start_dt
+        self.timestep = timestep
+        self.mixed_layer_depth_min = mixed_layer_depth_min
+        self.mixed_layer_depth_max = mixed_layer_depth_max
+        self.topography_file = topography_file
+        self.mask_file = mask_file
+        self.SST_clim_file = SST_clim_file
+        self.domain = Domain.from_grid_specification(
+            grid_specification,
+            topography_file = topography_file,
+            mask_file = mask_file,
+        )
 
-        self.start_dt = config.start_dt
-        self.timestep = config.timestep
-        self.substeps = config.substeps
-        self.subtimestep = self.timestep / self.substeps
 
-        D2_nodal_shape = config.domain.grids["T"].nodal_shape
-        
+        D2_nodal_shape = self.domain.grids["T"].nodal_shape
         self.component_state_class = create_component_state_class(
             prog_cls = create_field_group_class(
                 cls_name = "state",
@@ -131,9 +100,8 @@ class SlabOceanModel(Component):
         # Initialize slab ocean model boundary conditions
         # =========================================================================
        
-        T_grid = self.config.domain.grids["T"] 
+        T_grid = self.domain.grids["T"] 
         D2_nodal_shape = T_grid.nodal_shape
-        config = self.config
 
         lat_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "latitude")
         lon_dim_idx = next( i for i, axis_name in enumerate(T_grid.axis_names) if axis_name == "longitude")
@@ -156,28 +124,25 @@ class SlabOceanModel(Component):
             axis = lat_dim_idx,
         )
 
-        lnd_idx = config.domain.bmask == 1
-        ocn_idx = config.domain.bmask == 0
+        lnd_idx = self.domain.bmask == 1
+        ocn_idx = self.domain.bmask == 0
         
         # initialize mld
-        mld_max = config.params["mld_max"] if "mld_max" in config.params else 60.0
-        mld_min = config.params["mld_min"] if "mld_min" in config.params else 40.0
-
-        init_mld = mld_max + (mld_min - mld_max) * jnp.cos(self.llat_rad)**3
+        init_mld = self.mixed_layer_depth_max + (self.mixed_layer_depth_min - self.mixed_layer_depth_max) * jnp.cos(self.llat_rad)**3
         init_T = None
 
         self.has_climatology = False
         self.SST_clim = None
 
-        if "SST_clim_file" in config.params and config.params["SST_clim_file"] is not None:
+        if self.SST_clim_file is not None:
             print("SST climatology file. The given initial SST will be used.")
-            print("SST climatology file: ", config.params["SST_clim_file"])            
-            self.SST_clim = jnp.array(xr.open_dataset(config.params["SST_clim_file"])["sst"])
+            print("SST climatology file: ", self.SST_clim_file)            
+            self.SST_clim = jnp.array(xr.open_dataset(self.SST_clim_file)["sst"])
             self.has_climatology = True
             init_T = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
-            init_T = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15
+            init_T = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15 + 15
 
         
         init_T = init_T.at[lnd_idx].set(273.15+15)
@@ -186,11 +151,15 @@ class SlabOceanModel(Component):
         else:
             raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
 
+        if not self.has_climatology:
+            print("Climaology SST does not exist. Set relaxation time to inifinity.")
+            self.relaxation_time = jnp.inf
+        
         # Compute heat capacity cd, and time factor for Euler backward scheme
         cd = constants.ocean_density * constants.ocean_specific_heat_capacity * init_mld 
         tau = jnp.ones_like(cd) * self.relaxation_time
-        self.time_factor = ( 1.0 + self.subtimestep / tau )**(-1)
-        self.cd_factor = self.subtimestep / cd
+        self.time_factor = ( 1.0 + self.timestep / tau )**(-1)
+        self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
             prog_kwargs = dict(
@@ -205,8 +174,9 @@ class SlabOceanModel(Component):
     ):
 
         # Find day of the year to locate climatology
-        ref_dt = pd.Timestamp(year=self.start_dt.year, month=self.start_dt.month, day=1)
-        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / pd.Timedelta(days=1) ))
+        ref_year = self.start_dt.to_pydatetime().year
+        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
+        start_dt_offset = jnp.int_(jnp.floor( ( self.start_dt - ref_dt ) / jdt.to_timedelta(1, "day") ))
         
         def step_function(state, forcing, t):
             new_Tanom = state.prog.T
@@ -217,7 +187,7 @@ class SlabOceanModel(Component):
                 clim_day_beg = start_dt_offset + days_after_start
                 clim_day_end = jnp.mod(clim_day_beg + 1, self.SST_clim.shape[2])
                 
-                ocn_idx = self.config.domain.bmask == 0
+                ocn_idx = self.domain.bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_day_beg]
                 snapshot_SST_clim_beg = jnp.where(ocn_idx, snapshot_SST_clim_beg, 273.15+15)
                 
@@ -228,22 +198,14 @@ class SlabOceanModel(Component):
                 
                 new_Tanom = state.prog.T - snapshot_SST_clim_beg
                 
-            def sub_step_function(T, sim_time):
-                return self.time_factor * ( T + self.cd_factor * ( - (
-                     forcing.flux.total_heat_flux
-                ))), None
-
-            sub_sim_times = state.prog.sim_time + jnp.arange(self.substeps) * self.subtimestep
             new_sim_time = state.prog.sim_time + self.timestep
-            new_Tanom, _ = jax.lax.scan(
-                sub_step_function,
-                new_Tanom,
-                xs = sub_sim_times,    
-            )
+            new_Tanom = self.time_factor * ( new_Tanom + self.cd_factor * ( - (
+                     forcing.flux.total_heat_flux
+            )))
             
             new_T = new_Tanom 
             if self.has_climatology:
-                new_T += snapshot_SST_clim_beg + SST_clim_trend * self.config.timestep
+                new_T += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 
             new_state = state.copy(
                 prog_kwargs = dict(
@@ -272,7 +234,7 @@ class SlabOceanModel(Component):
         prog    = predictions["prog"]
         forcing = predictions["forcing"]
 
-        T_grid_axis_names = self.config.domain.grids["T"].axis_names
+        T_grid_axis_names = self.domain.grids["T"].axis_names
         T_grid_dims = ("time",) + T_grid_axis_names
 
         ds = xr.Dataset(

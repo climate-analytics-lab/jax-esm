@@ -1,13 +1,14 @@
 """Main coupler class for Earth system model coupling."""
 
+from functools import partial
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import AbstractComponentState, Component
-from jax_esm.coupling.flux_exchange import FluxExchanger
+from jax_esm.components.base import ComponentState, Component
+from jax_esm.coupling.forcing_mapper import ForcingMapper
 
 from dataclasses import dataclass, make_dataclass
 import tree_math
@@ -16,7 +17,6 @@ from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs=None, length=None):
-    
     if xs is None:
         xs = [1] * length
     carry = init
@@ -36,26 +36,14 @@ def adhoc_scan(f, init, xs=None, length=None):
     return carry, stack_objects(ys)
     
 
-@dataclass
-class CouplerConfig:
-    """Configuration for coupler."""
-    timestep: float  # seconds
-
-class CoupledState:
-    ...
-
-class CoupledForcing:
-    ...
-
-
 class Coupler:
     """Main coupler for Earth system components."""
 
     def __init__(
         self,
-        config: CouplerConfig,
+        coupling_timestep: float,
         components: Dict[str, Component],
-        flux_exchangers: Optional[ List[ FluxExchanger ] ] = [],
+        forcing_mapper: Optional[ ForcingMapper ] = None,
     ):
         """Initialize the coupler.
         
@@ -67,31 +55,24 @@ class Coupler:
         """
         self.components = components
         self.component_names = list(components.keys())
-        self.config = config
+        self.coupling_timestep = coupling_timestep
         
         # Extract component timesteps
         component_timesteps = {
-            name: comp.timestep for name, comp in components.items()
+            name: comp.config.timestep for name, comp in components.items()
         }
 
-        self.coupled_state_class = tree_math.struct(make_dataclass(
-            cls_name = "JESMCoupledState",
-            fields = [ (component_name, component.component_state_class) for component_name, component in components.items() ],
-            bases = (CoupledState,),
-        ))
-
-        self.coupled_forcing_class = tree_math.struct(make_dataclass(
-            cls_name = "JESMCoupledForcing",
-            fields = [ (component_name, component.component_forcing_class) for component_name, component in components.items() ],
-            bases = (CoupledForcing,),
-        ))
-
-        self.flux_exchangers = flux_exchangers
+        # Check the compatibility of timestep
+        for component_name, component_timestep in component_timesteps.items():
+            if self.coupling_timestep % component_timestep != 0.0:
+                raise ValueError(f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}.")
+ 
+        self.forcing_mapper = forcing_mapper
 
         
     def initialize(
         self,
-    ) -> Dict[str, AbstractComponentState]:
+    ) -> Dict[str, ComponentState]:
         """Initialize all components.
         
         Args:
@@ -101,10 +82,10 @@ class Coupler:
             Dictionary of initial states for all components
         """
         
-        return self.coupled_state_class(**{
+        return {
             name : component.initialize() 
             for name, component in self.components.items()
-        })
+        }
    
 
     def generate_step_function(
@@ -119,78 +100,77 @@ class Coupler:
         Returns:
             New states after one coupling timestep
         """
+        
+        scan_func = jax.lax.scan if jitted else adhoc_scan
 
-        # Get step functions for the three components
-        step_functions = { component_name : component.generate_step_function(jitted = jitted) for component_name, component in self.components.items() }
-
-        def step_function(cpl_state, t):
+        # Get step functions of each component
+        step_functions = {}
+        for component_name, component in self.components.items():
+            step_function = component.generate_step_function(jitted=jitted)
+            # Closure in a loop is used. Using functools.partial to cache.
+            def looped_step_function(state, forcing, t, step_function, component):
+                ts = t + component.config.timestep * jnp.arange(int(self.coupling_timestep / component.config.timestep))
+                def wrapped_step_function(bundle, t):
+                    new_state, history = step_function(bundle["state"], bundle["forcing"], t)
+                    return dict(state=new_state, forcing=bundle["forcing"]), history
+                _carry, _predictions = scan_func(
+                    wrapped_step_function,
+                    dict(state=state, forcing=forcing),
+                    xs = ts,
+                )
+                _predictions = unwrap_leading_dims(_predictions, first_n_dim=2)
+                return _carry["state"], _predictions
+            step_functions[component_name] = partial(looped_step_function, step_function=step_function, component=component)
+        
+        def step_function(coupled_state, t):
             
-
             # Compute forcing
-            forcing_group = { component_name : component.component_forcing_class.zeros() for component_name, component in self.components.items() }
-            for flux_exchanger in self.flux_exchangers:
-                
-                # Only certain information is collected
-                state_group = { component_name : getattr(cpl_state, component_name) for component_name, _ in flux_exchanger.components.items() }
-                forcing_group = flux_exchanger.transformation(state_group, forcing_group)
+            forcings = self.forcing_mapper.couple_components(coupled_state)
             
             # Call forward functions and unpack results directly into dictionaries
             results = {
-                component_name: step_function(getattr(cpl_state, component_name), forcing_group[component_name], t) 
+                component_name: step_function(coupled_state[component_name], forcings[component_name], t) 
                 for component_name, step_function in step_functions.items()
             }
-            
-            new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
-            cpl_predictions = {name: pred for name, (_, pred) in results.items()}
+            coupled_state = {name: state for name, (state, _) in results.items()}
+            coupled_predictions = {name: prediction for name, (_, prediction) in results.items()}
 
-            return new_cplstate, cpl_predictions
+            return coupled_state, coupled_predictions
 
         return jax.jit(step_function) if jitted else step_function
 
 
     def run(
         self,
-        init_cplstate : Dict[str, AbstractComponentState],
+        init_coupled_state : Dict[str, ComponentState],
         start_time    : float,
         end_time      : float,
         jax_scan: bool = True,
         save_interval_steps = 1,
     ):
 
-        coupler = self
-        
         _start_time = time.time()
         scan_func = jax.lax.scan if jax_scan else adhoc_scan
-
-        timestep = self.config.timestep
-        total_time = end_time - start_time
-        total_steps = int(total_time / timestep)
         
-        if total_steps * timestep != total_time:
+        total_time = end_time - start_time
+        total_steps = int(total_time / self.coupling_timestep)
+        
+        if total_steps * self.coupling_timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
-        # The goal should be generate forward function once
-        # and reuse it all the time.
-
-        # Currently, atmosphere model output will have strange
-        # shape if reuse the forward function. This causes the
-        # error during post-processing. Therefore for now, I 
-        # fall back to generate forward function every time.
-        #
-        cpl_step_function = coupler.generate_step_function(jitted=jax_scan)
-        final_state, predictions = scan_func(
-            cpl_step_function,
-            init_cplstate,
-            xs=jnp.arange(total_steps),
+        coupled_step_function = self.generate_step_function(jitted=jax_scan)
+        final_coupled_state, predictions = scan_func(
+            coupled_step_function,
+            init_coupled_state,
+            xs = start_time + self.coupling_timestep * jnp.arange(total_steps),
         )
-
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
         print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
-        return final_state, predictions
+        return final_coupled_state, predictions
         
     
     def add_component(
