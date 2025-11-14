@@ -2,8 +2,6 @@
 
 from typing import Dict, List, Optional, Tuple, Callable
 
-import jax
-import jax.numpy as jnp
 from jax import Array
 
 from jax_esm.components.base import (

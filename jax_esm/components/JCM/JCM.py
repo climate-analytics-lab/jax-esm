@@ -1,16 +1,13 @@
 """JCM Wrapper Class"""
 
-from typing import Dict, Tuple
 from dataclasses import dataclass
 
 import jax_datetime as jdt
-import jcm
 from jcm.model import Model as RawJCMModel
 from jcm.forcing import ForcingData, default_forcing
 
 import jax
 import jax.numpy as jnp
-from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.base import (
     Component,
@@ -21,14 +18,12 @@ from jax_esm.components.base import (
 )
 
 
-from jcm.physics_interface import dynamics_state_to_physics_state, physics_state_to_dynamics_state
+from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.physics_interface import PhysicsState
-from jcm.model import Predictions
 
-import dinosaur
 from dinosaur import primitive_equations, primitive_equations_states
 
-from jax_esm.utils.bulk_op import stack_objects, mean_leaf
+from jax_esm.utils.bulk_op import mean_leaf
 from jax_esm.components.domain import Domain 
 
 import tree_math

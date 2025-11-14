@@ -2,7 +2,7 @@
 
 from functools import partial
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import jax
 import jax.numpy as jnp
@@ -10,8 +10,6 @@ import jax.numpy as jnp
 from jax_esm.components.base import ComponentState, Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 
-from dataclasses import dataclass, make_dataclass
-import tree_math
 
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
 

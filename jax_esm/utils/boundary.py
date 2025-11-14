@@ -1,8 +1,7 @@
 """Boundary condition translation utilities."""
 
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
-import jax
 import jax.numpy as jnp
 from jax import Array
 

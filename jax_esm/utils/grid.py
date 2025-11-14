@@ -1,8 +1,7 @@
 """Grid interpolation utilities for coupling different resolution components."""
 
-from typing import Optional, Tuple
+from typing import Tuple
 
-import jax
 import jax.numpy as jnp
 from jax import Array
 

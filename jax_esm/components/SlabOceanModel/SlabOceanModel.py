@@ -1,6 +1,6 @@
 """Slab ocean model component."""
 
-from typing import Dict, Tuple, Any, List, Optional
+from typing import Optional
 
 import jax_datetime as jdt
 import jax
@@ -9,9 +9,7 @@ import jax.numpy as jnp
 from jax_esm import constants as constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.components.domain import Domain
-from pathlib import Path
 import xarray as xr
-import numpy as np
 
 from jax_esm.components.base import (
     Component,

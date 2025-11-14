@@ -1,10 +1,9 @@
 """Base component interface for Earth system models."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
-import jax
 import jax.numpy as jnp
 from jax import Array
 import tree_math

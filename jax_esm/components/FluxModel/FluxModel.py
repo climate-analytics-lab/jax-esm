@@ -1,12 +1,8 @@
 """Flux model component."""
 
-from typing import Dict, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax import Array
-import tree_math
-from dataclasses import make_dataclass
 
 from jax_esm import constants as constants
 

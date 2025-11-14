@@ -1,6 +1,6 @@
 """Time integration utilities using jax.lax.scan."""
 
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Tuple
 
 import jax
 import jax.numpy as jnp

@@ -1,8 +1,7 @@
 
-from typing import Dict, Tuple, Any, List
+from typing import List
 import jax
 import jax.numpy as jnp
-from jax import tree_util
 
 def mean_leaf(
     tree : any,
