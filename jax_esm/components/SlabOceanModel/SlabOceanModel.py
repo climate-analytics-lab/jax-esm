@@ -123,7 +123,6 @@ class SlabOceanModel(Component):
         )
 
         lnd_idx = self.domain.bmask == 1
-        ocn_idx = self.domain.bmask == 0
         
         # initialize mld
         init_mld = self.mixed_layer_depth_max + (self.mixed_layer_depth_min - self.mixed_layer_depth_max) * jnp.cos(self.llat_rad)**3

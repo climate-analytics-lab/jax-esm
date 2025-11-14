@@ -184,8 +184,8 @@ class Coupler:
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        if not hasattr(CoupledState, name):
-            raise Exception("Unable to add {name:s}. It has to be one of the attribute names of CoupledState.".format(
+        if not hasattr(ComponentState, name):
+            raise Exception("Unable to add {name:s}. It has to be one of the attribute names of ComponentState.".format(
                 name = name,
             ))
 
