@@ -1,3 +1,5 @@
 from .JCM import JCM
 
-__all__ = ["JCM",]
+__all__ = [
+    "JCM",
+]

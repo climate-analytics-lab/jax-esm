@@ -13,7 +13,7 @@ from jax_esm.components.base import (
 
 class ForcingMapper:
     """Manages flux exchange and boundary condition translation between components."""
-    
+
     def __init__(
         self,
         components: Dict[str, Component],
@@ -21,7 +21,7 @@ class ForcingMapper:
         transformations: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
         """Initialize flux exchanger.
-        
+
         Args:
             component_names: List of component names
             forcing_mappings: Optional mapping of flux names between components.
@@ -36,54 +36,75 @@ class ForcingMapper:
         self.component_names = list(self.components.keys())
         self.forcing_mappings = forcing_mappings or {}
         self.transformations = transformations or {}
-       
-        self.component_forcing_classes = { component_name : component.component_forcing_class for component_name, component in components.items() }
- 
+
+        self.component_forcing_classes = {
+            component_name: component.component_forcing_class
+            for component_name, component in components.items()
+        }
+
         # Build connectivity graph
         self.connections = self._build_connections()
-    
+
     def _build_connections(self) -> Dict[str, List[str]]:
         """Build connectivity graph between components."""
         connections = {name: [] for name in self.component_names}
-        
-        for (source, target) in self.forcing_mappings.keys():
+
+        for source, target in self.forcing_mappings.keys():
             if source in connections:
                 connections[source].append(target)
-        
+
         return connections
-    
+
     def map_forcings(
         self,
-        component_states : Dict[str, ComponentState],
+        component_states: Dict[str, ComponentState],
     ) -> Dict[str, ComponentForcing]:
         """Map fluxes and scalars between components.
-        
+
         Args:
-            
+
         Returns:
             Dictionary mapping component names to their input fluxes
         """
         forcings = {}
-        
-        for target_component_name, target_component_forcing_class in self.component_forcing_classes.items():
+
+        for (
+            target_component_name,
+            target_component_forcing_class,
+        ) in self.component_forcing_classes.items():
             forcing = target_component_forcing_class.zeros()
-            for source_component_name, source_component_state in component_states.items():
+            for (
+                source_component_name,
+                source_component_state,
+            ) in component_states.items():
                 if source_component_name == target_component_name:
                     continue
-                    
+
                 # Get mapping of variable names for this source-target pair
-                mapping = self.forcing_mappings.get((source_component_name, target_component_name), {})
+                mapping = self.forcing_mappings.get(
+                    (source_component_name, target_component_name), {}
+                )
                 if not mapping:
-                    raise Exception(f"Mapping for {source_component_name:s} -> {target_component_name:s} does not exist.")
-                
+                    raise Exception(
+                        f"Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
+                    )
+
                 # Apply mappings and transformations
                 for source_variable_name, target_variable_name in mapping.items():
-                    
-                    source_variable = strget(source_component_state, source_variable_name)
+                    source_variable = strget(
+                        source_component_state, source_variable_name
+                    )
                     # Apply transformation if defined
-                    transform_key = (source_component_name, target_component_name, source_variable_name, target_variable_name)
+                    transform_key = (
+                        source_component_name,
+                        target_component_name,
+                        source_variable_name,
+                        target_variable_name,
+                    )
                     if transform_key in self.transformations:
-                        source_variable = self.transformations[transform_key](source_variable)
+                        source_variable = self.transformations[transform_key](
+                            source_variable
+                        )
 
                     # Accumulate flux or scalar (for multiple sources)
                     strset(
@@ -93,29 +114,29 @@ class ForcingMapper:
                     )
 
             forcings[target_component_name] = forcing
-        
+
         return forcings
-    
+
     def couple_components(
         self,
         component_states: Dict[str, ComponentState],
     ) -> Dict[str, ComponentForcing]:
         """Couple components by remapping forcings with conservation checks.
-        
+
         Args:
             states: Current states of all components
-            
+
         Returns:
             A dictionary of forcing of each components
         """
-        
+
         forcings = self.map_forcings(component_states)
-        
+
         # Optional: Add conservation checks here
-        #self._check_conservation(output_fluxes, input_fluxes)
-        
+        # self._check_conservation(output_fluxes, input_fluxes)
+
         return forcings
-    
+
     def _check_conservation(
         self,
         output_fluxes: Dict[str, any],
@@ -125,7 +146,7 @@ class ForcingMapper:
         # This could check that total heat/moisture/momentum is conserved
         # across the coupling interface
         pass
-    
+
     def add_forcing_mapping(
         self,
         source_component_name: str,
@@ -133,7 +154,7 @@ class ForcingMapper:
         mapping: Dict[str, str],
     ) -> None:
         """Add or update flux mapping between components.
-        
+
         Args:
             source_component_name: Source component name
             target_component_name: Target component name
@@ -141,7 +162,7 @@ class ForcingMapper:
         """
         self.forcing_mappings[(source_component_name, target_component_name)] = mapping
         self.connections = self._build_connections()
-    
+
     def add_transformation(
         self,
         source_component_name: str,
@@ -151,7 +172,7 @@ class ForcingMapper:
         transform_fn: Callable[[Array], Array],
     ) -> None:
         """Add transformation function for a specific flux.
-        
+
         Args:
             source: Source component name
             target: Target component name
@@ -159,7 +180,14 @@ class ForcingMapper:
             target_variable_name: Name of the target variable to transform
             transform_fn: Transformation function
         """
-        self.transformations[(source_component_name, target_component_name, source_variable_name, target_variable_name)] = transform_fn
+        self.transformations[
+            (
+                source_component_name,
+                target_component_name,
+                source_variable_name,
+                target_variable_name,
+            )
+        ] = transform_fn
 
 
 def strget(obj, flattened_variable_name):
@@ -170,7 +198,8 @@ def strget(obj, flattened_variable_name):
         target = getattr(target, splitted_name)
 
     return target
-    
+
+
 def strset(obj, flattened_variable_name, value):
     splitted_names = flattened_variable_name.split(".")
 
@@ -179,7 +208,3 @@ def strset(obj, flattened_variable_name, value):
         target = getattr(target, splitted_name)
 
     setattr(target, splitted_names[-1], value)
-
-    
-    
-    

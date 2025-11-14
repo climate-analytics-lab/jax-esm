@@ -16,53 +16,53 @@ from jax_esm.components.base import (
 
 class SlabOceanModel(Component):
     """Simple slab ocean model with prescribed mixed layer depth.
-    
+
     This model integrates SST anomalies based on surface heat fluxes
     and relaxes towards a prescribed climatology.
     """
-    
+
     def __init__(self, config: ComponentConfig):
         """Initialize slab ocean model.
-        
+
         Expected parameters in config:
         - mixed_layer_depth: Ocean mixed layer depth (m)
         - relaxation_time: Relaxation timescale to climatology (days)
         - sst_clim_file: Optional path to SST climatology
         """
         super().__init__(config)
-        
+
         # Physical constants
         self.rho_sw = 1025.0  # Seawater density (kg/m³)
-        self.cp_sw = 3985.0   # Seawater specific heat capacity (J/kg/K)
-        
+        self.cp_sw = 3985.0  # Seawater specific heat capacity (J/kg/K)
+
         # Model parameters
         self.mixed_layer_depth = config.params.get("mixed_layer_depth", 50.0)  # m
         self.relaxation_time = config.params.get("relaxation_time", 30.0)  # days
-        
+
         # Grid info
         self.nlat = config.grid["nlat"]
         self.nlon = config.grid["nlon"]
-        
+
         # Precompute factors for efficiency
         self.heat_capacity = self.rho_sw * self.cp_sw * self.mixed_layer_depth
         self.cd_factor = 1.0 / self.heat_capacity  # K/(W/m²)/s
-        
+
         # Time factor for anomaly evolution (per day)
         self.time_factor_per_day = jnp.exp(-1.0 / self.relaxation_time)
-    
+
     def initialize(self, rng_key: jax.random.PRNGKey) -> ComponentState:
         """Initialize ocean state with climatological SST."""
         shape = (self.nlat, self.nlon)
-        
+
         # Initialize with simple zonal climatology
         lat = jnp.linspace(-90, 90, self.nlat)
         sst_clim = 273.15 + 30.0 * jnp.cos(jnp.pi * lat / 180.0)
         sst_clim = sst_clim[:, None]  # Add longitude dimension
         sst_clim = jnp.broadcast_to(sst_clim, shape)
-        
+
         # Start with no anomaly
         sst = sst_clim
-        
+
         return ComponentState(
             prognostic={
                 "sst": sst,  # Sea surface temperature (K)
@@ -87,7 +87,7 @@ class SlabOceanModel(Component):
                 "lon": jnp.linspace(0, 360, self.nlon),
             },
         )
-    
+
     def step(
         self,
         state: ComponentState,
@@ -95,12 +95,12 @@ class SlabOceanModel(Component):
         dt: float,
     ) -> Tuple[ComponentState, BoundaryFluxes]:
         """Advance slab ocean model by one timestep.
-        
+
         Args:
             state: Current ocean state
             forcing: Surface fluxes from atmosphere
             dt: Time step in seconds
-            
+
         Returns:
             Tuple of (new_state, output_fluxes)
         """
@@ -109,27 +109,27 @@ class SlabOceanModel(Component):
         sst_clim_current = state.forcing["sst_clim"]
         sst_clim_next = state.forcing["sst_clim_next"]
         hflux_clim = state.forcing["hflux_clim"]
-        
+
         # Get heat flux from atmosphere (W/m²)
         # Positive flux means heat into ocean
         hflux = forcing.heat
-        
+
         # Calculate anomalies
         sst_anom = sst - sst_clim_current
         hflux_anom = hflux - hflux_clim
-        
+
         # Time integration factor for this timestep
         dt_days = dt / 86400.0  # Convert seconds to days
         time_factor = jnp.power(self.time_factor_per_day, dt_days)
-        
+
         # Integrate SST anomaly
         # d(SST_anom)/dt = -SST_anom/tau + Q_anom/(rho*cp*h)
         # Using exponential time factor for relaxation
         new_sst_anom = time_factor * (sst_anom + hflux_anom * self.cd_factor * dt)
-        
+
         # Add anomaly to next climatology
         new_sst = new_sst_anom + sst_clim_next
-        
+
         # Update state
         new_state = ComponentState(
             prognostic={
@@ -150,7 +150,7 @@ class SlabOceanModel(Component):
                 "day_of_year": (state.metadata["day_of_year"] + dt_days) % 365,
             },
         )
-        
+
         # Ocean doesn't directly output fluxes, but provides SST through boundary
         output_fluxes = BoundaryFluxes(
             heat=jnp.zeros_like(new_sst),
@@ -159,9 +159,9 @@ class SlabOceanModel(Component):
             momentum_v=jnp.zeros_like(new_sst),
             tracers={},
         )
-        
+
         return new_state, output_fluxes
-    
+
     def compute_tendencies(
         self,
         state: ComponentState,
@@ -172,28 +172,28 @@ class SlabOceanModel(Component):
         sst = state.prognostic["sst"]
         sst_clim = state.forcing["sst_clim"]
         hflux_clim = state.forcing["hflux_clim"]
-        
+
         # Get heat flux
         hflux = forcing.heat
-        
+
         # Calculate anomalies
         sst_anom = sst - sst_clim
         hflux_anom = hflux - hflux_clim
-        
+
         # SST tendency from heat flux and relaxation
         # d(SST)/dt = -SST_anom/tau + Q/(rho*cp*h)
         relaxation_tendency = -sst_anom / (self.relaxation_time * 86400.0)
         heating_tendency = hflux / self.heat_capacity
         sst_tendency = relaxation_tendency + heating_tendency
-        
+
         # Anomaly tendency
         anom_tendency = relaxation_tendency + hflux_anom / self.heat_capacity
-        
+
         return {
             "sst": sst_tendency,
             "sst_anomaly": anom_tendency,
         }
-    
+
     def update_climatology(
         self,
         state: ComponentState,
@@ -201,22 +201,22 @@ class SlabOceanModel(Component):
         hflux_clim: Optional[Array] = None,
     ) -> ComponentState:
         """Update climatological fields (e.g., for seasonal cycle).
-        
+
         Args:
             state: Current ocean state
             sst_clim: New SST climatology
             hflux_clim: Optional new heat flux climatology
-            
+
         Returns:
             Updated state with new climatology
         """
         new_forcing = dict(state.forcing)
         new_forcing["sst_clim"] = new_forcing["sst_clim_next"]
         new_forcing["sst_clim_next"] = sst_clim
-        
+
         if hflux_clim is not None:
             new_forcing["hflux_clim"] = hflux_clim
-        
+
         return ComponentState(
             prognostic=state.prognostic,
             diagnostic=state.diagnostic,
@@ -224,11 +224,11 @@ class SlabOceanModel(Component):
             forcing=new_forcing,
             metadata=state.metadata,
         )
-    
+
     def get_required_fluxes(self) -> list[str]:
         """Ocean requires heat flux from atmosphere."""
         return ["heat"]
-    
+
     def get_provided_fluxes(self) -> list[str]:
         """Ocean provides SST through boundary conditions."""
         return []
