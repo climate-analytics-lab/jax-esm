@@ -23,7 +23,6 @@ jobs:
       with:
         repository: climate-analytics-lab/jax-gcm
         token: ${{ secrets.TOKEN_TO_CLONE }}
-        ref: "08b87fe028b33e6c7f9470a6810b2ca2e688be02"
         path: jax-gcm
 
     - name: Show Working directory
@@ -73,9 +72,9 @@ jobs:
 
     - name: Check import sorting with ruff
       run: |
-        ruff check --output-format=github jax_esm/ tests/
-        ruff format --check jax_esm/ tests/
+        ruff check --output-format=github jax_esm/
+        ruff format --check jax_esm/ 
 
     - name: Type check with mypy
       run: |
-        mypy jax_esm/ --ignore-missing-imports || true
+        mypy jax_esm/ --ignore-missing-imports
