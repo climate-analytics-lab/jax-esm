@@ -7,7 +7,11 @@ import pandas as pd
 
 from jax_esm import ComponentConfig
 from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import Component, create_component_state_class, create_field_group_class
+from jax_esm.components.base import (
+    Component,
+    create_component_state_class,
+    create_field_group_class,
+)
 from jax_esm.utils.bulk_op import stack_objects
 
 
@@ -54,10 +58,14 @@ class MockAtmosphere(Component):
                 }
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -95,10 +103,14 @@ class MockFlux(Component):
                 phydata_kwargs={"heatflx": heat_flux},
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -144,10 +156,14 @@ class MockOcean(Component):
                 }
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -243,9 +259,9 @@ class TestCoupler:
         states = coupler.initialize()
 
         # Check that states were created
-        assert hasattr(states, 'atm')
-        assert hasattr(states, 'flx')
-        assert hasattr(states, 'ocn')
+        assert hasattr(states, "atm")
+        assert hasattr(states, "flx")
+        assert hasattr(states, "ocn")
 
         # Check initial values
         assert jnp.allclose(states.atm.prog.temperature, 280.0)
@@ -347,8 +363,7 @@ class TestCoupler:
         # Check that coupling occurred (states changed)
         # Atmosphere should change (responds to ocean SST)
         assert not jnp.allclose(
-            initial_state.atm.prog.temperature,
-            new_state.atm.prog.temperature
+            initial_state.atm.prog.temperature, new_state.atm.prog.temperature
         )
         # Ocean may not change much in one timestep with weak coupling
         # Just check that flux was computed
@@ -550,6 +565,7 @@ class TestCoupler:
         # Add predictions_to_xarray method to mock components
         def mock_to_xarray(predictions):
             import xarray as xr
+
             return xr.Dataset()
 
         atmosphere = MockAtmosphere(atm_config)

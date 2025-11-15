@@ -1,6 +1,5 @@
 """Tests for SlabOceanModel component."""
 
-import jax
 import jax.numpy as jnp
 import pytest
 import pandas as pd
@@ -14,10 +13,13 @@ from jax_esm import constants
 # Skip all tests if jcm is not available
 try:
     from jax_esm.components.SlabOceanModel.SlabOceanModel import SlabOceanModel
+
     HAS_JCM = True
 except ImportError:
     HAS_JCM = False
-    pytestmark = pytest.mark.skip(reason="JCM not installed - required for SlabOceanModel")
+    pytestmark = pytest.mark.skip(
+        reason="JCM not installed - required for SlabOceanModel"
+    )
 
 
 class TestSlabOceanModel:
@@ -28,11 +30,12 @@ class TestSlabOceanModel:
         """Create basic ocean configuration."""
         # Create mock coordinates
         from unittest.mock import Mock
+
         coords = Mock()
         coords.nodal_shape = (8, 32, 64)  # levels, lon, lat
         coords.horizontal = Mock()
-        coords.horizontal.longitudes = jnp.linspace(0, 2*jnp.pi, 32)
-        coords.horizontal.latitudes = jnp.linspace(-jnp.pi/2, jnp.pi/2, 64)
+        coords.horizontal.longitudes = jnp.linspace(0, 2 * jnp.pi, 32)
+        coords.horizontal.latitudes = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, 64)
 
         geometry = Mock()
 
@@ -49,7 +52,7 @@ class TestSlabOceanModel:
                 "relaxation_time": 86400.0 * 30,  # 30 days
                 "mld_max": 60.0,
                 "mld_min": 40.0,
-            }
+            },
         )
 
     def test_initialization(self, basic_config):
@@ -67,13 +70,13 @@ class TestSlabOceanModel:
         state = ocean.initialize()
 
         # Check state structure
-        assert hasattr(state, 'prog')
-        assert hasattr(state, 'phydata')
+        assert hasattr(state, "prog")
+        assert hasattr(state, "phydata")
 
         # Check prognostic fields
-        assert hasattr(state.prog, 'T')
-        assert hasattr(state.prog, 'mld')
-        assert hasattr(state.prog, 'sim_time')
+        assert hasattr(state.prog, "T")
+        assert hasattr(state.prog, "mld")
+        assert hasattr(state.prog, "sim_time")
 
         # Check shapes
         assert state.prog.T.shape == (32, 64)
@@ -88,24 +91,23 @@ class TestSlabOceanModel:
 
         # Check temperature is physical
         assert jnp.all(state.prog.T > 273.15)  # Above freezing
-        assert jnp.all(state.prog.T < 320.0)   # Below boiling
+        assert jnp.all(state.prog.T < 320.0)  # Below boiling
 
     def test_initial_state_with_climatology(self, basic_config):
         """Test initial state with SST climatology."""
         # Create temporary climatology file
-        with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as f:
             temp_file = f.name
 
         try:
             # Create mock climatology
             sst_clim = jnp.ones((32, 64, 12)) * 288.15  # 15°C, 12 months
-            ds = xr.Dataset({
-                'sst': (['lon', 'lat', 'time'], sst_clim)
-            })
+            ds = xr.Dataset({"sst": (["lon", "lat", "time"], sst_clim)})
             ds.to_netcdf(temp_file)
 
             # Add boundaries to config
             from unittest.mock import Mock
+
             boundaries = Mock()
             boundaries.fmask = jnp.zeros((32, 64))  # All ocean
             boundaries.orog = jnp.zeros((32, 64))
@@ -153,6 +155,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = state
 
@@ -182,6 +185,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state with heating
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = initial_state
 
@@ -209,6 +213,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state with cooling
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = initial_state
 
@@ -247,6 +252,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = state
         cpl.flx = Mock()
@@ -258,12 +264,12 @@ class TestSlabOceanModel:
 
         # Predictions should be a dict with 'prog' key (from stack_objects)
         assert isinstance(predictions, dict)
-        assert 'prog' in predictions
+        assert "prog" in predictions
 
         # Should have stacked structure (time dimension added)
-        assert hasattr(predictions['prog'], 'T')
-        assert hasattr(predictions['prog'], 'mld')
-        assert hasattr(predictions['prog'], 'sim_time')
+        assert hasattr(predictions["prog"], "T")
+        assert hasattr(predictions["prog"], "mld")
+        assert hasattr(predictions["prog"], "sim_time")
 
     def test_xarray_conversion(self, basic_config):
         """Test conversion of predictions to xarray."""
@@ -272,6 +278,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = state
         cpl.flx = Mock()
@@ -286,13 +293,13 @@ class TestSlabOceanModel:
 
         # Check structure
         assert isinstance(ds, xr.Dataset)
-        assert 'T' in ds.data_vars
-        assert 'mld' in ds.data_vars
-        assert 'time' in ds.coords
+        assert "T" in ds.data_vars
+        assert "mld" in ds.data_vars
+        assert "time" in ds.coords
 
         # Check shapes
-        assert ds['T'].dims == ('time', 'lon', 'lat')
-        assert ds['mld'].dims == ('time', 'lon', 'lat')
+        assert ds["T"].dims == ("time", "lon", "lat")
+        assert ds["mld"].dims == ("time", "lon", "lat")
 
     def test_conservation_of_mass(self, basic_config):
         """Test that mixed layer depth doesn't change (mass conservation)."""
@@ -302,6 +309,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = initial_state
         cpl.flx = Mock()
@@ -321,6 +329,7 @@ class TestSlabOceanModel:
 
         # Apply extreme heating
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = state
         cpl.flx = Mock()
@@ -345,6 +354,7 @@ class TestSlabOceanModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.ocn = state
         cpl.flx = Mock()

@@ -11,7 +11,11 @@ import pandas as pd
 
 from jax_esm import ComponentConfig
 from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import Component, create_component_state_class, create_field_group_class
+from jax_esm.components.base import (
+    Component,
+    create_component_state_class,
+    create_field_group_class,
+)
 from jax_esm.utils.bulk_op import stack_objects
 
 
@@ -69,13 +73,17 @@ class SimplifiedAtmosphere(Component):
                 phydata_kwargs={
                     "surface_flux": surface_flux,
                     "precipitation": jnp.zeros((16, 32)),
-                }
+                },
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -113,10 +121,14 @@ class SimplifiedFluxModel(Component):
                 phydata_kwargs={"heatflx": heat_flux},
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -165,13 +177,17 @@ class SimplifiedOcean(Component):
                 },
                 phydata_kwargs={
                     "heat_content": new_T * self.heat_capacity,
-                }
+                },
             )
 
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
+            predictions = stack_objects(
+                [
+                    {
+                        "prog": new_state.prog,
+                        "phydata": new_state.phydata,
+                    }
+                ]
+            )
 
             return new_state, predictions
 
@@ -230,9 +246,9 @@ class TestIntegration:
         initial_state = coupled_system.initialize()
 
         # Check all components initialized
-        assert hasattr(initial_state, 'atm')
-        assert hasattr(initial_state, 'flx')
-        assert hasattr(initial_state, 'ocn')
+        assert hasattr(initial_state, "atm")
+        assert hasattr(initial_state, "flx")
+        assert hasattr(initial_state, "ocn")
 
         # Check initial values are reasonable
         assert jnp.all(initial_state.atm.prog.T_surface > 200.0)
@@ -286,15 +302,14 @@ class TestIntegration:
         initial_diff = jnp.abs(
             initial_state.ocn.prog.T - initial_state.atm.prog.T_surface
         )
-        final_diff = jnp.abs(
-            final_state.ocn.prog.T - final_state.atm.prog.T_surface
-        )
+        final_diff = jnp.abs(final_state.ocn.prog.T - final_state.atm.prog.T_surface)
 
         mean_initial_diff = jnp.mean(initial_diff)
         mean_final_diff = jnp.mean(final_diff)
 
-        assert mean_final_diff < mean_initial_diff, \
+        assert mean_final_diff < mean_initial_diff, (
             "System should equilibrate (temperature difference should decrease)"
+        )
 
     def test_conservation_check(self, coupled_system):
         """Test approximate energy conservation in the system."""
@@ -306,9 +321,8 @@ class TestIntegration:
         C_atm = 1.0e7  # Simplified atmospheric heat capacity
         C_ocn = 4.0e7  # Ocean heat capacity
 
-        initial_energy = (
-            jnp.sum(C_atm * initial_state.atm.prog.T_surface) +
-            jnp.sum(C_ocn * initial_state.ocn.prog.T)
+        initial_energy = jnp.sum(C_atm * initial_state.atm.prog.T_surface) + jnp.sum(
+            C_ocn * initial_state.ocn.prog.T
         )
 
         # Run simulation
@@ -321,16 +335,16 @@ class TestIntegration:
         )
 
         # Compute final total heat content
-        final_energy = (
-            jnp.sum(C_atm * final_state.atm.prog.T_surface) +
-            jnp.sum(C_ocn * final_state.ocn.prog.T)
+        final_energy = jnp.sum(C_atm * final_state.atm.prog.T_surface) + jnp.sum(
+            C_ocn * final_state.ocn.prog.T
         )
 
         # Energy should be approximately conserved (no external forcing)
         # Allow small numerical errors
         relative_change = jnp.abs(final_energy - initial_energy) / initial_energy
-        assert relative_change < 1e-6, \
+        assert relative_change < 1e-6, (
             f"Energy should be conserved (relative change: {relative_change})"
+        )
 
     def test_reproducibility(self, coupled_system):
         """Test that simulations are reproducible."""
@@ -354,10 +368,10 @@ class TestIntegration:
         )
 
         # Results should be identical
-        assert jnp.allclose(final_state1.atm.prog.T_surface,
-                           final_state2.atm.prog.T_surface)
-        assert jnp.allclose(final_state1.ocn.prog.T,
-                           final_state2.ocn.prog.T)
+        assert jnp.allclose(
+            final_state1.atm.prog.T_surface, final_state2.atm.prog.T_surface
+        )
+        assert jnp.allclose(final_state1.ocn.prog.T, final_state2.ocn.prog.T)
 
     def test_jit_vs_nojit_equivalence(self, coupled_system):
         """Test that JIT and non-JIT modes give same results."""
@@ -382,17 +396,17 @@ class TestIntegration:
         )
 
         # Results should be very close
-        assert jnp.allclose(final_jit.atm.prog.T_surface,
-                           final_nojit.atm.prog.T_surface, atol=1e-5)
-        assert jnp.allclose(final_jit.ocn.prog.T,
-                           final_nojit.ocn.prog.T, atol=1e-5)
+        assert jnp.allclose(
+            final_jit.atm.prog.T_surface, final_nojit.atm.prog.T_surface, atol=1e-5
+        )
+        assert jnp.allclose(final_jit.ocn.prog.T, final_nojit.ocn.prog.T, atol=1e-5)
 
     def test_time_advancement(self, coupled_system):
         """Test that simulation time advances correctly."""
         initial_state = coupled_system.initialize()
 
         run_time = 86400.0  # 1 day
-        timestep = 3600.0   # 1 hour
+        timestep = 3600.0  # 1 hour
 
         final_state, predictions = coupled_system.run(
             init_cplstate=initial_state,
@@ -417,12 +431,10 @@ class TestIntegration:
         spatial_T = lat_gradient * lon_uniform
 
         initial_state = initial_state.copy(
-            atm=initial_state.atm.copy(
-                prog_kwargs={"T_surface": spatial_T}
-            ),
+            atm=initial_state.atm.copy(prog_kwargs={"T_surface": spatial_T}),
             ocn=initial_state.ocn.copy(
                 prog_kwargs={"T": spatial_T + 5.0}  # Ocean 5K warmer
-            )
+            ),
         )
 
         # Run simulation

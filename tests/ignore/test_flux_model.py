@@ -1,6 +1,5 @@
 """Tests for FluxModel component."""
 
-import jax
 import jax.numpy as jnp
 import pytest
 import pandas as pd
@@ -11,6 +10,7 @@ from jax_esm import ComponentConfig
 # Skip all tests if jcm is not available (FluxModel depends on JCM structures)
 try:
     from jax_esm.components.FluxModel.FluxModel import FluxModel
+
     HAS_JCM = True
 except ImportError:
     HAS_JCM = False
@@ -25,6 +25,7 @@ class TestFluxModel:
         """Create basic flux model configuration."""
         # Create mock coordinates
         from unittest.mock import Mock
+
         coords = Mock()
         coords.nodal_shape = (8, 32, 64)  # levels, lon, lat
 
@@ -37,7 +38,7 @@ class TestFluxModel:
             grid={"type": "latlon"},
             params={
                 "coords": coords,
-            }
+            },
         )
 
     def test_initialization(self, basic_config):
@@ -53,15 +54,15 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         # Check state structure
-        assert hasattr(state, 'prog')
-        assert hasattr(state, 'phydata')
+        assert hasattr(state, "prog")
+        assert hasattr(state, "phydata")
 
         # Check prognostic fields
-        assert hasattr(state.prog, 'sim_time')
+        assert hasattr(state.prog, "sim_time")
         assert state.prog.sim_time == 0.0
 
         # Check phydata fields
-        assert hasattr(state.phydata, 'heatflx')
+        assert hasattr(state.phydata, "heatflx")
         assert state.phydata.heatflx.shape == (32, 64)
 
         # Initial heat flux should be zero
@@ -81,6 +82,7 @@ class TestFluxModel:
 
         # Create mock coupled state with atmosphere data
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -113,6 +115,7 @@ class TestFluxModel:
 
         # Create mock coupled state
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -137,6 +140,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -173,6 +177,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -188,12 +193,12 @@ class TestFluxModel:
 
         # Predictions should be a dict with 'prog' and 'phydata' keys
         assert isinstance(predictions, dict)
-        assert 'prog' in predictions
-        assert 'phydata' in predictions
+        assert "prog" in predictions
+        assert "phydata" in predictions
 
         # Should have expected fields
-        assert hasattr(predictions['prog'], 'sim_time')
-        assert hasattr(predictions['phydata'], 'heatflx')
+        assert hasattr(predictions["prog"], "sim_time")
+        assert hasattr(predictions["phydata"], "heatflx")
 
     def test_xarray_conversion(self, basic_config):
         """Test conversion of predictions to xarray."""
@@ -201,6 +206,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -219,11 +225,11 @@ class TestFluxModel:
 
         # Check structure
         assert isinstance(ds, xr.Dataset)
-        assert 'heatflx' in ds.data_vars
-        assert 'time' in ds.coords
+        assert "heatflx" in ds.data_vars
+        assert "time" in ds.coords
 
         # Check dimensions
-        assert ds['heatflx'].dims == ('time', 'lon', 'lat')
+        assert ds["heatflx"].dims == ("time", "lon", "lat")
 
     def test_zero_flux_handling(self, basic_config):
         """Test handling of zero atmospheric fluxes."""
@@ -231,6 +237,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -254,6 +261,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -279,6 +287,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -305,6 +314,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
@@ -339,6 +349,7 @@ class TestFluxModel:
         state = flux_model.initialize()
 
         from unittest.mock import Mock
+
         cpl = Mock()
         cpl.flx = state
 
