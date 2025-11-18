@@ -106,22 +106,33 @@ class Coupler:
             New states after one coupling timestep
         """
 
-        # Get step functions for the three components
+        # Get step functions for all components (hardcoded for atm, flx, ocn, lnd)
         atm_step_fn = self.components["atm"].gen_step_fn()
         flx_step_fn = self.components["flx"].gen_step_fn()
         ocn_step_fn = self.components["ocn"].gen_step_fn()
+        
+        # Land component is optional for backward compatibility
+        has_land = "lnd" in self.components
+        if has_land:
+            lnd_step_fn = self.components["lnd"].gen_step_fn()
 
         @jax.jit
         def step_fn(cplstate, t):
             
             # Call forward functions and unpack results directly into dictionaries
+            component_list = [
+                ("atm", atm_step_fn),
+                ("flx", flx_step_fn), 
+                ("ocn", ocn_step_fn)
+            ]
+            
+            # Add land if present
+            if has_land:
+                component_list.append(("lnd", lnd_step_fn))
+            
             results = {
                 name: step_fn(cplstate, t) 
-                for name, step_fn in [
-                    ("atm", atm_step_fn),
-                    ("flx", flx_step_fn), 
-                    ("ocn", ocn_step_fn)
-                ]
+                for name, step_fn in component_list
             }
             
             new_cplstate = self.coupled_state_class(**{name: state for name, (state, _) in results.items()})
