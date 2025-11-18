@@ -12,9 +12,15 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import xarray as xr
+from typing import NamedTuple
 
 from jax_esm.components.LandModel import LandModel
 from jax_esm.components.base import ComponentConfig
+
+
+class MockCoupledState(NamedTuple):
+    """JAX-compatible mock coupled state."""
+    lnd: object
 
 
 class MockCoordinates:
@@ -213,12 +219,7 @@ def run_standalone_land_model():
     days_to_run = 365
     print(f"Running {days_to_run}-day simulation...")
     
-    # Create mock coupled state
-    class MockCoupledState:
-        def __init__(self, land_state):
-            self.lnd = land_state
-    
-    cpl = MockCoupledState(state)
+    cpl = MockCoupledState(lnd=state)
     step_fn = land.gen_step_fn()
     
     # Store history
@@ -233,7 +234,7 @@ def run_standalone_land_model():
             print(f"  Day {day}/{days_to_run}...")
         
         new_state, predictions = step_fn(cpl, day)
-        cpl = MockCoupledState(new_state)
+        cpl = MockCoupledState(lnd=new_state)
         
         # Save every 7 days
         if day % 7 == 0:
@@ -317,15 +318,6 @@ def run_standalone_land_model():
     plt.tight_layout()
     plt.savefig('land_model_demo_results.png', dpi=150, bbox_inches='tight')
     print("Saved results to: land_model_demo_results.png")
-    
-    # Create xarray output
-    ds = land.predictions_to_xarray({
-        "prog": new_state.prog,
-        "phydata": new_state.phydata,
-    })
-    
-    print("\nOutput dataset structure:")
-    print(ds)
     
     return land, new_state, T_history
 

@@ -9,9 +9,16 @@ import numpy as np
 import xarray as xr
 import tempfile
 import os
+from typing import NamedTuple
 
 from jax_esm.components.LandModel import LandModel
 from jax_esm.components.base import ComponentConfig
+
+
+class MockCoupledState(NamedTuple):
+    """JAX-compatible mock coupled state for testing."""
+    lnd: object
+    flx: object = None
 
 
 class MockCoordinates:
@@ -275,11 +282,7 @@ class TestLandModelPhysics(unittest.TestCase):
         state = land.initialize()
         
         # Create mock coupled state
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         
         # Get step function
         step_fn = land.gen_step_fn()
@@ -312,19 +315,19 @@ class TestLandModelPhysics(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        # Create mock coupled state with heat flux
-        class MockFluxState:
-            def __init__(self):
-                self.phydata = type('obj', (object,), {
-                    'heatflx': jnp.ones((5, 10), dtype=jnp.float32) * 100.0  # 100 W/m^2 upward
-                })()
+        # Create mock flux state with heat flux
+        class MockFluxState(NamedTuple):
+            phydata: object
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-                self.flx = MockFluxState()
+        class MockFluxPhydata(NamedTuple):
+            heatflx: jnp.ndarray
         
-        cpl = MockCoupledState(state)
+        flux_phydata = MockFluxPhydata(
+            heatflx=jnp.ones((5, 10), dtype=jnp.float32) * 100.0  # 100 W/m^2 upward
+        )
+        flux_state = MockFluxState(phydata=flux_phydata)
+        
+        cpl = MockCoupledState(lnd=state, flx=flux_state)
         
         # Get step function
         step_fn = land.gen_step_fn()
@@ -334,7 +337,7 @@ class TestLandModelPhysics(unittest.TestCase):
         
         for i in range(5):
             new_state, predictions = step_fn(cpl, i)
-            cpl = MockCoupledState(new_state)
+            cpl = MockCoupledState(lnd=new_state, flx=flux_state)
         
         # With positive upward flux (negative downward), temperature should decrease slightly
         # due to energy loss (but relaxation to climatology dominates)
@@ -364,11 +367,7 @@ class TestLandModelTimestepping(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         step_fn = land.gen_step_fn()
         
         new_state, predictions = step_fn(cpl, 0)
@@ -398,11 +397,7 @@ class TestLandModelTimestepping(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         step_fn = land.gen_step_fn()
         
         assert state.prog.sim_time == 0.0
@@ -410,7 +405,7 @@ class TestLandModelTimestepping(unittest.TestCase):
         new_state, _ = step_fn(cpl, 0)
         assert new_state.prog.sim_time == timestep
         
-        cpl = MockCoupledState(new_state)
+        cpl = MockCoupledState(lnd=new_state)
         new_state, _ = step_fn(cpl, 1)
         assert new_state.prog.sim_time == 2 * timestep
     
@@ -432,17 +427,13 @@ class TestLandModelTimestepping(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         step_fn = land.gen_step_fn()
         
         # Run for many steps
         for i in range(100):
             new_state, _ = step_fn(cpl, i)
-            cpl = MockCoupledState(new_state)
+            cpl = MockCoupledState(lnd=new_state)
             
             # Check temperature stays physical
             assert jnp.all(new_state.prog.T > 200.0), f"Step {i}: T too low"
@@ -499,18 +490,14 @@ class TestLandModelIntegration(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         step_fn = land.gen_step_fn()
         
         # Function should already be JIT compiled
         # Try to use it multiple times (would fail if not JIT compatible)
         for i in range(3):
             new_state, predictions = step_fn(cpl, i)
-            cpl = MockCoupledState(new_state)
+            cpl = MockCoupledState(lnd=new_state)
         
         # Should complete without error
         assert True
@@ -533,13 +520,9 @@ class TestLandModelIntegration(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        class MockCoupledState:
-            def __init__(self, land_state):
-                self.lnd = land_state
-        
         original_T = state.prog.T.copy()
         
-        cpl = MockCoupledState(state)
+        cpl = MockCoupledState(lnd=state)
         step_fn = land.gen_step_fn()
         
         new_state, _ = step_fn(cpl, 0)
@@ -569,14 +552,30 @@ class TestLandModelOutputs(unittest.TestCase):
         land = LandModel(config)
         state = land.initialize()
         
-        # Create predictions dict
-        predictions = {
-            "prog": state.prog,
-            "phydata": state.phydata,
+        cpl = MockCoupledState(lnd=state)
+        step_fn = land.gen_step_fn()
+        
+        # Run a few steps to collect predictions
+        # Note: Each step already returns stacked predictions with shape (1, ...)
+        prog_list = []
+        phydata_list = []
+        
+        for i in range(3):
+            new_state, predictions = step_fn(cpl, i)
+            # predictions already has shape (1, nlat, nlon) from stack_objects in step_fn
+            prog_list.append(predictions["prog"])
+            phydata_list.append(predictions["phydata"])
+            cpl = MockCoupledState(lnd=new_state)
+        
+        # Concatenate predictions along time axis
+        from jax_esm.utils.bulk_op import concat_objects
+        stacked_predictions = {
+            "prog": concat_objects(prog_list, axis=0),
+            "phydata": concat_objects(phydata_list, axis=0),
         }
         
         # Convert to xarray
-        ds = land.predictions_to_xarray(predictions)
+        ds = land.predictions_to_xarray(stacked_predictions)
         
         # Check structure
         assert isinstance(ds, xr.Dataset)
@@ -617,17 +616,13 @@ class TestClimatologyInterpolation(unittest.TestCase):
             land = LandModel(config)
             state = land.initialize()
             
-            class MockCoupledState:
-                def __init__(self, land_state):
-                    self.lnd = land_state
-            
-            cpl = MockCoupledState(state)
+            cpl = MockCoupledState(lnd=state)
             step_fn = land.gen_step_fn()
             
             # Run for a month to test interpolation
             for i in range(30):
                 new_state, predictions = step_fn(cpl, i)
-                cpl = MockCoupledState(new_state)
+                cpl = MockCoupledState(lnd=new_state)
                 
                 # Snow depth should match climatology
                 assert jnp.all(jnp.isfinite(new_state.phydata.snowd))

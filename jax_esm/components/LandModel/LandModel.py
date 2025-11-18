@@ -351,7 +351,11 @@ class LandModel(Component):
             
             # Get heat flux from flux component (positive downward into land)
             # Note: flux component convention is positive upward, so we negate
-            heatflx = -cpl.flx.phydata.heatflx
+            # If no flux component, assume zero flux
+            if hasattr(cpl, 'flx') and cpl.flx is not None:
+                heatflx = -cpl.flx.phydata.heatflx
+            else:
+                heatflx = jnp.zeros_like(cpl.lnd.prog.T)
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
             T_anom = cpl.lnd.prog.T - stl_clim_current
@@ -431,7 +435,7 @@ class LandModel(Component):
                 }),
             ),
             coords = dict(
-                time = (["time"], prog.sim_time, {
+                time = (["time"], jnp.atleast_1d(prog.sim_time).flatten(), {
                     "long_name": "Simulation time",
                     "units": "seconds since initialization",
                 }),
