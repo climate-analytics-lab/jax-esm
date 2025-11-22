@@ -1,12 +1,12 @@
-from typing import List
+from typing import List, Any
 import jax
 import jax.numpy as jnp
 
 
 def mean_leaf(
-    tree: any,
+    tree: Any,
     axis: int | list,
-):
+) -> Any:
     """
     A tool function that does the jnp.mean to leaf nodes.
 
@@ -23,9 +23,9 @@ def mean_leaf(
 
 
 def unwrap_leading_dims(
-    obj,
-    first_n_dim=2,
-):
+    obj: Any,
+    first_n_dim: int = 2,
+) -> Any:
     """
     A tool function that unwraps the leading dimensions of jax arrays
 

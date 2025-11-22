@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Callable
 
 import jax.numpy as jnp
 from jax import Array
@@ -50,7 +50,7 @@ def create_field_group_class(
         bases=(base_cls,),
     )
 
-    @classmethod
+    @classmethod # type: ignore
     def zeros(_cls, **kwargs):
         init_args = dict()
         for varname, dtype, shape in fields:
@@ -61,7 +61,7 @@ def create_field_group_class(
 
         return _cls(**init_args)
 
-    @classmethod
+    @classmethod # type: ignore
     def ones(_cls, **kwargs):
         init_args = dict()
         for varname, dtype, shape in fields:
@@ -82,9 +82,9 @@ def create_field_group_class(
 
         return type(self)(**init_args)
 
-    cls.zeros = zeros
-    cls.ones = ones
-    cls.copy = copy
+    cls.zeros = zeros  # type: ignore
+    cls.ones = ones    # type: ignore
+    cls.copy = copy    # type: ignore
 
     return tree_math.struct(cls)
 
@@ -119,14 +119,14 @@ def create_component_state_class(
         bases=(ComponentState,),
     )
 
-    @classmethod
+    @classmethod # type: ignore
     def zeros(_cls):
         return _cls(
             prog=prog_cls.zeros(),
             phydata=phydata_cls.zeros(),
         )
 
-    @classmethod
+    @classmethod # type: ignore
     def ones(_cls):
         return _cls(
             prog=prog_cls.ones(),
@@ -141,9 +141,9 @@ def create_component_state_class(
 
         return o
 
-    new_cls.zeros = zeros
-    new_cls.ones = ones
-    new_cls.copy = copy
+    new_cls.zeros = zeros  # type: ignore
+    new_cls.ones = ones    # type: ignore
+    new_cls.copy = copy    # type: ignore
 
     new_cls = tree_math.struct(new_cls)
 
@@ -180,14 +180,14 @@ def create_component_forcing_class(
         bases=(ComponentForcing,),
     )
 
-    @classmethod
+    @classmethod # type: ignore
     def zeros(_cls):
         return _cls(
             flux=flux_cls.zeros(),
             scalar=scalar_cls.zeros(),
         )
 
-    @classmethod
+    @classmethod # type: ignore
     def ones(_cls):
         return _cls(
             flux=flux_cls.ones(),
@@ -202,9 +202,9 @@ def create_component_forcing_class(
 
         return o
 
-    new_cls.zeros = zeros
-    new_cls.ones = ones
-    new_cls.copy = copy
+    new_cls.zeros = zeros # type: ignore
+    new_cls.ones = ones   # type: ignore
+    new_cls.copy = copy   # type: ignore
 
     new_cls = tree_math.struct(new_cls)
 
@@ -221,6 +221,8 @@ class CoupledComponentConfig:
 
 class Component(ABC):
     """Abstract base class for Earth system components."""
+
+    component_forcing_class: ComponentForcing
 
     def __init__(self, config: CoupledComponentConfig):
         """Initialize component with configuration."""
@@ -241,7 +243,7 @@ class Component(ABC):
     @abstractmethod
     def generate_step_function(
         self,
-    ) -> callable:
+    ) -> Callable:
         """Advance component state by one timestep.
 
         Args:
@@ -250,22 +252,3 @@ class Component(ABC):
             A function that accepts (init_state, time) and returns (final_state, predictions)
         """
         pass
-
-    def get_boundary_fields(self, state: ComponentState) -> Dict[str, Array]:
-        """Extract boundary fields needed by other components.
-
-        Args:
-            state: Current component state
-
-        Returns:
-            Dictionary of boundary fields
-        """
-        return state.boundary
-
-    def get_required_fluxes(self) -> List[str]:
-        """Return list of required flux names from other components."""
-        return ["heat", "moisture", "momentum_u", "momentum_v"]
-
-    def get_provided_fluxes(self) -> List[str]:
-        """Return list of flux names provided to other components."""
-        return ["heat", "moisture", "momentum_u", "momentum_v"]
