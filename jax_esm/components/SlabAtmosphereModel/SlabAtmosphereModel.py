@@ -166,12 +166,12 @@ class SlabAtmosphereModel(Component):
             
             land_sensible_heat_flux = surface_air_density * drag_coefficient * ((state.prog.mean_zonal_wind_velocity ** 2 + state.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (forcing.scalar.land_surface_temperature - state.prog.mean_air_temperature)
 
-            ocean_sensible_heat_flux = ocean_sensible_heat_flux.at[land_index] = 0.0
-            land_sensible_heat_flux = land_sensible_heat_flux.at[ocean_index] = 0.0
+            ocean_sensible_heat_flux = ocean_sensible_heat_flux.at[land_index].set(0.0)
+            land_sensible_heat_flux = land_sensible_heat_flux.at[ocean_index].set(0.0)
 
             latent_heat_flux = 0.0
 
-            total_heat_flux = sensible_heat_flux + latent_heat_flux
+            total_heat_flux = ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
 
             def sub_step_function(T, sim_time):
                 return T + self.cd_factor * total_heat_flux, None
