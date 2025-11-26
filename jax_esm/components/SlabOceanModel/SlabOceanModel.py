@@ -127,8 +127,9 @@ class SlabOceanModel(Component):
             axis=lat_dim_idx,
         )
 
-        lnd_idx = self.domain.bmask == 1
-
+        ocn_idx = self.domain.bmask == 0
+        nonocn_idx = self.domain.bmask != 0
+        
         # initialize mld
         init_mld = (
             self.mixed_layer_depth_max
@@ -154,8 +155,9 @@ class SlabOceanModel(Component):
                 + 15
             )
 
-        init_T = init_T.at[lnd_idx].set(273.15 + 15)
-        if jnp.sum(jnp.isnan(init_T)) == 0:
+        
+        init_T = init_T.at[nonocn_idx].set(0)
+        if jnp.sum( jnp.isnan(init_T) ) == 0:
             print("domain.bmask and SST_clim do share the same mask.")
         else:
             raise Exception(
@@ -186,10 +188,9 @@ class SlabOceanModel(Component):
         # Find day of the year to locate climatology
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_day_offset = (self.start_datetime - ref_dt) / jdt.to_timedelta(
-            1, "second"
-        )
-
+        start_day_offset = ( self.start_datetime - ref_dt ) / jdt.to_timedelta(1, "second")
+        nonocn_idx = self.domain.bmask != 0
+        
         def step_function(state, forcing, t):
             new_Tanom = state.prog.T
             if self.has_climatology:
@@ -231,7 +232,8 @@ class SlabOceanModel(Component):
             new_T = new_Tanom
             if self.has_climatology:
                 new_T += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
-
+            
+            new_T = new_T.at[nonocn_idx].set(0) 
             new_state = state.copy(
                 prog_kwargs=dict(
                     T=new_T,

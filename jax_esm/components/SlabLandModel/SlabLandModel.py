@@ -125,6 +125,7 @@ class SlabLandModel(Component):
         )
 
         land_index = self.domain.bmask == 1
+        nonland_index = self.domain.bmask != 1
        
         print("Total land grid count: ", land_index.sum())
  
@@ -146,7 +147,7 @@ class SlabLandModel(Component):
             init_land_surface_temperature = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15 + 15
 
         
-        init_land_surface_temperature = init_land_surface_temperature.at[land_index].set(273.15+20)
+        init_land_surface_temperature = init_land_surface_temperature.at[land_index].set(273.15+20).at[nonland_index].set(0)
         if jnp.sum( jnp.isnan(init_land_surface_temperature) ) == 0:
             print("domain.bmask and land_surface_temperature_clim do share the same mask.")
         else:

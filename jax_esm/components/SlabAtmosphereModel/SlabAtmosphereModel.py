@@ -82,11 +82,22 @@ class SlabAtmosphereModel(Component):
                 cls_name="flux",
                 fields=[],
             ),
+<<<<<<< HEAD
             scalar_cls=create_field_group_class(
                 cls_name="scalar",
                 fields=[
                     ("sea_surface_temperature", float, D2_nodal_shape),
+=======
+            scalar_cls = create_field_group_class(
+                cls_name = "scalar",
+                fields = [
+                    ("bare_land_albedo", float, D2_nodal_shape),
+                    ("sea_ice_concentration", float, D2_nodal_shape),
+                    ("soil_moisture", float, D2_nodal_shape),
+                    ("snow_cover", float, D2_nodal_shape),
+>>>>>>> 35b36f2 (Make atm-ocn-lnd slab version work)
                     ("land_surface_temperature", float, D2_nodal_shape),
+                    ("sea_surface_temperature", float, D2_nodal_shape),
                 ],
             ),
         )
@@ -216,6 +227,7 @@ class SlabAtmosphereModel(Component):
         )
 
         ds = xr.Dataset(
+<<<<<<< HEAD
             data_vars=dict(
                 mean_air_temperature=(
                     ["time", "longitude", "latitude"],
@@ -241,6 +253,25 @@ class SlabAtmosphereModel(Component):
                 ),
                 latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
                 longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
+=======
+            data_vars = dict(
+                hfluxn = (["time", "longitude", "latitude", "two"], phydata.hfluxn),
+                mean_air_temperature = (["time", "longitude", "latitude"], prog.mean_air_temperature),
+                mean_zonal_wind_velocity = (["time", "longitude", "latitude"], prog.mean_zonal_wind_velocity),
+                mean_meridional_wind_velocity = (["time", "longitude", "latitude"], prog.mean_meridional_wind_velocity),
+                bare_land_albedo = (["time", "longitude", "latitude"], forcing.scalar.bare_land_albedo),
+                sea_ice_concentration = (["time", "longitude", "latitude"], forcing.scalar.sea_ice_concentration),
+                soil_moisture = (["time", "longitude", "latitude"], forcing.scalar.soil_moisture),
+                snow_cover = (["time", "longitude", "latitude"], forcing.scalar.snow_cover),
+                land_surface_temperature = (["time", "longitude", "latitude"], forcing.scalar.land_surface_temperature),
+                sea_surface_temperature = (["time", "longitude", "latitude"], forcing.scalar.sea_surface_temperature),
+
+            ), 
+            coords = dict(
+                time = (["time",], prog.sim_time/3600.0, {"units": f"hours since {start_datetime_str:s}"}),
+                latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
+                longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
+>>>>>>> 35b36f2 (Make atm-ocn-lnd slab version work)
             ),
         )
 

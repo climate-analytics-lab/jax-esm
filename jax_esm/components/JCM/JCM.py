@@ -86,9 +86,20 @@ class JCM(Component):
                 cls_name="flux",
                 fields=[],
             ),
+<<<<<<< HEAD
             scalar_cls=create_field_group_class(
                 cls_name="scalar",
                 fields=[
+=======
+            scalar_cls = create_field_group_class(
+                cls_name = "scalar",
+                fields = [
+                    ("bare_land_albedo", float, D2_nodal_shape),
+                    ("sea_ice_concentration", float, D2_nodal_shape),
+                    ("soil_moisture", float, D2_nodal_shape),
+                    ("snow_cover", float, D2_nodal_shape),
+                    ("land_surface_temperature", float, D2_nodal_shape),
+>>>>>>> 35b36f2 (Make atm-ocn-lnd slab version work)
                     ("sea_surface_temperature", float, D2_nodal_shape),
                 ],
             ),
@@ -140,7 +151,12 @@ class JCM(Component):
     def generate_step_function(self, jitted: bool = True):
         def step_function(state, forcing, t):
             atm_forcing = self.model.forcing.copy(
-                sea_surface_temperature=forcing.scalar.sea_surface_temperature,
+                #alb0 = forcing.scalar.bare_land_albedo,
+                #sice_am = forcing.scalar.sea_ice_concentration,
+                #snowc_am = forcing.scalar.snow_cover,
+                #soilw_am = forcing.scalar.soil_moisture,
+                stl_am = forcing.scalar.land_surface_temperature,
+                sea_surface_temperature = forcing.scalar.sea_surface_temperature * 0 + 277.0,
             )
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state=state.metadata,
@@ -163,7 +179,7 @@ class JCM(Component):
         self,
         predictions,
     ):
-        return self.model.predictions_to_xarray(predictions)
-
+        return predictions.to_xarray()
+    
     def report(self):
         pass

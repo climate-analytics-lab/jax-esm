@@ -88,6 +88,6 @@ if __name__ == "__main__":
     output_dict = model.predictions_to_xarray(predictions)
 
     for component_name, ds in output_dict.items():
-        output_file = output_dir / f"JESM-SAM_SOM-{component_name:s}.nc"
+        output_file = output_dir / f"JESM-SAM_SOM_SLM-{component_name:s}.nc"
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, engine="netcdf4")
