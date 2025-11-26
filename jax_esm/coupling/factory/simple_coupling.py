@@ -87,9 +87,10 @@ def couple_atm_ocn_lnd(
     else:
         raise ValueError("Currently only deal with JCM and SlabAtmosphereModel.")
 
+    forcing_mapper = ForcingMapper(components=components)
+    
     # Atmosphere-ocean flux
     interpolators = generate_atm_ocn_interpolators(dict(atm=atm.domain, ocn=ocn.domain))
-    forcing_mapper = ForcingMapper(components=components)
     forcing_mapper.add_forcing_mapping("atm", "ocn", {
         surface_flux_name : "flux.total_heat_flux", 
     })
@@ -103,7 +104,6 @@ def couple_atm_ocn_lnd(
 
     # Atmosphere-land flux
     interpolators = generate_atm_lnd_interpolators(dict(atm=atm.domain, lnd=lnd.domain))
-    forcing_mapper = ForcingMapper(components=components)
     forcing_mapper.add_forcing_mapping("atm", "lnd", {
         surface_flux_name : "flux.total_heat_flux", 
     })

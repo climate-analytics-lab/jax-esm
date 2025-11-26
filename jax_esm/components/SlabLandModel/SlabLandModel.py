@@ -125,7 +125,9 @@ class SlabLandModel(Component):
         )
 
         land_index = self.domain.bmask == 1
-        
+       
+        print("Total land grid count: ", land_index.sum())
+ 
         # initialize land_depth
         init_land_depth = self.land_depth_max + (self.land_depth_min - self.land_depth_max) * jnp.cos(self.llat_rad)**3
         init_T = None
@@ -138,7 +140,7 @@ class SlabLandModel(Component):
             print("Land climatology file: ", self.land_clim_file)            
             self.land_surface_temperature_clim = jnp.array(xr.open_dataset(self.land_clim_file)["stl"])
             self.has_climatology = True
-            init_T = self.land_surface_temperature_clim[:, :, 0].copy()
+            init_land_surface_temperature = self.land_surface_temperature_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_land_surface_temperature = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15 + 15
@@ -163,7 +165,7 @@ class SlabLandModel(Component):
         return self.component_state_class.zeros().copy(
             prog_kwargs = dict(
                 land_depth = init_land_depth,
-                land_surface_temperature_clim = init_land_surface_temperature,
+                land_surface_temperature = init_land_surface_temperature,
             ),
         )
 
@@ -176,7 +178,10 @@ class SlabLandModel(Component):
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
         start_day_offset = ( self.start_datetime - ref_dt ) / jdt.to_timedelta(1, "second")
-        
+       
+        nonland_index = self.domain.bmask != 1
+        land_index = self.domain.bmask == 1
+ 
         def step_function(state, forcing, t):
             
             # Compute anomaly later if climatology is given
@@ -188,7 +193,6 @@ class SlabLandModel(Component):
                 clim_beg_idx = jnp.mod(jnp.int_( jnp.floor( (start_day_offset + t                ) / 86400.0) ), length_of_a_cycle)
                 clim_end_idx = jnp.mod(jnp.int_( jnp.floor( (start_day_offset + t + self.timestep) / 86400.0) ), length_of_a_cycle)
                 
-                land_index = self.domain.bmask == 1
                 snapshot_land_surface_temperature_clim_beg = self.land_surface_temperature_clim[:, :, clim_beg_idx]
                 snapshot_land_surface_temperature_clim_beg = jnp.where(land_index, snapshot_land_surface_temperature_clim_beg, 273.15+15)
                 
@@ -206,11 +210,12 @@ class SlabLandModel(Component):
             
             new_land_surface_temperature = new_land_surface_temperature_anomaly
             if self.has_climatology:
-                new_T += snapshot_land_surface_temperature_clim_beg + land_surface_temperature_clim_trend * self.timestep
-                
+                new_land_surface_temperature += snapshot_land_surface_temperature_clim_beg + land_surface_temperature_clim_trend * self.timestep
+            
+            new_land_surface_temperature = new_land_surface_temperature.at[nonland_index].set(0)
             new_state = state.copy(
                 prog_kwargs = dict(
-                    T = new_T,
+                    land_surface_temperature = new_land_surface_temperature,
                     sim_time = new_sim_time,
                 ),
             )
