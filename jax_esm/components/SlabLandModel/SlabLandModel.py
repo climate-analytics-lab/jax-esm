@@ -26,7 +26,7 @@ from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_
 class SlabLandModel(Component):
     
     """
-    An inactive land model
+    A simple land model adapated from SlabOceanModel
     """
 
     def __init__(
@@ -136,7 +136,7 @@ class SlabLandModel(Component):
         if self.land_clim_file is not None:
             print("Land climatology file. The given initial land surface temperature will be used.")
             print("Land climatology file: ", self.land_clim_file)            
-            self.land_surface_temperature_clim = jnp.array(xr.open_dataset(self.land_clim_file)["lst"])
+            self.land_surface_temperature_clim = jnp.array(xr.open_dataset(self.land_clim_file)["stl"])
             self.has_climatology = True
             init_T = self.land_surface_temperature_clim[:, :, 0].copy()
         else:
