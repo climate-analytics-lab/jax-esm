@@ -14,8 +14,22 @@ class AbstractFieldGroup:
     pass
 
 
-class ComponentForcing:
-    pass
+
+class ComponentForcing(ABC):
+    
+    @abstractmethod
+    def zeros(cls):
+        pass
+
+    @abstractmethod
+    def ones(cls):
+        pass
+
+    @abstractmethod
+    def copy(cls):
+        pass
+
+
 
 
 class ComponentState:
@@ -243,6 +257,7 @@ class Component(ABC):
     @abstractmethod
     def generate_step_function(
         self,
+        jitted: bool = False,
     ) -> Callable:
         """Advance component state by one timestep.
 

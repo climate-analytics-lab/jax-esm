@@ -2,7 +2,7 @@
 
 from functools import partial
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable
 
 import jax
 import jax.numpy as jnp
@@ -88,7 +88,7 @@ class Coupler:
     def generate_step_function(
         self,
         jitted: bool = True,
-    ) -> callable:
+    ) -> Callable:
         """Advance coupled system by one coupling timestep.
 
         Args:
@@ -102,7 +102,8 @@ class Coupler:
         # Get step functions of each component
         step_functions = {}
         for component_name, component in self.components.items():
-            step_function = component.generate_step_function(jitted=jitted)
+            
+            _step_function = component.generate_step_function(jitted=jitted)
 
             # Closure in a loop is used. Using functools.partial to cache.
             def looped_step_function(state, forcing, t, step_function, component):
@@ -125,7 +126,7 @@ class Coupler:
                 return _carry["state"], _predictions
 
             step_functions[component_name] = partial(
-                looped_step_function, step_function=step_function, component=component
+                looped_step_function, step_function=_step_function, component=component
             )
 
         def step_function(coupled_state, t):
@@ -203,10 +204,13 @@ class Coupler:
         self.component_names = list(self.components.keys())
 
         # Recreate time integrator with new component
-        component_timesteps = {n: c.timestep for n, c in self.components.items()}
+        component_timesteps = {n: c.config.timestep for n, c in self.components.items()}
 
         # Revalidate
         self._validate_components()
+
+    def _validate_components(self):
+        pass
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
@@ -219,7 +223,7 @@ class Coupler:
             self.component_names = list(self.components.keys())
 
             # Recreate time integrator without removed component
-            component_timesteps = {n: c.timestep for n, c in self.components.items()}
+            component_timesteps = {n: c.config.timestep for n, c in self.components.items()}
 
     def predictions_to_xarray(
         self,

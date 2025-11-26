@@ -143,8 +143,8 @@ class ForcingMapper:
 
     def _check_conservation(
         self,
-        output_fluxes: Dict[str, any],
-        input_fluxes: Dict[str, any],
+        output_fluxes: Dict[str, Any],
+        input_fluxes: Dict[str, Any],
     ) -> None:
         """Check conservation of fluxes (placeholder for conservation checks)."""
         # This could check that total heat/moisture/momentum is conserved
