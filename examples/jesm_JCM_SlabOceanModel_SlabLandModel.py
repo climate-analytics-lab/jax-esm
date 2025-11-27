@@ -79,7 +79,7 @@ if __name__ == "__main__":
     _start_datetime = start_datetime
     for rel_month in range(simulate_months):
        
-        _end_datetime = _start_datetime + jdt.to_timedelta(days_of_month_in_date(_start_datetime)*0+5, "day")
+        _end_datetime = _start_datetime + jdt.to_timedelta(days_of_month_in_date(_start_datetime)*0+10, "day")
         current_year_month = _start_datetime.to_pydatetime().strftime("%Y-%m")
         
         print(f"Running year {current_year_month:s} (relative month {rel_month:d})")

@@ -22,11 +22,11 @@ if __name__ == "__main__":
             model=jcm.model.Model(start_date=start_datetime),
             coupling_timestep=coupling_timestep,
         ),
-        ocn=SlabOceanModel(
-            grid_specification="Veros::4deg",
-            timestep=coupling_timestep,
-            start_datetime=start_datetime,
-            save_interval=coupling_timestep,
+        ocn = SlabOceanModel(
+            grid_specification = "JCM::T31",
+            timestep = coupling_timestep,
+            start_datetime = start_datetime,
+            save_interval = coupling_timestep,
         ),
     )
 
@@ -46,9 +46,10 @@ if __name__ == "__main__":
     # Run coupled model
     print("Running model...")
     final_state, predictions = model.run(
-        init_coupled_state=initial_state,
-        start_time=0.0,
-        end_time=86400.0 * 360,
+        init_coupled_state = initial_state,
+        start_time = 0.0,
+        end_time = 86400.0 * 3,
+        jax_scan = False,
     )
 
     # Convert output into xarray
