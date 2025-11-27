@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional, Dict
+from typing import Any, List, Tuple, Optional, Dict
 import jax.numpy as jnp
 import xarray as xr
 import dinosaur
@@ -19,17 +19,19 @@ class GridSpecification:
 
 @dataclass
 class Grid:
-    nodal_shape: Tuple[int]
-    axis_names: Tuple[str]
-    axis_values: Tuple[List[float]]
+    nodal_shape: Tuple[int, ...]
+    axis_names: Tuple[str, ...]
+    axis_values: Tuple[jnp.ndarray, ...]
 
     @classmethod
     def from_latitude_longitude(
         cls,
-        latitude: List[float],
-        longitude: List[float],
+        latitude: List[float] | jnp.ndarray,
+        longitude: List[float] | jnp.ndarray,
         order: str = "latitude_longitude",
     ) -> "Grid":
+        latitude = jnp.array(latitude)
+        longitude = jnp.array(longitude)
         if order == "latitude_longitude":
             return cls(
                 nodal_shape=(len(latitude), len(longitude)),
@@ -52,9 +54,9 @@ class Grid:
 class Domain:
     grid_specification: GridSpecification
     grids: Dict[str, Grid]
-    fmask: jnp.array  # fractional mask
-    bmask: jnp.array  # binary mask
-    topography: jnp.array
+    fmask: jnp.ndarray  # fractional mask
+    bmask: jnp.ndarray  # binary mask
+    topography: jnp.ndarray
 
     @classmethod
     def from_grid_specification(
@@ -67,23 +69,29 @@ class Domain:
         Returns a coordinate object based on grid specification.
         """
 
-        grid_specification = parse_grid_specification(grid_specification)
-        if grid_specification["grid_type"] == "JCM":
-            return get_jcm_domain(
-                horizontal_resolution=int(grid_specification["grid_name"][1:]),
+        d = None
+
+        parsed_grid_specification = parse_grid_specification(grid_specification)
+        if parsed_grid_specification["grid_type"] == "JCM":
+            d = get_jcm_domain(
+                horizontal_resolution=int(parsed_grid_specification["grid_name"][1:]),
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
-        elif grid_specification["grid_type"] == "Veros":
-            return get_veros_domain(
-                grid_specification["grid_name"],
+        elif parsed_grid_specification["grid_type"] == "Veros":
+            d = get_veros_domain(
+                parsed_grid_specification["grid_name"],
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
+        if d is None:
+            raise Exception("Error: domain is not created.")
 
-def parse_grid_specification(grid_specification):
+        return d
+
+def parse_grid_specification(grid_specification : str) -> Dict[str, str]:
     """
     Parse a grid specification string of format "<grid_type>::<grid_name>".
 
@@ -148,9 +156,9 @@ def load_jcm_topography_file(
 
 
 def get_jcm_domain(
-    horizontal_resolution,
-    mask_file: Optional[str],
-    topography_file: Optional[str],
+    horizontal_resolution: int,
+    mask_file: Optional[str] = None,
+    topography_file: Optional[str] = None,
 ) -> Domain:
     """
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -231,8 +239,8 @@ def get_veros_domain(
         ds = xr.open_dataset(
             Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc"
         )
-        longitude = ds["xt"].to_numpy() * jnp.pi / 180.0
-        latitude = ds["yt"].to_numpy() * jnp.pi / 180.0
+        longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
+        latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
 
         grids = dict(
             T=Grid.from_latitude_longitude(
@@ -257,7 +265,9 @@ def get_veros_domain(
     if topography_file is None:
         topography = jnp.zeros(grids["T"].nodal_shape)
     else:
-        topography = load_veros_topography_file(topography_file)
+        pass
+        # When veros provide its own topography file, it will be
+        # topography = load_veros_topography_file(topography_file)
 
     return Domain(
         grid_specification=GridSpecification(grid_type="Veros", grid_name=grid_name),
