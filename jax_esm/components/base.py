@@ -1,10 +1,16 @@
 """Base component interface for Earth system models."""
 
+<<<<<<< HEAD
 from jax_esm.components.domain import Domain
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Tuple, Callable, Sequence
+=======
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
+>>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
 
 import jax.numpy as jnp
 import tree_math

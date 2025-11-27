@@ -24,7 +24,11 @@ from jcm.physics_interface import PhysicsState
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import mean_leaf
+<<<<<<< HEAD
 from jax_esm.components.domain import Domain
+=======
+from jax_esm.components.domain import Domain 
+>>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
 
 import tree_math
 from typing import Any
@@ -149,6 +153,7 @@ class JCM(Component):
         )
 
     def generate_step_function(self, jitted: bool = True):
+<<<<<<< HEAD
         def step_function(state, forcing, t):
             atm_forcing = self.model.forcing.copy(
                 #alb0 = forcing.scalar.bare_land_albedo,
@@ -157,12 +162,38 @@ class JCM(Component):
                 #soilw_am = forcing.scalar.soil_moisture,
                 stl_am = forcing.scalar.land_surface_temperature,
                 sea_surface_temperature = forcing.scalar.sea_surface_temperature * 0 + 277.0,
+=======
+      
+
+        D2_nodal_shape = self.model.coords.nodal_shape[1:]
+        def repeat(arr, repeats=365):
+            return jnp.repeat(jnp.expand_dims(arr, axis=-1), axis=-1, repeats=repeats)
+ 
+        def step_function(state, forcing, t):
+                
+            jcm_forcing = ForcingData(
+                alb0 = forcing.scalar.bare_land_albedo,
+                sice_am = repeat(forcing.scalar.sea_ice_concentration),
+                snowc_am = repeat(forcing.scalar.snow_cover),
+                soilw_am = repeat(forcing.scalar.soil_moisture),
+                stl_am = repeat(forcing.scalar.land_surface_temperature.at[:, :].set(288.15)),
+                sea_surface_temperature = repeat(forcing.scalar.sea_surface_temperature),
+                lfluxland = True,
+>>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
             )
+
             new_atm_modal_state, predictions = self.model.run_from_state(
+<<<<<<< HEAD
                 initial_state=state.metadata,
                 save_interval=self.save_interval / 86400.0,  # in days
                 total_time=self.config.timestep / 86400.0,  # in days
                 forcing=atm_forcing,
+=======
+                initial_state = state.metadata,
+                save_interval = self.save_interval / 86400.0, # in days
+                total_time = self.config.timestep  / 86400.0, # in days
+                forcing = jcm_forcing,
+>>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
             )
 
             # phydata is a stacked object, so I take the mean here.

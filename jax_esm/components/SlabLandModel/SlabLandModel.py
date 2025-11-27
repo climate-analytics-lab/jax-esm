@@ -1,6 +1,6 @@
 """Slab ocean model component."""
 
-from typing import Dict, Tuple, Any, List, Optional
+from typing import Optional
 
 import jax_datetime as jdt
 import jax
@@ -9,9 +9,7 @@ import jax.numpy as jnp
 from jax_esm import constants as constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.components.domain import Domain
-from pathlib import Path
 import xarray as xr
-import numpy as np
 
 from jax_esm.components.base import (
     Component,
@@ -147,14 +145,14 @@ class SlabLandModel(Component):
             init_land_surface_temperature = positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15 + 15
 
         
-        init_land_surface_temperature = init_land_surface_temperature.at[land_index].set(273.15+20).at[nonland_index].set(0)
+        init_land_surface_temperature = init_land_surface_temperature.at[nonland_index].set(0)
         if jnp.sum( jnp.isnan(init_land_surface_temperature) ) == 0:
             print("domain.bmask and land_surface_temperature_clim do share the same mask.")
         else:
             raise Exception("Warning: fmask_ocn and sst_init do not share the same mask.")
 
         if not self.has_climatology:
-            print("Climaology SST does not exist. Set relaxation time to inifinity.")
+            print("Climaology land surface temperature does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
         
         # Compute heat capacity cd, and time factor for Euler backward scheme

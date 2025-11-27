@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 from typing import Dict
+=======
+from typing import Dict 
+>>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
 from jax_esm.components.domain import Domain
 from jax_esm.components.base import Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper
@@ -94,26 +98,26 @@ def couple_atm_ocn_lnd(
     forcing_mapper.add_forcing_mapping("atm", "ocn", {
         surface_flux_name : "flux.total_heat_flux", 
     })
+    forcing_mapper.add_transformation("atm", "ocn", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_ocn_hfluxn"])
 
     forcing_mapper.add_forcing_mapping("ocn", "atm", {
         "prog.T" : "scalar.sea_surface_temperature",
     })
-
     forcing_mapper.add_transformation("ocn", "atm", "prog.T", "scalar.sea_surface_temperature", interpolators["ocn_to_atm"])
-    forcing_mapper.add_transformation("atm", "ocn", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_ocn_hfluxn"])
+
 
     # Atmosphere-land flux
     interpolators = generate_atm_lnd_interpolators(dict(atm=atm.domain, lnd=lnd.domain))
     forcing_mapper.add_forcing_mapping("atm", "lnd", {
         surface_flux_name : "flux.total_heat_flux", 
     })
+    forcing_mapper.add_transformation("atm", "lnd", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_lnd_hfluxn"])
 
     forcing_mapper.add_forcing_mapping("lnd", "atm", {
         "prog.land_surface_temperature" : "scalar.land_surface_temperature",
     })
-
     forcing_mapper.add_transformation("lnd", "atm", "prog.land_surface_temperature", "scalar.land_surface_temperature", interpolators["lnd_to_atm"])
-    forcing_mapper.add_transformation("atm", "lnd", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_lnd_hfluxn"])
+
 
     return Coupler(
         components = components,
