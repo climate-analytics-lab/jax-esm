@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-from typing import Dict
-=======
 from typing import Dict 
->>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
 from jax_esm.components.domain import Domain
 from jax_esm.components.base import Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper

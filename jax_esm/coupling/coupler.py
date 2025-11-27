@@ -2,11 +2,7 @@
 
 from functools import partial
 import time
-<<<<<<< HEAD
-from typing import Dict, Optional, Callable
-=======
 from typing import Dict, Optional
->>>>>>> 0b02962 (Able to couple JCM-ocn-lnd)
 
 import jax
 import jax.numpy as jnp
