@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict
 import jax.numpy as jnp
 import xarray as xr
 import dinosaur
@@ -91,7 +91,8 @@ class Domain:
 
         return d
 
-def parse_grid_specification(grid_specification : str) -> Dict[str, str]:
+
+def parse_grid_specification(grid_specification: str) -> Dict[str, str]:
     """
     Parse a grid specification string of format "<grid_type>::<grid_name>".
 

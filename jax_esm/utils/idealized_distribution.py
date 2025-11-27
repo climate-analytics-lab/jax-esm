@@ -1,4 +1,5 @@
-import jax.numpy as jnp 
+import jax.numpy as jnp
+
 
 def positive_cosine_cubic_latitude_squared(
     lat: jnp.ndarray,

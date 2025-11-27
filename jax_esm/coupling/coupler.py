@@ -102,7 +102,6 @@ class Coupler:
         # Get step functions of each component
         step_functions = {}
         for component_name, component in self.components.items():
-            
             _step_function = component.generate_step_function(jitted=jitted)
 
             # Closure in a loop is used. Using functools.partial to cache.
@@ -223,7 +222,9 @@ class Coupler:
             self.component_names = list(self.components.keys())
 
             # Recreate time integrator without removed component
-            component_timesteps = {n: c.config.timestep for n, c in self.components.items()}
+            component_timesteps = {
+                n: c.config.timestep for n, c in self.components.items()
+            }
 
     def predictions_to_xarray(
         self,

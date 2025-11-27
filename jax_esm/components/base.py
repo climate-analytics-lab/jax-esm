@@ -4,10 +4,9 @@ from jax_esm.components.domain import Domain
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Callable, Sequence
+from typing import Any, Tuple, Callable, Sequence
 
 import jax.numpy as jnp
-from jax import Array
 import tree_math
 from dataclasses import make_dataclass
 
@@ -16,9 +15,7 @@ class AbstractFieldGroup:
     pass
 
 
-
 class ComponentForcing(ABC):
-    
     @abstractmethod
     def zeros(cls):
         pass
@@ -32,8 +29,6 @@ class ComponentForcing(ABC):
         pass
 
 
-
-
 class ComponentState:
     prog: AbstractFieldGroup | Any
     phydata: AbstractFieldGroup | Any
@@ -41,7 +36,7 @@ class ComponentState:
 
 def create_field_group_class(
     cls_name: str,
-    fields: Sequence[ Tuple[str, type, Sequence[int]] ],
+    fields: Sequence[Tuple[str, type, Sequence[int]]],
     base_cls=AbstractFieldGroup,
 ):
     """
@@ -66,7 +61,7 @@ def create_field_group_class(
         bases=(base_cls,),
     )
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def zeros(_cls, **kwargs):
         init_args = dict()
         for varname, dtype, shape in fields:
@@ -77,7 +72,7 @@ def create_field_group_class(
 
         return _cls(**init_args)
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def ones(_cls, **kwargs):
         init_args = dict()
         for varname, dtype, shape in fields:
@@ -99,8 +94,8 @@ def create_field_group_class(
         return type(self)(**init_args)
 
     cls.zeros = zeros  # type: ignore
-    cls.ones = ones    # type: ignore
-    cls.copy = copy    # type: ignore
+    cls.ones = ones  # type: ignore
+    cls.copy = copy  # type: ignore
 
     return tree_math.struct(cls)
 
@@ -135,14 +130,14 @@ def create_component_state_class(
         bases=(ComponentState,),
     )
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def zeros(_cls):
         return _cls(
             prog=prog_cls.zeros(),
             phydata=phydata_cls.zeros(),
         )
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def ones(_cls):
         return _cls(
             prog=prog_cls.ones(),
@@ -158,8 +153,8 @@ def create_component_state_class(
         return o
 
     new_cls.zeros = zeros  # type: ignore
-    new_cls.ones = ones    # type: ignore
-    new_cls.copy = copy    # type: ignore
+    new_cls.ones = ones  # type: ignore
+    new_cls.copy = copy  # type: ignore
 
     new_cls = tree_math.struct(new_cls)
 
@@ -196,14 +191,14 @@ def create_component_forcing_class(
         bases=(ComponentForcing,),
     )
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def zeros(_cls):
         return _cls(
             flux=flux_cls.zeros(),
             scalar=scalar_cls.zeros(),
         )
 
-    @classmethod # type: ignore
+    @classmethod  # type: ignore
     def ones(_cls):
         return _cls(
             flux=flux_cls.ones(),
@@ -218,9 +213,9 @@ def create_component_forcing_class(
 
         return o
 
-    new_cls.zeros = zeros # type: ignore
-    new_cls.ones = ones   # type: ignore
-    new_cls.copy = copy   # type: ignore
+    new_cls.zeros = zeros  # type: ignore
+    new_cls.ones = ones  # type: ignore
+    new_cls.copy = copy  # type: ignore
 
     new_cls = tree_math.struct(new_cls)
 
