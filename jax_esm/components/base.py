@@ -1,8 +1,10 @@
 """Base component interface for Earth system models."""
 
+from jax_esm.components.domain import Domain
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Callable
+from typing import Any, Dict, List, Tuple, Callable, Sequence
 
 import jax.numpy as jnp
 from jax import Array
@@ -39,7 +41,7 @@ class ComponentState:
 
 def create_field_group_class(
     cls_name: str,
-    fields: Tuple,
+    fields: Sequence[ Tuple[str, type, Sequence[int]] ],
     base_cls=AbstractFieldGroup,
 ):
     """
@@ -237,6 +239,7 @@ class Component(ABC):
     """Abstract base class for Earth system components."""
 
     component_forcing_class: ComponentForcing
+    domain: Domain
 
     def __init__(self, config: CoupledComponentConfig):
         """Initialize component with configuration."""
