@@ -144,18 +144,16 @@ class JCM(Component):
 
     def generate_step_function(self, jitted: bool = True):
         D2_nodal_shape = self.model.coords.nodal_shape[1:]
-        def repeat(arr, repeats=365):
-            return jnp.repeat(jnp.expand_dims(arr, axis=-1), axis=-1, repeats=repeats)
  
         def step_function(state, forcing, t):
                 
             jcm_forcing = ForcingData(
                 alb0 = forcing.scalar.bare_land_albedo,
-                sice_am = repeat(forcing.scalar.sea_ice_concentration),
-                snowc_am = repeat(forcing.scalar.snow_cover),
-                soilw_am = repeat(forcing.scalar.soil_moisture),
-                stl_am = repeat(forcing.scalar.land_surface_temperature.at[:, :].set(288.15)),
-                sea_surface_temperature = repeat(forcing.scalar.sea_surface_temperature),
+                sice_am = forcing.scalar.sea_ice_concentration,
+                snowc_am = forcing.scalar.snow_cover,
+                soilw_am = forcing.scalar.soil_moisture,
+                stl_am = forcing.scalar.land_surface_temperature.at[:, :].set(288.15),
+                sea_surface_temperature = forcing.scalar.sea_surface_temperature,
                 lfluxland = True,
             )
 
