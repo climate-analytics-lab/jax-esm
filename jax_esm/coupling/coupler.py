@@ -2,7 +2,7 @@
 
 from functools import partial
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable
 
 import jax
 import jax.numpy as jnp

@@ -2,12 +2,13 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Sequence, Callable
 
 import jax.numpy as jnp
 import tree_math
 from dataclasses import make_dataclass
 
+from jax_esm.components.domain import Domain
 
 class AbstractFieldGroup:
     pass
