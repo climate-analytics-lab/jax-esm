@@ -217,6 +217,7 @@ class SlabAtmosphereModel(Component):
         """
         prog = predictions["prog"]
         phydata = predictions["phydata"]
+        forcing = predictions["forcing"]
         T_grid_axis_names = self.domain.grids["T"].axis_names
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
             "%Y-%m-%d %H:%M:%S"
