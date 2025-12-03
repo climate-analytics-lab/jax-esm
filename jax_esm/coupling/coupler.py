@@ -148,14 +148,13 @@ class Coupler:
         save_interval_steps=1,
     ):
         _start_time = time.time()
-        scan_func = jax.lax.scan if jax_scan else adhoc_scan
-
         total_time = end_time - start_time
         total_steps = int(total_time / self.coupling_timestep)
 
         if total_steps * self.coupling_timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
+        scan_func = jax.lax.scan if jax_scan else adhoc_scan
         coupled_step_function = self.generate_step_function(jitted=jax_scan)
         final_coupled_state, predictions = scan_func(
             coupled_step_function,
@@ -198,11 +197,19 @@ class Coupler:
 
         # Check the compatibility of timestep
         for component_name, component_timestep in self.component_timesteps.items():
+
+            if component_timestep <= 0:
+                raise ValueError(
+                    f"Timestep of {component_name:s} ({component_timestep:f}) must be a positive number."
+                )
+
             if self.coupling_timestep % component_timestep != 0.0:
                 raise ValueError(
                     f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
                 )
 
+        for component_name, component in self.components.items():
+            component.validate()
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.

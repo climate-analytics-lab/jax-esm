@@ -221,7 +221,11 @@ class SlabLandModel(Component):
             return new_state, stack_objects( [ dict(prog=new_state.prog, forcing=forcing) ] )
             
         return jax.jit(step_function) if jitted else step_function
-        
+ 
+    def validate(self):
+        pass
+
+       
     def predictions_to_xarray(
         self,
         predictions,

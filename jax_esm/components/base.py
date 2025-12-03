@@ -264,3 +264,17 @@ class Component(ABC):
             A function that accepts (init_state, time) and returns (final_state, predictions)
         """
         pass
+
+    @abstractmethod
+    def validate(self) -> None:
+        """Validate component configuration.
+           Throw exceptions and errors when configuration is not correct.
+
+        Args:
+
+        Returns:
+            None
+        """
+        pass
+
+

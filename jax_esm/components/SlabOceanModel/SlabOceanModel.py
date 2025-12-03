@@ -246,6 +246,10 @@ class SlabOceanModel(Component):
 
         return jax.jit(step_function) if jitted else step_function
 
+    def validate(self):
+        pass
+
+
     def predictions_to_xarray(
         self,
         predictions,
