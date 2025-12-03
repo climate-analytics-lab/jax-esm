@@ -172,18 +172,23 @@ class Coupler:
 
     def add_component(
         self,
-        name: str,
-        component: Component,
+        name: Optional[str] = None,
+        component: Optional[Component] = None,
     ) -> None:
         """Add a new component to the coupler.
-
+           If name is not provided, then simply re-extract component names and timesteps
         Args:
             name: Component name
             component: Component instance
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        self.components[name] = component
+        if component is not None:
+            if name is None:
+                raise ValueError("When component is provided, the name must be given.")
+        
+            self.components[name] = component
+
         self.component_names = list(self.components.keys())
         self.component_timesteps = {name: component.config.timestep for name, component in self.components.items()}
         
@@ -207,8 +212,9 @@ class Coupler:
         """
         if name in self.components:
             del self.components[name]
-            self.component_names = list(self.components.keys())
-            self.component_timesteps = {name: component.config.timestep for name, component in self.components.items()}
+
+            # update information
+            self.add_component()
 
     def predictions_to_xarray(
         self,
