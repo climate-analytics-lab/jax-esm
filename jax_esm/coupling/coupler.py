@@ -40,7 +40,7 @@ class Coupler:
     def __init__(
         self,
         coupling_timestep: float,
-        components: Dict[str, Component],
+        components: Optional[ Dict[str, Component] ] = None,
         forcing_mapper: Optional[ForcingMapper] = None,
     ):
         """Initialize the coupler.
@@ -51,21 +51,12 @@ class Coupler:
             config: CouplerConfig object
 
         """
-        self.components = components
-        self.component_names = list(components.keys())
+        
         self.coupling_timestep = coupling_timestep
+        self.components = components or {}
+        for name, component in self.components.items():
+            self.add_component(name, component)
 
-        # Extract component timesteps
-        component_timesteps = {
-            name: comp.config.timestep for name, comp in components.items()
-        }
-
-        # Check the compatibility of timestep
-        for component_name, component_timestep in component_timesteps.items():
-            if self.coupling_timestep % component_timestep != 0.0:
-                raise ValueError(
-                    f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
-                )
 
         self.forcing_mapper = forcing_mapper
 
@@ -192,24 +183,21 @@ class Coupler:
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        if not hasattr(ComponentState, name):
-            raise Exception(
-                "Unable to add {name:s}. It has to be one of the attribute names of ComponentState.".format(
-                    name=name,
-                )
-            )
-
         self.components[name] = component
         self.component_names = list(self.components.keys())
-
-        # Recreate time integrator with new component
-        component_timesteps = {n: c.config.timestep for n, c in self.components.items()}
-
-        # Revalidate
+        self.component_timesteps = {name: component.config.timestep for name, component in self.components.items()}
+        
         self._validate_components()
 
     def _validate_components(self):
-        pass
+
+        # Check the compatibility of timestep
+        for component_name, component_timestep in self.component_timesteps.items():
+            if self.coupling_timestep % component_timestep != 0.0:
+                raise ValueError(
+                    f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
+                )
+
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
@@ -220,11 +208,7 @@ class Coupler:
         if name in self.components:
             del self.components[name]
             self.component_names = list(self.components.keys())
-
-            # Recreate time integrator without removed component
-            component_timesteps = {
-                n: c.config.timestep for n, c in self.components.items()
-            }
+            self.component_timesteps = {name: component.config.timestep for name, component in self.components.items()}
 
     def predictions_to_xarray(
         self,
