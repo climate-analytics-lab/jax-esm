@@ -2,4 +2,6 @@
 
 from jax_esm.components.base import Component
 
-__all__ = ["Component", ]
+__all__ = [
+    "Component",
+]

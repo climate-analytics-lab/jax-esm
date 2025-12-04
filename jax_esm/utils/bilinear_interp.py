@@ -264,7 +264,6 @@ class BilinearInterpolator:
         extrapolation_block_size: int = 4096,
         fill_value: float = jnp.nan,
     ):
-
         self.periodic = bool(periodic_longitude)
         self.nan_renorm = bool(nan_renorm)
         if extrapolation_mode in ["idw", "nearest", "none"]:
@@ -359,14 +358,10 @@ class BilinearInterpolator:
         # Unit vectors for all sources & targets
         self._r_source_all = _geo_to_cart(
             longitude_source_rad, latitude_source_rad
-        ).reshape(
-            -1, 3
-        )  # (K,3)
+        ).reshape(-1, 3)  # (K,3)
         self._r_target_all = _geo_to_cart(
             self.longitude_target_rad, self.latitude_target_rad
-        ).reshape(
-            -1, 3
-        )  # (target_grid_size,3)
+        ).reshape(-1, 3)  # (target_grid_size,3)
         # -----------------
 
         # Blocking schedule (static)

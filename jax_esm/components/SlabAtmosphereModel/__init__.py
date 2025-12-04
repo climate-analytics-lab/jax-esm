@@ -1,4 +1,5 @@
-
 from .SlabAtmosphereModel import SlabAtmosphereModel
 
-__all__ = ["SlabAtmosphereModel",]
+__all__ = [
+    "SlabAtmosphereModel",
+]
