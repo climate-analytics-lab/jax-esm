@@ -192,7 +192,7 @@ class SlabOceanModel(Component):
         nonocn_idx = self.domain.bmask != 0
         
         def step_function(state, forcing, t):
-            new_Tanom = state.prog.sea_surface_temperature
+            new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
             if self.has_climatology:
                 # Compute SST clim at begin and end time
                 length_of_a_cycle = self.SST_clim.shape[2]
