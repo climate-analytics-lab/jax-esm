@@ -233,7 +233,7 @@ class SlabOceanModel(Component):
             if self.has_climatology:
                 new_sst += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
             
-            new_sst = new_sst.at[nonocn_idx].set(0) 
+            new_sst = new_sst.at[nonocn_idx].set(288.15) 
             new_state = state.copy(
                 prog_kwargs=dict(
                     sst=new_sst,
