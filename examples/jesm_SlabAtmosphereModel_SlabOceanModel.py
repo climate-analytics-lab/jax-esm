@@ -1,23 +1,19 @@
-"""Example of coupling jax-gcm with a simple slab ocean model."""
+"""Example of coupling of simple slab atmosphere and ocean models."""
 
 if __name__ == "__main__":
-
     from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
     import jax_datetime as jdt
     from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
-    from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files 
     from pathlib import Path
-    
-    import jcm
 
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
 
     coupling_timestep = 86400.0
-    start_datetime = jdt.to_datetime('2000-01-01')
+    start_datetime = jdt.to_datetime("2000-01-01")
     simulation_interval = jdt.to_timedelta(30, "day")
     output_dir = Path("output/SAM_SOM").resolve()
-    
+
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
 

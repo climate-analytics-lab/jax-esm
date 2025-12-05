@@ -1,23 +1,20 @@
 """Example of coupling jax-gcm with a simple slab ocean model."""
 
 if __name__ == "__main__":
-   
-
-    from jax_esm.utils.datetime_tools import days_of_month_in_date
     from jax_esm.components import JCM, SlabOceanModel
     from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
-    import jcm 
+    import jcm
     import jax_datetime as jdt
     from pathlib import Path
- 
+
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
 
     coupling_timestep = 86400.0
-    start_datetime = jdt.to_datetime('2000-01-01')
+    start_datetime = jdt.to_datetime("2000-01-01")
     simulation_interval = jdt.to_timedelta(30, "day")
     output_dir = Path("output/JCM_SOM_aqua").resolve()
-    
+
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -57,4 +54,3 @@ if __name__ == "__main__":
         output_file = output_dir / f"{component_name:s}.nc"
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, engine="netcdf4")
-
