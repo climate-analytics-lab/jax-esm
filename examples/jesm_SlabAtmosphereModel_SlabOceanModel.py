@@ -59,10 +59,11 @@ if __name__ == "__main__":
     final_state, predictions = model.run(
         init_coupled_state=initial_state,
         start_time=0.0,
-        end_time=86400.0 * 420,
+        end_time=86400.0 * 5,
         jax_scan=True,
     )
 
+    print("Converting output...")
     # Convert output into xarray
     output_dict = model.predictions_to_xarray(predictions)
 
