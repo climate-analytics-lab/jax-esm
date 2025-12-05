@@ -41,14 +41,14 @@ def couple_atm_ocn(
         "ocn",
         "atm",
         {
-            "prog.sst": "scalar.sea_surface_temperature",
+            "prog.sea_surface_temperature": "scalar.sea_surface_temperature",
         },
     )
 
     forcing_mapper.add_transformation(
         "ocn",
         "atm",
-        "prog.sst",
+        "prog.sea_surface_temperature",
         "scalar.sea_surface_temperature",
         interpolators["ocn_to_atm"],
     )
@@ -97,9 +97,9 @@ def couple_atm_ocn_lnd(
     forcing_mapper.add_transformation("atm", "ocn", surface_flux_name, "flux.total_heat_flux", interpolators["atm_to_ocn_hfluxn"])
 
     forcing_mapper.add_forcing_mapping("ocn", "atm", {
-        "prog.sst" : "scalar.sea_surface_temperature",
+        "prog.sea_surface_temperature" : "scalar.sea_surface_temperature",
     })
-    forcing_mapper.add_transformation("ocn", "atm", "prog.sst", "scalar.sea_surface_temperature", interpolators["ocn_to_atm"])
+    forcing_mapper.add_transformation("ocn", "atm", "prog.sea_surface_temperature", "scalar.sea_surface_temperature", interpolators["ocn_to_atm"])
 
 
     # Atmosphere-land flux
