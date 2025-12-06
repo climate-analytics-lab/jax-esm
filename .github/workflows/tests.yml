@@ -41,7 +41,7 @@ jobs:
     - name: Run tests with pytest
       run: |
         export PYTHONPATH=./jax-gcm:$PYTHONPATH
-        pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term --ignore=tests/ignore --ignore=tests/unit
+        pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term --ignore=tests/ignore
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
