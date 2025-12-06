@@ -62,6 +62,6 @@ def test_integration():
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
 if __name__ == "__main__":
-    test()
+    test_integration()
 
 
