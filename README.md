@@ -35,11 +35,8 @@ An example of jax-gcm coupled to slab ocean and land models is as follows:
 
 # File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
 
-from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
-    generate_jcm_forcing_and_topography_files,
-)
-from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
-from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
+from jax_esm.components import JCM, SlabOceanModel
+from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
 import jcm
 import jax_datetime as jdt
 from pathlib import Path
@@ -50,9 +47,8 @@ grid_specification = f"JCM::T{resolution:d}"
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
 simulation_interval = jdt.to_timedelta(10, "day")
-output_dir = Path("output/JCM_SOM_SLM").resolve()
+output_dir = Path("output/JCM_SOM_aqua").resolve()
 
-external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
 print("Output dir: ", str(output_dir))
 output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -68,18 +64,6 @@ components = dict(
         start_datetime=start_datetime,
         save_interval=coupling_timestep,
         relaxation_time=60 * 86400.0,
-        mask_file=external_files["terrain"],
-        SST_clim_file=external_files["forcing"],
-    ),
-    lnd=SlabLandModel(
-        grid_specification=grid_specification,
-        timestep=3600 * 6,
-        start_datetime=start_datetime,
-        save_interval=coupling_timestep,
-        relaxation_time=60 * 86400.0,
-        topography_file=external_files["terrain"],
-        mask_file=external_files["terrain"],
-        land_clim_file=external_files["forcing"],
     ),
 )
 
@@ -87,15 +71,17 @@ components = dict(
 model = couple(**components)
 
 # Obtain initial condition
-initial_state = model.initialize()
+initial_coupled_state = model.initialize()
 
 # Run coupled model
 print("Running model...")
 state_holder, predictions = model.run(
-    init_coupled_state=initial_state,
+    initial_coupled_state=initial_coupled_state,
     start_time=0,
     end_time=simulation_interval / jdt.to_timedelta(1, "second"),
-    jax_scan=True,
+    jitted=True,
+    show_progress=True,
+    tqdm_kwargs=dict(desc="Simulation"),
 )
 # Convert output into xarray
 output_dict = model.predictions_to_xarray(predictions)

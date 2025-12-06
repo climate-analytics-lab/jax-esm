@@ -146,7 +146,7 @@ class Coupler:
 
     def run(
         self,
-        init_coupled_state: Dict[str, ComponentState],
+        initial_coupled_state: Dict[str, ComponentState],
         start_time: float,
         end_time: float,
         save_interval_steps=1,
@@ -183,7 +183,7 @@ class Coupler:
         
         final_coupled_state, predictions = scan_func(
             coupled_step_function,
-            init_coupled_state,
+            initial_coupled_state,
             xs=step_times,
         )
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
