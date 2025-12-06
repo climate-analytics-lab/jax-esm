@@ -15,41 +15,23 @@ from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
 
-
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
-def generate_scan_function(
-    jitted: bool,
-    show_progress: bool,
-    tqdm_kwargs: Dict[str, Any] = {},
-):
-    scan_function = None
+def adhoc_scan(f, init, xs):
+    carry = init
+    ys = []
+    for x in xs:
+        _start_time = time.time()
 
-    if jitted:
-        scan_function = jax.lax.scan
-    else:
+        carry, y = f(carry, x)
+        ys.append(y)
 
-        def _scan_function(f, init, xs=None, length=None):
-            if xs is None:
-                xs = [1] * length
-            carry = init
-            ys = []
-            iterable_xs = list(zip(range(len(xs)), xs))
-            # closure of show_progress
-            if show_progress:
-                iterable_xs = tqdm(iterable_xs, **tqdm_kwargs)
-            for i, x in iterable_xs:
-                _start_time = time.time()
+        _end_time = time.time()
+        _elapsed_time = _end_time - _start_time
 
-                carry, y = f(carry, x)
-                ys.append(y)
+    return carry, stack_objects(ys)
 
-                _end_time = time.time()
-                _elapsed_time = _end_time - _start_time
-
-            return carry, stack_objects(ys)
-
-        scan_function = _scan_function
-    return scan_function
+def generate_scan_function(jitted:bool):
+    return jax.lax.scan if jitted else adhoc_scan
 
 
 class Coupler:
@@ -106,10 +88,7 @@ class Coupler:
             New states after one coupling timestep
         """
 
-        scan_func = generate_scan_function(
-            jitted=jitted,
-            show_progress=False,
-        )
+        scan_func = generate_scan_function(jitted=jitted)
 
         # Get step functions of each component
         step_functions = {}
@@ -140,17 +119,16 @@ class Coupler:
                 looped_step_function, step_function=_step_function, component=component
             )
 
-        def step_function(coupled_state, t):
-            # jax_tqdm style: see https://github.com/jeremiecoullon/jax-tqdm
-            if jitted and show_progress:
-                _, t = t
+        def step_function(coupled_state, step_time):
+            _, t = step_time
+
             # Compute forcing
             forcings = self.forcing_mapper.couple_components(coupled_state)
 
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 component_name: step_function(
-                    coupled_state[component_name], forcings[component_name], t
+                    coupled_state[component_name], forcings[component_name], t,
                 )
                 for component_name, step_function in step_functions.items()
             }
@@ -183,28 +161,30 @@ class Coupler:
         if total_steps * self.coupling_timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
-        scan_func = generate_scan_function(
-            jitted=jitted,
-            show_progress=show_progress,
-            tqdm_kwargs=tqdm_kwargs,
-        )
+        scan_func = generate_scan_function(jitted=jitted)
 
         coupled_step_function = self.generate_step_function(
             show_progress=show_progress,
             jitted=jitted,
         )
 
-        time_points = start_time + self.coupling_timestep * jnp.arange(total_steps)
-        if show_progress and jitted:
-            coupled_step_function = scan_tqdm(n=len(time_points), **tqdm_kwargs)(
-                coupled_step_function
-            )
-            time_points = (jnp.arange(len(time_points)), time_points)
-
+        steps = jnp.arange(total_steps)
+        times = start_time + self.coupling_timestep * steps
+        if jitted:
+            step_times = (steps, times) # type: ignore
+        else:
+            step_times = list(zip(steps, times)) # type: ignore
+            
+        if show_progress:
+            if jitted:
+                coupled_step_function = scan_tqdm(n=total_steps, **tqdm_kwargs)(coupled_step_function)
+            else:
+                step_times = tqdm(step_times, **tqdm_kwargs)
+        
         final_coupled_state, predictions = scan_func(
             coupled_step_function,
             init_coupled_state,
-            xs=time_points,
+            xs=step_times,
         )
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
