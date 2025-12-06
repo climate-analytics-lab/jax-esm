@@ -1,4 +1,4 @@
-from typing import Tuple, Optional, cast
+from typing import Any, Tuple, Optional, cast
 import math
 import jax
 import jax.numpy as jnp
@@ -584,7 +584,7 @@ class BilinearInterpolator:
 
         return self.source_mask & jnp.isfinite(source)
 
-    def _apply_bilinear_scalar(self, source: Array) -> Tuple[Array, Array]:
+    def _apply_bilinear_scalar(self, source: Array) -> Any:
         r"""Core bilinear (with optional NaN/mask renormalization).
 
         Mathematics:
@@ -686,7 +686,7 @@ class BilinearInterpolator:
     # ----------------- fixed-size extrapolation core ----------------- #
     def _extrapolate_blocks_scalar(
         self, need_mask: Array, source_flat: Array, valid_flat: Array
-    ) -> Array:
+    ) -> Any:
         r"""
         Fixed-size (k, extrapolation_block_size) extrapolation over ALL targets using lax.fori_loop.
         Returns a flat array of length ntarget with fill values for the 'need' entries.
@@ -829,7 +829,7 @@ class BilinearInterpolator:
 
     def _extrapolate_blocks_vector(
         self, need_mask: Array, u_flat: Array, v_flat: Array, valid_flat: Array
-    ) -> tuple[Array, Array]:
+    ) -> Any:
         """
         Same as scalar but computes (u,v) using the same neighbor sets/weights.
 
@@ -963,7 +963,7 @@ class BilinearInterpolator:
             out = jnp.where(need, self.fill_value, out_bilin)
             return out
 
-        def _extrapolation_case(operand: Tuple[Array, ...]) -> Array:
+        def _extrapolation_case(operand: Tuple[Array, ...]) -> Any:
             out_bilin, need, source = operand
             source = jnp.asarray(source, float)
             valid = self._ensure_source_mask(source).reshape(-1)
