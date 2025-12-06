@@ -22,7 +22,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        token: ${{ secrets.TOKEN_TO_CLONE }}
         path: jax-gcm
 
     - name: Show Working directory
