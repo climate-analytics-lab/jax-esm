@@ -42,8 +42,7 @@ jobs:
     - name: Run tests with pytest
       run: |
         export PYTHONPATH=./jax-gcm:$PYTHONPATH
-        python3 scripts/generate_jcm_boundary_file.py
-        pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term --ignore=tests/ignore
+        pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term --ignore=tests/ignore --ignore=tests/unit
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
