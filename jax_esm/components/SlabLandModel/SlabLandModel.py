@@ -129,7 +129,7 @@ class SlabLandModel(Component):
  
         # initialize land_depth
         init_land_depth = self.land_depth_max + (self.land_depth_min - self.land_depth_max) * jnp.cos(self.llat_rad)**3
-        init_T = None
+        init_land_surface_temperature = None
 
         self.has_climatology = False
         self.land_surface_temperature_clim = None

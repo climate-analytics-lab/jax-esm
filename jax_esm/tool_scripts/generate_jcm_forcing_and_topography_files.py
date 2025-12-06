@@ -20,7 +20,8 @@ def generate_jcm_forcing_and_topography_files(resolution:int=31):
     if not all(get_files_exist(files_to_check)):
         print("Some files do not exist. Need to produce it.")
 
-        import subprocess, sys
+        import subprocess
+        import sys
         try:
             result = subprocess.run([sys.executable, str(interpolation_code), f"{resolution:d}"], check=True, capture_output=True, text=True,)
             print(result.stdout)

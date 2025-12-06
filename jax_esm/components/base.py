@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Sequence, Callable
+from typing import Any, Tuple, Sequence, Callable
 
 import jax.numpy as jnp
 import tree_math

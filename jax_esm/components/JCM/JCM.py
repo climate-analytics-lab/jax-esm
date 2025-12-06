@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import jax_datetime as jdt
 from jcm.model import Model as RawJCMModel
-from jcm.forcing import ForcingData, default_forcing
+from jcm.forcing import ForcingData
 from jcm.physics.speedy.physics_data import PhysicsData
 
 import jax
@@ -117,7 +117,6 @@ class JCM(Component):
         )
 
     def generate_step_function(self, jitted: bool = True):
-        D2_nodal_shape = self.model.coords.nodal_shape[1:]
  
         def step_function(state, forcing, t):
                 
