@@ -2,7 +2,7 @@
 
 from functools import partial
 import time
-from typing import Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable
 
 import jax
 import jax.numpy as jnp
@@ -12,26 +12,44 @@ from jax_esm.coupling.forcing_mapper import ForcingMapper
 
 
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
+from jax_tqdm import scan_tqdm
+from tqdm import tqdm
 
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
-def adhoc_scan(f, init, xs=None, length=None):
-    if xs is None:
-        xs = [1] * length
-    carry = init
-    ys = []
-    for i, x in enumerate(xs):
-        print(f"The {i:d}-th iteration. ", end="")
-        _start_time = time.time()
+def generate_scan_function(
+    jitted: bool,
+    show_progress: bool,
+    tqdm_kwargs: Dict[str, Any] = {},
+):
+    scan_function = None
 
-        carry, y = f(carry, x)
-        ys.append(y)
+    if jitted:
+        scan_function = jax.lax.scan
+    else:
 
-        _end_time = time.time()
-        _elapsed_time = _end_time - _start_time
-        print(f"Execution time: {_elapsed_time:.1f} seconds.")
+        def _scan_function(f, init, xs=None, length=None):
+            if xs is None:
+                xs = [1] * length
+            carry = init
+            ys = []
+            iterable_xs = list(zip(range(len(xs)), xs))
+            # closure of show_progress
+            if show_progress:
+                iterable_xs = tqdm(iterable_xs, **tqdm_kwargs)
+            for i, x in iterable_xs:
+                _start_time = time.time()
 
-    return carry, stack_objects(ys)
+                carry, y = f(carry, x)
+                ys.append(y)
+
+                _end_time = time.time()
+                _elapsed_time = _end_time - _start_time
+
+            return carry, stack_objects(ys)
+
+        scan_function = _scan_function
+    return scan_function
 
 
 class Coupler:
@@ -40,7 +58,7 @@ class Coupler:
     def __init__(
         self,
         coupling_timestep: float,
-        components: Optional[ Dict[str, Component] ] = None,
+        components: Optional[Dict[str, Component]] = None,
         forcing_mapper: Optional[ForcingMapper] = None,
     ):
         """Initialize the coupler.
@@ -51,12 +69,11 @@ class Coupler:
             config: CouplerConfig object
 
         """
-        
+
         self.coupling_timestep = coupling_timestep
         self.components = components or {}
         for name, component in self.components.items():
             self.add_component(name, component)
-
 
         self.forcing_mapper = forcing_mapper
 
@@ -79,6 +96,7 @@ class Coupler:
     def generate_step_function(
         self,
         jitted: bool = True,
+        show_progress: bool = True,
     ) -> Callable:
         """Advance coupled system by one coupling timestep.
 
@@ -88,7 +106,10 @@ class Coupler:
             New states after one coupling timestep
         """
 
-        scan_func = jax.lax.scan if jitted else adhoc_scan
+        scan_func = generate_scan_function(
+            jitted=jitted,
+            show_progress=False,
+        )
 
         # Get step functions of each component
         step_functions = {}
@@ -120,6 +141,9 @@ class Coupler:
             )
 
         def step_function(coupled_state, t):
+            # jax_tqdm style: see https://github.com/jeremiecoullon/jax-tqdm
+            if jitted and show_progress:
+                _, t = t
             # Compute forcing
             forcings = self.forcing_mapper.couple_components(coupled_state)
 
@@ -137,15 +161,20 @@ class Coupler:
 
             return coupled_state, coupled_predictions
 
-        return jax.jit(step_function) if jitted else step_function
+        if jitted:
+            step_function = jax.jit(step_function)
+
+        return step_function
 
     def run(
         self,
         init_coupled_state: Dict[str, ComponentState],
         start_time: float,
         end_time: float,
-        jax_scan: bool = True,
         save_interval_steps=1,
+        jitted: bool = True,
+        show_progress: bool = False,
+        tqdm_kwargs: Dict[str, Any] = dict(),
     ):
         _start_time = time.time()
         total_time = end_time - start_time
@@ -154,12 +183,28 @@ class Coupler:
         if total_steps * self.coupling_timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
-        scan_func = jax.lax.scan if jax_scan else adhoc_scan
-        coupled_step_function = self.generate_step_function(jitted=jax_scan)
+        scan_func = generate_scan_function(
+            jitted=jitted,
+            show_progress=show_progress,
+            tqdm_kwargs=tqdm_kwargs,
+        )
+
+        coupled_step_function = self.generate_step_function(
+            show_progress=show_progress,
+            jitted=jitted,
+        )
+
+        time_points = start_time + self.coupling_timestep * jnp.arange(total_steps)
+        if show_progress and jitted:
+            coupled_step_function = scan_tqdm(n=len(time_points), **tqdm_kwargs)(
+                coupled_step_function
+            )
+            time_points = (jnp.arange(len(time_points)), time_points)
+
         final_coupled_state, predictions = scan_func(
             coupled_step_function,
             init_coupled_state,
-            xs=start_time + self.coupling_timestep * jnp.arange(total_steps),
+            xs=time_points,
         )
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
@@ -185,19 +230,20 @@ class Coupler:
         if component is not None:
             if name is None:
                 raise ValueError("When component is provided, the name must be given.")
-        
+
             self.components[name] = component
 
         self.component_names = list(self.components.keys())
-        self.component_timesteps = {name: component.config.timestep for name, component in self.components.items()}
-        
+        self.component_timesteps = {
+            name: component.config.timestep
+            for name, component in self.components.items()
+        }
+
         self._validate_components()
 
     def _validate_components(self):
-
         # Check the compatibility of timestep
         for component_name, component_timestep in self.component_timesteps.items():
-
             if component_timestep <= 0:
                 raise ValueError(
                     f"Timestep of {component_name:s} ({component_timestep:f}) must be a positive number."

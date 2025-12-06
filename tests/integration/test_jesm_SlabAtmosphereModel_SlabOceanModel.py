@@ -47,7 +47,9 @@ def test_integration():
         init_coupled_state=initial_state,
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
-        jax_scan=True,
+        jitted=True,
+        show_progress=True,
+        tqdm_kwargs=dict(desc="Simulation"),
     )
     # Convert output into xarray
     output_dict = model.predictions_to_xarray(predictions)

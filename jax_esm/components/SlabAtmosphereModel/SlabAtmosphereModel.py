@@ -82,9 +82,9 @@ class SlabAtmosphereModel(Component):
                 cls_name="flux",
                 fields=[],
             ),
-            scalar_cls = create_field_group_class(
-                cls_name = "scalar",
-                fields = [
+            scalar_cls=create_field_group_class(
+                cls_name="scalar",
+                fields=[
                     ("bare_land_albedo", float, D2_nodal_shape),
                     ("sea_ice_concentration", float, D2_nodal_shape),
                     ("soil_moisture", float, D2_nodal_shape),
@@ -157,37 +157,70 @@ class SlabAtmosphereModel(Component):
         self,
         jitted: bool = True,
     ):
-        
         land_index = self.domain.bmask == 1
         ocean_index = self.domain.bmask == 0
 
         def step_function(state, forcing, t):
             # Simple bulk formula
-            surface_air_density = 1.22 # kg / m^3
-            drag_coefficient = 1e-3 # scalar
-            
-            ocean_sensible_heat_flux = surface_air_density * drag_coefficient * ((state.prog.mean_zonal_wind_velocity ** 2 + state.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (forcing.scalar.sea_surface_temperature - state.prog.mean_air_temperature)
-            
-            land_sensible_heat_flux = surface_air_density * drag_coefficient * ((state.prog.mean_zonal_wind_velocity ** 2 + state.prog.mean_meridional_wind_velocity**2)**0.5) * constants.atmosphere_specific_heat_capacity_under_constant_pressure * (forcing.scalar.land_surface_temperature - state.prog.mean_air_temperature)
+            surface_air_density = 1.22  # kg / m^3
+            drag_coefficient = 1e-3  # scalar
+
+            ocean_sensible_heat_flux = (
+                surface_air_density
+                * drag_coefficient
+                * (
+                    (
+                        state.prog.mean_zonal_wind_velocity**2
+                        + state.prog.mean_meridional_wind_velocity**2
+                    )
+                    ** 0.5
+                )
+                * constants.atmosphere_specific_heat_capacity_under_constant_pressure
+                * (
+                    forcing.scalar.sea_surface_temperature
+                    - state.prog.mean_air_temperature
+                )
+            )
+
+            land_sensible_heat_flux = (
+                surface_air_density
+                * drag_coefficient
+                * (
+                    (
+                        state.prog.mean_zonal_wind_velocity**2
+                        + state.prog.mean_meridional_wind_velocity**2
+                    )
+                    ** 0.5
+                )
+                * constants.atmosphere_specific_heat_capacity_under_constant_pressure
+                * (
+                    forcing.scalar.land_surface_temperature
+                    - state.prog.mean_air_temperature
+                )
+            )
 
             ocean_sensible_heat_flux = ocean_sensible_heat_flux.at[land_index].set(0.0)
             land_sensible_heat_flux = land_sensible_heat_flux.at[ocean_index].set(0.0)
 
             latent_heat_flux = 0.0
 
-            total_heat_flux = ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
+            total_heat_flux = (
+                ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
+            )
 
             def sub_step_function(T, sim_time):
                 return T + self.cd_factor * total_heat_flux, None
 
             new_sim_time = state.prog.sim_time + self.timestep
-            new_mean_air_temperature = state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+            new_mean_air_temperature = (
+                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+            )
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
 
             new_state = state.copy(
-                prog_kwargs = dict(
-                    mean_air_temperature = new_mean_air_temperature,
-                    sim_time = new_sim_time,
+                prog_kwargs=dict(
+                    mean_air_temperature=new_mean_air_temperature,
+                    sim_time=new_sim_time,
                 ),
                 phydata_kwargs=dict(
                     hfluxn=new_hfluxn,
@@ -224,23 +257,55 @@ class SlabAtmosphereModel(Component):
         )
 
         ds = xr.Dataset(
-            data_vars = dict(
-                hfluxn = (["time", "longitude", "latitude", "two"], phydata.hfluxn),
-                mean_air_temperature = (["time", "longitude", "latitude"], prog.mean_air_temperature),
-                mean_zonal_wind_velocity = (["time", "longitude", "latitude"], prog.mean_zonal_wind_velocity),
-                mean_meridional_wind_velocity = (["time", "longitude", "latitude"], prog.mean_meridional_wind_velocity),
-                bare_land_albedo = (["time", "longitude", "latitude"], forcing.scalar.bare_land_albedo),
-                sea_ice_concentration = (["time", "longitude", "latitude"], forcing.scalar.sea_ice_concentration),
-                soil_moisture = (["time", "longitude", "latitude"], forcing.scalar.soil_moisture),
-                snow_cover = (["time", "longitude", "latitude"], forcing.scalar.snow_cover),
-                land_surface_temperature = (["time", "longitude", "latitude"], forcing.scalar.land_surface_temperature),
-                sea_surface_temperature = (["time", "longitude", "latitude"], forcing.scalar.sea_surface_temperature),
-
-            ), 
-            coords = dict(
-                time = (["time",], prog.sim_time/3600.0, {"units": f"hours since {start_datetime_str:s}"}),
-                latitude2D = (T_grid_axis_names, self.llat_rad * 180/jnp.pi),
-                longitude2D = (T_grid_axis_names, self.llon_rad * 180/jnp.pi),
+            data_vars=dict(
+                hfluxn=(["time", "longitude", "latitude", "two"], phydata.hfluxn),
+                mean_air_temperature=(
+                    ["time", "longitude", "latitude"],
+                    prog.mean_air_temperature,
+                ),
+                mean_zonal_wind_velocity=(
+                    ["time", "longitude", "latitude"],
+                    prog.mean_zonal_wind_velocity,
+                ),
+                mean_meridional_wind_velocity=(
+                    ["time", "longitude", "latitude"],
+                    prog.mean_meridional_wind_velocity,
+                ),
+                bare_land_albedo=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.bare_land_albedo,
+                ),
+                sea_ice_concentration=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.sea_ice_concentration,
+                ),
+                soil_moisture=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.soil_moisture,
+                ),
+                snow_cover=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.snow_cover,
+                ),
+                land_surface_temperature=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.land_surface_temperature,
+                ),
+                sea_surface_temperature=(
+                    ["time", "longitude", "latitude"],
+                    forcing.scalar.sea_surface_temperature,
+                ),
+            ),
+            coords=dict(
+                time=(
+                    [
+                        "time",
+                    ],
+                    prog.sim_time / 3600.0,
+                    {"units": f"hours since {start_datetime_str:s}"},
+                ),
+                latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
+                longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
             ),
         )
 

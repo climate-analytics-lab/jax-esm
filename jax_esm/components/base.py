@@ -10,6 +10,7 @@ from dataclasses import make_dataclass
 
 from jax_esm.components.domain import Domain
 
+
 class AbstractFieldGroup:
     pass
 
@@ -276,5 +277,3 @@ class Component(ABC):
             None
         """
         pass
-
-

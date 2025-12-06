@@ -16,7 +16,7 @@ def test_integration():
 
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
-    simulation_interval = jdt.to_timedelta(30, "day")
+    simulation_interval = jdt.to_timedelta(5, "day")
     output_dir = Path("output/SAM_SOM_SLM").resolve()
 
     external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
@@ -66,7 +66,9 @@ def test_integration():
         init_coupled_state=initial_state,
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
-        jax_scan=True,
+        jitted=True,
+        show_progress=True,
+        tqdm_kwargs=dict(desc="Simulation"),
     )
     # Convert output into xarray
     output_dict = model.predictions_to_xarray(predictions)

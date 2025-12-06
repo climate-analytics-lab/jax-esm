@@ -128,7 +128,7 @@ class SlabOceanModel(Component):
         )
 
         nonocn_idx = self.domain.bmask != 0
-        
+
         # initialize mixed_layer_depth
         init_mixed_layer_depth = (
             self.mixed_layer_depth_max
@@ -154,9 +154,10 @@ class SlabOceanModel(Component):
                 + 15
             )
 
-        
-        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(0)
-        if jnp.sum( jnp.isnan(init_sea_surface_temperature) ) == 0:
+        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
+            0
+        )
+        if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
             print("domain.bmask and SST_clim do share the same mask.")
         else:
             raise Exception(
@@ -168,7 +169,11 @@ class SlabOceanModel(Component):
             self.relaxation_time = jnp.inf
 
         # Compute heat capacity cd, and time factor for Euler backward scheme
-        cd = constants.ocean_density * constants.ocean_specific_heat_capacity * init_mixed_layer_depth
+        cd = (
+            constants.ocean_density
+            * constants.ocean_specific_heat_capacity
+            * init_mixed_layer_depth
+        )
         tau = jnp.ones_like(cd) * self.relaxation_time
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
@@ -187,9 +192,11 @@ class SlabOceanModel(Component):
         # Find day of the year to locate climatology
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_day_offset = ( self.start_datetime - ref_dt ) / jdt.to_timedelta(1, "second")
+        start_day_offset = (self.start_datetime - ref_dt) / jdt.to_timedelta(
+            1, "second"
+        )
         nonocn_idx = self.domain.bmask != 0
-        
+
         def step_function(state, forcing, t):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
             if self.has_climatology:
@@ -221,18 +228,25 @@ class SlabOceanModel(Component):
                     snapshot_SST_clim_end - snapshot_SST_clim_beg
                 ) / 86400.0  # convert to per second
 
-                new_sea_surface_temperature_anom = state.prog.sea_surface_temperature - snapshot_SST_clim_beg
+                new_sea_surface_temperature_anom = (
+                    state.prog.sea_surface_temperature - snapshot_SST_clim_beg
+                )
 
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
-                new_sea_surface_temperature_anom + self.cd_factor * (-(forcing.flux.total_heat_flux))
+                new_sea_surface_temperature_anom
+                + self.cd_factor * (-(forcing.flux.total_heat_flux))
             )
 
             new_sea_surface_temperature = new_sea_surface_temperature_anom
             if self.has_climatology:
-                new_sea_surface_temperature += snapshot_SST_clim_beg + SST_clim_trend * self.timestep
-            
-            new_sea_surface_temperature = new_sea_surface_temperature.at[nonocn_idx].set(288.15) 
+                new_sea_surface_temperature += (
+                    snapshot_SST_clim_beg + SST_clim_trend * self.timestep
+                )
+
+            new_sea_surface_temperature = new_sea_surface_temperature.at[
+                nonocn_idx
+            ].set(288.15)
             new_state = state.copy(
                 prog_kwargs=dict(
                     sea_surface_temperature=new_sea_surface_temperature,
@@ -247,7 +261,6 @@ class SlabOceanModel(Component):
 
     def validate(self):
         pass
-
 
     def predictions_to_xarray(
         self,

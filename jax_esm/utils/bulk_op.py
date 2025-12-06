@@ -2,6 +2,7 @@ from typing import Any, List
 import jax
 import jax.numpy as jnp
 
+
 def mean_leaf(
     tree: Any,
     axis: int | list,

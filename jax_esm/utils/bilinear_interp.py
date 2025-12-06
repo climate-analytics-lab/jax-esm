@@ -1162,4 +1162,3 @@ class BilinearInterpolator:
             u_target.reshape(self.target_grid_shape),
             v_target.reshape(self.target_grid_shape),
         )
-
