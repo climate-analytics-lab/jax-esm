@@ -30,6 +30,9 @@ dependencies = [
     "jax_datetime",
     "jax_tqdm",
     "tqdm",
+    "netcdf4",
+    "xarray",
+    "tree_math",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +41,11 @@ dev = [
     "pytest-cov>=3.0",
     "mypy>=0.900",
     "ruff",
+]
+
+jcm = [
+    "dinosaur",
+    "flax",
 ]
 
 [project.urls]
