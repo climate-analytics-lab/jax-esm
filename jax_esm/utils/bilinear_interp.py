@@ -1,6 +1,5 @@
 from typing import Any, Tuple, Optional, cast
 import math
-import jax
 import jax.numpy as jnp
 from jax import Array, lax
 from jax import config as _jax_config
