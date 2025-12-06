@@ -127,7 +127,6 @@ class SlabOceanModel(Component):
             axis=lat_dim_idx,
         )
 
-        ocn_idx = self.domain.bmask == 0
         nonocn_idx = self.domain.bmask != 0
         
         # initialize mixed_layer_depth
