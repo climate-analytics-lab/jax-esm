@@ -24,6 +24,13 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+You can run a Jax-gcm coupled run with
+```
+python tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
+```
+The results will be placed in the directory `output`. 
+
+
 ```python
 
 # File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
