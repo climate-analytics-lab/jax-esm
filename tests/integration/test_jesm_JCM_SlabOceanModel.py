@@ -1,9 +1,12 @@
-"""Example of coupling of simple slab atmosphere and ocean models."""
+"""Example of coupling jax-gcm with a simple slab ocean model."""
 
-if __name__ == "__main__":
-    from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
-    import jax_datetime as jdt
+
+
+def test_integration():
+    from jax_esm.components import JCM, SlabOceanModel
     from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
+    import jcm
+    import jax_datetime as jdt
     from pathlib import Path
 
     resolution = 31
@@ -11,19 +14,17 @@ if __name__ == "__main__":
 
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
-    simulation_interval = jdt.to_timedelta(30, "day")
-    output_dir = Path("output/SAM_SOM").resolve()
+    simulation_interval = jdt.to_timedelta(10, "day")
+    output_dir = Path("output/JCM_SOM_aqua").resolve()
 
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
 
     # Creating components
     components = dict(
-        atm=SlabAtmosphereModel(
-            grid_specification=grid_specification,
-            timestep=3600.0,
-            start_datetime=start_datetime,
-            save_interval=coupling_timestep,
+        atm=JCM(
+            model=jcm.model.Model(start_date=start_datetime),
+            coupling_timestep=coupling_timestep,
         ),
         ocn=SlabOceanModel(
             grid_specification=grid_specification,
@@ -56,7 +57,6 @@ if __name__ == "__main__":
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, engine="netcdf4")
 
-    output_dir = Path("output").resolve()
+if __name__ == "__main__":
+    test_integration()
 
-    print("Output dir: ", str(output_dir))
-    output_dir.mkdir(exist_ok=True, parents=True)

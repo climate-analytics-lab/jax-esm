@@ -26,7 +26,7 @@ pip install -e ".[dev]"
 
 ```python
 
-# File examples/jesm_JCM_SlabOceanModel_SlabLandModel.py
+# File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
 
 from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
@@ -42,7 +42,7 @@ grid_specification = f"JCM::T{resolution:d}"
 
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
-simulation_interval = jdt.to_timedelta(30, "day")
+simulation_interval = jdt.to_timedelta(10, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
@@ -128,10 +128,11 @@ The current implementation uses direct coupling:
 
 ## Examples
 
-See the `examples/` and `notebooks/` directories:
-- `examples/jesm_minimal_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models.
-
-**Note**: Use the notebook or `jax_gcm_slab_ocean.py` as reference for current API.
+See the `tests/integration/` directories:
+- `tests/integration/test_jesm_JCM_SlabOceanModel.py`: JAX-GCM coupled with slab ocean on an aquaplanet.
+- `tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models with Earth landscape.
+- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel.py`: Coupled slab atmosphere-ocean model on an aquaplanet.
+- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel_SlabLandModel.py`: Coupled slab atmosphere-ocean-land model with Earth landscape.
 
 ## Integration with JAX-GCM (JCM)
 

@@ -1,13 +1,14 @@
-"""Example of coupling jax-gcm with simple slab ocean and slab land models."""
+"""Example of coupling of simple slab atmosphere, ocean, and land models."""
 
-if __name__ == "__main__":
+
+def test_integration():
+
+    from jax_esm.components import SlabOceanModel, SlabAtmosphereModel, SlabLandModel
+    import jax_datetime as jdt
+    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
     from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
         generate_jcm_forcing_and_topography_files,
     )
-    from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
-    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
-    import jcm
-    import jax_datetime as jdt
     from pathlib import Path
 
     resolution = 31
@@ -16,17 +17,20 @@ if __name__ == "__main__":
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
     simulation_interval = jdt.to_timedelta(30, "day")
-    output_dir = Path("output/JCM_SOM_SLM").resolve()
+    output_dir = Path("output/SAM_SOM_SLM").resolve()
 
     external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
+
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
 
     # Creating components
     components = dict(
-        atm=JCM(
-            model=jcm.model.Model(start_date=start_datetime),
-            coupling_timestep=coupling_timestep,
+        atm=SlabAtmosphereModel(
+            grid_specification=grid_specification,
+            timestep=3600.0,
+            start_datetime=start_datetime,
+            save_interval=coupling_timestep,
         ),
         ocn=SlabOceanModel(
             grid_specification=grid_specification,
@@ -34,6 +38,7 @@ if __name__ == "__main__":
             start_datetime=start_datetime,
             save_interval=coupling_timestep,
             relaxation_time=60 * 86400.0,
+            topography_file=external_files["terrain"],
             mask_file=external_files["terrain"],
             SST_clim_file=external_files["forcing"],
         ),
@@ -70,3 +75,6 @@ if __name__ == "__main__":
         output_file = output_dir / f"{component_name:s}.nc"
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, engine="netcdf4")
+
+if __name__ == "__main__":
+    test_integration()
