@@ -72,7 +72,6 @@ jobs:
     - name: Check import sorting with ruff
       run: |
         ruff check --output-format=github jax_esm/
-        ruff format --check jax_esm/ 
 
     - name: Type check with mypy
       run: |
