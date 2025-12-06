@@ -29,7 +29,7 @@ You can run a Jax-gcm coupled run with
 python tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
 ```
 The results will be placed in the directory `output`. 
-
+An example of jax-gcm coupled to slab ocean and land models is as follows:
 
 ```python
 
