@@ -13,17 +13,17 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 
 ## Installation
 
-For most users, please install with `jax-gcm` (hereafter `jcm`) functionality.
+Please install with `jax-gcm` (hereafter `jcm`) functionality.
 ```bash
+
 pip install -e ".[jcm]"
+
+# Need to clone jax-gcm manually for now
+git clone https://github.com/climate-analytics-lab/jax-gcm.git
+export PYTHONPATH=`pwd`/jax-gcm:$PYTHONPATH
 ```
 
-For advanced users, if you do not need any `jcm` functionality, such as its atmosphere model, or grid system (`JCM::T{resolution}`), then it is sufficient to install the essential ones:
-```bash
-pip install -e "."
-```
-
-For development:
+For development, please run additionally
 ```bash
 pip install -e ".[dev]"
 ```
@@ -41,8 +41,11 @@ An example of jax-gcm coupled to slab ocean and land models is as follows:
 
 # File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
 
-from jax_esm.components import JCM, SlabOceanModel
-from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
+from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
+    generate_jcm_forcing_and_topography_files,
+)
+from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
+from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
 import jcm
 import jax_datetime as jdt
 from pathlib import Path
@@ -53,8 +56,9 @@ grid_specification = f"JCM::T{resolution:d}"
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
 simulation_interval = jdt.to_timedelta(10, "day")
-output_dir = Path("output/JCM_SOM_aqua").resolve()
+output_dir = Path("output/JCM_SOM_SLM").resolve()
 
+external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
 print("Output dir: ", str(output_dir))
 output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -70,6 +74,18 @@ components = dict(
         start_datetime=start_datetime,
         save_interval=coupling_timestep,
         relaxation_time=60 * 86400.0,
+        mask_file=external_files["terrain"],
+        SST_clim_file=external_files["forcing"],
+    ),
+    lnd=SlabLandModel(
+        grid_specification=grid_specification,
+        timestep=3600 * 6,
+        start_datetime=start_datetime,
+        save_interval=coupling_timestep,
+        relaxation_time=60 * 86400.0,
+        topography_file=external_files["terrain"],
+        mask_file=external_files["terrain"],
+        land_clim_file=external_files["forcing"],
     ),
 )
 
