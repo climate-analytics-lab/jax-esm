@@ -13,8 +13,14 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 
 ## Installation
 
+For most users, please install with `jax-gcm` (hereafter `jcm`) functionality.
 ```bash
-pip install -e .
+pip install -e ".[jcm]"
+```
+
+For advanced users, if you do not need any `jcm` functionality, such as its atmosphere model, or grid system (`JCM::T{resolution}`), then it is sufficient to install the essential ones:
+```bash
+pip install -e "."
 ```
 
 For development:
