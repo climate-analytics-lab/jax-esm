@@ -57,7 +57,7 @@ class Coupler:
         for name, component in self.components.items():
             self.add_component(name, component)
 
-        self.forcing_mapper = forcing_mapper
+        self.forcing_mapper = forcing_mapper or ForcingMapper(self.components)
 
     def initialize(
         self,
