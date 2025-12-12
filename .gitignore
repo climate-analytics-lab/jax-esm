@@ -9,3 +9,4 @@ CLAUDE.md
 .vscode/
 .idea/
 env/
+output/*/*.nc
