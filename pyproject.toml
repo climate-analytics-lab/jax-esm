@@ -7,7 +7,7 @@ name = "jax-esm"
 version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "JAX-ESM Developers", email = "dwatsonparris@ucsd.edu"},
@@ -17,10 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
@@ -31,16 +27,25 @@ dependencies = [
     "numpy>=1.21.0",
     "typing-extensions>=4.0.0",
     "dataclasses-json>=0.5.0",
+    "jax_datetime",
+    "jax_tqdm",
+    "tqdm",
+    "netcdf4",
+    "xarray",
+    "tree_math",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=3.0",
-    "black>=22.0",
-    "isort>=5.0",
-    "flake8>=4.0",
     "mypy>=0.900",
+    "ruff",
+]
+
+jcm = [
+    "dinosaur",
+    "flax",
 ]
 
 [project.urls]
@@ -60,7 +65,7 @@ profile = "black"
 multi_line_output = 3
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true

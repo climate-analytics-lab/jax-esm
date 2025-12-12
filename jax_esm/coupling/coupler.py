@@ -2,7 +2,7 @@
 
 from functools import partial
 import time
-from typing import Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable
 
 import jax
 import jax.numpy as jnp
@@ -12,16 +12,14 @@ from jax_esm.coupling.forcing_mapper import ForcingMapper
 
 
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
-
+from jax_tqdm import scan_tqdm
+from tqdm import tqdm
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
-def adhoc_scan(f, init, xs=None, length=None):
-    if xs is None:
-        xs = [1] * length
+def adhoc_scan(f, init, xs):
     carry = init
     ys = []
-    for i, x in enumerate(xs):
-        print(f"The {i:d}-th iteration. ", end="")
+    for x in xs:
         _start_time = time.time()
 
         carry, y = f(carry, x)
@@ -29,9 +27,11 @@ def adhoc_scan(f, init, xs=None, length=None):
 
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
-        print(f"Execution time: {_elapsed_time:.1f} seconds.")
 
     return carry, stack_objects(ys)
+
+def generate_scan_function(jitted:bool):
+    return jax.lax.scan if jitted else adhoc_scan
 
 
 class Coupler:
@@ -40,7 +40,7 @@ class Coupler:
     def __init__(
         self,
         coupling_timestep: float,
-        components: Dict[str, Component],
+        components: Optional[Dict[str, Component]] = None,
         forcing_mapper: Optional[ForcingMapper] = None,
     ):
         """Initialize the coupler.
@@ -51,23 +51,13 @@ class Coupler:
             config: CouplerConfig object
 
         """
-        self.components = components
-        self.component_names = list(components.keys())
+
         self.coupling_timestep = coupling_timestep
+        self.components = components or {}
+        for name, component in self.components.items():
+            self.add_component(name, component)
 
-        # Extract component timesteps
-        component_timesteps = {
-            name: comp.config.timestep for name, comp in components.items()
-        }
-
-        # Check the compatibility of timestep
-        for component_name, component_timestep in component_timesteps.items():
-            if self.coupling_timestep % component_timestep != 0.0:
-                raise ValueError(
-                    f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
-                )
-
-        self.forcing_mapper = forcing_mapper
+        self.forcing_mapper = forcing_mapper or ForcingMapper(self.components)
 
     def initialize(
         self,
@@ -88,6 +78,7 @@ class Coupler:
     def generate_step_function(
         self,
         jitted: bool = True,
+        show_progress: bool = True,
     ) -> Callable:
         """Advance coupled system by one coupling timestep.
 
@@ -97,7 +88,7 @@ class Coupler:
             New states after one coupling timestep
         """
 
-        scan_func = jax.lax.scan if jitted else adhoc_scan
+        scan_func = generate_scan_function(jitted=jitted)
 
         # Get step functions of each component
         step_functions = {}
@@ -128,14 +119,16 @@ class Coupler:
                 looped_step_function, step_function=_step_function, component=component
             )
 
-        def step_function(coupled_state, t):
+        def step_function(coupled_state, step_time):
+            _, t = step_time
+
             # Compute forcing
             forcings = self.forcing_mapper.couple_components(coupled_state)
 
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 component_name: step_function(
-                    coupled_state[component_name], forcings[component_name], t
+                    coupled_state[component_name], forcings[component_name], t,
                 )
                 for component_name, step_function in step_functions.items()
             }
@@ -146,30 +139,52 @@ class Coupler:
 
             return coupled_state, coupled_predictions
 
-        return jax.jit(step_function) if jitted else step_function
+        if jitted:
+            step_function = jax.jit(step_function)
+
+        return step_function
 
     def run(
         self,
-        init_coupled_state: Dict[str, ComponentState],
+        initial_coupled_state: Dict[str, ComponentState],
         start_time: float,
         end_time: float,
-        jax_scan: bool = True,
         save_interval_steps=1,
+        jitted: bool = True,
+        show_progress: bool = False,
+        tqdm_kwargs: Dict[str, Any] = dict(),
     ):
         _start_time = time.time()
-        scan_func = jax.lax.scan if jax_scan else adhoc_scan
-
         total_time = end_time - start_time
         total_steps = int(total_time / self.coupling_timestep)
 
         if total_steps * self.coupling_timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
-        coupled_step_function = self.generate_step_function(jitted=jax_scan)
+        scan_func = generate_scan_function(jitted=jitted)
+
+        coupled_step_function = self.generate_step_function(
+            show_progress=show_progress,
+            jitted=jitted,
+        )
+
+        steps = jnp.arange(total_steps)
+        times = start_time + self.coupling_timestep * steps
+        if jitted:
+            step_times = (steps, times) # type: ignore
+        else:
+            step_times = list(zip(steps, times)) # type: ignore
+            
+        if show_progress:
+            if jitted:
+                coupled_step_function = scan_tqdm(n=total_steps, **tqdm_kwargs)(coupled_step_function)
+            else:
+                step_times = tqdm(step_times, **tqdm_kwargs)
+        
         final_coupled_state, predictions = scan_func(
             coupled_step_function,
-            init_coupled_state,
-            xs=start_time + self.coupling_timestep * jnp.arange(total_steps),
+            initial_coupled_state,
+            xs=step_times,
         )
         predictions = unwrap_leading_dims(predictions, first_n_dim=2)
 
@@ -181,35 +196,46 @@ class Coupler:
 
     def add_component(
         self,
-        name: str,
-        component: Component,
+        name: Optional[str] = None,
+        component: Optional[Component] = None,
     ) -> None:
         """Add a new component to the coupler.
-
+           If name is not provided, then simply re-extract component names and timesteps
         Args:
             name: Component name
             component: Component instance
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        if not hasattr(ComponentState, name):
-            raise Exception(
-                "Unable to add {name:s}. It has to be one of the attribute names of ComponentState.".format(
-                    name=name,
-                )
-            )
+        if component is not None:
+            if name is None:
+                raise ValueError("When component is provided, the name must be given.")
 
-        self.components[name] = component
+            self.components[name] = component
+
         self.component_names = list(self.components.keys())
+        self.component_timesteps = {
+            name: component.config.timestep
+            for name, component in self.components.items()
+        }
 
-        # Recreate time integrator with new component
-        component_timesteps = {n: c.config.timestep for n, c in self.components.items()}
-
-        # Revalidate
         self._validate_components()
 
     def _validate_components(self):
-        pass
+        # Check the compatibility of timestep
+        for component_name, component_timestep in self.component_timesteps.items():
+            if component_timestep <= 0:
+                raise ValueError(
+                    f"Timestep of {component_name:s} ({component_timestep:f}) must be a positive number."
+                )
+
+            if self.coupling_timestep % component_timestep != 0.0:
+                raise ValueError(
+                    f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
+                )
+
+        for component_name, component in self.components.items():
+            component.validate()
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
@@ -219,12 +245,9 @@ class Coupler:
         """
         if name in self.components:
             del self.components[name]
-            self.component_names = list(self.components.keys())
 
-            # Recreate time integrator without removed component
-            component_timesteps = {
-                n: c.config.timestep for n, c in self.components.items()
-            }
+            # update information
+            self.add_component()
 
     def predictions_to_xarray(
         self,

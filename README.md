@@ -13,113 +13,106 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 
 ## Installation
 
+Please install with `jax-gcm` (hereafter `jcm`) functionality.
 ```bash
-pip install -e .
+
+pip install -e ".[jcm]"
+
+# Need to clone jax-gcm manually for now
+git clone https://github.com/climate-analytics-lab/jax-gcm.git
+export PYTHONPATH=`pwd`/jax-gcm:$PYTHONPATH
 ```
 
-For development:
+For development, please run additionally
 ```bash
 pip install -e ".[dev]"
 ```
 
 ## Quick Start
 
+You can run a Jax-gcm coupled run with
+```
+python tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
+```
+The results will be placed in the directory `output`. 
+An example of jax-gcm coupled to slab ocean and land models is as follows:
+
 ```python
-import jax
-import jax.numpy as jnp
-import pandas as pd
-from jax_esm import Component, ComponentConfig
-from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import create_component_state_class, create_field_group_class
-from jax_esm.utils.bulk_op import stack_objects
 
-# Define a custom component
-class MyOcean(Component):
-    def __init__(self, config: ComponentConfig):
-        super().__init__(config)
+# File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
 
-        # Create state class dynamically
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="OceanProg",
-                fields=[
-                    ("T", float, (64, 128)),      # SST
-                    ("sim_time", float, ()),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="OceanPhydata",
-                fields=[
-                    ("heat_content", float, (64, 128)),
-                ],
-            ),
-        )
+from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
+    generate_jcm_forcing_and_topography_files,
+)
+from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
+from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
+import jcm
+import jax_datetime as jdt
+from pathlib import Path
 
-    def initialize(self):
-        return self.component_state_class.zeros().copy(
-            prog_kwargs={"T": jnp.ones((64, 128)) * 288.0}  # 15°C
-        )
+resolution = 31
+grid_specification = f"JCM::T{resolution:d}"
 
-    def gen_step_fn(self):
-        @jax.jit
-        def step_fn(cpl, t):
-            # Access other components: cpl.atm, cpl.flx, cpl.ocn
-            heat_flux = cpl.flx.phydata.heatflx
+coupling_timestep = 86400.0
+start_datetime = jdt.to_datetime("2000-01-01")
+simulation_interval = jdt.to_timedelta(10, "day")
+output_dir = Path("output/JCM_SOM_SLM").resolve()
 
-            # Update temperature
-            new_T = cpl.ocn.prog.T + heat_flux * self.timestep / 1e8
+external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
+print("Output dir: ", str(output_dir))
+output_dir.mkdir(exist_ok=True, parents=True)
 
-            new_state = cpl.ocn.copy(
-                prog_kwargs={
-                    "T": new_T,
-                    "sim_time": cpl.ocn.prog.sim_time + self.timestep,
-                }
-            )
-
-            # Return (new_state, predictions)
-            predictions = stack_objects([{
-                "prog": new_state.prog,
-                "phydata": new_state.phydata,
-            }])
-
-            return new_state, predictions
-
-        return step_fn
-
-# Configure component (requires atm, flx, ocn)
-ocean_config = ComponentConfig(
-    name="ocn",
-    start_dt=pd.Timestamp("2000-01-01"),
-    timestep=3600.0,      # 1 hour
-    substeps=4,           # Internal sub-stepping
-    save_interval=3600.0,
-    grid={},
-    params={},
+# Creating components
+components = dict(
+    atm=JCM(
+        model=jcm.model.Model(start_date=start_datetime),
+        coupling_timestep=coupling_timestep,
+    ),
+    ocn=SlabOceanModel(
+        grid_specification=grid_specification,
+        timestep=coupling_timestep,
+        start_datetime=start_datetime,
+        save_interval=coupling_timestep,
+        relaxation_time=60 * 86400.0,
+        mask_file=external_files["terrain"],
+        SST_clim_file=external_files["forcing"],
+    ),
+    lnd=SlabLandModel(
+        grid_specification=grid_specification,
+        timestep=3600 * 6,
+        start_datetime=start_datetime,
+        save_interval=coupling_timestep,
+        relaxation_time=60 * 86400.0,
+        topography_file=external_files["terrain"],
+        mask_file=external_files["terrain"],
+        land_clim_file=external_files["forcing"],
+    ),
 )
 
-# Create components (need all 3: atm, flx, ocn)
-ocean = MyOcean(ocean_config)
-# ... create atmosphere and flux model ...
+# Creating model
+model = couple(**components)
 
-# Create coupler (hardcoded to use "atm", "flx", "ocn" keys)
-coupler = Coupler(
-    components={"atm": atmosphere, "flx": flux_model, "ocn": ocean},
-    config=CouplerConfig(timestep=3600.0),
+# Obtain initial condition
+initial_coupled_state = model.initialize()
+
+# Run coupled model
+print("Running model...")
+state_holder, predictions = model.run(
+    initial_coupled_state=initial_coupled_state,
+    start_time=0,
+    end_time=simulation_interval / jdt.to_timedelta(1, "second"),
+    jitted=True,
+    show_progress=True,
+    tqdm_kwargs=dict(desc="Simulation"),
 )
+# Convert output into xarray
+output_dict = model.predictions_to_xarray(predictions)
 
-# Initialize and run
-initial_state = coupler.initialize()
-final_state, predictions = coupler.run(
-    init_cplstate=initial_state,
-    start_time=0.0,
-    end_time=86400.0,  # 1 day
-    timestep=3600.0,
-    jax_scan=True,     # Use JAX scan (False for debugging)
-)
+for component_name, ds in output_dict.items():
+    output_file = output_dir / f"{component_name:s}.nc"
+    print("Output file: ", str(output_file))
+    ds.to_netcdf(output_file, engine="netcdf4")
 
-# Convert to xarray
-datasets = coupler.predictions_to_xarray(predictions)
-# Access: datasets["atm"], datasets["flx"], datasets["ocn"]
 ```
 
 ## Architecture
@@ -128,45 +121,18 @@ datasets = coupler.predictions_to_xarray(predictions)
 
 Each component must inherit from `Component` and implement:
 
-- **`__init__(config)`**: Initialize with ComponentConfig, create state class
+- **`__init__(config)`**: Initialize with ComponentConfig, need to define `component_state_class` and `component_forcing_class`.
 - **`initialize()`**: Return initial component state
-- **`gen_step_fn()`**: Return a JIT-compiled step function
-  - Signature: `step_fn(coupled_state, t) -> (new_component_state, predictions)`
+- **`generate_step_function()`**: Return a JIT-compiled step function
+  - Signature: `step_function(state, forcing, time) -> (new_component_state, predictions)`
 
-### State Management
-
-States are created dynamically using factory functions:
-
-```python
-# Create field groups
-ProgClass = create_field_group_class(
-    cls_name="MyProg",
-    fields=[
-        ("temperature", float, (64, 128)),
-        ("sim_time", float, ()),
-    ],
-)
-
-# Create component state
-StateClass = create_component_state_class(
-    prog_cls=ProgClass,
-    phydata_cls=PhydataClass,
-)
-```
-
-Component states have two main fields:
-- **`prog`**: Prognostic variables (temperature, SST, time, etc.)
-- **`phydata`**: Physical/diagnostic data (fluxes, derived quantities)
-
-States are JAX pytrees with arithmetic operations via `tree_math.struct`.
+`component_class_class` and `component_forcing_class` are JAX pytrees with arithmetic operations via `tree_math.struct`.
 
 ### Component Coupling
 
-The current implementation uses **direct coupling**:
+The current implementation uses direct coupling:
 - Coupler creates a `CoupledState` with fields for each component
-- Step functions receive the full coupled state: `step_fn(cpl, t)`
-- Components directly access each other: `cpl.ocn.prog.T`, `cpl.atm.phydata.flux`
-- Currently hardcoded to 3 components: `atm`, `flx`, `ocn`
+- Coupler pass the state of each component and forcing to the corresponding component's `step_function`.
 
 ### Time Integration
 
@@ -177,13 +143,11 @@ The current implementation uses **direct coupling**:
 
 ## Examples
 
-See the `examples/` and `notebooks/` directories:
-- `examples/jax_gcm_slab_ocean.py`: JAX-GCM coupled with slab ocean and flux model
-- `notebooks/01TestCoupledSpeedy.ipynb`: Working coupled JCM-FluxModel-SlabOcean example
-- `examples/jax_gcm_example.py`: **OUTDATED** - uses old API
-- `examples/simple_slab_ocean_test.py`: **OUTDATED** - uses old API
-
-**Note**: Use the notebook or `jax_gcm_slab_ocean.py` as reference for current API.
+See the `tests/integration/` directories:
+- `tests/integration/test_jesm_JCM_SlabOceanModel.py`: JAX-GCM coupled with slab ocean on an aquaplanet.
+- `tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models with Earth landscape.
+- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel.py`: Coupled slab atmosphere-ocean model on an aquaplanet.
+- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel_SlabLandModel.py`: Coupled slab atmosphere-ocean-land model with Earth landscape.
 
 ## Integration with JAX-GCM (JCM)
 
@@ -197,77 +161,17 @@ JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean
    - Handles conversion between Dinosaur dynamics states and physics states
    - Supports internal sub-stepping
 
-2. **FluxModel**
-   - Location: `jax_esm/components/FluxModel/`
-   - Computes total heat flux from atmosphere to ocean
-   - Formula: `heatflx = -atm.phydata.surface_flux.hfluxn.sum(axis=-1)`
-   - Sign convention: positive upward
-
-3. **SlabOceanModel**
+2. **SlabOceanModel**
    - Location: `jax_esm/components/SlabOceanModel/`
    - Mixed-layer ocean with climatological relaxation
    - Anomaly-based SST evolution using Euler backward scheme
-   - Physics:
-     ```python
-     cd = rho_ocean * cp_ocean * mixed_layer_depth  # J/K/m²
-     T_anomaly_new = time_factor * (T_anomaly + heat_flux * cd_factor)
-     SST_new = T_anomaly_new + SST_climatology + climatology_trend * dt
-     ```
 
-### Example Coupled System
-
-```python
-from jax_esm.components.JCM.JCM import JCM
-from jax_esm.components.FluxModel.FluxModel import FluxModel
-from jax_esm.components.SlabOceanModel.SlabOceanModel import SlabOceanModel
-
-# Configure components
-atm = JCM(atm_config)
-flx = FluxModel(flux_config)
-ocn = SlabOceanModel(ocean_config)
-
-# Create coupler
-coupler = Coupler(
-    components={"atm": atm, "flx": flx, "ocn": ocn},
-    config=CouplerConfig(timestep=3600.0),
-)
-
-# Run coupled simulation
-initial_state = coupler.initialize()
-final_state, predictions = coupler.run(
-    init_cplstate=initial_state,
-    start_time=0.0,
-    end_time=86400.0 * 30,  # 30 days
-    timestep=3600.0,
-)
-```
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run core coupler tests (no JCM required)
-pytest tests/test_coupler.py -v
-
-# Run with coverage
-pytest --cov=jax_esm --cov-report=html
-
-# Run specific test
-pytest tests/test_integration.py::TestIntegration::test_coupled_initialization -v
-```
-
-Test suite includes:
-- **Unit tests**: SlabOceanModel, FluxModel, Coupler
-- **Integration tests**: Full coupled system validation
-- **CI/CD**: GitHub Actions with multi-platform testing
+3. **SlabLandModel**
+   - Location: `jax_esm/components/SlabLandModel/`
+   - One layer land with climatological relaxation
+   - Anomaly-based land surface temperature evolution using Euler backward scheme
 
 ## Current Limitations
-
-- **3-Component System**: Coupler is currently hardcoded to `atm`, `flx`, `ocn` keys
-- **Direct Coupling**: Components directly access each other's state (tight coupling)
-- **No FluxExchanger**: Flux translation layer exists but is unused
 - **JCM Dependency**: Component tests require JCM (jax-gcm) to be installed
 
 See `CODE_REVIEW.md` for detailed analysis and improvement recommendations.

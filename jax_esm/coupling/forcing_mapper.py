@@ -90,8 +90,8 @@ class ForcingMapper:
                     (source_component_name, target_component_name), {}
                 )
                 if not mapping:
-                    raise Exception(
-                        f"Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
+                    print(
+                        f"Notice: Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
                     )
 
                 # Apply mappings and transformations

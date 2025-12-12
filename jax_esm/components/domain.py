@@ -143,7 +143,7 @@ def load_jcm_mask(mask_file):
 
     # It is land (mask = 1) only if fmask == 1
     # If there is a bit of water ( fmask < 1 ), then bmask = 0
-    bmask = jnp.where(fmask == 1, 1.0, 0.0)
+    bmask = jnp.where(fmask > 0.95, 1.0, 0.0)
 
     return fmask, bmask
 

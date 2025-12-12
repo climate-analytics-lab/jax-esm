@@ -1,14 +1,14 @@
 """Base component interface for Earth system models."""
 
-from jax_esm.components.domain import Domain
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Tuple, Callable, Sequence
+from typing import Any, Tuple, Sequence, Callable
 
 import jax.numpy as jnp
 import tree_math
 from dataclasses import make_dataclass
+
+from jax_esm.components.domain import Domain
 
 
 class AbstractFieldGroup:
@@ -263,5 +263,17 @@ class Component(ABC):
 
         Returns:
             A function that accepts (init_state, time) and returns (final_state, predictions)
+        """
+        pass
+
+    @abstractmethod
+    def validate(self) -> None:
+        """Validate component configuration.
+           Throw exceptions and errors when configuration is not correct.
+
+        Args:
+
+        Returns:
+            None
         """
         pass

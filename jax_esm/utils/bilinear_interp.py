@@ -1,10 +1,8 @@
-from typing import Tuple, Optional, cast
+from typing import Any, Tuple, Optional, cast
 import math
-import jax
 import jax.numpy as jnp
 from jax import Array, lax
 from jax import config as _jax_config
-import matplotlib.pyplot as plt
 
 
 _jax_config.update("jax_enable_x64", True)
@@ -584,7 +582,7 @@ class BilinearInterpolator:
 
         return self.source_mask & jnp.isfinite(source)
 
-    def _apply_bilinear_scalar(self, source: Array) -> Tuple[Array, Array]:
+    def _apply_bilinear_scalar(self, source: Array) -> Any:
         r"""Core bilinear (with optional NaN/mask renormalization).
 
         Mathematics:
@@ -686,7 +684,7 @@ class BilinearInterpolator:
     # ----------------- fixed-size extrapolation core ----------------- #
     def _extrapolate_blocks_scalar(
         self, need_mask: Array, source_flat: Array, valid_flat: Array
-    ) -> Array:
+    ) -> Any:
         r"""
         Fixed-size (k, extrapolation_block_size) extrapolation over ALL targets using lax.fori_loop.
         Returns a flat array of length ntarget with fill values for the 'need' entries.
@@ -829,7 +827,7 @@ class BilinearInterpolator:
 
     def _extrapolate_blocks_vector(
         self, need_mask: Array, u_flat: Array, v_flat: Array, valid_flat: Array
-    ) -> tuple[Array, Array]:
+    ) -> Any:
         """
         Same as scalar but computes (u,v) using the same neighbor sets/weights.
 
@@ -963,7 +961,7 @@ class BilinearInterpolator:
             out = jnp.where(need, self.fill_value, out_bilin)
             return out
 
-        def _extrapolation_case(operand: Tuple[Array, ...]) -> Array:
+        def _extrapolation_case(operand: Tuple[Array, ...]) -> Any:
             out_bilin, need, source = operand
             source = jnp.asarray(source, float)
             valid = self._ensure_source_mask(source).reshape(-1)
@@ -1164,138 +1162,3 @@ class BilinearInterpolator:
             u_target.reshape(self.target_grid_shape),
             v_target.reshape(self.target_grid_shape),
         )
-
-
-if __name__ == "__main__":
-    NXs, NYs = 180, 91
-    longitude_source = jnp.linspace(0.0, 360.0 - 360.0 / NXs, NXs)
-    latitude_source = jnp.linspace(-90.0, 90.0, NYs)
-
-    longitude_source_2d, latitude_source_2d = jnp.meshgrid(
-        longitude_source, latitude_source
-    )
-    scalar_source = jnp.cos(jnp.deg2rad(latitude_source_2d)) * jnp.cos(
-        jnp.deg2rad(longitude_source_2d - 180.0)
-    )
-    u_source = jnp.cos(jnp.deg2rad(latitude_source_2d))
-    v_source = 0.5 * jnp.sin(jnp.deg2rad(longitude_source_2d - 180.0))
-
-    source_mask = jnp.ones_like(scalar_source, dtype=bool)
-    source_mask = source_mask.at[
-        (latitude_source_2d > 20.0) & (latitude_source_2d < 30.0)
-    ].set(False)
-    source_mask = source_mask.at[
-        (latitude_source_2d > 0.0)
-        & (latitude_source_2d < 10.0)
-        & (longitude_source_2d > 50)
-        & (longitude_source_2d < 70)
-    ].set(False)
-    source_mask = source_mask.at[
-        (latitude_source_2d > -30.0)
-        & (latitude_source_2d < -10.0)
-        & (longitude_source_2d > 20)
-        & (longitude_source_2d < 50)
-    ].set(False)
-
-    scalar_source = jnp.where(source_mask, scalar_source, jnp.nan)
-    u_source = jnp.where(source_mask, u_source, jnp.nan)
-    v_source = jnp.where(source_mask, v_source, jnp.nan)
-
-    longitude_target = jnp.linspace(-180.0, 180.0, 361)
-    latitude_target = jnp.linspace(-90.0, 90.0, 181)
-    longitude_target_2d, latitude_target_2d = jnp.meshgrid(
-        longitude_target, latitude_target
-    )
-
-    target_mask = jnp.ones_like(longitude_target_2d, dtype=bool)
-    target_mask = target_mask.at[
-        (latitude_target_2d > 20.0) & (latitude_target_2d < 30.0)
-    ].set(False)
-    target_mask = target_mask.at[
-        (latitude_target_2d > 0.0)
-        & (latitude_target_2d < 10.0)
-        & (longitude_target_2d > 50)
-        & (longitude_target_2d < 70)
-    ].set(False)
-    # target_mask = target_mask.at[(latitude_target_2d > -30.0) & (latitude_target_2d < -10.0)
-    #                      & (longitude_target_2d > 20) & (longitude_target_2d < 50)].set(False)
-    target_mask = target_mask.at[
-        (latitude_target_2d > -25.0)
-        & (latitude_target_2d < -15.0)
-        & (longitude_target_2d > 25)
-        & (longitude_target_2d < 35)
-    ].set(False)
-
-    itp = BilinearInterpolator(
-        longitude_source,
-        latitude_source,
-        longitude_target,
-        latitude_target,
-        periodic_longitude=True,
-        nan_renorm=True,
-        source_mask=source_mask,
-        target_mask=target_mask,
-        extrapolation_mode="idw",
-        idw_k=8,
-        extrapolation_block_size=4096,  # tune for memory/speed 4096 | 16384 | 64800
-        fill_value=jnp.nan,
-    )
-
-    jit_scalar = jax.jit(lambda s: itp.apply_scalar(s))
-    jit_vector = jax.jit(lambda u, v: itp.apply_vector(u, v))
-
-    scalar_target = jit_scalar(scalar_source)
-    u_target, v_target = jit_vector(u_source, v_source)
-
-    print("Scalar target shape:", scalar_target.shape)
-    print("Vector target shape:", u_target.shape, v_target.shape)
-
-    fig, axs = plt.subplots(2, 2, figsize=(15, 10), layout="constrained")
-
-    im = axs[0, 0].pcolormesh(
-        longitude_source_2d,
-        latitude_source_2d,
-        scalar_source,
-        shading="auto",
-        cmap="coolwarm",
-    )
-    axs[0, 0].set_title("Initial Scalar Field")
-    axs[0, 0].set_xlabel("Longitude")
-    axs[0, 0].set_ylabel("Latitude")
-
-    axs[0, 1].quiver(
-        longitude_source_2d[::4, ::4],
-        latitude_source_2d[::4, ::4],
-        u_source[::4, ::4],
-        v_source[::4, ::4],
-        scale=40,
-    )
-    axs[0, 1].set_title("Initial Vector Field")
-    axs[0, 1].set_xlabel("Longitude")
-    axs[0, 1].set_ylabel("Latitude")
-
-    axs[1, 0].pcolormesh(
-        longitude_target_2d,
-        latitude_target_2d,
-        scalar_target,
-        shading="auto",
-        cmap="coolwarm",
-    )
-    axs[1, 0].set_title("Interpolated Scalar Field")
-    axs[1, 0].set_xlabel("Longitude")
-    axs[1, 0].set_ylabel("Latitude")
-
-    axs[1, 1].quiver(
-        longitude_target_2d[::4, ::8],
-        latitude_target_2d[::4, ::8],
-        u_target[::4, ::8],
-        v_target[::4, ::8],
-        scale=40,
-    )
-    axs[1, 1].set_title("Interpolated Vector Field")
-    axs[1, 1].set_xlabel("Longitude")
-    axs[1, 1].set_ylabel("Latitude")
-
-    fig.colorbar(im, ax=axs, shrink=0.6)
-
-    plt.show()
