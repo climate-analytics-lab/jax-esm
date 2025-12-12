@@ -1,30 +1,38 @@
 """Slab ocean model component."""
 
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import jax_datetime as jdt
-import jax
 import jax.numpy as jnp
-
-from jax_esm import constants as constants
-from jax_esm.utils.bulk_op import stack_objects
-from jax_esm.components.domain import Domain
 import xarray as xr
 
+from jax_esm import constants
+from jax_esm.utils.bulk_op import stack_objects
+from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
+from jax_esm.components.slab.base import SlabModelBase
 from jax_esm.components.base import (
-    Component,
-    CoupledComponentConfig,
     create_component_state_class,
     create_component_forcing_class,
     create_field_group_class,
 )
 
-from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
+class SlabOceanModel(SlabModelBase):
+    """Slab ocean model with prescribed mixed layer depth and climatology.
 
-class SlabOceanModel(Component):
-    """
-    Slab ocean model with prescribed mixed layer depth and climatology.
+    This model simulates sea surface temperature evolution using a simple
+    thermodynamic equation with optional relaxation to climatology.
+
+    Physics:
+        dT/dt = Q/(rho * cp * h) - (T - T_clim)/tau
+
+    where:
+        T: sea surface temperature
+        Q: total heat flux (positive upward)
+        rho: ocean density
+        cp: ocean specific heat capacity
+        h: mixed layer depth
+        tau: relaxation timescale to climatology
     """
 
     def __init__(
@@ -40,34 +48,49 @@ class SlabOceanModel(Component):
         mask_file: Optional[str] = None,
         SST_clim_file: Optional[str] = None,
     ):
-        """Initialize slab ocean model."""
+        """Initialize slab ocean model.
 
-        super().__init__(
-            CoupledComponentConfig(name="SlabOceanModel", timestep=timestep)
-        )
-
+        Args:
+            grid_specification: Grid spec string (e.g., "JCM::T31")
+            start_datetime: Simulation start datetime
+            timestep: Model timestep in seconds
+            save_interval: Output save interval in seconds (unused, kept for compatibility)
+            relaxation_time: Relaxation timescale to climatology in seconds
+            mixed_layer_depth_min: Minimum mixed layer depth in meters
+            mixed_layer_depth_max: Maximum mixed layer depth in meters
+            topography_file: Optional path to topography NetCDF file
+            mask_file: Optional path to land/ocean mask NetCDF file
+            SST_clim_file: Optional path to SST climatology NetCDF file
+        """
         self.relaxation_time = relaxation_time
-        self.start_datetime = start_datetime
-        self.timestep = timestep
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
-        self.topography_file = topography_file
-        self.mask_file = mask_file
         self.SST_clim_file = SST_clim_file
-        self.domain = Domain.from_grid_specification(
-            grid_specification,
+
+        super().__init__(
+            name="SlabOceanModel",
+            grid_specification=grid_specification,
+            start_datetime=start_datetime,
+            timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
         )
 
-        D2_nodal_shape = self.domain.grids["T"].nodal_shape
+        # Climatology data (loaded during initialize)
+        self.has_climatology = False
+        self.SST_clim = None
+        self.time_factor = None
+        self.cd_factor = None
+
+    def _create_state_and_forcing_classes(self) -> None:
+        """Create state and forcing classes for ocean model."""
         self.component_state_class = create_component_state_class(
             prog_cls=create_field_group_class(
                 cls_name="state",
                 fields=[
                     ("sim_time", float, ()),
-                    ("sea_surface_temperature", float, D2_nodal_shape),
-                    ("mixed_layer_depth", float, D2_nodal_shape),
+                    ("sea_surface_temperature", float, self.grid_shape),
+                    ("mixed_layer_depth", float, self.grid_shape),
                 ],
             ),
             phydata_cls=create_field_group_class(
@@ -81,7 +104,7 @@ class SlabOceanModel(Component):
             flux_cls=create_field_group_class(
                 cls_name="flux",
                 fields=[
-                    ("total_heat_flux", float, D2_nodal_shape),
+                    ("total_heat_flux", float, self.grid_shape),
                 ],
             ),
             scalar_cls=create_field_group_class(
@@ -90,56 +113,18 @@ class SlabOceanModel(Component):
             ),
         )
 
-    def initialize(self):
-        # =========================================================================
-        # Initialize slab ocean model boundary conditions
-        # =========================================================================
-
-        T_grid = self.domain.grids["T"]
-        D2_nodal_shape = T_grid.nodal_shape
-
-        lat_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.axis_names)
-            if axis_name == "latitude"
-        )
-        lon_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.axis_names)
-            if axis_name == "longitude"
-        )
-
-        self.llat_rad = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.axis_values[lat_dim_idx],
-                axis=lon_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lon_dim_idx],
-            axis=lon_dim_idx,
-        )
-
-        self.llon_rad = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.axis_values[lon_dim_idx],
-                axis=lat_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lat_dim_idx],
-            axis=lat_dim_idx,
-        )
-
+    def _initialize_fields(self):
+        """Initialize ocean model fields."""
         nonocn_idx = self.domain.bmask != 0
 
-        # initialize mixed_layer_depth
+        # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
             self.mixed_layer_depth_max
             + (self.mixed_layer_depth_min - self.mixed_layer_depth_max)
             * jnp.cos(self.llat_rad) ** 3
         )
-        init_sea_surface_temperature = None
 
-        self.has_climatology = False
-        self.SST_clim = None
-
+        # Load or create initial SST
         if self.SST_clim_file is not None:
             print("SST climatology file. The given initial SST will be used.")
             print("SST climatology file: ", self.SST_clim_file)
@@ -153,9 +138,10 @@ class SlabOceanModel(Component):
                 + constants.default_land_temperature_K
             )
 
-        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
-            0
-        )
+        # Apply mask
+        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(0)
+
+        # Validate mask consistency
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
             print("domain.bmask and SST_clim do share the same mask.")
         else:
@@ -163,11 +149,12 @@ class SlabOceanModel(Component):
                 "Warning: fmask_ocn and sea_surface_temperature_init do not share the same mask."
             )
 
+        # Set relaxation time to infinity if no climatology
         if not self.has_climatology:
             print("Climaology SST does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
-        # Compute heat capacity cd, and time factor for Euler backward scheme
+        # Compute heat capacity and time factors for Euler backward scheme
         cd = (
             constants.ocean_density
             * constants.ocean_specific_heat_capacity
@@ -184,32 +171,19 @@ class SlabOceanModel(Component):
             ),
         )
 
-    def generate_step_function(
-        self,
-        jitted: bool = True,
-    ):
-        # Find day of the year to locate climatology
-        ref_year = self.start_datetime.to_pydatetime().year
-        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_day_offset = (self.start_datetime - ref_dt) / jdt.to_timedelta(
-            1, "second"
-        )
+    def _create_step_function_body(self):
+        """Create the step function for ocean model."""
+        start_day_offset = self._compute_start_day_offset()
         nonocn_idx = self.domain.bmask != 0
 
         def step_function(state, forcing, t):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
+
             if self.has_climatology:
-                # Compute SST clim at begin and end time
+                # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
-                clim_beg_idx = jnp.mod(
-                    jnp.int_(jnp.floor((start_day_offset + t) / 86400.0)),
-                    length_of_a_cycle,
-                )
-                clim_end_idx = jnp.mod(
-                    jnp.int_(
-                        jnp.floor((start_day_offset + t + self.timestep) / 86400.0)
-                    ),
-                    length_of_a_cycle,
+                clim_beg_idx, clim_end_idx = self._get_climatology_indices(
+                    t, start_day_offset, length_of_a_cycle
                 )
 
                 ocn_idx = self.domain.bmask == 0
@@ -225,27 +199,31 @@ class SlabOceanModel(Component):
 
                 SST_clim_trend = (
                     snapshot_SST_clim_end - snapshot_SST_clim_beg
-                ) / 86400.0  # convert to per second
+                ) / 86400.0  # per second
 
                 new_sea_surface_temperature_anom = (
                     state.prog.sea_surface_temperature - snapshot_SST_clim_beg
                 )
 
+            # Euler backward step
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
                 + self.cd_factor * (-(forcing.flux.total_heat_flux))
             )
 
+            # Add climatology back
             new_sea_surface_temperature = new_sea_surface_temperature_anom
             if self.has_climatology:
                 new_sea_surface_temperature += (
                     snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 )
 
-            new_sea_surface_temperature = new_sea_surface_temperature.at[
-                nonocn_idx
-            ].set(constants.default_land_temperature_K)
+            # Apply land mask
+            new_sea_surface_temperature = new_sea_surface_temperature.at[nonocn_idx].set(
+                constants.default_land_temperature_K
+            )
+
             new_state = state.copy(
                 prog_kwargs=dict(
                     sea_surface_temperature=new_sea_surface_temperature,
@@ -256,50 +234,16 @@ class SlabOceanModel(Component):
                 [dict(prog=new_state.prog, forcing=forcing)]
             )
 
-        return jax.jit(step_function) if jitted else step_function
+        return step_function
 
-    def validate(self):
-        pass
-
-    def predictions_to_xarray(
-        self,
-        predictions,
-    ):
-        """
-        A tool function that converts a trajectory into an xarray Dataset.
-
-        Args:
-            predictions : The predictions returned from `forward_func`
-
-        Returns:
-            ds : The resulting xarray dataset.
-        """
+    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+        """Create xarray data variables for ocean output."""
         prog = predictions["prog"]
         forcing = predictions["forcing"]
+        T_grid_dims = self._get_grid_dims()
 
-        T_grid_axis_names = self.domain.grids["T"].axis_names
-        T_grid_dims = ("time",) + T_grid_axis_names
-        start_datetime_str = self.start_datetime.to_pydatetime().strftime(
-            "%Y-%m-%d %H:%M:%S"
+        return dict(
+            sea_surface_temperature=(T_grid_dims, prog.sea_surface_temperature),
+            mixed_layer_depth=(T_grid_dims, prog.mixed_layer_depth),
+            total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
         )
-
-        ds = xr.Dataset(
-            data_vars=dict(
-                sea_surface_temperature=(T_grid_dims, prog.sea_surface_temperature),
-                mixed_layer_depth=(T_grid_dims, prog.mixed_layer_depth),
-                total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
-            ),
-            coords=dict(
-                time=(
-                    [
-                        "time",
-                    ],
-                    prog.sim_time / 3600.0,
-                    {"units": f"hours since {start_datetime_str:s}"},
-                ),
-                latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
-                longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
-            ),
-        )
-
-        return ds

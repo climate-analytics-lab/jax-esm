@@ -48,60 +48,68 @@ This document provides a comprehensive code review of the JAX-ESM prototype and 
 - `tests/unit/test_bulk_op.py` - bulk operation tests
 - `tests/unit/test_gradients.py` - gradient flow tests
 
+### Phase 3: Reduce Code Duplication - ✅ COMPLETE
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 3.1 Create `SlabModelBase` class | ✅ Done | New `jax_esm/components/slab/base.py` (~230 lines) |
+| 3.2 Refactor `SlabOceanModel` | ✅ Done | Reduced from 306 to 250 lines |
+| 3.3 Refactor `SlabLandModel` | ✅ Done | Reduced from 327 to 266 lines |
+| 3.4 Refactor `SlabAtmosphereModel` | ✅ Done | Reduced from 307 to 251 lines |
+
+**Code Reduction Summary:**
+- **Before:** 940 total lines across 3 slab models
+- **After:** 767 lines (base class) + 767 lines (3 models) = 997 lines
+- **Net change:** +57 lines, but with ~230 lines of shared infrastructure now reusable
+- **Duplicated code eliminated:** ~200 lines of lat/lon grid setup, climatology lookup, xarray coord creation
+
+**Key improvements:**
+- Common lat/lon grid construction in `_setup_lat_lon_grids()`
+- Shared climatology index calculation in `_get_climatology_indices()`
+- Unified `predictions_to_xarray()` structure with customizable data vars
+- Clear abstract method contracts for subclasses
+- Better documentation with physics equations in docstrings
+
+**Files created:**
+- `jax_esm/components/slab/__init__.py`
+- `jax_esm/components/slab/base.py` - `SlabModelBase` abstract class
+
+**All 82 tests pass after refactoring.**
+
 ---
 
 ## Executive Summary
 
 JAX-ESM is a well-structured prototype for coupling Earth system model components in JAX. The architecture is sound, but there are significant opportunities to:
 
-1. **Reduce redundancy** - ~300 lines of duplicated code across slab models
+1. **Reduce redundancy** - ~~300 lines of duplicated code across slab models~~ ✅ Fixed with `SlabModelBase`
 2. **Improve clarity** - ~~Inconsistent naming, missing documentation, magic numbers~~ (partially addressed)
 3. **Simplify the interface** - Complex factory patterns, fragile string-based access
 4. **Enable differentiability** - Support gradients w.r.t. parameters and forcings
-5. **Increase test coverage** - Currently minimal unit tests
+5. **Increase test coverage** - ~~Currently minimal unit tests~~ ✅ 78 unit tests added
 
-**Overall Assessment**: Functional prototype with solid JAX foundations. Phase 1 critical fixes complete. Needs continued refactoring for production use and scientific extensibility.
+**Overall Assessment**: Functional prototype with solid JAX foundations. Phases 1-3 complete. Remaining work: interface improvements (Phase 4) and differentiability support (Phase 5).
 
 ---
 
 ## 1. Critical Issues
 
-### 1.1 Massive Code Duplication Between Slab Models
+### 1.1 Massive Code Duplication Between Slab Models - ✅ FIXED
 
-**Files affected:**
-- `jax_esm/components/SlabOceanModel/SlabOceanModel.py` (307 lines)
-- `jax_esm/components/SlabLandModel/SlabLandModel.py` (328 lines)
-- `jax_esm/components/SlabAtmosphereModel/SlabAtmosphereModel.py` (313 lines)
+**Status:** Resolved in Phase 3 by creating `SlabModelBase` class.
 
-These three files share ~80% identical code:
-
-| Duplicated Pattern | Approx. Lines per File |
-|---|---|
-| `initialize()` lat/lon grid construction | ~30 lines |
-| `generate_step_function()` climatology lookup | ~40 lines |
-| `predictions_to_xarray()` structure | ~25 lines |
-| Heat capacity / time factor computation | ~10 lines |
-
-**Impact:** ~200+ lines of redundant code that must be maintained in parallel.
-
-**Example - Grid construction duplicated in all three:**
-```python
-# Identical in SlabOceanModel, SlabLandModel, SlabAtmosphereModel
-lat_dim_idx = next(
-    i for i, axis_name in enumerate(T_grid.axis_names)
-    if axis_name == "latitude"
-)
-lon_dim_idx = next(
-    i for i, axis_name in enumerate(T_grid.axis_names)
-    if axis_name == "longitude"
-)
-self.llat_rad = jnp.repeat(
-    jnp.expand_dims(T_grid.axis_values[lat_dim_idx], axis=lon_dim_idx),
-    repeats=D2_nodal_shape[lon_dim_idx],
-    axis=lon_dim_idx,
-)
-# ... continues for ~20 more lines
-```
+**Solution:**
+- Created `jax_esm/components/slab/base.py` with `SlabModelBase` abstract class
+- Common functionality now in base class:
+  - `_setup_lat_lon_grids()` - lat/lon grid construction
+  - `_compute_start_day_offset()` - climatology time offset
+  - `_get_climatology_indices()` - climatology lookup indices
+  - `predictions_to_xarray()` - unified xarray output with customizable data vars
+- Subclasses implement only model-specific logic via abstract methods:
+  - `_create_state_and_forcing_classes()`
+  - `_initialize_fields()`
+  - `_create_step_function_body()`
+  - `_create_xarray_data_vars()`
 
 ### 1.2 Inconsistent Component Interface - ✅ FIXED
 

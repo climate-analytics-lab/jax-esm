@@ -1,30 +1,39 @@
-"""Slab ocean model component."""
+"""Slab land model component."""
 
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import jax_datetime as jdt
-import jax
 import jax.numpy as jnp
-
-from jax_esm import constants as constants
-from jax_esm.utils.bulk_op import stack_objects
-from jax_esm.components.domain import Domain
 import xarray as xr
 
+from jax_esm import constants
+from jax_esm.utils.bulk_op import stack_objects
+from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
+from jax_esm.components.slab.base import SlabModelBase
 from jax_esm.components.base import (
-    Component,
-    CoupledComponentConfig,
     create_component_state_class,
     create_component_forcing_class,
     create_field_group_class,
 )
 
-from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
+class SlabLandModel(SlabModelBase):
+    """Slab land model with prescribed depth and climatology.
 
-class SlabLandModel(Component):
-    """
-    A simple land model adapated from SlabOceanModel
+    This model simulates land surface temperature evolution using a simple
+    thermodynamic equation with optional relaxation to climatology.
+    Adapted from SlabOceanModel.
+
+    Physics:
+        dT/dt = Q/(rho * cp * h) - (T - T_clim)/tau
+
+    where:
+        T: land surface temperature
+        Q: total heat flux (positive upward)
+        rho: land density
+        cp: land specific heat capacity
+        h: land depth (thermal)
+        tau: relaxation timescale to climatology
     """
 
     def __init__(
@@ -40,34 +49,49 @@ class SlabLandModel(Component):
         mask_file: Optional[str] = None,
         land_clim_file: Optional[str] = None,
     ):
-        """Initialize slab ocean model."""
+        """Initialize slab land model.
 
-        super().__init__(
-            CoupledComponentConfig(name="SlabLandModel", timestep=timestep)
-        )
-
+        Args:
+            grid_specification: Grid spec string (e.g., "JCM::T31")
+            start_datetime: Simulation start datetime
+            timestep: Model timestep in seconds
+            save_interval: Output save interval in seconds (unused, kept for compatibility)
+            relaxation_time: Relaxation timescale to climatology in seconds
+            land_depth_min: Minimum land depth in meters
+            land_depth_max: Maximum land depth in meters
+            topography_file: Optional path to topography NetCDF file
+            mask_file: Optional path to land/ocean mask NetCDF file
+            land_clim_file: Optional path to land surface temperature climatology NetCDF file
+        """
         self.relaxation_time = relaxation_time
-        self.start_datetime = start_datetime
-        self.timestep = timestep
         self.land_depth_min = land_depth_min
         self.land_depth_max = land_depth_max
-        self.topography_file = topography_file
-        self.mask_file = mask_file
         self.land_clim_file = land_clim_file
-        self.domain = Domain.from_grid_specification(
-            grid_specification,
+
+        super().__init__(
+            name="SlabLandModel",
+            grid_specification=grid_specification,
+            start_datetime=start_datetime,
+            timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
         )
 
-        D2_nodal_shape = self.domain.grids["T"].nodal_shape
+        # Climatology data (loaded during initialize)
+        self.has_climatology = False
+        self.land_surface_temperature_clim = None
+        self.time_factor = None
+        self.cd_factor = None
+
+    def _create_state_and_forcing_classes(self) -> None:
+        """Create state and forcing classes for land model."""
         self.component_state_class = create_component_state_class(
             prog_cls=create_field_group_class(
                 cls_name="state",
                 fields=[
                     ("sim_time", float, ()),
-                    ("land_surface_temperature", float, D2_nodal_shape),
-                    ("land_depth", float, D2_nodal_shape),
+                    ("land_surface_temperature", float, self.grid_shape),
+                    ("land_depth", float, self.grid_shape),
                 ],
             ),
             phydata_cls=create_field_group_class(
@@ -81,7 +105,7 @@ class SlabLandModel(Component):
             flux_cls=create_field_group_class(
                 cls_name="flux",
                 fields=[
-                    ("total_heat_flux", float, D2_nodal_shape),
+                    ("total_heat_flux", float, self.grid_shape),
                 ],
             ),
             scalar_cls=create_field_group_class(
@@ -90,70 +114,29 @@ class SlabLandModel(Component):
             ),
         )
 
-    def initialize(self):
-        # =========================================================================
-        # Initialize slab land model boundary conditions
-        # =========================================================================
-
-        T_grid = self.domain.grids["T"]
-        D2_nodal_shape = T_grid.nodal_shape
-
-        lat_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.axis_names)
-            if axis_name == "latitude"
-        )
-        lon_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.axis_names)
-            if axis_name == "longitude"
-        )
-
-        self.llat_rad = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.axis_values[lat_dim_idx],
-                axis=lon_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lon_dim_idx],
-            axis=lon_dim_idx,
-        )
-
-        self.llon_rad = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.axis_values[lon_dim_idx],
-                axis=lat_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lat_dim_idx],
-            axis=lat_dim_idx,
-        )
-
+    def _initialize_fields(self):
+        """Initialize land model fields."""
         land_index = self.domain.bmask == 1
         nonland_index = self.domain.bmask != 1
 
         print("Total land grid count: ", land_index.sum())
 
-        # initialize land_depth
+        # Initialize land depth with latitudinal variation
         init_land_depth = (
             self.land_depth_max
-            + (self.land_depth_min - self.land_depth_max) * jnp.cos(self.llat_rad) ** 3
+            + (self.land_depth_min - self.land_depth_max)
+            * jnp.cos(self.llat_rad) ** 3
         )
-        init_land_surface_temperature = None
 
-        self.has_climatology = False
-        self.land_surface_temperature_clim = None
-
+        # Load or create initial land surface temperature
         if self.land_clim_file is not None:
-            print(
-                "Land climatology file. The given initial land surface temperature will be used."
-            )
+            print("Land climatology file. The given initial land surface temperature will be used.")
             print("Land climatology file: ", self.land_clim_file)
             self.land_surface_temperature_clim = jnp.array(
                 xr.open_dataset(self.land_clim_file)["stl"]
             )
             self.has_climatology = True
-            init_land_surface_temperature = self.land_surface_temperature_clim[
-                :, :, 0
-            ].copy()
+            init_land_surface_temperature = self.land_surface_temperature_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial LST will be used.")
             init_land_surface_temperature = (
@@ -161,25 +144,23 @@ class SlabLandModel(Component):
                 + constants.default_land_temperature_K
             )
 
-        init_land_surface_temperature = init_land_surface_temperature.at[
-            nonland_index
-        ].set(0)
+        # Apply mask
+        init_land_surface_temperature = init_land_surface_temperature.at[nonland_index].set(0)
+
+        # Validate mask consistency
         if jnp.sum(jnp.isnan(init_land_surface_temperature)) == 0:
-            print(
-                "domain.bmask and land_surface_temperature_clim do share the same mask."
-            )
+            print("domain.bmask and land_surface_temperature_clim do share the same mask.")
         else:
             raise Exception(
                 "Warning: fmask_ocn and sst_init do not share the same mask."
             )
 
+        # Set relaxation time to infinity if no climatology
         if not self.has_climatology:
-            print(
-                "Climaology land surface temperature does not exist. Set relaxation time to inifinity."
-            )
+            print("Climaology land surface temperature does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
-        # Compute heat capacity cd, and time factor for Euler backward scheme
+        # Compute heat capacity and time factors for Euler backward scheme
         cd = (
             constants.land_density
             * constants.land_specific_heat_capacity
@@ -196,67 +177,59 @@ class SlabLandModel(Component):
             ),
         )
 
-    def generate_step_function(
-        self,
-        jitted: bool = True,
-    ):
-        # Find day of the year to locate climatology
-        ref_year = self.start_datetime.to_pydatetime().year
-        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_day_offset = (self.start_datetime - ref_dt) / jdt.to_timedelta(
-            1, "second"
-        )
-
+    def _create_step_function_body(self):
+        """Create the step function for land model."""
+        start_day_offset = self._compute_start_day_offset()
         nonland_index = self.domain.bmask != 1
         land_index = self.domain.bmask == 1
 
         def step_function(state, forcing, t):
-            # Compute anomaly later if climatology is given
+            # Compute anomaly if climatology is given
             new_land_surface_temperature_anomaly = state.prog.land_surface_temperature
+
             if self.has_climatology:
-                # Compute SST clim at begin and end time
+                # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.land_surface_temperature_clim.shape[2]
-                clim_beg_idx = jnp.mod(
-                    jnp.int_(jnp.floor((start_day_offset + t) / 86400.0)),
-                    length_of_a_cycle,
-                )
-                clim_end_idx = jnp.mod(
-                    jnp.int_(
-                        jnp.floor((start_day_offset + t + self.timestep) / 86400.0)
-                    ),
-                    length_of_a_cycle,
+                clim_beg_idx, clim_end_idx = self._get_climatology_indices(
+                    t, start_day_offset, length_of_a_cycle
                 )
 
                 snapshot_land_surface_temperature_clim_beg = (
                     self.land_surface_temperature_clim[:, :, clim_beg_idx]
                 )
                 snapshot_land_surface_temperature_clim_beg = jnp.where(
-                    land_index, snapshot_land_surface_temperature_clim_beg, constants.default_land_temperature_K
+                    land_index,
+                    snapshot_land_surface_temperature_clim_beg,
+                    constants.default_land_temperature_K,
                 )
 
                 snapshot_land_surface_temperature_clim_end = (
                     self.land_surface_temperature_clim[:, :, clim_end_idx]
                 )
                 snapshot_land_surface_temperature_clim_end = jnp.where(
-                    land_index, snapshot_land_surface_temperature_clim_end, constants.default_land_temperature_K
+                    land_index,
+                    snapshot_land_surface_temperature_clim_end,
+                    constants.default_land_temperature_K,
                 )
 
                 land_surface_temperature_clim_trend = (
                     snapshot_land_surface_temperature_clim_end
                     - snapshot_land_surface_temperature_clim_beg
-                ) / 86400.0  # convert to per second
+                ) / 86400.0  # per second
 
                 new_land_surface_temperature_anomaly = (
                     state.prog.land_surface_temperature
                     - snapshot_land_surface_temperature_clim_beg
                 )
 
+            # Euler backward step
             new_sim_time = state.prog.sim_time + self.timestep
             new_land_surface_temperature_anomaly = self.time_factor * (
                 new_land_surface_temperature_anomaly
                 + self.cd_factor * (-(forcing.flux.total_heat_flux))
             )
 
+            # Add climatology back
             new_land_surface_temperature = new_land_surface_temperature_anomaly
             if self.has_climatology:
                 new_land_surface_temperature += (
@@ -264,9 +237,9 @@ class SlabLandModel(Component):
                     + land_surface_temperature_clim_trend * self.timestep
                 )
 
-            new_land_surface_temperature = new_land_surface_temperature.at[
-                nonland_index
-            ].set(0)
+            # Apply ocean mask
+            new_land_surface_temperature = new_land_surface_temperature.at[nonland_index].set(0)
+
             new_state = state.copy(
                 prog_kwargs=dict(
                     land_surface_temperature=new_land_surface_temperature,
@@ -277,50 +250,16 @@ class SlabLandModel(Component):
                 [dict(prog=new_state.prog, forcing=forcing)]
             )
 
-        return jax.jit(step_function) if jitted else step_function
+        return step_function
 
-    def validate(self):
-        pass
-
-    def predictions_to_xarray(
-        self,
-        predictions,
-    ):
-        """
-        A tool function that converts a trajectory into an xarray Dataset.
-
-        Args:
-            predictions : The predictions returned from `forward_func`
-
-        Returns:
-            ds : The resulting xarray dataset.
-        """
+    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+        """Create xarray data variables for land output."""
         prog = predictions["prog"]
         forcing = predictions["forcing"]
+        T_grid_dims = self._get_grid_dims()
 
-        T_grid_axis_names = self.domain.grids["T"].axis_names
-        T_grid_dims = ("time",) + T_grid_axis_names
-        start_datetime_str = self.start_datetime.to_pydatetime().strftime(
-            "%Y-%m-%d %H:%M:%S"
+        return dict(
+            land_surface_temperature=(T_grid_dims, prog.land_surface_temperature),
+            land_depth=(T_grid_dims, prog.land_depth),
+            total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
         )
-
-        ds = xr.Dataset(
-            data_vars=dict(
-                land_surface_temperature=(T_grid_dims, prog.land_surface_temperature),
-                land_depth=(T_grid_dims, prog.land_depth),
-                total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
-            ),
-            coords=dict(
-                time=(
-                    [
-                        "time",
-                    ],
-                    prog.sim_time / 3600.0,
-                    {"units": f"hours since {start_datetime_str:s}"},
-                ),
-                latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
-                longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
-            ),
-        )
-
-        return ds
