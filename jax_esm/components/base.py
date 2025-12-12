@@ -2,9 +2,10 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Tuple, Sequence, Callable
+from typing import Any, Tuple, Sequence, Callable, Dict
 
 import jax.numpy as jnp
+import xarray as xr
 import tree_math
 from dataclasses import make_dataclass
 
@@ -16,16 +17,21 @@ class AbstractFieldGroup:
 
 
 class ComponentForcing(ABC):
+    @classmethod
     @abstractmethod
     def zeros(cls):
+        """Create a forcing instance with all fields set to zeros."""
         pass
 
+    @classmethod
     @abstractmethod
     def ones(cls):
+        """Create a forcing instance with all fields set to ones."""
         pass
 
     @abstractmethod
-    def copy(cls):
+    def copy(self, **kwargs):
+        """Create a copy of this forcing instance, optionally replacing fields."""
         pass
 
 
@@ -144,7 +150,11 @@ def create_component_state_class(
             phydata=phydata_cls.ones(),
         )
 
-    def copy(self, prog_kwargs={}, phydata_kwargs={}):
+    def copy(self, prog_kwargs=None, phydata_kwargs=None):
+        if prog_kwargs is None:
+            prog_kwargs = {}
+        if phydata_kwargs is None:
+            phydata_kwargs = {}
         o = new_cls(
             prog=self.prog.copy(**prog_kwargs),
             phydata=self.phydata.copy(**phydata_kwargs),
@@ -205,7 +215,11 @@ def create_component_forcing_class(
             scalar=scalar_cls.ones(),
         )
 
-    def copy(self, flux_kwargs={}, scalar_kwargs={}):
+    def copy(self, flux_kwargs=None, scalar_kwargs=None):
+        if flux_kwargs is None:
+            flux_kwargs = {}
+        if scalar_kwargs is None:
+            scalar_kwargs = {}
         o = new_cls(
             flux=self.flux.copy(**flux_kwargs),
             scalar=self.scalar.copy(**scalar_kwargs),
@@ -244,9 +258,6 @@ class Component(ABC):
     def initialize(self) -> ComponentState:
         """Initialize component state.
 
-        Args:
-            rng_key: JAX random key for initialization
-
         Returns:
             Initial component state
         """
@@ -257,23 +268,42 @@ class Component(ABC):
         self,
         jitted: bool = False,
     ) -> Callable:
-        """Advance component state by one timestep.
+        """Generate a step function that advances the component state by one timestep.
 
         Args:
+            jitted: If True, the returned function will be JIT-compiled.
 
         Returns:
-            A function that accepts (init_state, time) and returns (final_state, predictions)
+            A function with signature:
+                step_fn(state: ComponentState, forcing: ComponentForcing, t: float)
+                    -> Tuple[ComponentState, Dict]
+
+            Where:
+                - state: Current component state
+                - forcing: External forcing from other components
+                - t: Current simulation time in seconds
+                - Returns: (new_state, predictions) tuple
         """
         pass
 
     @abstractmethod
     def validate(self) -> None:
         """Validate component configuration.
-           Throw exceptions and errors when configuration is not correct.
+
+        Raises:
+            ValueError: If configuration is invalid.
+        """
+        pass
+
+    @abstractmethod
+    def predictions_to_xarray(self, predictions: Dict) -> xr.Dataset:
+        """Convert predictions from step function to xarray Dataset.
 
         Args:
+            predictions: Dictionary of predictions accumulated from step function calls.
 
         Returns:
-            None
+            xarray Dataset containing the predictions with appropriate coordinates
+            and metadata.
         """
         pass

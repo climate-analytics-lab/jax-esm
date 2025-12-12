@@ -1,381 +1,520 @@
-# JAX-ESM Code Review
+# JAX-ESM Code Review and Refactoring Plan
 
-**Review Date**: 2025-10-07
-**Codebase Size**: ~2,086 lines of Python
-**Version**: 0.1.0 (Alpha)
+**Review Date**: 2025-12-11
+**Last Updated**: 2025-12-11
+**Reviewer**: Claude Code
+**Codebase Version**: 0.1.0 (Alpha)
+**Branch**: feature/flux-exchanger
+
+This document provides a comprehensive code review of the JAX-ESM prototype and outlines a refactoring plan to improve maintainability, reduce redundancy, and prepare the codebase for production use.
+
+---
+
+## Progress Summary
+
+### Phase 1: Foundation Fixes - ✅ COMPLETE
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 1.1 Fix mutable default arguments | ✅ Done | Changed `{}` defaults to `None` in `base.py` |
+| 1.2 Add `predictions_to_xarray` to abstract class | ✅ Done | Added as `@abstractmethod` in `Component` |
+| 1.3 Fix docstrings for `generate_step_function` | ✅ Done | Now documents correct `(state, forcing, t)` signature |
+| 1.4 Move magic numbers to `constants.py` | ✅ Done | Added 8 new constants, updated 4 component files |
+| 1.5 Remove unused `sub_step_function` | ✅ Done | Removed from `SlabAtmosphereModel.py` |
+| 1.6 Fix `ComponentForcing` ABC signatures | ✅ Done | Added proper `@classmethod` decorators |
+
+**All 4 integration tests pass after Phase 1 changes.**
+
+---
 
 ## Executive Summary
 
-JAX-ESM shows promise as a prototype coupling framework with good use of JAX primitives and a clear component-based architecture. However, significant technical debt exists, particularly around **outdated tests**, **hardcoded assumptions**, **missing type hints**, and **inconsistent API design**. The codebase is in transition between two architectures, leaving unused code and broken tests.
+JAX-ESM is a well-structured prototype for coupling Earth system model components in JAX. The architecture is sound, but there are significant opportunities to:
 
-**Overall Grade**: C+ (Functional prototype but needs refactoring for production use)
+1. **Reduce redundancy** - ~300 lines of duplicated code across slab models
+2. **Improve clarity** - ~~Inconsistent naming, missing documentation, magic numbers~~ (partially addressed)
+3. **Simplify the interface** - Complex factory patterns, fragile string-based access
+4. **Enable differentiability** - Support gradients w.r.t. parameters and forcings
+5. **Increase test coverage** - Currently minimal unit tests
 
----
-
-## Critical Issues (Must Fix)
-
-### 1. **Tests Are Completely Broken** 🔴 BLOCKING
-
-**Location**: `tests/test_coupler.py`
-
-**Problem**: All tests use the old API that no longer exists:
-- References `ComponentState` dataclass (doesn't exist)
-- References `BoundaryFluxes` class (doesn't exist)
-- Uses `step()` method instead of `gen_step_fn()`
-- Uses `coupler.step()` method that doesn't exist
-- Uses `coupler.run()` with wrong signature
-
-**Impact**: No test coverage of actual implementation. Tests pass imports but would fail at runtime.
-
-**Example**:
-```python
-# Line 8: Imports classes that don't exist
-from jax_esm import Component, ComponentConfig, ComponentState, Coupler, BoundaryFluxes
-
-# Line 25: Uses old API
-def step(self, state, forcing, dt):  # Should be gen_step_fn()
-```
-
-**Recommendation**: Completely rewrite tests to match current API or mark as skipped.
+**Overall Assessment**: Functional prototype with solid JAX foundations. Phase 1 critical fixes complete. Needs continued refactoring for production use and scientific extensibility.
 
 ---
 
-### 2. **Coupler Hardcoded to 3 Components** 🔴 DESIGN FLAW
+## 1. Critical Issues
 
-**Location**: `jax_esm/coupling/coupler.py:110-112`
+### 1.1 Massive Code Duplication Between Slab Models
 
-**Problem**: Despite claiming to be flexible, the coupler hardcodes "atm", "flx", "ocn":
+**Files affected:**
+- `jax_esm/components/SlabOceanModel/SlabOceanModel.py` (307 lines)
+- `jax_esm/components/SlabLandModel/SlabLandModel.py` (328 lines)
+- `jax_esm/components/SlabAtmosphereModel/SlabAtmosphereModel.py` (313 lines)
 
+These three files share ~80% identical code:
+
+| Duplicated Pattern | Approx. Lines per File |
+|---|---|
+| `initialize()` lat/lon grid construction | ~30 lines |
+| `generate_step_function()` climatology lookup | ~40 lines |
+| `predictions_to_xarray()` structure | ~25 lines |
+| Heat capacity / time factor computation | ~10 lines |
+
+**Impact:** ~200+ lines of redundant code that must be maintained in parallel.
+
+**Example - Grid construction duplicated in all three:**
 ```python
-def gen_step_fn(self):
-    # Get step functions for the three components
-    atm_step_fn = self.components["atm"].gen_step_fn()
-    flx_step_fn = self.components["flx"].gen_step_fn()
-    ocn_step_fn = self.components["ocn"].gen_step_fn()
-```
-
-This directly contradicts the `add_component()` and `remove_component()` methods and the flexible component dictionary.
-
-**Impact**:
-- Cannot add land, ice, or other components
-- Misleading API suggests flexibility that doesn't exist
-- `add_component()` and `remove_component()` methods are broken/unused
-
-**Recommendation**: Either:
-1. Make it fully dynamic: `for name, comp in self.components.items()`
-2. Or explicitly document this as a 3-component atm-flx-ocn coupler
-
----
-
-### 3. **Dead Code: flux_exchange.py and time_integration.py** 🔴 TECHNICAL DEBT
-
-**Location**: `jax_esm/coupling/flux_exchange.py`, `jax_esm/coupling/time_integration.py`
-
-**Problem**:
-- `flux_exchange.py` (181 lines) defines `FluxExchanger` class that is never used
-- `time_integration.py` presumably contains unused time integration logic
-- References `BoundaryFluxes` and `ComponentState` that don't exist in current API
-- Imported by `__init__.py` but never instantiated
-
-**Impact**:
-- Code maintenance burden
-- Confusing for new developers
-- Suggests incomplete refactoring
-
-**Recommendation**: Either remove or mark as deprecated, or complete the refactoring to use them.
-
----
-
-### 4. **Missing Type Hints** 🟡 QUALITY ISSUE
-
-**Coverage**: ~30% of functions have complete type hints
-
-**Examples**:
-
-```python
-# base.py:22 - No return type
-def create_field_group_class(
-    cls_name: str,
-    fields: Tuple,
-):  # Missing -> type
-
-# base.py:174 - No return type
-def initialize(self) -> AbstractComponentState:  # Good!
-
-# coupler.py:97 - callable is too vague
-def gen_step_fn(self) -> callable:  # Should be Callable[[...], ...]
-```
-
-**Impact**:
-- Poor IDE support
-- Harder to catch bugs
-- Unclear API contracts
-
-**Recommendation**: Add comprehensive type hints, especially for:
-- Factory functions returning dynamic classes
-- Step function signatures
-- Tree structures (use `PyTree` type from jax.typing)
-
----
-
-### 5. **No Input Validation or Error Handling** 🟡 ROBUSTNESS
-
-**Problem**: Functions assume valid inputs with no defensive programming:
-
-```python
-# coupler.py:153
-if total_steps * timestep != total_time:
-    raise Exception("timestep has to exactly divide (end_time - start_time).")
-    # Good! But only place with validation
-```
-
-**Missing validations**:
-- Component configs (negative timesteps, missing required params)
-- Grid shape compatibility between components
-- Array shape consistency in state objects
-- Division by zero in ocean model (mld could be zero)
-- NaN/Inf checks after physics computations
-
-**Examples**:
-
-```python
-# SlabOceanModel.py:147 - What if mld is zero?
-cd = self.ocn_rho * self.ocn_cp * init_mld  # Could be zero!
-self.cd_factor = self.subtimestep / cd  # Division by zero
-
-# JCM.py:128 - No check if tsea exists
-atm_boundary = self.model.boundaries.copy(
-    tsea = cpl.ocn.prog.T  # What if T has wrong shape?
+# Identical in SlabOceanModel, SlabLandModel, SlabAtmosphereModel
+lat_dim_idx = next(
+    i for i, axis_name in enumerate(T_grid.axis_names)
+    if axis_name == "latitude"
 )
+lon_dim_idx = next(
+    i for i, axis_name in enumerate(T_grid.axis_names)
+    if axis_name == "longitude"
+)
+self.llat_rad = jnp.repeat(
+    jnp.expand_dims(T_grid.axis_values[lat_dim_idx], axis=lon_dim_idx),
+    repeats=D2_nodal_shape[lon_dim_idx],
+    axis=lon_dim_idx,
+)
+# ... continues for ~20 more lines
 ```
 
-**Recommendation**: Add validation at component initialization and state boundaries.
+### 1.2 Inconsistent Component Interface - ✅ FIXED
+
+~~The `Component` abstract class in `base.py:256-266` has documentation that doesn't match implementation.~~
+
+**Fixed:** Docstring now correctly documents the `(state, forcing, t) -> (new_state, predictions)` signature.
+
+### 1.3 Missing `predictions_to_xarray` in Base Class - ✅ FIXED
+
+~~`predictions_to_xarray` is called by `Coupler.predictions_to_xarray()` but is not declared as an abstract method in `Component`.~~
+
+**Fixed:** Added `predictions_to_xarray` as an `@abstractmethod` in the `Component` base class.
+
+### 1.4 Mutable Default Arguments - ✅ FIXED
+
+~~In `base.py:147` and `base.py:208`: `def copy(self, prog_kwargs={}, phydata_kwargs={}):`~~
+
+**Fixed:** Changed to `prog_kwargs=None` with internal `if prog_kwargs is None: prog_kwargs = {}` pattern.
 
 ---
 
-## High Priority Issues
+## 2. Architecture Issues
 
-### 6. **Inconsistent State Structures** 🟡 DESIGN INCONSISTENCY
+### 2.1 Redundant State Class Factory Functions
 
-**Problem**: Components have different state structures:
+`create_component_state_class` and `create_component_forcing_class` in `base.py:103-222` are nearly identical (~60 lines each). They differ only in field names (`prog`/`phydata` vs `flux`/`scalar`).
+
+### 2.2 Factory Functions Have Significant Duplication
+
+In `coupling/factory/simple_coupling.py`:
+- `couple_atm_ocn` (~68 lines) and `couple_atm_ocn_lnd` (~90 lines) duplicate ~50 lines of interpolator setup
+- `generate_atm_ocn_interpolators` (~83 lines) and `generate_atm_lnd_interpolators` (~83 lines) are nearly identical
+
+### 2.3 Confusing Naming: `timestep` vs `coupling_timestep`
+
+| Component | Parameter Name | Stored As |
+|-----------|---------------|-----------|
+| `SlabOceanModel` | `timestep` | `self.config.timestep` AND `self.timestep` |
+| `SlabLandModel` | `timestep` | `self.config.timestep` AND `self.timestep` |
+| `SlabAtmosphereModel` | `timestep` | `self.config.timestep` AND `self.timestep` |
+| `JCM` | `coupling_timestep` | `self.config.timestep` only |
+
+The redundant storage is confusing and error-prone.
+
+### 2.4 BilinearInterpolator Sets Global JAX Config
+
+In `bilinear_interp.py:8`:
+```python
+_jax_config.update("jax_enable_x64", True)
+```
+
+This side effect at import time affects the entire program and should be the caller's responsibility.
+
+---
+
+## 3. Interface Simplification Needs
+
+### 3.1 String-Based Variable Access is Fragile
+
+The `ForcingMapper` uses dot-notation strings for variable access:
+```python
+# In forcing_mapper.py:98-101
+source_variable = strget(source_component_state, "phydata.surface_flux.hfluxn")
+```
+
+This is error-prone, has no IDE support, and fails silently with typos. There's no validation at registration time.
+
+### 3.2 Differentiability Requirements
+
+A key feature of JAX-based ESMs is the ability to compute gradients. The current interface needs explicit support for:
+
+#### 3.2.1 Differentiation w.r.t. Component Parameters
+
+| Component | Differentiable Parameters |
+|-----------|--------------------------|
+| Ocean | `relaxation_time`, `mixed_layer_depth_min/max` |
+| Land | `land_depth_min/max`, `relaxation_time` |
+| Atmosphere | `drag_coefficient`, `surface_air_density` |
+| JCM | Physics parameters via `jcm.Model` |
+
+#### 3.2.2 Differentiation w.r.t. External Forcings
+
+| Forcing Type | Description | Use Case |
+|--------------|-------------|----------|
+| CO2 concentration | Radiative forcing | Climate sensitivity studies |
+| Solar incoming radiation | Top-of-atmosphere insolation | Paleoclimate, solar variability |
+| Aerosol optical depth | Direct/indirect effects | Aerosol-climate interactions |
+| Volcanic forcing | Stratospheric aerosols | Historical attribution |
+| Greenhouse gases | CH4, N2O, CFCs | Emission scenarios |
+
+#### 3.2.3 Requirements for Differentiable Coupling
+
+| Requirement | Current Status | Needed Change |
+|-------------|---------------|---------------|
+| Parameters as JAX arrays | Python floats | Convert to `jnp.array` |
+| Pure step functions | Some side effects | Refactor to pure functions |
+| Pytree states | Done via `tree_math.struct` | ✓ Already supported |
+| External forcing interface | Not implemented | New `ExternalForcing` class |
+| Gradient-preserving transforms | Untested | Add gradient tests |
+
+**Current gaps:**
+- Parameters like `relaxation_time` are stored as Python floats, not traced
+- No interface for time-varying external forcings (CO2, solar)
+- `ForcingMapper` transformations not verified to preserve gradients
+- No tests verifying gradient flow through coupled simulation
+
+### 3.3 `CoupledComponentConfig` is Minimal
 
 ```python
-# JCM has 3 fields
 @dataclass
-class JCMState(AbstractComponentState):
-    prog: PhysicsState
-    phydata: Any
-    metadata: primitive_equations_states  # Extra field!
-
-# Others have 2 fields
-create_component_state_class(
-    prog_cls=...,
-    phydata_cls=...,
-    # No metadata field
-)
+class CoupledComponentConfig:
+    name: str
+    timestep: float
 ```
 
-**Impact**:
-- Cannot write generic component manipulation functions
-- `AbstractComponentState` doesn't define required structure
-- Confusing for component developers
-
-**Recommendation**: Either:
-1. Make `metadata` optional in all components
-2. Or create separate base classes for different patterns
+Components already have `__class__.__name__`. Consider whether this wrapper adds value or just adds indirection.
 
 ---
 
-### 7. **Direct Component Coupling** 🟡 TIGHT COUPLING
+## 4. Code Clarity Issues
 
-**Problem**: Components directly access other components' internal state:
+### 4.1 Magic Numbers - ✅ FIXED
 
+All magic numbers have been moved to `constants.py` and components updated to use them:
+
+| Constant Added | Value | Used In |
+|----------------|-------|---------|
+| `default_land_temperature_K` | `288.15` | SlabOceanModel, SlabLandModel, JCM |
+| `freezing_point_K` | `273.15` | SlabAtmosphereModel |
+| `surface_air_density` | `1.22` | SlabAtmosphereModel |
+| `bulk_drag_coefficient` | `1e-3` | SlabAtmosphereModel |
+| `default_mld_min` | `40.0` | constants.py (available for use) |
+| `default_mld_max` | `60.0` | constants.py (available for use) |
+| `default_land_depth_min` | `40.0` | constants.py (available for use) |
+| `default_land_depth_max` | `60.0` | constants.py (available for use) |
+
+### 4.2 Inconsistent Mask Conventions
+
+| Component | Mask Convention | Code |
+|-----------|----------------|------|
+| `SlabOceanModel` | Ocean where mask = 0 | `nonocn_idx = self.domain.bmask != 0` |
+| `SlabLandModel` | Land where mask = 1 | `land_index = self.domain.bmask == 1` |
+| `SlabAtmosphereModel` | Land where mask = 1 | `land_index = self.domain.bmask == 1` |
+
+The mask semantics (`bmask`: 0=ocean, 1=land) should be documented clearly in `Domain`.
+
+### 4.3 Unused Code - ✅ PARTIALLY FIXED
+
+| File | Unused Code | Status |
+|------|------------|--------|
+| `SlabAtmosphereModel.py` | `sub_step_function` | ✅ Removed |
+| `base.py` | `ComponentForcing` ABC incorrect signatures | ✅ Fixed with `@classmethod` |
+
+### 4.4 Empty `validate()` Methods
+
+Every component has an empty `validate()` implementation:
 ```python
-# JCM.py:128
-atm_boundary = self.model.boundaries.copy(
-    tsea = cpl.ocn.prog.T  # Directly accessing ocean internals
-)
-
-# FluxModel.py:93
-atm_phydata = cplstate.atm.phydata  # Directly accessing atm internals
-
-# SlabOceanModel.py:189
-cpl.flx.phydata.heatflx  # Directly accessing flux model internals
+def validate(self):
+    pass
 ```
 
-**Impact**:
-- Tight coupling between components
-- Changes to one component break others
-- Cannot swap component implementations
-- Violates encapsulation
-
-**Recommendation**: Define clear interfaces for component data exchange, possibly through:
-- `get_boundary_fields()` method (already exists but unused)
-- Explicit coupling contracts
-- FluxExchanger pattern (exists but unused)
+Either implement validation or remove from the interface.
 
 ---
 
-### 8. **Magic Numbers Throughout** 🟡 MAINTAINABILITY
+## 5. Testing Gaps
 
-**Examples**:
+### 5.1 Current Test Coverage
 
-```python
-# SlabOceanModel.py:119
-thrsh = 0.3  # What is this threshold?
+| Directory | Contents | Status |
+|-----------|----------|--------|
+| `tests/integration/` | 4 integration tests | Working |
+| `tests/ignore/` | 6+ unit tests | Disabled/outdated |
 
-# SlabOceanModel.py:132
-init_T = self.SST_clim[:, :, 0].copy().at[fmask_ocn == 0].set(273.15+15)
-# Why 273.15+15? (288K)
+**Effective unit test coverage: ~0%**
 
-# base.py:211
-return ["heat", "moisture", "momentum_u", "momentum_v"]  # Hardcoded defaults
+### 5.2 Missing Unit Tests
+
+| Module | Missing Tests |
+|--------|---------------|
+| `components/base.py` | Factory functions, state class operations, zeros/ones/copy |
+| `components/domain.py` | Grid parsing, mask loading, domain creation for JCM/Veros |
+| `coupling/coupler.py` | Timestep validation, component management, step function generation |
+| `coupling/forcing_mapper.py` | Mapping, transformations, strget/strset edge cases |
+| `utils/bulk_op.py` | stack_objects, unwrap_leading_dims, mean_leaf |
+| `utils/bilinear_interp.py` | Interpolation accuracy, edge cases, masking, periodic wrapping |
+| Individual components | Initialize, step function correctness, predictions_to_xarray |
+| Gradients | End-to-end gradient flow, parameter sensitivities |
+
+### 5.3 Required New Tests
+
+#### 5.3.1 Unit Tests for `base.py`
+- `create_field_group_class`: zeros(), ones(), copy() methods work correctly
+- `create_component_state_class`: nested structure operations
+- `create_component_forcing_class`: flux/scalar structure
+- Tree math operations (addition, scalar multiplication)
+
+#### 5.3.2 Unit Tests for `domain.py`
+- `parse_grid_specification`: valid formats ("JCM::T31", "Veros::1deg")
+- `parse_grid_specification`: invalid formats (errors appropriately)
+- `Domain.from_grid_specification`: JCM grids at various resolutions
+- `Domain.from_grid_specification`: Veros grids
+- Mask loading from NetCDF files
+- Topography loading
+
+#### 5.3.3 Unit Tests for `forcing_mapper.py`
+- `strget`: nested attribute access ("prog.sea_surface_temperature")
+- `strset`: setting nested attributes
+- `ForcingMapper.add_forcing_mapping`: correct registration
+- `ForcingMapper.add_transformation`: transformation applied correctly
+- `ForcingMapper.map_forcings`: correct output structure
+- Edge cases: missing mappings, invalid paths
+
+#### 5.3.4 Unit Tests for `coupler.py`
+- Timestep validation (component timestep must divide coupling timestep)
+- Component addition with validation
+- Component removal
+- Step function generation
+- `run()` with `jitted=True` and `jitted=False` produce same results
+
+#### 5.3.5 Unit Tests for `bilinear_interp.py`
+- Scalar interpolation accuracy (known analytic fields)
+- Vector interpolation with rotation across dateline
+- Mask handling (source and target masks)
+- Extrapolation modes (nearest, IDW, none)
+- Periodic longitude wrapping
+- Ascending vs descending latitude grids
+
+#### 5.3.6 Unit Tests for Each Component
+- `SlabOceanModel`: SST evolution matches expected physics
+- `SlabLandModel`: Land temperature evolution
+- `SlabAtmosphereModel`: Heat flux calculation, energy conservation
+- `JCM`: State conversion, forcing application
+
+#### 5.3.7 Gradient Tests
+- Verify gradients flow through single component step
+- Verify gradients flow through coupled simulation
+- Test differentiation w.r.t. initial conditions
+- Test differentiation w.r.t. parameters (relaxation_time, etc.)
+- Test differentiation w.r.t. external forcings
+
+---
+
+## 6. Refactoring Plan
+
+### Phase 1: Foundation (Low Risk, High Value)
+
+| Task | Files | Effort | Impact |
+|------|-------|--------|--------|
+| 1.1 Fix mutable default arguments | `base.py` | 1 hour | Prevents bugs |
+| 1.2 Add `predictions_to_xarray` to abstract class | `base.py` | 30 min | Prevents runtime errors |
+| 1.3 Fix docstrings for `generate_step_function` | `base.py` | 30 min | Documentation |
+| 1.4 Move magic numbers to `constants.py` | Multiple | 2 hours | Maintainability |
+| 1.5 Remove unused `sub_step_function` | `SlabAtmosphereModel.py` | 15 min | Clarity |
+| 1.6 Document mask conventions in `Domain` | `domain.py` | 1 hour | Clarity |
+| 1.7 Remove redundant `self.timestep` storage | All components | 1 hour | Consistency |
+
+**Phase 1 Total: ~6 hours**
+
+### Phase 2: Write Unit Tests
+
+| Task | Target File | Effort | Priority |
+|------|-------------|--------|----------|
+| 2.1 Tests for `base.py` factory functions | `tests/unit/test_base.py` | 4 hours | High |
+| 2.2 Tests for `domain.py` | `tests/unit/test_domain.py` | 4 hours | High |
+| 2.3 Tests for `forcing_mapper.py` | `tests/unit/test_forcing_mapper.py` | 3 hours | High |
+| 2.4 Tests for `coupler.py` | `tests/unit/test_coupler.py` | 4 hours | High |
+| 2.5 Tests for `bulk_op.py` | `tests/unit/test_bulk_op.py` | 2 hours | Medium |
+| 2.6 Tests for `bilinear_interp.py` | `tests/unit/test_bilinear_interp.py` | 6 hours | Medium |
+| 2.7 Tests for individual components | `tests/unit/test_components.py` | 6 hours | Medium |
+| 2.8 Gradient flow tests | `tests/unit/test_gradients.py` | 4 hours | High |
+| 2.9 Create shared fixtures | `tests/conftest.py` | 2 hours | High |
+
+**Phase 2 Total: ~35 hours**
+
+### Phase 3: Reduce Duplication (Medium Risk)
+
+| Task | Files | Effort | Impact |
+|------|-------|--------|--------|
+| 3.1 Create `SlabModel` base class | New `components/slab/base.py` | 6 hours | High - ~200 lines |
+| 3.2 Refactor `SlabOceanModel` to use base | `SlabOceanModel.py` | 2 hours | High |
+| 3.3 Refactor `SlabLandModel` to use base | `SlabLandModel.py` | 2 hours | High |
+| 3.4 Refactor `SlabAtmosphereModel` to use base | `SlabAtmosphereModel.py` | 2 hours | High |
+| 3.5 Consolidate factory functions in `base.py` | `base.py` | 3 hours | Medium - ~60 lines |
+| 3.6 Unify interpolator generation | `simple_coupling.py` | 3 hours | Medium - ~80 lines |
+
+**Phase 3 Total: ~18 hours**
+
+### Phase 4: Interface Improvements (Higher Risk)
+
+| Task | Files | Effort | Impact |
+|------|-------|--------|--------|
+| 4.1 Add type aliases for step functions | `base.py` | 1 hour | Type safety |
+| 4.2 Add validation to `ForcingMapper` | `forcing_mapper.py` | 3 hours | Error prevention |
+| 4.3 Remove global JAX config from interpolator | `bilinear_interp.py` | 1 hour | Correctness |
+| 4.4 Consider removing `CoupledComponentConfig` | `base.py`, all components | 2 hours | Simplification |
+
+**Phase 4 Total: ~7 hours**
+
+### Phase 5: Differentiability Support
+
+| Task | Files | Effort | Impact |
+|------|-------|--------|--------|
+| 5.1 Convert parameters to JAX arrays | All components | 4 hours | Enables gradients |
+| 5.2 Create `ExternalForcing` interface | New `coupling/external_forcing.py` | 6 hours | Clean forcing API |
+| 5.3 Add CO2 forcing support | Components, coupler | 4 hours | Science capability |
+| 5.4 Add solar forcing support | Components, coupler | 4 hours | Science capability |
+| 5.5 Verify gradient flow end-to-end | Tests | 4 hours | Validation |
+| 5.6 Document differentiable usage | `CLAUDE.md`, README | 2 hours | Usability |
+
+**Phase 5 Total: ~24 hours**
+
+---
+
+## 7. Proposed File Structure After Refactoring
+
 ```
+jax_esm/
+├── __init__.py
+├── constants.py                       # Add missing constants (Section 4.1)
+├── components/
+│   ├── __init__.py
+│   ├── base.py                        # Component ABC, consolidated factories
+│   ├── domain.py                      # Domain, Grid (add mask documentation)
+│   ├── slab/                          # NEW: consolidated slab models
+│   │   ├── __init__.py
+│   │   ├── base.py                    # SlabModel base class (~150 lines)
+│   │   ├── ocean.py                   # SlabOceanModel (slim, ~100 lines)
+│   │   ├── land.py                    # SlabLandModel (slim, ~100 lines)
+│   │   └── atmosphere.py              # SlabAtmosphereModel (slim, ~120 lines)
+│   └── JCM/
+│       ├── __init__.py
+│       └── JCM.py                     # Unchanged
+├── coupling/
+│   ├── __init__.py
+│   ├── coupler.py                     # Main coupler
+│   ├── forcing_mapper.py              # Add validation
+│   ├── external_forcing.py            # NEW: CO2, solar, aerosol forcing
+│   └── factory.py                     # Consolidated from factory/simple_coupling.py
+├── utils/
+│   ├── __init__.py
+│   ├── bulk_op.py                     # Unchanged
+│   ├── bilinear_interp.py             # Remove global config side effect
+│   ├── grid_utils.py                  # NEW: extract lat/lon grid utilities
+│   └── idealized_distribution.py      # Unchanged
+└── tool_scripts/
+    └── generate_jcm_forcing_and_topography_files.py
 
-**Recommendation**: Define as named constants with documentation:
-
-```python
-LAND_MASK_THRESHOLD = 0.3  # Fraction above which grid cell is land
-DEFAULT_LAND_TEMPERATURE = 288.15  # K (15°C)
+tests/
+├── __init__.py
+├── conftest.py                        # NEW: shared fixtures
+├── unit/                              # NEW: comprehensive unit tests
+│   ├── __init__.py
+│   ├── test_base.py
+│   ├── test_domain.py
+│   ├── test_forcing_mapper.py
+│   ├── test_coupler.py
+│   ├── test_bulk_op.py
+│   ├── test_bilinear_interp.py
+│   ├── test_components.py
+│   └── test_gradients.py
+└── integration/                       # Existing integration tests
+    ├── test_jesm_JCM_SlabOceanModel.py
+    ├── test_jesm_JCM_SlabOceanModel_SlabLandModel.py
+    ├── test_jesm_SlabAtmosphereModel_SlabOceanModel.py
+    └── test_jesm_SlabAtmosphereModel_SlabOceanModel_SlabLandModel.py
 ```
 
 ---
 
-### 9. **Inconsistent Naming Conventions** 🟡 STYLE
+## 8. Implementation Priority
 
-**Problems**:
-
-```python
-# Mixed snake_case and camelCase
-cplstate     # camelCase
-coupled_state  # snake_case
-init_mld     # snake_case
-SST_clim     # UPPER_snake_case
-
-# Abbreviations without pattern
-atm, ocn, flx  # 3 letters
-phydata  # full word mashed
-cpl  # 3 letters
-mld  # 3 letters
-```
-
-**Recommendation**: Standardize on:
-- `snake_case` for variables and functions
-- `PascalCase` for classes
-- Spell out abbreviations or use consistently (e.g., `atm` → `atmosphere` or keep `atm` everywhere)
+| Priority | Phase | Tasks | Rationale |
+|----------|-------|-------|-----------|
+| **P0** | 1 | 1.1-1.7 | Fix bugs and documentation first |
+| **P1** | 2 | 2.1-2.4, 2.8-2.9 | Core tests enable safe refactoring |
+| **P2** | 3 | 3.1-3.4 | Biggest code reduction |
+| **P3** | 5 | 5.1-5.5 | Core scientific capability |
+| **P4** | 4, 2.5-2.7 | Remaining tasks | Polish and completeness |
 
 ---
 
-### 10. **Unclear Simulation Time Management** 🟡 CONFUSION
+## 9. Estimated Effort Summary
 
-**Problem**: Multiple overlapping time concepts:
-
-```python
-# ComponentConfig has start_dt (Timestamp)
-config.start_dt = pd.Timestamp("2001-01-01")
-
-# run() has start_time (float seconds)
-coupler.run(start_time=0.0, end_time=86400.0, timestep=3600.0)
-
-# Components track sim_time internally
-prog.sim_time = 0.0  # in seconds
-```
-
-**Issues**:
-- `start_dt` is calendar time (Timestamp)
-- `start_time` is elapsed time (seconds)
-- Unclear how they relate
-- No calendar time in output predictions
-
-**Recommendation**: Clarify the time system:
-- Document that `start_time` is elapsed since `start_dt`
-- Or unify them into a single time representation
-- Include calendar time in predictions output
+| Phase | Description | Estimated Time |
+|-------|-------------|---------------|
+| Phase 1 | Foundation fixes | 6 hours |
+| Phase 2 | Unit tests | 35 hours |
+| Phase 3 | Reduce duplication | 18 hours |
+| Phase 4 | Interface improvements | 7 hours |
+| Phase 5 | Differentiability | 24 hours |
+| **Total** | | **~90 hours** |
 
 ---
 
-## Medium Priority Issues
+## 10. Success Criteria
 
-### 11. **Insufficient Documentation**
+### 10.1 Code Quality
+- [ ] No duplicated code blocks > 10 lines
+- [ ] All public methods have docstrings with parameter types and units
+- [ ] No mutable default arguments
+- [ ] No magic numbers outside `constants.py`
+- [ ] Consistent naming conventions throughout
 
-**Missing**:
-- Module-level docstrings for most files
-- Parameter units not specified (seconds? days? minutes?)
-- Physics equations not documented (e.g., ocean heat capacity formula)
-- Return value structures not documented
+### 10.2 Test Coverage
+- [ ] Unit test coverage > 80% for core modules
+- [ ] All gradient paths tested and verified
+- [ ] Integration tests pass with `jitted=True` and `jitted=False`
+- [ ] Edge cases covered (empty arrays, NaN handling, mask boundaries)
 
-**Good examples**:
-```python
-# SlabOceanModel.py:27-29
-"""
-Slab ocean model with prescribed mixed layer depth and climatology.
-"""
-```
+### 10.3 Interface
+- [ ] Clean API for external forcings (CO2, solar, aerosols)
+- [ ] Type hints on all public functions
+- [ ] Gradients verified to flow through full coupled simulation
+- [ ] `ForcingMapper` validates mappings at registration time
 
-**Bad examples**:
-```python
-# base.py:22 - No docstring
-def create_field_group_class(cls_name: str, fields: Tuple):
-```
-
-### 12. **Hardcoded Array Indexing**
-
-```python
-# FluxModel.py:101
-heatflx = - atm_phydata.surface_flux.hfluxn.sum(axis=-1)
-# What is axis=-1? Document it!
-
-# SlabOceanModel.py:132
-init_T = self.SST_clim[:, :, 0]  # What is dimension 0?
-```
-
-### 13. **Float32/Int32 Type Workaround**
-
-```python
-# JCM.py:112-114
-# This is a temporary solution to jcm's problem: some of the array's initiated
-# by jcm is int32, but it will change to float32 after step_fn.
-```
-
-**Issue**: Indicates upstream JCM issue. Workaround masks the problem.
-
-**Recommendation**: Fix in JCM or explicitly document the requirement.
-
-### 14. **Unused Parameters**
-
-```python
-# base.py:155
-class ComponentConfig:
-    substeps: int           # Used by JCM and Ocean
-    save_interval: float    # Used internally but not in interface
-```
-
-Some components don't use all config fields. Should they be component-specific?
-
-### 15. **Global State in Components**
-
-```python
-# SlabOceanModel.py:82
-self.first_call = True  # Never used!
-```
-
-### 16. **Inconsistent Return Patterns**
-
-```python
-# coupler.py:165-171
-final_state, predictions = scan_func(...)
-predictions = unwrap_leading_dims(predictions, first_n_dim=2)
-return final_state, predictions
-
-# But step_fn returns:
-new_cplstate, cpl_predictions
-
-# Naming inconsistency: predictions vs cpl_predictions
-```
+### 10.4 Documentation
+- [ ] Updated CLAUDE.md with refactored structure
+- [ ] Mask conventions documented in Domain class
+- [ ] Differentiability usage examples in README
+- [ ] All physics equations documented with references
 
 ---
 
-## Positive Aspects ✅
+## 11. Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Refactoring breaks existing code | High | Write tests first (Phase 2 before Phase 3) |
+| Gradient tests reveal non-differentiable code | Medium | Identify and fix incrementally |
+| BilinearInterpolator changes affect results | High | Add numerical accuracy tests first |
+| External forcing API too complex | Medium | Start simple (CO2 only), iterate |
+
+---
+
+## 12. Positive Aspects ✅
 
 ### What's Done Well:
 
@@ -383,173 +522,32 @@ new_cplstate, cpl_predictions
    - Appropriate use of `@jax.jit` for performance
    - `tree_math.struct` for pytree arithmetic
    - `jax.lax.scan` for efficient time stepping
-   - Fallback to python loop for debugging
+   - Fallback to Python loop for debugging (`jitted=False`)
 
 2. **Clean Component Abstraction**
    - Abstract base class with clear interface
    - Factory pattern for state creation
+   - Components are self-contained
 
 3. **Separation of Concerns**
    - Components, coupling, and utilities separated
    - Physics constants in separate module
+   - Domain handling abstracted
 
 4. **Flexible State Creation**
    - Dynamic field group generation
-   - Tree math integration
+   - Tree math integration for arithmetic operations
 
 5. **Good Debugging Features**
    - `adhoc_scan` for debugging without JIT
-   - Print statements for execution time
-   - `jax_scan` flag to toggle compilation
+   - Progress bar support via `jax_tqdm`
+   - `jitted` flag to toggle compilation
 
 6. **xarray Integration**
    - `predictions_to_xarray()` for easy analysis
-   - Standard climate data formats
+   - Standard climate data format output
 
----
-
-## Code Style Issues
-
-### PEP 8 Violations:
-
-1. **Line length** (PEP 8: 79-88 chars)
-   - Many lines exceed 100 characters
-
-2. **Whitespace**
-   ```python
-   # Inconsistent spacing
-   dict(prog=new_state.prog, phydata=new_state.phydata)  # No spaces
-   dict( prog=new_state.prog, phydata=new_state.phydata )  # Extra spaces
-   ```
-
-3. **Imports**
-   ```python
-   # Generally good, but some unused imports possible
-   ```
-
-4. **Commented code**
-   ```python
-   # coupler.py:159-163 - Commented explanation is good
-   # But check for actual commented-out code elsewhere
-   ```
-
----
-
-## Recommendations by Priority
-
-### Immediate (Before Next PR):
-
-1. ✅ Fix or skip all tests - tests that import non-existent classes block CI
-2. ✅ Document hardcoded 3-component limitation or make dynamic
-3. ✅ Remove or deprecate dead code (flux_exchange.py, time_integration.py)
-4. ✅ Add input validation to prevent runtime errors
-
-### Short Term (Next Sprint):
-
-5. ✅ Add comprehensive type hints
-6. ✅ Standardize naming conventions
-7. ✅ Add docstrings with parameter units
-8. ✅ Define component coupling contracts
-9. ✅ Add magic number constants
-
-### Medium Term (Future Releases):
-
-10. ✅ Implement proper FluxExchanger pattern
-11. ✅ Unify state structures across components
-12. ✅ Add conservation checks
-13. ✅ Improve time management clarity
-14. ✅ Add logging framework
-15. ✅ Performance profiling and optimization
-
-### Long Term (Production Ready):
-
-16. ✅ Full test coverage (>80%)
-17. ✅ Integration tests with real JCM runs
-18. ✅ Benchmark suite
-19. ✅ Error recovery and checkpointing
-20. ✅ Documentation website with examples
-
----
-
-## Architectural Suggestions
-
-### Consider:
-
-1. **Protocol-based interfaces** instead of inheritance
-   ```python
-   from typing import Protocol
-
-   class Steppable(Protocol):
-       def gen_step_fn(self) -> Callable: ...
-   ```
-
-2. **Explicit coupling configuration**
-   ```python
-   CouplingSpec(
-       source="ocean",
-       target="atmosphere",
-       field_map={"T": "sst"},
-       transform=None,
-   )
-   ```
-
-3. **State builders** for validation
-   ```python
-   StateBuilder(component="ocean")
-       .add_prognostic("T", shape=(64, 128), units="K")
-       .add_prognostic("mld", shape=(64, 128), units="m")
-       .build()
-   ```
-
-4. **Configuration validation with Pydantic**
-   ```python
-   from pydantic import BaseModel, validator
-
-   class ComponentConfig(BaseModel):
-       timestep: float
-
-       @validator('timestep')
-       def timestep_positive(cls, v):
-           if v <= 0:
-               raise ValueError('timestep must be positive')
-           return v
-   ```
-
----
-
-## Testing Gaps
-
-**Current Coverage**: Effectively 0% (tests are broken)
-
-**Needed Tests**:
-- [ ] Component initialization
-- [ ] Single time step execution
-- [ ] Multi-step coupling
-- [ ] State consistency checks
-- [ ] Grid shape validation
-- [ ] Time integration accuracy
-- [ ] JIT compilation works
-- [ ] Scan vs adhoc_scan equivalence
-- [ ] xarray conversion
-- [ ] Edge cases (zero arrays, NaN handling)
-
----
-
-## Conclusion
-
-JAX-ESM is a promising prototype with solid foundations in JAX and a reasonable component architecture. The main issues are:
-
-1. **Incomplete refactoring** - old code and tests not updated
-2. **Hardcoded limitations** - not as flexible as claimed
-3. **Missing robustness** - no validation or error handling
-4. **Documentation gaps** - unclear units, interfaces, and assumptions
-
-**Path Forward**:
-1. Fix tests to match current API (1-2 days)
-2. Clean up dead code (1 day)
-3. Add input validation and type hints (2-3 days)
-4. Document limitations and design decisions (1 day)
-
-After these fixes, the codebase would be a solid foundation for a production Earth system coupler.
-
-**Estimated Effort**: 1-2 weeks of focused development to address critical issues.
+7. **Sophisticated Interpolation**
+   - `BilinearInterpolator` handles periodic longitude, masks, extrapolation
+   - Vector rotation across dateline supported
+   - Well-documented mathematics

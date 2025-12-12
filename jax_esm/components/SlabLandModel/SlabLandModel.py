@@ -155,11 +155,10 @@ class SlabLandModel(Component):
                 :, :, 0
             ].copy()
         else:
-            print("Boundary does not exist. Idealized initial SST will be used.")
+            print("Boundary does not exist. Idealized initial LST will be used.")
             init_land_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
-                + 273.15
-                + 15
+                + constants.default_land_temperature_K
             )
 
         init_land_surface_temperature = init_land_surface_temperature.at[
@@ -232,14 +231,14 @@ class SlabLandModel(Component):
                     self.land_surface_temperature_clim[:, :, clim_beg_idx]
                 )
                 snapshot_land_surface_temperature_clim_beg = jnp.where(
-                    land_index, snapshot_land_surface_temperature_clim_beg, 273.15 + 15
+                    land_index, snapshot_land_surface_temperature_clim_beg, constants.default_land_temperature_K
                 )
 
                 snapshot_land_surface_temperature_clim_end = (
                     self.land_surface_temperature_clim[:, :, clim_end_idx]
                 )
                 snapshot_land_surface_temperature_clim_end = jnp.where(
-                    land_index, snapshot_land_surface_temperature_clim_end, 273.15 + 15
+                    land_index, snapshot_land_surface_temperature_clim_end, constants.default_land_temperature_K
                 )
 
                 land_surface_temperature_clim_trend = (

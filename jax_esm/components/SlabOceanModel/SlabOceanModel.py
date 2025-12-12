@@ -150,8 +150,7 @@ class SlabOceanModel(Component):
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_sea_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
-                + 273.15
-                + 15
+                + constants.default_land_temperature_K
             )
 
         init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
@@ -216,12 +215,12 @@ class SlabOceanModel(Component):
                 ocn_idx = self.domain.bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
-                    ocn_idx, snapshot_SST_clim_beg, 273.15 + 15
+                    ocn_idx, snapshot_SST_clim_beg, constants.default_land_temperature_K
                 )
 
                 snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
                 snapshot_SST_clim_end = jnp.where(
-                    ocn_idx, snapshot_SST_clim_end, 273.15 + 15
+                    ocn_idx, snapshot_SST_clim_end, constants.default_land_temperature_K
                 )
 
                 SST_clim_trend = (
@@ -246,7 +245,7 @@ class SlabOceanModel(Component):
 
             new_sea_surface_temperature = new_sea_surface_temperature.at[
                 nonocn_idx
-            ].set(288.15)
+            ].set(constants.default_land_temperature_K)
             new_state = state.copy(
                 prog_kwargs=dict(
                     sea_surface_temperature=new_sea_surface_temperature,

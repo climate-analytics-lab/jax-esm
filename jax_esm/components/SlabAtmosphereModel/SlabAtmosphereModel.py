@@ -133,7 +133,7 @@ class SlabAtmosphereModel(Component):
         )
 
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + 273.15
+            positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0 + constants.freezing_point_K
         )
         init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
         init_mean_meridional_wind_velocity = jnp.zeros_like(self.llat_rad)
@@ -161,13 +161,10 @@ class SlabAtmosphereModel(Component):
         ocean_index = self.domain.bmask == 0
 
         def step_function(state, forcing, t):
-            # Simple bulk formula
-            surface_air_density = 1.22  # kg / m^3
-            drag_coefficient = 1e-3  # scalar
-
+            # Simple bulk formula using constants from constants.py
             ocean_sensible_heat_flux = (
-                surface_air_density
-                * drag_coefficient
+                constants.surface_air_density
+                * constants.bulk_drag_coefficient
                 * (
                     (
                         state.prog.mean_zonal_wind_velocity**2
@@ -183,8 +180,8 @@ class SlabAtmosphereModel(Component):
             )
 
             land_sensible_heat_flux = (
-                surface_air_density
-                * drag_coefficient
+                constants.surface_air_density
+                * constants.bulk_drag_coefficient
                 * (
                     (
                         state.prog.mean_zonal_wind_velocity**2
@@ -207,9 +204,6 @@ class SlabAtmosphereModel(Component):
             total_heat_flux = (
                 ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
             )
-
-            def sub_step_function(T, sim_time):
-                return T + self.cd_factor * total_heat_flux, None
 
             new_sim_time = state.prog.sim_time + self.timestep
             new_mean_air_temperature = (

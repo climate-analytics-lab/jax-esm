@@ -128,7 +128,7 @@ class JCM(Component):
                 sice_am=forcing.scalar.sea_ice_concentration,
                 snowc_am=forcing.scalar.snow_cover,
                 soilw_am=forcing.scalar.soil_moisture,
-                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(288.15),
+                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(constants.default_land_temperature_K),
                 sea_surface_temperature=forcing.scalar.sea_surface_temperature,
                 lfluxland=True,
             )
