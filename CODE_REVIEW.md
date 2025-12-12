@@ -25,6 +25,29 @@ This document provides a comprehensive code review of the JAX-ESM prototype and 
 
 **All 4 integration tests pass after Phase 1 changes.**
 
+### Phase 2: Unit Tests - ✅ COMPLETE
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 2.1 Tests for `base.py` factory functions | ✅ Done | 23 tests in `tests/unit/test_base.py` |
+| 2.3 Tests for `forcing_mapper.py` | ✅ Done | 20 tests in `tests/unit/test_forcing_mapper.py` |
+| 2.5 Tests for `bulk_op.py` | ✅ Done | 23 tests in `tests/unit/test_bulk_op.py` |
+| 2.8 Gradient flow tests | ✅ Done | 12 tests in `tests/unit/test_gradients.py` |
+| 2.9 Create shared fixtures | ✅ Done | 7 fixtures in `tests/conftest.py` |
+
+**Test Summary:**
+- Unit tests created: 78 tests across 4 files
+- All 82 tests pass (78 unit + 4 integration)
+- Gradient flow verified through: state operations, single component steps, multiple steps, `jax.lax.scan`, `ForcingMapper`, and coupled simulations
+
+**Files created:**
+- `tests/unit/__init__.py`
+- `tests/conftest.py` - shared pytest fixtures
+- `tests/unit/test_base.py` - factory function tests
+- `tests/unit/test_forcing_mapper.py` - ForcingMapper tests
+- `tests/unit/test_bulk_op.py` - bulk operation tests
+- `tests/unit/test_gradients.py` - gradient flow tests
+
 ---
 
 ## Executive Summary
@@ -182,8 +205,14 @@ A key feature of JAX-based ESMs is the ability to compute gradients. The current
 **Current gaps:**
 - Parameters like `relaxation_time` are stored as Python floats, not traced
 - No interface for time-varying external forcings (CO2, solar)
-- `ForcingMapper` transformations not verified to preserve gradients
-- No tests verifying gradient flow through coupled simulation
+
+**Verified working (Phase 2 tests):**
+- ✅ Gradients flow through field group and state copy operations
+- ✅ Gradients flow through single component step functions
+- ✅ Gradients flow through multiple timesteps
+- ✅ Gradients flow through `jax.lax.scan`
+- ✅ `ForcingMapper` preserves gradients (direct and with transformations)
+- ✅ Coupled simulations are differentiable w.r.t. initial conditions
 
 ### 3.3 `CoupledComponentConfig` is Minimal
 
@@ -250,23 +279,25 @@ Either implement validation or remove from the interface.
 
 | Directory | Contents | Status |
 |-----------|----------|--------|
-| `tests/integration/` | 4 integration tests | Working |
+| `tests/integration/` | 4 integration tests | ✅ Working |
+| `tests/unit/` | 78 unit tests | ✅ NEW - Working |
+| `tests/conftest.py` | 7 shared fixtures | ✅ NEW |
 | `tests/ignore/` | 6+ unit tests | Disabled/outdated |
 
-**Effective unit test coverage: ~0%**
+**Unit test coverage significantly improved with Phase 2.**
 
-### 5.2 Missing Unit Tests
+### 5.2 Unit Tests - Status
 
-| Module | Missing Tests |
-|--------|---------------|
-| `components/base.py` | Factory functions, state class operations, zeros/ones/copy |
-| `components/domain.py` | Grid parsing, mask loading, domain creation for JCM/Veros |
-| `coupling/coupler.py` | Timestep validation, component management, step function generation |
-| `coupling/forcing_mapper.py` | Mapping, transformations, strget/strset edge cases |
-| `utils/bulk_op.py` | stack_objects, unwrap_leading_dims, mean_leaf |
-| `utils/bilinear_interp.py` | Interpolation accuracy, edge cases, masking, periodic wrapping |
-| Individual components | Initialize, step function correctness, predictions_to_xarray |
-| Gradients | End-to-end gradient flow, parameter sensitivities |
+| Module | Status | Tests |
+|--------|--------|-------|
+| `components/base.py` | ✅ Done | 23 tests - factory functions, state operations, JIT/scan compatibility |
+| `components/domain.py` | ⬜ TODO | Grid parsing, mask loading, domain creation |
+| `coupling/coupler.py` | ⬜ TODO | Timestep validation, component management |
+| `coupling/forcing_mapper.py` | ✅ Done | 20 tests - mapping, transformations, strget/strset |
+| `utils/bulk_op.py` | ✅ Done | 23 tests - stack_objects, unwrap_leading_dims, mean_leaf |
+| `utils/bilinear_interp.py` | ⬜ TODO | Interpolation accuracy, edge cases |
+| Individual components | ⬜ TODO | Initialize, step function correctness |
+| Gradients | ✅ Done | 12 tests - end-to-end gradient flow verified |
 
 ### 5.3 Required New Tests
 
