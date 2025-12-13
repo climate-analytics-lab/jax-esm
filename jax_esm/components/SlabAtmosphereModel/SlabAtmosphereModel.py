@@ -148,8 +148,6 @@ class SlabAtmosphereModel(SlabModelBase):
                 + state.prog.mean_meridional_wind_velocity ** 2
             ) ** 0.5
 
-            wind_speed = 1.0
-
             print("bulk_drag_coefficient = ", forcing.scalar.bulk_drag_coefficient)
             # Bulk aerodynamic formula for ocean sensible heat flux
             ocean_sensible_heat_flux = (
@@ -188,7 +186,7 @@ class SlabAtmosphereModel(SlabModelBase):
             # Update temperature
             new_sim_time = state.prog.sim_time + self.timestep
             new_mean_air_temperature = (
-                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux 
             )
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
 

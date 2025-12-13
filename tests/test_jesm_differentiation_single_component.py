@@ -6,8 +6,8 @@ def test_integration():
 
     from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
     import jax_datetime as jdt
-    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
     from pathlib import Path
+    from jax_esm.coupling.coupler import Coupler
 
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
@@ -28,17 +28,10 @@ def test_integration():
             start_datetime=start_datetime,
             save_interval=coupling_timestep,
         ),
-        ocn=SlabOceanModel(
-            grid_specification=grid_specification,
-            timestep=coupling_timestep,
-            start_datetime=start_datetime,
-            save_interval=coupling_timestep,
-            relaxation_time=60 * 86400.0,
-        ),
     )
 
     # Creating model
-    model = couple(**components)
+    model = Coupler(components=components, coupling_timestep=coupling_timestep)
 
     # Obtain initial condition
 
@@ -55,7 +48,7 @@ def test_integration():
         initial_coupled_state_forcing = model.initialize()
         initial_coupled_state_forcing["atm"][1].scalar.bulk_drag_coefficient = param
         state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
-        result = state_holder["state"]["ocn"].prog.sea_surface_temperature.sum() 
+        result = state_holder["state"]["atm"].prog.mean_air_temperature.sum() 
         return result
     
     import jax 
@@ -64,7 +57,7 @@ def test_integration():
     
     measure_results = []
     grad_measure_results = []
-    params = jnp.linspace(0, 1e-2, 5)
+    params = jnp.linspace(0, 1e-1, 5)
     for i, param in enumerate(params):
         print(f"[{i:d}] Evaluating param {param:f}...")
         measure_results.append(measure(param))
