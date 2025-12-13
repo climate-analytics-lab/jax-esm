@@ -148,11 +148,8 @@ class Coupler:
 
         return step_function
 
-
-    #@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6, 7))
-    def run(
+    def generate_trajectory_function(
         self,
-        initial_coupled_state_forcing: Dict[str, tuple[ComponentState, ComponentForcing]],
         start_time: float,
         end_time: float,
         save_interval_steps=1,
@@ -160,7 +157,6 @@ class Coupler:
         show_progress: bool = False,
         tqdm_kwargs: Dict[str, Any] = dict(),
     ):
-        _start_time = time.time()
         total_time = end_time - start_time
         total_steps = int(total_time / self.coupling_timestep)
 
@@ -187,26 +183,21 @@ class Coupler:
             else:
                 step_times = tqdm(step_times, **tqdm_kwargs)
         
-        final_coupled_state, predictions = scan_func(
-            coupled_step_function,
-            dict(
-                state = {
-                    component_name: _state for component_name, (_state, _) in initial_coupled_state_forcing.items()
-                },
-                forcings = {
-                    component_name: _forcing for component_name, (_, _forcing) in initial_coupled_state_forcing.items()
-                },
-            ),
-            xs=step_times,
-        )
-        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
-
-        _end_time = time.time()
-        _elapsed_time = _end_time - _start_time
-        print(f"Execution time: {_elapsed_time:.1f} seconds.")
-
-        return final_coupled_state, predictions
-
+        def trajectory_function(
+            initial_coupled_state_forcing: Dict[str, tuple[ComponentState, ComponentForcing]],
+        ):
+            final_coupled_state, predictions = scan_func(
+                coupled_step_function,
+                dict(
+                    state = {component_name: _state for component_name, (_state, _) in initial_coupled_state_forcing.items()},
+                    forcings = {component_name: _forcing for component_name, (_, _forcing) in initial_coupled_state_forcing.items()},
+                ),
+                xs=step_times,
+            )
+            predictions = unwrap_leading_dims(predictions, first_n_dim=2)
+            return final_coupled_state, predictions
+        
+        return trajectory_function
     
     def add_component(
         self,
