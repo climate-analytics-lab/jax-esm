@@ -40,5 +40,4 @@ default_land_depth_max = 60.0  # Maximum land depth (m)
 # =============================================================================
 # Default temperatures
 # =============================================================================
-default_land_temperature_K = 288.15  # Default land surface temperature (K) = 15°C
 freezing_point_K = 273.15  # Freezing point of water (K) = 0°C
