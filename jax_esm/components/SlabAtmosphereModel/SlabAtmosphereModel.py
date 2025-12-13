@@ -114,7 +114,7 @@ class SlabAtmosphereModel(SlabModelBase):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
+            positive_cosine_cubic_latitude_squared(self.llat_rad) * 17.0
             + constants.freezing_point_K
         )
         init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
@@ -133,7 +133,7 @@ class SlabAtmosphereModel(SlabModelBase):
                 mean_zonal_wind_velocity=init_mean_zonal_wind_velocity,
                 mean_meridional_wind_velocity=init_mean_meridional_wind_velocity,
             ),
-        )
+        ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -180,7 +180,7 @@ class SlabAtmosphereModel(SlabModelBase):
             total_heat_flux = (
                 ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
             )
-
+            
             # Update temperature
             new_sim_time = state.prog.sim_time + self.timestep
             new_mean_air_temperature = (
