@@ -40,17 +40,19 @@ def test_integration():
 
     # Obtain initial condition
     initial_coupled_state_forcing = model.initialize()
-
-    # Run coupled model
-    print("Running model...")
-    state_holder, predictions = model.run(
-        initial_coupled_state_forcing=initial_coupled_state_forcing,
+    
+    trajectory_function = model.generate_trajectory_function(
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
         jitted=True,
         show_progress=True,
         tqdm_kwargs=dict(desc="Simulation"),
     )
+
+    # Run coupled model
+    print("Running model...")
+    state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+    
     # Convert output into xarray
     output_dict = model.predictions_to_xarray(predictions)
 
