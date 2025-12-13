@@ -100,6 +100,7 @@ class SlabAtmosphereModel(SlabModelBase):
             scalar_cls=create_field_group_class(
                 cls_name="scalar",
                 fields=[
+                    ("bulk_drag_coefficient", float, ()),
                     ("bare_land_albedo", float, self.grid_shape),
                     ("sea_ice_concentration", float, self.grid_shape),
                     ("soil_moisture", float, self.grid_shape),
@@ -133,7 +134,7 @@ class SlabAtmosphereModel(SlabModelBase):
                 mean_zonal_wind_velocity=init_mean_zonal_wind_velocity,
                 mean_meridional_wind_velocity=init_mean_meridional_wind_velocity,
             ),
-        ), self.component_forcing_class.zeros()
+        ), self.component_forcing_class.zeros().copy(scalar_kwargs=dict(bulk_drag_coefficient=1e-3))
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -147,10 +148,13 @@ class SlabAtmosphereModel(SlabModelBase):
                 + state.prog.mean_meridional_wind_velocity ** 2
             ) ** 0.5
 
+            wind_speed = 1.0
+
+            print("bulk_drag_coefficient = ", forcing.scalar.bulk_drag_coefficient)
             # Bulk aerodynamic formula for ocean sensible heat flux
             ocean_sensible_heat_flux = (
                 constants.surface_air_density
-                * constants.bulk_drag_coefficient
+                * forcing.scalar.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
@@ -162,7 +166,7 @@ class SlabAtmosphereModel(SlabModelBase):
             # Bulk aerodynamic formula for land sensible heat flux
             land_sensible_heat_flux = (
                 constants.surface_air_density
-                * constants.bulk_drag_coefficient
+                * forcing.scalar.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
