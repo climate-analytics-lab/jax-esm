@@ -54,12 +54,12 @@ def test_integration():
     model = couple(**components)
 
     # Obtain initial condition
-    initial_coupled_state = model.initialize()
+    initial_coupled_state_forcing = model.initialize()
 
     # Run coupled model
     print("Running model...")
     state_holder, predictions = model.run(
-        initial_coupled_state=initial_coupled_state,
+        initial_coupled_state_forcing=initial_coupled_state_forcing,
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
         jitted=True,

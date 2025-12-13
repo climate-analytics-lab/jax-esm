@@ -12,7 +12,7 @@ def test_integration():
 
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
-    simulation_interval = jdt.to_timedelta(30, "day")
+    simulation_interval = jdt.to_timedelta(50, "day")
     output_dir = Path("output/SAM_SOM").resolve()
 
     print("Output dir: ", str(output_dir))
@@ -22,7 +22,7 @@ def test_integration():
     components = dict(
         atm=SlabAtmosphereModel(
             grid_specification=grid_specification,
-            timestep=3600.0,
+            timestep=3600.0 * 12,
             start_datetime=start_datetime,
             save_interval=coupling_timestep,
         ),
@@ -39,12 +39,12 @@ def test_integration():
     model = couple(**components)
 
     # Obtain initial condition
-    initial_coupled_state = model.initialize()
+    initial_coupled_state_forcing = model.initialize()
 
     # Run coupled model
     print("Running model...")
     state_holder, predictions = model.run(
-        initial_coupled_state=initial_coupled_state,
+        initial_coupled_state_forcing=initial_coupled_state_forcing,
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
         jitted=True,
