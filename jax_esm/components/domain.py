@@ -49,14 +49,18 @@ class Grid:
                 f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`"
             )
 
+class GridType(str):
+    pass
+
+
 
 @dataclass
 class Domain:
     grid_specification: GridSpecification
-    grids: Dict[str, Grid]
-    fmask: jnp.ndarray  # fractional mask
-    bmask: jnp.ndarray  # binary mask
-    topography: jnp.ndarray
+    coordinates: Dict[GridType, cx.Coordinate]
+    bmask: Dict[GridType, jnp.ndarray]  # binary mask
+    fmask: Dict[GridType, jnp.ndarray]  # fractional mask
+    topography: Dict[GridType, jnp.jnp.ndarray]
 
     @classmethod
     def from_grid_specification(
