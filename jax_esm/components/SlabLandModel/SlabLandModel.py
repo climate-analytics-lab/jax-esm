@@ -10,6 +10,7 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
+from jax_esm.components.base import ComponentForcing, ComponentState
 from jax_esm.utils.component_variable_tools import (
     create_variable_container_class,
     create_field_group_class,
@@ -85,33 +86,35 @@ class SlabLandModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="state",
-                fields=[
-                    ("sim_time", float, ()),
-                    ("land_surface_temperature", float, self.grid_shape),
-                    ("land_depth", float, self.grid_shape),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="phydata",
-                fields=[],
-            ),
+        dimension_names = ("longitude", "latitude")
+        self.component_state_class = create_variable_container_class(
+            {
+                "prog" : create_field_group_class(
+                    fields=[
+                        ("sim_time", float, (), ()),
+                        ("land_surface_temperature", float, dimension_names, self.grid_shape),
+                        ("land_depth", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+                "phydata" : create_field_group_class(
+                    fields=[],
+                ),
+            },
+            base_class = ComponentState,
         )
 
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[
-                    ("total_heat_flux", float, self.grid_shape),
-                ],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[],
-            ),
+        self.component_forcing_class = create_variable_container_class(
+            {
+                "flux" : create_field_group_class(
+                    fields=[
+                        ("total_heat_flux", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+                "scalar" : create_field_group_class(
+                    fields=[],
+                ),
+            },
+            base_class = ComponentForcing,
         )
 
     def _initialize_fields(self):
@@ -171,7 +174,7 @@ class SlabLandModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
-            prog_kwargs=dict(
+            prog=dict(
                 land_depth=init_land_depth,
                 land_surface_temperature=init_land_surface_temperature,
             ),
@@ -241,7 +244,7 @@ class SlabLandModel(SlabModelBase):
             new_land_surface_temperature = new_land_surface_temperature.at[nonland_index].set(0)
 
             new_state = state.copy(
-                prog_kwargs=dict(
+                prog=dict(
                     land_surface_temperature=new_land_surface_temperature,
                     sim_time=new_sim_time,
                 ),

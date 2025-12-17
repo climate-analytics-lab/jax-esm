@@ -85,29 +85,35 @@ class SlabOceanModel(SlabModelBase):
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
         dimension_names = ("longitude", "latitude")
-        self.component_state_class = create_variable_container_class({
-            "prog" : create_field_group_class(
-                fields=[
-                    ("sim_time", float, (), ()),
-                    ("sea_surface_temperature", float, dimension_names, self.grid_shape),
-                    ("mixed_layer_depth", float, dimension_names, self.grid_shape),
-                ],
-            ),
-            "phydata" : create_field_group_class(
-                fields=[],
-            ),
-        })
+        self.component_state_class = create_variable_container_class(
+            {
+                "prog" : create_field_group_class(
+                    fields=[
+                        ("sim_time", float, (), ()),
+                        ("sea_surface_temperature", float, dimension_names, self.grid_shape),
+                        ("mixed_layer_depth", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+                "phydata" : create_field_group_class(
+                    fields=[],
+                ),
+            },
+            base_class = ComponentState,
+        )
 
-        self.component_forcing_class = create_variable_container_class({
-            "flux" : create_field_group_class(
-                fields=[
-                    ("total_heat_flux", float, dimension_names, self.grid_shape),
-                ],
-            ),
-            "scalar" : create_field_group_class(
-                fields=[],
-            ),
-        })
+        self.component_forcing_class = create_variable_container_class(
+            {
+                "flux" : create_field_group_class(
+                    fields=[
+                        ("total_heat_flux", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+                "scalar" : create_field_group_class(
+                    fields=[],
+                ),
+            },
+            base_class = ComponentForcing,
+        )
 
     def _initialize_fields(self):
         """Initialize ocean model fields."""

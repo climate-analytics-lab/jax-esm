@@ -9,6 +9,7 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
+from jax_esm.components.base import ComponentForcing, ComponentState
 from jax_esm.utils.component_variable_tools import (
     create_variable_container_class,
     create_field_group_class,
@@ -73,42 +74,45 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for atmosphere model."""
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="state",
-                fields=[
-                    ("sim_time", float, ()),
-                    ("mean_air_temperature", float, self.grid_shape),
-                    ("mean_zonal_wind_velocity", float, self.grid_shape),
-                    ("mean_meridional_wind_velocity", float, self.grid_shape),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="phydata",
-                fields=[
-                    ("hfluxn", float, self.grid_shape + (2,)),
-                ],
-            ),
+        dimension_names = ("longitude", "latitude")
+        self.component_state_class = create_variable_container_class(
+            {
+                "prog" : create_field_group_class(
+                    fields=[
+                        ("sim_time", float, ()),
+                        ("mean_air_temperature", float, dimension_names, self.grid_shape),
+                        ("mean_zonal_wind_velocity", float, dimension_names, self.grid_shape),
+                        ("mean_meridional_wind_velocity", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+            
+                "phydata" : create_field_group_class(
+                    fields=[
+                        ("hfluxn", float, dimension_names + ("two",), self.grid_shape + (2,)),
+                    ],
+                )
+            },
+            base_class = ComponentState,
         )
 
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[
-                    ("bulk_drag_coefficient", float, ()),
-                    ("bare_land_albedo", float, self.grid_shape),
-                    ("sea_ice_concentration", float, self.grid_shape),
-                    ("soil_moisture", float, self.grid_shape),
-                    ("snow_cover", float, self.grid_shape),
-                    ("land_surface_temperature", float, self.grid_shape),
-                    ("sea_surface_temperature", float, self.grid_shape),
-                ],
-            ),
+        self.component_forcing_class = create_variable_container_class(
+            {
+                "flux" : create_field_group_class(
+                    fields=[],
+                ),
+                "scalar" : create_field_group_class(
+                    fields=[
+                        ("bulk_drag_coefficient", float, (), ()),
+                        ("bare_land_albedo", float, dimension_names, self.grid_shape),
+                        ("sea_ice_concentration", float, dimension_names, self.grid_shape),
+                        ("soil_moisture", float, dimension_names, self.grid_shape),
+                        ("snow_cover", float, self.grid_shape),
+                        ("land_surface_temperature", float, dimension_names, self.grid_shape),
+                        ("sea_surface_temperature", float, dimension_names, self.grid_shape),
+                    ],
+                ),
+            },
+            base_class = ComponentForcing,
         )
 
     def _initialize_fields(self):
@@ -129,12 +133,12 @@ class SlabAtmosphereModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
-            prog_kwargs=dict(
+            prog=dict(
                 mean_air_temperature=init_mean_air_temperature,
                 mean_zonal_wind_velocity=init_mean_zonal_wind_velocity,
                 mean_meridional_wind_velocity=init_mean_meridional_wind_velocity,
             ),
-        ), self.component_forcing_class.zeros().copy(scalar_kwargs=dict(bulk_drag_coefficient=1e-3))
+        ), self.component_forcing_class.zeros().copy(scalar=dict(bulk_drag_coefficient=1e-3))
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -191,11 +195,11 @@ class SlabAtmosphereModel(SlabModelBase):
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
 
             new_state = state.copy(
-                prog_kwargs=dict(
+                prog=dict(
                     mean_air_temperature=new_mean_air_temperature,
                     sim_time=new_sim_time,
                 ),
-                phydata_kwargs=dict(
+                phydata=dict(
                     hfluxn=new_hfluxn,
                 ),
             )
