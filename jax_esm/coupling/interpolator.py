@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
-import numpy as np
+import jax.numpy as jnp
 from typing import Optional, Dict, Any, Tuple
+from jax import Array
 from dataclasses import dataclass
 
 
@@ -8,12 +9,12 @@ from dataclasses import dataclass
 class GridInfo:
     """Store grid dimension information."""
     shape: Tuple[int, ...]
-    area_weights: Optional[np.ndarray] = None
-    mask: Optional[np.ndarray] = None
+    grid_weights: Optional[Array] = None
+    mask: Optional[Array] = None
     
     def __post_init__(self):
-        if self.area_weights is not None:
-            assert self.area_weights.shape == self.shape, \
+        if self.grid_weights is not None:
+            assert self.grid_weights.shape == self.shape, \
                 "Area weights must match grid shape"
         if self.mask is not None:
             assert self.mask.shape == self.shape, \
@@ -67,7 +68,7 @@ class GridInterpolator(ABC):
         self.last_validation: Dict[str, Any] = {}
     
     @abstractmethod
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Array) -> Array:
         """
         Transform data from source grid to target grid.
         
@@ -76,28 +77,28 @@ class GridInterpolator(ABC):
         
         Parameters
         ----------
-        data : np.ndarray
+        data : Array
             Data on source grid
             
         Returns
         -------
-        np.ndarray
+        Array
             Data interpolated to target grid
         """
         pass
     
-    def __call__(self, data: np.ndarray) -> np.ndarray:
+    def __call__(self, data: Array) -> Array:
         """
         Apply transformation with validation.
         
         Parameters
         ----------
-        data : np.ndarray
+        data : Array
             Data on source grid
             
         Returns
         -------
-        np.ndarray
+        Array
             Validated transformed data
             
         Raises
@@ -105,10 +106,10 @@ class GridInterpolator(ABC):
         ValidationError
             If validation checks fail
         """
-        # Check input shape
+        # Check ijnput shape
         if data.shape != self.source_grid.shape:
             raise ValueError(
-                f"Input shape {data.shape} does not match source grid "
+                f"Ijnput shape {data.shape} does not match source grid "
                 f"shape {self.source_grid.shape}"
             )
         
@@ -120,15 +121,15 @@ class GridInterpolator(ABC):
         
         return result
     
-    def _validate(self, source_data: np.ndarray, target_data: np.ndarray):
+    def _validate(self, source_data: Array, target_data: Array):
         """
         Perform validation checks on transformed data.
         
         Parameters
         ----------
-        source_data : np.ndarray
+        source_data : Array
             Original data on source grid
-        target_data : np.ndarray
+        target_data : Array
             Transformed data on target grid
             
         Raises
@@ -146,7 +147,7 @@ class GridInterpolator(ABC):
         if self.validate_conservation:
             self._validate_conservation(source_data, target_data)
     
-    def _validate_shape(self, target_data: np.ndarray):
+    def _validate_shape(self, target_data: Array):
         """Validate that output has correct shape."""
         if target_data.shape != self.target_grid.shape:
             raise ValidationError(
@@ -157,8 +158,8 @@ class GridInterpolator(ABC):
     
     def _validate_conservation(
         self,
-        source_data: np.ndarray,
-        target_data: np.ndarray
+        source_data: Array,
+        target_data: Array
     ):
         """
         Validate conservation of integrated quantity.
@@ -167,22 +168,22 @@ class GridInterpolator(ABC):
         over the domain should be conserved during interpolation.
         """
         # Calculate source integral
-        if self.source_grid.area_weights is not None:
-            source_mask = self.source_grid.mask if self.source_grid.mask is not None else np.ones_like(source_data, dtype=bool)
-            source_integral = np.sum(
-                source_data * self.source_grid.area_weights * source_mask
+        if self.source_grid.grid_weights is not None:
+            source_mask = self.source_grid.mask if self.source_grid.mask is not None else jnp.ones_like(source_data, dtype=bool)
+            source_integral = jnp.sum(
+                source_data * self.source_grid.grid_weights * source_mask
             )
         else:
-            source_integral = np.sum(source_data)
+            source_integral = jnp.sum(source_data)
         
         # Calculate target integral
-        if self.target_grid.area_weights is not None:
-            target_mask = self.target_grid.mask if self.target_grid.mask is not None else np.ones_like(target_data, dtype=bool)
-            target_integral = np.sum(
-                target_data * self.target_grid.area_weights * target_mask
+        if self.target_grid.grid_weights is not None:
+            target_mask = self.target_grid.mask if self.target_grid.mask is not None else jnp.ones_like(target_data, dtype=bool)
+            target_integral = jnp.sum(
+                target_data * self.target_grid.grid_weights * target_mask
             )
         else:
-            target_integral = np.sum(target_data)
+            target_integral = jnp.sum(target_data)
         
         # Check conservation
         if abs(source_integral) > 1e-10:  # Avoid division by very small numbers
@@ -211,21 +212,21 @@ class GridInterpolator(ABC):
 class BilinearInterpolator(GridInterpolator):
     """Simple bilinear interpolation (for demonstration)."""
     
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Array) -> Array:
         """Apply bilinear interpolation."""
         from scipy.interpolate import RegularGridInterpolator
         
         # Create interpolator for source grid
         source_shape = self.source_grid.shape
-        x = np.linspace(0, 1, source_shape[0])
-        y = np.linspace(0, 1, source_shape[1])
+        x = jnp.linspace(0, 1, source_shape[0])
+        y = jnp.linspace(0, 1, source_shape[1])
         interp = RegularGridInterpolator((x, y), data, method='linear')
         
         # Create target grid coordinates
         target_shape = self.target_grid.shape
-        x_new = np.linspace(0, 1, target_shape[0])
-        y_new = np.linspace(0, 1, target_shape[1])
-        xx, yy = np.meshgrid(x_new, y_new, indexing='ij')
+        x_new = jnp.linspace(0, 1, target_shape[0])
+        y_new = jnp.linspace(0, 1, target_shape[1])
+        xx, yy = jnp.meshgrid(x_new, y_new, indexing='ij')
         
         # Interpolate
         return interp((xx, yy))
@@ -234,7 +235,7 @@ class BilinearInterpolator(GridInterpolator):
 class ConservativeInterpolator(GridInterpolator):
     """Conservative remapping (placeholder for actual conservative method)."""
     
-    def transform(self, data: np.ndarray) -> np.ndarray:
+    def transform(self, data: Array) -> Array:
         """Apply conservative remapping."""
         # This is a simplified example - real conservative remapping
         # would use proper overlap calculations
@@ -249,8 +250,8 @@ class ConservativeInterpolator(GridInterpolator):
         result = zoom(data, zoom_factors, order=1)
         
         # Rescale to conserve integral
-        if self.source_grid.area_weights is None and self.target_grid.area_weights is None:
-            result *= np.prod(self.source_grid.shape) / np.prod(self.target_grid.shape)
+        if self.source_grid.grid_weights is None and self.target_grid.grid_weights is None:
+            result *= jnp.prod(self.source_grid.shape) / jnp.prod(self.target_grid.shape)
         
         return result
 
@@ -260,12 +261,12 @@ if __name__ == "__main__":
     # Define grids
     atm_grid = GridInfo(
         shape=(180, 360),
-        area_weights=np.ones((180, 360))  # Simplified, should be cos(lat)
+        grid_weights=jnp.ones((180, 360))  # Simplified, should be cos(lat)
     )
     
     ocean_grid = GridInfo(
         shape=(100, 200),
-        area_weights=np.ones((100, 200))
+        grid_weights=jnp.ones((100, 200))
     )
     
     # Create interpolator
@@ -276,7 +277,7 @@ if __name__ == "__main__":
     )
     
     # Test data
-    test_data = np.random.randn(180, 360)
+    test_data = jnp.random.randn(180, 360)
     
     try:
         result = interpolator(test_data)

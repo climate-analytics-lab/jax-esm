@@ -7,60 +7,13 @@ import re
 import jax_esm
 from pathlib import Path
 
-
-@dataclass
-class GridSpecification:
-    grid_type: str
-    grid_name: str
-
-    def __str__(self):
-        return f"{self.grid_type:s}::{self.grid_name:s}"
-
-
-@dataclass
-class Grid:
-    nodal_shape: Tuple[int, ...]
-    axis_names: Tuple[str, ...]
-    axis_values: Tuple[jnp.ndarray, ...]
-
-    @classmethod
-    def from_latitude_longitude(
-        cls,
-        latitude: List[float] | jnp.ndarray,
-        longitude: List[float] | jnp.ndarray,
-        order: str = "latitude_longitude",
-    ) -> "Grid":
-        latitude = jnp.array(latitude)
-        longitude = jnp.array(longitude)
-        if order == "latitude_longitude":
-            return cls(
-                nodal_shape=(len(latitude), len(longitude)),
-                axis_names=("latitude", "longitude"),
-                axis_values=(latitude, longitude),
-            )
-        elif order == "longitude_latitude":
-            return cls(
-                nodal_shape=(len(longitude), len(latitude)),
-                axis_names=("longitude", "latitude"),
-                axis_values=(longitude, latitude),
-            )
-        else:
-            raise ValueError(
-                f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`"
-            )
-
-class GridType(str):
-    pass
-
-
-
 @dataclass
 class Domain:
-    grid_specification: GridSpecification
-    coordinates: Dict[GridType, cx.Coordinate]
-    bmask: Dict[GridType, jnp.ndarray]  # binary mask
-    fmask: Dict[GridType, jnp.ndarray]  # fractional mask
-    topography: Dict[GridType, jnp.jnp.ndarray]
+    """
+        Domain is a collection of grids plus other meta data such as topography
+    """
+    grids: Dict[GridType, Grid]
+    topography: Dict[GridType, Array | None]
 
     @classmethod
     def from_grid_specification(
@@ -76,16 +29,16 @@ class Domain:
         d = None
 
         parsed_grid_specification = parse_grid_specification(grid_specification)
-        if parsed_grid_specification["grid_type"] == "JCM":
+        if parsed_grid_specification["root_name"] == "JCM":
             d = get_jcm_domain(
-                horizontal_resolution=int(parsed_grid_specification["grid_name"][1:]),
+                horizontal_resolution=int(parsed_grid_specification["grid_family"][1:]),
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
-        elif parsed_grid_specification["grid_type"] == "Veros":
+        elif parsed_grid_specification["root_name"] == "Veros":
             d = get_veros_domain(
-                parsed_grid_specification["grid_name"],
+                parsed_grid_specification["grid_family"],
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
@@ -98,39 +51,39 @@ class Domain:
 
 def parse_grid_specification(grid_specification: str) -> Dict[str, str]:
     """
-    Parse a grid specification string of format "<grid_type>::<grid_name>".
+    Parse a grid specification string of format "<root_name>::<grid_family>".
 
-    For grid_type == "JCM", grid_name should be "T<truncation_number>"
+    For root_name == "JCM", grid_family should be "T<truncation_number>"
     where truncation_number is an integer.
 
-    For grid_type == "Veros", grid_name should be "<resolution>"
+    For root_name == "Veros", grid_family should be "<resolution>"
     where resolution is a float.
 
     Args:
-        grid_specification (str): String in format "<grid_type>::<grid_name>"
+        grid_specification (str): String in format "<root_name>::<grid_family>"
 
     Returns:
-        dict: Dictionary with keys 'grid_type', 'grid_name', and if applicable,
+        dict: Dictionary with keys 'root_name', 'grid_family', and if applicable,
               'truncation_number'
 
     Raises:
         ValueError: If the format is invalid
     """
-    # Parse the basic format: <grid_type>::<grid_name>
+    # Parse the basic format: <root_name>::<grid_family>
     match = re.match(r"^([^:]+)::(.+)$", grid_specification)
 
     if not match:
         raise ValueError(
             f"Invalid grid specification format: '{grid_specification}'. "
-            f"Expected format: '<grid_type>::<grid_name>'"
+            f"Expected format: '<root_name>::<grid_family>'"
         )
 
-    grid_type = match.group(1)
-    grid_name = match.group(2)
+    root_name = match.group(1)
+    grid_family = match.group(2)
 
     return {
-        "grid_type": grid_type,
-        "grid_name": grid_name,
+        "root_name": root_name,
+        "grid_family": grid_family,
     }
 
 
@@ -169,7 +122,7 @@ def get_jcm_domain(
     Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
 
-    grid_name = f"T{horizontal_resolution:d}"
+    grid_family = f"T{horizontal_resolution:d}"
 
     try:
         horizontal_grid = getattr(
@@ -206,7 +159,7 @@ def get_jcm_domain(
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(
-        grid_specification=GridSpecification(grid_type="JCM", grid_name=grid_name),
+        grid_specification=GridSpecification(root_name="JCM", grid_family=grid_family),
         grids=grids,
         fmask=fmask,
         bmask=bmask,
@@ -235,14 +188,14 @@ def load_veros_mask(mask_file):
 
 
 def get_veros_domain(
-    grid_name: str,
+    grid_family: str,
     mask_file: Optional[str],
     topography_file: Optional[str],
 ) -> Domain:
     grids = None
     try:
         ds = xr.open_dataset(
-            Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_name:s}.nc"
+            Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_family:s}.nc"
         )
         longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
@@ -275,7 +228,7 @@ def get_veros_domain(
         # topography = load_veros_topography_file(topography_file)
 
     return Domain(
-        grid_specification=GridSpecification(grid_type="Veros", grid_name=grid_name),
+        grid_specification=GridSpecification(root_name="Veros", grid_family=grid_family),
         grids=grids,
         fmask=fmask,
         bmask=bmask,
