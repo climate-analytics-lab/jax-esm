@@ -10,9 +10,9 @@ from pathlib import Path
 @dataclass
 class Domain:
     """
-        Domain is a collection of grids plus other meta data such as topography
+        Domain is a collection of horizontal_grids plus other meta data such as topography
     """
-    grids: Dict[GridType, Grid]
+    horizontal_grids: Dict[GridType, Grid]
     topography: Dict[GridType, Array | None]
 
     @classmethod
@@ -139,7 +139,7 @@ def get_jcm_domain(
     )
 
     hgrid = one_layer_coords.horizontal
-    grids = dict(
+    horizontal_grids = dict(
         T=Grid.from_latitude_longitude(
             latitude=hgrid.latitudes,
             longitude=hgrid.longitudes,
@@ -148,19 +148,19 @@ def get_jcm_domain(
     )
 
     if mask_file is None:
-        fmask = jnp.zeros(grids["T"].nodal_shape)
-        bmask = jnp.zeros(grids["T"].nodal_shape)
+        fmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        bmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
     else:
         fmask, bmask = load_jcm_mask(mask_file)
 
     if topography_file is None:
-        topography = jnp.zeros(grids["T"].nodal_shape)
+        topography = jnp.zeros(horizontal_grids["T"].nodal_shape)
     else:
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(
         grid_specification=GridSpecification(root_name="JCM", grid_family=grid_family),
-        grids=grids,
+        horizontal_grids=horizontal_grids,
         fmask=fmask,
         bmask=bmask,
         topography=topography,
@@ -192,7 +192,7 @@ def get_veros_domain(
     mask_file: Optional[str],
     topography_file: Optional[str],
 ) -> Domain:
-    grids = None
+    horizontal_grids = None
     try:
         ds = xr.open_dataset(
             Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_family:s}.nc"
@@ -200,7 +200,7 @@ def get_veros_domain(
         longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
 
-        grids = dict(
+        horizontal_grids = dict(
             T=Grid.from_latitude_longitude(
                 latitude=latitude,
                 longitude=longitude,
@@ -215,13 +215,13 @@ def get_veros_domain(
         raise e
 
     if mask_file is None:
-        fmask = jnp.zeros(grids["T"].nodal_shape)
-        bmask = jnp.zeros(grids["T"].nodal_shape)
+        fmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        bmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
     else:
         fmask, bmask = load_veros_mask(mask_file)
 
     if topography_file is None:
-        topography = jnp.zeros(grids["T"].nodal_shape)
+        topography = jnp.zeros(horizontal_grids["T"].nodal_shape)
     else:
         pass
         # When veros provide its own topography file, it will be
@@ -229,7 +229,7 @@ def get_veros_domain(
 
     return Domain(
         grid_specification=GridSpecification(root_name="Veros", grid_family=grid_family),
-        grids=grids,
+        horizontal_grids=horizontal_grids,
         fmask=fmask,
         bmask=bmask,
         topography=topography,
