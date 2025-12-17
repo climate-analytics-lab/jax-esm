@@ -10,11 +10,11 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import (
-    create_component_state_class,
-    create_component_forcing_class,
+from jax_esm.utils.component_variable_tools import (
+    create_variable_container_class,
     create_field_group_class,
 )
+
 
 
 class SlabLandModel(SlabModelBase):

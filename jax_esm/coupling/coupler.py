@@ -7,11 +7,10 @@ from typing import Any, Dict, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, ComponentForcing, Component
+from jax_esm.components.base import ComponentState, ComponentForcing, CoupledComponent
 from jax_esm.coupling.forcing_mapper import ForcingMapper
-
-
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
+
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
 
@@ -40,7 +39,7 @@ class Coupler:
     def __init__(
         self,
         coupling_timestep: float,
-        components: Optional[Dict[str, Component]] = None,
+        components: Optional[Dict[str, CoupledComponent]] = None,
         forcing_mapper: Optional[ForcingMapper] = None,
     ):
         """Initialize the coupler.
@@ -202,7 +201,7 @@ class Coupler:
     def add_component(
         self,
         name: Optional[str] = None,
-        component: Optional[Component] = None,
+        component: Optional[CoupledComponent] = None,
     ) -> None:
         """Add a new component to the coupler.
            If name is not provided, then simply re-extract component names and timesteps

@@ -11,13 +11,15 @@ import jax
 import jax.numpy as jnp
 from jax_esm import constants as constants
 from jax_esm.components.base import (
-    Component,
+    CoupledComponent,
     CoupledComponentConfig,
     ComponentState,
-    create_component_forcing_class,
-    create_field_group_class,
 )
 
+from jax_esm.utils.component_variable_tools import (
+    create_variable_container_class,
+    create_field_group_class,
+)
 
 from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.physics_interface import PhysicsState
@@ -25,7 +27,7 @@ from jcm.physics_interface import PhysicsState
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import mean_leaf
-from jax_esm.components.domain import Domain
+from jax_esm.base.domain import Domain
 
 import tree_math
 from typing import Any
@@ -48,7 +50,7 @@ class JCMState(ComponentState):
     metadata: primitive_equations_states
 
 
-class JCM(Component):
+class JCM(CoupledComponent):
     """
     This is a class wrapping JCM.
     """

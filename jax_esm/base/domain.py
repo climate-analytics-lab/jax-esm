@@ -1,10 +1,13 @@
 from typing import List, Tuple, Optional, Dict
+from jax import Array
 import jax.numpy as jnp
 import xarray as xr
 import dinosaur
 from dataclasses import dataclass
 import re
-import jax_esm
+
+from jax_esm.base.grid import Grid
+
 from pathlib import Path
 
 @dataclass
@@ -12,8 +15,8 @@ class Domain:
     """
         Domain is a collection of horizontal_grids plus other meta data such as topography
     """
-    horizontal_grids: Dict[GridType, Grid]
-    topography: Dict[GridType, Array | None]
+    horizontal_grids: Dict[str, Grid]
+    topography: Dict[str, Array | None]
 
     @classmethod
     def from_grid_specification(

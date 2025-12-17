@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 from jax import Array
 
 from jax_esm.components.base import (
-    Component,
+    CoupledComponent,
     ComponentForcing,
     ComponentState,
 )
@@ -14,14 +14,14 @@ from jax_esm.components.base import (
 class ForcingMapper:
     """Manages flux exchange and boundary condition translation between components."""
 
-    components: Dict[str, Component]
+    components: Dict[str, CoupledComponent]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
     transformations: Dict[Tuple[str, str, str, str], Callable]
     component_forcing_classes: Dict[str, ComponentForcing]
 
     def __init__(
         self,
-        components: Dict[str, Component],
+        components: Dict[str, CoupledComponent],
         forcing_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
         transformations: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):

@@ -1,6 +1,6 @@
 from typing import Dict
-from jax_esm.components.domain import Domain
-from jax_esm.components.base import Component
+from jax_esm.base.domain import Domain
+from jax_esm.components.base import CoupledComponent
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 from jax_esm.coupling.coupler import Coupler
 from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
@@ -10,8 +10,8 @@ import jax.numpy as jnp
 
 
 def couple_atm_ocn(
-    atm: Component,
-    ocn: Component,
+    atm: CoupledComponent,
+    ocn: CoupledComponent,
     coupling_timestep: float = 86400.0,
 ):
     components = dict(
@@ -68,9 +68,9 @@ def couple_atm_ocn(
 
 
 def couple_atm_ocn_lnd(
-    atm: Component,
-    ocn: Component,
-    lnd: Component,
+    atm: CoupledComponent,
+    ocn: CoupledComponent,
+    lnd: CoupledComponent,
     coupling_timestep: float = 86400.0,
 ):
     components = dict(
@@ -223,17 +223,19 @@ def generate_atm_ocn_interpolators(
         def atm_to_ocn_hfluxn(in_array):
             in_array = in_array.sum(axis=-1)
             return conditional_transpose(
-                interpolator_atm_to_ocn.apply_scalar(
+                #interpolator_atm_to_ocn.apply_scalar(
                     conditional_transpose(in_array, not atm_latlon)
-                ),
+                #),
+                ,
                 not ocn_latlon,
             )
 
         def ocn_to_atm(in_array):
             return conditional_transpose(
-                interpolator_ocn_to_atm.apply_scalar(
+                #interpolator_ocn_to_atm.apply_scalar(
                     conditional_transpose(in_array, not ocn_latlon)
-                ),
+                #),
+                ,
                 not atm_latlon,
             )
 

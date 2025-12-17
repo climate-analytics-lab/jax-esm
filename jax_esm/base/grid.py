@@ -5,8 +5,8 @@ import xarray as xr
 import dinosaur
 from dataclasses import dataclass
 import re
-import jax_esm
 from pathlib import Path
+import coordax as cx
 
 @dataclass
 class GridSpecification:

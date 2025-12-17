@@ -9,8 +9,8 @@ import xarray as xr
 import tree_math
 from dataclasses import make_dataclass
 
-from jax_esm.domain import Domain
-from jax_esm.variable_registry import VariableRegistry
+from jax_esm.base.domain import Domain
+from jax_esm.coupling.variable_registry import VariableRegistry
 
 
 class AbstractFieldGroup:

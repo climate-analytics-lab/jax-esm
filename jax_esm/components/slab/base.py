@@ -13,11 +13,11 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
-from jax_esm.components.base import Component, CoupledComponentConfig
-from jax_esm.components.domain import Domain
+from jax_esm.components.base import CoupledComponent, CoupledComponentConfig
+from jax_esm.base.domain import Domain
 
 
-class SlabModelBase(Component):
+class SlabModelBase(CoupledComponent):
     """Base class for slab models providing shared infrastructure.
 
     This base class handles:
