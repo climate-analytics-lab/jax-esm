@@ -4,22 +4,7 @@ from typing import Optional, Dict, Any, Tuple
 from jax import Array
 from dataclasses import dataclass
 
-
-@dataclass
-class GridInfo:
-    """Store grid dimension information."""
-    shape: Tuple[int, ...]
-    grid_weights: Optional[Array] = None
-    mask: Optional[Array] = None
-    
-    def __post_init__(self):
-        if self.grid_weights is not None:
-            assert self.grid_weights.shape == self.shape, \
-                "Area weights must match grid shape"
-        if self.mask is not None:
-            assert self.mask.shape == self.shape, \
-                "Mask must match grid shape"
-
+from jax_esm.grid import Grid
 
 class ValidationError(Exception):
     """Raised when validation fails."""
@@ -36,8 +21,8 @@ class GridInterpolator(ABC):
     
     def __init__(
         self,
-        source_grid: GridInfo,
-        target_grid: GridInfo,
+        source_grid: Grid,
+        target_grid: Grid,
         conservation_tol: float = 1e-6,
         validate_shape: bool = True,
         validate_conservation: bool = True
@@ -208,6 +193,13 @@ class GridInterpolator(ABC):
 
 
 # Example implementations
+
+class IdentityInterpolator(GridInterpolator):
+    """Identity mapping (no interpolation)."""
+    
+    def transform(self, data: Array) -> Array:
+        return data
+
 
 class BilinearInterpolator(GridInterpolator):
     """Simple bilinear interpolation (for demonstration)."""
