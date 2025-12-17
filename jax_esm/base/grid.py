@@ -73,7 +73,7 @@ class Grid:
     fmask: Optional[Array] = None
  
     def __post_init__(self):
-        if self.grid_weights is not None:
+        if self.weights is not None:
             assert self.grid_weights.shape == self.shape, \
                 "Area weights must match grid shape"
         if self.bmask is not None:

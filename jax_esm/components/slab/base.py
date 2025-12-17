@@ -67,7 +67,7 @@ class SlabModelBase(CoupledComponent):
         )
 
         # Get grid shape for state/forcing class creation
-        self.grid_shape = self.domain.grids["T"].nodal_shape
+        self.grid_shape = self.domain.horizontal_grids["T"].shape
 
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()

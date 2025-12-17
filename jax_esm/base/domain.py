@@ -6,7 +6,8 @@ import dinosaur
 from dataclasses import dataclass
 import re
 
-from jax_esm.base.grid import Grid
+from jax_esm.base.grid import Grid, GridSpecification
+from jax_esm.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 
 from pathlib import Path
 
@@ -31,17 +32,17 @@ class Domain:
 
         d = None
 
-        parsed_grid_specification = parse_grid_specification(grid_specification)
-        if parsed_grid_specification["root_name"] == "JCM":
+        parsed_grid_specification = GridSpecification.parse_grid_specification(grid_specification)
+        if parsed_grid_specification.grid_universe == "JCM":
             d = get_jcm_domain(
-                horizontal_resolution=int(parsed_grid_specification["grid_family"][1:]),
+                horizontal_resolution=int(parsed_grid_specification.grid_family[1:]),
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
-        elif parsed_grid_specification["root_name"] == "Veros":
+        elif parsed_grid_specification.grid_universe == "Veros":
             d = get_veros_domain(
-                parsed_grid_specification["grid_family"],
+                parsed_grid_specification.grid_family,
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
@@ -50,44 +51,6 @@ class Domain:
             raise Exception("Error: domain is not created.")
 
         return d
-
-
-def parse_grid_specification(grid_specification: str) -> Dict[str, str]:
-    """
-    Parse a grid specification string of format "<root_name>::<grid_family>".
-
-    For root_name == "JCM", grid_family should be "T<truncation_number>"
-    where truncation_number is an integer.
-
-    For root_name == "Veros", grid_family should be "<resolution>"
-    where resolution is a float.
-
-    Args:
-        grid_specification (str): String in format "<root_name>::<grid_family>"
-
-    Returns:
-        dict: Dictionary with keys 'root_name', 'grid_family', and if applicable,
-              'truncation_number'
-
-    Raises:
-        ValueError: If the format is invalid
-    """
-    # Parse the basic format: <root_name>::<grid_family>
-    match = re.match(r"^([^:]+)::(.+)$", grid_specification)
-
-    if not match:
-        raise ValueError(
-            f"Invalid grid specification format: '{grid_specification}'. "
-            f"Expected format: '<root_name>::<grid_family>'"
-        )
-
-    root_name = match.group(1)
-    grid_family = match.group(2)
-
-    return {
-        "root_name": root_name,
-        "grid_family": grid_family,
-    }
 
 
 def load_jcm_mask(mask_file):
@@ -107,13 +70,10 @@ def load_jcm_mask(mask_file):
 
     return fmask, bmask
 
-
 def load_jcm_topography_file(
     topography_file: str,
 ):
     return jnp.asarray(xr.open_dataset(topography_file, engine="netcdf4")["orog"])
-
-    return None
 
 
 def get_jcm_domain(
@@ -142,30 +102,34 @@ def get_jcm_domain(
     )
 
     hgrid = one_layer_coords.horizontal
-    horizontal_grids = dict(
-        T=Grid.from_latitude_longitude(
-            latitude=hgrid.latitudes,
-            longitude=hgrid.longitudes,
-            order="longitude_latitude",
-        )
+    
+    coordinate_T = generate_coordinate_from_latitude_longitude(
+        latitude=hgrid.latitudes,
+        longitude=hgrid.longitudes,
+        order="longitude_latitude",
     )
 
     if mask_file is None:
-        fmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
-        bmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        fmask = jnp.ones(coordinate_T.shape)
+        bmask = jnp.ones(coordinate_T.shape)
     else:
         fmask, bmask = load_jcm_mask(mask_file)
 
     if topography_file is None:
-        topography = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        topography = jnp.zeros(coordinate_T.shape)
     else:
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(
-        grid_specification=GridSpecification(root_name="JCM", grid_family=grid_family),
-        horizontal_grids=horizontal_grids,
-        fmask=fmask,
-        bmask=bmask,
+        horizontal_grids = dict(
+            T = Grid(
+                coordinate = coordinate_T,
+                grid_type = "T",
+                grid_specification=GridSpecification(grid_universe="JCM", grid_family=grid_family),
+                bmask = bmask,
+                fmask = fmask,
+            ),
+        ),
         topography=topography,
     )
 
@@ -195,7 +159,7 @@ def get_veros_domain(
     mask_file: Optional[str],
     topography_file: Optional[str],
 ) -> Domain:
-    horizontal_grids = None
+    grids = None
     try:
         ds = xr.open_dataset(
             Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_family:s}.nc"
@@ -203,7 +167,7 @@ def get_veros_domain(
         longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
 
-        horizontal_grids = dict(
+        grids = dict(
             T=Grid.from_latitude_longitude(
                 latitude=latitude,
                 longitude=longitude,
@@ -217,23 +181,34 @@ def get_veros_domain(
         traceback.print_exc()
         raise e
 
+    coordinate_T = generate_coordinate_from_latitude_longitude(
+        latitude=hgrid.latitudes,
+        longitude=hgrid.longitudes,
+        order="longitude_latitude",
+    )
+
     if mask_file is None:
-        fmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
-        bmask = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        fmask = jnp.zeros(coordinate_T.shape)
+        bmask = jnp.zeros(coordinate_T.shape)
     else:
         fmask, bmask = load_veros_mask(mask_file)
 
     if topography_file is None:
-        topography = jnp.zeros(horizontal_grids["T"].nodal_shape)
+        topography = jnp.zeros(coordinate_T.shape)
     else:
-        pass
         # When veros provide its own topography file, it will be
         # topography = load_veros_topography_file(topography_file)
+        pass
 
     return Domain(
-        grid_specification=GridSpecification(root_name="Veros", grid_family=grid_family),
-        horizontal_grids=horizontal_grids,
-        fmask=fmask,
-        bmask=bmask,
+        horizontal_grids = dict(
+            T = Grid(
+                coordinate = coordinate_T,
+                grid_type = "T",
+                grid_specification=GridSpecification(grid_universe="Veros", grid_family=grid_family),
+                bmask = bmask,
+                fmask = fmask,
+            ),
+        ),
         topography=topography,
     )

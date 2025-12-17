@@ -79,7 +79,7 @@ class SlabAtmosphereModel(SlabModelBase):
             {
                 "prog" : create_field_group_class(
                     fields=[
-                        ("sim_time", float, ()),
+                        ("sim_time", float, (), ()),
                         ("mean_air_temperature", float, dimension_names, self.grid_shape),
                         ("mean_zonal_wind_velocity", float, dimension_names, self.grid_shape),
                         ("mean_meridional_wind_velocity", float, dimension_names, self.grid_shape),
@@ -106,7 +106,7 @@ class SlabAtmosphereModel(SlabModelBase):
                         ("bare_land_albedo", float, dimension_names, self.grid_shape),
                         ("sea_ice_concentration", float, dimension_names, self.grid_shape),
                         ("soil_moisture", float, dimension_names, self.grid_shape),
-                        ("snow_cover", float, self.grid_shape),
+                        ("snow_cover", float, dimension_names, self.grid_shape),
                         ("land_surface_temperature", float, dimension_names, self.grid_shape),
                         ("sea_surface_temperature", float, dimension_names, self.grid_shape),
                     ],
