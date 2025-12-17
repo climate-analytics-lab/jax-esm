@@ -10,9 +10,9 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import (
-    create_component_state_class,
-    create_component_forcing_class,
+from jax_esm.components.base import ComponentForcing, ComponentState
+from jax_esm.utils.component_variable_tools import (
+    create_variable_container_class,
     create_field_group_class,
 )
 
@@ -84,34 +84,30 @@ class SlabOceanModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="state",
+        dimension_names = ("longitude", "latitude")
+        self.component_state_class = create_variable_container_class({
+            "prog" : create_field_group_class(
                 fields=[
-                    ("sim_time", float, ()),
-                    ("sea_surface_temperature", float, self.grid_shape),
-                    ("mixed_layer_depth", float, self.grid_shape),
+                    ("sim_time", float, (), ()),
+                    ("sea_surface_temperature", float, dimension_names, self.grid_shape),
+                    ("mixed_layer_depth", float, dimension_names, self.grid_shape),
                 ],
             ),
-            phydata_cls=create_field_group_class(
-                cls_name="phydata",
+            "phydata" : create_field_group_class(
                 fields=[],
             ),
-        )
+        })
 
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
+        self.component_forcing_class = create_variable_container_class({
+            "flux" : create_field_group_class(
                 fields=[
-                    ("total_heat_flux", float, self.grid_shape),
+                    ("total_heat_flux", float, dimension_names, self.grid_shape),
                 ],
             ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
+            "scalar" : create_field_group_class(
                 fields=[],
             ),
-        )
+        })
 
     def _initialize_fields(self):
         """Initialize ocean model fields."""
@@ -165,7 +161,7 @@ class SlabOceanModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
-            prog_kwargs=dict(
+            prog=dict(
                 mixed_layer_depth=init_mixed_layer_depth,
                 sea_surface_temperature=init_sea_surface_temperature,
             ),
@@ -225,7 +221,7 @@ class SlabOceanModel(SlabModelBase):
             )
 
             new_state = state.copy(
-                prog_kwargs=dict(
+                prog=dict(
                     sea_surface_temperature=new_sea_surface_temperature,
                     sim_time=new_sim_time,
                 ),
