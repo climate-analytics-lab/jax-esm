@@ -224,6 +224,12 @@ class Coupler:
             for name, component in self.components.items()
         }
 
+        self.component_variable_registries = {
+             name: component.variable_registry
+            for name, component in self.components.items()
+        }
+
+       
         self._validate_components()
 
     def _validate_components(self):
