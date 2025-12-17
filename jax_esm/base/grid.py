@@ -88,6 +88,13 @@ class Grid:
         grid_specification_full_name = "" if self.grid_specification is None else self.grid_specification.full_name
         return f"{grid_specification_full_name}{self.grid_type}"
 
+    @property
+    def shape(self):
+        return self.coordinate.shape
+
+    @property
+    def dimension_names(self):
+        return self.coordinate.dims
 
 
 
