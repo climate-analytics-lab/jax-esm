@@ -143,7 +143,11 @@ def build_dataclass(shape_dict: dict):
             """Return list of tuples: (full_name, data_type, dim_names, shape)"""
             return _collect_info(cls)
 
-
+        def __getitem__(self, key: str):
+            obj = self
+            for part in key.split("."):
+                obj = getattr(obj, part)
+            return obj
 
         # Inject
         cls.__init__ = __init__
@@ -151,6 +155,7 @@ def build_dataclass(shape_dict: dict):
         cls.ones = ones
         cls.copy = copy
         cls.schema_info = schema_info
+        cls.__getitem__ = __getitem__
         
         return cls
 
