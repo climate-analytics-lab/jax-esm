@@ -9,6 +9,7 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
+from jax_esm.base.variable import VariableMetadata, VariableRegistry
 import jax_esm.base.data_structure as data_structure
 
 @data_structure.schema
@@ -20,7 +21,7 @@ class PrognosticData:
 
 @data_structure.schema
 class PhysicsData:
-    hfluxn: Annotated[float, ("latitudinal", "longitude"), "heatflux_dimension"]
+    hfluxn: Annotated[float, ("latitudinal", "longitude", "two"), "heatflux_dimension"]
 
 @data_structure.schema
 class AtmosphereState:
@@ -113,6 +114,17 @@ class SlabAtmosphereModel(SlabModelBase):
         })
         self.component_state_class = decorator(AtmosphereState)
         self.component_forcing_class = decorator(AtmosphereForcing)
+
+    def _create_variable_registries(self) -> None:
+        self.state_variable_registry = VariableRegistry()
+        self.forcing_variable_registry = VariableRegistry()
+
+        for target_registry, target_class in [
+            (self.state_variable_registry, self.component_state_class),
+            (self.forcing_variable_registry, self.component_forcing_class),
+        ]:
+            for (name, _, dimensions, shape) in target_class.schema_info():
+                target_registry.register_variable(VariableMetadata(name=name, shape=shape, dimensions=dimensions))
 
     def _initialize_fields(self):
         """Initialize atmosphere model fields."""

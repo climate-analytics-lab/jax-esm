@@ -13,12 +13,6 @@ from jax_esm import constants as constants
 from jax_esm.components.base import (
     CoupledComponent,
     CoupledComponentConfig,
-    ComponentState,
-)
-
-from jax_esm.utils.component_variable_tools import (
-    create_variable_container_class,
-    create_field_group_class,
 )
 
 from jcm.physics_interface import dynamics_state_to_physics_state
@@ -44,7 +38,7 @@ def asfloat64(tree):
 
 @tree_math.struct
 @dataclass
-class JCMState(ComponentState):
+class JCMState:
     prog: PhysicsState
     phydata: Any
     metadata: primitive_equations_states

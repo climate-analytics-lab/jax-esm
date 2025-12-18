@@ -9,8 +9,9 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import ComponentForcing, ComponentState
 import jax_esm.base.data_structure as data_structure
+
+from jax_esm.base.variable import VariableRegistry, VariableMetadata
 
 @data_structure.schema
 class PrognosticData:
@@ -109,7 +110,18 @@ class SlabOceanModel(SlabModelBase):
         decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
         self.component_state_class = decorator(OceanState)
         self.component_forcing_class = decorator(OceanForcing)
+    
+    def _create_variable_registries(self) -> None:
+        self.state_variable_registry = VariableRegistry()
+        self.forcing_variable_registry = VariableRegistry()
 
+        for target_registry, target_class in [
+            (self.state_variable_registry, self.component_state_class),
+            (self.forcing_variable_registry, self.component_forcing_class),
+        ]:
+            for (name, _, dimensions, shape) in target_class.schema_info():
+                target_registry.register_variable(VariableMetadata(name=name, shape=shape, dimensions=dimensions))
+            
     def _initialize_fields(self):
         """Initialize ocean model fields."""
         nonocn_idx = self.domain.bmask != 0

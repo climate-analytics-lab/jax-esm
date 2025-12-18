@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, ComponentForcing, CoupledComponent
+from jax_esm.components.base import CoupledComponent
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
 
@@ -60,7 +60,7 @@ class Coupler:
 
     def initialize(
         self,
-    ) -> Dict[str, tuple[ComponentState, ComponentForcing]]:
+    ) -> Dict[str, tuple[type, type]]:
         """Initialize all components.
 
         Args:
@@ -183,7 +183,7 @@ class Coupler:
                 step_times = tqdm(step_times, **tqdm_kwargs)
         
         def trajectory_function(
-            initial_coupled_state_forcing: Dict[str, tuple[ComponentState, ComponentForcing]],
+            initial_coupled_state_forcing: Dict[str, tuple[type, type]],
         ):
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,

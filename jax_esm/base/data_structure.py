@@ -130,7 +130,7 @@ def build_dataclass(shape_dict: dict):
             for name, info in flds.items():
                 full_name = f"{parent_name}.{name}" if parent_name else name
                 if isinstance(info, dict):  # leaf
-                    result.append((full_name, info["data_type"], info["dimension_names"], info["shape"]))
+                    result.append((full_name, info["data_type"], info["dimension_names"], cls.shape_dict[info["shape_name"]]))
                 elif isinstance(info, type) and hasattr(info, "_fields"):  # nested
                     result.extend(_collect_info(info, parent_name=full_name))
                 else:

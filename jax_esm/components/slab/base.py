@@ -71,6 +71,7 @@ class SlabModelBase(CoupledComponent):
 
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()
+        self._create_variable_registries()
 
         # Lat/lon grids will be set during initialize()
         self.llat_rad = None
@@ -85,6 +86,14 @@ class SlabModelBase(CoupledComponent):
         - self.component_forcing_class
         """
         pass
+
+    @abstractmethod
+    def _create_variable_registries(self) -> None:
+        """Create state_variable_registry and forcing_variable_registry
+
+        """
+        pass
+
 
     def _setup_lat_lon_grids(self) -> None:
         """Set up 2D latitude and longitude grids in radians.

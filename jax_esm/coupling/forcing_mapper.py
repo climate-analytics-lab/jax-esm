@@ -6,8 +6,6 @@ from jax import Array
 
 from jax_esm.components.base import (
     CoupledComponent,
-    ComponentForcing,
-    ComponentState,
 )
 
 
@@ -17,7 +15,7 @@ class ForcingMapper:
     components: Dict[str, CoupledComponent]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
     transformations: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, ComponentForcing]
+    component_forcing_classes: Dict[str, type]
 
     def __init__(
         self,
@@ -62,9 +60,9 @@ class ForcingMapper:
 
     def map_forcings(
         self,
-        component_forcings: Dict[str, ComponentForcing],
-        component_states: Dict[str, ComponentState],
-    ) -> Dict[str, ComponentForcing]:
+        component_forcings: Dict[str, type],
+        component_states: Dict[str, type],
+    ) -> Dict[str, type]:
         """Map fluxes and scalars between components.
 
         Args:
@@ -124,9 +122,9 @@ class ForcingMapper:
 
     def couple_components(
         self,
-        component_forcings: Dict[str, ComponentForcing],
-        component_states: Dict[str, ComponentState],
-    ) -> Dict[str, ComponentForcing]:
+        component_forcings: Dict[str, type],
+        component_states: Dict[str, type],
+    ) -> Dict[str, type]:
         """Couple components by remapping forcings with conservation checks.
 
         Args:

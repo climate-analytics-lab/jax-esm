@@ -11,36 +11,7 @@ from dataclasses import make_dataclass
 
 from jax_esm.base.exceptions import ValidationError
 from jax_esm.base.domain import Domain
-from jax_esm.coupling.variable_registry import VariableRegistry
-
-class AbstractFieldGroup:
-    pass
-
-
-class ComponentForcing(ABC):
-    @classmethod
-    @abstractmethod
-    def zeros(cls):
-        """Create a forcing instance with all fields set to zeros."""
-        pass
-
-    @classmethod
-    @abstractmethod
-    def ones(cls):
-        """Create a forcing instance with all fields set to ones."""
-        pass
-
-    @abstractmethod
-    def copy(self, **kwargs):
-        """Create a copy of this forcing instance, optionally replacing fields."""
-        pass
-
-
-class ComponentState:
-    prog: AbstractFieldGroup | Any
-    phydata: AbstractFieldGroup | Any
-
-
+from jax_esm.base.variable import VariableRegistry
 
 @dataclass
 class CoupledComponentConfig:
@@ -53,8 +24,8 @@ class CoupledComponentConfig:
 class CoupledComponent(ABC):
     """Abstract base class for Earth system components."""
 
-    component_forcing_class: ComponentForcing
-    component_state_class: ComponentState
+    component_forcing_class: type
+    component_state_class: type
     state_variable_registry: VariableRegistry
     forcing_variable_registry: VariableRegistry
     domain: Domain
@@ -64,7 +35,7 @@ class CoupledComponent(ABC):
         self.config = config
 
     @abstractmethod
-    def initialize(self) -> tuple[ComponentState, ComponentForcing]:
+    def initialize(self) -> tuple[type, type]:
         """Initialize component state and forcing.
 
         Returns:
@@ -84,8 +55,8 @@ class CoupledComponent(ABC):
 
         Returns:
             A function with signature:
-                step_fn(state: ComponentState, forcing: ComponentForcing, t: float)
-                    -> Tuple[ComponentState, Dict]
+                step_fn(state, forcing, t: float)
+                    -> Tuple[type, Dict]
 
             Where:
                 - state: Current component state
@@ -105,8 +76,8 @@ class CoupledComponent(ABC):
         """
         print(f"Validating {self.config.name}")
         for test_member, suggested_type, strictly_typed in [
-            ('component_forcing_class', ComponentForcing, False),
-            ('component_state_class', ComponentState, False),
+            ('component_forcing_class', object, False),
+            ('component_state_class', object, False),
             ('state_variable_registry', VariableRegistry, True),
             ('forcing_variable_registry', VariableRegistry, True),
             ('domain', Domain, True),
