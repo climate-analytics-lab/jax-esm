@@ -1,5 +1,6 @@
 """Slab ocean model component."""
 
+
 from typing import Optional, Dict, Any
 
 import jax_datetime as jdt
@@ -81,6 +82,12 @@ class SlabOceanModel(SlabModelBase):
         self.SST_clim = None
         self.time_factor = None
         self.cd_factor = None
+
+        self.validate()
+
+    def validate(self):
+        super()._validate()
+
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""

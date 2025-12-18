@@ -84,6 +84,12 @@ class SlabLandModel(SlabModelBase):
         self.time_factor = None
         self.cd_factor = None
 
+        self.validate()
+
+    def validate(self):
+        super()._validate()
+
+
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
         dimension_names = ("longitude", "latitude")

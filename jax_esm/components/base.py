@@ -9,6 +9,7 @@ import xarray as xr
 import tree_math
 from dataclasses import make_dataclass
 
+from jax_esm.base.exceptions import ValidationError
 from jax_esm.base.domain import Domain
 from jax_esm.coupling.variable_registry import VariableRegistry
 
@@ -94,6 +95,32 @@ class CoupledComponent(ABC):
                 - Returns: (new_state, predictions) tuple
         """
         pass
+
+
+
+    def _validate(self) -> None:
+        """Validate component configuration.
+
+        Raises:
+            ValueError: If configuration is invalid.
+        """
+        print(f"Validating {self.config.name}")
+        for test_member, suggested_type, strictly_typed in [
+            ('component_forcing_class', ComponentForcing, False),
+            ('component_state_class', ComponentState, False),
+            ('state_variable_registry', VariableRegistry, True),
+            ('forcing_variable_registry', VariableRegistry, True),
+            ('domain', Domain, True),
+        ]:
+            if not hasattr(self, test_member):
+                raise ValidationError(f"The member {test_member:s} must be assinged.")
+        
+            if not isinstance(getattr(self, test_member), suggested_type):
+                if strictly_typed:
+                    raise ValidationError(f"The member {test_member:s} must be a subclass of {str(suggested_type):s}.")
+                else:
+                    print(f"Warning: The member {test_member:s} should be a subclass of {str(suggested_type):s}.")
+
 
     @abstractmethod
     def validate(self) -> None:
