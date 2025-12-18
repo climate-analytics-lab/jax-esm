@@ -1,6 +1,6 @@
 """Slab land model component."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Annotated
 
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -10,13 +10,27 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import ComponentForcing, ComponentState
-from jax_esm.utils.component_variable_tools import (
-    create_variable_container_class,
-    create_field_group_class,
-)
+import jax_esm.base.data_structure as data_structure
+
+@data_structure.schema
+class PrognosticData:
+    sim_time: Annotated[float, (), "zero_dimensional"]
+    land_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    land_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+@data_structure.schema
+class AirlandFlux:
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 
+@data_structure.schema
+class LandState:
+    prog : PrognosticData
+
+
+@data_structure.schema
+class LandForcing:
+    flux : AirlandFlux
 
 class SlabLandModel(SlabModelBase):
     """Slab land model with prescribed depth and climatology.
@@ -92,36 +106,10 @@ class SlabLandModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
-        dimension_names = ("longitude", "latitude")
-        self.component_state_class = create_variable_container_class(
-            {
-                "prog" : create_field_group_class(
-                    fields=[
-                        ("sim_time", float, (), ()),
-                        ("land_surface_temperature", float, dimension_names, self.grid_shape),
-                        ("land_depth", float, dimension_names, self.grid_shape),
-                    ],
-                ),
-                "phydata" : create_field_group_class(
-                    fields=[],
-                ),
-            },
-            base_class = ComponentState,
-        )
 
-        self.component_forcing_class = create_variable_container_class(
-            {
-                "flux" : create_field_group_class(
-                    fields=[
-                        ("total_heat_flux", float, dimension_names, self.grid_shape),
-                    ],
-                ),
-                "scalar" : create_field_group_class(
-                    fields=[],
-                ),
-            },
-            base_class = ComponentForcing,
-        )
+        decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
+        self.component_state_class = decorator(LandState)
+        self.component_forcing_class = decorator(LandForcing)
 
     def _initialize_fields(self):
         """Initialize land model fields."""
@@ -179,12 +167,10 @@ class SlabLandModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy(
-            prog=dict(
-                land_depth=init_land_depth,
-                land_surface_temperature=init_land_surface_temperature,
-            ),
-        ), self.component_forcing_class.zeros()
+        return self.component_state_class.zeros().copy({
+            "prog.land_depth" : init_land_depth,
+            "prog.land_surface_temperature" : init_land_surface_temperature,
+        }), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for land model."""
@@ -248,13 +234,10 @@ class SlabLandModel(SlabModelBase):
 
             # Apply ocean mask
             new_land_surface_temperature = new_land_surface_temperature.at[nonland_index].set(0)
-
-            new_state = state.copy(
-                prog=dict(
-                    land_surface_temperature=new_land_surface_temperature,
-                    sim_time=new_sim_time,
-                ),
-            )
+            new_state = state.copy({
+                "prog.land_surface_temperature" : new_land_surface_temperature,
+                "prog.sim_time" : new_sim_time,
+            })
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, forcing=forcing)]
             )

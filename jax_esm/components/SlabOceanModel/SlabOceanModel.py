@@ -1,7 +1,5 @@
 """Slab ocean model component."""
-
-
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Annotated
 
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -12,11 +10,28 @@ from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
 from jax_esm.components.base import ComponentForcing, ComponentState
-from jax_esm.utils.component_variable_tools import (
-    create_variable_container_class,
-    create_field_group_class,
-)
+import jax_esm.base.data_structure as data_structure
 
+@data_structure.schema
+class PrognosticData:
+    sim_time: Annotated[float, (), "zero_dimensional"]
+    sea_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.schema
+class AirseaFlux:
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.schema
+class OceanState:
+    prog : PrognosticData
+
+
+@data_structure.schema
+class OceanForcing:
+    flux : AirseaFlux
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -91,36 +106,9 @@ class SlabOceanModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
-        dimension_names = ("longitude", "latitude")
-        self.component_state_class = create_variable_container_class(
-            {
-                "prog" : create_field_group_class(
-                    fields=[
-                        ("sim_time", float, (), ()),
-                        ("sea_surface_temperature", float, dimension_names, self.grid_shape),
-                        ("mixed_layer_depth", float, dimension_names, self.grid_shape),
-                    ],
-                ),
-                "phydata" : create_field_group_class(
-                    fields=[],
-                ),
-            },
-            base_class = ComponentState,
-        )
-
-        self.component_forcing_class = create_variable_container_class(
-            {
-                "flux" : create_field_group_class(
-                    fields=[
-                        ("total_heat_flux", float, dimension_names, self.grid_shape),
-                    ],
-                ),
-                "scalar" : create_field_group_class(
-                    fields=[],
-                ),
-            },
-            base_class = ComponentForcing,
-        )
+        decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
+        self.component_state_class = decorator(OceanState)
+        self.component_forcing_class = decorator(OceanForcing)
 
     def _initialize_fields(self):
         """Initialize ocean model fields."""
@@ -173,12 +161,10 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy(
-            prog=dict(
-                mixed_layer_depth=init_mixed_layer_depth,
-                sea_surface_temperature=init_sea_surface_temperature,
-            ),
-        ), self.component_forcing_class.zeros()
+        return self.component_state_class.zeros().copy({
+            "prog.mixed_layer_depth_max" : init_mixed_layer_depth,
+            "prog.sea_surface_temperature" : init_sea_surface_temperature,
+        }), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -233,12 +219,10 @@ class SlabOceanModel(SlabModelBase):
                 constants.freezing_point_K
             )
 
-            new_state = state.copy(
-                prog=dict(
-                    sea_surface_temperature=new_sea_surface_temperature,
-                    sim_time=new_sim_time,
-                ),
-            )
+            new_state = state.copy({
+                "prog.sea_surface_temperature" : new_sea_surface_temperature,
+                "prog.sim_time" : new_sim_time,
+            })
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, forcing=forcing)]
             )
