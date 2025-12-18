@@ -13,7 +13,6 @@ from jax_esm.base.exceptions import ValidationError
 from jax_esm.base.domain import Domain
 from jax_esm.coupling.variable_registry import VariableRegistry
 
-
 class AbstractFieldGroup:
     pass
 

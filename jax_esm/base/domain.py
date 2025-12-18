@@ -10,7 +10,8 @@ from jax_esm.base.grid import Grid, GridSpecification
 from jax_esm.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 
 from pathlib import Path
-
+from jax_esm.base.grid import Grid
+from jax import Array
 @dataclass
 class Domain:
     """
