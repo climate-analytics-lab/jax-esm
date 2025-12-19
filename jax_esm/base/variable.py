@@ -1,5 +1,5 @@
 from jax import Array
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import coordax as cx
 from dataclasses import dataclass
 from jax_esm.base.exceptions import ValidationError
@@ -44,15 +44,20 @@ class VariableRegistry:
     keeping it separate from component state objects.
     """
 
-    def __init__(self):
+    def __init__(self, variable_metadatas: Optional[List[VariableMetadata]] = None):
         self._metadata: Dict[str, VariableMetadata] = {}
+
+        if variable_metadatas is not None:
+            for variable_metadata in variable_metadatas:
+                self.register_variable(variable_metadata)
 
     def register_variable(
         self,
         variable_metadata: VariableMetadata,
-    ):
+    ) -> "VariableRegistry":
         """Register all fields for a component."""
         self._metadata[variable_metadata.name] = variable_metadata
+        return self
 
     def get_metadata(self, variable_name: str) -> VariableMetadata:
         """Retrieve metadata for a specific field."""

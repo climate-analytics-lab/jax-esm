@@ -14,6 +14,7 @@ import jax_esm.base.data_structure as data_structure
 
 from jax_esm.base.variable import VariableRegistry, VariableMetadata
 
+default_land_surface_temperature = 288.15
 
 @data_structure.schema
 class PrognosticData:
@@ -155,7 +156,7 @@ class SlabOceanModel(SlabModelBase):
 
         # Apply mask
         init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
-            0
+            default_land_surface_temperature
         )
 
         # Validate mask consistency
@@ -206,12 +207,12 @@ class SlabOceanModel(SlabModelBase):
                 ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
-                    ocn_idx, snapshot_SST_clim_beg, constants.freezing_point_K + 15.0
+                    ocn_idx, snapshot_SST_clim_beg, default_land_surface_temperature
                 )
 
                 snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
                 snapshot_SST_clim_end = jnp.where(
-                    ocn_idx, snapshot_SST_clim_end, constants.freezing_point_K + 15.0
+                    ocn_idx, snapshot_SST_clim_end, default_land_surface_temperature
                 )
 
                 SST_clim_trend = (
@@ -239,7 +240,7 @@ class SlabOceanModel(SlabModelBase):
             # Apply land mask
             new_sea_surface_temperature = new_sea_surface_temperature.at[
                 nonocn_idx
-            ].set(constants.freezing_point_K)
+            ].set(default_land_surface_temperature)
 
             new_state = state.copy(
                 {

@@ -13,6 +13,7 @@ from jax_esm.components.slab.base import SlabModelBase
 from jax_esm.base.variable import VariableMetadata, VariableRegistry
 import jax_esm.base.data_structure as data_structure
 
+default_sea_surface_temperature = 288.15
 
 @data_structure.schema
 class PrognosticData:
@@ -165,7 +166,7 @@ class SlabLandModel(SlabModelBase):
         # Apply mask
         init_land_surface_temperature = init_land_surface_temperature.at[
             nonland_index
-        ].set(0)
+        ].set(default_sea_surface_temperature)
 
         # Validate mask consistency
         if jnp.sum(jnp.isnan(init_land_surface_temperature)) == 0:
@@ -264,7 +265,7 @@ class SlabLandModel(SlabModelBase):
             # Apply ocean mask
             new_land_surface_temperature = new_land_surface_temperature.at[
                 nonland_index
-            ].set(0)
+            ].set(default_sea_surface_temperature)
             new_state = state.copy(
                 {
                     "prog.land_surface_temperature": new_land_surface_temperature,

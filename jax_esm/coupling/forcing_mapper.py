@@ -232,10 +232,12 @@ class ForcingMapper:
 
 def strget(obj, flattened_variable_name):
     splitted_names = flattened_variable_name.split(".")
-
     target = obj
     for splitted_name in splitted_names:
-        target = getattr(target, splitted_name)
+        if isinstance(target, dict):
+            target = target[splitted_name]
+        else:
+            target = getattr(target, splitted_name)
 
     return target
 
@@ -245,6 +247,12 @@ def strset(obj, flattened_variable_name, value):
 
     target = obj
     for splitted_name in splitted_names[:-1]:
-        target = getattr(target, splitted_name)
+        if isinstance(target, dict):
+            target = target[splitted_name]
+        else:
+            target = getattr(target, splitted_name)
 
-    setattr(target, splitted_names[-1], value)
+    if isinstance(target, dict):
+        target[splitted_names[-1]] = value
+    else:
+        setattr(target, splitted_names[-1], value)
