@@ -101,23 +101,23 @@ class SlabModelBase(CoupledComponent):
         Creates self.llat_rad and self.llon_rad as 2D arrays matching
         the T-grid shape.
         """
-        T_grid = self.domain.grids["T"]
-        D2_nodal_shape = T_grid.nodal_shape
+        T_grid = self.domain.horizontal_grids["T"]
+        D2_nodal_shape = T_grid.shape
 
         lat_dim_idx = next(
             i
-            for i, axis_name in enumerate(T_grid.axis_names)
+            for i, axis_name in enumerate(T_grid.coordinate.dims)
             if axis_name == "latitude"
         )
         lon_dim_idx = next(
             i
-            for i, axis_name in enumerate(T_grid.axis_names)
+            for i, axis_name in enumerate(T_grid.coordinate.dims)
             if axis_name == "longitude"
         )
 
         self.llat_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[lat_dim_idx],
+                T_grid.coordinate.fields["latitude"].data,#[lat_dim_idx],
                 axis=lon_dim_idx,
             ),
             repeats=D2_nodal_shape[lon_dim_idx],
@@ -126,7 +126,7 @@ class SlabModelBase(CoupledComponent):
 
         self.llon_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[lon_dim_idx],
+                T_grid.coordinate.fields["longitude"].data,#[lon_dim_idx],
                 axis=lat_dim_idx,
             ),
             repeats=D2_nodal_shape[lat_dim_idx],
@@ -228,7 +228,7 @@ class SlabModelBase(CoupledComponent):
         Returns:
             xarray Dataset with model output
         """
-        T_grid_axis_names = self.domain.grids["T"].axis_names
+        T_grid_axis_names = self.domain.horizontal_grids["T"].coordinate.dims
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -281,4 +281,4 @@ class SlabModelBase(CoupledComponent):
         Returns:
             Tuple of dimension names including time
         """
-        return ("time",) + self.domain.grids["T"].axis_names
+        return ("time",) + self.domain.horizontal_grids["T"].coordinate.dims

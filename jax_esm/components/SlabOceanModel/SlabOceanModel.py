@@ -124,7 +124,7 @@ class SlabOceanModel(SlabModelBase):
             
     def _initialize_fields(self):
         """Initialize ocean model fields."""
-        nonocn_idx = self.domain.bmask != 0
+        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
 
         # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
@@ -181,7 +181,7 @@ class SlabOceanModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
-        nonocn_idx = self.domain.bmask != 0
+        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
 
         def step_function(state, forcing, t):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
@@ -193,7 +193,7 @@ class SlabOceanModel(SlabModelBase):
                     t, start_day_offset, length_of_a_cycle
                 )
 
-                ocn_idx = self.domain.bmask == 0
+                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
                     ocn_idx, snapshot_SST_clim_beg, constants.freezing_point_K + 15.0

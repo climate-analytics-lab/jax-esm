@@ -111,8 +111,9 @@ def get_jcm_domain(
     )
 
     if mask_file is None:
-        fmask = jnp.ones(coordinate_T.shape)
-        bmask = jnp.ones(coordinate_T.shape)
+        print("Notice: No mask_file given. Set fmask = 0.")
+        fmask = jnp.zeros(coordinate_T.shape)
+        bmask = jnp.zeros(coordinate_T.shape)
     else:
         fmask, bmask = load_jcm_mask(mask_file)
 

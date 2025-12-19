@@ -5,12 +5,13 @@ def test_integration():
 
     from jax_esm.components import SlabOceanModel, SlabAtmosphereModel, SlabLandModel
     import jax_datetime as jdt
-    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
     from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
         generate_jcm_forcing_and_topography_files,
     )
     from pathlib import Path
-
+    from jax_esm.coupling.transformer import IdentityTransformer
+    from jax_esm.coupling.forcing_mapper import ForcingMapper
+    from jax_esm.coupling.coupler import Coupler
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
 
@@ -30,6 +31,7 @@ def test_integration():
             grid_specification=grid_specification,
             timestep=3600.0*12,
             start_datetime=start_datetime,
+            mask_file=external_files["terrain"],
             save_interval=coupling_timestep,
         ),
         ocn=SlabOceanModel(
@@ -54,8 +56,62 @@ def test_integration():
         ),
     )
 
-    # Creating model
-    model = couple(**components)
+    # Creating forcing mapping
+    transformers = dict(
+        a2o = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["atm"].domain.horizontal_grids["T"],
+                target_grid = components["ocn"].domain.horizontal_grids["T"],
+            ),
+        ),
+        o2a = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["ocn"].domain.horizontal_grids["T"],
+                target_grid = components["atm"].domain.horizontal_grids["T"],
+            ),
+        ),
+        a2l = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["atm"].domain.horizontal_grids["T"],
+                target_grid = components["lnd"].domain.horizontal_grids["T"],
+            ),
+        ),
+        l2a = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["lnd"].domain.horizontal_grids["T"],
+                target_grid = components["atm"].domain.horizontal_grids["T"],
+            ),
+        ),
+    )
+
+    forcing_mapper = ForcingMapper(components=components)
+    forcing_mapper.add_forcing_mapping(
+        source = ("atm", "phydata.total_heat_flux"),
+        target = ("ocn", "flux.total_heat_flux"),
+        transformer = transformers["a2o"]["identity_transformer"],
+    )
+    forcing_mapper.add_forcing_mapping(
+        source = ("ocn", "prog.sea_surface_temperature"),
+        target = ("atm", "scalar.sea_surface_temperature"),
+        transformer = transformers["o2a"]["identity_transformer"],
+    )
+    forcing_mapper.add_forcing_mapping(
+        source = ("atm", "phydata.total_heat_flux"),
+        target = ("lnd", "flux.total_heat_flux"),
+        transformer = transformers["a2l"]["identity_transformer"],
+    )
+    forcing_mapper.add_forcing_mapping(
+        source = ("lnd", "prog.land_surface_temperature"),
+        target = ("atm", "scalar.land_surface_temperature"),
+        transformer = transformers["l2a"]["identity_transformer"],
+    )
+
+    # Construct coupled model
+    model = Coupler(
+        components=components,
+        forcing_mapper=forcing_mapper,
+        coupling_timestep=coupling_timestep,
+    )
 
     # Obtain initial condition
     initial_coupled_state_forcing = model.initialize()

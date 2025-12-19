@@ -223,10 +223,16 @@ class Coupler:
             for name, component in self.components.items()
         }
 
-        self.component_variable_registries = {
-             name: component.variable_registry
+        self.component_state_variable_registries = {
+             name: component.state_variable_registry
             for name, component in self.components.items()
         }
+
+        self.component_forcing_variable_registries = {
+             name: component.forcing_variable_registry
+            for name, component in self.components.items()
+        }
+
 
        
         self._validate_components()

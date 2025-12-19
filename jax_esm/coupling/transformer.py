@@ -3,15 +3,10 @@ import jax.numpy as jnp
 from typing import Optional, Dict, Any, Tuple
 from jax import Array
 from dataclasses import dataclass
-
-from jax_esm.grid import Grid
-
-class ValidationError(Exception):
-    """Raised when validation fails."""
-    pass
-
-
-class GridInterpolator(ABC):
+from jax_esm.base.exceptions import ValidationError
+from jax_esm.base.grid import Grid
+from jax_esm.base.variable import VariableMetadata
+class Transformer(ABC):
     """
     Abstract base class for interpolating between climate model grids.
     
@@ -28,7 +23,7 @@ class GridInterpolator(ABC):
         validate_conservation: bool = True
     ):
         """
-        Initialize the interpolator.
+        Initialize the transformer.
         
         Parameters
         ----------
@@ -91,7 +86,7 @@ class GridInterpolator(ABC):
         ValidationError
             If validation checks fail
         """
-        # Check ijnput shape
+        # Check input shape
         if data.shape != self.source_grid.shape:
             raise ValueError(
                 f"Ijnput shape {data.shape} does not match source grid "
@@ -140,7 +135,12 @@ class GridInterpolator(ABC):
                 f"target grid shape {self.target_grid.shape}"
             )
         self.last_validation['shape_valid'] = True
-    
+ 
+    @abstractmethod
+    def validate_metadata(self, source_metadata: VariableMetadata, target_metadata: VariableMetadata):
+        """Validate the metadata"""
+        pass
+ 
     def _validate_conservation(
         self,
         source_data: Array,
@@ -194,25 +194,30 @@ class GridInterpolator(ABC):
 
 # Example implementations
 
-class IdentityInterpolator(GridInterpolator):
+class IdentityTransformer(Transformer):
     """Identity mapping (no interpolation)."""
     
     def transform(self, data: Array) -> Array:
         return data
+    
+    def validate_metadata(self, source_metadata: VariableMetadata, target_metadata: VariableMetadata):
+        if source_metadata.shape != target_metadata.shape:
+            print(source_metadata.shape)
+            print(target_metadata.shape)
+            raise ValidationError("Source and target metadata must have the same shape")
 
-
-class BilinearInterpolator(GridInterpolator):
+class BilinearTransformer(Transformer):
     """Simple bilinear interpolation (for demonstration)."""
     
     def transform(self, data: Array) -> Array:
         """Apply bilinear interpolation."""
-        from scipy.interpolate import RegularGridInterpolator
+        from scipy.interpolate import RegularTransformer
         
-        # Create interpolator for source grid
+        # Create transformer for source grid
         source_shape = self.source_grid.shape
         x = jnp.linspace(0, 1, source_shape[0])
         y = jnp.linspace(0, 1, source_shape[1])
-        interp = RegularGridInterpolator((x, y), data, method='linear')
+        interp = RegularTransformer((x, y), data, method='linear')
         
         # Create target grid coordinates
         target_shape = self.target_grid.shape
@@ -224,7 +229,7 @@ class BilinearInterpolator(GridInterpolator):
         return interp((xx, yy))
 
 
-class ConservativeInterpolator(GridInterpolator):
+class ConservativeTransformer(Transformer):
     """Conservative remapping (placeholder for actual conservative method)."""
     
     def transform(self, data: Array) -> Array:
@@ -261,8 +266,8 @@ if __name__ == "__main__":
         grid_weights=jnp.ones((100, 200))
     )
     
-    # Create interpolator
-    interpolator = ConservativeInterpolator(
+    # Create transformer
+    transformer = ConservativeTransformer(
         source_grid=atm_grid,
         target_grid=ocean_grid,
         conservation_tol=1e-3
@@ -272,7 +277,7 @@ if __name__ == "__main__":
     test_data = jnp.random.randn(180, 360)
     
     try:
-        result = interpolator(test_data)
+        result = transformer(test_data)
         print(f"Transformation successful!")
         print(f"Output shape: {result.shape}")
         print(f"Validation results: {interpolator.last_validation}")

@@ -125,8 +125,8 @@ class SlabLandModel(SlabModelBase):
 
     def _initialize_fields(self):
         """Initialize land model fields."""
-        land_index = self.domain.bmask == 1
-        nonland_index = self.domain.bmask != 1
+        land_index = self.domain.horizontal_grids["T"].bmask == 1
+        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
 
         print("Total land grid count: ", land_index.sum())
 
@@ -187,8 +187,8 @@ class SlabLandModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for land model."""
         start_day_offset = self._compute_start_day_offset()
-        nonland_index = self.domain.bmask != 1
-        land_index = self.domain.bmask == 1
+        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
+        land_index = self.domain.horizontal_grids["T"].bmask == 1
 
         def step_function(state, forcing, t):
             # Compute anomaly if climatology is given

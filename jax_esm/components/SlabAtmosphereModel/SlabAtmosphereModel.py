@@ -22,6 +22,7 @@ class PrognosticData:
 @data_structure.schema
 class PhysicsData:
     hfluxn: Annotated[float, ("latitudinal", "longitude", "two"), "heatflux_dimension"]
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 @data_structure.schema
 class AtmosphereState:
@@ -153,8 +154,8 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
-        land_index = self.domain.bmask == 1
-        ocean_index = self.domain.bmask == 0
+        land_index = self.domain.horizontal_grids["T"].bmask == 1
+        ocean_index = self.domain.horizontal_grids["T"].bmask == 0
 
         def step_function(state, forcing, t):
             # Compute wind speed
@@ -163,7 +164,6 @@ class SlabAtmosphereModel(SlabModelBase):
                 + state.prog.mean_meridional_wind_velocity ** 2
             ) ** 0.5
 
-            print("bulk_drag_coefficient = ", forcing.scalar.bulk_drag_coefficient)
             # Bulk aerodynamic formula for ocean sensible heat flux
             ocean_sensible_heat_flux = (
                 constants.surface_air_density
@@ -175,7 +175,6 @@ class SlabAtmosphereModel(SlabModelBase):
                     - state.prog.mean_air_temperature
                 )
             )
-
             # Bulk aerodynamic formula for land sensible heat flux
             land_sensible_heat_flux = (
                 constants.surface_air_density
@@ -203,12 +202,15 @@ class SlabAtmosphereModel(SlabModelBase):
             new_mean_air_temperature = (
                 state.prog.mean_air_temperature + self.cd_factor * total_heat_flux 
             )
+
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
             new_state = state.copy({
                 "prog.mean_air_temperature" : new_mean_air_temperature,
                 "prog.sim_time" : new_sim_time,
                 "phydata.hfluxn" : new_hfluxn,
+                "phydata.total_heat_flux" : total_heat_flux,
             })
+            
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, phydata=new_state.phydata, forcing=forcing)]
             )
@@ -223,6 +225,7 @@ class SlabAtmosphereModel(SlabModelBase):
 
         return dict(
             hfluxn=(["time", "longitude", "latitude", "two"], phydata.hfluxn),
+            total_heat_flux=(["time", "longitude", "latitude",], phydata.total_heat_flux),
             mean_air_temperature=(
                 ["time", "longitude", "latitude"],
                 prog.mean_air_temperature,

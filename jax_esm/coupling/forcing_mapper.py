@@ -1,13 +1,10 @@
 """Flux exchange and boundary condition translation utilities."""
 
 from typing import Any, Dict, List, Optional, Tuple, Callable
-
 from jax import Array
-
-from jax_esm.components.base import (
-    CoupledComponent,
-)
-
+from jax_esm.components.base import CoupledComponent
+from jax_esm.base.variable import VariableRegistry
+from jax_esm.coupling.transformer import Transformer
 
 class ForcingMapper:
     """Manages flux exchange and boundary condition translation between components."""
@@ -44,6 +41,18 @@ class ForcingMapper:
             component_name: component.component_forcing_class
             for component_name, component in components.items()
         }
+
+        self.component_state_variable_registries = {
+            component_name: component.state_variable_registry
+            for component_name, component in components.items()
+        }
+
+        self.component_forcing_variable_registries = {
+            component_name: component.forcing_variable_registry
+            for component_name, component in components.items()
+        }
+
+
 
         # Build connectivity graph
         self.connections = self._build_connections()
@@ -83,6 +92,9 @@ class ForcingMapper:
                 if source_component_name == target_component_name:
                     continue
 
+                target_component_variable_registry = self.component_forcing_variable_registries[target_component_name]
+                source_component_variable_registry = self.component_state_variable_registries[source_component_name]
+
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
                     (source_component_name, target_component_name), {}
@@ -105,11 +117,12 @@ class ForcingMapper:
                         target_variable_name,
                     )
                     if transform_key in self.transformations:
-                        print(f"{source_component_name:s}.{source_variable_name} => {target_component_name:s}.{target_variable_name}")
                         source_variable = self.transformations[transform_key](
                             source_variable
                         )
-
+                    print(
+                        f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
+                    )
                     strset(
                         forcing,
                         target_variable_name,
@@ -153,9 +166,9 @@ class ForcingMapper:
 
     def add_forcing_mapping(
         self,
-        source_component_name: str,
-        target_component_name: str,
-        mapping: Dict[str, str],
+        source: Tuple[str, str],
+        target: Tuple[str, str],
+        transformer: Optional[Transformer] = None,
     ) -> None:
         """Add or update flux mapping between components.
 
@@ -164,16 +177,27 @@ class ForcingMapper:
             target_component_name: Target component name
             mapping: Dictionary mapping source state names to target forcing
         """
-        self.forcing_mappings[(source_component_name, target_component_name)] = mapping
+        source_component_name, source_variable_name = source
+        target_component_name, target_variable_name = target
+        self.forcing_mappings[(source_component_name, target_component_name)] = { source_variable_name : target_variable_name }
         self.connections = self._build_connections()
-
+        
+        if transformer is not None:
+            self.add_transformation(
+                source_component_name,
+                target_component_name,
+                source_variable_name,
+                target_variable_name,
+                transformer,
+            )
+        
     def add_transformation(
         self,
         source_component_name: str,
         target_component_name: str,
         source_variable_name: str,
         target_variable_name: str,
-        transform_fn: Callable[[Array], Array],
+        transformer: Transformer,
     ) -> None:
         """Add transformation function for a specific flux.
 
@@ -184,6 +208,9 @@ class ForcingMapper:
             target_variable_name: Name of the target variable to transform
             transform_fn: Transformation function
         """
+        source_variable_metadata = self.component_state_variable_registries[source_component_name].get_metadata(source_variable_name)
+        target_variable_metadata = self.component_forcing_variable_registries[target_component_name].get_metadata(target_variable_name)
+        transformer.validate_metadata(source_variable_metadata, target_variable_metadata)
         self.transformations[
             (
                 source_component_name,
@@ -191,7 +218,7 @@ class ForcingMapper:
                 source_variable_name,
                 target_variable_name,
             )
-        ] = transform_fn
+        ] = transformer.transform
 
 
 def strget(obj, flattened_variable_name):

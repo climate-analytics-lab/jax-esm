@@ -5,13 +5,14 @@ from jax_esm.coupling.forcing_mapper import ForcingMapper
 from jax_esm.coupling.coupler import Coupler
 from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
 from jax_esm.components.JCM import JCM
-from jax_esm.utils.bilinear_interp import BilinearInterpolator
-import jax.numpy as jnp
+from jax_esm.coupling.transformer import IdentityTransformer
 
+import jax.numpy as jnp
 
 def couple_atm_ocn(
     atm: CoupledComponent,
     ocn: CoupledComponent,
+    mappings: Dict[str, Dict[str,],
     coupling_timestep: float = 86400.0,
 ):
     components = dict(
@@ -168,10 +169,10 @@ def generate_atm_ocn_interpolators(
     atm_domain = domain["atm"]
     ocn_domain = domain["ocn"]
 
-    if atm_domain.grid_specification.grid_type in [
+    if atm_domain.horizontal_grids["T"].grid_specification.grid_universe in [
         "JCM",
         "Veros",
-    ] and ocn_domain.grid_specification.grid_type in ["JCM", "Veros"]:
+    ] and ocn_domain.horizontal_grids["T"].grid_specification.grid_universe in ["JCM", "Veros"]:
 
         def find_latitude_longitude(domain: Domain):
             T_grid = domain.grids["T"]
