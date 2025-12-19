@@ -137,7 +137,7 @@ class JCM(CoupledComponent):
 
             phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
             extra = {
-                "total_heat_flux" : jnp.sum(phydata.surface_flux.hfluxn, axis=2),
+                "total_heat_flux" : - jnp.sum(phydata.surface_flux.hfluxn, axis=2), # upward positive
             }
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
