@@ -1,13 +1,13 @@
 """Earth system components module."""
 
 from jax_esm.components.JCM import JCM
-from jax_esm.components.SlabOceanModel import SlabOceanModel
-from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
-from jax_esm.components.SlabLandModel import SlabLandModel
+import jax_esm.components.slab_ocean_model as slab_ocean_model
+import jax_esm.components.slab_atmosphere_model as slab_atmosphere_model
+import jax_esm.components.slab_land_model as slab_land_model
 
 __all__ = [
     "JCM",
-    "SlabOceanModel",
-    "SlabAtmosphereModel",
-    "SlabLandModel",
+    "slab_ocean_model",
+    "slab_atmosphere_model",
+    "slab_land_model",
 ]
