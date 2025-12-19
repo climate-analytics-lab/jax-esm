@@ -56,7 +56,7 @@ def test_integration():
         ),
     )
 
-    # Creating forcing mapping
+    # Creating transofmrations
     transformers = dict(
         a2o = dict(
             identity_transformer = IdentityTransformer(

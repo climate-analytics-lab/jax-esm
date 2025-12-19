@@ -57,12 +57,19 @@ class JCM(CoupledComponent):
         model: RawJCMModel,
         coupling_timestep: float = 86400.0,
         save_interval: float = 86400.0,
+        land_model_active: bool = True,
     ):
         """
         config: Configuration of JCM.
+        
+        land_model_active: True if land temperature will be provided by coupler, False otherwise. This is a
+                           necessary information because jax-gcm uses a boolean `lfluxland` to indicate if
+                           it is going to use `ForcingData.stl_am` or not. In summary, this variable should
+                           only be False if you are running an aquaplanet.
         """
 
         self.model = model
+        self.land_model_active = land_model_active
         super().__init__(
             CoupledComponentConfig(
                 name="JCM",
@@ -116,7 +123,7 @@ class JCM(CoupledComponent):
                 "total_heat_flux" : jnp.zeros(self.model.coords.horizontal.nodal_shape),
             },
         ), self.component_forcing_class.zeros(nodal_shape=self.model.coords.horizontal.nodal_shape).copy(
-            lfluxland = jnp.bool_(True),
+            lfluxland = jnp.bool_(self.land_model_active),
         )
 
     def generate_step_function(self, jitted: bool = True):

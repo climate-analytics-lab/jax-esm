@@ -1,13 +1,16 @@
-"""Example of coupling jax-gcm with a simple slab ocean model."""
-
-
+"""Example of coupling jax-gcm with simple slab ocean and slab land models."""
 
 def test_integration():
-    from jax_esm.components import JCM, SlabOceanModel
-    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
+    
     import jcm
     import jax_datetime as jdt
     from pathlib import Path
+
+    from jax_esm.components import JCM, SlabOceanModel
+    from jax_esm.coupling.transformer import IdentityTransformer
+    from jax_esm.coupling.forcing_mapper import ForcingMapper
+    from jax_esm.coupling.coupler import Coupler
+
 
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
@@ -15,7 +18,7 @@ def test_integration():
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
     simulation_interval = jdt.to_timedelta(10, "day")
-    output_dir = Path("output/JCM_SOM_aqua").resolve()
+    output_dir = Path("output/JCM_SOM").resolve()
 
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
@@ -25,32 +28,70 @@ def test_integration():
         atm=JCM(
             model=jcm.model.Model(start_date=start_datetime),
             coupling_timestep=coupling_timestep,
+            save_interval=coupling_timestep,
+            land_model_active=False,
         ),
         ocn=SlabOceanModel(
             grid_specification=grid_specification,
             timestep=coupling_timestep,
             start_datetime=start_datetime,
             save_interval=coupling_timestep,
-            relaxation_time=60 * 86400.0,
         ),
     )
 
+    # Creating transformations
+    transformers = dict(
+        a2o = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["atm"].domain.horizontal_grids["T"],
+                target_grid = components["ocn"].domain.horizontal_grids["T"],
+            ),
+        ),
+        o2a = dict(
+            identity_transformer = IdentityTransformer(
+                source_grid = components["ocn"].domain.horizontal_grids["T"],
+                target_grid = components["atm"].domain.horizontal_grids["T"],
+            ),
+        ),
+    )
+
+    forcing_mapper = ForcingMapper(components=components)
+    forcing_mapper.add_forcing_mapping(
+        source = ("atm", "extra.total_heat_flux"),
+        target = ("ocn", "flux.total_heat_flux"),
+        transformer = transformers["a2o"]["identity_transformer"],
+    )
+    forcing_mapper.add_forcing_mapping(
+        source = ("ocn", "prog.sea_surface_temperature"),
+        target = ("atm", "sea_surface_temperature"),
+        transformer = transformers["o2a"]["identity_transformer"],
+    )
+
     # Creating model
-    model = couple(**components)
+    model = Coupler(
+        components=components,
+        forcing_mapper=forcing_mapper,
+        coupling_timestep=coupling_timestep,
+    )
+
 
     # Obtain initial condition
     initial_coupled_state_forcing = model.initialize()
 
     # Run coupled model
     print("Running model...")
-    state_holder, predictions = model.run(
-        initial_coupled_state_forcing=initial_coupled_state_forcing,
+    trajectory_function = model.generate_trajectory_function(
         start_time=0,
         end_time=simulation_interval / jdt.to_timedelta(1, "second"),
         jitted=True,
         show_progress=True,
         tqdm_kwargs=dict(desc="Simulation"),
     )
+ 
+    # Run coupled model
+    print("Running model...")
+    state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+ 
     # Convert output into xarray
     output_dict = model.predictions_to_xarray(predictions)
 
