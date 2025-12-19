@@ -306,3 +306,12 @@ class Coupler:
             )
 
         return d
+
+    def get_info(self):
+        info = dict(
+            coupling_timestep = self.coupling_timestep,
+            component_info = {
+                component_name : component.get_info() for component_name, component in self.components.items()
+            },
+        )
+        return info

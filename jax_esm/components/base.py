@@ -112,3 +112,6 @@ class CoupledComponent(ABC):
             and metadata.
         """
         pass
+
+    def get_info(self) -> Dict:
+        return {'name': self.config.name}
