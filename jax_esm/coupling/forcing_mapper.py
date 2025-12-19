@@ -1,10 +1,9 @@
 """Flux exchange and boundary condition translation utilities."""
 
 from typing import Any, Dict, List, Optional, Tuple, Callable
-from jax import Array
 from jax_esm.components.base import CoupledComponent
-from jax_esm.base.variable import VariableRegistry
 from jax_esm.coupling.transformer import Transformer
+
 
 class ForcingMapper:
     """Manages flux exchange and boundary condition translation between components."""
@@ -52,8 +51,6 @@ class ForcingMapper:
             for component_name, component in components.items()
         }
 
-
-
         # Build connectivity graph
         self.connections = self._build_connections()
 
@@ -92,8 +89,12 @@ class ForcingMapper:
                 if source_component_name == target_component_name:
                     continue
 
-                target_component_variable_registry = self.component_forcing_variable_registries[target_component_name]
-                source_component_variable_registry = self.component_state_variable_registries[source_component_name]
+                target_component_variable_registry = (
+                    self.component_forcing_variable_registries[target_component_name]
+                )
+                source_component_variable_registry = (
+                    self.component_state_variable_registries[source_component_name]
+                )
 
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
@@ -179,9 +180,11 @@ class ForcingMapper:
         """
         source_component_name, source_variable_name = source
         target_component_name, target_variable_name = target
-        self.forcing_mappings[(source_component_name, target_component_name)] = { source_variable_name : target_variable_name }
+        self.forcing_mappings[(source_component_name, target_component_name)] = {
+            source_variable_name: target_variable_name
+        }
         self.connections = self._build_connections()
-        
+
         if transformer is not None:
             self.add_transformation(
                 source_component_name,
@@ -190,7 +193,7 @@ class ForcingMapper:
                 target_variable_name,
                 transformer,
             )
-        
+
     def add_transformation(
         self,
         source_component_name: str,
@@ -208,9 +211,15 @@ class ForcingMapper:
             target_variable_name: Name of the target variable to transform
             transform_fn: Transformation function
         """
-        source_variable_metadata = self.component_state_variable_registries[source_component_name].get_metadata(source_variable_name)
-        target_variable_metadata = self.component_forcing_variable_registries[target_component_name].get_metadata(target_variable_name)
-        transformer.validate_metadata(source_variable_metadata, target_variable_metadata)
+        source_variable_metadata = self.component_state_variable_registries[
+            source_component_name
+        ].get_metadata(source_variable_name)
+        target_variable_metadata = self.component_forcing_variable_registries[
+            target_component_name
+        ].get_metadata(target_variable_name)
+        transformer.validate_metadata(
+            source_variable_metadata, target_variable_metadata
+        )
         self.transformations[
             (
                 source_component_name,

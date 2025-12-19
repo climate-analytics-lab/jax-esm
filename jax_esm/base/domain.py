@@ -1,22 +1,22 @@
-from typing import List, Tuple, Optional, Dict
+from typing import Optional, Dict
 from jax import Array
 import jax.numpy as jnp
 import xarray as xr
 import dinosaur
 from dataclasses import dataclass
-import re
 
 from jax_esm.base.grid import Grid, GridSpecification
 from jax_esm.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 
 from pathlib import Path
-from jax_esm.base.grid import Grid
-from jax import Array
+
+
 @dataclass
 class Domain:
     """
-        Domain is a collection of horizontal_grids plus other meta data such as topography
+    Domain is a collection of horizontal_grids plus other meta data such as topography
     """
+
     horizontal_grids: Dict[str, Grid]
     topography: Dict[str, Array | None]
 
@@ -33,7 +33,9 @@ class Domain:
 
         d = None
 
-        parsed_grid_specification = GridSpecification.parse_grid_specification(grid_specification)
+        parsed_grid_specification = GridSpecification.parse_grid_specification(
+            grid_specification
+        )
         if parsed_grid_specification.grid_universe == "JCM":
             d = get_jcm_domain(
                 horizontal_resolution=int(parsed_grid_specification.grid_family[1:]),
@@ -71,6 +73,7 @@ def load_jcm_mask(mask_file):
 
     return fmask, bmask
 
+
 def load_jcm_topography_file(
     topography_file: str,
 ):
@@ -103,7 +106,7 @@ def get_jcm_domain(
     )
 
     hgrid = one_layer_coords.horizontal
-    
+
     coordinate_T = generate_coordinate_from_latitude_longitude(
         latitude=hgrid.latitudes,
         longitude=hgrid.longitudes,
@@ -123,13 +126,15 @@ def get_jcm_domain(
         topography = load_jcm_topography_file(topography_file)
 
     return Domain(
-        horizontal_grids = dict(
-            T = Grid(
-                coordinate = coordinate_T,
-                grid_type = "T",
-                grid_specification=GridSpecification(grid_universe="JCM", grid_family=grid_family),
-                bmask = bmask,
-                fmask = fmask,
+        horizontal_grids=dict(
+            T=Grid(
+                coordinate=coordinate_T,
+                grid_type="T",
+                grid_specification=GridSpecification(
+                    grid_universe="JCM", grid_family=grid_family
+                ),
+                bmask=bmask,
+                fmask=fmask,
             ),
         ),
         topography=topography,
@@ -164,7 +169,10 @@ def get_veros_domain(
     grids = None
     try:
         ds = xr.open_dataset(
-            Path(jax_esm.__file__).parent / "data" / "veros" / f"veros_{grid_family:s}.nc"
+            Path(jax_esm.__file__).parent
+            / "data"
+            / "veros"
+            / f"veros_{grid_family:s}.nc"
         )
         longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
@@ -203,13 +211,15 @@ def get_veros_domain(
         pass
 
     return Domain(
-        horizontal_grids = dict(
-            T = Grid(
-                coordinate = coordinate_T,
-                grid_type = "T",
-                grid_specification=GridSpecification(grid_universe="Veros", grid_family=grid_family),
-                bmask = bmask,
-                fmask = fmask,
+        horizontal_grids=dict(
+            T=Grid(
+                coordinate=coordinate_T,
+                grid_type="T",
+                grid_specification=GridSpecification(
+                    grid_universe="Veros", grid_family=grid_family
+                ),
+                bmask=bmask,
+                fmask=fmask,
             ),
         ),
         topography=topography,

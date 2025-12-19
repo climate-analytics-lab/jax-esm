@@ -12,38 +12,55 @@ from jax_esm.components.slab.base import SlabModelBase
 from jax_esm.base.variable import VariableMetadata, VariableRegistry
 import jax_esm.base.data_structure as data_structure
 
+
 @data_structure.schema
 class PrognosticData:
     sim_time: Annotated[float, (), "zero_dimensional"]
-    mean_air_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    mean_zonal_wind_velocity: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    mean_meridional_wind_velocity: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    mean_air_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    mean_zonal_wind_velocity: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    mean_meridional_wind_velocity: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+
 
 @data_structure.schema
 class PhysicsData:
     hfluxn: Annotated[float, ("latitudinal", "longitude", "two"), "heatflux_dimension"]
     total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
+
 @data_structure.schema
 class AtmosphereState:
-    prog : PrognosticData
-    phydata : PhysicsData
+    prog: PrognosticData
+    phydata: PhysicsData
+
 
 @data_structure.schema
 class SurfaceForcing:
-    bulk_drag_coefficient : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    bare_land_albedo : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    sea_ice_concentration : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    soil_moisture : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    snow_cover : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    land_surface_temperature : Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    sea_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    bulk_drag_coefficient: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    bare_land_albedo: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    sea_ice_concentration: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    soil_moisture: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    snow_cover: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    land_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    sea_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
 
 
 @data_structure.schema
 class AtmosphereForcing:
-    scalar : SurfaceForcing
-
+    scalar: SurfaceForcing
 
 
 class SlabAtmosphereModel(SlabModelBase):
@@ -106,13 +123,14 @@ class SlabAtmosphereModel(SlabModelBase):
     def validate(self):
         super()._validate()
 
-
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for atmosphere model."""
-        decorator = data_structure.build_dataclass({
-            "two_dimensional": self.grid_shape,
-            "heatflux_dimension": self.grid_shape + (2,),
-        })
+        decorator = data_structure.build_dataclass(
+            {
+                "two_dimensional": self.grid_shape,
+                "heatflux_dimension": self.grid_shape + (2,),
+            }
+        )
         self.component_state_class = decorator(AtmosphereState)
         self.component_forcing_class = decorator(AtmosphereForcing)
 
@@ -124,8 +142,10 @@ class SlabAtmosphereModel(SlabModelBase):
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
-            for (name, _, dimensions, shape) in target_class.schema_info():
-                target_registry.register_variable(VariableMetadata(name=name, shape=shape, dimensions=dimensions))
+            for name, _, dimensions, shape in target_class.schema_info():
+                target_registry.register_variable(
+                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
+                )
 
     def _initialize_fields(self):
         """Initialize atmosphere model fields."""
@@ -144,13 +164,17 @@ class SlabAtmosphereModel(SlabModelBase):
         )
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy({
-            "prog.mean_air_temperature" : init_mean_air_temperature,
-            "prog.mean_zonal_wind_velocity" : init_mean_zonal_wind_velocity,
-            "prog.mean_meridional_wind_velocity" : init_mean_meridional_wind_velocity,
-        }), self.component_forcing_class.zeros().copy({
-            "scalar.bulk_drag_coefficient" : jnp.array(1e-3),
-        })
+        return self.component_state_class.zeros().copy(
+            {
+                "prog.mean_air_temperature": init_mean_air_temperature,
+                "prog.mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
+                "prog.mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
+            }
+        ), self.component_forcing_class.zeros().copy(
+            {
+                "scalar.bulk_drag_coefficient": jnp.array(1e-3),
+            }
+        )
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -160,8 +184,8 @@ class SlabAtmosphereModel(SlabModelBase):
         def step_function(state, forcing, t):
             # Compute wind speed
             wind_speed = (
-                state.prog.mean_zonal_wind_velocity ** 2
-                + state.prog.mean_meridional_wind_velocity ** 2
+                state.prog.mean_zonal_wind_velocity**2
+                + state.prog.mean_meridional_wind_velocity**2
             ) ** 0.5
 
             # Bulk aerodynamic formula for ocean sensible heat flux
@@ -196,21 +220,23 @@ class SlabAtmosphereModel(SlabModelBase):
             total_heat_flux = (
                 ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
             )
-            
+
             # Update temperature
             new_sim_time = state.prog.sim_time + self.timestep
             new_mean_air_temperature = (
-                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux 
+                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
             )
 
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
-            new_state = state.copy({
-                "prog.mean_air_temperature" : new_mean_air_temperature,
-                "prog.sim_time" : new_sim_time,
-                "phydata.hfluxn" : new_hfluxn,
-                "phydata.total_heat_flux" : total_heat_flux,
-            })
-            
+            new_state = state.copy(
+                {
+                    "prog.mean_air_temperature": new_mean_air_temperature,
+                    "prog.sim_time": new_sim_time,
+                    "phydata.hfluxn": new_hfluxn,
+                    "phydata.total_heat_flux": total_heat_flux,
+                }
+            )
+
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, phydata=new_state.phydata, forcing=forcing)]
             )
@@ -225,7 +251,14 @@ class SlabAtmosphereModel(SlabModelBase):
 
         return dict(
             hfluxn=(["time", "longitude", "latitude", "two"], phydata.hfluxn),
-            total_heat_flux=(["time", "longitude", "latitude",], phydata.total_heat_flux),
+            total_heat_flux=(
+                [
+                    "time",
+                    "longitude",
+                    "latitude",
+                ],
+                phydata.total_heat_flux,
+            ),
             mean_air_temperature=(
                 ["time", "longitude", "latitude"],
                 prog.mean_air_temperature,

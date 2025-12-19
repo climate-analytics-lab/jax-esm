@@ -1,4 +1,5 @@
 """Slab ocean model component."""
+
 from typing import Optional, Dict, Any, Annotated
 
 import jax_datetime as jdt
@@ -13,10 +14,13 @@ import jax_esm.base.data_structure as data_structure
 
 from jax_esm.base.variable import VariableRegistry, VariableMetadata
 
+
 @data_structure.schema
 class PrognosticData:
     sim_time: Annotated[float, (), "zero_dimensional"]
-    sea_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    sea_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
     mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 
@@ -27,12 +31,13 @@ class AirseaFlux:
 
 @data_structure.schema
 class OceanState:
-    prog : PrognosticData
+    prog: PrognosticData
 
 
 @data_structure.schema
 class OceanForcing:
-    flux : AirseaFlux
+    flux: AirseaFlux
+
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -104,13 +109,12 @@ class SlabOceanModel(SlabModelBase):
     def validate(self):
         super()._validate()
 
-
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
         decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
         self.component_state_class = decorator(OceanState)
         self.component_forcing_class = decorator(OceanForcing)
-    
+
     def _create_variable_registries(self) -> None:
         self.state_variable_registry = VariableRegistry()
         self.forcing_variable_registry = VariableRegistry()
@@ -119,9 +123,11 @@ class SlabOceanModel(SlabModelBase):
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
-            for (name, _, dimensions, shape) in target_class.schema_info():
-                target_registry.register_variable(VariableMetadata(name=name, shape=shape, dimensions=dimensions))
-            
+            for name, _, dimensions, shape in target_class.schema_info():
+                target_registry.register_variable(
+                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
+                )
+
     def _initialize_fields(self):
         """Initialize ocean model fields."""
         nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
@@ -145,10 +151,12 @@ class SlabOceanModel(SlabModelBase):
             init_sea_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
                 + constants.freezing_point_K
-            ) 
+            )
 
         # Apply mask
-        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(0)
+        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
+            0
+        )
 
         # Validate mask consistency
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
@@ -173,10 +181,12 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy({
-            "prog.mixed_layer_depth_max" : init_mixed_layer_depth,
-            "prog.sea_surface_temperature" : init_sea_surface_temperature,
-        }), self.component_forcing_class.zeros()
+        return self.component_state_class.zeros().copy(
+            {
+                "prog.mixed_layer_depth_max": init_mixed_layer_depth,
+                "prog.sea_surface_temperature": init_sea_surface_temperature,
+            }
+        ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -216,7 +226,7 @@ class SlabOceanModel(SlabModelBase):
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * ( - forcing.flux.total_heat_flux )
+                + self.cd_factor * (-forcing.flux.total_heat_flux)
             )
 
             # Add climatology back
@@ -227,14 +237,16 @@ class SlabOceanModel(SlabModelBase):
                 )
 
             # Apply land mask
-            new_sea_surface_temperature = new_sea_surface_temperature.at[nonocn_idx].set(
-                constants.freezing_point_K
-            )
+            new_sea_surface_temperature = new_sea_surface_temperature.at[
+                nonocn_idx
+            ].set(constants.freezing_point_K)
 
-            new_state = state.copy({
-                "prog.sea_surface_temperature" : new_sea_surface_temperature,
-                "prog.sim_time" : new_sim_time,
-            })
+            new_state = state.copy(
+                {
+                    "prog.sea_surface_temperature": new_sea_surface_temperature,
+                    "prog.sim_time": new_sim_time,
+                }
+            )
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, forcing=forcing)]
             )

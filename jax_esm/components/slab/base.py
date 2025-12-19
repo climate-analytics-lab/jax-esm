@@ -89,11 +89,8 @@ class SlabModelBase(CoupledComponent):
 
     @abstractmethod
     def _create_variable_registries(self) -> None:
-        """Create state_variable_registry and forcing_variable_registry
-
-        """
+        """Create state_variable_registry and forcing_variable_registry"""
         pass
-
 
     def _setup_lat_lon_grids(self) -> None:
         """Set up 2D latitude and longitude grids in radians.
@@ -117,7 +114,7 @@ class SlabModelBase(CoupledComponent):
 
         self.llat_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.coordinate.fields["latitude"].data,#[lat_dim_idx],
+                T_grid.coordinate.fields["latitude"].data,  # [lat_dim_idx],
                 axis=lon_dim_idx,
             ),
             repeats=D2_nodal_shape[lon_dim_idx],
@@ -126,7 +123,7 @@ class SlabModelBase(CoupledComponent):
 
         self.llon_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.coordinate.fields["longitude"].data,#[lon_dim_idx],
+                T_grid.coordinate.fields["longitude"].data,  # [lon_dim_idx],
                 axis=lat_dim_idx,
             ),
             repeats=D2_nodal_shape[lat_dim_idx],

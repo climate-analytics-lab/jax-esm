@@ -1,21 +1,19 @@
-from typing import List, Tuple, Optional, Dict
+from typing import Optional, Dict
 from jax import Array
-import jax.numpy as jnp
-import xarray as xr
-import dinosaur
 from dataclasses import dataclass
 import re
-from pathlib import Path
 import coordax as cx
+
 
 @dataclass
 class GridSpecification:
     """
-        grid_universe : Top name for classification. Such as JCM, GFDL, CESM, ... , and such.
-        grid_family   : Such as T31, FV45, ..., gx1v6 and such.
+    grid_universe : Top name for classification. Such as JCM, GFDL, CESM, ... , and such.
+    grid_family   : Such as T31, FV45, ..., gx1v6 and such.
     """
-    grid_family    : str
-    grid_universe  : str
+
+    grid_family: str
+    grid_universe: str
 
     def parse_grid_specification(grid_specification_string: str) -> Dict[str, str]:
         """
@@ -47,10 +45,9 @@ class GridSpecification:
             )
 
         return GridSpecification(
-            grid_universe = match.group(1),
-            grid_family = match.group(2),
+            grid_universe=match.group(1),
+            grid_family=match.group(2),
         )
-
 
     @property
     def full_name(self):
@@ -59,33 +56,39 @@ class GridSpecification:
     def __str__(self):
         return self.full_name
 
+
 @dataclass
 class Grid:
     """
-        Grid specifies the coordinate (shape the most important) and additionally weights and masks.
+    Grid specifies the coordinate (shape the most important) and additionally weights and masks.
     """
 
     coordinate: cx.Coordinate
-    grid_type: Optional[str] = None # "T" for tracer grid (most common), "U" for U grid (arakawa-grid context), ... and such.
+    grid_type: Optional[str] = (
+        None  # "T" for tracer grid (most common), "U" for U grid (arakawa-grid context), ... and such.
+    )
     grid_specification: Optional[GridSpecification] = None
     weights: Optional[Array] = None
     bmask: Optional[Array] = None
     fmask: Optional[Array] = None
- 
+
     def __post_init__(self):
         if self.weights is not None:
-            assert self.grid_weights.shape == self.shape, \
+            assert self.grid_weights.shape == self.shape, (
                 "Area weights must match grid shape"
+            )
         if self.bmask is not None:
-            assert self.bmask.shape == self.shape, \
-                "Binary mask must match grid shape"
+            assert self.bmask.shape == self.shape, "Binary mask must match grid shape"
         if self.fmask is not None:
-            assert self.fmask.shape == self.shape, \
+            assert self.fmask.shape == self.shape, (
                 "Fractional mask must match grid shape"
+            )
 
     @property
     def full_name(self):
-        grid_specification_full_name = "" if self.grid_specification is None else self.grid_specification.full_name
+        grid_specification_full_name = (
+            "" if self.grid_specification is None else self.grid_specification.full_name
+        )
         return f"{grid_specification_full_name}{self.grid_type}"
 
     @property
@@ -95,6 +98,3 @@ class Grid:
     @property
     def dimension_names(self):
         return self.coordinate.dims
-
-
-

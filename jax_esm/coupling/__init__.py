@@ -1,4 +1,3 @@
 """Coupling module for Earth system components."""
 
-__all__ = [
-]
+__all__ = []

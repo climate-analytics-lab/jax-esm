@@ -26,7 +26,6 @@ from jax_esm.base.domain import Domain
 import tree_math
 from typing import Any
 
-from jax_esm.base.variable import VariableMetadata, VariableRegistry
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
 # by jcm is int32, but it will change to float32 after step_function. This causes
@@ -36,12 +35,14 @@ def asfloat64(tree):
 
     return jax.tree_util.tree_map(lambda arr: jnp.array(arr).astype(jnp.float64), tree)
 
+
 @tree_math.struct
 @dataclass
 class JCMState:
     prog: PhysicsState
     phydata: Any
     metadata: primitive_equations_states
+
 
 class JCM(CoupledComponent):
     """
@@ -101,7 +102,6 @@ class JCM(CoupledComponent):
 
     def generate_step_function(self, jitted: bool = True):
         def step_function(state, forcing, t):
-
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state=state.metadata,
                 save_interval=self.save_interval / 86400.0,  # in days
