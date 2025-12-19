@@ -26,6 +26,7 @@ from jax_esm.base.domain import Domain
 import tree_math
 from typing import Any
 
+from jax_esm.base.variable import VariableMetadata, VariableRegistry
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
 # by jcm is int32, but it will change to float32 after step_function. This causes
@@ -35,14 +36,12 @@ def asfloat64(tree):
 
     return jax.tree_util.tree_map(lambda arr: jnp.array(arr).astype(jnp.float64), tree)
 
-
 @tree_math.struct
 @dataclass
 class JCMState:
     prog: PhysicsState
     phydata: Any
     metadata: primitive_equations_states
-
 
 class JCM(CoupledComponent):
     """
@@ -79,30 +78,14 @@ class JCM(CoupledComponent):
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = JCMState
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[
-                    ("bare_land_albedo", float, D2_nodal_shape),
-                    ("sea_ice_concentration", float, D2_nodal_shape),
-                    ("soil_moisture", float, D2_nodal_shape),
-                    ("snow_cover", float, D2_nodal_shape),
-                    ("land_surface_temperature", float, D2_nodal_shape),
-                    ("sea_surface_temperature", float, D2_nodal_shape),
-                ],
-            ),
-        )
+        self.component_forcing_class = ForcingData
 
     def initialize(
         self,
         initial_state: PhysicsState | primitive_equations.State = None,
         start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
     ):
+        D2_nodal_shape = self.model.coords.nodal_shape[1:]
         _modal_state = asfloat64(self.model._prepare_initial_modal_state())
         self.model._final_modal_state = _modal_state
         return JCMState(
@@ -114,25 +97,16 @@ class JCM(CoupledComponent):
                 )
             ),
             prog=dynamics_state_to_physics_state(_modal_state, self.model.primitive),
-        ), self.component_forcing_class.zeros()
+        ), self.component_forcing_class.zeros(nodal_shape=D2_nodal_shape)
 
     def generate_step_function(self, jitted: bool = True):
         def step_function(state, forcing, t):
-            jcm_forcing = ForcingData(
-                alb0=forcing.scalar.bare_land_albedo,
-                sice_am=forcing.scalar.sea_ice_concentration,
-                snowc_am=forcing.scalar.snow_cover,
-                soilw_am=forcing.scalar.soil_moisture,
-                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(constants.freezing_point_K + 15.0),
-                sea_surface_temperature=forcing.scalar.sea_surface_temperature,
-                lfluxland=True,
-            )
 
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state=state.metadata,
                 save_interval=self.save_interval / 86400.0,  # in days
                 total_time=self.config.timestep / 86400.0,  # in days
-                forcing=jcm_forcing,
+                forcing=forcing,
             )
 
             # phydata is a stacked object, so I take the mean here.
