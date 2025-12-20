@@ -76,7 +76,11 @@ def tree_to_dict(obj: Any) -> Any:
         return { (f"{key}", type(value).__name__): tree_to_dict(value) for key, value in obj.items()}
     
     # List -> recursively process items
-    if isinstance(obj, list | tuple):
+    if isinstance(obj, list):
+        return { (f"{{{i:d}}}", type(item).__name__) : tree_to_dict(item) for i, item in enumerate(obj) }
+ 
+    # Tuple -> recursively process items
+    if isinstance(obj, tuple):
         return { (f"[{i:d}]", type(item).__name__) : tree_to_dict(item) for i, item in enumerate(obj) }
     
     # NumPy array -> list
