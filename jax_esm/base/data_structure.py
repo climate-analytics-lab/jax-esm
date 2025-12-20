@@ -3,9 +3,10 @@ from typing import Any, List, Tuple
 import jax.numpy as jnp
 from copy import deepcopy
 from jax.tree_util import register_pytree_node_class
+import tree_math
+from dataclasses import dataclass
 
-
-def schema(cls):
+def typed_and_dimensioned(cls):
     hints = get_type_hints(cls, include_extras=True)
     cls._fields = {}
 
@@ -16,9 +17,13 @@ def schema(cls):
                 data_type=meta[0], dimension_names=meta[1], shape_name=meta[2]
             )
         else:
-            cls._fields[name] = hint  # nested schema
+            if hasattr(hint, "is_typed_and_dimensioned") and hint.is_typed_and_dimensioned:
+                cls._fields[name] = hint  # nested schema
+            else:
+                raise Exception("Cannot contain class that is not typed_and_dimensioned, or Annotated")
+                
 
-    cls.is_schema = True
+    cls.is_typed_and_dimensioned = True
 
     def tree_flatten(self):
         children = []
@@ -38,6 +43,8 @@ def schema(cls):
                         name=name, is_leaf=False, cls=info, aux_data=_children_aux_data
                     )
                 )
+            else:
+                raise Exception("Error: Should not be here.")
 
         return children, aux_data
 
@@ -56,12 +63,12 @@ def schema(cls):
     cls.tree_unflatten = tree_unflatten
     cls.tree_flatten = tree_flatten
 
-    return register_pytree_node_class(cls)
+    return register_pytree_node_class(dataclass(cls))
 
 
-def build_dataclass(shape_dict: dict):
+def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
     def decorator(cls):
-        if getattr(cls, "is_schema", None) != True:
+        if getattr(cls, "is_typed_and_dimensioned", None) != True:
             raise Exception("Cannot apply build_dataclass on a non-schemaed class.")
 
         cls.shape_dict = shape_dict or {}
@@ -150,7 +157,7 @@ def build_dataclass(shape_dict: dict):
 
         # Attribute introspection method
         @classmethod
-        def schema_info(cls) -> List[Tuple[str, Any, Any, Any]]:
+        def typed_and_dimensioned_info(cls) -> List[Tuple[str, Any, Any, Any]]:
             """Return list of tuples: (full_name, data_type, dim_names, shape)"""
             return _collect_info(cls)
 
@@ -165,7 +172,7 @@ def build_dataclass(shape_dict: dict):
         cls.zeros = zeros
         cls.ones = ones
         cls.copy = copy
-        cls.schema_info = schema_info
+        cls.typed_and_dimensioned_info = typed_and_dimensioned_info
         cls.__getitem__ = __getitem__
 
         return cls

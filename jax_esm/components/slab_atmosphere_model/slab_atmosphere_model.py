@@ -13,7 +13,7 @@ from jax_esm.base.variable import VariableMetadata, VariableRegistry
 import jax_esm.base.data_structure as data_structure
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class PrognosticData:
     sim_time: Annotated[float, (), "zero_dimensional"]
     mean_air_temperature: Annotated[
@@ -27,19 +27,19 @@ class PrognosticData:
     ]
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class PhysicsData:
     hfluxn: Annotated[float, ("latitudinal", "longitude", "two"), "heatflux_dimension"]
     total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class AtmosphereState:
     prog: PrognosticData
     phydata: PhysicsData
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class SurfaceForcing:
     bulk_drag_coefficient: Annotated[
         float, ("latitudinal", "longitude"), "two_dimensional"
@@ -58,7 +58,7 @@ class SurfaceForcing:
     ]
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class AtmosphereForcing:
     scalar: SurfaceForcing
 
@@ -125,7 +125,7 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for atmosphere model."""
-        decorator = data_structure.build_dataclass(
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
             {
                 "two_dimensional": self.grid_shape,
                 "heatflux_dimension": self.grid_shape + (2,),
@@ -142,7 +142,7 @@ class SlabAtmosphereModel(SlabModelBase):
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
-            for name, _, dimensions, shape in target_class.schema_info():
+            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry.register_variable(
                     VariableMetadata(name=name, shape=shape, dimensions=dimensions)
                 )
