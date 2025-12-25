@@ -308,10 +308,11 @@ class Coupler:
         return d
 
     def get_info(self):
-        info = dict(
-            coupling_timestep = self.coupling_timestep,
-            component_info = {
+        return {
+            "coupling_timestep" : self.coupling_timestep,
+            "component_info" : {
                 component_name : component.get_info() for component_name, component in self.components.items()
             },
-        )
+            "forcing_mapper" : "None" if self.forcing_mapper is None else self.forcing_mapper.get_info(),
+        }
         return info

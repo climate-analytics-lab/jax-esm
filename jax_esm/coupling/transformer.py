@@ -15,6 +15,12 @@ class Transformer(ABC):
     grid configurations (e.g., atmosphere to ocean) with built-in validation.
     """
 
+    source_grid: Grid
+    target_grid: Grid
+    conservation_tol: float
+    validate_shape: bool
+    validate_conservation: bool
+
     def __init__(
         self,
         source_grid: Grid,
@@ -198,6 +204,16 @@ class Transformer(ABC):
                 f"Target integral: {target_integral:.6e}"
             )
 
+
+    def get_info(self):
+        
+        return {
+            'source_grid' : self.source_grid.get_info(), 
+            'target_grid' : self.target_grid.get_info(),
+            'validate_conservation' : self.validate_conservation,
+            'validate_shape' : self.validate_shape,
+        }
+       
 
 # Example implementations
 
