@@ -61,6 +61,8 @@ class GridSpecification:
 class Grid:
     """
     Grid specifies the coordinate (shape the most important) and additionally weights and masks.
+    The binary mask `bmask` values adopt the convention that 1 means land, and 0 means ocean
+    The fraction mask `fmask` means the fraction of grid area occupied by land.
     """
 
     coordinate: cx.Coordinate
