@@ -1,9 +1,9 @@
 from typing import Optional, Dict
+import jax.numpy as jnp
 from jax import Array
 from dataclasses import dataclass
 import re
 import coordax as cx
-
 
 @dataclass
 class GridSpecification:
@@ -62,6 +62,8 @@ class GridSpecification:
 class Grid:
     """
     Grid specifies the coordinate (shape the most important) and additionally weights and masks.
+    The binary mask `bmask` values adopt the convention that 1 means land, and 0 means ocean
+    The fraction mask `fmask` means the fraction of grid area occupied by land.
     """
 
     coordinate: cx.Coordinate
@@ -99,3 +101,29 @@ class Grid:
     @property
     def dimension_names(self):
         return self.coordinate.dims
+
+    def get_info(self):
+        
+        bmask_info = None
+        if self.bmask is not None:
+            count_ones  = jnp.sum(self.bmask == 1)
+            count_zeros = jnp.sum(self.bmask == 0)
+            total = count_zeros + count_ones
+            bmask_info = {
+                'shape' : str(self.bmask.shape),
+                'count 1' : f"{count_ones:d} / {total:d} ({100*count_ones/total:.1f}%)",
+                'count 0' : f"{count_zeros:d} / {total:d} ({100*count_zeros/total:.1f}%)",
+            }
+ 
+        weights_info = None
+        if self.weights is not None:
+            weights_info = {
+                'shape' : str(self.weights.shape),
+                'sum of weights' : f"{jnp.sum(self.weights):f}",
+            }
+        
+        return {
+            'grid_specification' : str(self.grid_specification),
+            'bmask' : bmask_info,
+            'weights' : weights_info,
+        }

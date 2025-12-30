@@ -9,6 +9,8 @@ def test_integration():
     from jax_esm.coupling.transformer import IdentityTransformer
     from jax_esm.coupling.forcing_mapper import ForcingMapper
     from jax_esm.coupling.coupler import Coupler
+    import jax_esm.utils.tree_tools as tree_tools
+
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"
 
@@ -71,8 +73,14 @@ def test_integration():
         coupling_timestep=coupling_timestep,
     )
 
+    print("Model info: ") 
+    tree_tools.print_tree(model.get_info(), root="Model")
+
     # Obtain initial condition
     initial_coupled_state_forcing = model.initialize()
+
+    print("Model state:")
+    tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
    
     trajectory_function = model.generate_trajectory_function(
         start_time=0,

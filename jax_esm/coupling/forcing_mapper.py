@@ -118,7 +118,7 @@ class ForcingMapper:
                         target_variable_name,
                     )
                     if transform_key in self.transformations:
-                        source_variable = self.transformations[transform_key](
+                        source_variable = self.transformations[transform_key].transform(
                             source_variable
                         )
                     print(
@@ -227,7 +227,25 @@ class ForcingMapper:
                 source_variable_name,
                 target_variable_name,
             )
-        ] = transformer.transform
+        ] = transformer
+
+    def get_info(self):
+
+        transformer_info = dict()
+        for i, key in enumerate(self.transformations.keys()):
+            source_component_name, target_component_name, source_variable_name, target_variable_name = key
+            transformer_info[f"transformer {i:d}"] = {
+                'source variable' : f"{source_component_name}[{source_variable_name}]",
+                'target variable' : f"{target_component_name}[{target_variable_name}]",
+                'transformer' : self.transformations[key].get_info(),
+            }
+            
+
+
+        return {
+            "forcing_mappings": self.forcing_mappings, 
+            "transformers" : transformer_info,
+        }
 
 
 def strget(obj, flattened_variable_name):

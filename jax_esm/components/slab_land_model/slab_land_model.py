@@ -15,7 +15,7 @@ import jax_esm.base.data_structure as data_structure
 
 default_sea_surface_temperature = 288.15
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class PrognosticData:
     sim_time: Annotated[float, (), "zero_dimensional"]
     land_surface_temperature: Annotated[
@@ -24,17 +24,17 @@ class PrognosticData:
     land_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class AirlandFlux:
     total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class LandState:
     prog: PrognosticData
 
 
-@data_structure.schema
+@data_structure.typed_and_dimensioned
 class LandForcing:
     flux: AirlandFlux
 
@@ -113,7 +113,7 @@ class SlabLandModel(SlabModelBase):
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
 
-        decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
         self.component_state_class = decorator(LandState)
         self.component_forcing_class = decorator(LandForcing)
 
@@ -125,7 +125,7 @@ class SlabLandModel(SlabModelBase):
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
-            for name, _, dimensions, shape in target_class.schema_info():
+            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry.register_variable(
                     VariableMetadata(name=name, shape=shape, dimensions=dimensions)
                 )
