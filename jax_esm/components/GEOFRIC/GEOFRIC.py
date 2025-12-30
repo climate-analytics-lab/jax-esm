@@ -14,7 +14,7 @@ from jax_esm.components.base import (
     CoupledComponentConfig,
 )
 
-from jax_esm.utils.bulk_op import mean_leaf
+from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.base.domain import Domain
 from jax_esm.base.variable import VariableMetadata, VariableRegistry
 
@@ -81,7 +81,11 @@ class GEOFRIC(CoupledComponent):
         return self.model.initialize()
 
     def generate_step_function(self, jitted: bool = True):
-        return self.model.generate_step_function(jitted=jitted)
+        raw_model_step_function = self.model.generate_step_function(jitted=jitted)
+        def step_function(state, forcing, time):
+            final_state, predictions = raw_model_step_function(state, forcing, time)
+            return final_state, stack_objects([predictions,])
+        return jax.jit(step_function) if jitted else step_function
 
 
     def validate(self):
