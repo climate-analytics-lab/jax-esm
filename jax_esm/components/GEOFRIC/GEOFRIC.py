@@ -23,7 +23,7 @@ from typing import Any, Dict
 
 class GEOFRIC(CoupledComponent):
     """
-    This is a class wrapping JCM.
+    This is a class wrapping GEOFRIC.
     """
 
     def __init__(
@@ -66,19 +66,14 @@ class GEOFRIC(CoupledComponent):
         self.component_state_class = model.component_state_class
         self.component_forcing_class = model.component_forcing_class
 
-        """
         self.state_variable_registry = VariableRegistry([
-            VariableMetadata(name="extra.total_heat_flux", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="prog.sea_surface_temperature", shape=shapes["T"], dimensions=("tile", "j", "i")),
         ])
 
         self.forcing_variable_registry = VariableRegistry([
-            VariableMetadata(name="sea_surface_temperature", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-            VariableMetadata(name="sice_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-            VariableMetadata(name="snowc_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-            VariableMetadata(name="soilw_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-            VariableMetadata(name="stl_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="flux.total_heat_flux", shape=shapes["T"], dimensions=("tile", "j", "i")),
         ])
-        """
+    
     def initialize(
         self,
         start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),

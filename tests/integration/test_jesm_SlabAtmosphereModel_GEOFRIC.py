@@ -8,7 +8,7 @@ def test_integration():
     from GEOFRIC.model import Model as GEOFRICRawModel
     import jax_datetime as jdt
     from pathlib import Path
-    from jax_esm.coupling.transformer import IdentityTransformer
+    from jax_esm.coupling.transformer import ESMFRegridTransformer
     from jax_esm.coupling.forcing_mapper import ForcingMapper
     from jax_esm.coupling.coupler import Coupler
     resolution = 31
@@ -43,13 +43,15 @@ def test_integration():
     # Creating transofmrations
     transformers = dict(
         a2o = dict(
-            identity_transformer = IdentityTransformer(
+            conserve = ESMFRegridTransformer(
+                weight_file = "regrid_weights/weight_algo-conserve_JCM_T31_to_LLC_20.nc",
                 source_grid = components["atm"].domain.horizontal_grids["T"],
                 target_grid = components["ocn"].domain.horizontal_grids["T"],
             ),
         ),
         o2a = dict(
-            identity_transformer = IdentityTransformer(
+            bilinear = ESMFRegridTransformer(
+                weight_file = "regrid_weights/weight_algo-bilinear_LLC_20_to_JCM_T31.nc",
                 source_grid = components["ocn"].domain.horizontal_grids["T"],
                 target_grid = components["atm"].domain.horizontal_grids["T"],
             ),
@@ -60,12 +62,12 @@ def test_integration():
     forcing_mapper.add_forcing_mapping(
         source = ("atm", "phydata.total_heat_flux"),
         target = ("ocn", "flux.total_heat_flux"),
-        transformer = transformers["a2o"]["identity_transformer"],
+        transformer = transformers["a2o"]["conserve"],
     )
     forcing_mapper.add_forcing_mapping(
         source = ("ocn", "prog.sea_surface_temperature"),
         target = ("atm", "scalar.sea_surface_temperature"),
-        transformer = transformers["o2a"]["identity_transformer"],
+        transformer = transformers["o2a"]["bilinear"],
     )
     
     # Construct coupled model
