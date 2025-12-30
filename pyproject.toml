@@ -47,6 +47,7 @@ dev = [
 jcm = [
     "dinosaur",
     "flax",
+    "jax-gcm",
 ]
 
 [project.urls]
