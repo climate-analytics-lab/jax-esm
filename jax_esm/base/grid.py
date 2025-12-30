@@ -15,7 +15,8 @@ class GridSpecification:
     grid_family: str
     grid_universe: str
 
-    def parse_grid_specification(grid_specification_string: str) -> Dict[str, str]:
+    @classmethod
+    def parse_grid_specification(cls, grid_specification_string: str) -> Dict[str, str]:
         """
         Parse a grid specification string of format "<grid_universe>::<grid_family>".
 
