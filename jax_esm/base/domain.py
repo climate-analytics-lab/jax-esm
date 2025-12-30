@@ -18,7 +18,7 @@ class Domain:
     """
 
     horizontal_grids: Dict[str, Grid]
-    topography: Dict[str, Array | None]
+    topography: Optional[Dict[str, Array]] = None
 
     @classmethod
     def from_grid_specification(
