@@ -6,6 +6,7 @@ from jax_esm.base.exceptions import ValidationError
 from jax_esm.base.grid import Grid
 from jax_esm.base.variable import VariableMetadata
 
+from jax_esm.base.ESMF_regrid import ESMFRegridder 
 
 class Transformer(ABC):
     """
@@ -267,6 +268,34 @@ class ConservativeTransformer(Transformer):
             )
 
         return result
+
+
+class ESMFRegridTransformer(Transformer):
+    """Use ESMF_RegridWeightGen generated file to regrid"""
+    def __init__(
+        self,
+        weight_file: str,
+        **kwargs, # keywords for Transformer
+    ):
+        super().__init__(**kwargs)
+        self.regridder = ESMFRegridder(
+            weight_file,
+            self.source_grid.coordinate.shape,
+            self.target_grid.coordinate.shape,
+        )
+
+    def validate_metadata(
+        self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
+    ):
+        if source_metadata.shape != self.source_grid.coordinate.shape:
+            raise ValidationError(f"Source variable {source_metadata.name} {str(source_metadata.shape)} does not match the source grid shape {str(self.source_grid.coordinate.shape)}.")
+        if target_metadata.shape != self.target_grid.coordinate.shape:
+            raise ValidationError(f"Target variable {target_metadata.name} {str(target_metadata.shape)} does not match the target grid shape {str(self.target_grid.coordinate.shape)}.")
+
+    def transform(self, data: Array) -> Array:
+        return self.regridder(data) 
+    
+
 
 
 # Example usage
