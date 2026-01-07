@@ -46,16 +46,18 @@ class SlabOceanModel(SlabModelBase):
     This model simulates sea surface temperature evolution using a simple
     thermodynamic equation with optional relaxation to climatology.
 
-    Physics:
-        dT/dt = Q/(rho * cp * h) - (T - T_clim)/tau
+        dT/dt = F_net/(rho * cp * h) + flag_adj ( flag_Q * Q/(rho * cp * h) - (1 - flag_Q) (T - T_clim)/tau )
 
     where:
         T: sea surface temperature
-        Q: total heat flux (positive upward)
+        F_net: total heat flux (positive upward)
+        Q: traditional Q-flux adjust (periodic forcing accounting for missing processes)
         rho: ocean density
         cp: ocean specific heat capacity
         h: mixed layer depth
         tau: relaxation timescale to climatology
+        flag_adj: If set 1 then adjustment is activated
+        flag_Q: If set 1/True then Q-flux is used. If set 0/False then linear relaxaion is used and timescale `tau` will used.
     """
 
     def __init__(
@@ -70,6 +72,10 @@ class SlabOceanModel(SlabModelBase):
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
         SST_clim_file: Optional[str] = None,
+        Q_flux_file: Optional[str] = None,
+        flag_adj: bool = False,
+        flag_Q: bool = True,
+        initialization_sea_surface_temperature: float = 288.15,
     ):
         """Initialize slab ocean model.
 
@@ -89,7 +95,9 @@ class SlabOceanModel(SlabModelBase):
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
         self.SST_clim_file = SST_clim_file
-
+        self.Q_flux_file = Q_flux_file
+        self.flag_adj = flag_adj
+        self.flag_Q = flag_Q
         super().__init__(
             name="SlabOceanModel",
             grid_specification=grid_specification,
@@ -110,6 +118,20 @@ class SlabOceanModel(SlabModelBase):
     def validate(self):
         super()._validate()
 
+        if self.flag_adj:
+            if self.flag_Q: # Q-flux method
+                if self.Q_flux_file is None:
+                    raise ValueError("If `flag_adj` and `flag_Q` are both `True`, `Q_flux_file` must be given.")
+                elif not Path(self.Q_flux_file).exists():
+                    raise FileNotFoundError(f"Q-flux file \"{str(self.Q_flux_file):s}\" does not exist.")
+            else: # linear relaxation is used
+                if self.SST_clim_file is None:
+                    raise ValueError("If `flag_adj` is True and `flag_Q` is `False`, `SST_clim_file` must be given.")
+                elif not Path(self.SST_clim_file).exists():
+                    raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" does not exist.")
+                elif ( not self.relaxation_time > 0 ) or not jnp.isinf(self.relaxation_time):
+                    raise ValueError("`relaxation_time` must be a positive number of infinity.")
+        
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
@@ -141,18 +163,10 @@ class SlabOceanModel(SlabModelBase):
         )
 
         # Load or create initial SST
-        if self.SST_clim_file is not None:
-            print("SST climatology file. The given initial SST will be used.")
-            print("SST climatology file: ", self.SST_clim_file)
-            self.SST_clim = jnp.array(xr.open_dataset(self.SST_clim_file)["sst"])
-            self.has_climatology = True
-            init_sea_surface_temperature = self.SST_clim[:, :, 0].copy()
-        else:
-            print("Boundary does not exist. Idealized initial SST will be used.")
-            init_sea_surface_temperature = (
-                positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
-                + constants.freezing_point_K
-            )
+        init_sea_surface_temperature = (
+            positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
+            + constants.freezing_point_K
+        )
 
         # Apply mask
         init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
