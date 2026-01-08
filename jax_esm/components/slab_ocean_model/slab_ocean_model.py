@@ -45,19 +45,36 @@ class SlabOceanModel(SlabModelBase):
 
     This model simulates sea surface temperature evolution using a simple
     thermodynamic equation with optional relaxation to climatology.
+        
+    dT/dt = F_net/(rho * cp * h) + forcing
 
-        dT/dt = F_net/(rho * cp * h) + flag_adj ( flag_Q * Q/(rho * cp * h) - (1 - flag_Q) (T - T_clim)/tau )
 
     where:
         T: sea surface temperature
         F_net: total heat flux (positive upward)
-        Q: traditional Q-flux adjust (periodic forcing accounting for missing processes)
         rho: ocean density
         cp: ocean specific heat capacity
         h: mixed layer depth
-        tau: relaxation timescale to climatology
-        flag_adj: If set 1 then adjustment is activated
-        flag_Q: If set 1/True then Q-flux is used. If set 0/False then linear relaxaion is used and timescale `tau` will used.
+        forcing: the forcing of temperature. See below for explaination
+    
+    (1) If `forcing_method` == "None" (or just None), then forcing = 0.
+
+    (2) If `forcing_method` == "Qflux", then traditional Q-flux adjust, i.e., periodic forcing
+        over a year, is used:
+ 
+            forcing = Q / (rho * cp * h)
+
+        where variable `Q` will be read from a file given in `Q_flux_file`. If `Q_flux_file`
+        is not provided, then Q will be all zeros, which is possible when doing training.
+    
+    (3) If `forcing_method` == "climatology", then linear relaxation will be used
+
+            forcing = - (T - T_clim) / tau
+
+        where tau is the relaxation timescale to climatology (can be jnp.inf), and T_clim
+        is the climatology read from `SST_clim_file`. If `SST_clim_file` is not provided, 
+        then T_clim will be all zeros, which is possible when doing training.
+
     """
 
     def __init__(
@@ -73,8 +90,7 @@ class SlabOceanModel(SlabModelBase):
         mask_file: Optional[str] = None,
         SST_clim_file: Optional[str] = None,
         Q_flux_file: Optional[str] = None,
-        flag_adj: bool = False,
-        flag_Q: bool = True,
+        forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
     ):
         """Initialize slab ocean model.
@@ -96,8 +112,6 @@ class SlabOceanModel(SlabModelBase):
         self.mixed_layer_depth_max = mixed_layer_depth_max
         self.SST_clim_file = SST_clim_file
         self.Q_flux_file = Q_flux_file
-        self.flag_adj = flag_adj
-        self.flag_Q = flag_Q
         super().__init__(
             name="SlabOceanModel",
             grid_specification=grid_specification,
@@ -112,13 +126,15 @@ class SlabOceanModel(SlabModelBase):
         self.SST_clim = None
         self.time_factor = None
         self.cd_factor = None
+        self.forcing_method = forcing_method
 
         self.validate()
 
     def validate(self):
         super()._validate()
 
-        if self.flag_adj:
+        if self.forcing_method == "None" or self.forcing_method is None:
+        elif self.flag
             if self.flag_Q: # Q-flux method
                 if self.Q_flux_file is None:
                     raise ValueError("If `flag_adj` and `flag_Q` are both `True`, `Q_flux_file` must be given.")
