@@ -34,12 +34,11 @@ class AirseaFlux:
 class OceanState:
     prog: PrognosticData
 
-
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     flux: AirseaFlux
-
-
+    q_flux: Annotated[float, ("latitudinal", "longitude", "month"), "two_dimensional_with_month"]
+    
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
 
@@ -67,7 +66,7 @@ class SlabOceanModel(SlabModelBase):
         where variable `Q` will be read from a file given in `Q_flux_file`. If `Q_flux_file`
         is not provided, then Q will be all zeros, which is possible when doing training.
     
-    (3) If `forcing_method` == "climatology", then linear relaxation will be used
+    (3) If `forcing_method` == "relaxation", then linear relaxation will be used
 
             forcing = - (T - T_clim) / tau
 
@@ -92,6 +91,7 @@ class SlabOceanModel(SlabModelBase):
         Q_flux_file: Optional[str] = None,
         forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
+        forcing_method: Optional[str] = None,
     ):
         """Initialize slab ocean model.
 
@@ -134,19 +134,22 @@ class SlabOceanModel(SlabModelBase):
         super()._validate()
 
         if self.forcing_method == "None" or self.forcing_method is None:
-        elif self.flag
-            if self.flag_Q: # Q-flux method
-                if self.Q_flux_file is None:
-                    raise ValueError("If `flag_adj` and `flag_Q` are both `True`, `Q_flux_file` must be given.")
-                elif not Path(self.Q_flux_file).exists():
-                    raise FileNotFoundError(f"Q-flux file \"{str(self.Q_flux_file):s}\" does not exist.")
-            else: # linear relaxation is used
-                if self.SST_clim_file is None:
-                    raise ValueError("If `flag_adj` is True and `flag_Q` is `False`, `SST_clim_file` must be given.")
-                elif not Path(self.SST_clim_file).exists():
-                    raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" does not exist.")
-                elif ( not self.relaxation_time > 0 ) or not jnp.isinf(self.relaxation_time):
-                    raise ValueError("`relaxation_time` must be a positive number of infinity.")
+            # Do nothing
+        
+        elif self.forcing_method == "Qflux":
+            if self.Q_flux_file is None:
+                print("Notice: `Q_flux_file` is not given. Default values (zeros) will be used.")
+            elif not Path(self.Q_flux_file).exists():
+                raise FileNotFoundError(f"Q-flux file \"{str(self.Q_flux_file):s}\" is specified but it does not exist.")
+        elif self.forcing_method == "relaxation":
+            if self.SST_clim_file is None:
+                print("Notice: `SST_clim_file` is not given. Default values (zeros) will be used.")
+            elif not Path(self.SST_clim_file).exists():
+                raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" is specified but does not exist.")
+            elif ( not self.relaxation_time > 0 ) or not jnp.isinf(self.relaxation_time):
+                raise ValueError("`relaxation_time` must be a positive number of infinity.")
+        else: 
+            raise ValueError(f"Unknown `forcing_method` is given: \"{str(forcing_method):s}\" ")
         
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
@@ -197,21 +200,19 @@ class SlabOceanModel(SlabModelBase):
                 "Warning: fmask_ocn and sea_surface_temperature_init do not share the same mask."
             )
 
-        # Set relaxation time to infinity if no climatology
-        if not self.has_climatology:
-            print("Climaology SST does not exist. Set relaxation time to inifinity.")
-            self.relaxation_time = jnp.inf
-
         # Compute heat capacity and time factors for Euler backward scheme
-        cd = (
+        self.cd_factor = self.timestep / (
             constants.ocean_density
             * constants.ocean_specific_heat_capacity
             * init_mixed_layer_depth
         )
-        tau = jnp.ones_like(cd) * self.relaxation_time
-        self.time_factor = (1.0 + self.timestep / tau) ** (-1)
-        self.cd_factor = self.timestep / cd
-
+        
+        if self.forcing_method == "relaxation":
+            tau = jnp.ones_like(self.cd_factor) * self.relaxation_time
+            self.time_factor = (1.0 + self.timestep / tau) ** (-1)
+        else:
+            self.time_factor = 1.0
+            
         return self.component_state_class.zeros().copy(
             {
                 "prog.mixed_layer_depth_max": init_mixed_layer_depth,
@@ -223,11 +224,11 @@ class SlabOceanModel(SlabModelBase):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
         nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
-
+        
         def step_function(state, forcing, t):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
 
-            if self.has_climatology:
+            if self.forcing_method == "relaxation":
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
@@ -253,16 +254,21 @@ class SlabOceanModel(SlabModelBase):
                     state.prog.sea_surface_temperature - snapshot_SST_clim_beg
                 )
 
+            elif forcing_method == "Qflux":
+                
+                Qflux = 
+
+
             # Euler backward step
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * (-forcing.flux.total_heat_flux)
+                + self.cd_factor * (- forcing.flux.total_heat_flux)
             )
 
-            # Add climatology back
+            # Add climatology back if relaxation method is used
             new_sea_surface_temperature = new_sea_surface_temperature_anom
-            if self.has_climatology:
+            if self.forcing_method == "relaxation":
                 new_sea_surface_temperature += (
                     snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 )
