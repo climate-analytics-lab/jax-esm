@@ -18,7 +18,7 @@ conda create -y -n jem_fresh python=3.13
 conda activate jem_fresh
 
 # Remember to replace `your_credential`.
-git clone -b prep-for-0.1.0 https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
+git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
 cd jax-esm
 
 pip3 install -e ".[jcm,plot]"
