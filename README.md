@@ -11,16 +11,29 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 - **Direct Component Coupling**: Components can directly access each other's state for tight integration
 - **xarray Integration**: Built-in conversion to xarray Datasets for analysis
 
-## Installation
+## Lightnigh Start: Installation + Run
+Copy and paste in your terminal to set up a fresh Conda environment and run example code.
+```
+conda create -y -n jem_fresh python=3.13
+conda activate jaxesm_fresh
+
+# Remember to replace `your_credential`.
+git clone -b v0.1.0 https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
+cd jax-esm
+
+pip3 install -e ".[jcm]"
+
+export PYTHONPATH=`pwd`
+
+# You can run the following file directly, or with Notebook+Jupytext.
+python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
+```
+
+## Installation 
 
 Please install with `jax-gcm` (hereafter `jcm`) functionality.
 ```bash
-
 pip install -e ".[jcm]"
-
-# Need to clone jax-gcm manually for now
-git clone https://github.com/climate-analytics-lab/jax-gcm.git
-export PYTHONPATH=`pwd`/jax-gcm:$PYTHONPATH
 ```
 
 For development, please run additionally
@@ -32,41 +45,46 @@ pip install -e ".[dev]"
 
 You can run a Jax-gcm coupled run with
 ```
-python tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
+python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
 ```
-The results will be placed in the directory `output`. 
-An example of jax-gcm coupled to slab ocean and land models is as follows:
-
+The results will be placed in the directory `output`. Its code is below
 ```python
 
-# File tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py
+# File jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
+import os, sys
+from pathlib import Path
 
-from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
+# or `export PYTHONPATH=/path/to/jax-esm/root/directory`
+sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
+
+import jcm
+from jcm.geometry import Geometry
+import jax_datetime as jdt
+
+from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
-from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
-from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn_lnd as couple
-import jcm
-import jax_datetime as jdt
-from pathlib import Path
+from jem.components import JCM, SlabLandModel, SlabOceanModel
+from jem.coupling.transformer import IdentityTransformer
+from jem.coupling.forcing_mapper import ForcingMapper
+from jem.coupling.coupler import Coupler
+import jem.utils.tree_tools as tree_tools
 
 resolution = 31
 grid_specification = f"JCM::T{resolution:d}"
-
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
-simulation_interval = jdt.to_timedelta(10, "day")
-output_dir = Path("output/JCM_SOM_SLM").resolve()
+simulation_interval = jdt.to_timedelta(20, "day")
 
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
-print("Output dir: ", str(output_dir))
-output_dir.mkdir(exist_ok=True, parents=True)
+geometry = Geometry.from_file(external_files["terrain"])
 
 # Creating components
 components = dict(
     atm=JCM(
-        model=jcm.model.Model(start_date=start_datetime),
+        model=jcm.model.Model(start_date=start_datetime, geometry=geometry),
         coupling_timestep=coupling_timestep,
+        save_interval=coupling_timestep,
     ),
     ocn=SlabOceanModel(
         grid_specification=grid_specification,
@@ -79,7 +97,7 @@ components = dict(
     ),
     lnd=SlabLandModel(
         grid_specification=grid_specification,
-        timestep=3600 * 6,
+        timestep=coupling_timestep,
         start_datetime=start_datetime,
         save_interval=coupling_timestep,
         relaxation_time=60 * 86400.0,
@@ -89,30 +107,91 @@ components = dict(
     ),
 )
 
-# Creating model
-model = couple(**components)
+# Creating Flux and Scalar Exchange between Components
+# Creating transformations
+transformers = dict(
+    a2o = dict(
+        identity_transformer = IdentityTransformer(
+            source_grid = components["atm"].domain.horizontal_grids["T"],
+            target_grid = components["ocn"].domain.horizontal_grids["T"],
+        ),
+    ),
+    o2a = dict(
+        identity_transformer = IdentityTransformer(
+            source_grid = components["ocn"].domain.horizontal_grids["T"],
+            target_grid = components["atm"].domain.horizontal_grids["T"],
+        ),
+    ),
+    a2l = dict(
+        identity_transformer = IdentityTransformer(
+            source_grid = components["atm"].domain.horizontal_grids["T"],
+            target_grid = components["lnd"].domain.horizontal_grids["T"],
+        ),
+    ),
+    l2a = dict(
+        identity_transformer = IdentityTransformer(
+            source_grid = components["lnd"].domain.horizontal_grids["T"],
+            target_grid = components["atm"].domain.horizontal_grids["T"],
+        ),
+    ),
+)
+
+forcing_mapper = ForcingMapper(components=components)
+forcing_mapper.add_forcing_mapping(
+    source = ("atm", "extra.total_heat_flux"),
+    target = ("ocn", "flux.total_heat_flux"),
+    transformer = transformers["a2o"]["identity_transformer"],
+)
+forcing_mapper.add_forcing_mapping(
+    source = ("ocn", "prog.sea_surface_temperature"),
+    target = ("atm", "sea_surface_temperature"),
+    transformer = transformers["o2a"]["identity_transformer"],
+)
+forcing_mapper.add_forcing_mapping(
+    source = ("atm", "extra.total_heat_flux"),
+    target = ("lnd", "flux.total_heat_flux"),
+    transformer = transformers["a2l"]["identity_transformer"],
+)
+forcing_mapper.add_forcing_mapping(
+    source = ("lnd", "prog.land_surface_temperature"),
+    target = ("atm", "stl_am"),
+    transformer = transformers["l2a"]["identity_transformer"],
+)
+
+# Create Coupled Model
+model = Coupler(
+    components=components,
+    forcing_mapper=forcing_mapper,
+    coupling_timestep=coupling_timestep,
+)
+
+print("Model info: ") 
+tree_tools.print_tree(model.get_info(), root="Model")
 
 # Obtain initial condition
-initial_coupled_state = model.initialize()
+initial_coupled_state_forcing = model.initialize()
 
-# Run coupled model
-print("Running model...")
-state_holder, predictions = model.run(
-    initial_coupled_state=initial_coupled_state,
+print("Model state:")
+tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
+
+# Create model trajectory function
+trajectory_function = model.generate_trajectory_function(
     start_time=0,
     end_time=simulation_interval / jdt.to_timedelta(1, "second"),
     jitted=True,
     show_progress=True,
     tqdm_kwargs=dict(desc="Simulation"),
 )
-# Convert output into xarray
-output_dict = model.predictions_to_xarray(predictions)
 
+# Run coupled model
+state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+
+# Output to netCDF
+output_dict = model.predictions_to_xarray(predictions)
 for component_name, ds in output_dict.items():
     output_file = output_dir / f"{component_name:s}.nc"
     print("Output file: ", str(output_file))
     ds.to_netcdf(output_file, engine="netcdf4")
-
 ```
 
 ## Architecture
@@ -122,7 +201,7 @@ for component_name, ds in output_dict.items():
 Each component must inherit from `Component` and implement:
 
 - **`__init__(config)`**: Initialize with ComponentConfig, need to define `component_state_class` and `component_forcing_class`.
-- **`initialize()`**: Return initial component state
+- **`initialize()`**: Return initial component state and forcing
 - **`generate_step_function()`**: Return a JIT-compiled step function
   - Signature: `step_function(state, forcing, time) -> (new_component_state, predictions)`
 
@@ -142,15 +221,9 @@ The current implementation uses direct coupling:
 - Debug mode available with `jax_scan=False` (uses Python loop)
 
 ## Examples
-
-See the `tests/integration/` directories:
-- `tests/integration/test_jesm_JCM_SlabOceanModel.py`: JAX-GCM coupled with slab ocean on an aquaplanet.
-- `tests/integration/test_jesm_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models with Earth landscape.
-- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel.py`: Coupled slab atmosphere-ocean model on an aquaplanet.
-- `tests/integration/test_jesm_SlabAtmosphereModel_SlabOceanModel_SlabLandModel.py`: Coupled slab atmosphere-ocean-land model with Earth landscape.
+- `jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models with Earth landscape.
 
 ## Integration with JAX-GCM (JCM)
-
 JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean models:
 
 ### Included Components
