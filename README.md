@@ -47,16 +47,9 @@ You can run a Jax-gcm coupled run with
 ```
 python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
 ```
-The results will be placed in the directory `output`. Its code is below
+whose essential code is below
 ```python
-
-# File jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
-import os, sys
-from pathlib import Path
-
-# or `export PYTHONPATH=/path/to/jax-esm/root/directory`
-sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
-
+# Same jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py but only the essential part
 import jcm
 from jcm.geometry import Geometry
 import jax_datetime as jdt
@@ -79,7 +72,6 @@ simulation_interval = jdt.to_timedelta(20, "day")
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
 geometry = Geometry.from_file(external_files["terrain"])
 
-# Creating components
 components = dict(
     atm=JCM(
         model=jcm.model.Model(start_date=start_datetime, geometry=geometry),
@@ -107,8 +99,6 @@ components = dict(
     ),
 )
 
-# Creating Flux and Scalar Exchange between Components
-# Creating transformations
 transformers = dict(
     a2o = dict(
         identity_transformer = IdentityTransformer(
@@ -158,23 +148,13 @@ forcing_mapper.add_forcing_mapping(
     transformer = transformers["l2a"]["identity_transformer"],
 )
 
-# Create Coupled Model
 model = Coupler(
     components=components,
     forcing_mapper=forcing_mapper,
     coupling_timestep=coupling_timestep,
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
-
-# Obtain initial condition
 initial_coupled_state_forcing = model.initialize()
-
-print("Model state:")
-tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
-
-# Create model trajectory function
 trajectory_function = model.generate_trajectory_function(
     start_time=0,
     end_time=simulation_interval / jdt.to_timedelta(1, "second"),
@@ -186,12 +166,10 @@ trajectory_function = model.generate_trajectory_function(
 # Run coupled model
 state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
 
-# Output to netCDF
 output_dict = model.predictions_to_xarray(predictions)
 for component_name, ds in output_dict.items():
-    output_file = output_dir / f"{component_name:s}.nc"
-    print("Output file: ", str(output_file))
-    ds.to_netcdf(output_file, engine="netcdf4")
+    print(f"# Output data of {component_name}:")
+    print(ds)
 ```
 
 ## Architecture
