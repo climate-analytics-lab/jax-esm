@@ -11,7 +11,7 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 - **Direct Component Coupling**: Components can directly access each other's state for tight integration
 - **xarray Integration**: Built-in conversion to xarray Datasets for analysis
 
-## Lightnigh Start: Installation + Run
+## Lightning Start: Installation + Run
 Copy and paste in your terminal to set up a fresh Conda environment and run example code.
 ```
 conda create -y -n jem_fresh python=3.13
