@@ -13,8 +13,8 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
-from jax_esm.components.base import CoupledComponent, CoupledComponentConfig
-from jax_esm.base.domain import Domain
+from jem.components.base import CoupledComponent, CoupledComponentConfig
+from jem.base.domain import Domain
 
 
 class SlabModelBase(CoupledComponent):

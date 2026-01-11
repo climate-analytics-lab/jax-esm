@@ -1,9 +1,9 @@
-"""Unit tests for jax_esm.components.base module."""
+"""Unit tests for jem.components.base module."""
 
 import pytest
 import jax.numpy as jnp
 import jax
-from jax_esm.components.base import (
+from jem.components.base import (
     create_field_group_class,
     create_component_state_class,
     create_component_forcing_class,

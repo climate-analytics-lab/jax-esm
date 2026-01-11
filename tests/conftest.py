@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for jax_esm tests."""
+"""Shared pytest fixtures for jem tests."""
 
 import pytest
 import jax.numpy as jnp

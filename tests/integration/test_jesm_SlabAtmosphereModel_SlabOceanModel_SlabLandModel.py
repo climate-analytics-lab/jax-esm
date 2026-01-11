@@ -3,16 +3,16 @@
 
 def test_integration():
 
-    from jax_esm.components import SlabOceanModel, SlabAtmosphereModel, SlabLandModel
+    from jem.components import SlabOceanModel, SlabAtmosphereModel, SlabLandModel
     import jax_datetime as jdt
-    from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
+    from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
         generate_jcm_forcing_and_topography_files,
     )
     from pathlib import Path
-    from jax_esm.coupling.transformer import IdentityTransformer
-    from jax_esm.coupling.forcing_mapper import ForcingMapper
-    from jax_esm.coupling.coupler import Coupler
-    import jax_esm.utils.tree_tools as tree_tools
+    from jem.coupling.transformer import IdentityTransformer
+    from jem.coupling.forcing_mapper import ForcingMapper
+    from jem.coupling.coupler import Coupler
+    import jem.utils.tree_tools as tree_tools
 
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"

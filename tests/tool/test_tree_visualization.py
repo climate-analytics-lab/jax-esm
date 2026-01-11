@@ -1,7 +1,7 @@
-import jax_esm
+import jem
 
-import jax_esm.components.slab_atmosphere_model as SAM
-from jax_esm.utils.tree_tools import analyze_tree, visualize_pytree_with_paths, PyTreePrinter
+import jem.components.slab_atmosphere_model as SAM
+from jem.utils.tree_tools import analyze_tree, visualize_pytree_with_paths, PyTreePrinter
 
 from jax import tree_util
 

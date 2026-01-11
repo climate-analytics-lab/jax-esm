@@ -6,9 +6,9 @@ from typing import Callable, Dict
 
 import xarray as xr
 
-from jax_esm.base.exceptions import ValidationError
-from jax_esm.base.domain import Domain
-from jax_esm.base.variable import VariableRegistry
+from jem.base.exceptions import ValidationError
+from jem.base.domain import Domain
+from jem.base.variable import VariableRegistry
 
 
 @dataclass

@@ -7,12 +7,12 @@ import xarray as xr
 from pathlib import Path
 import tempfile
 
-from jax_esm import ComponentConfig
-from jax_esm import constants
+from jem import ComponentConfig
+from jem import constants
 
 # Skip all tests if jcm is not available
 try:
-    from jax_esm.components.SlabOceanModel.SlabOceanModel import SlabOceanModel
+    from jem.components.SlabOceanModel.SlabOceanModel import SlabOceanModel
 
     HAS_JCM = True
 except ImportError:

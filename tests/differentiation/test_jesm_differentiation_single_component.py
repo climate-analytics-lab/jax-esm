@@ -4,10 +4,10 @@ def test_integration():
 
     import matplotlib.pyplot as plt
 
-    from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
+    from jem.components import SlabOceanModel, SlabAtmosphereModel
     import jax_datetime as jdt
     from pathlib import Path
-    from jax_esm.coupling.coupler import Coupler
+    from jem.coupling.coupler import Coupler
 
     resolution = 31
     grid_specification = f"JCM::T{resolution:d}"

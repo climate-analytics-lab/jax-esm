@@ -11,7 +11,7 @@ import pytest
 import unittest
 
 # Old API - no longer exists
-# from jax_esm import Component, ComponentConfig, ComponentState, BoundaryFluxes
+# from jem import Component, ComponentConfig, ComponentState, BoundaryFluxes
 
 pytestmark = pytest.mark.skip(reason="Tests use deprecated API - see new tests")
 

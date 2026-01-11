@@ -4,9 +4,9 @@ def test_integration():
 
     import matplotlib.pyplot as plt
 
-    from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
+    from jem.components import SlabOceanModel, SlabAtmosphereModel
     import jax_datetime as jdt
-    from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
+    from jem.coupling.factory.simple_coupling import couple_atm_ocn as couple
     from pathlib import Path
 
     resolution = 31

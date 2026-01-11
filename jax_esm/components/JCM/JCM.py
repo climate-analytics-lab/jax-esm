@@ -10,8 +10,8 @@ from jcm.physics.speedy.physics_data import PhysicsData
 import jax
 import jax.numpy as jnp
 from jax import Array
-from jax_esm import constants as constants
-from jax_esm.components.base import (
+from jem import constants as constants
+from jem.components.base import (
     CoupledComponent,
     CoupledComponentConfig,
 )
@@ -21,9 +21,9 @@ from jcm.physics_interface import PhysicsState
 
 from dinosaur import primitive_equations, primitive_equations_states
 
-from jax_esm.utils.bulk_op import mean_leaf
-from jax_esm.base.domain import Domain
-from jax_esm.base.variable import VariableMetadata, VariableRegistry
+from jem.utils.bulk_op import mean_leaf
+from jem.base.domain import Domain
+from jem.base.variable import VariableMetadata, VariableRegistry
 
 import tree_math
 from typing import Any, Dict

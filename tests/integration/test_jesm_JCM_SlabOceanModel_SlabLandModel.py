@@ -7,14 +7,14 @@ def test_integration():
     import jax_datetime as jdt
     from pathlib import Path
 
-    from jax_esm.tool_scripts.generate_jcm_forcing_and_topography_files import (
+    from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
         generate_jcm_forcing_and_topography_files,
     )
-    from jax_esm.components import JCM, SlabLandModel, SlabOceanModel
-    from jax_esm.coupling.transformer import IdentityTransformer
-    from jax_esm.coupling.forcing_mapper import ForcingMapper
-    from jax_esm.coupling.coupler import Coupler
-    import jax_esm.utils.tree_tools as tree_tools
+    from jem.components import JCM, SlabLandModel, SlabOceanModel
+    from jem.coupling.transformer import IdentityTransformer
+    from jem.coupling.forcing_mapper import ForcingMapper
+    from jem.coupling.coupler import Coupler
+    import jem.utils.tree_tools as tree_tools
 
 
     resolution = 31

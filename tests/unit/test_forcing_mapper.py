@@ -1,11 +1,11 @@
-"""Unit tests for jax_esm.coupling.forcing_mapper module."""
+"""Unit tests for jem.coupling.forcing_mapper module."""
 
 import pytest
 import jax.numpy as jnp
 from dataclasses import dataclass
 
-from jax_esm.coupling.forcing_mapper import ForcingMapper, strget, strset
-from jax_esm.components.base import (
+from jem.coupling.forcing_mapper import ForcingMapper, strget, strset
+from jem.components.base import (
     create_field_group_class,
     create_component_state_class,
     create_component_forcing_class,

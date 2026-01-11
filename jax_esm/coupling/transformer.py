@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from typing import Dict, Any
 from jax import Array
-from jax_esm.base.exceptions import ValidationError
-from jax_esm.base.grid import Grid
-from jax_esm.base.variable import VariableMetadata
+from jem.base.exceptions import ValidationError
+from jem.base.grid import Grid
+from jem.base.variable import VariableMetadata
 
 
 class Transformer(ABC):

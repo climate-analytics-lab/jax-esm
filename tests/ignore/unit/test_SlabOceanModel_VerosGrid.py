@@ -3,10 +3,10 @@
 import jax.numpy as jnp
 import unittest
 
-from jax_esm.components.SlabOceanModel import SlabOceanModel
+from jem.components.SlabOceanModel import SlabOceanModel
 
 
-import jax_esm.constants as constants
+import jem.constants as constants
 
 
 class TestSlabOceanModel(unittest.TestCase):

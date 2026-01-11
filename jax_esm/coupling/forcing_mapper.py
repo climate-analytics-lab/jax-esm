@@ -1,8 +1,8 @@
 """Flux exchange and boundary condition translation utilities."""
 
 from typing import Any, Dict, List, Optional, Tuple, Callable
-from jax_esm.components.base import CoupledComponent
-from jax_esm.coupling.transformer import Transformer
+from jem.components.base import CoupledComponent
+from jem.coupling.transformer import Transformer
 
 
 class ForcingMapper:

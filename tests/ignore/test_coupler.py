@@ -5,14 +5,14 @@ import jax.numpy as jnp
 import pytest
 import pandas as pd
 
-from jax_esm import ComponentConfig
-from jax_esm.coupling.coupler import Coupler, CouplerConfig
-from jax_esm.components.base import (
+from jem import ComponentConfig
+from jem.coupling.coupler import Coupler, CouplerConfig
+from jem.components.base import (
     Component,
     create_component_state_class,
     create_field_group_class,
 )
-from jax_esm.utils.bulk_op import stack_objects
+from jem.utils.bulk_op import stack_objects
 
 
 class MockAtmosphere(Component):

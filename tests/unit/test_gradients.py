@@ -11,15 +11,15 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import (
+from jem.components.base import (
     create_field_group_class,
     create_component_state_class,
     create_component_forcing_class,
     Component,
     CoupledComponentConfig,
 )
-from jax_esm.coupling.forcing_mapper import ForcingMapper
-from jax_esm.utils.bulk_op import stack_objects
+from jem.coupling.forcing_mapper import ForcingMapper
+from jem.utils.bulk_op import stack_objects
 
 
 # =============================================================================

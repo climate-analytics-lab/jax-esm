@@ -3,8 +3,8 @@
 import jax.numpy as jnp
 import unittest
 
-from jax_esm.components.SlabOceanModel import SlabOceanModel
-import jax_esm.constants as constants
+from jem.components.SlabOceanModel import SlabOceanModel
+import jem.constants as constants
 import jcm
 from pathlib import Path
 

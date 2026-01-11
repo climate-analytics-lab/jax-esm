@@ -5,8 +5,8 @@ import xarray as xr
 import dinosaur
 from dataclasses import dataclass
 
-from jax_esm.base.grid import Grid, GridSpecification
-from jax_esm.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
+from jem.base.grid import Grid, GridSpecification
+from jem.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 
 from pathlib import Path
 
@@ -169,7 +169,7 @@ def get_veros_domain(
     grids = None
     try:
         ds = xr.open_dataset(
-            Path(jax_esm.__file__).parent
+            Path(jem.__file__).parent
             / "data"
             / "veros"
             / f"veros_{grid_family:s}.nc"

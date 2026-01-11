@@ -5,11 +5,11 @@ import pytest
 import pandas as pd
 import xarray as xr
 
-from jax_esm import ComponentConfig
+from jem import ComponentConfig
 
 # Skip all tests if jcm is not available (FluxModel depends on JCM structures)
 try:
-    from jax_esm.components.FluxModel.FluxModel import FluxModel
+    from jem.components.FluxModel.FluxModel import FluxModel
 
     HAS_JCM = True
 except ImportError:

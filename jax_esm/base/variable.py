@@ -2,7 +2,7 @@ from jax import Array
 from typing import Dict, Any, Optional, List
 import coordax as cx
 from dataclasses import dataclass
-from jax_esm.base.exceptions import ValidationError
+from jem.base.exceptions import ValidationError
 
 
 @dataclass

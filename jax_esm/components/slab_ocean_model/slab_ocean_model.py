@@ -6,13 +6,13 @@ import jax_datetime as jdt
 import jax.numpy as jnp
 import xarray as xr
 
-from jax_esm import constants
-from jax_esm.utils.bulk_op import stack_objects
-from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
-from jax_esm.components.slab.base import SlabModelBase
-import jax_esm.base.data_structure as data_structure
+from jem import constants
+from jem.utils.bulk_op import stack_objects
+from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
+from jem.components.slab.base import SlabModelBase
+import jem.base.data_structure as data_structure
 
-from jax_esm.base.variable import VariableRegistry, VariableMetadata
+from jem.base.variable import VariableRegistry, VariableMetadata
 
 default_land_surface_temperature = 288.15
 

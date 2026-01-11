@@ -1,1 +1,1 @@
-"""Unit tests for jax_esm."""
+"""Unit tests for jem."""

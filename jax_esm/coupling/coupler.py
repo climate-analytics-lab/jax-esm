@@ -7,9 +7,9 @@ from typing import Any, Dict, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import CoupledComponent
-from jax_esm.coupling.forcing_mapper import ForcingMapper
-from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
+from jem.components.base import CoupledComponent
+from jem.coupling.forcing_mapper import ForcingMapper
+from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm

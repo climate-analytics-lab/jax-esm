@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import unittest
 
-from jax_esm.components.JCM import JCM
+from jem.components.JCM import JCM
 
 import jcm
 from pathlib import Path
