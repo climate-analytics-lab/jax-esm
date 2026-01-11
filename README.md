@@ -33,7 +33,7 @@ python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
 
 Please install with `jax-gcm` (hereafter `jcm`) functionality.
 ```bash
-pip install -e ".[jcm]"
+pip install -e ".[jcm,plot]"
 ```
 
 For development, please run additionally
