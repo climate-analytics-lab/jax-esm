@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # JEM - Coupling Examples
+# # JEM - Coupling Quick Start
 #
 # This notebook demonstrates a JAX-ESM (JEM) example using JAX-GCM (JCM), Slab Ocean Model, and Slab Land Model.
 
@@ -52,7 +52,7 @@ grid_specification = f"JCM::T{resolution:d}"
 
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
-simulation_interval = jdt.to_timedelta(30, "day")
+simulation_interval = jdt.to_timedelta(20, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
@@ -197,6 +197,12 @@ for component_name, ds in output_dict.items():
     ds.to_netcdf(output_file, engine="netcdf4")
 
 # %% [markdown]
+# ## Visualization
+
+# %%
+import matplotlib.pyplot as plt
+
+# %% [markdown]
 # ### Atmosphere
 
 # %%
@@ -265,5 +271,4 @@ g = (ds['land_surface_temperature'] - 273.15).plot(x='longitude', y='latitude', 
 g.fig.suptitle("Land Surface Temperature [${}^\\circ \\mathrm{C}$]", fontsize=16, y=1.02)
 
 # %%
-
-# %%
+plt.show()
