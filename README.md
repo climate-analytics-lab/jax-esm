@@ -15,7 +15,7 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 Copy and paste in your terminal to set up a fresh Conda environment and run example code.
 ```
 conda create -y -n jem_fresh python=3.13
-conda activate jaxesm_fresh
+conda activate jem_fresh
 
 # Remember to replace `your_credential`.
 git clone -b prep-for-0.1.0 https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
@@ -229,18 +229,18 @@ JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean
 ### Included Components
 
 1. **JCM (Atmosphere)**
-   - Location: `jax_esm/components/JCM/`
+   - Location: `jem/components/JCM/`
    - Wraps JCM atmosphere model from jax-gcm
    - Handles conversion between Dinosaur dynamics states and physics states
    - Supports internal sub-stepping
 
 2. **SlabOceanModel**
-   - Location: `jax_esm/components/SlabOceanModel/`
+   - Location: `jem/components/SlabOceanModel/`
    - Mixed-layer ocean with climatological relaxation
    - Anomaly-based SST evolution using Euler backward scheme
 
 3. **SlabLandModel**
-   - Location: `jax_esm/components/SlabLandModel/`
+   - Location: `jem/components/SlabLandModel/`
    - One layer land with climatological relaxation
    - Anomaly-based land surface temperature evolution using Euler backward scheme
 
