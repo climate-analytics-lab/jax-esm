@@ -21,7 +21,7 @@ conda activate jem_fresh
 git clone -b prep-for-0.1.0 https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
 cd jax-esm
 
-pip3 install -e ".[jcm]"
+pip3 install -e ".[jcm,plot]"
 
 export PYTHONPATH=`pwd`
 
@@ -31,7 +31,7 @@ python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
 
 ## Installation 
 
-Please install with `jax-gcm` (hereafter `jcm`) functionality.
+Please install `jax-gcm` (hereafter `jcm`) and `matplotlib` with
 ```bash
 pip install -e ".[jcm,plot]"
 ```
