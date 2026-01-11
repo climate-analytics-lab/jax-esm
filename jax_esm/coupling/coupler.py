@@ -7,13 +7,13 @@ from typing import Any, Dict, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, ComponentForcing, Component
+from jax_esm.components.base import CoupledComponent
 from jax_esm.coupling.forcing_mapper import ForcingMapper
-
-
 from jax_esm.utils.bulk_op import unwrap_leading_dims, stack_objects
+
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
+
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs):
@@ -30,7 +30,8 @@ def adhoc_scan(f, init, xs):
 
     return carry, stack_objects(ys)
 
-def generate_scan_function(jitted:bool):
+
+def generate_scan_function(jitted: bool):
     return jax.lax.scan if jitted else adhoc_scan
 
 
@@ -40,7 +41,7 @@ class Coupler:
     def __init__(
         self,
         coupling_timestep: float,
-        components: Optional[Dict[str, Component]] = None,
+        components: Optional[Dict[str, CoupledComponent]] = None,
         forcing_mapper: Optional[ForcingMapper] = None,
     ):
         """Initialize the coupler.
@@ -61,7 +62,7 @@ class Coupler:
 
     def initialize(
         self,
-    ) -> Dict[str, tuple[ComponentState, ComponentForcing]]:
+    ) -> Dict[str, tuple[type, type]]:
         """Initialize all components.
 
         Args:
@@ -127,12 +128,16 @@ class Coupler:
 
             # Forcing should have the flexibility that sometimes we want forcing to be
             # mapped (coupled), and sometimes being left unchanged (true forcing)
-            coupled_forcings = self.forcing_mapper.couple_components(coupled_forcings, coupled_state)
+            coupled_forcings = self.forcing_mapper.couple_components(
+                coupled_forcings, coupled_state
+            )
 
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 component_name: step_function(
-                    coupled_state[component_name], coupled_forcings[component_name], t,
+                    coupled_state[component_name],
+                    coupled_forcings[component_name],
+                    t,
                 )
                 for component_name, step_function in step_functions.items()
             }
@@ -141,7 +146,9 @@ class Coupler:
                 name: prediction for name, (_, prediction) in results.items()
             }
 
-            return dict(state=coupled_state, forcings=coupled_forcings), coupled_predictions
+            return dict(
+                state=coupled_state, forcings=coupled_forcings
+            ), coupled_predictions
 
         if jitted:
             step_function = jax.jit(step_function)
@@ -173,36 +180,50 @@ class Coupler:
         steps = jnp.arange(total_steps)
         times = start_time + self.coupling_timestep * steps
         if jitted:
-            step_times = (steps, times) # type: ignore
+            step_times = (steps, times)  # type: ignore
         else:
-            step_times = list(zip(steps, times)) # type: ignore
-            
+            step_times = list(zip(steps, times))  # type: ignore
+
         if show_progress:
             if jitted:
-                coupled_step_function = scan_tqdm(n=total_steps, **tqdm_kwargs)(coupled_step_function)
+                coupled_step_function = scan_tqdm(n=total_steps, **tqdm_kwargs)(
+                    coupled_step_function
+                )
             else:
                 step_times = tqdm(step_times, **tqdm_kwargs)
-        
+
         def trajectory_function(
-            initial_coupled_state_forcing: Dict[str, tuple[ComponentState, ComponentForcing]],
+            initial_coupled_state_forcing: Dict[str, tuple[type, type]],
         ):
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
                 dict(
-                    state = {component_name: _state for component_name, (_state, _) in initial_coupled_state_forcing.items()},
-                    forcings = {component_name: _forcing for component_name, (_, _forcing) in initial_coupled_state_forcing.items()},
+                    state={
+                        component_name: _state
+                        for component_name, (
+                            _state,
+                            _,
+                        ) in initial_coupled_state_forcing.items()
+                    },
+                    forcings={
+                        component_name: _forcing
+                        for component_name, (
+                            _,
+                            _forcing,
+                        ) in initial_coupled_state_forcing.items()
+                    },
                 ),
                 xs=step_times,
             )
             predictions = unwrap_leading_dims(predictions, first_n_dim=2)
             return final_coupled_state, predictions
-        
+
         return trajectory_function
-    
+
     def add_component(
         self,
         name: Optional[str] = None,
-        component: Optional[Component] = None,
+        component: Optional[CoupledComponent] = None,
     ) -> None:
         """Add a new component to the coupler.
            If name is not provided, then simply re-extract component names and timesteps
@@ -221,6 +242,16 @@ class Coupler:
         self.component_names = list(self.components.keys())
         self.component_timesteps = {
             name: component.config.timestep
+            for name, component in self.components.items()
+        }
+
+        self.component_state_variable_registries = {
+            name: component.state_variable_registry
+            for name, component in self.components.items()
+        }
+
+        self.component_forcing_variable_registries = {
+            name: component.forcing_variable_registry
             for name, component in self.components.items()
         }
 

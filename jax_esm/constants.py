@@ -11,7 +11,9 @@ solar_const = 1367.0  # Solar constant at top of atmosphere (W/m²)
 # Atmosphere properties
 # =============================================================================
 atmosphere_column_mass = 1e4  # Total mass of atmospheric column (kg/m²)
-atmosphere_specific_heat_capacity_under_constant_pressure = 1004.0  # Cp for dry air (J/K/kg)
+atmosphere_specific_heat_capacity_under_constant_pressure = (
+    1004.0  # Cp for dry air (J/K/kg)
+)
 
 # Surface layer properties (for bulk formula calculations)
 surface_air_density = 1.22  # Surface air density at sea level (kg/m³)

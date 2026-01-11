@@ -1,6 +1,6 @@
 """Slab land model component."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Annotated
 
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -10,11 +10,33 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import (
-    create_component_state_class,
-    create_component_forcing_class,
-    create_field_group_class,
-)
+from jax_esm.base.variable import VariableMetadata, VariableRegistry
+import jax_esm.base.data_structure as data_structure
+
+default_sea_surface_temperature = 288.15
+
+@data_structure.schema
+class PrognosticData:
+    sim_time: Annotated[float, (), "zero_dimensional"]
+    land_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    land_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.schema
+class AirlandFlux:
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.schema
+class LandState:
+    prog: PrognosticData
+
+
+@data_structure.schema
+class LandForcing:
+    flux: AirlandFlux
 
 
 class SlabLandModel(SlabModelBase):
@@ -83,60 +105,57 @@ class SlabLandModel(SlabModelBase):
         self.time_factor = None
         self.cd_factor = None
 
+        self.validate()
+
+    def validate(self):
+        super()._validate()
+
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="state",
-                fields=[
-                    ("sim_time", float, ()),
-                    ("land_surface_temperature", float, self.grid_shape),
-                    ("land_depth", float, self.grid_shape),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="phydata",
-                fields=[],
-            ),
-        )
 
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[
-                    ("total_heat_flux", float, self.grid_shape),
-                ],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[],
-            ),
-        )
+        decorator = data_structure.build_dataclass({"two_dimensional": self.grid_shape})
+        self.component_state_class = decorator(LandState)
+        self.component_forcing_class = decorator(LandForcing)
+
+    def _create_variable_registries(self) -> None:
+        self.state_variable_registry = VariableRegistry()
+        self.forcing_variable_registry = VariableRegistry()
+
+        for target_registry, target_class in [
+            (self.state_variable_registry, self.component_state_class),
+            (self.forcing_variable_registry, self.component_forcing_class),
+        ]:
+            for name, _, dimensions, shape in target_class.schema_info():
+                target_registry.register_variable(
+                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
+                )
 
     def _initialize_fields(self):
         """Initialize land model fields."""
-        land_index = self.domain.bmask == 1
-        nonland_index = self.domain.bmask != 1
+        land_index = self.domain.horizontal_grids["T"].bmask == 1
+        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
 
         print("Total land grid count: ", land_index.sum())
 
         # Initialize land depth with latitudinal variation
         init_land_depth = (
             self.land_depth_max
-            + (self.land_depth_min - self.land_depth_max)
-            * jnp.cos(self.llat_rad) ** 3
+            + (self.land_depth_min - self.land_depth_max) * jnp.cos(self.llat_rad) ** 3
         )
 
         # Load or create initial land surface temperature
         if self.land_clim_file is not None:
-            print("Land climatology file. The given initial land surface temperature will be used.")
+            print(
+                "Land climatology file. The given initial land surface temperature will be used."
+            )
             print("Land climatology file: ", self.land_clim_file)
             self.land_surface_temperature_clim = jnp.array(
                 xr.open_dataset(self.land_clim_file)["stl"]
             )
             self.has_climatology = True
-            init_land_surface_temperature = self.land_surface_temperature_clim[:, :, 0].copy()
+            init_land_surface_temperature = self.land_surface_temperature_clim[
+                :, :, 0
+            ].copy()
         else:
             print("Boundary does not exist. Idealized initial LST will be used.")
             init_land_surface_temperature = (
@@ -145,11 +164,15 @@ class SlabLandModel(SlabModelBase):
             )
 
         # Apply mask
-        init_land_surface_temperature = init_land_surface_temperature.at[nonland_index].set(0)
+        init_land_surface_temperature = init_land_surface_temperature.at[
+            nonland_index
+        ].set(default_sea_surface_temperature)
 
         # Validate mask consistency
         if jnp.sum(jnp.isnan(init_land_surface_temperature)) == 0:
-            print("domain.bmask and land_surface_temperature_clim do share the same mask.")
+            print(
+                "domain.bmask and land_surface_temperature_clim do share the same mask."
+            )
         else:
             raise Exception(
                 "Warning: fmask_ocn and sst_init do not share the same mask."
@@ -157,7 +180,9 @@ class SlabLandModel(SlabModelBase):
 
         # Set relaxation time to infinity if no climatology
         if not self.has_climatology:
-            print("Climaology land surface temperature does not exist. Set relaxation time to inifinity.")
+            print(
+                "Climaology land surface temperature does not exist. Set relaxation time to inifinity."
+            )
             self.relaxation_time = jnp.inf
 
         # Compute heat capacity and time factors for Euler backward scheme
@@ -171,17 +196,17 @@ class SlabLandModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
-            prog_kwargs=dict(
-                land_depth=init_land_depth,
-                land_surface_temperature=init_land_surface_temperature,
-            ),
+            {
+                "prog.land_depth": init_land_depth,
+                "prog.land_surface_temperature": init_land_surface_temperature,
+            }
         ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for land model."""
         start_day_offset = self._compute_start_day_offset()
-        nonland_index = self.domain.bmask != 1
-        land_index = self.domain.bmask == 1
+        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
+        land_index = self.domain.horizontal_grids["T"].bmask == 1
 
         def step_function(state, forcing, t):
             # Compute anomaly if climatology is given
@@ -238,13 +263,14 @@ class SlabLandModel(SlabModelBase):
                 )
 
             # Apply ocean mask
-            new_land_surface_temperature = new_land_surface_temperature.at[nonland_index].set(0)
-
+            new_land_surface_temperature = new_land_surface_temperature.at[
+                nonland_index
+            ].set(default_sea_surface_temperature)
             new_state = state.copy(
-                prog_kwargs=dict(
-                    land_surface_temperature=new_land_surface_temperature,
-                    sim_time=new_sim_time,
-                ),
+                {
+                    "prog.land_surface_temperature": new_land_surface_temperature,
+                    "prog.sim_time": new_sim_time,
+                }
             )
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, forcing=forcing)]
