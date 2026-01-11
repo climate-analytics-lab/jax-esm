@@ -226,7 +226,9 @@ class SlabOceanModel(SlabModelBase):
         nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
         
         def step_function(state, forcing, t):
+            
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
+            total_heat_flux = forcing.flux.total_heat_flux
 
             if self.forcing_method == "relaxation":
                 # Get climatology at begin and end of timestep
@@ -256,14 +258,25 @@ class SlabOceanModel(SlabModelBase):
 
             elif forcing_method == "Qflux":
                 
-                Qflux = 
+                length_of_a_cycle = self.Qflux.shape[2]
+                Qflux_beg_idx, Qflux_end_idx = self._get_climatology_indices(
+                    t, start_day_offset, length_of_a_cycle
+                )
+
+                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
+                snapshot_Qflux = self.Qflux[:, :, clim_beg_idx]
+                snapshot_Qflux = jnp.where(
+                    ocn_idx, snapshot_Qflux, 0.0
+                )
+
+                total_heat_flux = total_heat_flux + snapshot_Qflux
 
 
             # Euler backward step
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * (- forcing.flux.total_heat_flux)
+                + self.cd_factor * (- total_heat_flux)
             )
 
             # Add climatology back if relaxation method is used
