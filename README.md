@@ -49,7 +49,8 @@ python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
 ```
 whose essential code is below
 ```python
-# Same jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py but only the essential part
+# Same as jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py 
+# but only the essential part
 import jcm
 from jcm.geometry import Geometry
 import jax_datetime as jdt
