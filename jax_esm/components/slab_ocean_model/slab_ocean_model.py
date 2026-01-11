@@ -1,6 +1,6 @@
 """Slab ocean model component."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Annotated
 
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -10,11 +10,34 @@ from jax_esm import constants
 from jax_esm.utils.bulk_op import stack_objects
 from jax_esm.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jax_esm.components.slab.base import SlabModelBase
-from jax_esm.components.base import (
-    create_component_state_class,
-    create_component_forcing_class,
-    create_field_group_class,
-)
+import jax_esm.base.data_structure as data_structure
+
+from jax_esm.base.variable import VariableRegistry, VariableMetadata
+
+default_land_surface_temperature = 288.15
+
+@data_structure.typed_and_dimensioned
+class PrognosticData:
+    sim_time: Annotated[float, (), "zero_dimensional"]
+    sea_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.typed_and_dimensioned
+class AirseaFlux:
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+
+@data_structure.typed_and_dimensioned
+class OceanState:
+    prog: PrognosticData
+
+
+@data_structure.typed_and_dimensioned
+class OceanForcing:
+    flux: AirseaFlux
 
 
 class SlabOceanModel(SlabModelBase):
@@ -82,40 +105,33 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = None
         self.cd_factor = None
 
+        self.validate()
+
+    def validate(self):
+        super()._validate()
+
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
-        self.component_state_class = create_component_state_class(
-            prog_cls=create_field_group_class(
-                cls_name="state",
-                fields=[
-                    ("sim_time", float, ()),
-                    ("sea_surface_temperature", float, self.grid_shape),
-                    ("mixed_layer_depth", float, self.grid_shape),
-                ],
-            ),
-            phydata_cls=create_field_group_class(
-                cls_name="phydata",
-                fields=[],
-            ),
-        )
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
+        self.component_state_class = decorator(OceanState)
+        self.component_forcing_class = decorator(OceanForcing)
 
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[
-                    ("total_heat_flux", float, self.grid_shape),
-                ],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[],
-            ),
-        )
+    def _create_variable_registries(self) -> None:
+        self.state_variable_registry = VariableRegistry()
+        self.forcing_variable_registry = VariableRegistry()
+
+        for target_registry, target_class in [
+            (self.state_variable_registry, self.component_state_class),
+            (self.forcing_variable_registry, self.component_forcing_class),
+        ]:
+            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
+                target_registry.register_variable(
+                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
+                )
 
     def _initialize_fields(self):
         """Initialize ocean model fields."""
-        nonocn_idx = self.domain.bmask != 0
+        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
 
         # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
@@ -136,10 +152,12 @@ class SlabOceanModel(SlabModelBase):
             init_sea_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
                 + constants.freezing_point_K
-            ) 
+            )
 
         # Apply mask
-        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(0)
+        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
+            default_land_surface_temperature
+        )
 
         # Validate mask consistency
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
@@ -165,16 +183,16 @@ class SlabOceanModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return self.component_state_class.zeros().copy(
-            prog_kwargs=dict(
-                mixed_layer_depth=init_mixed_layer_depth,
-                sea_surface_temperature=init_sea_surface_temperature,
-            ),
+            {
+                "prog.mixed_layer_depth_max": init_mixed_layer_depth,
+                "prog.sea_surface_temperature": init_sea_surface_temperature,
+            }
         ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
-        nonocn_idx = self.domain.bmask != 0
+        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
 
         def step_function(state, forcing, t):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
@@ -186,15 +204,15 @@ class SlabOceanModel(SlabModelBase):
                     t, start_day_offset, length_of_a_cycle
                 )
 
-                ocn_idx = self.domain.bmask == 0
+                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
-                    ocn_idx, snapshot_SST_clim_beg, constants.freezing_point_K + 15.0
+                    ocn_idx, snapshot_SST_clim_beg, default_land_surface_temperature
                 )
 
                 snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
                 snapshot_SST_clim_end = jnp.where(
-                    ocn_idx, snapshot_SST_clim_end, constants.freezing_point_K + 15.0
+                    ocn_idx, snapshot_SST_clim_end, default_land_surface_temperature
                 )
 
                 SST_clim_trend = (
@@ -209,7 +227,7 @@ class SlabOceanModel(SlabModelBase):
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * ( - forcing.flux.total_heat_flux )
+                + self.cd_factor * (-forcing.flux.total_heat_flux)
             )
 
             # Add climatology back
@@ -220,15 +238,15 @@ class SlabOceanModel(SlabModelBase):
                 )
 
             # Apply land mask
-            new_sea_surface_temperature = new_sea_surface_temperature.at[nonocn_idx].set(
-                constants.freezing_point_K
-            )
+            new_sea_surface_temperature = new_sea_surface_temperature.at[
+                nonocn_idx
+            ].set(default_land_surface_temperature)
 
             new_state = state.copy(
-                prog_kwargs=dict(
-                    sea_surface_temperature=new_sea_surface_temperature,
-                    sim_time=new_sim_time,
-                ),
+                {
+                    "prog.sea_surface_temperature": new_sea_surface_temperature,
+                    "prog.sim_time": new_sim_time,
+                }
             )
             return new_state, stack_objects(
                 [dict(prog=new_state.prog, forcing=forcing)]

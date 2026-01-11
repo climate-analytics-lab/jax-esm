@@ -9,15 +9,12 @@ from jcm.physics.speedy.physics_data import PhysicsData
 
 import jax
 import jax.numpy as jnp
+from jax import Array
 from jax_esm import constants as constants
 from jax_esm.components.base import (
-    Component,
+    CoupledComponent,
     CoupledComponentConfig,
-    ComponentState,
-    create_component_forcing_class,
-    create_field_group_class,
 )
-
 
 from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.physics_interface import PhysicsState
@@ -25,10 +22,11 @@ from jcm.physics_interface import PhysicsState
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jax_esm.utils.bulk_op import mean_leaf
-from jax_esm.components.domain import Domain
+from jax_esm.base.domain import Domain
+from jax_esm.base.variable import VariableMetadata, VariableRegistry
 
 import tree_math
-from typing import Any
+from typing import Any, Dict
 
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
@@ -42,13 +40,14 @@ def asfloat64(tree):
 
 @tree_math.struct
 @dataclass
-class JCMState(ComponentState):
+class JCMState:
     prog: PhysicsState
     phydata: Any
+    extra: Dict[str, Array]
     metadata: primitive_equations_states
 
 
-class JCM(Component):
+class JCM(CoupledComponent):
     """
     This is a class wrapping JCM.
     """
@@ -58,12 +57,19 @@ class JCM(Component):
         model: RawJCMModel,
         coupling_timestep: float = 86400.0,
         save_interval: float = 86400.0,
+        land_model_active: bool = True,
     ):
         """
         config: Configuration of JCM.
+        
+        land_model_active: True if land temperature will be provided by coupler, False otherwise. This is a
+                           necessary information because jax-gcm uses a boolean `lfluxland` to indicate if
+                           it is going to use `ForcingData.stl_am` or not. In summary, this variable should
+                           only be False if you are running an aquaplanet.
         """
 
         self.model = model
+        self.land_model_active = land_model_active
         super().__init__(
             CoupledComponentConfig(
                 name="JCM",
@@ -83,24 +89,19 @@ class JCM(Component):
         D2_nodal_shape = D3_nodal_shape[1:]
 
         self.component_state_class = JCMState
-        self.component_forcing_class = create_component_forcing_class(
-            cls_name="forcing",
-            flux_cls=create_field_group_class(
-                cls_name="flux",
-                fields=[],
-            ),
-            scalar_cls=create_field_group_class(
-                cls_name="scalar",
-                fields=[
-                    ("bare_land_albedo", float, D2_nodal_shape),
-                    ("sea_ice_concentration", float, D2_nodal_shape),
-                    ("soil_moisture", float, D2_nodal_shape),
-                    ("snow_cover", float, D2_nodal_shape),
-                    ("land_surface_temperature", float, D2_nodal_shape),
-                    ("sea_surface_temperature", float, D2_nodal_shape),
-                ],
-            ),
-        )
+        self.component_forcing_class = ForcingData
+
+        self.state_variable_registry = VariableRegistry([
+            VariableMetadata(name="extra.total_heat_flux", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+        ])
+
+        self.forcing_variable_registry = VariableRegistry([
+            VariableMetadata(name="sea_surface_temperature", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="sice_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="snowc_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="soilw_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+            VariableMetadata(name="stl_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
+        ])
 
     def initialize(
         self,
@@ -118,33 +119,33 @@ class JCM(Component):
                 )
             ),
             prog=dynamics_state_to_physics_state(_modal_state, self.model.primitive),
-        ), self.component_forcing_class.zeros()
+            extra={
+                "total_heat_flux" : jnp.zeros(self.model.coords.horizontal.nodal_shape),
+            },
+        ), self.component_forcing_class.zeros(nodal_shape=self.model.coords.horizontal.nodal_shape).copy(
+            lfluxland = jnp.bool_(self.land_model_active),
+        )
 
     def generate_step_function(self, jitted: bool = True):
         def step_function(state, forcing, t):
-            jcm_forcing = ForcingData(
-                alb0=forcing.scalar.bare_land_albedo,
-                sice_am=forcing.scalar.sea_ice_concentration,
-                snowc_am=forcing.scalar.snow_cover,
-                soilw_am=forcing.scalar.soil_moisture,
-                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(constants.freezing_point_K + 15.0),
-                sea_surface_temperature=forcing.scalar.sea_surface_temperature,
-                lfluxland=True,
-            )
-
             new_atm_modal_state, predictions = self.model.run_from_state(
                 initial_state=state.metadata,
                 save_interval=self.save_interval / 86400.0,  # in days
                 total_time=self.config.timestep / 86400.0,  # in days
-                forcing=jcm_forcing,
+                forcing=forcing,
             )
 
+            phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
+            extra = {
+                "total_heat_flux" : - jnp.sum(phydata.surface_flux.hfluxn, axis=2), # upward positive
+            }
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
             return JCMState(
                 prog=asfloat64(mean_leaf(predictions.dynamics, axis=0)),
-                phydata=asfloat64(mean_leaf(predictions.physics, axis=0)),
+                phydata=phydata,
                 metadata=new_atm_modal_state,
+                extra=extra,
             ), predictions
 
         return jax.jit(step_function) if jitted else step_function

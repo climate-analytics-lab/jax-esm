@@ -13,11 +13,11 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
-from jax_esm.components.base import Component, CoupledComponentConfig
-from jax_esm.components.domain import Domain
+from jax_esm.components.base import CoupledComponent, CoupledComponentConfig
+from jax_esm.base.domain import Domain
 
 
-class SlabModelBase(Component):
+class SlabModelBase(CoupledComponent):
     """Base class for slab models providing shared infrastructure.
 
     This base class handles:
@@ -67,10 +67,11 @@ class SlabModelBase(Component):
         )
 
         # Get grid shape for state/forcing class creation
-        self.grid_shape = self.domain.grids["T"].nodal_shape
+        self.grid_shape = self.domain.horizontal_grids["T"].shape
 
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()
+        self._create_variable_registries()
 
         # Lat/lon grids will be set during initialize()
         self.llat_rad = None
@@ -86,29 +87,34 @@ class SlabModelBase(Component):
         """
         pass
 
+    @abstractmethod
+    def _create_variable_registries(self) -> None:
+        """Create state_variable_registry and forcing_variable_registry"""
+        pass
+
     def _setup_lat_lon_grids(self) -> None:
         """Set up 2D latitude and longitude grids in radians.
 
         Creates self.llat_rad and self.llon_rad as 2D arrays matching
         the T-grid shape.
         """
-        T_grid = self.domain.grids["T"]
-        D2_nodal_shape = T_grid.nodal_shape
+        T_grid = self.domain.horizontal_grids["T"]
+        D2_nodal_shape = T_grid.shape
 
         lat_dim_idx = next(
             i
-            for i, axis_name in enumerate(T_grid.axis_names)
+            for i, axis_name in enumerate(T_grid.coordinate.dims)
             if axis_name == "latitude"
         )
         lon_dim_idx = next(
             i
-            for i, axis_name in enumerate(T_grid.axis_names)
+            for i, axis_name in enumerate(T_grid.coordinate.dims)
             if axis_name == "longitude"
         )
 
         self.llat_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[lat_dim_idx],
+                T_grid.coordinate.fields["latitude"].data,  # [lat_dim_idx],
                 axis=lon_dim_idx,
             ),
             repeats=D2_nodal_shape[lon_dim_idx],
@@ -117,7 +123,7 @@ class SlabModelBase(Component):
 
         self.llon_rad = jnp.repeat(
             jnp.expand_dims(
-                T_grid.axis_values[lon_dim_idx],
+                T_grid.coordinate.fields["longitude"].data,  # [lon_dim_idx],
                 axis=lat_dim_idx,
             ),
             repeats=D2_nodal_shape[lat_dim_idx],
@@ -219,7 +225,7 @@ class SlabModelBase(Component):
         Returns:
             xarray Dataset with model output
         """
-        T_grid_axis_names = self.domain.grids["T"].axis_names
+        T_grid_axis_names = self.domain.horizontal_grids["T"].coordinate.dims
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -272,4 +278,4 @@ class SlabModelBase(Component):
         Returns:
             Tuple of dimension names including time
         """
-        return ("time",) + self.domain.grids["T"].axis_names
+        return ("time",) + self.domain.horizontal_grids["T"].coordinate.dims

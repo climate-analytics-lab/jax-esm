@@ -33,6 +33,7 @@ dependencies = [
     "netcdf4",
     "xarray",
     "tree_math",
+    "coordax",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,7 @@ dev = [
 jcm = [
     "dinosaur",
     "flax",
+    "jcm",
 ]
 
 [project.urls]

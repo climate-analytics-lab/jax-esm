@@ -1,5 +1,6 @@
-from .JCM import JCM
+from .JCM import JCM, JCMState
 
 __all__ = [
     "JCM",
+    "JCMState",
 ]
