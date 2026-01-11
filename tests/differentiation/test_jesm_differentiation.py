@@ -2,6 +2,8 @@
 
 def test_integration():
 
+    import matplotlib.pyplot as plt
+
     from jax_esm.components import SlabOceanModel, SlabAtmosphereModel
     import jax_datetime as jdt
     from jax_esm.coupling.factory.simple_coupling import couple_atm_ocn as couple
@@ -12,7 +14,7 @@ def test_integration():
 
     coupling_timestep = 86400.0
     start_datetime = jdt.to_datetime("2000-01-01")
-    simulation_interval = jdt.to_timedelta(50, "day")
+    simulation_interval = jdt.to_timedelta(5, "day")
     output_dir = Path("output/SAM_SOM").resolve()
 
     print("Output dir: ", str(output_dir))
@@ -39,7 +41,7 @@ def test_integration():
     model = couple(**components)
 
     # Obtain initial condition
-    initial_coupled_state_forcing = model.initialize()
+
     
     trajectory_function = model.generate_trajectory_function(
         start_time=0,
@@ -49,22 +51,35 @@ def test_integration():
         tqdm_kwargs=dict(desc="Simulation"),
     )
 
-    # Run coupled model
-    print("Running model...")
-    state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+    def measure(param):
+        initial_coupled_state_forcing = model.initialize()
+        initial_coupled_state_forcing["atm"][1].scalar.bulk_drag_coefficient = param
+        state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+        result = state_holder["state"]["ocn"].prog.sea_surface_temperature.sum() 
+        return result
     
-    # Convert output into xarray
-    output_dict = model.predictions_to_xarray(predictions)
+    import jax 
+    import jax.numpy as jnp 
+    grad_measure = jax.grad(measure)
+    
+    measure_results = []
+    grad_measure_results = []
+    params = jnp.linspace(0, 1e-2, 5)
+    for i, param in enumerate(params):
+        print(f"[{i:d}] Evaluating param {param:f}...")
+        measure_results.append(measure(param))
+        grad_measure_result = grad_measure(param)
+        print("Grad_measure: ", grad_measure_result)
+        grad_measure_results.append(grad_measure_result) 
 
-    for component_name, ds in output_dict.items():
-        output_file = output_dir / f"{component_name:s}.nc"
-        print("Output file: ", str(output_file))
-        ds.to_netcdf(output_file, engine="netcdf4")
-
-    output_dir = Path("output").resolve()
-
-    print("Output dir: ", str(output_dir))
-    output_dir.mkdir(exist_ok=True, parents=True)
+    fig, ax = plt.subplots(2,1)
+    ax[0].plot(params, measure_results)    
+    ax[1].plot(params, grad_measure_results)
+    
+    ax[0].set_title("Measure") 
+    ax[1].set_title("Grad Measure") 
+    plt.show()
+    
 if __name__ == "__main__":
     test_integration()
 

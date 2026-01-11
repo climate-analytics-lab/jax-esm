@@ -135,8 +135,8 @@ class SlabOceanModel(SlabModelBase):
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_sea_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
-                + constants.default_land_temperature_K
-            )
+                + constants.freezing_point_K
+            ) 
 
         # Apply mask
         init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(0)
@@ -169,7 +169,7 @@ class SlabOceanModel(SlabModelBase):
                 mixed_layer_depth=init_mixed_layer_depth,
                 sea_surface_temperature=init_sea_surface_temperature,
             ),
-        )
+        ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -189,12 +189,12 @@ class SlabOceanModel(SlabModelBase):
                 ocn_idx = self.domain.bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
-                    ocn_idx, snapshot_SST_clim_beg, constants.default_land_temperature_K
+                    ocn_idx, snapshot_SST_clim_beg, constants.freezing_point_K + 15.0
                 )
 
                 snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
                 snapshot_SST_clim_end = jnp.where(
-                    ocn_idx, snapshot_SST_clim_end, constants.default_land_temperature_K
+                    ocn_idx, snapshot_SST_clim_end, constants.freezing_point_K + 15.0
                 )
 
                 SST_clim_trend = (
@@ -209,7 +209,7 @@ class SlabOceanModel(SlabModelBase):
             new_sim_time = state.prog.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * (-(forcing.flux.total_heat_flux))
+                + self.cd_factor * ( - forcing.flux.total_heat_flux )
             )
 
             # Add climatology back
@@ -221,7 +221,7 @@ class SlabOceanModel(SlabModelBase):
 
             # Apply land mask
             new_sea_surface_temperature = new_sea_surface_temperature.at[nonocn_idx].set(
-                constants.default_land_temperature_K
+                constants.freezing_point_K
             )
 
             new_state = state.copy(

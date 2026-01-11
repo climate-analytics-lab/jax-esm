@@ -141,7 +141,7 @@ class SlabLandModel(SlabModelBase):
             print("Boundary does not exist. Idealized initial LST will be used.")
             init_land_surface_temperature = (
                 positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
-                + constants.default_land_temperature_K
+                + constants.freezing_point_K
             )
 
         # Apply mask
@@ -175,7 +175,7 @@ class SlabLandModel(SlabModelBase):
                 land_depth=init_land_depth,
                 land_surface_temperature=init_land_surface_temperature,
             ),
-        )
+        ), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for land model."""
@@ -200,7 +200,7 @@ class SlabLandModel(SlabModelBase):
                 snapshot_land_surface_temperature_clim_beg = jnp.where(
                     land_index,
                     snapshot_land_surface_temperature_clim_beg,
-                    constants.default_land_temperature_K,
+                    constants.freezing_point_K + 15.0,
                 )
 
                 snapshot_land_surface_temperature_clim_end = (
@@ -209,7 +209,7 @@ class SlabLandModel(SlabModelBase):
                 snapshot_land_surface_temperature_clim_end = jnp.where(
                     land_index,
                     snapshot_land_surface_temperature_clim_end,
-                    constants.default_land_temperature_K,
+                    constants.freezing_point_K + 15.0,
                 )
 
                 land_surface_temperature_clim_trend = (

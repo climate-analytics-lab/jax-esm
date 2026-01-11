@@ -62,6 +62,7 @@ class ForcingMapper:
 
     def map_forcings(
         self,
+        component_forcings: Dict[str, ComponentForcing],
         component_states: Dict[str, ComponentState],
     ) -> Dict[str, ComponentForcing]:
         """Map fluxes and scalars between components.
@@ -71,13 +72,12 @@ class ForcingMapper:
         Returns:
             Dictionary mapping component names to their input fluxes
         """
-        forcings = {}
 
         for (
             target_component_name,
             target_component_forcing_class,
         ) in self.component_forcing_classes.items():
-            forcing = target_component_forcing_class.zeros()
+            forcing = component_forcings[target_component_name]
             for (
                 source_component_name,
                 source_component_state,
@@ -107,23 +107,24 @@ class ForcingMapper:
                         target_variable_name,
                     )
                     if transform_key in self.transformations:
+                        print(f"{source_component_name:s}.{source_variable_name} => {target_component_name:s}.{target_variable_name}")
                         source_variable = self.transformations[transform_key](
                             source_variable
                         )
 
-                    # Accumulate flux or scalar (for multiple sources)
                     strset(
                         forcing,
                         target_variable_name,
-                        strget(forcing, target_variable_name) + source_variable,
+                        source_variable,
                     )
 
-            forcings[target_component_name] = forcing
+            component_forcings[target_component_name] = forcing
 
-        return forcings
+        return component_forcings
 
     def couple_components(
         self,
+        component_forcings: Dict[str, ComponentForcing],
         component_states: Dict[str, ComponentState],
     ) -> Dict[str, ComponentForcing]:
         """Couple components by remapping forcings with conservation checks.
@@ -135,12 +136,12 @@ class ForcingMapper:
             A dictionary of forcing of each components
         """
 
-        forcings = self.map_forcings(component_states)
+        component_forcings = self.map_forcings(component_forcings, component_states)
 
         # Optional: Add conservation checks here
         # self._check_conservation(output_fluxes, input_fluxes)
 
-        return forcings
+        return component_forcings
 
     def _check_conservation(
         self,

@@ -100,6 +100,7 @@ class SlabAtmosphereModel(SlabModelBase):
             scalar_cls=create_field_group_class(
                 cls_name="scalar",
                 fields=[
+                    ("bulk_drag_coefficient", float, ()),
                     ("bare_land_albedo", float, self.grid_shape),
                     ("sea_ice_concentration", float, self.grid_shape),
                     ("soil_moisture", float, self.grid_shape),
@@ -114,7 +115,7 @@ class SlabAtmosphereModel(SlabModelBase):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
+            positive_cosine_cubic_latitude_squared(self.llat_rad) * 17.0
             + constants.freezing_point_K
         )
         init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
@@ -133,7 +134,7 @@ class SlabAtmosphereModel(SlabModelBase):
                 mean_zonal_wind_velocity=init_mean_zonal_wind_velocity,
                 mean_meridional_wind_velocity=init_mean_meridional_wind_velocity,
             ),
-        )
+        ), self.component_forcing_class.zeros().copy(scalar_kwargs=dict(bulk_drag_coefficient=1e-3))
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -147,10 +148,11 @@ class SlabAtmosphereModel(SlabModelBase):
                 + state.prog.mean_meridional_wind_velocity ** 2
             ) ** 0.5
 
+            print("bulk_drag_coefficient = ", forcing.scalar.bulk_drag_coefficient)
             # Bulk aerodynamic formula for ocean sensible heat flux
             ocean_sensible_heat_flux = (
                 constants.surface_air_density
-                * constants.bulk_drag_coefficient
+                * forcing.scalar.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
@@ -162,7 +164,7 @@ class SlabAtmosphereModel(SlabModelBase):
             # Bulk aerodynamic formula for land sensible heat flux
             land_sensible_heat_flux = (
                 constants.surface_air_density
-                * constants.bulk_drag_coefficient
+                * forcing.scalar.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
@@ -180,11 +182,11 @@ class SlabAtmosphereModel(SlabModelBase):
             total_heat_flux = (
                 ocean_sensible_heat_flux + land_sensible_heat_flux + latent_heat_flux
             )
-
+            
             # Update temperature
             new_sim_time = state.prog.sim_time + self.timestep
             new_mean_air_temperature = (
-                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux 
             )
             new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
 

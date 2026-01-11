@@ -105,7 +105,6 @@ class JCM(Component):
     def initialize(
         self,
         initial_state: PhysicsState | primitive_equations.State = None,
-        forcing: ForcingData = None,
         start_date: jdt.Datetime = jdt.to_datetime("2000-01-01"),
     ):
         _modal_state = asfloat64(self.model._prepare_initial_modal_state())
@@ -119,7 +118,7 @@ class JCM(Component):
                 )
             ),
             prog=dynamics_state_to_physics_state(_modal_state, self.model.primitive),
-        )
+        ), self.component_forcing_class.zeros()
 
     def generate_step_function(self, jitted: bool = True):
         def step_function(state, forcing, t):
@@ -128,7 +127,7 @@ class JCM(Component):
                 sice_am=forcing.scalar.sea_ice_concentration,
                 snowc_am=forcing.scalar.snow_cover,
                 soilw_am=forcing.scalar.soil_moisture,
-                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(constants.default_land_temperature_K),
+                stl_am=forcing.scalar.land_surface_temperature.at[:, :].set(constants.freezing_point_K + 15.0),
                 sea_surface_temperature=forcing.scalar.sea_surface_temperature,
                 lfluxland=True,
             )

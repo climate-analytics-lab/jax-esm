@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from jax_esm.components.base import ComponentState, Component
+from jax_esm.components.base import ComponentState, ComponentForcing, Component
 from jax_esm.coupling.forcing_mapper import ForcingMapper
 
 
@@ -61,7 +61,7 @@ class Coupler:
 
     def initialize(
         self,
-    ) -> Dict[str, ComponentState]:
+    ) -> Dict[str, tuple[ComponentState, ComponentForcing]]:
         """Initialize all components.
 
         Args:
@@ -119,16 +119,20 @@ class Coupler:
                 looped_step_function, step_function=_step_function, component=component
             )
 
-        def step_function(coupled_state, step_time):
+        def step_function(bundle, step_time):
             _, t = step_time
 
-            # Compute forcing
-            forcings = self.forcing_mapper.couple_components(coupled_state)
+            coupled_state = bundle["state"]
+            coupled_forcings = bundle["forcings"]
+
+            # Forcing should have the flexibility that sometimes we want forcing to be
+            # mapped (coupled), and sometimes being left unchanged (true forcing)
+            coupled_forcings = self.forcing_mapper.couple_components(coupled_forcings, coupled_state)
 
             # Call forward functions and unpack results directly into dictionaries
             results = {
                 component_name: step_function(
-                    coupled_state[component_name], forcings[component_name], t,
+                    coupled_state[component_name], coupled_forcings[component_name], t,
                 )
                 for component_name, step_function in step_functions.items()
             }
@@ -137,16 +141,15 @@ class Coupler:
                 name: prediction for name, (_, prediction) in results.items()
             }
 
-            return coupled_state, coupled_predictions
+            return dict(state=coupled_state, forcings=coupled_forcings), coupled_predictions
 
         if jitted:
             step_function = jax.jit(step_function)
 
         return step_function
 
-    def run(
+    def generate_trajectory_function(
         self,
-        initial_coupled_state: Dict[str, ComponentState],
         start_time: float,
         end_time: float,
         save_interval_steps=1,
@@ -154,7 +157,6 @@ class Coupler:
         show_progress: bool = False,
         tqdm_kwargs: Dict[str, Any] = dict(),
     ):
-        _start_time = time.time()
         total_time = end_time - start_time
         total_steps = int(total_time / self.coupling_timestep)
 
@@ -181,19 +183,22 @@ class Coupler:
             else:
                 step_times = tqdm(step_times, **tqdm_kwargs)
         
-        final_coupled_state, predictions = scan_func(
-            coupled_step_function,
-            initial_coupled_state,
-            xs=step_times,
-        )
-        predictions = unwrap_leading_dims(predictions, first_n_dim=2)
-
-        _end_time = time.time()
-        _elapsed_time = _end_time - _start_time
-        print(f"Execution time: {_elapsed_time:.1f} seconds.")
-
-        return final_coupled_state, predictions
-
+        def trajectory_function(
+            initial_coupled_state_forcing: Dict[str, tuple[ComponentState, ComponentForcing]],
+        ):
+            final_coupled_state, predictions = scan_func(
+                coupled_step_function,
+                dict(
+                    state = {component_name: _state for component_name, (_state, _) in initial_coupled_state_forcing.items()},
+                    forcings = {component_name: _forcing for component_name, (_, _forcing) in initial_coupled_state_forcing.items()},
+                ),
+                xs=step_times,
+            )
+            predictions = unwrap_leading_dims(predictions, first_n_dim=2)
+            return final_coupled_state, predictions
+        
+        return trajectory_function
+    
     def add_component(
         self,
         name: Optional[str] = None,

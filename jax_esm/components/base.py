@@ -255,11 +255,11 @@ class Component(ABC):
         self.config = config
 
     @abstractmethod
-    def initialize(self) -> ComponentState:
-        """Initialize component state.
+    def initialize(self) -> tuple[ComponentState, ComponentForcing]:
+        """Initialize component state and forcing.
 
         Returns:
-            Initial component state
+            Initial component state and forcing
         """
         pass
 
