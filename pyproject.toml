@@ -56,7 +56,7 @@ jcm = [
 "Source" = "https://github.com/climate-analytics-lab/jax-esm"
 
 [tool.setuptools]
-packages = ["jax_esm", "jax_esm.components", "jax_esm.coupling", "jax_esm.utils"]
+packages = ["jem", "jem.components", "jem.coupling", "jem.utils"]
 
 [tool.black]
 line-length = 88
