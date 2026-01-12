@@ -177,7 +177,7 @@ for component_name, ds in output_dict.items():
 
 ### Component Interface
 
-Each component must inherit from `Component` and implement:
+Each component must inherit from `CoupledComponent` and implement:
 
 - **`__init__(config)`**: Initialize with ComponentConfig, need to define `component_state_class` and `component_forcing_class`.
 - **`initialize()`**: Return initial component state and forcing
@@ -190,7 +190,7 @@ Each component must inherit from `Component` and implement:
 
 The current implementation uses direct coupling:
 - Coupler creates a `CoupledState` with fields for each component
-- Coupler pass the state of each component and forcing to the corresponding component's `step_function`.
+- Coupler passes the state of each component and forcing to the corresponding component's `step_function`.
 
 ### Time Integration
 
