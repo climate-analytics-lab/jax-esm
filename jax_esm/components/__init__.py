@@ -5,6 +5,7 @@ from jax_esm.components.JCM import JCM
 from jax_esm.components.SlabOceanModel import SlabOceanModel
 from jax_esm.components.SlabAtmosphereModel import SlabAtmosphereModel
 from jax_esm.components.SlabLandModel import SlabLandModel
+from jax_esm.components.LandModel import LandModel
 
 __all__ = [
     "Component",
@@ -12,4 +13,5 @@ __all__ = [
     "SlabOceanModel",
     "SlabAtmosphereModel",
     "SlabLandModel",
+    "LandModel",
 ]
