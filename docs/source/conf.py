@@ -31,7 +31,9 @@ exclude_patterns = []
 autosummary_generate = True
 autosummary_generate_overwrite = True  # Regenerate on each buil
 
+napoleon_google_docstring = True
 napoleon_numpy_docstring = True
+
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
