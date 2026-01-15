@@ -21,6 +21,7 @@ from .base.data_structure import (
 )
 
 __all__ = [
+    "Coupler",
     "Transformer",
     "ForcingMapper",
     "IdentityTransformer",
