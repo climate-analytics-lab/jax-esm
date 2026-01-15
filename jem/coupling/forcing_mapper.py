@@ -14,8 +14,13 @@ class ForcingMapper:
             Keys are (source, target) component pairs, values are dicts 
             mapping source flux names to target names.
         transformations: Optional transformations for fluxes.
-            Keys are (source, target, flux_name) tuples, values are transformation
-            functions.
+            Keys are (source, target, variable_name) tuples, values are transformation
+            functions. If the variable is nested in additional data structure, variable_name
+            can be a dotted representation, such as "surface.sea_surface_temperature", 
+            "radiation.longwave_radiation", ... etc. To access the structure, if the underlying
+            data struct is a dict, ForcingMapper will use :code:`__getitem__`; if the data struct
+            is not a dict, :code:`getattr` will be used.
+                   
     """
     components: Dict[str, CoupledComponent]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
