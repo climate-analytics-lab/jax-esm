@@ -54,6 +54,11 @@ plot = [
     "matplotlib",
 ]
 
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/climate-analytics-lab/jax-esm"
 "Bug Reports" = "https://github.com/climate-analytics-lab/jax-esm/issues"
