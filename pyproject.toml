@@ -56,7 +56,7 @@ plot = [
 
 docs = [
     "sphinx",
-    "sphinx-book-theme",
+    "shibuya",
 ]
 
 [project.urls]

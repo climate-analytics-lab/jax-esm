@@ -22,16 +22,19 @@ extensions = [
     'sphinx.ext.doctest',
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
+    'sphinx.ext.napoleon',
 ]
 
 templates_path = ['_templates']
 exclude_patterns = []
 
-autosummary_generate=True
+autosummary_generate = True
+autosummary_generate_overwrite = True  # Regenerate on each buil
 
+napoleon_numpy_docstring = True
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-html_theme = 'sphinx_rtd_theme'
+html_theme = 'shibuya'
 html_static_path = ['_static']
