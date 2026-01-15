@@ -2,7 +2,10 @@ API Reference
 =============
 
 .. autosummary::
-   :toctree: _autosummary
+   :toctree: generated
    :recursive:
 
-   jem
+   jem.Grid
+   jem.GridSpecification
+   jem.Transformer
+   jem.IdentityTransformer

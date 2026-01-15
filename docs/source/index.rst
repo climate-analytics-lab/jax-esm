@@ -16,7 +16,7 @@ documentation for details.
    :caption: Contents:
 
    api
-
+   api_automodule
 
 Indices and tables
 ==================
