@@ -7,7 +7,20 @@ from jem.base.exceptions import ValidationError
 
 @dataclass
 class VariableMetadata:
-    """Metadata for a single field."""
+    """Metadata for a single variable.
+    
+    When coupling, it is important to keep track of the dimensions of the
+    individual variable. :code:`VariableMetadata` adopts :code:`Coordax.Field`
+    to do so. Most importantly, :code:`VariableMetadata` will be used by
+    :code:`Transformer` to re-order the dimension.
+
+    Attributes:
+        name: Access name of the variable.
+        shape: A tuple holding the shape of the variable.
+        dimension: A tuple holding the name of each dimension.
+        coords: The coordinate information of each dimension (not used).
+        attrs: The additional information of each dimension (not used).
+    """
 
     name: str
     shape: tuple[int, ...]
@@ -40,8 +53,11 @@ class VariableRegistry:
     """
     Registry maintaining coordinate metadata for all exchanged fields.
 
-    This is the single source of truth for coordinate information,
-    keeping it separate from component state objects.
+    A :code:`VariableResgistry` document the information of variable.
+
+    Attributes:
+        _metadata: The dict object holding all registered
+            :code:`VariableMetadata`. 
     """
 
     def __init__(self, variable_metadatas: Optional[List[VariableMetadata]] = None):
