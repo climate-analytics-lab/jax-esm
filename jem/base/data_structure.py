@@ -7,6 +7,29 @@ import tree_math
 from dataclasses import dataclass
 
 def typed_and_dimensioned(cls):
+    """
+    A decorator to store the information of underlying data type and
+    dimensions without explicit shape needed. The decorated class can move on
+    to be used with :code:`build_dataclass_from_typed_and_dimensioned` to
+    create a class injected with :code:`zeros`, :code:`ones`, and :code:`copy`
+    without specifying shape.
+
+    Usage:
+    
+    .. code-block:: python
+
+        from jem import typed_and_dimensioned
+        from typing import Annotated
+        
+        @typed_and_dimensioned
+        class Data:
+            mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+       
+       
+    
+
+    """
+
     hints = get_type_hints(cls, include_extras=True)
     cls._fields = {}
 
