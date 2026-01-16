@@ -25,9 +25,6 @@ def typed_and_dimensioned(cls):
         class Data:
             mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
        
-       
-    
-
     """
 
     hints = get_type_hints(cls, include_extras=True)
