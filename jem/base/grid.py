@@ -8,7 +8,10 @@ import coordax as cx
 @dataclass
 class GridSpecification:
     """
-    grid_universe : Top name for classification. Such as JCM, GFDL, CESM, ... , and such.
+    Descriptor of the grid.
+
+    grid_universe : Top name for classification. Such as JCM, GFDL, CESM, ... ,
+        and such.
     grid_family   : Such as T31, FV45, ..., gx1v6 and such.
     """
 
@@ -17,7 +20,8 @@ class GridSpecification:
 
     def parse_grid_specification(grid_specification_string: str) -> Dict[str, str]:
         """
-        Parse a grid specification string of format "<grid_universe>::<grid_family>".
+        Parse a grid specification string of format
+        "<grid_universe>::<grid_family>".
 
         For grid_universe == "JCM", grid_family should be "T<truncation_number>"
         where truncation_number is an integer.
@@ -26,11 +30,12 @@ class GridSpecification:
         where resolution is a float.
 
         Args:
-            grid_specification (str): String in format "<grid_universe>::<grid_family>"
+            grid_specification (str): String in format
+                "<grid_universe>::<grid_family>"
 
         Returns:
-            dict: Dictionary with keys 'grid_universe', 'grid_family', and if applicable,
-                  'truncation_number'
+            dict: Dictionary with keys 'grid_universe', 'grid_family', and if
+                applicable, 'truncation_number'
 
         Raises:
             ValueError: If the format is invalid
@@ -60,9 +65,12 @@ class GridSpecification:
 @dataclass
 class Grid:
     """
-    Grid specifies the coordinate (shape the most important) and additionally weights and masks.
-    The binary mask `bmask` values adopt the convention that 1 means land, and 0 means ocean
-    The fraction mask `fmask` means the fraction of grid area occupied by land.
+    Grid specifies the coordinate (shape the most important) and additionally
+    weights and masks.
+
+    The values of the binary mask (:code:`bmask`) adopt the convention that 1 
+    means land, and 0 means ocean. The fraction mask (:code:`fmask`) means 
+    the fraction of grid area occupied by land.
     """
 
     coordinate: cx.Coordinate
