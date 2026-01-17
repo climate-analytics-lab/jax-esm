@@ -8,14 +8,12 @@ def mean_leaf(
     axis: int | list,
 ) -> Any:
     """
-    A tool function that does the jnp.mean to leaf nodes.
+    Apply :code:`jnp.mean` to leaf nodes.
 
     Args:
-
         tree : a tree object
 
     Returns:
-
         tree_mean : tree with jnp.mean applied to each of its leaf node.
 
     """
@@ -27,15 +25,13 @@ def unwrap_leading_dims(
     first_n_dim: int = 2,
 ) -> Any:
     """
-    A tool function that unwraps the leading dimensions of jax arrays
+    Unwrap the leading dimensions of jax arrays
 
     Args:
-
-        obj : A structure containining jax arrays
+        obj: A structure containining jax arrays
 
     Returns:
-
-        unwrapped object.
+        Unwrapped object.
 
     """
 
@@ -50,15 +46,13 @@ def stack_objects(
     objs: List,
 ):
     """
-    A tool function that stack dataclasses together.
+    Stack stack dataclasses together.
 
     Args:
-
-        objs : A list of objects that need to be stacked
+        objs: A list of objects that need to be stacked
 
     Returns:
-
-        stacked : Stacked object.
+        Stacked object.
 
     """
     # objs is a list of pytrees with same structure
@@ -71,15 +65,13 @@ def concat_objects(
     axis: int,
 ):
     """
-    A tool function that concats dataclasses together.
+    Concats dataclasses together.
 
     Args:
-
-        objs : A list of objects that need to be concat
+        objs: A list of objects that need to be concat
 
     Returns:
-
-        concatenated : Concatenated object.
+        Concatenated object.
 
     """
     # objs is a list of pytrees with same structure
