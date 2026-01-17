@@ -20,8 +20,15 @@ from .base.data_structure import (
     build_dataclass_from_typed_and_dimensioned,
 )
 
+from .component.base import (
+    CoupledComponentConfig,
+    CoupledComponent,
+)
+
 __all__ = [
     "Coupler",
+    "CoupledComponentConfig",
+    "CoupledComponent",
     "Transformer",
     "ForcingMapper",
     "IdentityTransformer",
