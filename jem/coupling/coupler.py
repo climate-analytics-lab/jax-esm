@@ -44,7 +44,7 @@ class Coupler:
         coupling_timestep: The time interval (seconds) between each time components exchanging 
             information (heat fluxes, surface temperature, and so on).
         components:
-            A dict whose key is the name of the component and the key is the instantiated component.
+            A dict whose key is the name of the component and the value is the instantiated component.
         forcing_mapper: 
             A :code:`ForcingMapper` that is responsible for sending information between components.
     
