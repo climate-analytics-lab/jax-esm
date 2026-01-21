@@ -20,7 +20,43 @@ class ForcingMapper:
             "radiation.longwave_radiation", ... etc. To access the structure, if the underlying
             data struct is a dict, ForcingMapper will use :code:`__getitem__`; if the data struct
             is not a dict, :code:`getattr` will be used.
-                   
+
+    Example:
+
+    .. code-block:: python
+       :linenos:
+
+       from jem.coupling.transformer import IdentityTransformer
+       from jem.coupling.forcing_mapper import ForcingMapper
+       
+       # ... construct models ...
+       atm_model = ... 
+       ocn_model = ...
+       
+
+       forcing_mapper = ForcingMapper(
+           components=dict(
+               atm=atm_model,
+               ocn=ocn_model,
+           )
+       )
+       forcing_mapper.add_forcing_mapping(
+           source = ("atm", "phydata.total_heat_flux"),
+           target = ("ocn", "flux.total_heat_flux"),
+           transformer = IdentityTransformer(
+               source_grid=atm_model.grid,
+               target_grid=ocn_model.grid,
+           )
+       )
+       forcing_mapper.add_forcing_mapping(
+           source = ("ocn", "prog.sea_surface_temperature"),
+           target = ("atm", "scalar.sea_surface_temperature"),
+           transformer = IdentityTransformer(
+               source_grid=ocn_model.grid,
+               target_grid=atm_model.grid,
+           )
+       )
+
     """
     components: Dict[str, CoupledComponent]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
