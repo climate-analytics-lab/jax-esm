@@ -1,4 +1,4 @@
-"""JCM Wrapper Class"""
+"""JCM adapter to JEM"""
 
 from dataclasses import dataclass
 
@@ -53,12 +53,17 @@ class JCMState:
     extra: Dict[str, Array]
     metadata: primitive_equations_states
 
-
 def make_jem_compatible(
-    model: Model, save_interval: float = 86400.0, land_model_active: bool = True
+    model: Model,
+    coupling_timestep: float,
+    save_interval: float = 86400.0,
+    land_model_active: bool = True,
 ) -> Model:
     
     timestep = model.dt_si.to_timedelta().total_seconds()
+   
+    if coupling_timestep % timestep != 0:
+        raise Exception("Coupling timestep should be a multiple of timestep.")
     
     check_before_setattr(model, "timestep", timestep)
     check_before_setattr(model, "component_state_class", JCMState)
@@ -107,10 +112,9 @@ def make_jem_compatible(
             new_atm_modal_state, predictions = model.run_from_state(
                 initial_state=state.metadata,
                 save_interval=save_interval/86400.0,  # in days
-                total_time=timestep/86400.0,  # in days
+                total_time=coupling_timestep/86400.0,  # in days
                 forcing=forcing,
             )
-
             phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
             extra = {
                 "total_heat_flux" : - jnp.sum(phydata.surface_flux.hfluxn, axis=2), # upward positive
