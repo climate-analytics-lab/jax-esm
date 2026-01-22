@@ -119,38 +119,10 @@ class Coupler:
         scan_func = generate_scan_function(jitted=jitted)
 
         # Get step functions of each component
-        step_functions = {}
-        for component_name, component in self.components.items():
-            _step_function = component.generate_step_function(jitted=jitted)
-            
-            # do not refer to any variable defined here from
-            # looped_step_function. If you do, all components'
-            # looped_step_function will refer to the same closure 
-            # variable, which is typically undesired.
- 
-            # Closure in a loop is used. Using functools.partial to cache.
-            def looped_step_function(state, forcing, t, step_function, component):
-                ts = t + component.timestep * jnp.arange(
-                    int(self.coupling_timestep / component.timestep)
-                )
-
-                def wrapped_step_function(bundle, t):
-                    new_state, history = step_function(
-                        bundle["state"], bundle["forcing"], t
-                    )
-                    return dict(state=new_state, forcing=bundle["forcing"]), history
-
-                _carry, _predictions = scan_func(
-                    wrapped_step_function,
-                    dict(state=state, forcing=forcing),
-                    xs=ts,
-                )
-                _predictions = unwrap_leading_dims(_predictions, first_n_dim=2)
-                return _carry["state"], _predictions
-
-            step_functions[component_name] = partial(
-                looped_step_function, step_function=_step_function, component=component
-            )
+        component_step_functions = {
+            component_name: component.generate_step_function(jitted=jitted)
+            for component_name, component in self.components.items()
+        }
 
         def step_function(bundle, step_time):
             _, t = step_time
@@ -166,12 +138,12 @@ class Coupler:
 
             # Call forward functions and unpack results directly into dictionaries
             results = {
-                component_name: step_function(
+                component_name: component_step_function(
                     coupled_state[component_name],
                     coupled_forcings[component_name],
                     t,
                 )
-                for component_name, step_function in step_functions.items()
+                for component_name, component_step_function in component_step_functions.items()
             }
             coupled_state = {name: state for name, (state, _) in results.items()}
             coupled_predictions = {
@@ -296,7 +268,7 @@ class Coupler:
     def _validate_components_mixin(self, component) -> None:
 
         members_verification_info = {
-            "timestep" : SimulationTime,
+            "timestep" : float,
             "component_state_class" : State,
             "component_forcing_class" : Forcing,
             "state_variable_registry" : VariableRegistry,
