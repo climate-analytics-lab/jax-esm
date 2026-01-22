@@ -1,4 +1,4 @@
-from typing import TypeVar, Any, Callable, List
+from typing import TypeVar, Any, Callable, List, Dict
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
@@ -24,3 +24,4 @@ StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
 
 HistoryToXarray = Callable[History, xr.Dataset]
 
+GetInfoFunction = Callable[[], Dict]
