@@ -3,6 +3,10 @@
 from functools import partial
 import time
 from typing import Any, Dict, Optional, Callable
+
+from jem.base.variable import VariableRegistry
+
+import jem.base.mixin as mixin
 from jem.base.typing import (
     InitializeFunction,
     StepFunctionGenerator,
@@ -12,9 +16,7 @@ from jem.base.typing import (
     SimulationTime,
     GetInfoFunction,
 )
-from jem.base.variable import VariableRegistry
 
-import jem.base.mixin as mixin
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +27,21 @@ from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
+
+from dataclasses import dataclass
+
+@dataclass
+class JEMComponent:
+    timestep : float
+    component_state_class : State
+    component_forcing_class : Forcing
+    state_variable_registry : VariableRegistry
+    forcing_variable_registry : VariableRegistry
+
+    initialize : InitializeFunction
+    generate_step_function : StepFunctionGenerator
+    predictions_to_xarray : HistoryToXarray
+    get_info : GetInfoFunction
 
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
@@ -266,30 +283,7 @@ class Coupler:
 
 
     def _validate_components_mixin(self, component) -> None:
-
-        members_verification_info = {
-            "timestep" : float,
-            "component_state_class" : State,
-            "component_forcing_class" : Forcing,
-            "state_variable_registry" : VariableRegistry,
-            "forcing_variable_registry" : VariableRegistry,
-        }
-
-        functions_verification_info = {
-            "initialize" : InitializeFunction,
-            "generate_step_function" : StepFunctionGenerator,
-            "predictions_to_xarray" : HistoryToXarray,
-            "get_info" : GetInfoFunction,
-        }
-
-        if hasattr(component, "__JEM_MAPPING_MEMBERS__"):
-            members_verification_info.update(getattr(component, "__JEM_MAPPING_MEMBERS__"))
-
-        if hasattr(component, "__JEM_MAPPING_FUNCTIONS__"):
-            functions_verification_info.update(getattr(component, "__JEM_MAPPING_FUNCTIONS__"))
-
-        mixin.verify_members(component, members_verification_info, verbose=True)
-        mixin.verify_functions(component, functions_verification_info, verbose=True)
+        mixin.verify(component, reference_class=JEMComponent, verbose=True)
      
     def _validate_components(self):
 
