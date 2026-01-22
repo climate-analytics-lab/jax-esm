@@ -69,11 +69,7 @@ geometry = Geometry.from_file(external_files["terrain"])
 # %%
 # Creating components
 components = dict(
-    atm=JCM(
-        model=jcm.model.Model(start_date=start_datetime, geometry=geometry),
-        coupling_timestep=coupling_timestep,
-        save_interval=coupling_timestep,
-    ),
+    atm=JCM.make_jem_compatible(jcm.model.Model(start_date=start_datetime, geometry=geometry), save_interval=1800.0),
     ocn=SlabOceanModel(
         grid_specification=grid_specification,
         timestep=coupling_timestep,
