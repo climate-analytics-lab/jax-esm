@@ -17,7 +17,7 @@ SimulationTime = float
 History = TypeVar('History')
 JittableFlag = bool
 
-InitializeFunction = Callable[[CalendarTimeStr], tuple[State, Forcing]]
+InitializeFunction = Callable[[], tuple[State, Forcing]]
 
 StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
 StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
