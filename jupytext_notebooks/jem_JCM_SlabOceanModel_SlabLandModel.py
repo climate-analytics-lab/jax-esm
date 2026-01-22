@@ -52,7 +52,7 @@ grid_specification = f"JCM::T{resolution:d}"
 
 coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
-simulation_interval = jdt.to_timedelta(20, "day")
+simulation_interval = jdt.to_timedelta(50, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
@@ -68,8 +68,22 @@ geometry = Geometry.from_file(external_files["terrain"])
 
 # %%
 # Creating components
+
+atm_model = jcm.model.Model(
+    start_date=start_datetime,
+    geometry=geometry
+)
+
+JCM.make_jem_compatible(
+    atm_model,
+    coupling_timestep=coupling_timestep,
+    save_interval=3600.0 * 12,
+)
+
+
+
 components = dict(
-    atm=JCM.make_jem_compatible(jcm.model.Model(start_date=start_datetime, geometry=geometry), save_interval=1800.0),
+    atm=atm_model,
     ocn=SlabOceanModel(
         grid_specification=grid_specification,
         timestep=coupling_timestep,
@@ -192,6 +206,8 @@ for component_name, ds in output_dict.items():
     print("Output file: ", str(output_file))
     ds.to_netcdf(output_file, engine="netcdf4")
 
+
+exit()
 # %% [markdown]
 # ## Visualization
 
