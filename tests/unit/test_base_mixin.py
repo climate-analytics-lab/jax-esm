@@ -33,7 +33,6 @@ class TestMixin:
         def function_3args(x, y, z):
             pass
 
-
         s0 = State(function_0args)
         s1 = State(function_1args)
         s2 = State(function_2args)
