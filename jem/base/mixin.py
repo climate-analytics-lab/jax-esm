@@ -36,7 +36,7 @@ def verify_functions(
         goal_argument_types, output_type = get_args(function_signature)
 
         if len(target_function_sigature.parameters.keys()) != len(goal_argument_types):
-            raise MethodSignatureNotMatchError(f"The number of parameters in the method `{function_name:s}` is not the same as given `{str(function_signature)}`")
+            raise MethodSignatureNotMatchError(f"The number of parameters in the method `{function_name:s}` ({len(target_function_sigature.parameters.keys()):d}) is not the same as given `{str(function_signature)}` ({len(goal_argument_types):d})")
 
 def verify_members(
     target : Any,
