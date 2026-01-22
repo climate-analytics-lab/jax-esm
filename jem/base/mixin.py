@@ -54,5 +54,5 @@ def verify_members(
 
         member = getattr(target, member_name)
         if member_type != Any and not isinstance(member, member_type):
-            raise MemberTypeNotMatchError(f"The member `{member_name:s}` is expected to be of type `{str(member_type)}`")
+            raise MemberTypeNotMatchError(f"The member `{member_name:s}` ({str(type(member))}) is expected to be of type `{str(member_type)}`.")
 
