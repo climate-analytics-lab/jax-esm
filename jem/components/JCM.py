@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import jax_datetime as jdt
-from jcm.model import Model as RawJCMModel
+from jcm.model import Model
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -54,10 +54,12 @@ class JCMState:
     metadata: primitive_equations_states
 
 
-def make_jem_compatible(model: RawJCMModel, land_model_active: bool, save_interval: float):
+def make_jem_compatible(
+    model: Model, save_interval: float = 86400.0, land_model_active: bool = True
+) -> Model:
     
     timestep = model.dt_si.to_timedelta().total_seconds()
-   
+    
     check_before_setattr(model, "timestep", timestep)
     check_before_setattr(model, "component_state_class", JCMState)
     check_before_setattr(model, "component_forcing_class", ForcingData)
@@ -104,8 +106,8 @@ def make_jem_compatible(model: RawJCMModel, land_model_active: bool, save_interv
         def step_function(state, forcing, t):
             new_atm_modal_state, predictions = model.run_from_state(
                 initial_state=state.metadata,
-                save_interval=save_interval / 86400.0,  # in days
-                total_time=timestep / 86400.0,  # in days
+                save_interval=save_interval/86400.0,  # in days
+                total_time=timestep/86400.0,  # in days
                 forcing=forcing,
             )
 

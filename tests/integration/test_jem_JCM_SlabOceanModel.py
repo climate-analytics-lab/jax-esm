@@ -23,14 +23,13 @@ def test_integration():
 
     print("Output dir: ", str(output_dir))
     output_dir.mkdir(exist_ok=True, parents=True)
-
+        
     # Creating components
     components = dict(
-        atm=JCM(
-            model=jcm.model.Model(start_date=start_datetime),
-            coupling_timestep=coupling_timestep,
-            save_interval=coupling_timestep,
+        atm=JCM.make_jem_compatible(
+            jcm.model.Model(start_date=start_datetime),
             land_model_active=False,
+            save_interval=86400.0,
         ),
         ocn=SlabOceanModel(
             grid_specification=grid_specification,
