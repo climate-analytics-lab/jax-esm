@@ -13,11 +13,21 @@ class Transformer(ABC):
 
     This class provides a framework for transforming data between different
     grid configurations (e.g., atmosphere to ocean) with built-in validation.
+
+    Attributes:
+        source_grid: A Grid object holding the information of the source grid.
+        target_grid: A Grid object holding the information of the target grid.
+        conservation_tolerance: The precision of tolerance of the conservative mapping
+        validate_shape: A flag indicating whether to check the compatibility of the input
+            and output array when performing transformation.
+        validate_conservation: A flag indicating whether to check the conservation using
+            convervation_tolerance
+         
     """
 
     source_grid: Grid
     target_grid: Grid
-    conservation_tol: float
+    conservation_tolerance: float
     validate_shape: bool
     validate_conservation: bool
 
@@ -25,29 +35,15 @@ class Transformer(ABC):
         self,
         source_grid: Grid,
         target_grid: Grid,
-        conservation_tol: float = 1e-6,
+        conservation_tolerance: float = 1e-6,
         validate_shape: bool = True,
         validate_conservation: bool = True,
     ):
-        """
-        Initialize the transformer.
+        """Initialize the transformer."""
 
-        Parameters
-        ----------
-        source_grid : GridInfo
-            Information about the source grid
-        target_grid : GridInfo
-            Information about the target grid
-        conservation_tol : float
-            Tolerance for conservation checks (relative error)
-        validate_shape : bool
-            Whether to validate output shape
-        validate_conservation : bool
-            Whether to validate conservation
-        """
         self.source_grid = source_grid
         self.target_grid = target_grid
-        self.conservation_tol = conservation_tol
+        self.conservation_tolerance = conservation_tolerance
         self.validate_shape = validate_shape
         self.validate_conservation = validate_conservation
 
@@ -62,36 +58,25 @@ class Transformer(ABC):
         This method must be implemented by subclasses to define the
         specific interpolation/mapping method.
 
-        Parameters
-        ----------
-        data : Array
-            Data on source grid
+        Args:
+            data: Data on source grid
 
-        Returns
-        -------
-        Array
-            Data interpolated to target grid
+        Returns:
+            Array: Data that is interpolated to target grid.
         """
         pass
 
     def __call__(self, data: Array) -> Array:
-        """
-        Apply transformation with validation.
+        """Apply transformation with validation.
 
-        Parameters
-        ----------
-        data : Array
-            Data on source grid
+        Args:
+            data: Data on the source grid
 
-        Returns
-        -------
-        Array
+        Returns:
             Validated transformed data
 
-        Raises
-        ------
-        ValidationError
-            If validation checks fail
+        Raises:
+            ValidationError: If validation checks fail
         """
         # Check input shape
         if data.shape != self.source_grid.shape:
@@ -193,13 +178,13 @@ class Transformer(ABC):
         self.last_validation["target_integral"] = target_integral
         self.last_validation["relative_error"] = relative_error
         self.last_validation["conservation_valid"] = (
-            relative_error <= self.conservation_tol
+            relative_error <= self.conservation_tolerance
         )
 
-        if relative_error > self.conservation_tol:
+        if relative_error > self.conservation_tolerance:
             raise ValidationError(
                 f"Conservation violation: relative error {relative_error:.2e} "
-                f"exceeds tolerance {self.conservation_tol:.2e}. "
+                f"exceeds tolerance {self.conservation_tolerance:.2e}. "
                 f"Source integral: {source_integral:.6e}, "
                 f"Target integral: {target_integral:.6e}"
             )
@@ -297,7 +282,7 @@ if __name__ == "__main__":
 
     # Create transformer
     transformer = ConservativeTransformer(
-        source_grid=atm_grid, target_grid=ocean_grid, conservation_tol=1e-3
+        source_grid=atm_grid, target_grid=ocean_grid, conservation_tolerance=1e-3
     )
 
     # Test data

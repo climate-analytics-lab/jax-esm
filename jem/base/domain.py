@@ -14,7 +14,15 @@ from pathlib import Path
 @dataclass
 class Domain:
     """
-    Domain is a collection of horizontal_grids plus other meta data such as topography
+    A collection of horizontal_grids and topography.
+    
+    Attributes:
+        horizontal_grids: A dict of :code:`Grid`. The name of the grids are 
+            suggested to be "T" (tracer grid/T-grid), "U" (U-grid), "V" 
+            (V-grid), and so on.
+        topography: A dict of 2-dimensional array containing topography on
+            various grids. (Consider remove topography beacuase it does not
+            matter to coupling) 
     """
 
     horizontal_grids: Dict[str, Grid]
@@ -28,32 +36,42 @@ class Domain:
         topography_file: Optional[str] = None,
     ) -> "Domain":
         """
-        Returns a coordinate object based on grid specification.
+        Construct :code:`Domain` based on known :code:`GridSpecification`
+        strings.
+       
+        Args:
+            grid_specification: The string representation of grid 
+                specification. 
+            mask_file: The path to the mask file.
+            topography_file: The path to the topography file.
+
+        Returns:
+            :code:`Domain` object.
         """
 
-        d = None
+        domain = None
 
         parsed_grid_specification = GridSpecification.parse_grid_specification(
             grid_specification
         )
         if parsed_grid_specification.grid_universe == "JCM":
-            d = get_jcm_domain(
+            domain = get_jcm_domain(
                 horizontal_resolution=int(parsed_grid_specification.grid_family[1:]),
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
         elif parsed_grid_specification.grid_universe == "Veros":
-            d = get_veros_domain(
+            domain = get_veros_domain(
                 parsed_grid_specification.grid_family,
                 mask_file=mask_file,
                 topography_file=topography_file,
             )
 
-        if d is None:
+        if domain is None:
             raise Exception("Error: domain is not created.")
 
-        return d
+        return domain
 
 
 def load_jcm_mask(mask_file):
@@ -86,7 +104,8 @@ def get_jcm_domain(
     topography_file: Optional[str] = None,
 ) -> Domain:
     """
-    Returns a CoordinateSystem object for the given number of layers and horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
+    Returns a CoordinateSystem object for the given number of layers and 
+    horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
     """
 
     grid_family = f"T{horizontal_resolution:d}"

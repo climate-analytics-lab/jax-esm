@@ -5,3 +5,7 @@ API Reference
    :members:
    :imported-members:
 
+.. automodule:: jem.utils
+   :members:
+   :imported-members:
+
