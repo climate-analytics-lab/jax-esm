@@ -122,13 +122,16 @@ class Coupler:
         step_functions = {}
         for component_name, component in self.components.items():
             _step_function = component.generate_step_function(jitted=jitted)
-                
-            component_timestep = self.component_timesteps[component_name]
-
+            
+            # do not refer to any variable defined here from
+            # looped_step_function. If you do, all components'
+            # looped_step_function will refer to the same closure 
+            # variable, which is typically undesired.
+ 
             # Closure in a loop is used. Using functools.partial to cache.
             def looped_step_function(state, forcing, t, step_function, component):
-                ts = t + component_timestep * jnp.arange(
-                    int(self.coupling_timestep / component_timestep)
+                ts = t + component.timestep * jnp.arange(
+                    int(self.coupling_timestep / component.timestep)
                 )
 
                 def wrapped_step_function(bundle, t):
