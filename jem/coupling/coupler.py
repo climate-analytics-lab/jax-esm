@@ -7,6 +7,9 @@ from jem.base.typing import (
     InitializeFunction,
     StepFunctionGenerator,
     HistoryToXarray,
+    State,
+    Forcing,
+    SimulationTime,
 )
 import jem.base.mixin as mixin
 
@@ -286,7 +289,9 @@ class Coupler:
         mixin.verify_members(
             component,
             {
-                "timestep" : float,
+                "timestep" : SimulationTime,
+                "component_state_class" : State,
+                "component_forcing_class" : Forcing,
             },
             verbose=True,
         )
