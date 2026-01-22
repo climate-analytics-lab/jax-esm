@@ -36,8 +36,24 @@ def generate_scan_function(jitted: bool):
 
 
 class Coupler:
-    """Main coupler for Earth system components."""
-
+    """Main coupler for Earth system components.
+   
+    The engine of JEM. 
+    
+    Attributes:
+        coupling_timestep: The time interval (seconds) between each time components exchanging 
+            information (heat fluxes, surface temperature, and so on).
+        components:
+            A dict whose key is the name of the component and the value is the instantiated component.
+        forcing_mapper: 
+            A :code:`ForcingMapper` that is responsible for sending information between components.
+    
+    """
+    
+    coupling_timestep: float
+    components: Dict[str, CoupledComponent]
+    forcing_mapper: ForcingMapper
+    
     def __init__(
         self,
         coupling_timestep: float,

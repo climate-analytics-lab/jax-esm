@@ -26,6 +26,7 @@ from .component.base import (
 )
 
 __all__ = [
+    "Coupler",
     "CoupledComponentConfig",
     "CoupledComponent",
     "Transformer",
