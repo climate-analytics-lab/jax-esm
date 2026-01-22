@@ -10,6 +10,7 @@ from jem.base.typing import (
     State,
     Forcing,
     SimulationTime,
+    GetInfoFunction,
 )
 from jem.base.variable import VariableRegistry
 
@@ -76,7 +77,6 @@ class Coupler:
         Args:
             components: Dictionary of components to couple
             flux_exchangers: A list of flux_exchangers.
-            config: CouplerConfig object
 
         """
 
@@ -122,11 +122,13 @@ class Coupler:
         step_functions = {}
         for component_name, component in self.components.items():
             _step_function = component.generate_step_function(jitted=jitted)
+                
+            component_timestep = self.component_timesteps[component_name]
 
             # Closure in a loop is used. Using functools.partial to cache.
             def looped_step_function(state, forcing, t, step_function, component):
-                ts = t + component.config.timestep * jnp.arange(
-                    int(self.coupling_timestep / component.config.timestep)
+                ts = t + component_timestep * jnp.arange(
+                    int(self.coupling_timestep / component_timestep)
                 )
 
                 def wrapped_step_function(bundle, t):
@@ -265,11 +267,13 @@ class Coupler:
                 raise ValueError("When component is provided, the name must be given.")
 
             self.components[name] = component
+
+            print(f"Validate mixin of component {name:s}.")
             self._validate_components_mixin(component)
 
         self.component_names = list(self.components.keys())
         self.component_timesteps = {
-            name: component.config.timestep
+            name: component.timestep
             for name, component in self.components.items()
         }
 
@@ -300,6 +304,7 @@ class Coupler:
             "initialize" : InitializeFunction,
             "generate_step_function" : StepFunctionGenerator,
             "predictions_to_xarray" : HistoryToXarray,
+            "get_info" : GetInfoFunction,
         }
 
         if hasattr(component, "__JEM_MAPPING_MEMBERS__"):
@@ -363,7 +368,7 @@ class Coupler:
         return {
             "coupling_timestep" : self.coupling_timestep,
             "component_info" : {
-                component_name : component.get_info() for component_name, component in self.components.items()
+                component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
             },
             "forcing_mapper" : "None" if self.forcing_mapper is None else self.forcing_mapper.get_info(),
         }
