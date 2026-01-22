@@ -11,6 +11,8 @@ from jem.base.typing import (
     Forcing,
     SimulationTime,
 )
+from jem.base.variable import VariableRegistry
+
 import jem.base.mixin as mixin
 
 import jax
@@ -286,25 +288,28 @@ class Coupler:
 
     def _validate_components_mixin(self, component) -> None:
 
-        mixin.verify_members(
-            component,
-            {
-                "timestep" : SimulationTime,
-                "component_state_class" : State,
-                "component_forcing_class" : Forcing,
-            },
-            verbose=True,
-        )
+        members_verification_info = {
+            "timestep" : SimulationTime,
+            "component_state_class" : State,
+            "component_forcing_class" : Forcing,
+            "state_variable_registry" : VariableRegistry,
+            "forcing_variable_registry" : VariableRegistry,
+        }
 
-        mixin.verify_functions(
-            component,
-            {
-                "initialize" : InitializeFunction,
-                "generate_step_function" : StepFunctionGenerator,
-                "predictions_to_xarray" : HistoryToXarray,
-            },
-            verbose = True,
-        )
+        functions_verification_info = {
+            "initialize" : InitializeFunction,
+            "generate_step_function" : StepFunctionGenerator,
+            "predictions_to_xarray" : HistoryToXarray,
+        }
+
+        if hasattr(component, "__JEM_MAPPING_MEMBERS__"):
+            members_verification_info.update(getattr(component, "__JEM_MAPPING_MEMBERS__"))
+
+        if hasattr(component, "__JEM_MAPPING_FUNCTIONS__"):
+            functions_verification_info.update(getattr(component, "__JEM_MAPPING_FUNCTIONS__"))
+
+        mixin.verify_members(component, members_verification_info, verbose=True)
+        mixin.verify_functions(component, functions_verification_info, verbose=True)
      
     def _validate_components(self):
 
