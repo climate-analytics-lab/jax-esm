@@ -20,7 +20,7 @@ from .base.data_structure import (
     build_dataclass_from_typed_and_dimensioned,
 )
 
-from .component.base import (
+from .components.base import (
     CoupledComponentConfig,
     CoupledComponent,
 )
