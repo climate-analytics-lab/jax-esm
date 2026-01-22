@@ -265,3 +265,8 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth=(T_grid_dims, prog.mixed_layer_depth),
             total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
         )
+
+    def get_info(self):
+        return {
+            'relaxation_time' : self.relaxation_time,
+        }
