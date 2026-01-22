@@ -3,6 +3,12 @@
 from functools import partial
 import time
 from typing import Any, Dict, Optional, Callable
+from jem.base.typing import (
+    InitializeFunction,
+    StepFunctionGenerator,
+    HistoryToXarray,
+)
+import jem.base.mixin as mixin
 
 import jax
 import jax.numpy as jnp
@@ -254,6 +260,7 @@ class Coupler:
                 raise ValueError("When component is provided, the name must be given.")
 
             self.components[name] = component
+            self._validate_components_mixin(component)
 
         self.component_names = list(self.components.keys())
         self.component_timesteps = {
@@ -273,7 +280,29 @@ class Coupler:
 
         self._validate_components()
 
+
+    def _validate_components_mixin(self, component) -> None:
+
+        mixin.verify_members(
+            component,
+            {
+                "timestep" : float,
+            },
+            verbose=True,
+        )
+
+        mixin.verify_functions(
+            component,
+            {
+                "initialize" : InitializeFunction,
+                "generate_step_function" : StepFunctionGenerator,
+                "predictions_to_xarray" : HistoryToXarray,
+            },
+            verbose = True,
+        )
+     
     def _validate_components(self):
+
         # Check the compatibility of timestep
         for component_name, component_timestep in self.component_timesteps.items():
             if component_timestep <= 0:
@@ -285,9 +314,6 @@ class Coupler:
                 raise ValueError(
                     f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
                 )
-
-        for component_name, component in self.components.items():
-            component.validate()
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
