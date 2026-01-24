@@ -38,9 +38,9 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
 from jem.components import JCM, SlabLandModel, SlabOceanModel
-from jem.coupling.transformer import IdentityTransformer
-from jem.coupling.forcing_mapper import ForcingMapper
-from jem.coupling.coupler import Coupler
+from jem.base.regridder import IdentityRegridder
+from jem.base.forcing_mapper import BasicForcingMapper
+from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
 # %% [markdown]
@@ -110,53 +110,53 @@ components = dict(
 
 # %%
 # Creating transformations
-transformers = dict(
+regridders = dict(
     a2o = dict(
-        identity_transformer = IdentityTransformer(
+        identity_regridder = IdentityRegridder(
             source_grid = components["atm"].domain.horizontal_grids["T"],
             target_grid = components["ocn"].domain.horizontal_grids["T"],
         ),
     ),
     o2a = dict(
-        identity_transformer = IdentityTransformer(
+        identity_regridder = IdentityRegridder(
             source_grid = components["ocn"].domain.horizontal_grids["T"],
             target_grid = components["atm"].domain.horizontal_grids["T"],
         ),
     ),
     a2l = dict(
-        identity_transformer = IdentityTransformer(
+        identity_regridder = IdentityRegridder(
             source_grid = components["atm"].domain.horizontal_grids["T"],
             target_grid = components["lnd"].domain.horizontal_grids["T"],
         ),
     ),
     l2a = dict(
-        identity_transformer = IdentityTransformer(
+        identity_regridder = IdentityRegridder(
             source_grid = components["lnd"].domain.horizontal_grids["T"],
             target_grid = components["atm"].domain.horizontal_grids["T"],
         ),
     ),
 )
 
-forcing_mapper = ForcingMapper(components=components)
+forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "extra.total_heat_flux"),
     target = ("ocn", "flux.total_heat_flux"),
-    transformer = transformers["a2o"]["identity_transformer"],
+    regridder = regridders["a2o"]["identity_regridder"],
 )
 forcing_mapper.add_forcing_mapping(
     source = ("ocn", "prog.sea_surface_temperature"),
     target = ("atm", "sea_surface_temperature"),
-    transformer = transformers["o2a"]["identity_transformer"],
+    regridder = regridders["o2a"]["identity_regridder"],
 )
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "extra.total_heat_flux"),
     target = ("lnd", "flux.total_heat_flux"),
-    transformer = transformers["a2l"]["identity_transformer"],
+    regridder = regridders["a2l"]["identity_regridder"],
 )
 forcing_mapper.add_forcing_mapping(
     source = ("lnd", "prog.land_surface_temperature"),
     target = ("atm", "stl_am"),
-    transformer = transformers["l2a"]["identity_transformer"],
+    regridder = regridders["l2a"]["identity_regridder"],
 )
 
 # %% [markdown]
@@ -164,10 +164,13 @@ forcing_mapper.add_forcing_mapping(
 
 # %%
 model = Coupler(
+    timestep = coupling_timestep,
     components=components,
-    forcing_mapper=forcing_mapper,
-    coupling_timestep=coupling_timestep,
+    forcing_mappers=dict(fm=forcing_mapper),
 )
+
+workflow = ["fm", "atm", "ocn", "lnd"]
+
 
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
@@ -180,11 +183,14 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # Obtain initial condition
 initial_coupled_state_forcing = model.initialize()
 
+print(initial_coupled_state_forcing["ocn"][0]["prog.mixed_layer_depth"])
+
 print("Model state:")
 tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
+    workflow=workflow,
     start_time=0,
     end_time=simulation_interval / jdt.to_timedelta(1, "second"),
     jitted=True,
