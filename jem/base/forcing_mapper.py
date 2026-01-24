@@ -1,11 +1,9 @@
 """Flux exchange and boundary condition translation utilities."""
 
 from typing import Any, Dict, List, Optional, Tuple, Callable
-from jem.components.base import CoupledComponent
-from jem.coupling.transformer import Transformer
+from jem.base.typing import JEMComponent, RegridderFunction, State, Forcing
 
-
-class ForcingMapper:
+class BasicForcingMapper:
     """Manages flux exchange and boundary condition translation between components.
     
     Attributes:
@@ -13,8 +11,8 @@ class ForcingMapper:
         forcing_mappings: Optional mapping of flux names between components.
             Keys are (source, target) component pairs, values are dicts 
             mapping source flux names to target names.
-        transformations: Optional transformations for fluxes.
-            Keys are (source, target, variable_name) tuples, values are transformation
+        regridders: Optional regridders for fluxes.
+            Keys are (source, target, variable_name) tuples, values are regridder
             functions. If the variable is nested in additional data structure, variable_name
             can be a dotted representation, such as "surface.sea_surface_temperature", 
             "radiation.longwave_radiation", ... etc. To access the structure, if the underlying
@@ -26,7 +24,7 @@ class ForcingMapper:
     .. code-block:: python
        :linenos:
 
-       from jem.coupling.transformer import IdentityTransformer
+       from jem.coupling.regridder import IdentityTransformer
        from jem.coupling.forcing_mapper import ForcingMapper
        
        # ... construct models ...
@@ -43,7 +41,7 @@ class ForcingMapper:
        forcing_mapper.add_forcing_mapping(
            source = ("atm", "phydata.total_heat_flux"),
            target = ("ocn", "flux.total_heat_flux"),
-           transformer = IdentityTransformer(
+           regridder = IdentityTransformer(
                source_grid=atm_model.grid,
                target_grid=ocn_model.grid,
            )
@@ -51,29 +49,30 @@ class ForcingMapper:
        forcing_mapper.add_forcing_mapping(
            source = ("ocn", "prog.sea_surface_temperature"),
            target = ("atm", "scalar.sea_surface_temperature"),
-           transformer = IdentityTransformer(
+           regridder = IdentityTransformer(
                source_grid=ocn_model.grid,
                target_grid=atm_model.grid,
            )
        )
 
     """
-    components: Dict[str, CoupledComponent]
+    components: Dict[str, JEMComponent]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
-    transformations: Dict[Tuple[str, str, str, str], Callable]
+    regridders: Dict[Tuple[str, str, str, str], Callable]
     component_forcing_classes: Dict[str, type]
+    involved_component_names: List[str]
 
     def __init__(
         self,
-        components: Dict[str, CoupledComponent],
+        components: Dict[str, JEMComponent],
         forcing_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
-        transformations: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
+        regridders: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
         """Initialize flux exchanger."""
         self.components = components
         self.component_names = list(self.components.keys())
         self.forcing_mappings = forcing_mappings or {}
-        self.transformations = transformations or {}
+        self.regridders = regridders or {}
 
         self.component_forcing_classes = {
             component_name: component.component_forcing_class
@@ -105,22 +104,21 @@ class ForcingMapper:
 
     def map_forcings(
         self,
-        component_forcings: Dict[str, type],
-        component_states: Dict[str, type],
-    ) -> Dict[str, type]:
+        component_states: Dict[str, State],
+        component_forcings: Dict[str, Forcing],
+    ) -> Dict[str, Forcing]:
         """Map fluxes and scalars between components.
 
         Args:
-            component_forcings: A dict that maps component name
-                to component forcing class.
             component_states: A dict that maps component name to
                 component state class.
+            component_forcings: A dict that maps component name
+                to component forcing class.
 
         Returns:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
-
         for (
             target_component_name,
             target_component_forcing_class,
@@ -149,20 +147,20 @@ class ForcingMapper:
                         f"Notice: Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
                     )
 
-                # Apply mappings and transformations
+                # Apply mappings and regridders
                 for source_variable_name, target_variable_name in mapping.items():
                     source_variable = strget(
                         source_component_state, source_variable_name
                     )
-                    # Apply transformation if defined
-                    transform_key = (
+                    # Apply regridder if defined
+                    regrid_key = (
                         source_component_name,
                         target_component_name,
                         source_variable_name,
                         target_variable_name,
                     )
-                    if transform_key in self.transformations:
-                        source_variable = self.transformations[transform_key].transform(
+                    if regrid_key in self.regridders:
+                        source_variable = self.regridders[regrid_key].regrid(
                             source_variable
                         )
                     print(
@@ -213,7 +211,7 @@ class ForcingMapper:
         self,
         source: Tuple[str, str],
         target: Tuple[str, str],
-        transformer: Optional[Transformer] = None,
+        regridder: Optional[RegridderFunction] = None,
     ) -> None:
         """Add or update flux mapping between components.
 
@@ -229,31 +227,39 @@ class ForcingMapper:
         }
         self.connections = self._build_connections()
 
-        if transformer is not None:
-            self.add_transformation(
+        if regridder is not None:
+            self.add_regridder(
                 source_component_name,
                 target_component_name,
                 source_variable_name,
                 target_variable_name,
-                transformer,
+                regridder,
             )
 
-    def add_transformation(
+        involved_component_names = []
+        for source_component_name, target_variable_name, _, _ in self.regridders.keys():
+            involved_component_names.append(source_component_name)
+            involved_component_names.append(target_variable_name)
+        
+        # Use "set" to achieve uniqueness
+        self.involved_component_names = list(set(involved_component_names))
+
+    def add_regridder(
         self,
         source_component_name: str,
         target_component_name: str,
         source_variable_name: str,
         target_variable_name: str,
-        transformer: Transformer,
+        regridder: RegridderFunction,
     ) -> None:
-        """Add transformation function for a specific flux.
+        """Add regridder function for a specific flux.
 
         Args:
             source_component_name: Source component name
             target_component_name: Target component name
-            source_variable_name: Name of the source variable to transform
-            target_variable_name: Name of the target variable to transform
-            transformer: A :code:`Transformer` that will be used to regrid the input.
+            source_variable_name: Name of the source variable to regrid
+            target_variable_name: Name of the target variable to regrid
+            regridder: A :code:`Transformer` that will be used to regrid the input.
         """
         source_variable_metadata = self.component_state_variable_registries[
             source_component_name
@@ -261,34 +267,34 @@ class ForcingMapper:
         target_variable_metadata = self.component_forcing_variable_registries[
             target_component_name
         ].get_metadata(target_variable_name)
-        transformer.validate_metadata(
+        regridder.validate_metadata(
             source_variable_metadata, target_variable_metadata
         )
-        self.transformations[
+        self.regridders[
             (
                 source_component_name,
                 target_component_name,
                 source_variable_name,
                 target_variable_name,
             )
-        ] = transformer
+        ] = regridder
 
     def get_info(self):
 
-        transformer_info = dict()
-        for i, key in enumerate(self.transformations.keys()):
+        regridder_info = dict()
+        for i, key in enumerate(self.regridders.keys()):
             source_component_name, target_component_name, source_variable_name, target_variable_name = key
-            transformer_info[f"transformer {i:d}"] = {
+            regridder_info[f"regridder {i:d}"] = {
                 'source variable' : f"{source_component_name}[{source_variable_name}]",
                 'target variable' : f"{target_component_name}[{target_variable_name}]",
-                'transformer' : self.transformations[key].get_info(),
+                'regridder' : self.regridders[key].get_info(),
             }
             
 
 
         return {
             "forcing_mappings": self.forcing_mappings, 
-            "transformers" : transformer_info,
+            "regridders" : regridder_info,
         }
 
 
