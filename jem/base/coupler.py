@@ -15,34 +15,20 @@ from jem.base.typing import (
     Forcing,
     SimulationTime,
     GetInfoFunction,
+    JEMComponent,
+    JEMForcingMapper,
+    Workflow,
 )
+
 
 
 import jax
 import jax.numpy as jnp
 
-from jem.components.base import CoupledComponent
-from jem.coupling.forcing_mapper import ForcingMapper
 from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
-
-from dataclasses import dataclass
-
-@dataclass
-class JEMComponent:
-    timestep : float
-    component_state_class : State
-    component_forcing_class : Forcing
-    state_variable_registry : VariableRegistry
-    forcing_variable_registry : VariableRegistry
-
-    initialize : InitializeFunction
-    generate_step_function : StepFunctionGenerator
-    predictions_to_xarray : HistoryToXarray
-    get_info : GetInfoFunction
-
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs):
@@ -70,39 +56,44 @@ class Coupler:
     The engine of JEM. 
     
     Attributes:
-        coupling_timestep: The time interval (seconds) between each time components exchanging 
-            information (heat fluxes, surface temperature, and so on).
         components:
-            A dict whose key is the name of the component and the value is the instantiated component.
-        forcing_mapper: 
-            A :code:`ForcingMapper` that is responsible for sending information between components.
-    
+            A dict whose key is the name of the component and the value is the
+            instantiated component.
+        forcing_mappers: 
+            A dict whose key is the name of :code:`JEMForcingMapper`-compatible
+            object that is responsible for sending information between 
+            components.
     """
-    
-    coupling_timestep: float
-    components: Dict[str, CoupledComponent]
-    forcing_mapper: ForcingMapper
+   
+    timestep: float
+    components: Dict[str, JEMComponent]
+    forcing_mappers: Dict[str, JEMForcingMapper]
     
     def __init__(
         self,
-        coupling_timestep: float,
-        components: Optional[Dict[str, CoupledComponent]] = None,
-        forcing_mapper: Optional[ForcingMapper] = None,
+        timestep: float,
+        components: Optional[Dict[str, Any]] = None,
+        forcing_mappers: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the coupler.
 
+        Each forcing mapper needs to come with a coupling timestep. Currently,
+        all coupling timesteps must be an integer multiple of the minimum one.
+        
         Args:
             components: Dictionary of components to couple
             flux_exchangers: A list of flux_exchangers.
 
         """
 
-        self.coupling_timestep = coupling_timestep
+        self.timestep = timestep
         self.components = components or {}
         for name, component in self.components.items():
             self.add_component(name, component)
 
-        self.forcing_mapper = forcing_mapper or ForcingMapper(self.components)
+        self.forcing_mappers = forcing_mappers or {}
+        for name, forcing_mapper in self.forcing_mappers.items():
+            self.add_forcing_mapper(name, forcing_mapper)
 
     def initialize(
         self,
@@ -120,10 +111,13 @@ class Coupler:
             name: component.initialize() for name, component in self.components.items()
         }
 
+
     def generate_step_function(
         self,
+        workflow: Workflow,
         jitted: bool = True,
         show_progress: bool = True,
+        verbose: bool = True,
     ) -> Callable:
         """Advance coupled system by one coupling timestep.
 
@@ -133,6 +127,13 @@ class Coupler:
             New states after one coupling timestep
         """
 
+        self._verify_name_uniqueness()
+        self._verify_workflow(workflow)
+        flattened_workflow, _ = jax.tree.flatten(workflow)
+
+        if verbose:
+            print("Workflow: ", ", ".join(flattened_workflow))
+        
         scan_func = generate_scan_function(jitted=jitted)
 
         # Get step functions of each component
@@ -141,35 +142,34 @@ class Coupler:
             for component_name, component in self.components.items()
         }
 
-        def step_function(bundle, step_time):
+        def step_function(carry, step_time):
             _, t = step_time
 
-            coupled_state = bundle["state"]
-            coupled_forcings = bundle["forcings"]
+            states = carry["states"]
+            forcings = carry["forcings"]
+        
+            unstacked_predictions = { component_name : [] for component_name in self.components.keys() }
+        
+            for name in flattened_workflow:
+                if name in self.components: 
+                    states[name], _predictions = component_step_functions[name](states[name], forcings[name], t)
+                    unstacked_predictions[name].append(_predictions)
+                elif name in self.forcing_mappers:
+                    forcing_mapper = self.forcing_mappers[name]
+                    sub_states = { component_name : states[component_name] for component_name in forcing_mapper.involved_component_names }
+                    sub_forcings = { component_name : forcings[component_name] for component_name in forcing_mapper.involved_component_names }
+                    sub_forcings = forcing_mapper.map_forcings(sub_states, sub_forcings)
+                    for name in sub_forcings.keys():
+                        forcings[name] = sub_forcings[name]
+                else:
+                    raise Exception(f"Unknown error: Cannot find `{name}` in components or forcing_mappers.")        
 
-            # Forcing should have the flexibility that sometimes we want forcing to be
-            # mapped (coupled), and sometimes being left unchanged (true forcing)
-            coupled_forcings = self.forcing_mapper.couple_components(
-                coupled_forcings, coupled_state
-            )
-
-            # Call forward functions and unpack results directly into dictionaries
-            results = {
-                component_name: component_step_function(
-                    coupled_state[component_name],
-                    coupled_forcings[component_name],
-                    t,
-                )
-                for component_name, component_step_function in component_step_functions.items()
+            predictions = {
+                name : unwrap_leading_dims(stack_objects(unstacked_predictions[name]), first_n_dim=2)
+                for name in unstacked_predictions.keys()
             }
-            coupled_state = {name: state for name, (state, _) in results.items()}
-            coupled_predictions = {
-                name: prediction for name, (_, prediction) in results.items()
-            }
-
-            return dict(
-                state=coupled_state, forcings=coupled_forcings
-            ), coupled_predictions
+            
+            return dict(states=states, forcings=forcings), predictions
 
         if jitted:
             step_function = jax.jit(step_function)
@@ -178,6 +178,7 @@ class Coupler:
 
     def generate_trajectory_function(
         self,
+        workflow: Workflow,
         start_time: float,
         end_time: float,
         save_interval_steps=1,
@@ -186,20 +187,21 @@ class Coupler:
         tqdm_kwargs: Dict[str, Any] = dict(),
     ):
         total_time = end_time - start_time
-        total_steps = int(total_time / self.coupling_timestep)
+        total_steps = int(total_time / self.timestep)
 
-        if total_steps * self.coupling_timestep != total_time:
+        if total_steps * self.timestep != total_time:
             raise Exception("timestep has to exactly divide (end_time - start_time).")
 
         scan_func = generate_scan_function(jitted=jitted)
 
         coupled_step_function = self.generate_step_function(
+            workflow=workflow,
             show_progress=show_progress,
             jitted=jitted,
         )
 
         steps = jnp.arange(total_steps)
-        times = start_time + self.coupling_timestep * steps
+        times = start_time + self.timestep * steps
         if jitted:
             step_times = (steps, times)  # type: ignore
         else:
@@ -219,7 +221,7 @@ class Coupler:
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
                 dict(
-                    state={
+                    states={
                         component_name: _state
                         for component_name, (
                             _state,
@@ -244,7 +246,7 @@ class Coupler:
     def add_component(
         self,
         name: Optional[str] = None,
-        component: Optional[CoupledComponent] = None,
+        component: Optional[Any] = None,
     ) -> None:
         """Add a new component to the coupler.
            If name is not provided, then simply re-extract component names and timesteps
@@ -258,16 +260,16 @@ class Coupler:
             if name is None:
                 raise ValueError("When component is provided, the name must be given.")
 
-            self.components[name] = component
-
             print(f"Validate mixin of component {name:s}.")
-            self._validate_components_mixin(component)
+            self.components[name] = JEMComponent(
+                raw_component = component,
+                name = name,
+                **mixin.verify(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+            )
+            
+            
 
         self.component_names = list(self.components.keys())
-        self.component_timesteps = {
-            name: component.timestep
-            for name, component in self.components.items()
-        }
 
         self.component_state_variable_registries = {
             name: component.state_variable_registry
@@ -282,22 +284,6 @@ class Coupler:
         self._validate_components()
 
 
-    def _validate_components_mixin(self, component) -> None:
-        mixin.verify(component, reference_class=JEMComponent, verbose=True)
-     
-    def _validate_components(self):
-
-        # Check the compatibility of timestep
-        for component_name, component_timestep in self.component_timesteps.items():
-            if component_timestep <= 0:
-                raise ValueError(
-                    f"Timestep of {component_name:s} ({component_timestep:f}) must be a positive number."
-                )
-
-            if self.coupling_timestep % component_timestep != 0.0:
-                raise ValueError(
-                    f"Timestep of {component_name:s} ({component_timestep:f}) is not compatible with coupling timestep {self.coupling_timestep:f}."
-                )
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
@@ -310,6 +296,33 @@ class Coupler:
 
             # update information
             self.add_component()
+
+    def add_forcing_mapper(
+        self,
+        name: str,
+        forcing_mapper: Any,
+    ) -> None:
+        """Add a new forcing mapper to the coupler.
+        Args:
+            name: Forcing mapper name
+            forcing_mapper: Forcing mapper
+        """
+        self.forcing_mappers[name] = JEMForcingMapper(
+            raw_forcing_mapper = forcing_mapper,
+            name = name,
+            **mixin.verify(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
+        )
+        
+
+    def remove_forcing_mapper(self, name: str) -> None:
+        """Remove a forcing mapper from the coupler.
+
+        Args:
+            name: Forcing mapper name to remove
+        """
+        if name in self.forcing_mappers:
+            del self.forcing_mappers[name]
+
 
     def predictions_to_xarray(
         self,
@@ -335,10 +348,37 @@ class Coupler:
 
     def get_info(self):
         return {
-            "coupling_timestep" : self.coupling_timestep,
             "component_info" : {
                 component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
             },
-            "forcing_mapper" : "None" if self.forcing_mapper is None else self.forcing_mapper.get_info(),
+            "forcing_mappers" : "None" if self.forcing_mappers is None else { name: forcing_mapper.get_info() for name, forcing_mapper in self.forcing_mappers.items() } ,
         }
         return info
+
+    def _validate_components(self):
+        pass
+
+    def _verify_name_uniqueness(self) -> None:
+        
+        all_names = list(self.components.keys()) + list(self.forcing_mappers.keys())
+        counts = { name : 0 for name in all_names }
+        for name in all_names:
+            counts[name] += 1
+
+        for name, count in counts.items():
+            if count != 1:
+                raise Exception(f"The name `{name}` is not unique. There are {count:d} of the same name.")
+
+    def _verify_workflow(
+        self,
+        workflow: Workflow,
+    ) -> None:
+
+        flattened_workflow, _ = jax.tree.flatten(workflow)
+        for action in flattened_workflow:
+            if not isinstance(action, str):
+                raise ValueError("Actions in the workflow have to be strings.")
+            if action not in self.components and action not in self.forcing_mappers:
+                raise ValueError(f"Action `{action:s}` does not map to any component or forcing mapper.")
+        
+
