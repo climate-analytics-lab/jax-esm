@@ -337,14 +337,10 @@ class Coupler:
         Returns:
             ds : The resulting xarray dataset.
         """
-        d = dict()
-        for component_name in self.components.keys():
-            component = self.components[component_name]
-            d[component_name] = component.predictions_to_xarray(
-                predictions[component_name]
-            )
-
-        return d
+        return {
+            component_name : component.predictions_to_xarray(predictions[component_name])
+            for component_name, component in self.components.items()
+        }
 
     def get_info(self):
         return {
