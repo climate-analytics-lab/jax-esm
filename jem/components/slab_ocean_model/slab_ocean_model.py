@@ -184,7 +184,7 @@ class SlabOceanModel(SlabModelBase):
 
         return self.component_state_class.zeros().copy(
             {
-                "prog.mixed_layer_depth_max": init_mixed_layer_depth,
+                "prog.mixed_layer_depth": init_mixed_layer_depth,
                 "prog.sea_surface_temperature": init_sea_surface_temperature,
             }
         ), self.component_forcing_class.zeros()
