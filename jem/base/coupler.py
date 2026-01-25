@@ -14,6 +14,7 @@ from jem.base.typing import (
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 
 from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 
@@ -55,13 +56,11 @@ class Coupler:
             components.
     """
    
-    timestep: float
     components: Dict[str, JEMComponent]
     forcing_mappers: Dict[str, JEMForcingMapper]
     
     def __init__(
         self,
-        timestep: float,
         components: Optional[Dict[str, Any]] = None,
         forcing_mappers: Optional[Dict[str, Any]] = None,
     ):
@@ -76,7 +75,6 @@ class Coupler:
 
         """
 
-        self.timestep = timestep
         self.components = components or {}
         for name, component in self.components.items():
             self.add_component(name, component)
@@ -132,8 +130,7 @@ class Coupler:
             for component_name, component in self.components.items()
         }
 
-        def step_function(carry, step_time):
-            _, t = step_time
+        def step_function(carry, step):
 
             states = carry["states"]
             forcings = carry["forcings"]
@@ -142,7 +139,7 @@ class Coupler:
         
             for name in flattened_workflow:
                 if name in self.components: 
-                    states[name], _predictions = component_step_functions[name](states[name], forcings[name], t)
+                    states[name], _predictions = component_step_functions[name](states[name], forcings[name], step)
                     unstacked_predictions[name].append(_predictions)
                 elif name in self.forcing_mappers:
                     forcing_mapper = self.forcing_mappers[name]
@@ -169,41 +166,30 @@ class Coupler:
     def generate_trajectory_function(
         self,
         workflow: Workflow,
-        start_time: float,
-        end_time: float,
-        save_interval_steps=1,
+        iterations: int,
         jitted: bool = True,
         show_progress: bool = False,
         tqdm_kwargs: Dict[str, Any] = dict(),
     ) -> StepFunction:
-        total_time = end_time - start_time
-        total_steps = int(total_time / self.timestep)
-
-        if total_steps * self.timestep != total_time:
-            raise Exception("timestep has to exactly divide (end_time - start_time).")
 
         scan_func = generate_scan_function(jitted=jitted)
-
         coupled_step_function = self.generate_step_function(
             workflow=workflow,
             show_progress=show_progress,
             jitted=jitted,
         )
-
-        steps = jnp.arange(total_steps)
-        times = start_time + self.timestep * steps
-        if jitted:
-            step_times = (steps, times)  # type: ignore
-        else:
-            step_times = list(zip(steps, times))  # type: ignore
+        steps = jnp.arange(iterations)
+        
+        if not jitted:
+            steps = list(steps) # type: ignore
 
         if show_progress:
             if jitted:
-                coupled_step_function = scan_tqdm(n=total_steps, **tqdm_kwargs)(
+                coupled_step_function = scan_tqdm(n=iterations, **tqdm_kwargs)(
                     coupled_step_function
                 )
             else:
-                step_times = tqdm(step_times, **tqdm_kwargs)
+                steps = tqdm(steps, **tqdm_kwargs)
 
         def trajectory_function(
             initial_coupled_state_forcing: Dict[str, tuple[type, type]],
@@ -226,7 +212,7 @@ class Coupler:
                         ) in initial_coupled_state_forcing.items()
                     },
                 ),
-                xs=step_times,
+                xs=steps,
             )
             predictions = unwrap_leading_dims(predictions, first_n_dim=2)
             return final_coupled_state, predictions
