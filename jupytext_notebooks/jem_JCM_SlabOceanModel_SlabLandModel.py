@@ -33,7 +33,6 @@ import jcm
 from jcm.geometry import Geometry
 import jax_datetime as jdt
 
-
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
@@ -50,9 +49,9 @@ import jem.utils.tree_tools as tree_tools
 resolution = 31
 grid_specification = f"JCM::T{resolution:d}"
 
-coupling_timestep = 86400.0
 start_datetime = jdt.to_datetime("2000-01-01")
-simulation_interval = jdt.to_timedelta(50, "day")
+coupling_timestep = jdt.to_timedelta(1, "day")
+simulation_interval = jdt.to_timedelta(10, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
 external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
@@ -61,8 +60,7 @@ output_dir.mkdir(exist_ok=True, parents=True)
 
 geometry = Geometry.from_file(external_files["terrain"])
 
-
-
+one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
 
@@ -77,28 +75,26 @@ atm_model = jcm.model.Model(
 JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
-    save_interval=3600.0 * 12,
+    save_interval=jdt.to_timedelta(12, "hour"),
 )
-
-
 
 components = dict(
     atm=atm_model,
     ocn=SlabOceanModel(
         grid_specification=grid_specification,
-        timestep=coupling_timestep,
         start_datetime=start_datetime,
-        save_interval=coupling_timestep,
-        relaxation_time=60 * 86400.0,
+        timestep=coupling_timestep / one_second,
+        save_interval=coupling_timestep / one_second,
+        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         mask_file=external_files["terrain"],
         SST_clim_file=external_files["forcing"],
     ),
     lnd=SlabLandModel(
         grid_specification=grid_specification,
-        timestep=coupling_timestep,
         start_datetime=start_datetime,
-        save_interval=coupling_timestep,
-        relaxation_time=60 * 86400.0,
+        timestep=coupling_timestep / one_second,
+        save_interval=coupling_timestep / one_second,
+        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         topography_file=external_files["terrain"],
         mask_file=external_files["terrain"],
         land_clim_file=external_files["forcing"],
@@ -164,7 +160,6 @@ forcing_mapper.add_forcing_mapping(
 
 # %%
 model = Coupler(
-    timestep = coupling_timestep,
     components=components,
     forcing_mappers=dict(fm=forcing_mapper),
 )
@@ -191,8 +186,7 @@ tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
     workflow=workflow,
-    start_time=0,
-    end_time=simulation_interval / jdt.to_timedelta(1, "second"),
+    iterations = int(simulation_interval / coupling_timestep),
     jitted=True,
     show_progress=True,
     tqdm_kwargs=dict(desc="Simulation"),
