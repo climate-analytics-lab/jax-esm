@@ -15,7 +15,7 @@ class MemberTypeNotMatchError(Exception):
 class MethodSignatureNotMatchError(Exception):
     pass
 
-def verify(
+def resolve_interface(
     target : Any,
     reference_class: type,
     verbose: bool = False,
@@ -29,21 +29,21 @@ def verify(
         skip = [skip,]
     result = {}
     for member_name, member_type in metadata.items():
-        verified_name = None
+        resolved_name = None
         if member_name in skip:
             continue
         if verbose:
             print(f"Checking `{member_name:s}` => `{str(member_type)}`")
         if get_origin(member_type) is get_origin(Callable):
-            verified_name = _verify_function(target, member_name, member_type, customized_mapping)
+            resolved_name = _resolve_function(target, member_name, member_type, customized_mapping)
         else:
-            verified_name = _verify_member(target, member_name, member_type, customized_mapping)
+            resolved_name = _resolve_member(target, member_name, member_type, customized_mapping)
 
-        result[verified_name] = getattr(target, member_name)
+        result[resolved_name] = getattr(target, member_name)
 
     return result
 
-def _verify_function(
+def _resolve_function(
     target : Any,
     function_name: str,
     function_signature: Callable,
@@ -71,7 +71,7 @@ def _verify_function(
 
     return function_name
 
-def _verify_member(
+def _resolve_member(
     target : Any,
     member_name: str,
     member_type: type,

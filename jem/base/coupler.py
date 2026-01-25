@@ -4,7 +4,7 @@ from functools import partial
 import time
 from typing import Any, Dict, Optional, Callable
 
-import jem.base.mixin as mixin
+from jem.base.interface import resolve_interface
 from jem.base.typing import (
     JEMComponent,
     JEMForcingMapper,
@@ -235,7 +235,7 @@ class Coupler:
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
-            **mixin.verify(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
         )
 
         self._validate_components()
@@ -265,7 +265,7 @@ class Coupler:
         self.forcing_mappers[name] = JEMForcingMapper(
             raw_forcing_mapper = forcing_mapper,
             name = name,
-            **mixin.verify(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
+            **resolve_interface(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
         )
         
 
