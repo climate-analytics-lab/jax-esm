@@ -14,20 +14,25 @@ multi-decadal experiments. Climate Dynamics, 20(2-3), 175-191.
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
 
-from typing import Dict, Tuple, Any, Optional
+from typing import Annotated, Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 
-from jax_esm import constants as constants
-from jax_esm.utils.bulk_op import stack_objects
-from jax_esm.components.domain import Domain
+from jem import constants as constants
+from jem.utils.bulk_op import stack_objects
+from jem.components.domain import Domain
+
+from jem.base.variable import VariableMetadata, VariableRegistry
+import jem.base.data_structure as data_structure
 
 from pathlib import Path
 import xarray as xr
 
-from jax_esm.components.base import (
+
+
+from jem.components.base import (
     Component,
     CoupledComponentConfig,
     create_component_state_class,
@@ -35,6 +40,26 @@ from jax_esm.components.base import (
     create_field_group_class,
 )
 
+@data_structure.typed_and_dimensioned
+class PrognosticData:
+    sim_time: Annotated[float, (), "zero_dimensional"]
+    land_surface_temperature: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
+    snowd: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    soilw: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    
+@data_structure.typed_and_dimensioned
+class AirlandFlux:
+    heatflx: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+
+@data_structure.typed_and_dimensioned
+class LandState:
+    prog: PrognosticData
+
+@data_structure.typed_and_dimensioned
+class LandForcing:
+    flux: AirlandFlux
 
 class LandModel(Component):
     """
