@@ -9,6 +9,7 @@ from jem.base.typing import (
     JEMComponent,
     JEMForcingMapper,
     Workflow,
+    StepFunction,
 )
 
 import jax
@@ -174,7 +175,7 @@ class Coupler:
         jitted: bool = True,
         show_progress: bool = False,
         tqdm_kwargs: Dict[str, Any] = dict(),
-    ):
+    ) -> StepFunction:
         total_time = end_time - start_time
         total_steps = int(total_time / self.timestep)
 
