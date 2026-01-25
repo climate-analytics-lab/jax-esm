@@ -1,6 +1,7 @@
 """JCM adapter to JEM"""
 
 from dataclasses import dataclass
+import numpy as np
 
 import jax_datetime as jdt
 from jcm.model import Model
@@ -24,6 +25,7 @@ from jem.base.variable import VariableMetadata, VariableRegistry
 import tree_math
 from typing import Any, Dict
 
+import jax_datetime as jdt
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
@@ -55,14 +57,14 @@ class JCMState:
 
 def make_jem_compatible(
     model: Model,
-    coupling_timestep: float,
-    save_interval: float = 86400.0,
+    coupling_timestep: jdt.Timedelta,
+    save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
     land_model_active: bool = True,
 ) -> Model:
     
-    timestep = model.dt_si.to_timedelta().total_seconds()
+    timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
    
-    if coupling_timestep % timestep != 0:
+    if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
     
     check_before_setattr(model, "timestep", timestep)
@@ -107,12 +109,19 @@ def make_jem_compatible(
             lfluxland = jnp.bool_(land_model_active),
         )
 
+
     def generate_step_function(jitted: bool = True):
-        def step_function(state, forcing, t):
+        # Notice: since save_interval and total_time are claimed
+        #         static parameters, we cannot pass in traceable
+        #         object. So use item() to convert from scalar
+        #         jax.Array to float.
+        save_interval_day=(save_interval / jdt.to_timedelta(1, "day")).item() 
+        total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
+        def step_function(state, forcing, step):
             new_atm_modal_state, predictions = model.run_from_state(
                 initial_state=state.metadata,
-                save_interval=save_interval/86400.0,  # in days
-                total_time=coupling_timestep/86400.0,  # in days
+                save_interval=save_interval_day,  
+                total_time=total_time_day,
                 forcing=forcing,
             )
             phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
