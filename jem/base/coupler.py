@@ -234,8 +234,8 @@ class Coupler:
 
     def add_component(
         self,
-        name: Optional[str] = None,
-        component: Optional[Any] = None,
+        name: str,
+        component: Any,
     ) -> None:
         """Add a new component to the coupler.
            If name is not provided, then simply re-extract component names and timesteps
@@ -245,34 +245,14 @@ class Coupler:
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        if component is not None:
-            if name is None:
-                raise ValueError("When component is provided, the name must be given.")
-
-            print(f"Validate mixin of component {name:s}.")
-            self.components[name] = JEMComponent(
-                raw_component = component,
-                name = name,
-                **mixin.verify(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
-            )
-            
-            
-
-        self.component_names = list(self.components.keys())
-
-        self.component_state_variable_registries = {
-            name: component.state_variable_registry
-            for name, component in self.components.items()
-        }
-
-        self.component_forcing_variable_registries = {
-            name: component.forcing_variable_registry
-            for name, component in self.components.items()
-        }
+        print(f"Validate mixin of component {name:s}.")
+        self.components[name] = JEMComponent(
+            raw_component = component,
+            name = name,
+            **mixin.verify(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+        )
 
         self._validate_components()
-
-
 
     def remove_component(self, name: str) -> None:
         """Remove a component from the coupler.
