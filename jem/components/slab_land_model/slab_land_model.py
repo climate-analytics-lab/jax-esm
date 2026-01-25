@@ -208,7 +208,7 @@ class SlabLandModel(SlabModelBase):
         nonland_index = self.domain.horizontal_grids["T"].bmask != 1
         land_index = self.domain.horizontal_grids["T"].bmask == 1
 
-        def step_function(state, forcing, t):
+        def step_function(state, forcing, step):
             # Compute anomaly if climatology is given
             new_land_surface_temperature_anomaly = state.prog.land_surface_temperature
 
@@ -216,7 +216,7 @@ class SlabLandModel(SlabModelBase):
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.land_surface_temperature_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                    t, start_day_offset, length_of_a_cycle
+                    state.prog.sim_time, start_day_offset, length_of_a_cycle
                 )
 
                 snapshot_land_surface_temperature_clim_beg = (

@@ -194,14 +194,14 @@ class SlabOceanModel(SlabModelBase):
         start_day_offset = self._compute_start_day_offset()
         nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
 
-        def step_function(state, forcing, t):
+        def step_function(state, forcing, step):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
 
             if self.has_climatology:
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                    t, start_day_offset, length_of_a_cycle
+                    state.prog.sim_time, start_day_offset, length_of_a_cycle
                 )
 
                 ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
