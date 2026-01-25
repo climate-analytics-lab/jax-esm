@@ -34,10 +34,6 @@ RegridderFunction = Callable[[Array], Array]
 
 @dataclass
 class JEMComponent:
-    # skipped
-    raw_component: Any
-    name: str
-   
     # mandatory
     component_state_class : State
     component_forcing_class : Forcing
@@ -48,16 +44,21 @@ class JEMComponent:
     predictions_to_xarray : HistoryToXarray
     get_info : GetInfoFunction
 
+    # jem-internal
+    raw_component: Any
+    name: str
+ 
 
 @dataclass
 class JEMForcingMapper:
-    # skipped
-    raw_forcing_mapper: Any
-    name: str
-
     # mandatory
     involved_component_names: List[str]
     get_info : GetInfoFunction
     map_forcings: ForcingMapperFunction
+    
+    # jem-internal
+    raw_forcing_mapper: Any
+    name: str
 
+ 
 
