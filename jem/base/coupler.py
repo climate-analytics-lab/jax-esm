@@ -121,7 +121,7 @@ class Coupler:
         flattened_workflow, _ = jax.tree.flatten(workflow)
 
         if verbose:
-            print("Workflow: ", ", ".join(flattened_workflow))
+            print("Flattened workflow: ", ", ".join(flattened_workflow))
         
         scan_func = generate_scan_function(jitted=jitted)
 
@@ -245,7 +245,6 @@ class Coupler:
             flux_mappings: Optional flux mappings from this component to others
         """
 
-        print(f"Validate mixin of component {name:s}.")
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
