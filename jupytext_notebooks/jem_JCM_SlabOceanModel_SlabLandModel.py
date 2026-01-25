@@ -207,7 +207,6 @@ for component_name, ds in output_dict.items():
     ds.to_netcdf(output_file, engine="netcdf4")
 
 
-exit()
 # %% [markdown]
 # ## Visualization
 
