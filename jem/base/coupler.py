@@ -4,23 +4,12 @@ from functools import partial
 import time
 from typing import Any, Dict, Optional, Callable
 
-from jem.base.variable import VariableRegistry
-
 import jem.base.mixin as mixin
 from jem.base.typing import (
-    InitializeFunction,
-    StepFunctionGenerator,
-    HistoryToXarray,
-    State,
-    Forcing,
-    SimulationTime,
-    GetInfoFunction,
     JEMComponent,
     JEMForcingMapper,
     Workflow,
 )
-
-
 
 import jax
 import jax.numpy as jnp
