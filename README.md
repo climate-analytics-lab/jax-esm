@@ -135,9 +135,6 @@ initial_coupled_state_forcing = model.initialize()
 trajectory_function = model.generate_trajectory_function(
     workflow=["fm", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
-    jitted=True,
-    show_progress=True,
-    tqdm_kwargs=dict(desc="Simulation"),
 )
 
 # Run coupled model
