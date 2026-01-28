@@ -175,8 +175,31 @@ class LandModel(Component):
                 fields=[],
             ),
         )
-        
-    def initialize(self):
+ 
+    def validate(self):
+        super()._validate()
+
+    def _create_state_and_forcing_classes(self) -> None:
+        """Create state and forcing classes for land model."""
+
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
+        self.component_state_class = decorator(LandState)
+        self.component_forcing_class = decorator(LandForcing)
+
+    def _create_variable_registries(self) -> None:
+        self.state_variable_registry = VariableRegistry()
+        self.forcing_variable_registry = VariableRegistry()
+
+        for target_registry, target_class in [
+            (self.state_variable_registry, self.component_state_class),
+            (self.forcing_variable_registry, self.component_forcing_class),
+        ]:
+            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
+                target_registry.register_variable(
+                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
+                )
+
+    def _initialize_fields(self):
         """Initialize land surface model state and climatology.
         
         Returns:
@@ -333,17 +356,13 @@ class LandModel(Component):
         
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
-        return self.component_state_class.zeros().copy(
-            prog_kwargs = dict(
-                land_surface_temperature = init_T,
-                sim_time = 0.0,
-            ),
-            phydata_kwargs = dict(
-                heatflx = jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
-                snowd = self.snowd_clim[:, :, init_time_idx],
-                soilw = self.soilw_clim[:, :, init_time_idx],
-            ),
-        )
+        return self.component_state_class.zeros().copy({
+            "prog.land_surface_temperature" : init_T,
+            "prog.sim_time" : 0,
+            "phydata.heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
+            "phydata.snowd" : self.snowd_clim[:, :, init_time_idx],
+            "phydata.soilw" : self.soilw_clim[:, :, init_time_idx],
+        }), self.component_forcing_class.zeros()
     
     def _idealized_land_temperature(self, shape: Tuple[int, int]) -> jnp.ndarray:
         """Create idealized land temperature climatology.
@@ -378,7 +397,7 @@ class LandModel(Component):
         
         return T_clim.astype(jnp.float32)
     
-    def generate_step_function(self, jitted: bool = True):
+    def _create_step_function_body(self):
         """Generate step function for land model.
         
         Args:
@@ -391,7 +410,7 @@ class LandModel(Component):
         # Compute reference for climatology indexing
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        start_day_offset = (self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second")
+        start_day_offset = self._compute_start_day_offset()
         
         def step_function(state, forcing, t):
             """Land model time step.
