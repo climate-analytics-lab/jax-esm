@@ -1,7 +1,14 @@
 """Flux exchange and boundary condition translation utilities."""
-
 from typing import Any, Dict, List, Optional, Tuple, Callable
-from jem.base.typing import JEMComponent, RegridderFunction, State, Forcing
+from jem.base.typing import (
+    JEMComponentType,
+    JEMForcingMapperType,
+    RegridderFunction,
+    State,
+    Forcing,
+    VariableRegistry,
+)
+from typeguard import typechecked, check_type
 
 class BasicForcingMapper:
     """Manages flux exchange and boundary condition translation between components.
@@ -56,15 +63,18 @@ class BasicForcingMapper:
        )
 
     """
-    components: Dict[str, JEMComponent]
+    components: Dict[str, JEMComponentType]
     forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, type]
+    component_forcing_classes: Dict[str, JEMForcingMapperType]
+    component_state_variable_registries: Dict[str, VariableRegistry]
+    component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
 
+    @typechecked
     def __init__(
         self,
-        components: Dict[str, JEMComponent],
+        components: Dict[str, JEMComponentType],
         forcing_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
         regridders: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
@@ -88,7 +98,11 @@ class BasicForcingMapper:
             component_name: component.forcing_variable_registry
             for component_name, component in components.items()
         }
-
+      
+        # validate
+        check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
+        check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
+ 
         # Build connectivity graph
         self.connections = self._build_connections()
 
@@ -102,6 +116,7 @@ class BasicForcingMapper:
 
         return connections
 
+    @typechecked
     def map_forcings(
         self,
         component_states: Dict[str, State],
@@ -207,6 +222,7 @@ class BasicForcingMapper:
         # across the coupling interface
         pass
 
+    @typechecked
     def add_forcing_mapping(
         self,
         source: Tuple[str, str],
@@ -244,6 +260,7 @@ class BasicForcingMapper:
         # Use "set" to achieve uniqueness
         self.involved_component_names = list(set(involved_component_names))
 
+    @typechecked
     def add_regridder(
         self,
         source_component_name: str,
@@ -263,12 +280,13 @@ class BasicForcingMapper:
         """
         source_variable_metadata = self.component_state_variable_registries[
             source_component_name
-        ].get_metadata(source_variable_name)
+        ][source_variable_name]
         target_variable_metadata = self.component_forcing_variable_registries[
             target_component_name
-        ].get_metadata(target_variable_name)
+        ][target_variable_name]
         regridder.validate_metadata(
-            source_variable_metadata, target_variable_metadata
+            self.component_state_variable_registries[source_component_name][source_variable_name],
+            self.component_forcing_variable_registries[target_component_name][target_variable_name],
         )
         self.regridders[
             (
