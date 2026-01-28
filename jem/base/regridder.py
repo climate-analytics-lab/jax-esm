@@ -7,11 +7,11 @@ from jem.base.grid import Grid
 from jem.base.variable import VariableMetadata
 
 
-class Transformer(ABC):
+class BasicRegridder(ABC):
     """
     Abstract base class for interpolating between climate model grids.
 
-    This class provides a framework for transforming data between different
+    This class provides a framework for regriding data between different
     grid configurations (e.g., atmosphere to ocean) with built-in validation.
 
     Attributes:
@@ -19,7 +19,7 @@ class Transformer(ABC):
         target_grid: A Grid object holding the information of the target grid.
         conservation_tolerance: The precision of tolerance of the conservative mapping
         validate_shape: A flag indicating whether to check the compatibility of the input
-            and output array when performing transformation.
+            and output array when performing regridation.
         validate_conservation: A flag indicating whether to check the conservation using
             convervation_tolerance
          
@@ -39,7 +39,7 @@ class Transformer(ABC):
         validate_shape: bool = True,
         validate_conservation: bool = True,
     ):
-        """Initialize the transformer."""
+        """Initialize the regridder."""
 
         self.source_grid = source_grid
         self.target_grid = target_grid
@@ -51,7 +51,7 @@ class Transformer(ABC):
         self.last_validation: Dict[str, Any] = {}
 
     @abstractmethod
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """
         Transform data from source grid to target grid.
 
@@ -67,13 +67,13 @@ class Transformer(ABC):
         pass
 
     def __call__(self, data: Array) -> Array:
-        """Apply transformation with validation.
+        """Apply regridation with validation.
 
         Args:
             data: Data on the source grid
 
         Returns:
-            Validated transformed data
+            Validated regrided data
 
         Raises:
             ValidationError: If validation checks fail
@@ -85,8 +85,8 @@ class Transformer(ABC):
                 f"shape {self.source_grid.shape}"
             )
 
-        # Apply transformation
-        result = self.transform(data)
+        # Apply regridation
+        result = self.regrid(data)
 
         # Validate output
         self._validate(data, result)
@@ -95,7 +95,7 @@ class Transformer(ABC):
 
     def _validate(self, source_data: Array, target_data: Array):
         """
-        Perform validation checks on transformed data.
+        Perform validation checks on regrided data.
 
         Parameters
         ----------
@@ -203,10 +203,10 @@ class Transformer(ABC):
 # Example implementations
 
 
-class IdentityTransformer(Transformer):
+class IdentityRegridder(BasicRegridder):
     """Identity mapping (no interpolation)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         return data
 
     def validate_metadata(
@@ -218,18 +218,18 @@ class IdentityTransformer(Transformer):
             raise ValidationError("Source and target metadata must have the same shape")
 
 
-class BilinearTransformer(Transformer):
+class BilinearRegridder(BasicRegridder):
     """Simple bilinear interpolation (for demonstration)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """Apply bilinear interpolation."""
-        from scipy.interpolate import RegularTransformer
+        from scipy.interpolate import RegularRegridder
 
-        # Create transformer for source grid
+        # Create regridder for source grid
         source_shape = self.source_grid.shape
         x = jnp.linspace(0, 1, source_shape[0])
         y = jnp.linspace(0, 1, source_shape[1])
-        interp = RegularTransformer((x, y), data, method="linear")
+        interp = RegularRegridder((x, y), data, method="linear")
 
         # Create target grid coordinates
         target_shape = self.target_grid.shape
@@ -241,10 +241,10 @@ class BilinearTransformer(Transformer):
         return interp((xx, yy))
 
 
-class ConservativeTransformer(Transformer):
+class ConservativeRegridder(BasicRegridder):
     """Conservative remapping (placeholder for actual conservative method)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """Apply conservative remapping."""
         # This is a simplified example - real conservative remapping
         # would use proper overlap calculations
@@ -280,8 +280,8 @@ if __name__ == "__main__":
 
     ocean_grid = GridInfo(shape=(100, 200), grid_weights=jnp.ones((100, 200)))
 
-    # Create transformer
-    transformer = ConservativeTransformer(
+    # Create regridder
+    regridder = ConservativeRegridder(
         source_grid=atm_grid, target_grid=ocean_grid, conservation_tolerance=1e-3
     )
 
@@ -289,7 +289,7 @@ if __name__ == "__main__":
     test_data = jnp.random.randn(180, 360)
 
     try:
-        result = transformer(test_data)
+        result = regridder(test_data)
         print("Transformation successful!")
         print(f"Output shape: {result.shape}")
         print(f"Validation results: {interpolator.last_validation}")

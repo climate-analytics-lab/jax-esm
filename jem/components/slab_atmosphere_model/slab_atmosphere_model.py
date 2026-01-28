@@ -181,7 +181,7 @@ class SlabAtmosphereModel(SlabModelBase):
         land_index = self.domain.horizontal_grids["T"].bmask == 1
         ocean_index = self.domain.horizontal_grids["T"].bmask == 0
 
-        def step_function(state, forcing, t):
+        def step_function(state, forcing, step):
             # Compute wind speed
             wind_speed = (
                 state.prog.mean_zonal_wind_velocity**2

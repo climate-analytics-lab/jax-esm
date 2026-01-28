@@ -2,9 +2,9 @@
 
 __version__ = "0.1.0"
 
-from .coupling.coupler import Coupler
-from .coupling.transformer import Transformer
-from .coupling.forcing_mapper import ForcingMapper
+from .base.coupler import Coupler
+from .base.forcing_mapper import BasicForcingMapper
+from .base.regridder import IdentityRegridder
 
 from .base.grid import Grid
 from .base.grid import GridSpecification
@@ -20,18 +20,10 @@ from .base.data_structure import (
     build_dataclass_from_typed_and_dimensioned,
 )
 
-from .component.base import (
-    CoupledComponentConfig,
-    CoupledComponent,
-)
-
 __all__ = [
     "Coupler",
-    "CoupledComponentConfig",
-    "CoupledComponent",
-    "Transformer",
-    "ForcingMapper",
-    "IdentityTransformer",
+    "BasicForcingMapper",
+    "IdentityRegridder",
     "Grid",
     "GridSpecification",
     "Domain",
