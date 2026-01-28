@@ -1,77 +1,81 @@
-from typing import Optional, Dict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Dict, List
+
+from jem.mapping.grid import Grid, GridSpecification
+from jem.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
+
+import coordax as cx
+import dinosaur
 from jax import Array
 import jax.numpy as jnp
 import xarray as xr
-import dinosaur
-from dataclasses import dataclass
 
-from jem.base.grid import Grid, GridSpecification
-from jem.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
-
-from pathlib import Path
-
-
-@dataclass
-class Domain:
+def generate_grids_from_grid_specification(
+    grid_specification: str,
+    mask_file: Optional[str] = None,
+    topography_file: Optional[str] = None,
+) -> Dict[str, Grid]:
     """
-    A collection of horizontal_grids and topography.
-    
-    Attributes:
-        horizontal_grids: A dict of :code:`Grid`. The name of the grids are 
-            suggested to be "T" (tracer grid/T-grid), "U" (U-grid), "V" 
-            (V-grid), and so on.
-        topography: A dict of 2-dimensional array containing topography on
-            various grids. (Consider remove topography beacuase it does not
-            matter to coupling) 
+    Construct :code:`Domain` based on known :code:`GridSpecification`
+    strings.
+   
+    Args:
+        grid_specification: The string representation of grid 
+            specification. 
+        mask_file: The path to the mask file.
+        topography_file: The path to the topography file.
+
+    Returns:
+        :code:`Domain` object.
     """
 
-    horizontal_grids: Dict[str, Grid]
-    topography: Dict[str, Array | None]
+    grids = None
 
-    @classmethod
-    def from_grid_specification(
-        cls,
-        grid_specification: str,
-        mask_file: Optional[str] = None,
-        topography_file: Optional[str] = None,
-    ) -> "Domain":
-        """
-        Construct :code:`Domain` based on known :code:`GridSpecification`
-        strings.
-       
-        Args:
-            grid_specification: The string representation of grid 
-                specification. 
-            mask_file: The path to the mask file.
-            topography_file: The path to the topography file.
-
-        Returns:
-            :code:`Domain` object.
-        """
-
-        domain = None
-
-        parsed_grid_specification = GridSpecification.parse_grid_specification(
-            grid_specification
+    parsed_grid_specification = GridSpecification.parse_grid_specification(
+        grid_specification
+    )
+    if parsed_grid_specification.grid_universe == "JCM":
+        grids = get_jcm_grids(
+            horizontal_resolution=int(parsed_grid_specification.grid_family[1:]),
+            mask_file=mask_file,
         )
-        if parsed_grid_specification.grid_universe == "JCM":
-            domain = get_jcm_domain(
-                horizontal_resolution=int(parsed_grid_specification.grid_family[1:]),
-                mask_file=mask_file,
-                topography_file=topography_file,
-            )
 
-        elif parsed_grid_specification.grid_universe == "Veros":
-            domain = get_veros_domain(
-                parsed_grid_specification.grid_family,
-                mask_file=mask_file,
-                topography_file=topography_file,
-            )
+    elif parsed_grid_specification.grid_universe == "Veros":
+        grids = get_veros_grids(
+            parsed_grid_specification.grid_family,
+            mask_file=mask_file,
+        )
 
-        if domain is None:
-            raise Exception("Error: domain is not created.")
+    if grids is None:
+        raise Exception("Error: grids is not created.")
 
-        return domain
+    return grids
+
+
+def generate_coordinate_from_latitude_longitude(
+    latitude: List[float] | jnp.ndarray,
+    longitude: List[float] | jnp.ndarray,
+    order: str = "latitude_longitude",
+) -> cx.Coordinate:
+    axis_latitude = cx.LabeledAxis("latitude", jnp.array(latitude))
+    axis_longitude = cx.LabeledAxis("longitude", jnp.array(longitude))
+
+    args = None
+
+    if order == "latitude_longitude":
+        args = (axis_latitude, axis_longitude)
+
+    elif order == "longitude_latitude":
+        args = (axis_longitude, axis_latitude)
+
+    else:
+        raise ValueError(
+            f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`"
+        )
+
+    return cx.coords.compose(*args)
+
 
 
 def load_jcm_mask(mask_file):
@@ -91,18 +95,16 @@ def load_jcm_mask(mask_file):
 
     return fmask, bmask
 
-
 def load_jcm_topography_file(
     topography_file: str,
 ):
     return jnp.asarray(xr.open_dataset(topography_file, engine="netcdf4")["orog"])
 
 
-def get_jcm_domain(
+def get_jcm_grids(
     horizontal_resolution: int,
     mask_file: Optional[str] = None,
-    topography_file: Optional[str] = None,
-) -> Domain:
+) -> Dict[str, Grid]:
     """
     Returns a CoordinateSystem object for the given number of layers and 
     horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -139,24 +141,16 @@ def get_jcm_domain(
     else:
         fmask, bmask = load_jcm_mask(mask_file)
 
-    if topography_file is None:
-        topography = jnp.zeros(coordinate_T.shape)
-    else:
-        topography = load_jcm_topography_file(topography_file)
-
-    return Domain(
-        horizontal_grids=dict(
-            T=Grid(
-                coordinate=coordinate_T,
-                grid_type="T",
-                grid_specification=GridSpecification(
-                    grid_universe="JCM", grid_family=grid_family
-                ),
-                bmask=bmask,
-                fmask=fmask,
+    return dict(
+        T=Grid(
+            coordinate=coordinate_T,
+            grid_type="T",
+            grid_specification=GridSpecification(
+                grid_universe="JCM", grid_family=grid_family
             ),
+            bmask=bmask,
+            fmask=fmask,
         ),
-        topography=topography,
     )
 
 
@@ -180,11 +174,10 @@ def load_veros_mask(mask_file):
     return fmask, bmask
 
 
-def get_veros_domain(
+def get_veros_grids(
     grid_family: str,
     mask_file: Optional[str],
-    topography_file: Optional[str],
-) -> Domain:
+) -> Dict[str, Grid]:
     grids = None
     try:
         ds = xr.open_dataset(
@@ -229,17 +222,14 @@ def get_veros_domain(
         # topography = load_veros_topography_file(topography_file)
         pass
 
-    return Domain(
-        horizontal_grids=dict(
-            T=Grid(
-                coordinate=coordinate_T,
-                grid_type="T",
-                grid_specification=GridSpecification(
-                    grid_universe="Veros", grid_family=grid_family
-                ),
-                bmask=bmask,
-                fmask=fmask,
+    return dict(
+        T=Grid(
+            coordinate=coordinate_T,
+            grid_type="T",
+            grid_specification=GridSpecification(
+                grid_universe="Veros", grid_family=grid_family
             ),
+            bmask=bmask,
+            fmask=fmask,
         ),
-        topography=topography,
     )
