@@ -2,8 +2,10 @@
 
 __version__ = "0.1.0"
 
-from .base.coupler import Coupler
+from jem.base.coupler import Coupler
+import jem.base.typing as typing
 
 __all__ = [
+    "typing",
     "Coupler",
 ]
