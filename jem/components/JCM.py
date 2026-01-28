@@ -19,8 +19,7 @@ from jcm.physics_interface import PhysicsState
 from dinosaur import primitive_equations, primitive_equations_states
 
 from jem.utils.bulk_op import mean_leaf
-from jem.base.domain import Domain
-from jem.base.variable import VariableMetadata, VariableRegistry
+from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 import tree_math
 from typing import Any, Dict
@@ -73,22 +72,25 @@ def make_jem_compatible(
 
     D3_nodal_shape = model.coords.nodal_shape
     D2_nodal_shape = D3_nodal_shape[1:]
+    D2_information = (D2_nodal_shape, ("longitude", "latitude"))
 
-    check_before_setattr(model, "state_variable_registry", VariableRegistry([
-        VariableMetadata(name="extra.total_heat_flux", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-    ]))
+    check_before_setattr(model, "state_variable_registry", {
+        "extra.total_heat_flux" : D2_information,
+    })
 
-    check_before_setattr(model, "forcing_variable_registry", VariableRegistry([
-        VariableMetadata(name="sea_surface_temperature", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-        VariableMetadata(name="sice_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-        VariableMetadata(name="snowc_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-        VariableMetadata(name="soilw_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-        VariableMetadata(name="stl_am", shape=D2_nodal_shape, dimensions=("longitude", "latitude")),
-    ]))
+    check_before_setattr(model, "forcing_variable_registry", {
+        varname : D2_information for varname in [
+            "sea_surface_temperature",
+            "sice_am",
+            "snowc_am",
+            "soilw_am",
+            "stl_am",
+        ]
+    })
 
-    check_before_setattr(model, "domain", Domain.from_grid_specification(
-        f"JCM::T{model.coords.horizontal.total_wavenumbers - 2}"
-    ))
+    #check_before_setattr(model, "grids", Grids.generate_grids_from_grid_specification(
+    #    f"JCM::T{model.coords.horizontal.total_wavenumbers - 2}"
+    #))
 
     def initialize():
         _modal_state = asfloat64(model._prepare_initial_modal_state())
