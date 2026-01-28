@@ -46,20 +46,14 @@ import jem.utils.tree_tools as tree_tools
 # ## Configurations
 
 # %%
-resolution = 31
-grid_specification = f"JCM::T{resolution:d}"
-
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_interval = jdt.to_timedelta(10, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
-external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
-print("Simulation output dir: ", str(output_dir))
+external_files = generate_jcm_forcing_and_topography_files()
 output_dir.mkdir(exist_ok=True, parents=True)
-
 geometry = Geometry.from_file(external_files["terrain"])
-
 one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
@@ -81,20 +75,12 @@ JCM.make_jem_compatible(
 components = dict(
     atm=atm_model,
     ocn=SlabOceanModel(
-        grid_specification=grid_specification,
         start_datetime=start_datetime,
-        timestep=coupling_timestep / one_second,
-        save_interval=coupling_timestep / one_second,
-        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         mask_file=external_files["terrain"],
         SST_clim_file=external_files["forcing"],
     ),
     lnd=SlabLandModel(
-        grid_specification=grid_specification,
         start_datetime=start_datetime,
-        timestep=coupling_timestep / one_second,
-        save_interval=coupling_timestep / one_second,
-        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         topography_file=external_files["terrain"],
         mask_file=external_files["terrain"],
         land_clim_file=external_files["forcing"],
@@ -105,7 +91,7 @@ components = dict(
 # ## Creating Flux and Scalar Exchange between Components
 
 # %%
-# Creating transformations
+# Creating regridders and mapping
 identity_regridder = IdentityRegridder()
 forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
@@ -138,12 +124,8 @@ model = Coupler(
     forcing_mappers=dict(fm=forcing_mapper),
 )
 
-workflow = ["fm", "atm", "ocn", "lnd"]
-
-
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
-
 
 # %% [markdown]
 # ## Run Coupled Model
@@ -159,7 +141,7 @@ tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
-    workflow=workflow,
+    workflow=["fm", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
     jitted=True,
     show_progress=True,
