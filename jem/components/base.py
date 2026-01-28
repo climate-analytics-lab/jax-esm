@@ -2,14 +2,13 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Dict
-
-import xarray as xr
+from typing import Any, Callable, Dict
 
 from jem.base.exceptions import ValidationError
-from jem.base.domain import Domain
-from jem.base.variable import VariableRegistry
+from jem.mapping.grid import Grid
 
+import xarray as xr
+from typeguard import check_type
 
 @dataclass
 class CoupledComponentConfig:
@@ -24,9 +23,9 @@ class CoupledComponent(ABC):
 
     component_forcing_class: type
     component_state_class: type
-    state_variable_registry: VariableRegistry
-    forcing_variable_registry: VariableRegistry
-    domain: Domain
+    state_variable_registry: Any
+    forcing_variable_registry: Any
+    horizontal_grids: Dict[str, Grid]
 
     def __init__(self, config: CoupledComponentConfig):
         """Initialize component with configuration."""
@@ -71,25 +70,7 @@ class CoupledComponent(ABC):
             ValueError: If configuration is invalid.
         """
         print(f"Validating {self.config.name}")
-        for test_member, suggested_type, strictly_typed in [
-            ("component_forcing_class", object, False),
-            ("component_state_class", object, False),
-            ("state_variable_registry", VariableRegistry, True),
-            ("forcing_variable_registry", VariableRegistry, True),
-            ("domain", Domain, True),
-        ]:
-            if not hasattr(self, test_member):
-                raise ValidationError(f"The member {test_member:s} must be assinged.")
-
-            if not isinstance(getattr(self, test_member), suggested_type):
-                if strictly_typed:
-                    raise ValidationError(
-                        f"The member {test_member:s} must be a subclass of {str(suggested_type):s}."
-                    )
-                else:
-                    print(
-                        f"Warning: The member {test_member:s} should be a subclass of {str(suggested_type):s}."
-                    )
+        check_type(self.horizontal_grids, Dict[str, Grid])
 
     @abstractmethod
     def validate(self) -> None:
