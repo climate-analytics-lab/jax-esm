@@ -7,7 +7,7 @@ from pathlib import Path
 import jcm
 
 def generate_jcm_forcing_and_topography_files(
-    resolution: int,
+    resolution: int = 31,
     data_directory: Optional[Path] = None,
 ) -> Dict[str, Path]:
 
