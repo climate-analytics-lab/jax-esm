@@ -80,7 +80,7 @@ class SlabAtmosphereModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        timestep: float = 3600.0 * 6,
+        timestep: float = 86400.0,
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
