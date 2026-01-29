@@ -61,31 +61,31 @@ def evaluate_periodic_1D(
    
     # Linear interpolation weight
     alpha = distance_to_the_left_point / spacing_between_coarse_data
-    
-    interpolated_y = (1.0 - alpha) * pivot_y[idx] + alpha * pivot_y[idx_next]
+
+    # Add dummy indexes
+    alpha = alpha[(...,) + (None,) * (pivot_y.ndim - 1)]
+
+    interpolated_y = (1.0 - alpha) * pivot_y[idx, ...] + alpha * pivot_y[idx_next, ...]
     y_restored     = jnp.transpose(interpolated_y, axes=restore_to_original_axes)
     
     return y_restored
 
-# Define a vectorized version
-#vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None, None))  # vmap over x, keep data and name constant
-
-
 if __name__ == "__main__":
     
-    import matplotlib.pyplot as plt
     import jax.numpy as jnp
+    import xarray as xr
+
+    da = xr.open_dataset("/home/tienyiao/miniconda3/envs/jaxesm/lib/python3.13/site-packages/jcm/data/bc/t30/clim/sea_surface_temperature.nc")["sst"]
+    print(da)
     
-    x = jnp.linspace(0, 1, 21)[:-1]
-    y = jnp.sin(x * jnp.pi * 2)
+    x = jnp.linspace(0, 1, len(da.coords["time"])+1)[:-1]
+    y = jnp.array(da.to_numpy())
     
-    interpolated_x = jnp.linspace(0.85, 3.05, 50)[:-1]
+    interpolated_x = jnp.linspace(0.5, 1.5, 200)[:-1]
     interpolated_y = evaluate_periodic_1D(x, y, interpolated_x)
 
-    plt.plot(interpolated_x, interpolated_y)
-    plt.scatter(x, y)
-    plt.show()
-    
+    da_new = xr.DataArray(interpolated_y)
+    da_new.to_netcdf("interpolated_sst.nc") 
 
 
 
