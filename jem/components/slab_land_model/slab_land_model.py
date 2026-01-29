@@ -412,7 +412,6 @@ class SlabLandModel(SlabModelBase):
             new_state = state.copy({
                 "prog.sim_time" : new_sim_time,
                 "prog.land_surface_temperature" : new_T.astype(jnp.float32),
-                "prog.heatflx" : heatflx.astype(jnp.float32),
                 "prog.snowd" : snowd_clim_current.astype(jnp.float32),
                 "prog.soilw" : soilw_clim_current.astype(jnp.float32),
             })
@@ -440,50 +439,32 @@ class SlabLandModel(SlabModelBase):
         
         prog = predictions["prog"]
         forcing = predictions["forcing"]
+        T_grid_dims = self._get_grid_dims()
         
-        T_grid_axis_names = self.horizontal_grids["T"].axis_names
-        T_grid_dims = ("time",) + T_grid_axis_names
-        start_datetime_str = self.start_datetime.to_pydatetime().strftime(
-            "%Y-%m-%d %H:%M:%S"
+        return dict( 
+            land_surface_temperature = (T_grid_dims, prog.land_surface_temperature, {
+                "long_name": "Land surface temperature",
+                "units": "K",
+            }),
+            snowd = (T_grid_dims, prog.snowd, {
+                "long_name": "Snow depth (water equivalent)",
+                "units": "mm",
+            }),
+            soilw = (T_grid_dims, prog.soilw, {
+                "long_name": "Soil water availability",
+                "units": "1",
+            }),
+            total_heat_flux = (T_grid_dims, forcing.flux.total_heat_flux, {
+                "long_name": "Total heat flux forcing",
+                "units": "W m-2",
+            }),
         )
-        
-        ds = xr.Dataset(
-            data_vars = dict(
-                land_surface_temperature = (T_grid_dims, prog.land_surface_temperature, {
-                    "long_name": "Land surface temperature",
-                    "units": "K",
-                }),
-                heatflx = (T_grid_dims, prog.heatflx, {
-                    "long_name": "Surface heat flux into land",
-                    "units": "W m-2",
-                    "positive": "downward",
-                }),
-                snowd = (T_grid_dims, prog.snowd, {
-                    "long_name": "Snow depth (water equivalent)",
-                    "units": "mm",
-                }),
-                soilw = (T_grid_dims, prog.soilw, {
-                    "long_name": "Soil water availability",
-                    "units": "1",
-                }),
-                total_heat_flux = (T_grid_dims, forcing.flux.total_heat_flux, {
-                    "long_name": "Total heat flux forcing",
-                    "units": "W m-2",
-                }),
-            ),
-            coords = dict(
-                time = (["time"], prog.sim_time / 3600.0, {
-                    "units": f"hours since {start_datetime_str:s}",
-                }),
-                latitude2D = (T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
-                longitude2D = (T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
-            ),
-            attrs = dict(
-                description = "SPEEDY-based slab land surface model output",
-                depth_soil = f"{self.depth_soil} m",
-                depth_lice = f"{self.depth_lice} m",
-                tdland = f"{self.tdland} days",
-            ),
+
+        """
+        attrs = dict(
+            description = "SPEEDY-based slab land surface model output",
+            depth_soil = f"{self.depth_soil} m",
+            depth_lice = f"{self.depth_lice} m",
+            tdland = f"{self.tdland} days",
         )
-        
-        return ds
+        """
