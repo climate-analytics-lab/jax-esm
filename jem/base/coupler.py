@@ -169,7 +169,7 @@ class Coupler:
         iterations: int,
         jitted: bool = True,
         show_progress: bool = False,
-        tqdm_kwargs: Dict[str, Any] = dict(),
+        tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
     ) -> StepFunction:
 
         scan_func = generate_scan_function(jitted=jitted)

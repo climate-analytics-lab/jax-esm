@@ -1,4 +1,4 @@
-from .slab_ocean_model import SlabOceanModel, OceanState, OceanForcing
+from .slab_ocean_model import SlabOceanModel
 
 __all__ = [
     "SlabOceanModel",

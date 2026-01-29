@@ -9,9 +9,8 @@ import xarray as xr
 from jem import constants
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
+import jem.utils.data_structure as data_structure
 from jem.components.slab.base import SlabModelBase
-from jem.base.variable import VariableMetadata, VariableRegistry
-import jem.base.data_structure as data_structure
 
 default_sea_surface_temperature = 288.15
 
@@ -118,22 +117,20 @@ class SlabLandModel(SlabModelBase):
         self.component_forcing_class = decorator(LandForcing)
 
     def _create_variable_registries(self) -> None:
-        self.state_variable_registry = VariableRegistry()
-        self.forcing_variable_registry = VariableRegistry()
+        self.state_variable_registry = {}
+        self.forcing_variable_registry = {}
 
         for target_registry, target_class in [
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry.register_variable(
-                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
-                )
+                target_registry[name] = (shape, dimensions)
 
     def _initialize_fields(self):
         """Initialize land model fields."""
-        land_index = self.domain.horizontal_grids["T"].bmask == 1
-        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
+        land_index = self.horizontal_grids["T"].bmask == 1
+        nonland_index = self.horizontal_grids["T"].bmask != 1
 
         print("Total land grid count: ", land_index.sum())
 
@@ -205,8 +202,8 @@ class SlabLandModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for land model."""
         start_day_offset = self._compute_start_day_offset()
-        nonland_index = self.domain.horizontal_grids["T"].bmask != 1
-        land_index = self.domain.horizontal_grids["T"].bmask == 1
+        nonland_index = self.horizontal_grids["T"].bmask != 1
+        land_index = self.horizontal_grids["T"].bmask == 1
 
         def step_function(state, forcing, step):
             # Compute anomaly if climatology is given

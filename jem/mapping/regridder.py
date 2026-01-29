@@ -1,10 +1,15 @@
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
-from typing import Dict, Any
-from jax import Array
+from typing import Dict, Any, Optional
+
 from jem.base.exceptions import ValidationError
-from jem.base.grid import Grid
-from jem.base.variable import VariableMetadata
+from jem.base.typing import (
+    VariableMetadata,
+)
+from jem.mapping.grid import Grid
+
+from jax import Array
+from typeguard import typechecked
 
 
 class BasicRegridder(ABC):
@@ -25,16 +30,18 @@ class BasicRegridder(ABC):
          
     """
 
-    source_grid: Grid
-    target_grid: Grid
+    source_grid: Optional[Grid] = None
+    target_grid: Optional[Grid] = None
+
     conservation_tolerance: float
     validate_shape: bool
     validate_conservation: bool
 
+    @typechecked
     def __init__(
         self,
-        source_grid: Grid,
-        target_grid: Grid,
+        source_grid: Optional[Grid] = None,
+        target_grid: Optional[Grid] = None,
         conservation_tolerance: float = 1e-6,
         validate_shape: bool = True,
         validate_conservation: bool = True,
@@ -79,7 +86,7 @@ class BasicRegridder(ABC):
             ValidationError: If validation checks fail
         """
         # Check input shape
-        if data.shape != self.source_grid.shape:
+        if (not self.source_grid) and (data.shape != self.source_grid.shape):
             raise ValueError(
                 f"Ijnput shape {data.shape} does not match source grid "
                 f"shape {self.source_grid.shape}"
@@ -121,7 +128,10 @@ class BasicRegridder(ABC):
 
     def _validate_shape(self, target_data: Array):
         """Validate that output has correct shape."""
-        if target_data.shape != self.target_grid.shape:
+        if not self.target_grid:
+            raise Exception("target_grid was not provided. Cannot validate shape")
+
+        if (not self.target_grid) and (target_data.shape != self.target_grid.shape):
             raise ValidationError(
                 f"Output shape {target_data.shape} does not match "
                 f"target grid shape {self.target_grid.shape}"
@@ -130,7 +140,9 @@ class BasicRegridder(ABC):
 
     @abstractmethod
     def validate_metadata(
-        self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
+        self,
+        source_metadata: VariableMetadata,
+        target_metadata: VariableMetadata,
     ):
         """Validate the metadata"""
         pass
@@ -191,17 +203,15 @@ class BasicRegridder(ABC):
 
 
     def get_info(self):
-        
+       
         return {
-            'source_grid' : self.source_grid.get_info(), 
-            'target_grid' : self.target_grid.get_info(),
+            'type': str(self.__class__),
+            'source_grid' : self.source_grid.get_info() if self.source_grid is not None else None, 
+            'target_grid' : self.target_grid.get_info() if self.target_grid is not None else None, 
             'validate_conservation' : self.validate_conservation,
             'validate_shape' : self.validate_shape,
         }
        
-
-# Example implementations
-
 
 class IdentityRegridder(BasicRegridder):
     """Identity mapping (no interpolation)."""
@@ -212,10 +222,8 @@ class IdentityRegridder(BasicRegridder):
     def validate_metadata(
         self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
     ):
-        if source_metadata.shape != target_metadata.shape:
-            print(source_metadata.shape)
-            print(target_metadata.shape)
-            raise ValidationError("Source and target metadata must have the same shape")
+        if source_metadata[0] != target_metadata[0]: # shape
+            raise ValidationError(f"Source {str(source_metadata[0])} and target metadata {str(target_metadata[0])} must have the same shape")
 
 
 class BilinearRegridder(BasicRegridder):
@@ -268,30 +276,3 @@ class ConservativeRegridder(BasicRegridder):
             )
 
         return result
-
-
-# Example usage
-if __name__ == "__main__":
-    # Define grids
-    atm_grid = GridInfo(
-        shape=(180, 360),
-        grid_weights=jnp.ones((180, 360)),  # Simplified, should be cos(lat)
-    )
-
-    ocean_grid = GridInfo(shape=(100, 200), grid_weights=jnp.ones((100, 200)))
-
-    # Create regridder
-    regridder = ConservativeRegridder(
-        source_grid=atm_grid, target_grid=ocean_grid, conservation_tolerance=1e-3
-    )
-
-    # Test data
-    test_data = jnp.random.randn(180, 360)
-
-    try:
-        result = regridder(test_data)
-        print("Transformation successful!")
-        print(f"Output shape: {result.shape}")
-        print(f"Validation results: {interpolator.last_validation}")
-    except ValidationError as e:
-        print(f"Validation failed: {e}")

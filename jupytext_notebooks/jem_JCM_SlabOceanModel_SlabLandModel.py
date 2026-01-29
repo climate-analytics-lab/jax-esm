@@ -37,8 +37,8 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
 from jem.components import JCM, SlabLandModel, SlabOceanModel
-from jem.base.regridder import IdentityRegridder
-from jem.base.forcing_mapper import BasicForcingMapper
+from jem.mapping import IdentityRegridder
+from jem.mapping import BasicForcingMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
@@ -46,20 +46,14 @@ import jem.utils.tree_tools as tree_tools
 # ## Configurations
 
 # %%
-resolution = 31
-grid_specification = f"JCM::T{resolution:d}"
-
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_interval = jdt.to_timedelta(10, "day")
 output_dir = Path("output/JCM_SOM_SLM").resolve()
 
-external_files = generate_jcm_forcing_and_topography_files(resolution=resolution)
-print("Simulation output dir: ", str(output_dir))
+external_files = generate_jcm_forcing_and_topography_files()
 output_dir.mkdir(exist_ok=True, parents=True)
-
 geometry = Geometry.from_file(external_files["terrain"])
-
 one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
@@ -81,20 +75,12 @@ JCM.make_jem_compatible(
 components = dict(
     atm=atm_model,
     ocn=SlabOceanModel(
-        grid_specification=grid_specification,
         start_datetime=start_datetime,
-        timestep=coupling_timestep / one_second,
-        save_interval=coupling_timestep / one_second,
-        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         mask_file=external_files["terrain"],
         SST_clim_file=external_files["forcing"],
     ),
     lnd=SlabLandModel(
-        grid_specification=grid_specification,
         start_datetime=start_datetime,
-        timestep=coupling_timestep / one_second,
-        save_interval=coupling_timestep / one_second,
-        relaxation_time=jdt.to_timedelta(60, "day") / one_second,
         topography_file=external_files["terrain"],
         mask_file=external_files["terrain"],
         land_clim_file=external_files["forcing"],
@@ -105,54 +91,28 @@ components = dict(
 # ## Creating Flux and Scalar Exchange between Components
 
 # %%
-# Creating transformations
-regridders = dict(
-    a2o = dict(
-        identity_regridder = IdentityRegridder(
-            source_grid = components["atm"].domain.horizontal_grids["T"],
-            target_grid = components["ocn"].domain.horizontal_grids["T"],
-        ),
-    ),
-    o2a = dict(
-        identity_regridder = IdentityRegridder(
-            source_grid = components["ocn"].domain.horizontal_grids["T"],
-            target_grid = components["atm"].domain.horizontal_grids["T"],
-        ),
-    ),
-    a2l = dict(
-        identity_regridder = IdentityRegridder(
-            source_grid = components["atm"].domain.horizontal_grids["T"],
-            target_grid = components["lnd"].domain.horizontal_grids["T"],
-        ),
-    ),
-    l2a = dict(
-        identity_regridder = IdentityRegridder(
-            source_grid = components["lnd"].domain.horizontal_grids["T"],
-            target_grid = components["atm"].domain.horizontal_grids["T"],
-        ),
-    ),
-)
-
+# Creating regridders and mapping
+identity_regridder = IdentityRegridder()
 forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "extra.total_heat_flux"),
     target = ("ocn", "flux.total_heat_flux"),
-    regridder = regridders["a2o"]["identity_regridder"],
+    regridder = identity_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("ocn", "prog.sea_surface_temperature"),
     target = ("atm", "sea_surface_temperature"),
-    regridder = regridders["o2a"]["identity_regridder"],
+    regridder = identity_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "extra.total_heat_flux"),
     target = ("lnd", "flux.total_heat_flux"),
-    regridder = regridders["a2l"]["identity_regridder"],
+    regridder = identity_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("lnd", "prog.land_surface_temperature"),
     target = ("atm", "stl_am"),
-    regridder = regridders["l2a"]["identity_regridder"],
+    regridder = identity_regridder,
 )
 
 # %% [markdown]
@@ -164,12 +124,8 @@ model = Coupler(
     forcing_mappers=dict(fm=forcing_mapper),
 )
 
-workflow = ["fm", "atm", "ocn", "lnd"]
-
-
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
-
 
 # %% [markdown]
 # ## Run Coupled Model
@@ -185,11 +141,8 @@ tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
-    workflow=workflow,
+    workflow=["fm", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
-    jitted=True,
-    show_progress=True,
-    tqdm_kwargs=dict(desc="Simulation"),
 )
 
 # Run coupled model
