@@ -86,10 +86,10 @@ class BasicRegridder(ABC):
             ValidationError: If validation checks fail
         """
         # Check input shape
-        if (not self.source_grid) and (data.shape != self.source_grid.shape):
+        if (self.source_grid is not None) and (data.shape != self.source_grid.shape):
             raise ValueError(
-                f"Ijnput shape {data.shape} does not match source grid "
-                f"shape {self.source_grid.shape}"
+                f"Input shape {data.shape} does not match source grid "
+                f"shape {self.source_grid.shape}" 
             )
 
         # Apply regridation

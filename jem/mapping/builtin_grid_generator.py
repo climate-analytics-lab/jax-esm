@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List
 
+import jem
 from jem.mapping.grid import Grid, GridSpecification
 from jem.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 

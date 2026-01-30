@@ -20,7 +20,7 @@ def resolve_interface(
     reference_class: type,
     verbose: bool = False,
     customized_mapping_name:str = "__JEM_CUSTOMIZED_MAPPING__",
-    skip: Optional[ str | List[str] ] = [],
+    skip: str | List[str] = [],
 ) -> Dict[str, Any]:
     
     metadata = get_type_hints(reference_class)
