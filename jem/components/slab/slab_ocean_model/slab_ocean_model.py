@@ -15,28 +15,16 @@ from jem.components.slab.base import SlabModelBase
 default_land_surface_temperature = 288.15
 
 @data_structure.typed_and_dimensioned
-class PrognosticData:
+class OceanState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     sea_surface_temperature: Annotated[
         float, ("latitudinal", "longitude"), "two_dimensional"
     ]
     mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
-
-@data_structure.typed_and_dimensioned
-class AirseaFlux:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-
-
-@data_structure.typed_and_dimensioned
-class OceanState:
-    prog: PrognosticData
-
-
 @data_structure.typed_and_dimensioned
 class OceanForcing:
-    flux: AirseaFlux
-
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -178,8 +166,8 @@ class SlabOceanModel(SlabModelBase):
 
         return self.component_state_class.zeros().copy(
             {
-                "prog.mixed_layer_depth": init_mixed_layer_depth,
-                "prog.sea_surface_temperature": init_sea_surface_temperature,
+                "mixed_layer_depth": init_mixed_layer_depth,
+                "sea_surface_temperature": init_sea_surface_temperature,
             }
         ), self.component_forcing_class.zeros()
 
@@ -189,13 +177,13 @@ class SlabOceanModel(SlabModelBase):
         nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
         def step_function(state, forcing, step):
-            new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
+            new_sea_surface_temperature_anom = state.sea_surface_temperature
 
             if self.has_climatology:
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                    state.prog.sim_time, start_day_offset, length_of_a_cycle
+                    state.sim_time, start_day_offset, length_of_a_cycle
                 )
 
                 ocn_idx = self.horizontal_grids["T"].bmask == 0
@@ -214,14 +202,14 @@ class SlabOceanModel(SlabModelBase):
                 ) / 86400.0  # per second
 
                 new_sea_surface_temperature_anom = (
-                    state.prog.sea_surface_temperature - snapshot_SST_clim_beg
+                    state.sea_surface_temperature - snapshot_SST_clim_beg
                 )
 
             # Euler backward step
-            new_sim_time = state.prog.sim_time + self.timestep
+            new_sim_time = state.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * (-forcing.flux.total_heat_flux)
+                + self.cd_factor * (-forcing.total_heat_flux)
             )
 
             # Add climatology back
@@ -238,26 +226,48 @@ class SlabOceanModel(SlabModelBase):
 
             new_state = state.copy(
                 {
-                    "prog.sea_surface_temperature": new_sea_surface_temperature,
-                    "prog.sim_time": new_sim_time,
+                    "sea_surface_temperature": new_sea_surface_temperature,
+                    "sim_time": new_sim_time,
                 }
             )
             return new_state, stack_objects(
-                [dict(prog=new_state.prog, forcing=forcing)]
+                [dict(state=new_state, forcing=forcing)]
             )
 
         return step_function
 
     def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
         """Create xarray data variables for ocean output."""
-        prog = predictions["prog"]
+        state = predictions["state"]
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
         return dict(
-            sea_surface_temperature=(T_grid_dims, prog.sea_surface_temperature),
-            mixed_layer_depth=(T_grid_dims, prog.mixed_layer_depth),
-            total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
+            sea_surface_temperature=(
+                T_grid_dims,
+                state.sea_surface_temperature,
+                {
+                    "long_name": "Sea surface temperature",
+                    "units": "K",
+                }
+            ),
+            mixed_layer_depth=(
+                T_grid_dims,
+                state.mixed_layer_depth,
+                {
+                    "long_name": "Mixed layer depth",
+                    "units": "m",
+                }
+            ),
+            total_heat_flux=(
+                T_grid_dims,
+                forcing.total_heat_flux,
+                {
+                    "long_name": "Total heat flux forcing",
+                    "units": "W m-2",
+                    "positive": "upward",
+                }
+            ),
         )
 
     def get_info(self):

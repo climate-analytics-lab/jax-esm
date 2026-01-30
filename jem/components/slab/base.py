@@ -211,24 +211,21 @@ class SlabModelBase(ABC):
             "%Y-%m-%d %H:%M:%S"
         )
 
-        # Get time coordinate from predictions
-        sim_time = predictions["prog"].sim_time
-
-        # Build coordinates dict
         coords = dict(
             time=(
                 ["time"],
-                sim_time / 3600.0,
+                predictions["state"].sim_time / 3600.0,
                 {"units": f"hours since {start_datetime_str:s}"},
             ),
             latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
             longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
         )
 
-        # Get model-specific data variables from subclass
-        data_vars = self._create_xarray_data_vars(predictions)
-
-        return xr.Dataset(data_vars=data_vars, coords=coords)
+        return xr.Dataset(
+            data_vars=self._create_xarray_data_vars(predictions),
+            coords=coords,
+            attrs=self._create_xarray_global_attributes(),
+        )
 
     @abstractmethod
     def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
@@ -241,6 +238,14 @@ class SlabModelBase(ABC):
             Dict of data variables for xarray Dataset
         """
         pass
+    
+    def _create_xarray_global_attributes(self) -> Dict[str, Any]:
+        """Create model-specific xarray Dataset global attributes.
+
+        Returns:
+            Dict of global attributes for xarray Dataset
+        """
+        return {}
 
     def get_info(self) -> Dict[str, Any]:
         return dict(
