@@ -63,7 +63,6 @@ class SlabLandModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         timestep: float = 86400.0,
-        save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
         land_clim_file: Optional[str] = None,
@@ -79,7 +78,6 @@ class SlabLandModel(SlabModelBase):
             grid_specification: Grid specification string (e.g., "JCM::T31")
             start_datetime: Start datetime for simulation
             timestep: Model timestep in seconds
-            save_interval: Output save interval in seconds
             topography_file: Optional path to topography NetCDF file
             mask_file: Optional path to mask NetCDF file
             land_clim_file: Optional path to land climatology NetCDF file
@@ -99,7 +97,6 @@ class SlabLandModel(SlabModelBase):
             mask_file=mask_file,
         )
 
-        self.save_interval = save_interval
         self.land_clim_file = land_clim_file
         
         # Physical parameters from Fortran defaults
@@ -124,7 +121,7 @@ class SlabLandModel(SlabModelBase):
         self.validate()
  
     def validate(self):
-        super()._validate()
+        super().validate()
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
@@ -144,11 +141,6 @@ class SlabLandModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _initialize_fields(self):
-        """Initialize land model fields."""
-        land_index = self.horizontal_grids["T"].bmask == 1
-        nonland_index = self.horizontal_grids["T"].bmask != 1
-
     def _create_variable_registries(self) -> None:
         self.state_variable_registry = {}
         self.forcing_variable_registry = {}
@@ -161,7 +153,7 @@ class SlabLandModel(SlabModelBase):
                 target_registry[name] = (shape, dimensions)
 
 
-    def _initialize_fields(self):
+    def initialize(self):
         """Initialize land surface model state and climatology.
         
         Returns:
@@ -439,7 +431,7 @@ class SlabLandModel(SlabModelBase):
         
         prog = predictions["prog"]
         forcing = predictions["forcing"]
-        T_grid_dims = self._get_grid_dims()
+        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
         
         return dict( 
             land_surface_temperature = (T_grid_dims, prog.land_surface_temperature, {

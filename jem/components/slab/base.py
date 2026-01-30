@@ -1,11 +1,11 @@
-"""Base class for slab models (ocean, land, atmosphere).
+"""Base class for slab models.
 
 This module provides a common base class that extracts shared functionality
 from SlabOceanModel, SlabLandModel, and SlabAtmosphereModel to reduce
 code duplication.
 """
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any
 
 import jax
@@ -13,11 +13,9 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
-from jem.components.base import CoupledComponent, CoupledComponentConfig
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
-
-class SlabModelBase(CoupledComponent):
+class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
 
     This base class handles:
@@ -52,8 +50,8 @@ class SlabModelBase(CoupledComponent):
             topography_file: Optional path to topography NetCDF file
             mask_file: Optional path to land/ocean mask NetCDF file
         """
-        super().__init__(CoupledComponentConfig(name=name, timestep=timestep))
-
+        self.name = name
+        self.grid_specification = grid_specification
         self.start_datetime = start_datetime
         self.timestep = timestep
         self.topography_file = topography_file
@@ -72,10 +70,7 @@ class SlabModelBase(CoupledComponent):
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()
         self._create_variable_registries()
-
-        # Lat/lon grids will be set during initialize()
-        self.llat_rad = None
-        self.llon_rad = None
+        self._setup_lat_lon_grids()
 
     @abstractmethod
     def _create_state_and_forcing_classes(self) -> None:
@@ -166,26 +161,12 @@ class SlabModelBase(CoupledComponent):
         )
         return clim_beg_idx, clim_end_idx
 
+    @abstractmethod
     def initialize(self):
         """Initialize the slab model state.
 
-        Sets up lat/lon grids and delegates field initialization to subclass.
-
         Returns:
-            Initial component state
-        """
-        self._setup_lat_lon_grids()
-        return self._initialize_fields()
-
-    @abstractmethod
-    def _initialize_fields(self):
-        """Initialize model-specific fields.
-
-        Subclasses implement this to set up initial conditions,
-        climatology data, and compute time factors.
-
-        Returns:
-            Initial component state
+            Initial component state and forcing
         """
         pass
 
@@ -231,7 +212,7 @@ class SlabModelBase(CoupledComponent):
         )
 
         # Get time coordinate from predictions
-        sim_time = self._get_sim_time_from_predictions(predictions)
+        sim_time = predictions["prog"].sim_time
 
         # Build coordinates dict
         coords = dict(
@@ -249,17 +230,6 @@ class SlabModelBase(CoupledComponent):
 
         return xr.Dataset(data_vars=data_vars, coords=coords)
 
-    def _get_sim_time_from_predictions(self, predictions) -> jnp.ndarray:
-        """Extract simulation time from predictions.
-
-        Args:
-            predictions: Predictions dict from step function
-
-        Returns:
-            Array of simulation times
-        """
-        return predictions["prog"].sim_time
-
     @abstractmethod
     def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
         """Create model-specific xarray data variables.
@@ -272,10 +242,7 @@ class SlabModelBase(CoupledComponent):
         """
         pass
 
-    def _get_grid_dims(self) -> Tuple[str, ...]:
-        """Get the dimension names for grid variables.
-
-        Returns:
-            Tuple of dimension names including time
-        """
-        return ("time",) + self.horizontal_grids["T"].coordinate.dims
+    def get_info(self) -> Dict[str, Any]:
+        return dict(
+            name = self.name,
+        )

@@ -82,7 +82,6 @@ class SlabAtmosphereModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         timestep: float = 86400.0,
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
-        save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
     ):
@@ -92,11 +91,9 @@ class SlabAtmosphereModel(SlabModelBase):
             grid_specification: Grid spec string (e.g., "JCM::T31")
             timestep: Model timestep in seconds
             start_datetime: Simulation start datetime
-            save_interval: Output save interval in seconds (unused, kept for compatibility)
             topography_file: Optional path to topography NetCDF file
             mask_file: Optional path to land/ocean mask NetCDF file
         """
-        self.save_interval = save_interval
 
         super().__init__(
             name="SlabAtmosphereModel",
@@ -119,7 +116,7 @@ class SlabAtmosphereModel(SlabModelBase):
         self.validate()
 
     def validate(self):
-        super()._validate()
+        super().validate()
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for atmosphere model."""
@@ -143,7 +140,7 @@ class SlabAtmosphereModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _initialize_fields(self):
+    def initialize(self):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
@@ -244,6 +241,7 @@ class SlabAtmosphereModel(SlabModelBase):
         prog = predictions["prog"]
         phydata = predictions["phydata"]
         forcing = predictions["forcing"]
+        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
         return dict(
             hfluxn=(["time", "longitude", "latitude", "two"], phydata.hfluxn),

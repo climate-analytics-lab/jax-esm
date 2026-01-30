@@ -61,7 +61,6 @@ class SlabOceanModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         timestep: float = 86400.0,
-        save_interval: float = 86400.0,
         relaxation_time: float = 60 * 86400.0,
         mixed_layer_depth_min: float = 40.0,
         mixed_layer_depth_max: float = 60.0,
@@ -75,7 +74,6 @@ class SlabOceanModel(SlabModelBase):
             grid_specification: Grid spec string (e.g., "JCM::T31")
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
-            save_interval: Output save interval in seconds (unused, kept for compatibility)
             relaxation_time: Relaxation timescale to climatology in seconds
             mixed_layer_depth_min: Minimum mixed layer depth in meters
             mixed_layer_depth_max: Maximum mixed layer depth in meters
@@ -106,7 +104,7 @@ class SlabOceanModel(SlabModelBase):
         self.validate()
 
     def validate(self):
-        super()._validate()
+        super().validate()
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
@@ -125,7 +123,7 @@ class SlabOceanModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _initialize_fields(self):
+    def initialize(self):
         """Initialize ocean model fields."""
         nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
@@ -254,7 +252,7 @@ class SlabOceanModel(SlabModelBase):
         """Create xarray data variables for ocean output."""
         prog = predictions["prog"]
         forcing = predictions["forcing"]
-        T_grid_dims = self._get_grid_dims()
+        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
         return dict(
             sea_surface_temperature=(T_grid_dims, prog.sea_surface_temperature),
