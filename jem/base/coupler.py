@@ -168,7 +168,7 @@ class Coupler:
         workflow: Workflow,
         iterations: int,
         jitted: bool = True,
-        show_progress: bool = False,
+        show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
     ) -> StepFunction:
 
