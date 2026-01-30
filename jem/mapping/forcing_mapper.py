@@ -278,12 +278,23 @@ class BasicForcingMapper:
             target_variable_name: Name of the target variable to regrid
             regridder: A :code:`Transformer` that will be used to regrid the input.
         """
-        source_variable_metadata = self.component_state_variable_registries[
-            source_component_name
-        ][source_variable_name]
-        target_variable_metadata = self.component_forcing_variable_registries[
-            target_component_name
-        ][target_variable_name]
+
+        try:
+            source_variable_metadata = self.component_state_variable_registries[
+                source_component_name
+            ][source_variable_name]
+        except KeyError as e:
+            print(f"Error: Cannot find specified source component ({str(source_component_name)}) or its variable ({str(source_variable_name)})")
+            raise e
+
+        try:
+            target_variable_metadata = self.component_forcing_variable_registries[
+                target_component_name
+            ][target_variable_name]
+        except KeyError as e:
+            print(f"Error: Cannot find specified target component ({str(target_component_name)}) or its variable ({str(target_variable_name)})")
+            raise e
+
         regridder.validate_metadata(
             self.component_state_variable_registries[source_component_name][source_variable_name],
             self.component_forcing_variable_registries[target_component_name][target_variable_name],
