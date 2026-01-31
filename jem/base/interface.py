@@ -51,7 +51,7 @@ def _resolve_function(
     verbose: bool = True,
 ) -> str:
 
-    if not isinstance(function_signature, Callable):
+    if get_origin(function_signature) is not get_origin(Callable):
         raise ValueError(f"The function signature of `{function_name:s}` should be a Callable. ")
     
     if (function_name not in customized_mapping) and (not hasattr(target, function_name)):
