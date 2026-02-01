@@ -125,8 +125,6 @@ class Coupler:
         if verbose:
             print("Flattened workflow: ", ", ".join(flattened_workflow))
         
-        scan_func = generate_scan_function(jitted=jitted)
-
         # Get step functions of each component
         component_step_functions = {
             component_name: component.generate_step_function(jitted=jitted)  # type: ignore
@@ -306,7 +304,6 @@ class Coupler:
             },
             "forcing_mappers" : "None" if self.forcing_mappers is None else { name: forcing_mapper.get_info() for name, forcing_mapper in self.forcing_mappers.items() } ,
         }
-        return info
 
     def _validate_components(self):
         pass
