@@ -37,7 +37,10 @@ def adhoc_scan(f, init, xs):
         _end_time = time.time()
         _elapsed_time = _end_time - _start_time
 
-    return carry, stack_objects(ys)
+    if len(ys) > 0:
+        ys = stack_objects(ys)
+
+    return carry, ys
 
 
 def generate_scan_function(jitted: bool):
