@@ -4,7 +4,6 @@ from typing import Optional, Dict, List
 
 import jem
 from jem.mapping.grid import Grid, GridSpecification
-from jem.utils.domain_grid_tools import generate_coordinate_from_latitude_longitude
 
 import coordax as cx
 import dinosaur
@@ -191,7 +190,7 @@ def get_veros_grids(
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
 
         grids = dict(
-            T=Grid.from_latitude_longitude(
+            T=generate_coordinate_from_latitude_longitude(
                 latitude=latitude,
                 longitude=longitude,
                 order="latitude_longitude",
@@ -205,8 +204,8 @@ def get_veros_grids(
         raise e
 
     coordinate_T = generate_coordinate_from_latitude_longitude(
-        latitude=hgrid.latitudes,
-        longitude=hgrid.longitudes,
+        latitude=grids["T"].latitudes,
+        longitude=grids["T"].longitudes,
         order="longitude_latitude",
     )
 
@@ -215,13 +214,6 @@ def get_veros_grids(
         bmask = jnp.zeros(coordinate_T.shape)
     else:
         fmask, bmask = load_veros_mask(mask_file)
-
-    if topography_file is None:
-        topography = jnp.zeros(coordinate_T.shape)
-    else:
-        # When veros provide its own topography file, it will be
-        # topography = load_veros_topography_file(topography_file)
-        pass
 
     return dict(
         T=Grid(
