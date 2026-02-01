@@ -40,7 +40,7 @@ jobs:
     - name: Run tests with pytest
       run: |
         export PYTHONPATH=./jax-gcm:$PYTHONPATH
-        pytest tests/ -v --tb=short --cov=jax_esm --cov-report=xml --cov-report=term --ignore=tests/ignore
+        pytest tests/ -v --tb=short --cov=jem --cov-report=xml --cov-report=term --ignore=tests/ignore
 
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
@@ -69,8 +69,8 @@ jobs:
 
     - name: Check import sorting with ruff
       run: |
-        ruff check --output-format=github jax_esm/
+        ruff check --output-format=github jem/
 
     - name: Type check with mypy
       run: |
-        mypy jax_esm/ --ignore-missing-imports
+        mypy jem/ --ignore-missing-imports
