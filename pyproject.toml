@@ -65,7 +65,7 @@ docs = [
 "Source" = "https://github.com/climate-analytics-lab/jax-esm"
 
 [tool.setuptools]
-packages = ["jem", "jem.components", "jem.coupling", "jem.utils"]
+packages = ["jem", "jem.base", "jem.components", "jem", "jem.utils"]
 
 [tool.black]
 line-length = 88
