@@ -59,7 +59,7 @@ def generate_jcm_forcing_and_topography_files(
         interpolation_code = (raw_data_directory / "interpolate.py").resolve()
 
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [sys.executable, str(interpolation_code), f"{resolution:d}"],
                 check=True,
                 capture_output=True,
