@@ -310,9 +310,8 @@ class SlabLandModel(SlabModelBase):
         """
         
         # Compute reference for climatology indexing
-        ref_year = self.start_datetime.to_pydatetime().year
-        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
         start_day_offset = self._compute_start_day_offset()
+        length_of_a_cycle = self.stl_clim.shape[2]
         
         def step_function(state, forcing, t):
             """Land model time step.
@@ -336,21 +335,23 @@ class SlabLandModel(SlabModelBase):
             # Time and climatology management
             # =====================================================================
             
-            # Days since start
-            days_after_start = jnp.floor((start_day_offset + t) / 86400.0).astype(jnp.int32)
-            
             # Get current climatology index (wraps around for perpetual year)
-            current_clim_idx = jnp.mod(days_after_start, self.n_clim_steps).astype(jnp.int32)
-            next_clim_idx = jnp.mod(current_clim_idx + 1, self.n_clim_steps).astype(jnp.int32)
-            
+            clim_beg_idx, clim_end_idx = self._get_climatology_indices(
+                state.sim_time, start_day_offset, length_of_a_cycle
+            )
+
             # For daily data, use linear interpolation; for monthly, could use more sophisticated
             # Here we just use simple linear interpolation for all cases
-            time_weight = 0.0  # Use current snapshot only for simplicity
+            # Commented the following out because it is not used.
+            # time_weight = 0.0  # Use current snapshot only for simplicity
             
             # Get climatology at current time (data format is lat, lon, time)
-            stl_clim_current = self.stl_clim[:, :, current_clim_idx].astype(jnp.float32)
-            snowd_clim_current = self.snowd_clim[:, :, current_clim_idx].astype(jnp.float32)
-            soilw_clim_current = self.soilw_clim[:, :, current_clim_idx].astype(jnp.float32)
+
+            stl_clim_beg = self.stl_clim[:, :, clim_beg_idx].astype(jnp.float32)
+            stl_clim_end = self.stl_clim[:, :, clim_end_idx].astype(jnp.float32)
+            
+            snowd_clim_beg = self.snowd_clim[:, :, clim_beg_idx].astype(jnp.float32)
+            soilw_clim_beg = self.soilw_clim[:, :, clim_beg_idx].astype(jnp.float32)
             
             # =====================================================================
             # Land surface temperature evolution (Fortran: run_land_model)
@@ -361,7 +362,7 @@ class SlabLandModel(SlabModelBase):
             heatflx = -forcing.total_heat_flux
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
-            T_anom = (state.land_surface_temperature - stl_clim_current).astype(jnp.float32)
+            T_anom = (state.land_surface_temperature - stl_clim_beg).astype(jnp.float32)
             
             # Time evolution of temperature anomaly (Fortran: line 207)
             # tanom = cdland * (tanom + rhcapl * hfluxn)
@@ -369,7 +370,7 @@ class SlabLandModel(SlabModelBase):
             new_T_anom = (self.cdland * (T_anom + self.rhcapl * heatflx)).astype(jnp.float32)
             
             # Full surface temperature (Fortran: line 210)
-            new_T = (new_T_anom + stl_clim_current).astype(jnp.float32)
+            new_T = (new_T_anom + stl_clim_end).astype(jnp.float32)
             
             # Apply land mask
             new_T = jnp.where(self.bmask_l > 0, new_T, jnp.float32(273.15 + 15.0))
@@ -384,8 +385,8 @@ class SlabLandModel(SlabModelBase):
             new_state = state.copy({
                 "sim_time" : new_sim_time,
                 "land_surface_temperature" : new_T.astype(jnp.float32),
-                "snowd" : snowd_clim_current.astype(jnp.float32),
-                "soilw" : soilw_clim_current.astype(jnp.float32),
+                "snowd" : snowd_clim_beg.astype(jnp.float32),
+                "soilw" : soilw_clim_beg.astype(jnp.float32),
             })
             
             # Return new state and predictions for output
