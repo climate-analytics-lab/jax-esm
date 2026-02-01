@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "JAX-ESM Developers", email = "dwatsonparris@ucsd.edu"},
 ]
