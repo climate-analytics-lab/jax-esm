@@ -67,7 +67,7 @@ def typed_and_dimensioned(cls):
 
 def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
     def decorator(cls):
-        if getattr(cls, "is_typed_and_dimensioned", None) != True:
+        if getattr(cls, "is_typed_and_dimensioned", None) is None:
             raise Exception("Cannot apply build_dataclass on a non-schemaed class.")
 
         cls.shape_dict = shape_dict or {}
