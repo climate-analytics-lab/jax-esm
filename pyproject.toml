@@ -64,8 +64,8 @@ docs = [
 "Bug Reports" = "https://github.com/climate-analytics-lab/jax-esm/issues"
 "Source" = "https://github.com/climate-analytics-lab/jax-esm"
 
-[tool.setuptools]
-packages = ["jem", "jem.base", "jem.components", "jem", "jem.utils"]
+[tool.setuptools.packages.find]
+include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.black]
 line-length = 88

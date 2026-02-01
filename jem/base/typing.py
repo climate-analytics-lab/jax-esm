@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typeguard import typechecked
 
 Array = jnp.ndarray
-ArrayOrArrayTuple = Array | tuple[Array, ...]
+ArrayOrArrayTuple = Array | tuple[Array, ...] # type: ignore
 Numeric = float | int | Array
 
 ComponentName = str
