@@ -7,6 +7,7 @@ code duplication.
 
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any
+from jem.base.typing import VariableRegistry
 
 import jax
 import jax.numpy as jnp
@@ -30,6 +31,10 @@ class SlabModelBase(ABC):
     - _create_step_function_body(): Implement the physics for each timestep
     - _create_xarray_data_vars(): Define xarray data variables for output
     """
+
+    state_variable_registry: VariableRegistry
+    forcing_variable_registry: VariableRegistry
+
 
     def __init__(
         self,
@@ -133,7 +138,7 @@ class SlabModelBase(ABC):
         """
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        return (self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second")
+        return float( (self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second") )
 
     def _get_climatology_indices(
         self,

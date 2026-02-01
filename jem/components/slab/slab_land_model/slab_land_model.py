@@ -134,17 +134,6 @@ class SlabLandModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
 
     def initialize(self):
         """Initialize land surface model state and climatology.
@@ -412,7 +401,7 @@ class SlabLandModel(SlabModelBase):
     def _create_xarray_data_vars(
         self,
         predictions: Dict[str, Any],
-    ) -> xr.Dataset:
+    ) -> Dict[str, Any]:
         """Convert predictions to xarray Dataset.
         
         Args:
