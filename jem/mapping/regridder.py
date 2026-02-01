@@ -48,22 +48,6 @@ class BasicRegridder(ABC):
         # Store validation results
         self.last_validation: Dict[str, Any] = {}
 
-    @abstractmethod
-    def regrid(self, data: Array) -> Array:
-        """
-        Transform data from source grid to target grid.
-
-        This method must be implemented by subclasses to define the
-        specific interpolation/mapping method.
-
-        Args:
-            data: Data on source grid
-
-        Returns:
-            Array: Data that is interpolated to target grid.
-        """
-        pass
-
     def __call__(self, data: Array) -> Array:
         """Apply regridation with validation.
 
@@ -84,7 +68,7 @@ class BasicRegridder(ABC):
             )
 
         # Apply regridation
-        result = self.regrid(data)
+        result = self(data)
 
         # Validate output
         self._validate(data, result)
@@ -147,7 +131,7 @@ class BasicRegridder(ABC):
 class IdentityRegridder(BasicRegridder):
     """Identity mapping (no interpolation)."""
 
-    def regrid(self, data: Array) -> Array:
+    def __call__(self, data: Array) -> Array:
         return data
 
     def validate_metadata(
@@ -160,7 +144,7 @@ class IdentityRegridder(BasicRegridder):
 class BilinearRegridder(BasicRegridder):
     """Simple bilinear interpolation (for demonstration)."""
 
-    def regrid(self, data: Array) -> Array:
+    def __call__(self, data: Array) -> Array:
         """Apply bilinear interpolation."""
         from scipy.interpolate import RegularRegridder
 

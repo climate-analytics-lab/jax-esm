@@ -30,9 +30,8 @@ HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
-
 ForcingMapperFunction = Callable[ [ Dict[str, Forcing], Dict[str, State] ], Dict[str, Forcing] ]
-RegridderFunction = Callable[[Array], Array]
+
 
 VariableName = str
 VariableShape = tuple[int, ...]

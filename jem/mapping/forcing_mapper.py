@@ -1,14 +1,17 @@
 """Flux exchange and boundary condition translation utilities."""
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from jem.base.typing import (
+    Array,
     JEMComponentType,
     JEMForcingMapperType,
-    RegridderFunction,
     State,
     Forcing,
     VariableRegistry,
 )
+
 from typeguard import typechecked, check_type
+
+RegridderFunction = Callable[[Array], Array]
 
 class BasicForcingMapper:
     """Manages flux exchange and boundary condition translation between components.
@@ -175,7 +178,7 @@ class BasicForcingMapper:
                         target_variable_name,
                     )
                     if regrid_key in self.regridders:
-                        source_variable = self.regridders[regrid_key].regrid(
+                        source_variable = self.regridders[regrid_key](
                             source_variable
                         )
                     print(
@@ -244,6 +247,9 @@ class BasicForcingMapper:
         self.connections = self._build_connections()
 
         if regridder is not None:
+            
+            # Check if regridder is valid
+            
             self.add_regridder(
                 source_component_name,
                 target_component_name,
@@ -295,10 +301,11 @@ class BasicForcingMapper:
             print(f"Error: Cannot find specified target component ({str(target_component_name)}) or its variable ({str(target_variable_name)})")
             raise e
 
-        regridder.validate_metadata(
-            self.component_state_variable_registries[source_component_name][source_variable_name],
-            self.component_forcing_variable_registries[target_component_name][target_variable_name],
-        )
+        #regridder.validate_metadata(
+        #    self.component_state_variable_registries[source_component_name][source_variable_name],
+        #    self.component_forcing_variable_registries[target_component_name][target_variable_name],
+        #)
+        
         self.regridders[
             (
                 source_component_name,
