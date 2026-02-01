@@ -16,15 +16,13 @@ from jem import constants as constants
 from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.physics_interface import PhysicsState
 
-from dinosaur import primitive_equations, primitive_equations_states
+from dinosaur import primitive_equations_states
 
 from jem.utils.bulk_op import mean_leaf
-from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 import tree_math
 from typing import Any, Dict
 
-import jax_datetime as jdt
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):

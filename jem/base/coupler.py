@@ -1,6 +1,5 @@
 """Main coupler class for Earth system model coupling."""
 
-from functools import partial
 import time
 from typing import Any, Dict, Optional, Callable
 
@@ -11,13 +10,11 @@ from jem.base.typing import (
     Workflow,
     Pytree,
     History,
-    StepFunction,
     TrajectoryFunction,
 )
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
 
 from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 

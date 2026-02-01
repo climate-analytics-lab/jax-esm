@@ -27,7 +27,7 @@ def generate_jcm_forcing_and_topography_files(
 
         print(f'Using input data directory: "{str(data_directory)}".')
 
-    raw_data_directory = Path(jcm.__file__).parent / f"data/bc"
+    raw_data_directory = Path(jcm.__file__).parent / "data/bc"
 
     # Prepare boundary file
     files_to_check = dict(

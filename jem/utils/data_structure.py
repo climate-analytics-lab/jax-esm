@@ -3,7 +3,6 @@ from typing import Any, List, Tuple
 import jax.numpy as jnp
 from copy import deepcopy
 from jax.tree_util import register_pytree_node_class
-import tree_math
 from dataclasses import dataclass
 
 def typed_and_dimensioned(cls):

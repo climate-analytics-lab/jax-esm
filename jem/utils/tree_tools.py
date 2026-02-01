@@ -1,8 +1,7 @@
 import jax
-from jax import tree_util
 import numpy as np
 from typing import Any
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import fields, is_dataclass
 
 def print_tree(tree, root=None):
     print_dict_tree(tree_to_dict(tree), root=root)

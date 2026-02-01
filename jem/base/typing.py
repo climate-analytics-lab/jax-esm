@@ -1,6 +1,5 @@
 from typing import TypeVar, Any, Callable, List, Dict, Optional
 import jax.numpy as jnp
-import jax_datetime as jdt
 import xarray as xr
 from dataclasses import dataclass
 from typeguard import typechecked

@@ -14,9 +14,7 @@ multi-decadal experiments. Climate Dynamics, 20(2-3), 175-191.
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
 from typing import Annotated, Any, Dict, Optional, Tuple
-from pathlib import Path
 
-import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 

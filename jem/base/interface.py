@@ -1,5 +1,5 @@
 from typing import get_args, get_type_hints, get_origin
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 import inspect
 
 
