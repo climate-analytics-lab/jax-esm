@@ -43,11 +43,7 @@ import jem.utils.tree_tools as tree_tools
 
 # %% [markdown]
 # ## Configurations
-
 # %%
-
-
-
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_interval = jdt.to_timedelta(60, "day")
@@ -57,11 +53,9 @@ output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
-
-
 # %% [markdown]
 # ## Create Veros
-
+# %%
 from acc import ACCSetup
 
 ocn_model = ACCSetup()
@@ -76,7 +70,7 @@ print("Veros setup done.")
 
 # %% [markdown]
 # ## Create JCM
-
+# %%
 atm_model = jcm.model.Model(
     start_date=start_datetime,
 )
@@ -90,9 +84,7 @@ JCM.make_jem_compatible(
 
 # %% [markdown]
 # ## Putting models together
-
 # %%
-
 components = dict(
     atm=atm_model,
     ocn=ocn_model,
@@ -100,7 +92,6 @@ components = dict(
 
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
-
 # %%
 # Creating regridders and mapping
 identity_regridder = IdentityRegridder()
@@ -129,7 +120,6 @@ forcing_mapper.add_forcing_mapping(
 
 # %% [markdown]
 # ## Create Coupled Model
-
 # %%
 model = Coupler(
     components=components,
