@@ -1,5 +1,4 @@
 """Veros adapter to JEM"""
-
 from typing import Annotated, Any, Dict, Optional, Tuple
 from dataclasses import dataclass
 
@@ -79,8 +78,16 @@ def make_jem_compatible(
 
         def step_function(state, forcing, step):
             
+            drag_coefficient = 1e-3 # dimensionless
+            air_density = 1.22 # kg / m^3
             gc = 2 # hard-coded ghost cell number
             vs = state.raw_state.variables
+            
+            wind_velocity = jnp.sqrt(forcing.wind_x**2 + forcing.wind_y**2)
+            
+            with vs.unlock():
+                vs.surface_taux = vs.surface_taux.at[gc:-gc, gc:-gc].set( drag_coefficient * air_density * wind_velocity * forcing.wind_x)
+                vs.surface_tauy = vs.surface_tauy.at[gc:-gc, gc:-gc].set( drag_coefficient * air_density * wind_velocity * forcing.wind_y)
             for _ in range(steps_per_coupling_timestep):
                 model.step(state.raw_state)
             
