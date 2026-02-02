@@ -127,15 +127,6 @@ forcing_mapper.add_forcing_mapping(
     regridder = identity_regridder,
 )
 
-
-
-"""
-forcing_mapper.add_forcing_mapping(
-    source = ("ocn", "sea_surface_temperature"),
-    target = ("atm", "sea_surface_temperature"),
-    regridder = identity_regridder,
-)
-"""
 # %% [markdown]
 # ## Create Coupled Model
 
