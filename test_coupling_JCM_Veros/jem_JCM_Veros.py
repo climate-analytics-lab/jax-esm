@@ -153,7 +153,7 @@ print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
     workflow=["fm", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
-    jitted=True,
+    jitted=False,
 )
 
 # Run coupled model
