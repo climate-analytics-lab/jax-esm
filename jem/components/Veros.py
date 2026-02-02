@@ -1,19 +1,17 @@
-"""JCM adapter to JEM"""
+"""Veros adapter to JEM"""
 
+from typing import Annotated, Any, Dict, Optional, Tuple
 from dataclasses import dataclass
-import numpy as np
 
-import jax_datetime as jdt
 import jax
 import jax.numpy as jnp
 from jax import Array
-
-from jem.utils.bulk_op import mean_leaf
-
+import jax_datetime as jdt
+import xarray as xr
 import tree_math
-from typing import Any, Dict
 
-
+from jem.utils.bulk_op import mean_leaf, stack_objects
+import jem.utils.data_structure as data_structure
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
@@ -25,86 +23,94 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
     
     setattr(target, attribute_name, value)
 
+@data_structure.typed_and_dimensioned
+class AbstractVerosForcing:
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    wind_x: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    wind_y: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    t2m: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+
+@tree_math.struct
+@dataclass
+class VerosState:
+    raw_state: Any
+    sea_surface_temperature: Any
+
 def make_jem_compatible(
     model: Any,
     coupling_timestep: jdt.Timedelta,
-    save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
-    land_model_active: bool = True,
 ) -> Any:
-    
-    timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
-    if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
+
+    timestep = jdt.to_timedelta(int(model.state.settings.dt_tracer), "second")
+    if timestep * jnp.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
     
-    check_before_setattr(model, "component_state_class", JCMState)
-    check_before_setattr(model, "component_forcing_class", ForcingData)
-
-    D3_nodal_shape = model.coords.nodal_shape
-    D2_nodal_shape = D3_nodal_shape[1:]
-    D2_information = (D2_nodal_shape, ("longitude", "latitude"))
-
+    steps_per_coupling_timestep = int(coupling_timestep / timestep)
+    
+    nxt = model.state.dimensions["xt"]
+    nyt = model.state.dimensions["yt"]
+    
+    decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": (nxt, nyt)})
+    VerosForcing = decorator(AbstractVerosForcing)
+    D2_shape = (nxt, nyt)
+    D2_information = (D2_shape, ("longitude", "latitude"))
     check_before_setattr(model, "state_variable_registry", {
-        "extra.total_heat_flux" : D2_information,
+        varname : D2_information for varname in [
+            "sea_surface_temperature",
+        ]
     })
 
     check_before_setattr(model, "forcing_variable_registry", {
         varname : D2_information for varname in [
-            "sea_surface_temperature",
-            "sice_am",
-            "snowc_am",
-            "soilw_am",
-            "stl_am",
+            "wind_x",
+            "wind_y",
+            "t2m",
+            "total_heat_flux",
         ]
     })
 
-    #check_before_setattr(model, "grids", Grids.generate_grids_from_grid_specification(
-    #    f"JCM::T{model.coords.horizontal.total_wavenumbers - 2}"
-    #))
-
     def initialize():
-        _modal_state = asfloat64(model._prepare_initial_modal_state())
-        model._final_modal_state = _modal_state
-        return JCMState(
-            metadata=_modal_state,
-            phydata=asfloat64(
-                PhysicsData.zeros(
-                    model.coords.horizontal.nodal_shape,
-                    model.coords.vertical.layers,
-                )
-            ),
-            prog=dynamics_state_to_physics_state(_modal_state, model.primitive),
-            extra={
-                "total_heat_flux" : jnp.zeros(model.coords.horizontal.nodal_shape),
-            },
-        ), ForcingData.zeros(nodal_shape=model.coords.horizontal.nodal_shape).copy(
-            lfluxland = jnp.bool_(land_model_active),
-        )
-
+        initial_state = VerosState(raw_state = model.state, sea_surface_temperature = jnp.zeros(D2_shape) + 288.15)
+        initial_forcing = VerosForcing.zeros()
+        return initial_state, initial_forcing
 
     def generate_step_function(jitted: bool = True):
-        # Notice: since save_interval and total_time are claimed
-        #         static parameters, we cannot pass in traceable
-        #         object. So use item() to convert from scalar
-        #         jax.Array to float.
 
 
-        def step_function(state, forcing, step): 
-            n_state = state.copy()
-            acc.step(n_state)
+        def step_function(state, forcing, step):
             
-            return n_state, stack_objects(dict(
-                
-            )) 
+            gc = 2 # hard-coded ghost cell number
+            vs = state.raw_state.variables
+            for _ in range(steps_per_coupling_timestep):
+                model.step(state.raw_state)
+            
+            state.sea_surface_temperature = vs.temp[gc:-gc, gc:-gc, -1, vs.tau] + 273.15
+            state.sea_surface_temperature = jnp.where( state.sea_surface_temperature < 100, 288.15, state.sea_surface_temperature )
+            return state, stack_objects([dict(
+                sea_surface_temperature = state.sea_surface_temperature,
+                t2m = forcing.t2m,
+                wind_x = forcing.wind_x,
+                wind_y = forcing.wind_y,
+                total_heat_flux = forcing.total_heat_flux,
+            )])
 
 
         return jax.jit(step_function) if jitted else step_function
 
     def predictions_to_xarray(predictions):
-        return predictions.to_xarray()
+        return xr.Dataset(
+            data_vars=dict(
+                sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
+                t2m = (["time", "longitude", "latitude"], predictions["t2m"]),
+                wind_x = (["time", "longitude", "latitude"], predictions["wind_x"]),
+                wind_y = (["time", "longitude", "latitude"], predictions["wind_y"]),
+                total_heat_flux = (["time", "longitude", "latitude"], predictions["total_heat_flux"]),
+            ),
+        )
 
     def get_info():
         return {
-            "diffusion" : str(model.diffusion),
+            key: str(value) for key, value in model.state.settings.items()
         }
 
     check_before_setattr(model, "initialize", initialize)

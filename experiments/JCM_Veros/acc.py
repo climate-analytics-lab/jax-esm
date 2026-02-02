@@ -27,12 +27,19 @@ from veros.variables import allocate, Variable
 from veros.distributed import global_min, global_max
 from veros.core.operators import numpy as npx, update, at
 
+import jax.numpy as npx
 
 dxt = 3.75
 dyt = 3.125
 nx = 96
 ny = 48
 x_origin = 0.0
+
+# For some reason if I set y_origin to -90 and dyt = 3.75,
+# the initialization will throw exception. I guess it is 
+# related to singularity at poles. So the current ad-hoc
+# crappy workaround is to map ocean latitude [-75, 75] to
+# atmosphere [-90, 90], just to match the grid shape.
 y_origin = -75.0
 
 class ACCSetup(VerosSetup):
@@ -147,7 +154,14 @@ class ACCSetup(VerosSetup):
         settings = state.settings
 
         # initial conditions
-        vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * 15 * vs.maskT)[..., None])
+
+        y_center = 10.0
+        sigma = 15.0
+        amplitude = 5.0
+        distace_square = ((vs.yt[None, :, None] - y_center) ** 2) / (2 * sigma ** 2)
+        temp_anomaly = 5.0 * npx.exp(-distace_square) * vs.maskT
+        
+        vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * 15 * vs.maskT + temp_anomaly)[..., None] )
         vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
 
         # wind stress forcing
@@ -184,8 +198,9 @@ class ACCSetup(VerosSetup):
 
     @veros_routine
     def set_forcing(self, state):
-        vs = state.variables
-        vs.forc_temp_surface = vs.t_rest * (vs.t_star - vs.temp[:, :, -1, vs.tau])
+        pass
+        #vs = state.variables
+        #vs.forc_temp_surface = vs.t_rest * (vs.t_star - vs.temp[:, :, -1, vs.tau])
 
     @veros_routine
     def set_diagnostics(self, state):
