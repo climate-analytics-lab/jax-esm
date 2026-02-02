@@ -13,10 +13,9 @@
 # ---
 
 # %% [markdown]
-# # JEM - Coupling Quick Start
-#
+# # JEM - Coupling between jcm and veros
 # This notebook demonstrates a JAX-ESM (JEM) example using JAX-GCM (JCM), Slab Ocean Model, and Slab Land Model.
-
+# Please also see the adapter functions in `jem/components/Veros.py` and `jem/components/JCM.py`.
 # %% [markdown]
 # ## Import Packages
 
@@ -29,7 +28,6 @@ sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
 
 # %%
 import jcm
-from jcm.geometry import Geometry
 import jax_datetime as jdt
 
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
@@ -54,22 +52,18 @@ one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
 # %% [markdown]
-# ## Create Veros
+# ### Create Veros
 # %%
 from acc import ACCSetup
 
 ocn_model = ACCSetup()
 ocn_model.setup()
-
 Veros.make_jem_compatible(
     ocn_model,
     coupling_timestep=coupling_timestep,
 )
-
-print("Veros setup done.")
-
 # %% [markdown]
-# ## Create JCM
+# ### Create JCM
 # %%
 atm_model = jcm.model.Model(
     start_date=start_datetime,
