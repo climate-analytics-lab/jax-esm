@@ -15,6 +15,7 @@ from jem import constants as constants
 
 from jcm.physics_interface import dynamics_state_to_physics_state
 from jcm.physics_interface import PhysicsState
+from jcm.forcing import default_forcing
 
 from dinosaur import primitive_equations_states
 
@@ -74,6 +75,8 @@ def make_jem_compatible(
 
     check_before_setattr(model, "state_variable_registry", {
         "extra.total_heat_flux" : D2_information,
+        "phydata.surface_flux.u0" : D2_information,
+        "phydata.surface_flux.v0" : D2_information,
     })
 
     check_before_setattr(model, "forcing_variable_registry", {
@@ -105,10 +108,9 @@ def make_jem_compatible(
             extra={
                 "total_heat_flux" : jnp.zeros(model.coords.horizontal.nodal_shape),
             },
-        ), ForcingData.zeros(nodal_shape=model.coords.horizontal.nodal_shape).copy(
+        ), default_forcing(model.coords.horizontal).copy(
             lfluxland = jnp.bool_(land_model_active),
         )
-
 
     def generate_step_function(jitted: bool = True):
         # Notice: since save_interval and total_time are claimed
