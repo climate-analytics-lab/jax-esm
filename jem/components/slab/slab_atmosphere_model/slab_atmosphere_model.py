@@ -15,18 +15,18 @@ import jem.utils.data_structure as data_structure
 class AtmosphereState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     mean_air_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
     mean_zonal_wind_velocity: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
     mean_meridional_wind_velocity: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
 
 @data_structure.typed_and_dimensioned
 class AtmosphereForcing:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     bulk_drag_coefficient: Annotated[float, (), "zero_dimensional"]
 
 class SlabAtmosphereModel(SlabModelBase):

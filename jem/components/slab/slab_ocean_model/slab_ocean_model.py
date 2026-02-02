@@ -18,13 +18,13 @@ default_land_surface_temperature = 288.15
 class OceanState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     sea_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
-    mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    mixed_layer_depth: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 @data_structure.typed_and_dimensioned
 class OceanForcing:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.

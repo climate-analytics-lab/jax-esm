@@ -29,15 +29,15 @@ import xarray as xr
 class LandState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     land_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
-    snowd: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    soilw: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    snowd: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    soilw: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 
 @data_structure.typed_and_dimensioned
 class LandForcing:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 class SlabLandModel(SlabModelBase):
     """
