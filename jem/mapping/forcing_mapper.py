@@ -67,9 +67,8 @@ class BasicForcingMapper:
 
     """
     components: Dict[str, JEMComponentType]
-    forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
+    forcing_mappings: Dict[Tuple[str, str], List[tuple[str, str]]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, JEMForcingMapperType]
     component_state_variable_registries: Dict[str, VariableRegistry]
     component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
@@ -78,7 +77,7 @@ class BasicForcingMapper:
     def __init__(
         self,
         components: Dict[str, JEMComponentType],
-        forcing_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
+        forcing_mappings: Optional[Dict[Tuple[str, str], List[tuple[str, str]]]] = None,
         regridders: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
         """Initialize flux exchanger."""
@@ -86,11 +85,6 @@ class BasicForcingMapper:
         self.component_names = list(self.components.keys())
         self.forcing_mappings = forcing_mappings or {}
         self.regridders = regridders or {}
-
-        self.component_forcing_classes = {
-            component_name: component.component_forcing_class
-            for component_name, component in components.items()
-        }
 
         self.component_state_variable_registries = {
             component_name: component.state_variable_registry
@@ -108,6 +102,8 @@ class BasicForcingMapper:
  
         # Build connectivity graph
         self.connections = self._build_connections()
+
+        self.update_involved_component_names()
 
     def _build_connections(self) -> Dict[str, List[str]]:
         """Build connectivity graph between components."""
@@ -137,11 +133,9 @@ class BasicForcingMapper:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
-        for (
-            target_component_name,
-            target_component_forcing_class,
-        ) in self.component_forcing_classes.items():
-            forcing = component_forcings[target_component_name]
+        for target_component_name, target_component_forcing in component_forcings.items():
+            if target_component_name not in self.involved_component_names:
+                raise Exception(f"Error: target_component_name `{target_component_name}` is not in the involved_component_names {str(self.involved_component_names)}")
             for (
                 source_component_name,
                 source_component_state,
@@ -151,18 +145,22 @@ class BasicForcingMapper:
 
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
-                    (source_component_name, target_component_name), {}
+                    (source_component_name, target_component_name), []
                 )
-                if not mapping:
+                if len(mapping) == 0:
                     print(
                         f"Notice: Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
                     )
 
                 # Apply mappings and regridders
-                for source_variable_name, target_variable_name in mapping.items():
+                for source_variable_name, target_variable_name in mapping:
                     source_variable = strget(
                         source_component_state, source_variable_name
                     )
+                    target_variable = strget(
+                        target_component_forcing, target_variable_name
+                    )
+
                     # Apply regridder if defined
                     regrid_key = (
                         source_component_name,
@@ -171,19 +169,25 @@ class BasicForcingMapper:
                         target_variable_name,
                     )
                     if regrid_key in self.regridders:
-                        source_variable = self.regridders[regrid_key](
-                            source_variable
-                        )
+                        regridder = self.regridders[regrid_key]
+                    else:
+                        raise Exception(f"Cannot find regirdder for `{regrid_key}`.")
+
                     print(
                         f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
                     )
+                    
+                    regridded_source_variable = self.regridders[regrid_key](source_variable)
+                    if regridded_source_variable.shape != target_variable.shape:
+                        raise Exception(f"Shape of regridded varible {str(regridded_source_variable.shape)} does not match target {str(target_variable.shape)}.")
+                    
                     strset(
-                        forcing,
+                        target_component_forcing,
                         target_variable_name,
                         source_variable,
                     )
 
-            component_forcings[target_component_name] = forcing
+            component_forcings[target_component_name] = target_component_forcing
 
         return component_forcings
 
@@ -234,9 +238,11 @@ class BasicForcingMapper:
         """
         source_component_name, source_variable_name = source
         target_component_name, target_variable_name = target
-        self.forcing_mappings[(source_component_name, target_component_name)] = {
-            source_variable_name: target_variable_name
-        }
+        key = (source_component_name, target_component_name)
+        if key not in self.forcing_mappings:
+            self.forcing_mappings[key] = []
+
+        self.forcing_mappings[key].append( (source_variable_name, target_variable_name) )
         self.connections = self._build_connections()
 
         if regridder is not None:
@@ -250,7 +256,10 @@ class BasicForcingMapper:
                 target_variable_name,
                 regridder,
             )
+        
+        self.update_involved_component_names()
 
+    def update_involved_component_names(self):
         involved_component_names = []
         for source_component_name, target_variable_name, _, _ in self.regridders.keys():
             involved_component_names.append(source_component_name)
@@ -318,7 +327,8 @@ class BasicForcingMapper:
 
 
         return {
-            "forcing_mappings": self.forcing_mappings, 
+            "involved_component_names": ",".join(self.involved_component_names),
+            "forcing_mappings": self.forcing_mappings,
             "regridders" : regridder_info,
         }
 
