@@ -27,7 +27,7 @@ class AbstractVerosForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     wind_x: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     wind_y: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    t2m: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    surface_air_temperature: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 @tree_math.struct
 @dataclass
@@ -63,7 +63,7 @@ def make_jem_compatible(
         varname : D2_information for varname in [
             "wind_x",
             "wind_y",
-            "t2m",
+            "surface_air_temperature",
             "total_heat_flux",
         ]
     })
@@ -95,7 +95,7 @@ def make_jem_compatible(
             state.sea_surface_temperature = jnp.where( state.sea_surface_temperature < 100, 288.15, state.sea_surface_temperature )
             return state, stack_objects([dict(
                 sea_surface_temperature = state.sea_surface_temperature,
-                t2m = forcing.t2m,
+                surface_air_temperature = forcing.surface_air_temperature,
                 wind_x = forcing.wind_x,
                 wind_y = forcing.wind_y,
                 total_heat_flux = forcing.total_heat_flux,
@@ -108,7 +108,7 @@ def make_jem_compatible(
         return xr.Dataset(
             data_vars=dict(
                 sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
-                t2m = (["time", "longitude", "latitude"], predictions["t2m"]),
+                surface_air_temperature = (["time", "longitude", "latitude"], predictions["surface_air_temperature"]),
                 wind_x = (["time", "longitude", "latitude"], predictions["wind_x"]),
                 wind_y = (["time", "longitude", "latitude"], predictions["wind_y"]),
                 total_heat_flux = (["time", "longitude", "latitude"], predictions["total_heat_flux"]),
