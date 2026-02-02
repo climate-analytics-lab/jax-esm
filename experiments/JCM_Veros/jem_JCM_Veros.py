@@ -35,7 +35,7 @@ import jax_datetime as jdt
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
-from jem.components import JCM, SlabLandModel, SlabOceanModel
+from jem.components import JCM, Veros, SlabLandModel
 from jem.mapping import IdentityRegridder
 from jem.mapping import BasicForcingMapper
 from jem.base.coupler import Coupler
@@ -57,6 +57,27 @@ one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Create Components
 
+
+# %% [markdown]
+# ## Create Veros
+
+from acc import ACCSetup
+
+ocn_model = ACCSetup()
+ocn_model.setup()
+
+print("Type of variables...")
+print(type(ocn_model.state.variables.salt))
+
+Veros.make_jem_compatible(
+    ocn_model,
+    coupling_timestep=coupling_timestep,
+    save_interval=jdt.to_timedelta(12, "hour"),
+)
+
+
+print("Veros setup done.")
+
 # %% [markdown]
 # ## Create JCM
 
@@ -70,17 +91,6 @@ JCM.make_jem_compatible(
     coupling_timestep=coupling_timestep,
     save_interval=jdt.to_timedelta(12, "hour"),
 )
-
-# %% [markdown]
-# ## Create Veros
-
-from .acc import ACCSetup
-
-acc = ACCSetup()
-acc.setup()
-
-
-step_jit = jax.jit(ps)
 
 # %% [markdown]
 # ## Putting models together

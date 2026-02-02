@@ -13,6 +13,8 @@ from jem.utils.bulk_op import mean_leaf
 import tree_math
 from typing import Any, Dict
 
+
+
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
@@ -23,20 +25,12 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
     
     setattr(target, attribute_name, value)
 
-@tree_math.struct
-@dataclass
-class JCMState:
-    prog: PhysicsState
-    phydata: Any
-    extra: Dict[str, Array]
-    metadata: primitive_equations_states
-
 def make_jem_compatible(
-    model: Model,
+    model: Any,
     coupling_timestep: jdt.Timedelta,
     save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
     land_model_active: bool = True,
-) -> Model:
+) -> Any:
     
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
