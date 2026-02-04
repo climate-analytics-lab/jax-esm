@@ -28,12 +28,18 @@ from veros.distributed import global_min, global_max
 from veros.core.operators import numpy as npx, update, at
 
 import jax.numpy as npx
+import xarray as xr
 
 dxt = 3.75
-dyt = 3.125
+dyt = 3.75
 nx = 96
-ny = 48
+ny = 40
 x_origin = 0.0
+
+lat_skip = 4
+# 1: land, 0: ocean
+land_sea_mask = 1 - xr.open_dataset("funky_earth_add_cap.nc")["lsm"].to_numpy()[:, lat_skip:-lat_skip]
+
 
 # For some reason if I set y_origin to -90 and dyt = 3.75,
 # the initialization will throw exception. I guess it is 
@@ -142,10 +148,13 @@ class ACCSetup(VerosSetup):
     def set_topography(self, state):
         vs = state.variables
         x, y = npx.meshgrid(vs.xt, vs.yt, indexing="ij")
-        
+       
+         
         vs.kbot = npx.ones_like(x)
-        vs.kbot *= npx.where(npx.abs(y) > 75.0, 0, 1)
-        vs.kbot *= npx.where(npx.logical_and(npx.abs(x) < 5.0, y > -20.0), 0, 1)
+        vs.kbot = vs.kbot.at[2:-2, 2:-2].set(land_sea_mask)
+        #vs.kbot = npx.ones_like(x)
+        #vs.kbot *= npx.where(npx.abs(y) > 75.0, 0, 1)
+        #vs.kbot *= npx.where(npx.logical_and(npx.abs(x) < 5.0, y > -20.0), 0, 1)
 
 
     @veros_routine
