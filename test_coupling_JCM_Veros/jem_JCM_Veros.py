@@ -27,7 +27,9 @@ from pathlib import Path
 sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
 
 # %%
+import jax.numpy as jnp
 import jcm
+from jcm.geometry import Geometry
 import jax_datetime as jdt
 
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
@@ -44,11 +46,13 @@ import jem.utils.tree_tools as tree_tools
 # %%
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_interval = jdt.to_timedelta(60, "day")
-output_dir = Path("output/JCM_VEROS").resolve()
+simulation_interval = jdt.to_timedelta(45, "day")
+output_dir = Path("output/JCM_VEROS_SLM").resolve()
 
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
+terrain_file = Path("funky_earth_add_cap.nc")
+
 # %% [markdown]
 # ## Create Components
 # %% [markdown]
@@ -65,53 +69,75 @@ Veros.make_jem_compatible(
 # %% [markdown]
 # ### Create JCM
 # %%
+
 atm_model = jcm.model.Model(
     start_date=start_datetime,
+    geometry=Geometry.from_file(terrain_file),
 )
 
 JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
     save_interval=jdt.to_timedelta(12, "hour"),
-    land_model_active=False,
+    land_model_active=True,
 )
-
+# %% [markdown]
+# ### Create Land model
+# %%
+lnd_model = SlabLandModel(
+    start_datetime=start_datetime,
+    topography_file=terrain_file,
+    mask_file=terrain_file,
+)
 # %% [markdown]
 # ## Putting models together
 # %%
 components = dict(
     atm=atm_model,
     ocn=ocn_model,
+    lnd=lnd_model,
 )
-
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 # %%
 # Creating regridders and mapping
 identity_regridder = IdentityRegridder()
+def veros_to_jcm_regridder(arr):
+    return jnp.pad(arr, ((0, 0), (4, 4)), constant_values=150)
+def jcm_to_veros_regridder(arr):
+    return arr[:, 4:-4]
+ 
 forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "extra.total_heat_flux"),
     target = ("ocn", "total_heat_flux"),
-    regridder = identity_regridder,
+    regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "phydata.surface_flux.u0"),
     target = ("ocn", "wind_x"),
-    regridder = identity_regridder,
+    regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "phydata.surface_flux.v0"),
     target = ("ocn", "wind_y"),
-    regridder = identity_regridder,
+    regridder = jcm_to_veros_regridder,
 )
-
 forcing_mapper.add_forcing_mapping(
     source = ("ocn", "sea_surface_temperature"),
     target = ("atm", "sea_surface_temperature"),
+    regridder = veros_to_jcm_regridder,
+)
+forcing_mapper.add_forcing_mapping(
+    source = ("atm", "extra.total_heat_flux"),
+    target = ("lnd", "total_heat_flux"),
     regridder = identity_regridder,
 )
-
+forcing_mapper.add_forcing_mapping(
+    source = ("lnd", "land_surface_temperature"),
+    target = ("atm", "stl_am"),
+    regridder = identity_regridder,
+)
 # %% [markdown]
 # ## Create Coupled Model
 # %%
@@ -122,7 +148,6 @@ model = Coupler(
 
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
-
 # %% [markdown]
 # ## Run Coupled Model
 
@@ -135,7 +160,7 @@ tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
-    workflow=["fm", "atm", "ocn"],
+    workflow=["fm", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
     jitted=False,
 )
