@@ -108,6 +108,9 @@ class SlabLandModel(SlabModelBase):
         
         # Snow depth to snow cover conversion parameter
         self.sd2sc = 60.0  # mm water equivalent
+            
+        # Climatology data (loaded during initialize)
+        self.has_climatology = False
 
         self.validate()
  
@@ -173,11 +176,11 @@ class SlabLandModel(SlabModelBase):
             print(f"Loading land climatology from: {self.land_clim_file}")
             # Load monthly climatology from NetCDF
             ds = xr.open_dataset(self.land_clim_file)
-            
+            self.has_climatology = True
             # Land surface temperature climatology
             # Note: Data format is (lat, lon, time) not (time, lat, lon)
             if "stl" in ds:
-                stl_data = jnp.array(ds["stl"].values, dtype=jnp.float32)
+                stl_data = jnp.array(ds["stl"].values, dtype=jnp.float64)
                 print(f"Loaded stl climatology with shape: {stl_data.shape}")
                 # Store as (lat, lon, time) to match input format
                 self.stl_clim = stl_data
@@ -191,28 +194,29 @@ class SlabLandModel(SlabModelBase):
             
             # Snow depth climatology (mm water equivalent)
             if "snowd" in ds:
-                self.snowd_clim = jnp.array(ds["snowd"].values, dtype=jnp.float32)
+                self.snowd_clim = jnp.array(ds["snowd"].values, dtype=jnp.float64)
             else:
                 print("Warning: 'snowd' not in boundary file, using zero snow")
-                self.snowd_clim = jnp.zeros(D2_nodal_shape + (self.n_clim_steps,), dtype=jnp.float32)
+                self.snowd_clim = jnp.zeros(D2_nodal_shape + (self.n_clim_steps,), dtype=jnp.float64)
             
             # Soil water availability climatology (0-1)
             if "soilw" in ds:
-                self.soilw_clim = jnp.array(ds["soilw"].values, dtype=jnp.float32)
+                self.soilw_clim = jnp.array(ds["soilw"].values, dtype=jnp.float64)
             else:
                 print("Warning: 'soilw' not in boundary file, using uniform soil moisture")
-                self.soilw_clim = jnp.ones(D2_nodal_shape + (self.n_clim_steps,), dtype=jnp.float32) * 0.5
+                self.soilw_clim = jnp.ones(D2_nodal_shape + (self.n_clim_steps,), dtype=jnp.float64) * 0.5
                 
         else:
             # Create idealized climatology
             print("No boundary file specified. Using idealized land climatology.")
+            self.has_climatology = True
             ideal_clim = self._idealized_land_temperature(D2_nodal_shape)
             # Transpose from (12, lat, lon) to (lat, lon, 12)
             self.stl_clim = jnp.transpose(ideal_clim, (1, 2, 0))
             self.n_clim_steps = 12
-            self.snowd_clim = jnp.zeros(D2_nodal_shape + (12,), dtype=jnp.float32)
-            self.soilw_clim = jnp.ones(D2_nodal_shape + (12,), dtype=jnp.float32) * 0.5
-        
+            self.snowd_clim = jnp.zeros(D2_nodal_shape + (12,), dtype=jnp.float64)
+            self.soilw_clim = jnp.ones(D2_nodal_shape + (12,), dtype=jnp.float64) * 0.5
+ 
         # =========================================================================
         # Compute heat capacity and dissipation time fields
         # =========================================================================
@@ -220,7 +224,7 @@ class SlabLandModel(SlabModelBase):
         # Get albedo to discriminate soil vs ice (Fortran: lines 157-163)
         # Default: assume all soil (low albedo) for now
         # TODO: Could load from topography file if available
-        alb0 = jnp.ones(D2_nodal_shape, dtype=jnp.float32) * 0.2
+        alb0 = jnp.ones(D2_nodal_shape, dtype=jnp.float64) * 0.2
         
         # rhcapl = timestep / heat_capacity (Fortran uses delt which is timestep in seconds)
         # Use ice heat capacity where albedo >= 0.4, else soil
@@ -228,13 +232,16 @@ class SlabLandModel(SlabModelBase):
             alb0 < 0.4,
             self.timestep / self.hcapl,   # Soil
             self.timestep / self.hcapli   # Ice
-        ).astype(jnp.float32)
+        ).astype(jnp.float64)
         
         # cdland = dissipation coefficient (Fortran: line 165)
         # cdland = dmask * tdland / (1 + dmask * tdland)
         # Convert tdland from days to timesteps
-        tdland_timesteps = self.tdland * 86400.0 / self.timestep
-        self.cdland = (self.dmask * tdland_timesteps / (1.0 + self.dmask * tdland_timesteps)).astype(jnp.float32)
+        tdland_timesteps = self.tdland / self.timestep
+        if self.has_climatology:
+            self.cdland = (self.dmask * tdland_timesteps / (1.0 + self.dmask * tdland_timesteps)).astype(jnp.float64)
+        else:
+            self.cdland = self.dmask.astype(jnp.float64)
         
         print(f"Heat capacity range: {self.rhcapl.min():.2e} - {self.rhcapl.max():.2e}")
         print(f"Dissipation coefficient range: {self.cdland.min():.3f} - {self.cdland.max():.3f}")
@@ -251,17 +258,17 @@ class SlabLandModel(SlabModelBase):
             init_time_idx = self.start_datetime.to_pydatetime().month - 1
         
         # Initial land surface temperature from climatology (lat, lon, time)
-        init_T = self.stl_clim[:, :, init_time_idx].astype(jnp.float32)
+        init_T = self.stl_clim[:, :, init_time_idx].astype(jnp.float64)
         
         # Apply land mask (set ocean points to reasonable value)
-        init_T = jnp.where(self.bmask_l > 0, init_T, jnp.float32(273.15 + 15.0))
+        init_T = jnp.where(self.bmask_l > 0, init_T, jnp.float64(273.15 + 15.0))
         
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
         return self.component_state_class.zeros().copy({
             "land_surface_temperature" : init_T,
             "sim_time" : 0,
-            "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
+            "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float64),
             "snowd" : self.snowd_clim[:, :, init_time_idx],
             "soilw" : self.soilw_clim[:, :, init_time_idx],
         }), self.component_forcing_class.zeros()
@@ -270,12 +277,12 @@ class SlabLandModel(SlabModelBase):
         """Create idealized land temperature climatology.
         
         Args:
-            shape: (nlat, nlon) shape for temperature field
+            shape: (nlon, nlat) shape for temperature field
             
         Returns:
-            Monthly land temperature climatology (12, nlat, nlon) in Kelvin
+            Monthly land temperature climatology (12, nlon, nlat) in Kelvin
         """
-        nlat, nlon = shape
+        nlon, nlat = shape
         
         # Create latitude array
         lat = jnp.linspace(-90, 90, nlat)
@@ -294,10 +301,10 @@ class SlabLandModel(SlabModelBase):
         # Combine: (12, nlat)
         T_lat = base_T[None, :] + seasonal_amp[None, :] * jnp.cos(seasonal_phase[:, None])
         
-        # Broadcast to (12, nlat, nlon)
-        T_clim = jnp.broadcast_to(T_lat[:, :, None], (12, nlat, nlon))
+        # Broadcast to (12, nlon, nlat)
+        T_clim = jnp.broadcast_to(T_lat[:, None, :], (12, nlon, nlat))
         
-        return T_clim.astype(jnp.float32)
+        return T_clim.astype(jnp.float64)
     
     def _create_step_function_body(self):
         """Generate step function for land model.
@@ -318,9 +325,9 @@ class SlabLandModel(SlabModelBase):
             
             Implements the slab land model from Fortran run_land_model subroutine:
             1. Interpolate climatology to current day
-            2. Compute temperature anomaly w.r.t. climatology
+            2. If climatology is used, compute temperature anomaly w.r.t. climatology
             3. Evolve anomaly with heat flux forcing and dissipation
-            4. Add climatology to get final temperature
+            4. If climatology is used, add climatology to get final temperature
             
             Args:
                 state: Land component state
@@ -330,28 +337,37 @@ class SlabLandModel(SlabModelBase):
             Returns:
                 Tuple of (new_state, predictions_dict)
             """
-            
+           
+
+ 
             # =====================================================================
             # Time and climatology management
             # =====================================================================
             
-            # Get current climatology index (wraps around for perpetual year)
-            clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                state.sim_time, start_day_offset, length_of_a_cycle
-            )
+            if self.has_climatology:
+                # Get current climatology index (wraps around for perpetual year)
+                clim_beg_idx, clim_end_idx = self._get_climatology_indices(
+                    state.sim_time, start_day_offset, length_of_a_cycle
+                )
 
-            # For daily data, use linear interpolation; for monthly, could use more sophisticated
-            # Here we just use simple linear interpolation for all cases
-            # Commented the following out because it is not used.
-            # time_weight = 0.0  # Use current snapshot only for simplicity
-            
-            # Get climatology at current time (data format is lat, lon, time)
+                # For daily data, use linear interpolation; for monthly, could use more sophisticated
+                # Here we just use simple linear interpolation for all cases
+                # Commented the following out because it is not used.
+                # time_weight = 0.0  # Use current snapshot only for simplicity
+                
+                # Get climatology at current time (data format is lat, lon, time)
 
-            stl_clim_beg = self.stl_clim[:, :, clim_beg_idx].astype(jnp.float32)
-            stl_clim_end = self.stl_clim[:, :, clim_end_idx].astype(jnp.float32)
-            
-            snowd_clim_beg = self.snowd_clim[:, :, clim_beg_idx].astype(jnp.float32)
-            soilw_clim_beg = self.soilw_clim[:, :, clim_beg_idx].astype(jnp.float32)
+                stl_clim_beg = self.stl_clim[:, :, clim_beg_idx].astype(jnp.float64)
+                stl_clim_end = self.stl_clim[:, :, clim_end_idx].astype(jnp.float64)
+                
+                snowd_clim_beg = self.snowd_clim[:, :, clim_beg_idx].astype(jnp.float64)
+                soilw_clim_beg = self.soilw_clim[:, :, clim_beg_idx].astype(jnp.float64)
+
+                # Temperature anomaly w.r.t. climatology (Fortran: line 204)
+                T_anom = (state.land_surface_temperature - stl_clim_beg).astype(jnp.float64)
+
+            else:
+                T_anom = state.land_surface_temperature.astype(jnp.float64)
             
             # =====================================================================
             # Land surface temperature evolution (Fortran: run_land_model)
@@ -361,22 +377,21 @@ class SlabLandModel(SlabModelBase):
             # Negate because atmosphere uses positive upward convention
             heatflx = -forcing.total_heat_flux
             
-            # Temperature anomaly w.r.t. climatology (Fortran: line 204)
-            T_anom = (state.land_surface_temperature - stl_clim_beg).astype(jnp.float32)
-            
             # Time evolution of temperature anomaly (Fortran: line 207)
             # tanom = cdland * (tanom + rhcapl * hfluxn)
             # This is an implicit scheme: (1 - cdland) * T_anom + cdland * rhcapl * hfluxn
-            new_T_anom = (self.cdland * (T_anom + self.rhcapl * heatflx)).astype(jnp.float32)
+            new_T_anom = (self.cdland * (T_anom + self.rhcapl * heatflx)).astype(jnp.float64)
             
             # Full surface temperature (Fortran: line 210)
-            new_T = (new_T_anom + stl_clim_end).astype(jnp.float32)
+            new_T = new_T_anom
+            if self.has_climatology:
+                new_T = (new_T + stl_clim_end).astype(jnp.float64)
             
             # Apply land mask
-            new_T = jnp.where(self.bmask_l > 0, new_T, jnp.float32(273.15 + 15.0))
+            new_T = jnp.where(self.bmask_l > 0, new_T, jnp.float64(273.15 + 15.0))
             
-            # Update simulation time - keep as float32
-            new_sim_time = jnp.float32(state.sim_time + self.timestep)
+            # Update simulation time - keep as float64
+            new_sim_time = jnp.float64(state.sim_time + self.timestep)
             
             # =====================================================================
             # Create new state
@@ -384,11 +399,15 @@ class SlabLandModel(SlabModelBase):
             
             new_state = state.copy({
                 "sim_time" : new_sim_time,
-                "land_surface_temperature" : new_T.astype(jnp.float32),
-                "snowd" : snowd_clim_beg.astype(jnp.float32),
-                "soilw" : soilw_clim_beg.astype(jnp.float32),
+                "land_surface_temperature" : new_T.astype(jnp.float64),
             })
-            
+
+            if self.has_climatology:
+                new_state = new_state.copy({
+                    "snowd" : snowd_clim_beg.astype(jnp.float64),
+                    "soilw" : soilw_clim_beg.astype(jnp.float64),
+                })
+                
             # Return new state and predictions for output
             return new_state, stack_objects([dict(
                 state=new_state,
