@@ -176,7 +176,7 @@ class BasicForcingMapper:
                     print(
                         f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
                     )
-                    
+                   
                     regridded_source_variable = self.regridders[regrid_key](source_variable)
                     if regridded_source_variable.shape != target_variable.shape:
                         raise Exception(f"Shape of regridded varible {str(regridded_source_variable.shape)} does not match target {str(target_variable.shape)}.")
@@ -184,7 +184,7 @@ class BasicForcingMapper:
                     strset(
                         target_component_forcing,
                         target_variable_name,
-                        source_variable,
+                        regridded_source_variable,
                     )
 
             component_forcings[target_component_name] = target_component_forcing
@@ -318,10 +318,12 @@ class BasicForcingMapper:
         regridder_info = dict()
         for i, key in enumerate(self.regridders.keys()):
             source_component_name, target_component_name, source_variable_name, target_variable_name = key
+                
+            regridder = self.regridders[key]
             regridder_info[f"regridder {i:d}"] = {
                 'source variable' : f"{source_component_name}[{source_variable_name}]",
                 'target variable' : f"{target_component_name}[{target_variable_name}]",
-                'regridder' : self.regridders[key].get_info(),
+                'regridder' : regridder.get_info() if hasattr(regridder, "get_info") else str(regridder)
             }
             
 
