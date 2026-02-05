@@ -13,13 +13,14 @@ ComponentName = str
 Pytree = Any
 Workflow = Pytree
 State = Pytree
+Derived = Pytree
 Forcing = Pytree
 SimulationTime = float
 
 History = TypeVar('History')
 JittableFlag = bool
 
-InitializeFunction = Callable[[], tuple[State, Forcing]]
+InitializeFunction = Callable[[], tuple[State, Derived, Forcing]]
 
 StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
 StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
@@ -29,7 +30,7 @@ HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
-ForcingMapperFunction = Callable[ [ Dict[str, Forcing], Dict[str, State] ], Dict[str, Forcing] ]
+ForcingMapperFunction = Callable[ [ Dict[str, State], Dict[str, Derived], Dict[str, Forcing] ], Dict[str, Forcing] ]
 
 
 VariableName = str

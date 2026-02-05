@@ -97,10 +97,13 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
-
-        return {
-            name: component.initialize() for name, component in self.components.items()
-        }
+        initial_value = {}
+        for component_name, component in self.components.items():
+            _state_derived_forcing = component.initialize()
+            if len(_state_derived_forcing) != 3:
+                raise ValueError(f"Component `{component_name:s}`'s initialize function needs 3 return values (state, derived and forcing).")
+            initial_value[component_name] = _state_derived_forcing
+        return initial_value
 
 
     def generate_step_function(
@@ -159,7 +162,7 @@ class Coupler:
                 for name in unstacked_predictions.keys()
             }
             
-            return dict(states=states, forcings=forcings), predictions
+            return dict(states=states, deriveds=deriveds, forcings=forcings), predictions
 
         if jitted:
             step_function = jax.jit(step_function)
@@ -195,26 +198,18 @@ class Coupler:
                 steps = tqdm(steps, **tqdm_kwargs)
 
         def trajectory_function(
-            initial_coupled_state_forcing: Dict[str, tuple[type, type]],
+            initial_coupled_state_derived_forcing: Dict[str, tuple[type, type, type]],
         ) -> tuple[Pytree, History]:
+
+            initial_carry_value = dict(states={}, deriveds={}, forcings={})
+            for component_name, (_state, _derived, _forcing) in initial_coupled_state_derived_forcing.items():
+                initial_carry_value["states"][component_name] = _state
+                initial_carry_value["deriveds"][component_name] = _derived
+                initial_carry_value["forcings"][component_name] = _forcing
+            
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
-                dict(
-                    states={
-                        component_name: _state
-                        for component_name, (
-                            _state,
-                            _,
-                        ) in initial_coupled_state_forcing.items()
-                    },
-                    forcings={
-                        component_name: _forcing
-                        for component_name, (
-                            _,
-                            _forcing,
-                        ) in initial_coupled_state_forcing.items()
-                    },
-                ),
+                initial_carry_value,
                 xs=steps,
             )
             predictions = unwrap_leading_dims(predictions, first_n_dim=2)
