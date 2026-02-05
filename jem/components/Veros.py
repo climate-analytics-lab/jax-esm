@@ -29,12 +29,6 @@ class AbstractVerosForcing:
     wind_y: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     surface_air_temperature: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
-@tree_math.struct
-@dataclass
-class VerosState:
-    raw_state: Any
-    sea_surface_temperature: Any
-
 def make_jem_compatible(
     model: Any,
     coupling_timestep: jdt.Timedelta,
@@ -69,20 +63,21 @@ def make_jem_compatible(
     })
 
     def initialize():
-        initial_state = VerosState(raw_state = model.state, sea_surface_temperature = jnp.zeros(D2_shape) + 288.15)
-        initial_derived = {}
+        initial_state = model.state
+        initial_derived = {
+            'sea_surface_temperature' : jnp.zeros(D2_shape) + 273.15,
+        }
         initial_forcing = VerosForcing.zeros()
         return initial_state, initial_derived, initial_forcing
 
     def generate_step_function(jitted: bool = True):
-
 
         def step_function(state, forcing, step):
             
             drag_coefficient = 1e-3 # dimensionless
             air_density = 1.22 # kg / m^3
             gc = 2 # hard-coded ghost cell number
-            vs = state.raw_state.variables
+            vs = state.variables
             
             wind_velocity = jnp.sqrt(forcing.wind_x**2 + forcing.wind_y**2)
             
@@ -90,17 +85,23 @@ def make_jem_compatible(
                 vs.surface_taux = vs.surface_taux.at[gc:-gc, gc:-gc].set( drag_coefficient * air_density * wind_velocity * forcing.wind_x)
                 vs.surface_tauy = vs.surface_tauy.at[gc:-gc, gc:-gc].set( drag_coefficient * air_density * wind_velocity * forcing.wind_y)
             for _ in range(steps_per_coupling_timestep):
-                model.step(state.raw_state)
+                model.step(state)
             
-            state.sea_surface_temperature = vs.temp[gc:-gc, gc:-gc, -1, vs.tau] + 273.15
-            state.sea_surface_temperature = jnp.where( state.sea_surface_temperature < 100, 288.15, state.sea_surface_temperature )
-            return state, {}, stack_objects([dict(
-                sea_surface_temperature = state.sea_surface_temperature,
-                surface_air_temperature = forcing.surface_air_temperature,
-                wind_x = forcing.wind_x,
-                wind_y = forcing.wind_y,
-                total_heat_flux = forcing.total_heat_flux,
-            )])
+            sea_surface_temperature = vs.temp[gc:-gc, gc:-gc, -1, vs.tau] + 273.15
+            sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
+            return (
+                state,
+                {
+                    "sea_surface_temperature" : sea_surface_temperature,
+                },
+                stack_objects([dict(
+                    sea_surface_temperature = sea_surface_temperature,
+                    surface_air_temperature = forcing.surface_air_temperature,
+                    wind_x = forcing.wind_x,
+                    wind_y = forcing.wind_y,
+                    total_heat_flux = forcing.total_heat_flux,
+                )])
+            )
 
 
         return jax.jit(step_function) if jitted else step_function

@@ -124,7 +124,7 @@ forcing_mapper.add_forcing_mapping(
     regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("ocn", "state.sea_surface_temperature"),
+    source = ("ocn", "derived.sea_surface_temperature"),
     target = ("atm", "sea_surface_temperature"),
     regridder = veros_to_jcm_regridder,
 )
