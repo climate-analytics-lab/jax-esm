@@ -131,7 +131,7 @@ class BasicForcingMapper:
             } for component_name in component_states.keys()
         }
         for target_component_name in self.involved_component_names:
-            forcing = component_forcings[target_component_name]
+            target_component_forcing = component_forcings[target_component_name]
             for (
                 source_component_name,
                 source_component_state_and_derived,

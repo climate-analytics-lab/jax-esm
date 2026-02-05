@@ -12,11 +12,8 @@ import jax.numpy as jnp
 from jem import constants as constants
 
 from jcm.physics_interface import dynamics_state_to_physics_state
-<<<<<<< HEAD
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import default_forcing
-=======
->>>>>>> improve-step-function-design
 
 
 from jem.utils.bulk_op import mean_leaf
@@ -51,7 +48,8 @@ def make_jem_compatible(
    
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
-    
+
+    D2_nodal_shape = model.coords.nodal_shape[1:] 
     def initialize():
         _modal_state = asfloat64(model._prepare_initial_modal_state())
         model._final_modal_state = _modal_state

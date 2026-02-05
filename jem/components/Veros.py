@@ -70,8 +70,9 @@ def make_jem_compatible(
 
     def initialize():
         initial_state = VerosState(raw_state = model.state, sea_surface_temperature = jnp.zeros(D2_shape) + 288.15)
+        initial_derived = {}
         initial_forcing = VerosForcing.zeros()
-        return initial_state, initial_forcing
+        return initial_state, initial_derived, initial_forcing
 
     def generate_step_function(jitted: bool = True):
 
@@ -93,7 +94,7 @@ def make_jem_compatible(
             
             state.sea_surface_temperature = vs.temp[gc:-gc, gc:-gc, -1, vs.tau] + 273.15
             state.sea_surface_temperature = jnp.where( state.sea_surface_temperature < 100, 288.15, state.sea_surface_temperature )
-            return state, stack_objects([dict(
+            return state, {}, stack_objects([dict(
                 sea_surface_temperature = state.sea_surface_temperature,
                 surface_air_temperature = forcing.surface_air_temperature,
                 wind_x = forcing.wind_x,

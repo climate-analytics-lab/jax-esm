@@ -5,4 +5,4 @@
 
 rm acc.*.nc
 python3 modify_jcm_terrain.py
-python3 jem_JCM_Veros.py
+python3 jem_JCM_Veros_SLM.py

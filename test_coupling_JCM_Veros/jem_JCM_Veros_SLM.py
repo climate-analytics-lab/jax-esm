@@ -109,32 +109,32 @@ def jcm_to_veros_regridder(arr):
  
 forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
-    source = ("atm", "extra.total_heat_flux"),
+    source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "total_heat_flux"),
     regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("atm", "phydata.surface_flux.u0"),
+    source = ("atm", "derived.phydata.surface_flux.u0"),
     target = ("ocn", "wind_x"),
     regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("atm", "phydata.surface_flux.v0"),
+    source = ("atm", "derived.phydata.surface_flux.v0"),
     target = ("ocn", "wind_y"),
     regridder = jcm_to_veros_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("ocn", "sea_surface_temperature"),
+    source = ("ocn", "state.sea_surface_temperature"),
     target = ("atm", "sea_surface_temperature"),
     regridder = veros_to_jcm_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("atm", "extra.total_heat_flux"),
+    source = ("atm", "derived.total_heat_flux"),
     target = ("lnd", "total_heat_flux"),
     regridder = identity_regridder,
 )
 forcing_mapper.add_forcing_mapping(
-    source = ("lnd", "land_surface_temperature"),
+    source = ("lnd", "state.land_surface_temperature"),
     target = ("atm", "stl_am"),
     regridder = identity_regridder,
 )
