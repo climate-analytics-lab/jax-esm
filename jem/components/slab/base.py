@@ -14,7 +14,7 @@ import jax_datetime as jdt
 import xarray as xr
 
 from jem.components.base import CoupledComponent, CoupledComponentConfig
-from jem.base.domain import Domain
+from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 
 class SlabModelBase(CoupledComponent):
@@ -60,14 +60,14 @@ class SlabModelBase(CoupledComponent):
         self.mask_file = mask_file
 
         # Initialize domain
-        self.domain = Domain.from_grid_specification(
+        self.horizontal_grids = generate_grids_from_grid_specification(
             grid_specification,
             topography_file=topography_file,
             mask_file=mask_file,
         )
 
         # Get grid shape for state/forcing class creation
-        self.grid_shape = self.domain.horizontal_grids["T"].shape
+        self.grid_shape = self.horizontal_grids["T"].shape
 
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()
@@ -98,7 +98,7 @@ class SlabModelBase(CoupledComponent):
         Creates self.llat_rad and self.llon_rad as 2D arrays matching
         the T-grid shape.
         """
-        T_grid = self.domain.horizontal_grids["T"]
+        T_grid = self.horizontal_grids["T"]
         D2_nodal_shape = T_grid.shape
 
         lat_dim_idx = next(
@@ -225,7 +225,7 @@ class SlabModelBase(CoupledComponent):
         Returns:
             xarray Dataset with model output
         """
-        T_grid_axis_names = self.domain.horizontal_grids["T"].coordinate.dims
+        T_grid_axis_names = self.horizontal_grids["T"].coordinate.dims
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -278,4 +278,4 @@ class SlabModelBase(CoupledComponent):
         Returns:
             Tuple of dimension names including time
         """
-        return ("time",) + self.domain.horizontal_grids["T"].coordinate.dims
+        return ("time",) + self.horizontal_grids["T"].coordinate.dims

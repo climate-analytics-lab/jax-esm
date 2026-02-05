@@ -9,10 +9,8 @@ import xarray as xr
 from jem import constants
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
+import jem.utils.data_structure as data_structure
 from jem.components.slab.base import SlabModelBase
-import jem.base.data_structure as data_structure
-
-from jem.base.variable import VariableRegistry, VariableMetadata
 
 default_land_surface_temperature = 288.15
 
@@ -117,21 +115,19 @@ class SlabOceanModel(SlabModelBase):
         self.component_forcing_class = decorator(OceanForcing)
 
     def _create_variable_registries(self) -> None:
-        self.state_variable_registry = VariableRegistry()
-        self.forcing_variable_registry = VariableRegistry()
+        self.state_variable_registry = {}
+        self.forcing_variable_registry = {}
 
         for target_registry, target_class in [
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry.register_variable(
-                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
-                )
+                target_registry[name] = (shape, dimensions)
 
     def _initialize_fields(self):
         """Initialize ocean model fields."""
-        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
+        nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
         # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
@@ -161,7 +157,7 @@ class SlabOceanModel(SlabModelBase):
 
         # Validate mask consistency
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
-            print("domain.bmask and SST_clim do share the same mask.")
+            print("grid.bmask and SST_clim do share the same mask.")
         else:
             raise Exception(
                 "Warning: fmask_ocn and sea_surface_temperature_init do not share the same mask."
@@ -184,7 +180,7 @@ class SlabOceanModel(SlabModelBase):
 
         return self.component_state_class.zeros().copy(
             {
-                "prog.mixed_layer_depth_max": init_mixed_layer_depth,
+                "prog.mixed_layer_depth": init_mixed_layer_depth,
                 "prog.sea_surface_temperature": init_sea_surface_temperature,
             }
         ), self.component_forcing_class.zeros()
@@ -192,19 +188,19 @@ class SlabOceanModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
-        nonocn_idx = self.domain.horizontal_grids["T"].bmask != 0
+        nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
-        def step_function(state, forcing, t):
+        def step_function(state, forcing, step):
             new_sea_surface_temperature_anom = state.prog.sea_surface_temperature
 
             if self.has_climatology:
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                    t, start_day_offset, length_of_a_cycle
+                    state.prog.sim_time, start_day_offset, length_of_a_cycle
                 )
 
-                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
+                ocn_idx = self.horizontal_grids["T"].bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
                     ocn_idx, snapshot_SST_clim_beg, default_land_surface_temperature
@@ -265,3 +261,8 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth=(T_grid_dims, prog.mixed_layer_depth),
             total_heat_flux=(T_grid_dims, forcing.flux.total_heat_flux),
         )
+
+    def get_info(self):
+        return {
+            'relaxation_time' : self.relaxation_time,
+        }

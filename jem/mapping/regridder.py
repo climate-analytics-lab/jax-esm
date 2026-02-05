@@ -1,17 +1,22 @@
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
-from typing import Dict, Any
-from jax import Array
+from typing import Dict, Any, Optional
+
 from jem.base.exceptions import ValidationError
-from jem.base.grid import Grid
-from jem.base.variable import VariableMetadata
+from jem.base.typing import (
+    VariableMetadata,
+)
+from jem.mapping.grid import Grid
+
+from jax import Array
+from typeguard import typechecked
 
 
-class Transformer(ABC):
+class BasicRegridder(ABC):
     """
     Abstract base class for interpolating between climate model grids.
 
-    This class provides a framework for transforming data between different
+    This class provides a framework for regriding data between different
     grid configurations (e.g., atmosphere to ocean) with built-in validation.
 
     Attributes:
@@ -19,27 +24,29 @@ class Transformer(ABC):
         target_grid: A Grid object holding the information of the target grid.
         conservation_tolerance: The precision of tolerance of the conservative mapping
         validate_shape: A flag indicating whether to check the compatibility of the input
-            and output array when performing transformation.
+            and output array when performing regridation.
         validate_conservation: A flag indicating whether to check the conservation using
             convervation_tolerance
          
     """
 
-    source_grid: Grid
-    target_grid: Grid
+    source_grid: Optional[Grid] = None
+    target_grid: Optional[Grid] = None
+
     conservation_tolerance: float
     validate_shape: bool
     validate_conservation: bool
 
+    @typechecked
     def __init__(
         self,
-        source_grid: Grid,
-        target_grid: Grid,
+        source_grid: Optional[Grid] = None,
+        target_grid: Optional[Grid] = None,
         conservation_tolerance: float = 1e-6,
         validate_shape: bool = True,
         validate_conservation: bool = True,
     ):
-        """Initialize the transformer."""
+        """Initialize the regridder."""
 
         self.source_grid = source_grid
         self.target_grid = target_grid
@@ -51,7 +58,7 @@ class Transformer(ABC):
         self.last_validation: Dict[str, Any] = {}
 
     @abstractmethod
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """
         Transform data from source grid to target grid.
 
@@ -67,26 +74,26 @@ class Transformer(ABC):
         pass
 
     def __call__(self, data: Array) -> Array:
-        """Apply transformation with validation.
+        """Apply regridation with validation.
 
         Args:
             data: Data on the source grid
 
         Returns:
-            Validated transformed data
+            Validated regrided data
 
         Raises:
             ValidationError: If validation checks fail
         """
         # Check input shape
-        if data.shape != self.source_grid.shape:
+        if (not self.source_grid) and (data.shape != self.source_grid.shape):
             raise ValueError(
                 f"Ijnput shape {data.shape} does not match source grid "
                 f"shape {self.source_grid.shape}"
             )
 
-        # Apply transformation
-        result = self.transform(data)
+        # Apply regridation
+        result = self.regrid(data)
 
         # Validate output
         self._validate(data, result)
@@ -95,7 +102,7 @@ class Transformer(ABC):
 
     def _validate(self, source_data: Array, target_data: Array):
         """
-        Perform validation checks on transformed data.
+        Perform validation checks on regrided data.
 
         Parameters
         ----------
@@ -121,7 +128,10 @@ class Transformer(ABC):
 
     def _validate_shape(self, target_data: Array):
         """Validate that output has correct shape."""
-        if target_data.shape != self.target_grid.shape:
+        if not self.target_grid:
+            raise Exception("target_grid was not provided. Cannot validate shape")
+
+        if (not self.target_grid) and (target_data.shape != self.target_grid.shape):
             raise ValidationError(
                 f"Output shape {target_data.shape} does not match "
                 f"target grid shape {self.target_grid.shape}"
@@ -130,7 +140,9 @@ class Transformer(ABC):
 
     @abstractmethod
     def validate_metadata(
-        self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
+        self,
+        source_metadata: VariableMetadata,
+        target_metadata: VariableMetadata,
     ):
         """Validate the metadata"""
         pass
@@ -191,45 +203,41 @@ class Transformer(ABC):
 
 
     def get_info(self):
-        
+       
         return {
-            'source_grid' : self.source_grid.get_info(), 
-            'target_grid' : self.target_grid.get_info(),
+            'type': str(self.__class__),
+            'source_grid' : self.source_grid.get_info() if self.source_grid is not None else None, 
+            'target_grid' : self.target_grid.get_info() if self.target_grid is not None else None, 
             'validate_conservation' : self.validate_conservation,
             'validate_shape' : self.validate_shape,
         }
        
 
-# Example implementations
-
-
-class IdentityTransformer(Transformer):
+class IdentityRegridder(BasicRegridder):
     """Identity mapping (no interpolation)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         return data
 
     def validate_metadata(
         self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
     ):
-        if source_metadata.shape != target_metadata.shape:
-            print(source_metadata.shape)
-            print(target_metadata.shape)
-            raise ValidationError("Source and target metadata must have the same shape")
+        if source_metadata[0] != target_metadata[0]: # shape
+            raise ValidationError(f"Source {str(source_metadata[0])} and target metadata {str(target_metadata[0])} must have the same shape")
 
 
-class BilinearTransformer(Transformer):
+class BilinearRegridder(BasicRegridder):
     """Simple bilinear interpolation (for demonstration)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """Apply bilinear interpolation."""
-        from scipy.interpolate import RegularTransformer
+        from scipy.interpolate import RegularRegridder
 
-        # Create transformer for source grid
+        # Create regridder for source grid
         source_shape = self.source_grid.shape
         x = jnp.linspace(0, 1, source_shape[0])
         y = jnp.linspace(0, 1, source_shape[1])
-        interp = RegularTransformer((x, y), data, method="linear")
+        interp = RegularRegridder((x, y), data, method="linear")
 
         # Create target grid coordinates
         target_shape = self.target_grid.shape
@@ -241,10 +249,10 @@ class BilinearTransformer(Transformer):
         return interp((xx, yy))
 
 
-class ConservativeTransformer(Transformer):
+class ConservativeRegridder(BasicRegridder):
     """Conservative remapping (placeholder for actual conservative method)."""
 
-    def transform(self, data: Array) -> Array:
+    def regrid(self, data: Array) -> Array:
         """Apply conservative remapping."""
         # This is a simplified example - real conservative remapping
         # would use proper overlap calculations
@@ -268,30 +276,3 @@ class ConservativeTransformer(Transformer):
             )
 
         return result
-
-
-# Example usage
-if __name__ == "__main__":
-    # Define grids
-    atm_grid = GridInfo(
-        shape=(180, 360),
-        grid_weights=jnp.ones((180, 360)),  # Simplified, should be cos(lat)
-    )
-
-    ocean_grid = GridInfo(shape=(100, 200), grid_weights=jnp.ones((100, 200)))
-
-    # Create transformer
-    transformer = ConservativeTransformer(
-        source_grid=atm_grid, target_grid=ocean_grid, conservation_tolerance=1e-3
-    )
-
-    # Test data
-    test_data = jnp.random.randn(180, 360)
-
-    try:
-        result = transformer(test_data)
-        print("Transformation successful!")
-        print(f"Output shape: {result.shape}")
-        print(f"Validation results: {interpolator.last_validation}")
-    except ValidationError as e:
-        print(f"Validation failed: {e}")

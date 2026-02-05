@@ -9,9 +9,7 @@ from jem import constants
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 from jem.components.slab.base import SlabModelBase
-from jem.base.variable import VariableMetadata, VariableRegistry
-import jem.base.data_structure as data_structure
-
+import jem.utils.data_structure as data_structure
 
 @data_structure.typed_and_dimensioned
 class PrognosticData:
@@ -82,7 +80,7 @@ class SlabAtmosphereModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        timestep: float = 3600.0 * 6,
+        timestep: float = 86400.0,
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
@@ -135,17 +133,15 @@ class SlabAtmosphereModel(SlabModelBase):
         self.component_forcing_class = decorator(AtmosphereForcing)
 
     def _create_variable_registries(self) -> None:
-        self.state_variable_registry = VariableRegistry()
-        self.forcing_variable_registry = VariableRegistry()
+        self.state_variable_registry = {}
+        self.forcing_variable_registry = {}
 
         for target_registry, target_class in [
             (self.state_variable_registry, self.component_state_class),
             (self.forcing_variable_registry, self.component_forcing_class),
         ]:
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry.register_variable(
-                    VariableMetadata(name=name, shape=shape, dimensions=dimensions)
-                )
+                target_registry[name] = (shape, dimensions)
 
     def _initialize_fields(self):
         """Initialize atmosphere model fields."""
@@ -178,10 +174,10 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
-        land_index = self.domain.horizontal_grids["T"].bmask == 1
-        ocean_index = self.domain.horizontal_grids["T"].bmask == 0
+        land_index = self.horizontal_grids["T"].bmask == 1
+        ocean_index = self.horizontal_grids["T"].bmask == 0
 
-        def step_function(state, forcing, t):
+        def step_function(state, forcing, step):
             # Compute wind speed
             wind_speed = (
                 state.prog.mean_zonal_wind_velocity**2
