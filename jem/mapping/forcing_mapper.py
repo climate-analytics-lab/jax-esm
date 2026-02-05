@@ -87,24 +87,9 @@ class BasicForcingMapper:
         self.forcing_mappings = forcing_mappings or {}
         self.regridders = regridders or {}
 
-        self.component_forcing_classes = {
-            component_name: component.component_forcing_class
-            for component_name, component in components.items()
-        }
-
-        self.component_state_variable_registries = {
-            component_name: component.state_variable_registry
-            for component_name, component in components.items()
-        }
-
-        self.component_forcing_variable_registries = {
-            component_name: component.forcing_variable_registry
-            for component_name, component in components.items()
-        }
-      
         # validate
-        check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
-        check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
+        #check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
+        #check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
  
         # Build connectivity graph
         self.connections = self._build_connections()
@@ -144,10 +129,7 @@ class BasicForcingMapper:
                 "derived": component_deriveds[component_name],
             } for component_name in component_states.keys()
         }
-        for (
-            target_component_name,
-            target_component_forcing_class,
-        ) in self.component_forcing_classes.items():
+        for target_component_name in self.involved_component_names:
             forcing = component_forcings[target_component_name]
             for (
                 source_component_name,

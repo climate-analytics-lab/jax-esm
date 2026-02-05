@@ -43,10 +43,6 @@ VariableRegistry = Dict[VariableName, VariableMetadata]
 @dataclass
 class JEMComponent:
     # mandatory
-    component_state_class : State
-    component_forcing_class : Forcing
-    state_variable_registry : VariableRegistry
-    forcing_variable_registry : VariableRegistry
     initialize : InitializeFunction
     generate_step_function : StepFunctionGenerator
     predictions_to_xarray : HistoryToXarray
