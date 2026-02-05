@@ -26,6 +26,10 @@ class OceanState:
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
+@data_structure.typed_and_dimensioned
+class OceanDerived:
+    pass
+
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
 
@@ -99,6 +103,7 @@ class SlabOceanModel(SlabModelBase):
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
         self.component_state_class = decorator(OceanState)
         self.component_forcing_class = decorator(OceanForcing)
+        self.component_derived_class = decorator(OceanDerived)
 
     def _create_variable_registries(self) -> None:
         self.state_variable_registry = {}
@@ -169,7 +174,7 @@ class SlabOceanModel(SlabModelBase):
                 "mixed_layer_depth": init_mixed_layer_depth,
                 "sea_surface_temperature": init_sea_surface_temperature,
             }
-        ), self.component_forcing_class.zeros()
+        ), self.component_derived_class.zeros(), self.component_forcing_class.zeros()
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -230,7 +235,9 @@ class SlabOceanModel(SlabModelBase):
                     "sim_time": new_sim_time,
                 }
             )
-            return new_state, stack_objects(
+
+            new_derived = self.component_derived_class.zeros()
+            return new_state, new_derived, stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
 
