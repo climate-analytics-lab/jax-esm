@@ -1,6 +1,5 @@
 """JCM adapter to JEM"""
 
-from dataclasses import dataclass
 import numpy as np
 
 import jax_datetime as jdt
@@ -10,18 +9,13 @@ from jcm.physics.speedy.physics_data import PhysicsData
 
 import jax
 import jax.numpy as jnp
-from jax import Array
 from jem import constants as constants
 
 from jcm.physics_interface import dynamics_state_to_physics_state
-from jcm.physics_interface import PhysicsState
 
-from dinosaur import primitive_equations_states
 
 from jem.utils.bulk_op import mean_leaf
 
-import tree_math
-from typing import Any, Dict
 
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
@@ -39,18 +33,7 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
 # by jcm is int32, but it will change to float32 after step_function. This causes
 # jax.lax.scan to fail due to data type inconsistency.
 def asfloat64(tree):
-    # return jax.tree_util.tree_map(lambda arr: arr.astype(jnp.float64), tree)
-
     return jax.tree_util.tree_map(lambda arr: jnp.array(arr).astype(jnp.float64), tree)
-
-
-@tree_math.struct
-@dataclass
-class JCMState:
-    prog: PhysicsState
-    phydata: Any
-    extra: Dict[str, Array]
-    metadata: primitive_equations_states
 
 def make_jem_compatible(
     model: Model,
@@ -64,49 +47,24 @@ def make_jem_compatible(
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
     
-    check_before_setattr(model, "timestep", timestep)
-    check_before_setattr(model, "component_state_class", JCMState)
-    check_before_setattr(model, "component_forcing_class", ForcingData)
-
-    D3_nodal_shape = model.coords.nodal_shape
-    D2_nodal_shape = D3_nodal_shape[1:]
-    D2_information = (D2_nodal_shape, ("longitude", "latitude"))
-
-    check_before_setattr(model, "state_variable_registry", {
-        "extra.total_heat_flux" : D2_information,
-    })
-
-    check_before_setattr(model, "forcing_variable_registry", {
-        varname : D2_information for varname in [
-            "sea_surface_temperature",
-            "sice_am",
-            "snowc_am",
-            "soilw_am",
-            "stl_am",
-        ]
-    })
-
-    #check_before_setattr(model, "grids", Grids.generate_grids_from_grid_specification(
-    #    f"JCM::T{model.coords.horizontal.total_wavenumbers - 2}"
-    #))
-
+    D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
         _modal_state = asfloat64(model._prepare_initial_modal_state())
         model._final_modal_state = _modal_state
-        return JCMState(
-            metadata=_modal_state,
-            phydata=asfloat64(
-                PhysicsData.zeros(
-                    model.coords.horizontal.nodal_shape,
-                    model.coords.vertical.layers,
-                )
-            ),
-            prog=dynamics_state_to_physics_state(_modal_state, model.primitive),
-            extra={
-                "total_heat_flux" : jnp.zeros(model.coords.horizontal.nodal_shape),
+        return (
+            asfloat64(model._prepare_initial_modal_state()),
+            {
+                "phydata" : asfloat64(
+                    PhysicsData.zeros(
+                        model.coords.horizontal.nodal_shape,
+                        model.coords.vertical.layers,
+                    )
+                ),
+                "total_heat_flux" : jnp.zeros(D2_nodal_shape),
             },
-        ), ForcingData.zeros(nodal_shape=model.coords.horizontal.nodal_shape).copy(
-            lfluxland = jnp.bool_(land_model_active),
+            ForcingData.zeros(nodal_shape=model.coords.horizontal.nodal_shape).copy(
+                lfluxland = jnp.bool_(land_model_active),
+            )
         )
 
 
@@ -119,23 +77,25 @@ def make_jem_compatible(
         total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
         def step_function(state, forcing, step):
             new_atm_modal_state, predictions = model.run_from_state(
-                initial_state=state.metadata,
+                initial_state=state,
                 save_interval=save_interval_day,  
                 total_time=total_time_day,
                 forcing=forcing,
             )
-            phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
-            extra = {
-                "total_heat_flux" : - jnp.sum(phydata.surface_flux.hfluxn, axis=2), # upward positive
-            }
+            
             # phydata is a stacked object, so I take the mean here.
             # Howwever, this action will be done by jcm in the new jcm PR.
-            return JCMState(
-                prog=asfloat64(mean_leaf(predictions.dynamics, axis=0)),
-                phydata=phydata,
-                metadata=new_atm_modal_state,
-                extra=extra,
-            ), predictions
+            phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
+            total_heat_flux = - jnp.sum(phydata.surface_flux.hfluxn, axis=2) # upward positive
+            
+            return (
+                new_atm_modal_state,
+                {
+                    "phydata" : phydata,
+                    "total_heat_flux" : total_heat_flux,
+                },
+                predictions
+            )
 
         return jax.jit(step_function) if jitted else step_function
 
