@@ -135,18 +135,20 @@ class Coupler:
 
             states = carry["states"]
             forcings = carry["forcings"]
+            deriveds = carry["deriveds"]
         
             unstacked_predictions = { component_name : [] for component_name in self.components.keys() }
         
             for name in flattened_workflow:
                 if name in self.components: 
-                    states[name], _predictions = component_step_functions[name](states[name], forcings[name], step)
+                    states[name], deriveds[name], _predictions = component_step_functions[name](states[name], forcings[name], step)
                     unstacked_predictions[name].append(_predictions)
                 elif name in self.forcing_mappers:
                     forcing_mapper = self.forcing_mappers[name]
                     sub_states = { component_name : states[component_name] for component_name in forcing_mapper.involved_component_names }
+                    sub_deriveds = { component_name : deriveds[component_name] for component_name in forcing_mapper.involved_component_names }
                     sub_forcings = { component_name : forcings[component_name] for component_name in forcing_mapper.involved_component_names }
-                    sub_forcings = forcing_mapper.map_forcings(sub_states, sub_forcings)
+                    sub_forcings = forcing_mapper.map_forcings(sub_states, sub_deriveds, sub_forcings)
                     for name in sub_forcings.keys():
                         forcings[name] = sub_forcings[name]
                 else:
