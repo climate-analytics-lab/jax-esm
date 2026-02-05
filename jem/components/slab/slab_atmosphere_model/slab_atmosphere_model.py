@@ -23,10 +23,6 @@ class AtmosphereState:
     mean_meridional_wind_velocity: Annotated[
         float, ("latitudinal", "longitude"), "two_dimensional"
     ]
-    internal_total_heat_flux: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-
 
 @data_structure.typed_and_dimensioned
 class AtmosphereForcing:
@@ -37,7 +33,9 @@ class AtmosphereForcing:
 
 @data_structure.typed_and_dimensioned
 class AtmosphereDerived:
-    pass
+    internal_total_heat_flux: Annotated[
+        float, ("latitudinal", "longitude"), "two_dimensional"
+    ]
 
 class SlabAtmosphereModel(SlabModelBase):
     """Slab atmosphere model for simple air-sea-land heat exchange.
@@ -208,7 +206,9 @@ class SlabAtmosphereModel(SlabModelBase):
                 }
             )
 
-            new_derived = self.component_derived_class.zeros()
+            new_derived = self.component_derived_class.zeros().copy({
+                "internal_total_heat_flux" : total_heat_flux,
+            })
 
             return new_state, new_derived, stack_objects(
                 [dict(state=new_state, forcing=forcing)]
