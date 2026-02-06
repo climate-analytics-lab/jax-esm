@@ -2,25 +2,20 @@
 
 import numpy as np
 
-import jax_datetime as jdt
 from jcm.model import Model
 from jcm.forcing import ForcingData
+from jcm.forcing import default_forcing
 from jcm.physics.speedy.physics_data import PhysicsData
+from jcm.physics_interface import dynamics_state_to_physics_state
+from jcm.physics_interface import PhysicsState
 
 import jax
 import jax.numpy as jnp
-from jem import constants as constants
-
-from jcm.physics_interface import dynamics_state_to_physics_state
-from jcm.physics_interface import PhysicsState
-from jcm.forcing import default_forcing
-
+import jax_datetime as jdt
 
 from jem.utils.bulk_op import mean_leaf
 
-
-
-def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
+def safe_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
         if raise_exception:
@@ -29,7 +24,6 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
             print(f"Warning: {message:s}")
     
     setattr(target, attribute_name, value)
-
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
 # by jcm is int32, but it will change to float32 after step_function. This causes
@@ -51,10 +45,8 @@ def make_jem_compatible(
 
     D2_nodal_shape = model.coords.nodal_shape[1:] 
     def initialize():
-        _modal_state = asfloat64(model._prepare_initial_modal_state())
-        model._final_modal_state = _modal_state
         return (
-            asfloat64(model._prepare_initial_modal_state()),
+            model._prepare_initial_modal_state(),
             {
                 "phydata" : asfloat64(
                     PhysicsData.zeros(
@@ -108,9 +100,9 @@ def make_jem_compatible(
             "diffusion" : str(model.diffusion),
         }
 
-    check_before_setattr(model, "initialize", initialize)
-    check_before_setattr(model, "predictions_to_xarray", predictions_to_xarray)
-    check_before_setattr(model, "generate_step_function", generate_step_function)
-    check_before_setattr(model, "get_info", get_info)
+    safe_setattr(model, "initialize", initialize)
+    safe_setattr(model, "predictions_to_xarray", predictions_to_xarray)
+    safe_setattr(model, "generate_step_function", generate_step_function)
+    safe_setattr(model, "get_info", get_info)
 
     return model
