@@ -1,12 +1,11 @@
 from typing import TypeVar, Any, Callable, List, Dict, Optional
 import jax.numpy as jnp
-import jax_datetime as jdt
 import xarray as xr
 from dataclasses import dataclass
 from typeguard import typechecked
 
 Array = jnp.ndarray
-ArrayOrArrayTuple = Array | tuple[Array, ...]
+ArrayOrArrayTuple = Array | tuple[Array, ...] # type: ignore
 Numeric = float | int | Array
 
 ComponentName = str

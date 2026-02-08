@@ -149,13 +149,6 @@ class BasicForcingMapper:
                 if source_component_name == target_component_name:
                     continue
 
-                target_component_variable_registry = (
-                    self.component_forcing_variable_registries[target_component_name]
-                )
-                source_component_variable_registry = (
-                    self.component_state_variable_registries[source_component_name]
-                )
-
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
                     (source_component_name, target_component_name), {}
@@ -286,17 +279,13 @@ class BasicForcingMapper:
         """
 
         try:
-            source_variable_metadata = self.component_state_variable_registries[
-                source_component_name
-            ][source_variable_name]
+            self.component_state_variable_registries[source_component_name][source_variable_name]
         except KeyError as e:
             print(f"Error: Cannot find specified source component ({str(source_component_name)}) or its variable ({str(source_variable_name)})")
             raise e
 
         try:
-            target_variable_metadata = self.component_forcing_variable_registries[
-                target_component_name
-            ][target_variable_name]
+            self.component_forcing_variable_registries[target_component_name][target_variable_name]
         except KeyError as e:
             print(f"Error: Cannot find specified target component ({str(target_component_name)}) or its variable ({str(target_variable_name)})")
             raise e

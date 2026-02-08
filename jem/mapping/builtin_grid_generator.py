@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -7,7 +6,6 @@ from jem.mapping.grid import Grid, GridSpecification
 
 import coordax as cx
 import dinosaur
-from jax import Array
 import jax.numpy as jnp
 import xarray as xr
 

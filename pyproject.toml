@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "JAX-ESM Developers", email = "dwatsonparris@ucsd.edu"},
 ]
@@ -16,7 +16,6 @@ keywords = ["earth-system-modeling", "climate", "jax", "coupling"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
@@ -65,8 +64,8 @@ docs = [
 "Bug Reports" = "https://github.com/climate-analytics-lab/jax-esm/issues"
 "Source" = "https://github.com/climate-analytics-lab/jax-esm"
 
-[tool.setuptools]
-packages = ["jem", "jem.components", "jem.coupling", "jem.utils"]
+[tool.setuptools.packages.find]
+include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.black]
 line-length = 88

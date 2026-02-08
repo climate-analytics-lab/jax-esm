@@ -1,4 +1,4 @@
-from typing import Optional, Dict
+from typing import Optional
 import jax.numpy as jnp
 from jax import Array
 from dataclasses import dataclass

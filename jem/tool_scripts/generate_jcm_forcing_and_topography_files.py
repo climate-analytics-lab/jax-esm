@@ -27,7 +27,7 @@ def generate_jcm_forcing_and_topography_files(
 
         print(f'Using input data directory: "{str(data_directory)}".')
 
-    raw_data_directory = Path(jcm.__file__).parent / f"data/bc"
+    raw_data_directory = Path(jcm.__file__).parent / "data/bc"
 
     # Prepare boundary file
     files_to_check = dict(
@@ -59,7 +59,7 @@ def generate_jcm_forcing_and_topography_files(
         interpolation_code = (raw_data_directory / "interpolate.py").resolve()
 
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [sys.executable, str(interpolation_code), f"{resolution:d}"],
                 check=True,
                 capture_output=True,

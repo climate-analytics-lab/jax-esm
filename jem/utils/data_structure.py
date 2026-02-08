@@ -3,7 +3,6 @@ from typing import Any, List, Tuple
 import jax.numpy as jnp
 from copy import deepcopy
 from jax.tree_util import register_pytree_node_class
-import tree_math
 from dataclasses import dataclass
 
 def typed_and_dimensioned(cls):
@@ -68,7 +67,7 @@ def typed_and_dimensioned(cls):
 
 def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
     def decorator(cls):
-        if getattr(cls, "is_typed_and_dimensioned", None) != True:
+        if getattr(cls, "is_typed_and_dimensioned", None) is None:
             raise Exception("Cannot apply build_dataclass on a non-schemaed class.")
 
         cls.shape_dict = shape_dict or {}

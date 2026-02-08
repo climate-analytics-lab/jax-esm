@@ -1,5 +1,5 @@
 from typing import get_args, get_type_hints, get_origin
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 import inspect
 
 
@@ -39,7 +39,7 @@ def resolve_interface(
         else:
             resolved_name = _resolve_member(target, member_name, member_type, customized_mapping)
 
-        result[resolved_name] = getattr(target, member_name)
+        result[member_name] = getattr(target, resolved_name)
 
     return result
 
