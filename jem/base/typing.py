@@ -45,6 +45,8 @@ class JEMComponent:
     # mandatory
     initialize : InitializeFunction
     generate_step_function : StepFunctionGenerator
+
+    # not mandatory
     predictions_to_xarray : HistoryToXarray
     get_info : GetInfoFunction
 
@@ -57,9 +59,11 @@ class JEMComponent:
 class JEMForcingMapper:
     # mandatory
     involved_component_names: List[str]
-    get_info : GetInfoFunction
     map_forcings: ForcingMapperFunction
     
+    # not mandatory
+    get_info : GetInfoFunction
+
     # jem-internal
     raw_forcing_mapper: Any
     name: str

@@ -233,7 +233,7 @@ class Coupler:
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
-            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component", "get_info", "predictions_to_xarray"], verbose=True)
         )
 
         self._validate_components()
@@ -262,7 +262,7 @@ class Coupler:
         self.forcing_mappers[name] = JEMForcingMapper(
             raw_forcing_mapper = forcing_mapper,
             name = name,
-            **resolve_interface(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
+            **resolve_interface(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper", "get_info"], verbose=True)
         )
         
 
@@ -295,11 +295,25 @@ class Coupler:
         }
 
     def get_info(self):
+
+        component_info = {}
+        forcing_mapper_info = {}
+
+        for component_name, component in self.components.items():
+            if hasattr(component, "get_info"):
+                component_info[component_name] = component.get_info()
+            else:
+                component_info[component_name] = { "message" : "get_info not provided." }
+
+        for name, forcing_mapper in self.forcing_mappers.items():
+            if hasattr(forcing_mapper, "get_info"):
+                forcing_mapper_info[name] = forcing_mapper.get_info()
+            else:
+                forcing_mapper_info[name] = { "message" : "get_info not provided." }
+
         return {
-            "component_info" : {
-                component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
-            },
-            "forcing_mappers" : "None" if self.forcing_mappers is None else { name: forcing_mapper.get_info() for name, forcing_mapper in self.forcing_mappers.items() } ,
+            "component_info" : component_info,
+            "forcing_mappers" : forcing_mapper_info
         }
 
     def _validate_components(self):
