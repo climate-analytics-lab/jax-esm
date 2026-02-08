@@ -2,11 +2,19 @@ Quick Start
 =============
 
 
-Execute the following to setup your environment and run your first coupled run!
+Install jem
+-----------
+
 
 .. code-block::
    
    pip install jem
+
+Run the first coupled run
+-------------------------
+
+.. code-block::
+
    jem create_shell --directory exp --shell JCM_SlabOceanModel_SlabLandModel
    python3 exp/main.py
 
@@ -19,21 +27,4 @@ To integrate your model with jem, you need to create an adapter function similar
 4. (Optional) `get_info`: Returns a dict describing the model, which will be printed when coupled model's `get_info` is called.
 
 Happy coupling!
-
-
-Before jem is released
-======================
-
-Before jem is released, you can not `pip install jem`. Please do
-
-.. code-block::
-
-   conda create -y -n jem_fresh python=3.13
-   conda activate jem_fresh
-   git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
-   cd jax-esm
-   pip3 install -e ".[jcm,plot]"
-   export PYTHONPATH=`pwd`
-   python3 notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
-
 

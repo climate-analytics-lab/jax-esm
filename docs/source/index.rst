@@ -16,6 +16,8 @@ documentation for details.
    :caption: Contents:
 
    quick_start
+   tutorial
+   developers
    api
    api_automodule
 
