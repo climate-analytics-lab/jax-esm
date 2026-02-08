@@ -20,7 +20,7 @@ def resolve_interface(
     reference_class: type,
     verbose: bool = False,
     customized_mapping_name:str = "__JEM_CUSTOMIZED_MAPPING__",
-    skip: Optional[ str | List[str] ] = [],
+    skip: str | List[str] = [],
 ) -> Dict[str, Any]:
     
     metadata = get_type_hints(reference_class)
@@ -51,7 +51,7 @@ def _resolve_function(
     verbose: bool = True,
 ) -> str:
 
-    if not isinstance(function_signature, Callable):
+    if get_origin(function_signature) is not get_origin(Callable):
         raise ValueError(f"The function signature of `{function_name:s}` should be a Callable. ")
     
     if (function_name not in customized_mapping) and (not hasattr(target, function_name)):

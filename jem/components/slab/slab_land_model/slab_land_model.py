@@ -28,25 +28,18 @@ from jem.components.slab.base import SlabModelBase
 import xarray as xr
 
 @data_structure.typed_and_dimensioned
-class PrognosticData:
+class LandState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     land_surface_temperature: Annotated[
         float, ("latitudinal", "longitude"), "two_dimensional"
     ]
     snowd: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
     soilw: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    
-@data_structure.typed_and_dimensioned
-class AirlandFlux:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
-@data_structure.typed_and_dimensioned
-class LandState:
-    prog: PrognosticData
 
 @data_structure.typed_and_dimensioned
 class LandForcing:
-    flux: AirlandFlux
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
 
 class SlabLandModel(SlabModelBase):
     """
@@ -63,7 +56,6 @@ class SlabLandModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         timestep: float = 86400.0,
-        save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
         land_clim_file: Optional[str] = None,
@@ -79,7 +71,6 @@ class SlabLandModel(SlabModelBase):
             grid_specification: Grid specification string (e.g., "JCM::T31")
             start_datetime: Start datetime for simulation
             timestep: Model timestep in seconds
-            save_interval: Output save interval in seconds
             topography_file: Optional path to topography NetCDF file
             mask_file: Optional path to mask NetCDF file
             land_clim_file: Optional path to land climatology NetCDF file
@@ -99,7 +90,6 @@ class SlabLandModel(SlabModelBase):
             mask_file=mask_file,
         )
 
-        self.save_interval = save_interval
         self.land_clim_file = land_clim_file
         
         # Physical parameters from Fortran defaults
@@ -124,7 +114,7 @@ class SlabLandModel(SlabModelBase):
         self.validate()
  
     def validate(self):
-        super()._validate()
+        super().validate()
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
@@ -144,24 +134,8 @@ class SlabLandModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _initialize_fields(self):
-        """Initialize land model fields."""
-        land_index = self.horizontal_grids["T"].bmask == 1
-        nonland_index = self.horizontal_grids["T"].bmask != 1
 
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
-
-    def _initialize_fields(self):
+    def initialize(self):
         """Initialize land surface model state and climatology.
         
         Returns:
@@ -287,11 +261,11 @@ class SlabLandModel(SlabModelBase):
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
         return self.component_state_class.zeros().copy({
-            "prog.land_surface_temperature" : init_T,
-            "prog.sim_time" : 0,
-            "prog.heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
-            "prog.snowd" : self.snowd_clim[:, :, init_time_idx],
-            "prog.soilw" : self.soilw_clim[:, :, init_time_idx],
+            "land_surface_temperature" : init_T,
+            "sim_time" : 0,
+            "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
+            "snowd" : self.snowd_clim[:, :, init_time_idx],
+            "soilw" : self.soilw_clim[:, :, init_time_idx],
         }), self.component_forcing_class.zeros()
     
     def _idealized_land_temperature(self, shape: Tuple[int, int]) -> jnp.ndarray:
@@ -386,10 +360,10 @@ class SlabLandModel(SlabModelBase):
             
             # Get heat flux from forcing (positive downward into land)
             # Negate because atmosphere uses positive upward convention
-            heatflx = -forcing.flux.total_heat_flux
+            heatflx = -forcing.total_heat_flux
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
-            T_anom = (state.prog.land_surface_temperature - stl_clim_current).astype(jnp.float32)
+            T_anom = (state.land_surface_temperature - stl_clim_current).astype(jnp.float32)
             
             # Time evolution of temperature anomaly (Fortran: line 207)
             # tanom = cdland * (tanom + rhcapl * hfluxn)
@@ -403,23 +377,22 @@ class SlabLandModel(SlabModelBase):
             new_T = jnp.where(self.bmask_l > 0, new_T, jnp.float32(273.15 + 15.0))
             
             # Update simulation time - keep as float32
-            new_sim_time = jnp.float32(state.prog.sim_time + self.timestep)
+            new_sim_time = jnp.float32(state.sim_time + self.timestep)
             
             # =====================================================================
             # Create new state
             # =====================================================================
             
             new_state = state.copy({
-                "prog.sim_time" : new_sim_time,
-                "prog.land_surface_temperature" : new_T.astype(jnp.float32),
-                "prog.heatflx" : heatflx.astype(jnp.float32),
-                "prog.snowd" : snowd_clim_current.astype(jnp.float32),
-                "prog.soilw" : soilw_clim_current.astype(jnp.float32),
+                "sim_time" : new_sim_time,
+                "land_surface_temperature" : new_T.astype(jnp.float32),
+                "snowd" : snowd_clim_current.astype(jnp.float32),
+                "soilw" : soilw_clim_current.astype(jnp.float32),
             })
             
             # Return new state and predictions for output
             return new_state, stack_objects([dict(
-                prog=new_state.prog,
+                state=new_state,
                 forcing=forcing,
             )])
         
@@ -428,62 +401,59 @@ class SlabLandModel(SlabModelBase):
     def _create_xarray_data_vars(
         self,
         predictions: Dict[str, Any],
-    ) -> xr.Dataset:
+    ) -> Dict[str, Any]:
         """Convert predictions to xarray Dataset.
         
         Args:
-            predictions: Dictionary with 'prog', 'prog', and 'forcing' fields from model run
+            predictions: Dictionary with 'state' and 'forcing' fields from model run
             
         Returns:
             xarray Dataset with land surface variables and coordinates
         """
         
-        prog = predictions["prog"]
+        state = predictions["state"]
         forcing = predictions["forcing"]
+        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
         
-        T_grid_axis_names = self.horizontal_grids["T"].axis_names
-        T_grid_dims = ("time",) + T_grid_axis_names
-        start_datetime_str = self.start_datetime.to_pydatetime().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        
-        ds = xr.Dataset(
-            data_vars = dict(
-                land_surface_temperature = (T_grid_dims, prog.land_surface_temperature, {
+        return dict( 
+            land_surface_temperature = (
+                T_grid_dims,
+                state.land_surface_temperature, 
+                {
                     "long_name": "Land surface temperature",
                     "units": "K",
-                }),
-                heatflx = (T_grid_dims, prog.heatflx, {
-                    "long_name": "Surface heat flux into land",
-                    "units": "W m-2",
-                    "positive": "downward",
-                }),
-                snowd = (T_grid_dims, prog.snowd, {
+                }
+            ),
+            snowd = (
+                T_grid_dims, state.snowd,
+                {
                     "long_name": "Snow depth (water equivalent)",
                     "units": "mm",
-                }),
-                soilw = (T_grid_dims, prog.soilw, {
+                }
+            ),
+            soilw = (
+                T_grid_dims,
+                state.soilw,
+                {
                     "long_name": "Soil water availability",
                     "units": "1",
-                }),
-                total_heat_flux = (T_grid_dims, forcing.flux.total_heat_flux, {
+                }
+            ),
+            total_heat_flux = (
+                T_grid_dims,
+                forcing.total_heat_flux, 
+                {
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
-                }),
-            ),
-            coords = dict(
-                time = (["time"], prog.sim_time / 3600.0, {
-                    "units": f"hours since {start_datetime_str:s}",
-                }),
-                latitude2D = (T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
-                longitude2D = (T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
-            ),
-            attrs = dict(
-                description = "SPEEDY-based slab land surface model output",
-                depth_soil = f"{self.depth_soil} m",
-                depth_lice = f"{self.depth_lice} m",
-                tdland = f"{self.tdland} days",
+                    "positive": "upward",
+                }
             ),
         )
-        
-        return ds
+
+    def _create_xarray_global_attributes(self) -> Dict[str, Any]:
+        return dict(
+            description = "SPEEDY-based slab land surface model output",
+            depth_soil = f"{self.depth_soil} m",
+            depth_lice = f"{self.depth_lice} m",
+            tdland = f"{self.tdland} days",
+        )

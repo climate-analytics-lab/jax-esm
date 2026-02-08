@@ -12,7 +12,7 @@ from jem.components.slab.base import SlabModelBase
 import jem.utils.data_structure as data_structure
 
 @data_structure.typed_and_dimensioned
-class PrognosticData:
+class AtmosphereState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     mean_air_temperature: Annotated[
         float, ("latitudinal", "longitude"), "two_dimensional"
@@ -24,42 +24,10 @@ class PrognosticData:
         float, ("latitudinal", "longitude"), "two_dimensional"
     ]
 
-
-@data_structure.typed_and_dimensioned
-class PhysicsData:
-    hfluxn: Annotated[float, ("latitudinal", "longitude", "two"), "heatflux_dimension"]
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-
-
-@data_structure.typed_and_dimensioned
-class AtmosphereState:
-    prog: PrognosticData
-    phydata: PhysicsData
-
-
-@data_structure.typed_and_dimensioned
-class SurfaceForcing:
-    bulk_drag_coefficient: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-    bare_land_albedo: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    sea_ice_concentration: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-    soil_moisture: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    snow_cover: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    land_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-    sea_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-
-
 @data_structure.typed_and_dimensioned
 class AtmosphereForcing:
-    scalar: SurfaceForcing
-
+    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    bulk_drag_coefficient: Annotated[float, (), "zero_dimensional"]
 
 class SlabAtmosphereModel(SlabModelBase):
     """Slab atmosphere model for simple air-sea-land heat exchange.
@@ -82,7 +50,6 @@ class SlabAtmosphereModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         timestep: float = 86400.0,
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
-        save_interval: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
     ):
@@ -92,11 +59,9 @@ class SlabAtmosphereModel(SlabModelBase):
             grid_specification: Grid spec string (e.g., "JCM::T31")
             timestep: Model timestep in seconds
             start_datetime: Simulation start datetime
-            save_interval: Output save interval in seconds (unused, kept for compatibility)
             topography_file: Optional path to topography NetCDF file
             mask_file: Optional path to land/ocean mask NetCDF file
         """
-        self.save_interval = save_interval
 
         super().__init__(
             name="SlabAtmosphereModel",
@@ -119,12 +84,13 @@ class SlabAtmosphereModel(SlabModelBase):
         self.validate()
 
     def validate(self):
-        super()._validate()
+        super().validate()
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for atmosphere model."""
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
             {
+                "zero_dimensional": (),
                 "two_dimensional": self.grid_shape,
                 "heatflux_dimension": self.grid_shape + (2,),
             }
@@ -143,7 +109,7 @@ class SlabAtmosphereModel(SlabModelBase):
             for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
                 target_registry[name] = (shape, dimensions)
 
-    def _initialize_fields(self):
+    def initialize(self):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
@@ -162,13 +128,13 @@ class SlabAtmosphereModel(SlabModelBase):
 
         return self.component_state_class.zeros().copy(
             {
-                "prog.mean_air_temperature": init_mean_air_temperature,
-                "prog.mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
-                "prog.mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
+                "mean_air_temperature": init_mean_air_temperature,
+                "mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
+                "mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
             }
         ), self.component_forcing_class.zeros().copy(
             {
-                "scalar.bulk_drag_coefficient": jnp.array(1e-3),
+                "bulk_drag_coefficient": jnp.array(1e-3),
             }
         )
 
@@ -180,30 +146,30 @@ class SlabAtmosphereModel(SlabModelBase):
         def step_function(state, forcing, step):
             # Compute wind speed
             wind_speed = (
-                state.prog.mean_zonal_wind_velocity**2
-                + state.prog.mean_meridional_wind_velocity**2
+                state.mean_zonal_wind_velocity**2
+                + state.mean_meridional_wind_velocity**2
             ) ** 0.5
 
             # Bulk aerodynamic formula for ocean sensible heat flux
             ocean_sensible_heat_flux = (
                 constants.surface_air_density
-                * forcing.scalar.bulk_drag_coefficient
+                * forcing.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
-                    forcing.scalar.sea_surface_temperature
-                    - state.prog.mean_air_temperature
+                    forcing.sea_surface_temperature
+                    - state.mean_air_temperature
                 )
             )
             # Bulk aerodynamic formula for land sensible heat flux
             land_sensible_heat_flux = (
                 constants.surface_air_density
-                * forcing.scalar.bulk_drag_coefficient
+                * forcing.bulk_drag_coefficient
                 * wind_speed
                 * constants.atmosphere_specific_heat_capacity_under_constant_pressure
                 * (
-                    forcing.scalar.land_surface_temperature
-                    - state.prog.mean_air_temperature
+                    forcing.land_surface_temperature
+                    - state.mean_air_temperature
                 )
             )
 
@@ -218,77 +184,65 @@ class SlabAtmosphereModel(SlabModelBase):
             )
 
             # Update temperature
-            new_sim_time = state.prog.sim_time + self.timestep
+            new_sim_time = state.sim_time + self.timestep
             new_mean_air_temperature = (
-                state.prog.mean_air_temperature + self.cd_factor * total_heat_flux
+                state.mean_air_temperature + self.cd_factor * total_heat_flux
             )
 
-            new_hfluxn = state.phydata.hfluxn.at[:, :, 0].set(total_heat_flux)
             new_state = state.copy(
                 {
-                    "prog.mean_air_temperature": new_mean_air_temperature,
-                    "prog.sim_time": new_sim_time,
-                    "phydata.hfluxn": new_hfluxn,
-                    "phydata.total_heat_flux": total_heat_flux,
+                    "sim_time": new_sim_time,
+                    "mean_air_temperature": new_mean_air_temperature,
+                    "total_heat_flux": total_heat_flux,
                 }
             )
 
             return new_state, stack_objects(
-                [dict(prog=new_state.prog, phydata=new_state.phydata, forcing=forcing)]
+                [dict(state=new_state, forcing=forcing)]
             )
 
         return step_function
 
     def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
         """Create xarray data variables for atmosphere output."""
-        prog = predictions["prog"]
-        phydata = predictions["phydata"]
+        state = predictions["state"]
         forcing = predictions["forcing"]
+        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
         return dict(
-            hfluxn=(["time", "longitude", "latitude", "two"], phydata.hfluxn),
             total_heat_flux=(
-                [
-                    "time",
-                    "longitude",
-                    "latitude",
-                ],
-                phydata.total_heat_flux,
+                T_grid_dims,
+                forcing.total_heat_flux,
+                {
+                    "long_name": "Total heat flux forcing",
+                    "units": "W m^-2",
+                    "positive": "upward",
+                }                   
             ),
             mean_air_temperature=(
-                ["time", "longitude", "latitude"],
-                prog.mean_air_temperature,
+                T_grid_dims,
+                state.mean_air_temperature,
+                {
+                    "long_name": "Mean air column temperature",
+                    "units": "K",
+                }
             ),
             mean_zonal_wind_velocity=(
-                ["time", "longitude", "latitude"],
-                prog.mean_zonal_wind_velocity,
+                T_grid_dims,
+                state.mean_zonal_wind_velocity,
+                {
+                    "long_name": "Mean velocity of the air column in zonal direction",
+                    "units": "m s^-1",
+                    "positive": "east",
+                } 
             ),
             mean_meridional_wind_velocity=(
-                ["time", "longitude", "latitude"],
-                prog.mean_meridional_wind_velocity,
-            ),
-            bare_land_albedo=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.bare_land_albedo,
-            ),
-            sea_ice_concentration=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.sea_ice_concentration,
-            ),
-            soil_moisture=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.soil_moisture,
-            ),
-            snow_cover=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.snow_cover,
-            ),
-            land_surface_temperature=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.land_surface_temperature,
-            ),
-            sea_surface_temperature=(
-                ["time", "longitude", "latitude"],
-                forcing.scalar.sea_surface_temperature,
+                T_grid_dims,
+                state.mean_meridional_wind_velocity,
+                {
+                    "long_name": "Mean velocity of the air column in meridional direction",
+                    "units": "m s^-1",
+                    "positive": "north",
+                }
             ),
         )

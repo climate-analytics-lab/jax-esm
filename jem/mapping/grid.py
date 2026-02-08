@@ -12,10 +12,11 @@ class GridSpecification:
     grid_family   : Such as T31, FV45, ..., gx1v6 and such.
     """
 
-    grid_family: str
     grid_universe: str
+    grid_family: str
 
-    def parse_grid_specification(grid_specification_string: str) -> Dict[str, str]:
+    @classmethod
+    def parse_grid_specification(cls, grid_specification_string: str) -> "GridSpecification":
         """
         Parse a grid specification string of format "<grid_universe>::<grid_family>".
 
@@ -40,7 +41,7 @@ class GridSpecification:
 
         if not match:
             raise ValueError(
-                f"Invalid grid specification format: '{grid_specification}'. "
+                f"Invalid grid specification format: '{grid_specification_string}'. "
                 f"Expected format: '<grid_universe>::<grid_family>'"
             )
 

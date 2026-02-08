@@ -24,14 +24,14 @@ InitializeFunction = Callable[[], tuple[State, Forcing]]
 
 StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
 StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
+TrajectoryFunction = Callable[[Pytree], tuple[Pytree, History]]
 
-HistoryToXarray = Callable[History, xr.Dataset]
+HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
-
 ForcingMapperFunction = Callable[ [ Dict[str, Forcing], Dict[str, State] ], Dict[str, Forcing] ]
-RegridderFunction = Callable[[Array], Array]
+
 
 VariableName = str
 VariableShape = tuple[int, ...]

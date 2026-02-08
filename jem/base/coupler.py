@@ -9,7 +9,10 @@ from jem.base.typing import (
     JEMComponent,
     JEMForcingMapper,
     Workflow,
+    Pytree,
+    History,
     StepFunction,
+    TrajectoryFunction,
 )
 
 import jax
@@ -126,7 +129,7 @@ class Coupler:
 
         # Get step functions of each component
         component_step_functions = {
-            component_name: component.generate_step_function(jitted=jitted)
+            component_name: component.generate_step_function(jitted=jitted)  # type: ignore
             for component_name, component in self.components.items()
         }
 
@@ -168,9 +171,9 @@ class Coupler:
         workflow: Workflow,
         iterations: int,
         jitted: bool = True,
-        show_progress: bool = False,
+        show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
-    ) -> StepFunction:
+    ) -> TrajectoryFunction:
 
         scan_func = generate_scan_function(jitted=jitted)
         coupled_step_function = self.generate_step_function(
@@ -193,7 +196,7 @@ class Coupler:
 
         def trajectory_function(
             initial_coupled_state_forcing: Dict[str, tuple[type, type]],
-        ):
+        ) -> tuple[Pytree, History]:
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
                 dict(
@@ -248,9 +251,8 @@ class Coupler:
         """
         if name in self.components:
             del self.components[name]
-
-            # update information
-            self.add_component()
+        
+        self._validate_components()
 
     def add_forcing_mapper(
         self,
