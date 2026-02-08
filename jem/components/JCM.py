@@ -37,7 +37,13 @@ def make_jem_compatible(
     save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
     land_model_active: bool = True,
 ) -> Model:
+    """Adapt the input jcm model to jem framework
     
+    This function in-place injects `initialize`, `generate_step_function`, 
+    `predictions_to_xarray`, and `get_info` into jcm model object. Also, check
+    if jcm's time step `dt_si` can perfectly divide `coupling_timestep`.
+    
+    """    
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
    
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
