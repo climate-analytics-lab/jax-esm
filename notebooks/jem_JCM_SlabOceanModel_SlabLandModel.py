@@ -68,7 +68,6 @@ atm_model = jcm.model.Model(
 JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
-    save_interval=jdt.to_timedelta(12, "hour"),
 )
 
 components = dict(
