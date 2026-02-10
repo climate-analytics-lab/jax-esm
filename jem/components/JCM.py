@@ -34,7 +34,6 @@ def asfloat64(tree):
 def make_jem_compatible(
     model: Model,
     coupling_timestep: jdt.Timedelta,
-    save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
     land_model_active: bool = True,
 ) -> Model:
     """Adapt the input jcm model to jem framework
@@ -44,18 +43,18 @@ def make_jem_compatible(
     if jcm's time step `dt_si` can perfectly divide `coupling_timestep`.
     
     """    
-   
+     
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
    
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
 
-    D2_nodal_shape = model.coords.nodal_shape[1:] 
+    D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
         return (
             model._prepare_initial_modal_state(),
             {
-                "phydata" : asfloat64(
+                "physics" : asfloat64(
                     PhysicsData.zeros(
                         model.coords.horizontal.nodal_shape,
                         model.coords.vertical.layers,
@@ -73,7 +72,7 @@ def make_jem_compatible(
         #         static parameters, we cannot pass in traceable
         #         object. So use item() to convert from scalar
         #         jax.Array to float.
-        save_interval_day=(save_interval / jdt.to_timedelta(1, "day")).item() 
+        save_interval_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item() 
         total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
         def step_function(state, forcing, step):
             new_atm_modal_state, predictions = model.run_from_state(
@@ -81,17 +80,20 @@ def make_jem_compatible(
                 save_interval=save_interval_day,  
                 total_time=total_time_day,
                 forcing=forcing,
+                output_averages=True,
             )
-            
-            # phydata is a stacked object, so I take the mean here.
-            # Howwever, this action will be done by jcm in the new jcm PR.
-            phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
-            total_heat_flux = - jnp.sum(phydata.surface_flux.hfluxn, axis=2) # upward positive
-            
+            physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
+            total_heat_flux = - jnp.sum(physics_no_time_dimension.surface_flux.hfluxn, axis=-1) # upward positive
+
+            # This is a bug in jcm: Time dimension vanishes when save_interval == total_time
+            if len(predictions.dynamics.normalized_surface_pressure.shape) == 2:
+                nsp = predictions.dynamics.normalized_surface_pressure
+                predictions.dynamics.normalized_surface_pressure = jnp.reshape(nsp, (1,) + nsp.shape)
+                
             return (
                 new_atm_modal_state,
                 {
-                    "phydata" : phydata,
+                    "physics" : physics_no_time_dimension,
                     "total_heat_flux" : total_heat_flux,
                 },
                 predictions
