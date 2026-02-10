@@ -129,10 +129,12 @@ class Coupler:
             print("Flattened workflow: ", ", ".join(flattened_workflow))
         
         # Get step functions of each component
-        component_step_functions = {
-            component_name: component.generate_step_function(jitted=jitted)  # type: ignore
-            for component_name, component in self.components.items()
-        }
+        component_step_functions = {}
+        for component_name, component in self.components.items():
+            step_function = component.generate_step_function()
+            if jitted:
+                step_function = jax.jit(step_function)
+            component_step_functions[component_name] = step_function
 
         def step_function(carry, step):
 

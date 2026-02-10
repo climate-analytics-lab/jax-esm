@@ -18,12 +18,11 @@ Forcing = Pytree
 SimulationTime = float
 
 History = TypeVar('History')
-JittableFlag = bool
 
 InitializeFunction = Callable[[], tuple[State, Derived, Forcing]]
 
 StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
-StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
+StepFunctionGenerator = Callable[[], StepFunction]
 TrajectoryFunction = Callable[[Pytree], tuple[Pytree, History]]
 
 HistoryToXarray = Callable[[History], xr.Dataset]

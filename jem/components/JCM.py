@@ -66,7 +66,7 @@ def make_jem_compatible(
             )
         )
 
-    def generate_step_function(jitted: bool = True):
+    def generate_step_function():
         # Notice: since save_interval and total_time are claimed
         #         static parameters, we cannot pass in traceable
         #         object. So use item() to convert from scalar
@@ -98,7 +98,7 @@ def make_jem_compatible(
                 predictions
             )
 
-        return jax.jit(step_function) if jitted else step_function
+        return step_function
 
     def predictions_to_xarray(predictions):
         return predictions.to_xarray()
