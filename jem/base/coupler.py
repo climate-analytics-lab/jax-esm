@@ -9,6 +9,9 @@ from jem.base.typing import (
     JEMForcingMapper,
     Workflow,
     Pytree,
+    State,
+    Derived,
+    Forcing,
     History,
     TrajectoryFunction,
 )
@@ -88,7 +91,7 @@ class Coupler:
 
     def initialize(
         self,
-    ) -> Dict[str, tuple[type, type]]:
+    ) -> Dict[str, tuple[State, Derived, Forcing]]:
         """Initialize all components.
 
         Args:
@@ -131,10 +134,10 @@ class Coupler:
         # Get step functions of each component
         component_step_functions = {}
         for component_name, component in self.components.items():
-            step_function = component.generate_step_function()
+            _component_step_function = component.generate_step_function()
             if jitted:
-                step_function = jax.jit(step_function)
-            component_step_functions[component_name] = step_function
+                _component_step_function = jax.jit(_component_step_function)
+            component_step_functions[component_name] = _component_step_function
 
         def step_function(carry, step):
 
@@ -203,7 +206,7 @@ class Coupler:
             initial_coupled_state_derived_forcing: Dict[str, tuple[type, type, type]],
         ) -> tuple[Pytree, History]:
 
-            initial_carry_value = dict(states={}, deriveds={}, forcings={})
+            initial_carry_value = dict(states={}, deriveds={}, forcings={}) # type: ignore
             for component_name, (_state, _derived, _forcing) in initial_coupled_state_derived_forcing.items():
                 initial_carry_value["states"][component_name] = _state
                 initial_carry_value["deriveds"][component_name] = _derived

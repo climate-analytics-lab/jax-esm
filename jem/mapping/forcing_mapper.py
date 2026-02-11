@@ -179,6 +179,7 @@ class BasicForcingMapper:
     def couple_components(
         self,
         component_forcings: Dict[str, type],
+        component_deriveds: Dict[str, type],
         component_states: Dict[str, type],
     ) -> Dict[str, type]:
         """Couple components by remapping forcings with conservation checks.
@@ -190,7 +191,7 @@ class BasicForcingMapper:
             A dictionary of forcing of each components
         """
 
-        component_forcings = self.map_forcings(component_forcings, component_states)
+        component_forcings = self.map_forcings(component_forcings, component_deriveds, component_states)
 
         # Optional: Add conservation checks here
         # self._check_conservation(output_fluxes, input_fluxes)
