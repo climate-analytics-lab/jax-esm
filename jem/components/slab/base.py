@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any
 from jem.base.typing import VariableRegistry
 
-import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
