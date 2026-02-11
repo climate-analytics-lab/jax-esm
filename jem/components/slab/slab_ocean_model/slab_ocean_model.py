@@ -25,7 +25,7 @@ class OceanState:
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    q_flux: Annotated[float, ("month", "longitude", "latitude"), "two_dimensional_with_month"]
+    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -196,7 +196,7 @@ class SlabOceanModel(SlabModelBase):
             )
 
         # Set relaxation time to infinity if no climatology
-        if self.SST_clim_file is None:
+        if self.SST_clim_file is None
             print("Notice: Climaology SST does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
@@ -262,6 +262,8 @@ class SlabOceanModel(SlabModelBase):
                 )
 
                 snapshot_Qflux = forcing.q_flux[:, :, Qflux_beg_idx]
+                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
+                snapshot_Qflux = self.Qflux[:, :, clim_beg_idx]
                 snapshot_Qflux = jnp.where(
                     ocn_idx, snapshot_Qflux, 0.0
                 )
@@ -296,10 +298,12 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
-            return dict(
-                state=new_state,
-                forcing=forcing
-            ), stack_objects(
+            new_derived = self.component_derived_class.zeros()
+            predictions["state"] = new_state
+            predictions["forcing"] = forcing
+            if self.forcing_method == "Qflux":
+                predictions["Qflux"] = snapshot_Qflux
+            return new_state, new_derived, stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
 
