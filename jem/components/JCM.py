@@ -5,14 +5,11 @@ import numpy as np
 from jcm.model import Model
 from jcm.forcing import default_forcing
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics_interface import dynamics_state_to_physics_state
-from jcm.physics_interface import PhysicsState
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 
-from jem.utils.bulk_op import mean_leaf
 
 def safe_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):

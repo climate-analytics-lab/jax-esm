@@ -9,7 +9,7 @@ from jem.base.typing import (
     VariableRegistry,
 )
 
-from typeguard import typechecked, check_type
+from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
 
