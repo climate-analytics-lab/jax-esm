@@ -25,7 +25,7 @@ class OceanState:
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
+    q_flux: Annotated[float, ("month", "longitude", "latitude"), "two_dimensional_with_month"]
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -196,7 +196,7 @@ class SlabOceanModel(SlabModelBase):
             )
 
         # Set relaxation time to infinity if no climatology
-        if self.SST_clim_file is None
+        if self.SST_clim_file is None:
             print("Notice: Climaology SST does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
