@@ -18,13 +18,14 @@ default_land_surface_temperature = 288.15
 class OceanState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     sea_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
-    mixed_layer_depth: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    mixed_layer_depth: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 @data_structure.typed_and_dimensioned
 class OceanForcing:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
 
 @data_structure.typed_and_dimensioned
 class OceanDerived:
@@ -35,17 +36,35 @@ class SlabOceanModel(SlabModelBase):
 
     This model simulates sea surface temperature evolution using a simple
     thermodynamic equation with optional relaxation to climatology.
+        
+    dT/dt = F_net/(rho * cp * h) + forcing
 
-    Physics:
-        dT/dt = Q/(rho * cp * h) - (T - T_clim)/tau
 
     where:
         T: sea surface temperature
-        Q: total heat flux (positive upward)
+        F_net: total heat flux (positive upward)
         rho: ocean density
         cp: ocean specific heat capacity
         h: mixed layer depth
-        tau: relaxation timescale to climatology
+        forcing: the forcing of temperature. See below for explaination
+    
+    (1) If `forcing_method` == "None" (or just None), then forcing = 0.
+
+    (2) If `forcing_method` == "Qflux", then traditional Q-flux adjust, i.e., periodic forcing
+        over a year, is used:
+ 
+            forcing = Q / (rho * cp * h)
+
+        where variable `Q` will be read from a file given in `Q_flux_file`. If `Q_flux_file`
+        is not provided, then Q will be all zeros, which is possible when doing training.
+    
+    (3) If `forcing_method` == "relaxation", then linear relaxation will be used
+
+            forcing = - (T - T_clim) / tau
+
+        where tau is the relaxation timescale to climatology (can be jnp.inf), and T_clim
+        is the climatology read from `SST_clim_file`. If `SST_clim_file` is not provided, 
+        then T_clim will be all zeros, which is possible when doing training.
     """
 
     def __init__(
@@ -59,6 +78,10 @@ class SlabOceanModel(SlabModelBase):
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
         SST_clim_file: Optional[str] = None,
+        Q_flux_file: Optional[str] = None,
+        forcing_method: Optional[str] = None,
+        initialization_sea_surface_temperature: float = 288.15,
+        forcing_method: Optional[str] = None,
     ):
         """Initialize slab ocean model.
 
@@ -77,6 +100,7 @@ class SlabOceanModel(SlabModelBase):
         self.mixed_layer_depth_min = mixed_layer_depth_min
         self.mixed_layer_depth_max = mixed_layer_depth_max
         self.SST_clim_file = SST_clim_file
+        self.Q_flux_file = Q_flux_file
 
         super().__init__(
             name="SlabOceanModel",
@@ -88,19 +112,42 @@ class SlabOceanModel(SlabModelBase):
         )
 
         # Climatology data (loaded during initialize)
-        self.has_climatology = False
         self.SST_clim = None
         self.time_factor = None
         self.cd_factor = None
+        self.forcing_method = forcing_method | "None"
 
         self.validate()
 
     def validate(self):
         super().validate()
+        if self.forcing_method == "None":
+            # Do nothing
+        elif self.forcing_method == "Qflux":
+            if self.Q_flux_file is None:
+                print("Notice: `Q_flux_file` is not given. Default values (zeros) will be used.")
+            elif not Path(self.Q_flux_file).exists():
+                raise FileNotFoundError(f"Q-flux file \"{str(self.Q_flux_file):s}\" is specified but it does not exist.")
+        elif self.forcing_method == "relaxation":
+            if self.SST_clim_file is None:
+                print("Notice: `SST_clim_file` is not given. Default values (zeros) will be used.")
+            elif not Path(self.SST_clim_file).exists():
+                raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" is specified but does not exist.")
+            elif ( not self.relaxation_time > 0 ) or not jnp.isinf(self.relaxation_time):
+                raise ValueError("`relaxation_time` must be a positive number of infinity.")
+        else: 
+            raise ValueError(f"Unknown `forcing_method` is given: \"{str(forcing_method):s}\" ")
+ 
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
+            {
+                "two_dimensional": self.grid_shape,
+                "two_dimensional_with_month": (12,) + self.grid_shape,
+            }
+        )
         self.component_state_class = decorator(OceanState)
         self.component_forcing_class = decorator(OceanForcing)
         self.component_derived_class = decorator(OceanDerived)
@@ -132,7 +179,6 @@ class SlabOceanModel(SlabModelBase):
             print("SST climatology file. The given initial SST will be used.")
             print("SST climatology file: ", self.SST_clim_file)
             self.SST_clim = jnp.array(xr.open_dataset(self.SST_clim_file)["sst"])
-            self.has_climatology = True
             init_sea_surface_temperature = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
@@ -155,8 +201,8 @@ class SlabOceanModel(SlabModelBase):
             )
 
         # Set relaxation time to infinity if no climatology
-        if not self.has_climatology:
-            print("Climaology SST does not exist. Set relaxation time to inifinity.")
+        if self.SST_clim_file is None
+            print("Notice: Climaology SST does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
         # Compute heat capacity and time factors for Euler backward scheme
@@ -169,12 +215,14 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy(
-            {
+        return (
+            self.component_state_class.zeros().copy({
                 "mixed_layer_depth": init_mixed_layer_depth,
                 "sea_surface_temperature": init_sea_surface_temperature,
-            }
-        ), self.component_derived_class.zeros(), self.component_forcing_class.zeros()
+            }),
+            self.component_derived_class.zeros(),
+            self.component_forcing_class.zeros(),
+        )
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -183,8 +231,9 @@ class SlabOceanModel(SlabModelBase):
 
         def step_function(state, forcing, step):
             new_sea_surface_temperature_anom = state.sea_surface_temperature
-
-            if self.has_climatology:
+            total_heat_flux = forcing.total_heat_flux
+            predictions = {}
+            if self.forcing_method == "relaxation":
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
                 clim_beg_idx, clim_end_idx = self._get_climatology_indices(
@@ -209,21 +258,37 @@ class SlabOceanModel(SlabModelBase):
                 new_sea_surface_temperature_anom = (
                     state.sea_surface_temperature - snapshot_SST_clim_beg
                 )
+            elif forcing_method == "Qflux":
+                
+                length_of_a_cycle = self.Qflux.shape[2]
+                Qflux_beg_idx, _ = self._get_climatology_indices(
+                    state.sim_time, start_day_offset, length_of_a_cycle
+                )
+
+                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
+                snapshot_Qflux = self.Qflux[:, :, clim_beg_idx]
+                snapshot_Qflux = jnp.where(
+                    ocn_idx, snapshot_Qflux, 0.0
+                )
+
+
+                total_heat_flux = total_heat_flux + snapshot_Qflux
+
 
             # Euler backward step
             new_sim_time = state.sim_time + self.timestep
             new_sea_surface_temperature_anom = self.time_factor * (
                 new_sea_surface_temperature_anom
-                + self.cd_factor * (-forcing.total_heat_flux)
+                + self.cd_factor * (- total_heat_flux)
             )
 
             # Add climatology back
             new_sea_surface_temperature = new_sea_surface_temperature_anom
-            if self.has_climatology:
+            if self.forcing_method == "relaxation":
                 new_sea_surface_temperature += (
                     snapshot_SST_clim_beg + SST_clim_trend * self.timestep
                 )
-
+            
             # Apply land mask
             new_sea_surface_temperature = new_sea_surface_temperature.at[
                 nonocn_idx
@@ -237,6 +302,10 @@ class SlabOceanModel(SlabModelBase):
             )
 
             new_derived = self.component_derived_class.zeros()
+            predictions["state"] = new_state
+            predictions["forcing"] = forcing
+            if self.forcing_method == "Qflux":
+                predictions["Qflux"] = snapshot_Qflux
             return new_state, new_derived, stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
@@ -249,7 +318,7 @@ class SlabOceanModel(SlabModelBase):
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
-        return dict(
+        data_vars = dict(
             sea_surface_temperature=(
                 T_grid_dims,
                 state.sea_surface_temperature,
@@ -276,6 +345,19 @@ class SlabOceanModel(SlabModelBase):
                 }
             ),
         )
+
+        if "Qflux" in predictions:
+            data_vars["Qflux"] = (
+                T_grid_dims,
+                predictions["Qflux"],
+                {
+                    "long_name": "Q-flux",
+                    "units": "W m-2",
+                    "positive": "Heating the ocean",
+                }
+            )
+
+        return data_vars
 
     def get_info(self):
         return {
