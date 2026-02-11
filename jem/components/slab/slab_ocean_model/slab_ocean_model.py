@@ -25,7 +25,7 @@ class OceanState:
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
+    q_flux: Annotated[float, ("month", "longitude", "latitude"), "two_dimensional_with_month"]
 
 @data_structure.typed_and_dimensioned
 class OceanDerived:
@@ -81,7 +81,6 @@ class SlabOceanModel(SlabModelBase):
         Q_flux_file: Optional[str] = None,
         forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
-        forcing_method: Optional[str] = None,
     ):
         """Initialize slab ocean model.
 
@@ -115,7 +114,7 @@ class SlabOceanModel(SlabModelBase):
         self.SST_clim = None
         self.time_factor = None
         self.cd_factor = None
-        self.forcing_method = forcing_method | "None"
+        self.forcing_method = forcing_method or "None"
 
         self.validate()
 
@@ -123,6 +122,7 @@ class SlabOceanModel(SlabModelBase):
         super().validate()
         if self.forcing_method == "None":
             # Do nothing
+            pass
         elif self.forcing_method == "Qflux":
             if self.Q_flux_file is None:
                 print("Notice: `Q_flux_file` is not given. Default values (zeros) will be used.")
@@ -201,7 +201,7 @@ class SlabOceanModel(SlabModelBase):
             )
 
         # Set relaxation time to infinity if no climatology
-        if self.SST_clim_file is None
+        if self.SST_clim_file is None:
             print("Notice: Climaology SST does not exist. Set relaxation time to inifinity.")
             self.relaxation_time = jnp.inf
 
@@ -227,6 +227,7 @@ class SlabOceanModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
+        ocn_idx = self.horizontal_grids["T"].bmask == 0
         nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
         def step_function(state, forcing, step):
@@ -240,7 +241,6 @@ class SlabOceanModel(SlabModelBase):
                     state.sim_time, start_day_offset, length_of_a_cycle
                 )
 
-                ocn_idx = self.horizontal_grids["T"].bmask == 0
                 snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
                 snapshot_SST_clim_beg = jnp.where(
                     ocn_idx, snapshot_SST_clim_beg, default_land_surface_temperature
@@ -258,15 +258,14 @@ class SlabOceanModel(SlabModelBase):
                 new_sea_surface_temperature_anom = (
                     state.sea_surface_temperature - snapshot_SST_clim_beg
                 )
-            elif forcing_method == "Qflux":
+            elif self.forcing_method == "Qflux":
                 
-                length_of_a_cycle = self.Qflux.shape[2]
+                length_of_a_cycle = forcing.q_flux.shape[2]
                 Qflux_beg_idx, _ = self._get_climatology_indices(
                     state.sim_time, start_day_offset, length_of_a_cycle
                 )
 
-                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
-                snapshot_Qflux = self.Qflux[:, :, clim_beg_idx]
+                snapshot_Qflux = forcing.q_flux[:, :, Qflux_beg_idx]
                 snapshot_Qflux = jnp.where(
                     ocn_idx, snapshot_Qflux, 0.0
                 )
