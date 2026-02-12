@@ -141,9 +141,7 @@ class Coupler:
 
         def step_function(carry, step):
 
-            states = carry["states"]
-            forcings = carry["forcings"]
-            deriveds = carry["deriveds"]
+            states, deriveds, forcings = carry
         
             unstacked_predictions = { component_name : [] for component_name in self.components.keys() }
         
@@ -167,7 +165,7 @@ class Coupler:
                 for name in unstacked_predictions.keys()
             }
             
-            return dict(states=states, deriveds=deriveds, forcings=forcings), predictions
+            return (states, deriveds, forcings), predictions
 
         if jitted:
             step_function = jax.jit(step_function)
@@ -206,15 +204,17 @@ class Coupler:
             initial_coupled_state_derived_forcing: Dict[str, tuple[type, type, type]],
         ) -> tuple[Pytree, History]:
 
-            initial_carry_value = dict(states={}, deriveds={}, forcings={}) # type: ignore
+            _states = {}
+            _deriveds = {}
+            _forcings = {}
             for component_name, (_state, _derived, _forcing) in initial_coupled_state_derived_forcing.items():
-                initial_carry_value["states"][component_name] = _state
-                initial_carry_value["deriveds"][component_name] = _derived
-                initial_carry_value["forcings"][component_name] = _forcing
+                _states[component_name] = _state
+                _deriveds[component_name] = _derived
+                _forcings[component_name] = _forcing
             
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
-                initial_carry_value,
+                (_states, _deriveds, _forcings),
                 xs=steps,
             )
             predictions = unwrap_leading_dims(predictions, first_n_dim=2)
