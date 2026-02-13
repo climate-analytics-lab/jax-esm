@@ -30,14 +30,27 @@ JEM requires each of the component to provide
 
 - :code:`initialize: Callable[[], tuple[State, Derived, Forcing]]`: Returns
     three pytrees representing initial state, derived and forcing.
-
+- :code:`generate_step_function: Callable[[State, Forcing], tuple[State, 
+    Derived, History]]`: Returns three pytrees representing new state, new 
+    derived and the history. The tree structure of new state and derived has to
+    be consistent with the ones returned from :code:`initialize`. The first 
+    dimension of the leaf node in :code:`History` is expected to be time. The
+    coupler will concat multiple histories along this dimension.
 
 Forcing Mapping
 ---------------
 
+Forcing mapper is a callable that takes in multiple components' state and
+derived, and returns the resulting forcing. As long as the signature matches,
+JEM will accept it. Therefore, users can use their own designed forcing mappers
+which can do more sophisticated check for their own purposes.
 
 Coupling Models
 ---------------
 
+
+
+A Coupled Example
+-----------------
 
 
