@@ -9,7 +9,7 @@ from jem.base.typing import (
     VariableRegistry,
 )
 
-from typeguard import typechecked, check_type
+from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
 
@@ -87,24 +87,9 @@ class BasicForcingMapper:
         self.forcing_mappings = forcing_mappings or {}
         self.regridders = regridders or {}
 
-        self.component_forcing_classes = {
-            component_name: component.component_forcing_class
-            for component_name, component in components.items()
-        }
-
-        self.component_state_variable_registries = {
-            component_name: component.state_variable_registry
-            for component_name, component in components.items()
-        }
-
-        self.component_forcing_variable_registries = {
-            component_name: component.forcing_variable_registry
-            for component_name, component in components.items()
-        }
-      
         # validate
-        check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
-        check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
+        #check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
+        #check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
  
         # Build connectivity graph
         self.connections = self._build_connections()
@@ -123,6 +108,7 @@ class BasicForcingMapper:
     def map_forcings(
         self,
         component_states: Dict[str, State],
+        component_deriveds: Dict[str, State],
         component_forcings: Dict[str, Forcing],
     ) -> Dict[str, Forcing]:
         """Map fluxes and scalars between components.
@@ -137,15 +123,18 @@ class BasicForcingMapper:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
-        for (
-            target_component_name,
-            target_component_forcing_class,
-        ) in self.component_forcing_classes.items():
+        component_states_and_deriveds = {
+            component_name: {
+                "state": component_states[component_name],
+                "derived": component_deriveds[component_name],
+            } for component_name in component_states.keys()
+        }
+        for target_component_name in self.involved_component_names:
             forcing = component_forcings[target_component_name]
             for (
                 source_component_name,
-                source_component_state,
-            ) in component_states.items():
+                source_component_state_and_derived,
+            ) in component_states_and_deriveds.items():
                 if source_component_name == target_component_name:
                     continue
 
@@ -161,7 +150,7 @@ class BasicForcingMapper:
                 # Apply mappings and regridders
                 for source_variable_name, target_variable_name in mapping.items():
                     source_variable = strget(
-                        source_component_state, source_variable_name
+                        source_component_state_and_derived, source_variable_name
                     )
                     # Apply regridder if defined
                     regrid_key = (
@@ -190,6 +179,7 @@ class BasicForcingMapper:
     def couple_components(
         self,
         component_forcings: Dict[str, type],
+        component_deriveds: Dict[str, type],
         component_states: Dict[str, type],
     ) -> Dict[str, type]:
         """Couple components by remapping forcings with conservation checks.
@@ -201,7 +191,7 @@ class BasicForcingMapper:
             A dictionary of forcing of each components
         """
 
-        component_forcings = self.map_forcings(component_forcings, component_states)
+        component_forcings = self.map_forcings(component_forcings, component_deriveds, component_states)
 
         # Optional: Add conservation checks here
         # self._check_conservation(output_fluxes, input_fluxes)
@@ -278,23 +268,6 @@ class BasicForcingMapper:
             regridder: A :code:`Transformer` that will be used to regrid the input.
         """
 
-        try:
-            self.component_state_variable_registries[source_component_name][source_variable_name]
-        except KeyError as e:
-            print(f"Error: Cannot find specified source component ({str(source_component_name)}) or its variable ({str(source_variable_name)})")
-            raise e
-
-        try:
-            self.component_forcing_variable_registries[target_component_name][target_variable_name]
-        except KeyError as e:
-            print(f"Error: Cannot find specified target component ({str(target_component_name)}) or its variable ({str(target_variable_name)})")
-            raise e
-
-        #regridder.validate_metadata(
-        #    self.component_state_variable_registries[source_component_name][source_variable_name],
-        #    self.component_forcing_variable_registries[target_component_name][target_variable_name],
-        #)
-        
         self.regridders[
             (
                 source_component_name,

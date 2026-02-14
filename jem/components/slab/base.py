@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any
 from jem.base.typing import VariableRegistry
 
-import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
@@ -175,17 +174,16 @@ class SlabModelBase(ABC):
         """
         pass
 
-    def generate_step_function(self, jitted: bool = True):
+    def generate_step_function(self):
         """Generate the step function for time integration.
 
         Args:
-            jitted: If True, JIT-compile the step function
 
         Returns:
             Step function with signature (state, forcing, t) -> (new_state, predictions)
         """
         step_fn = self._create_step_function_body()
-        return jax.jit(step_fn) if jitted else step_fn
+        return step_fn
 
     @abstractmethod
     def _create_step_function_body(self):

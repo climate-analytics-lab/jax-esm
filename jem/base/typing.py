@@ -13,23 +13,23 @@ ComponentName = str
 Pytree = Any
 Workflow = Pytree
 State = Pytree
+Derived = Pytree
 Forcing = Pytree
 SimulationTime = float
 
 History = TypeVar('History')
-JittableFlag = bool
 
-InitializeFunction = Callable[[], tuple[State, Forcing]]
+InitializeFunction = Callable[[], tuple[State, Derived, Forcing]]
 
 StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
-StepFunctionGenerator = Callable[[JittableFlag], StepFunction]
+StepFunctionGenerator = Callable[[], StepFunction]
 TrajectoryFunction = Callable[[Pytree], tuple[Pytree, History]]
 
 HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
-ForcingMapperFunction = Callable[ [ Dict[str, Forcing], Dict[str, State] ], Dict[str, Forcing] ]
+ForcingMapperFunction = Callable[ [ Dict[str, State], Dict[str, Derived], Dict[str, Forcing] ], Dict[str, Forcing] ]
 
 
 VariableName = str
@@ -42,10 +42,6 @@ VariableRegistry = Dict[VariableName, VariableMetadata]
 @dataclass
 class JEMComponent:
     # mandatory
-    component_state_class : State
-    component_forcing_class : Forcing
-    state_variable_registry : VariableRegistry
-    forcing_variable_registry : VariableRegistry
     initialize : InitializeFunction
     generate_step_function : StepFunctionGenerator
     predictions_to_xarray : HistoryToXarray

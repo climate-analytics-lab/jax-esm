@@ -264,7 +264,7 @@ class SlabLandModel(SlabModelBase):
             "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
             "snowd" : self.snowd_clim[:, :, init_time_idx],
             "soilw" : self.soilw_clim[:, :, init_time_idx],
-        }), self.component_forcing_class.zeros()
+        }), {}, self.component_forcing_class.zeros()
     
     def _idealized_land_temperature(self, shape: Tuple[int, int]) -> jnp.ndarray:
         """Create idealized land temperature climatology.
@@ -390,7 +390,7 @@ class SlabLandModel(SlabModelBase):
             })
             
             # Return new state and predictions for output
-            return new_state, stack_objects([dict(
+            return new_state, {}, stack_objects([dict(
                 state=new_state,
                 forcing=forcing,
             )])
