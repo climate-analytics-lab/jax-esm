@@ -155,8 +155,7 @@ class Coupler:
                     pass
                 else:
                     raise Exception(f"Unknown error: Cannot find `{name}` in components or forcing_mappers.")        
-                updated_carry_structure = tree_structure(carry)
-                if input_carry_structure != updated_carry_structure:
+                if input_carry_structure != tree_structure(carry):
                     print(f"Warning: carry value structure changed after workflow element `{name:s}` is used.")
 
             predictions = {
