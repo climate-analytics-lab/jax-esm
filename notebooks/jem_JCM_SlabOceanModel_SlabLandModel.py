@@ -132,7 +132,7 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # Obtain initial condition
 initial_coupled_state_forcing = model.initialize()
 
-print(initial_coupled_state_forcing["ocn"][0]["mixed_layer_depth"])
+print(initial_coupled_state_forcing["ocn"]["state"]["mixed_layer_depth"])
 
 print("Model state:")
 tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
