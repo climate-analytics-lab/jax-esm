@@ -15,6 +15,7 @@ Workflow = Pytree
 State = Pytree
 Derived = Pytree
 Forcing = Pytree
+CoupledCarry = Dict[ComponentName, Dict[str, State | Derived | Forcing]]
 SimulationTime = float
 
 History = TypeVar('History')
@@ -29,7 +30,8 @@ HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
-ForcingMapperFunction = Callable[ [ Dict[str, State], Dict[str, Derived], Dict[str, Forcing] ], Dict[str, Forcing] ]
+
+ForcingMapperFunction = Callable[ [ CoupledCarry ], CoupledCarry ]
 
 
 VariableName = str
