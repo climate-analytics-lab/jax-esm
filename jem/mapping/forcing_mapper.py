@@ -4,8 +4,7 @@ from jem.base.typing import (
     Array,
     JEMComponentType,
     JEMForcingMapperType,
-    State,
-    Forcing,
+    CoupledCarry,
     VariableRegistry,
 )
 
@@ -107,10 +106,8 @@ class BasicForcingMapper:
     @typechecked
     def map_forcings(
         self,
-        component_states: Dict[str, State],
-        component_deriveds: Dict[str, State],
-        component_forcings: Dict[str, Forcing],
-    ) -> Dict[str, Forcing]:
+        coupled_carry: CoupledCarry,
+    ) -> CoupledCarry:
         """Map fluxes and scalars between components.
 
         Args:
@@ -123,21 +120,32 @@ class BasicForcingMapper:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
+
+        if not set(self.involved_component_names).issubset(set(coupled_carry.keys())):
+            raise Exception(
+                f"Not all involved_component_names ({str(self.involved_component_names)})"
+                f"can be found in coupled_carry ({str(list(coupled_carry.keys()))})"
+            )
+
+        # Crop state and derived out. 
         component_states_and_deriveds = {
             component_name: {
-                "state": component_states[component_name],
-                "derived": component_deriveds[component_name],
-            } for component_name in component_states.keys()
+                "state": component_carry["state"],
+                "derived": component_carry["derived"],
+            } for component_name, component_carry in coupled_carry.items()
         }
-        for target_component_name in self.involved_component_names:
-            forcing = component_forcings[target_component_name]
-            for (
-                source_component_name,
-                source_component_state_and_derived,
-            ) in component_states_and_deriveds.items():
+
+        # Loop through each involved component. 
+        # If there are N component involves, this loop is N by N.
+        # The combination is not valid when source == target
+        for target_component_name in coupled_carry.keys():
+            target_forcing = coupled_carry[target_component_name]["forcing"]
+            for source_component_name in coupled_carry.keys():
                 if source_component_name == target_component_name:
                     continue
-
+                
+                source_component_state_and_derived = component_states_and_deriveds[source_component_name]
+                
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
                     (source_component_name, target_component_name), {}
@@ -146,7 +154,7 @@ class BasicForcingMapper:
                     print(
                         f"Notice: Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
                     )
-
+                
                 # Apply mappings and regridders
                 for source_variable_name, target_variable_name in mapping.items():
                     source_variable = strget(
@@ -167,14 +175,14 @@ class BasicForcingMapper:
                         f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
                     )
                     strset(
-                        forcing,
+                        target_forcing,
                         target_variable_name,
                         source_variable,
                     )
-
-            component_forcings[target_component_name] = forcing
-
-        return component_forcings
+            # update forcing
+            coupled_carry[target_component_name]["forcing"] = target_forcing
+        
+        return coupled_carry
 
     def couple_components(
         self,
