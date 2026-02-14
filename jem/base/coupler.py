@@ -152,7 +152,6 @@ class Coupler:
                     unstacked_predictions[name].append(_predictions)
                 elif name in self.forcing_mappers:
                     carry = self.forcing_mappers[name].map_forcings(carry)
-                    pass
                 else:
                     raise Exception(f"Unknown error: Cannot find `{name}` in components or forcing_mappers.")        
                 if input_carry_structure != tree_structure(carry):
