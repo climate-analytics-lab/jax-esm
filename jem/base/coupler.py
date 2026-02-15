@@ -2,6 +2,7 @@
 
 import time
 from typing import Any, Dict, Optional, Callable
+import typeguard 
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
@@ -156,6 +157,23 @@ class Coupler:
 
         return jax.jit(step_function) if jitted else step_function
 
+    def run(
+        self,
+        workflow: Workflow,
+        iterations: int,
+        jitted: bool = True,
+        show_progress: bool = True,
+        tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+    ) -> TrajectoryFunction:
+        initial_carry = self.initialize()
+        return initial_carry, *self.generate_trajectory_function(
+            workflow=workflow,
+            iterations=iterations,
+            jitted=jitted,
+            show_progress=show_progress,
+            tqdm_kwargs=tqdm_kwargs,
+        )(initial_carry)
+
     def generate_trajectory_function(
         self,
         workflow: Workflow,
@@ -214,7 +232,7 @@ class Coupler:
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
-            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component", "predictions_to_xarray", "get_info"], verbose=True)
         )
 
         self._validate_components()
@@ -240,12 +258,12 @@ class Coupler:
             name: Forcing mapper name
             mapper: Forcing mapper
         """
-        self.mappers[name] = JEMMapper(
-            raw_mapper = mapper,
-            name = name,
-            **resolve_interface(mapper, reference_class=JEMMapper, skip=["name", "raw_mapper"], verbose=True)
-        )
+        try:
+            typeguard.check_type(mapper, JEMMapper)
+        except typeguard.TypeCheckError as e:
+            raise typeguard.TypeCheckError(f"The mapper {name} is not a valid JEMMapper.")
         
+        self.mappers[name] = mapper
 
     def remove_mapper(self, name: str) -> None:
         """Remove a forcing mapper from the coupler.
@@ -276,11 +294,23 @@ class Coupler:
         }
 
     def get_info(self):
+        component_info = {}
+        mapper_info = {}
+
+        for component_name, component in self.components.items():
+            if hasattr(component, "get_info"):
+                component_info[component_name] = component.get_info()
+            else:
+                component_info[component_name] = { "message" : "get_info not provided." }
+
+        for name, mapper in self.mappers.items():
+            if hasattr(mapper, "get_info"):
+                mapper_info[name] = mapper.get_info()
+            else:
+                mapper_info[name] = { "message" : "get_info not provided." }
         return {
-            "component_info" : {
-                component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
-            },
-            "mappers" : "None" if self.mappers is None else { name: mapper.get_info() for name, mapper in self.mappers.items() } ,
+            "component_info" : component_info,
+            "mappers" : mapper_info,
         }
 
     def _validate_components(self):
