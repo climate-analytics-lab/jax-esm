@@ -23,9 +23,10 @@ JEM expects each of the component to provide
 What is a Mapper?
 -----------------
 Mapper is a callable that modifies a :code:`CoupledCarray` and returns the
-result. While JEM provides a default mapper `jem.mapping.mapper.BasicMapper`.
-As long as the signature matches, JEM will any user-defined mapper. Therefore,
-it allows users to do more sophisticated checks.
+result, i.e., :code:`Callabel[[CoupledCarry], CoupledCarry]`. While JEM 
+provides a default mapper `jem.mapping.mapper.BasicMapper`. As long as the
+signature matches, JEM will any user-defined mapper. Therefore, it allows users
+to do more sophisticated checks.
 
 Adapting a Model to be JEM Compatible
 -------------------------------------
