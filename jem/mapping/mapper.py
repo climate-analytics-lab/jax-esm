@@ -4,8 +4,8 @@ from collections.abc import Sequence, Mapping
 
 from jem.base.typing import (
     Array,
-    JEMComponentType,
-    JEMMapperType,
+    JEMComponent,
+    JEMMapper,
     CoupledCarry,
     VariableRegistry,
 )
@@ -13,6 +13,8 @@ from jem.base.typing import (
 from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
+JEMMapperType = JEMMapper | Any
+JEMComponentType = JEMComponent | Any
 
 class BasicMapper:
     """Manages flux exchange and boundary condition translation between components.

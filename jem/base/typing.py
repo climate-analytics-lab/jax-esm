@@ -74,5 +74,4 @@ class JEMMapper:
         # This is the same as `self.raw_mapper(carry)`
         return self.__call__(carry)
  
-JEMMapperType = JEMMapper | Any
-JEMComponentType = JEMComponent | Any
+
