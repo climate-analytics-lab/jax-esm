@@ -4,24 +4,19 @@ import xarray as xr
 from dataclasses import dataclass
 from typeguard import typechecked
 
-Array = jnp.ndarray
-ArrayOrArrayTuple = Array | tuple[Array, ...] # type: ignore
-Numeric = float | int | Array
+Pytree = Any
 
 ComponentName = str
-
-Pytree = Any
-Workflow = Pytree
+Workflow = Pytree  # Any nested sequence of ComponentName
 ComponentCarry = Pytree
 CoupledCarry = Dict[ComponentName, ComponentCarry]
 SimulationTime = float
 Predictions = Pytree
 
-
 InitializeFunction = Callable[[], ComponentCarry]
 StepFunction = Callable[[ComponentCarry, SimulationTime], tuple[ComponentCarry, Predictions]]
 StepFunctionGenerator = Callable[[], StepFunction]
-MapperFunction = Callable[ [ CoupledCarry ], CoupledCarry ]
+MapperFunction = Callable[[ CoupledCarry ], CoupledCarry ]
 TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, Predictions]]
 PredictionsToXarrayFunction = Callable[[Predictions], xr.Dataset]
 GetInfoFunction = Callable[[], Dict]
@@ -29,17 +24,17 @@ GetInfoFunction = Callable[[], Dict]
 VariableName = str
 VariableShape = tuple[int, ...]
 VariableDimension = tuple[str, ...]
-VariableMetadata = tuple[ VariableShape, Optional[VariableDimension]]
+VariableMetadata = tuple[VariableShape, Optional[VariableDimension]]
 VariableRegistry = Dict[VariableName, VariableMetadata]
 
 @typechecked
 @dataclass
 class JEMComponent:
     # mandatory
-    initialize : InitializeFunction
-    generate_step_function : StepFunctionGenerator
-    predictions_to_xarray : PredictionsToXarrayFunction
-    get_info : GetInfoFunction
+    initialize: InitializeFunction
+    generate_step_function: StepFunctionGenerator
+    predictions_to_xarray: PredictionsToXarrayFunction
+    get_info: GetInfoFunction
 
     # jem-internal
     raw_component: Any
@@ -54,7 +49,7 @@ class JEMMapper:
 
     # mandatory
     involved_component_names: List[str]
-    get_info : GetInfoFunction
+    get_info: GetInfoFunction
     __call__: MapperFunction
 
     # =====================================================
