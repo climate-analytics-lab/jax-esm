@@ -72,6 +72,8 @@ class Spring:
             return carry, dict(x=new_x, v=new_v)
         return step_function
 
+# %% [markdown]
+# # Define Interaction
 
 # %%
 interaction_strength = 1.0
@@ -81,6 +83,8 @@ def mapper(coupled_carry):
     coupled_carry["spring2"].f = - f
     return coupled_carry
 
+# %% [markdown]
+# # Create Model
 total_time = 50
 dt = 0.01
 spring1 = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt)
@@ -90,6 +94,8 @@ model = Coupler(
     mappers=dict(mapper=mapper),
 )
 
+# %% [markdown]
+# # Run Model
 # %%
 iterations = int(total_time / dt)
 initial_coupled_carry, final_coupled_carry, predictions = model.run(
