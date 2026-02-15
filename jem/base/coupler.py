@@ -14,6 +14,7 @@ from jem.base.typing import (
     TrajectoryFunction,
     CoupledCarry,
 )
+import jem.utils.tree_tools as tree_tools
 
 import jax
 import jax.numpy as jnp
@@ -164,8 +165,17 @@ class Coupler:
         jitted: bool = True,
         show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+        verbose:bool = True,
     ) -> TrajectoryFunction:
+        
         initial_carry = self.initialize()
+
+        if verbose:
+            print("Model info: ") 
+            tree_tools.print_tree(self.get_info(), root="Model")
+            print("Initial Carry: ") 
+            tree_tools.print_tree(initial_carry, root="CoupledCarry")
+
         return initial_carry, *self.generate_trajectory_function(
             workflow=workflow,
             iterations=iterations,
