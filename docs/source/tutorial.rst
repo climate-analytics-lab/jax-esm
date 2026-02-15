@@ -107,3 +107,55 @@ Adapting a Model to be JEM Compatible
 A Coupled Example
 -----------------
 
+.. code-block:: python
+
+    import jax
+    import jax.numpy as jnp
+    from jax.typing import ArrayLike
+    from dataclasses import dataclass
+    import tree_math
+
+    from jem.base.coupler import Coupler
+    import jem.utils.tree_tools as tree_tools
+
+    @tree_math.struct
+    @dataclass
+    class SpringCarry:
+        x: ArrayLike  # position
+        v: ArrayLike  # velocity
+        m: ArrayLike  # mass
+        k: ArrayLike  # spring coefficient
+        f: ArrayLike  # external force
+
+    class Spring:
+
+        def __init__(self, init_x, init_v, k, m, dt):
+            self.init_x = init_x
+            self.init_v = init_v
+            self.k = k
+            self.m = m
+            self.dt = dt
+
+        def initialize(self):
+            return SpringCarry(
+                x = jnp.array(self.init_x),
+                v = jnp.array(self.init_v),
+                m = jnp.array(self.m),
+                k = jnp.array(self.k),
+                f = jnp.array(0),
+            )
+
+        def generate_step_function(self):
+            dt = self.dt
+            def step_function(carry, step):
+                """Integrates one time step of a harmonic oscillator."""
+
+                # Physics: a = -k/m * x + f
+                acceleration = - (carry.k * carry.x + carry.f) / carry.m
+
+                # Update state (Semi-implicit Euler for better stability)
+                new_v = carry.v + acceleration * dt
+                new_x = carry.x + new_v * dt
+
+                carry.v = new_v
+                carry.x = new_x
