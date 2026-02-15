@@ -154,10 +154,7 @@ class Coupler:
 
             return carry, predictions
 
-        if jitted:
-            step_function = jax.jit(step_function)
-
-        return step_function
+        return jax.jit(step_function) if jitted else step_function
 
     def generate_trajectory_function(
         self,
