@@ -30,7 +30,6 @@ sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
 # %%
 import jax_datetime as jdt
 from jem.components import SlabAtmosphereModel, SlabOceanModel
-from jem.mapping import IdentityRegridder
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
@@ -66,7 +65,8 @@ components = dict(
 
 # %%
 # Creating regridders and mapping
-identity_regridder = IdentityRegridder()
+def identity_regridder(x):
+    return x
 mapper = BasicMapper(components=components)
 mapper.add_mapping(
     source = ("atm", "derived.internal_total_heat_flux"),

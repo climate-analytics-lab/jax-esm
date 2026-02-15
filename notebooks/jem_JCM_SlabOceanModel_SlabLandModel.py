@@ -36,7 +36,6 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
 from jem.components import JCM, SlabLandModel, SlabOceanModel
-from jem.mapping import IdentityRegridder
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
@@ -90,27 +89,27 @@ components = dict(
 
 # %%
 # Creating regridders and mapping
-identity_regridder = IdentityRegridder()
+identity = lambda x: x
 mapper = BasicMapper(components=components)
 mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
-    regridder = identity_regridder,
+    regridder = identity,
 )
 mapper.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
     target = ("atm", "forcing.sea_surface_temperature"),
-    regridder = identity_regridder,
+    regridder = identity,
 )
 mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("lnd", "forcing.total_heat_flux"),
-    regridder = identity_regridder,
+    regridder = identity,
 )
 mapper.add_mapping(
     source = ("lnd", "state.land_surface_temperature"),
     target = ("atm", "forcing.stl_am"),
-    regridder = identity_regridder,
+    regridder = identity,
 )
 
 # %% [markdown]
