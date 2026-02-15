@@ -1,24 +1,25 @@
 """Flux exchange and boundary condition translation utilities."""
 from typing import Any, Dict, List, Optional, Tuple, Callable
+from collections.abc import Sequence, Mapping
+from jax.typing import ArrayLike as Array
 from jem.base.typing import (
-    Array,
-    JEMComponentType,
-    JEMForcingMapperType,
-    State,
-    Forcing,
+    JEMComponent,
+    MapperFunction,
+    CoupledCarry,
     VariableRegistry,
 )
 
-from typeguard import typechecked, check_type
+from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
+JEMComponentType = JEMComponent | Any
 
-class BasicForcingMapper:
+class BasicMapper:
     """Manages flux exchange and boundary condition translation between components.
     
     Attributes:
         component_names: List of component names
-        forcing_mappings: Optional mapping of flux names between components.
+        mappings: Optional mapping of flux names between components.
             Keys are (source, target) component pairs, values are dicts 
             mapping source flux names to target names.
         regridders: Optional regridders for fluxes.
@@ -26,7 +27,7 @@ class BasicForcingMapper:
             functions. If the variable is nested in additional data structure, variable_name
             can be a dotted representation, such as "surface.sea_surface_temperature", 
             "radiation.longwave_radiation", ... etc. To access the structure, if the underlying
-            data struct is a dict, ForcingMapper will use :code:`__getitem__`; if the data struct
+            data struct is a dict, Mapper will use :code:`__getitem__`; if the data struct
             is not a dict, :code:`getattr` will be used.
 
     Example:
@@ -35,20 +36,20 @@ class BasicForcingMapper:
        :linenos:
 
        from jem.coupling.regridder import IdentityTransformer
-       from jem.coupling.forcing_mapper import ForcingMapper
+       from jem.coupling.mapper import Mapper
        
        # ... construct models ...
        atm_model = ... 
        ocn_model = ...
        
 
-       forcing_mapper = ForcingMapper(
+       mapper = Mapper(
            components=dict(
                atm=atm_model,
                ocn=ocn_model,
            )
        )
-       forcing_mapper.add_forcing_mapping(
+       mapper.add_mapping(
            source = ("atm", "phydata.total_heat_flux"),
            target = ("ocn", "flux.total_heat_flux"),
            regridder = IdentityTransformer(
@@ -56,7 +57,7 @@ class BasicForcingMapper:
                target_grid=ocn_model.grid,
            )
        )
-       forcing_mapper.add_forcing_mapping(
+       mapper.add_mapping(
            source = ("ocn", "prog.sea_surface_temperature"),
            target = ("atm", "scalar.sea_surface_temperature"),
            regridder = IdentityTransformer(
@@ -67,30 +68,23 @@ class BasicForcingMapper:
 
     """
     components: Dict[str, JEMComponentType]
-    forcing_mappings: Dict[Tuple[str, str], Dict[str, str]]
+    mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, JEMForcingMapperType]
-    component_state_variable_registries: Dict[str, VariableRegistry]
-    component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
 
     @typechecked
     def __init__(
         self,
         components: Dict[str, JEMComponentType],
-        forcing_mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
+        mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
         regridders: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
         """Initialize flux exchanger."""
         self.components = components
         self.component_names = list(self.components.keys())
-        self.forcing_mappings = forcing_mappings or {}
+        self.mappings = mappings or {}
         self.regridders = regridders or {}
 
-        # validate
-        #check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
-        #check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
- 
         # Build connectivity graph
         self.connections = self._build_connections()
 
@@ -98,19 +92,17 @@ class BasicForcingMapper:
         """Build connectivity graph between components."""
         connections: Dict[str, List[str]] = {name: [] for name in self.component_names}
 
-        for source, target in self.forcing_mappings.keys():
+        for source, target in self.mappings.keys():
             if source in connections:
                 connections[source].append(target)
 
         return connections
 
     @typechecked
-    def map_forcings(
+    def __call__(
         self,
-        component_states: Dict[str, State],
-        component_deriveds: Dict[str, State],
-        component_forcings: Dict[str, Forcing],
-    ) -> Dict[str, Forcing]:
+        coupled_carry: CoupledCarry,
+    ) -> CoupledCarry:
         """Map fluxes and scalars between components.
 
         Args:
@@ -123,34 +115,37 @@ class BasicForcingMapper:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
-        component_states_and_deriveds = {
-            component_name: {
-                "state": component_states[component_name],
-                "derived": component_deriveds[component_name],
-            } for component_name in component_states.keys()
-        }
-        for target_component_name in self.involved_component_names:
-            forcing = component_forcings[target_component_name]
-            for (
-                source_component_name,
-                source_component_state_and_derived,
-            ) in component_states_and_deriveds.items():
+
+        if not set(self.involved_component_names).issubset(set(coupled_carry.keys())):
+            raise Exception(
+                f"Not all involved_component_names ({str(self.involved_component_names)})"
+                f"can be found in coupled_carry ({str(list(coupled_carry.keys()))})"
+            )
+
+        # Loop through each involved component. 
+        # If there are N component involves, this loop is N by N.
+        # The combination is not valid when source == target
+        for target_component_name in coupled_carry.keys():
+            target_carry = coupled_carry[target_component_name]
+            for source_component_name in coupled_carry.keys():
                 if source_component_name == target_component_name:
                     continue
-
+                
+                source_component_carry = coupled_carry[source_component_name]
+                
                 # Get mapping of variable names for this source-target pair
-                mapping = self.forcing_mappings.get(
+                mapping = self.mappings.get(
                     (source_component_name, target_component_name), {}
                 )
                 if not mapping:
                     print(
                         f"Notice: Mapping for {source_component_name:s} -> {target_component_name:s} does not exist."
                     )
-
+                
                 # Apply mappings and regridders
                 for source_variable_name, target_variable_name in mapping.items():
                     source_variable = strget(
-                        source_component_state_and_derived, source_variable_name
+                        source_component_carry, source_variable_name
                     )
                     # Apply regridder if defined
                     regrid_key = (
@@ -167,35 +162,14 @@ class BasicForcingMapper:
                         f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
                     )
                     strset(
-                        forcing,
+                        target_carry,
                         target_variable_name,
                         source_variable,
                     )
-
-            component_forcings[target_component_name] = forcing
-
-        return component_forcings
-
-    def couple_components(
-        self,
-        component_forcings: Dict[str, type],
-        component_states: Dict[str, type],
-    ) -> Dict[str, type]:
-        """Couple components by remapping forcings with conservation checks.
-
-        Args:
-            states: Current states of all components
-
-        Returns:
-            A dictionary of forcing of each components
-        """
-
-        component_forcings = self.map_forcings(component_forcings, component_states)
-
-        # Optional: Add conservation checks here
-        # self._check_conservation(output_fluxes, input_fluxes)
-
-        return component_forcings
+            # update carry
+            coupled_carry[target_component_name] = target_carry
+        
+        return coupled_carry
 
     def _check_conservation(
         self,
@@ -208,7 +182,7 @@ class BasicForcingMapper:
         pass
 
     @typechecked
-    def add_forcing_mapping(
+    def add_mapping(
         self,
         source: Tuple[str, str],
         target: Tuple[str, str],
@@ -223,7 +197,7 @@ class BasicForcingMapper:
         """
         source_component_name, source_variable_name = source
         target_component_name, target_variable_name = target
-        self.forcing_mappings[(source_component_name, target_component_name)] = {
+        self.mappings[(source_component_name, target_component_name)] = {
             source_variable_name: target_variable_name
         }
         self.connections = self._build_connections()
@@ -290,7 +264,7 @@ class BasicForcingMapper:
 
 
         return {
-            "forcing_mappings": self.forcing_mappings, 
+            "mappings": self.mappings, 
             "regridders" : regridder_info,
         }
 
@@ -299,7 +273,9 @@ def strget(obj, flattened_variable_name):
     splitted_names = flattened_variable_name.split(".")
     target = obj
     for splitted_name in splitted_names:
-        if isinstance(target, dict):
+        if isinstance(target, Sequence):
+            target = target[int(splitted_name)]
+        elif isinstance(target, Mapping):
             target = target[splitted_name]
         else:
             target = getattr(target, splitted_name)
@@ -309,15 +285,18 @@ def strget(obj, flattened_variable_name):
 
 def strset(obj, flattened_variable_name, value):
     splitted_names = flattened_variable_name.split(".")
-
-    target = obj
-    for splitted_name in splitted_names[:-1]:
-        if isinstance(target, dict):
-            target = target[splitted_name]
-        else:
-            target = getattr(target, splitted_name)
-
-    if isinstance(target, dict):
+    target = strget(obj, ".".join(splitted_names[:-1]))
+    if isinstance(target, Sequence):
+        try:
+            target[int(splitted_names[-1])] = value
+        except (TypeError, IndexError) as e:
+            print(f"Cannot update: {flattened_variable_name}. Maybe the leaf is not mutable?")
+            raise e
+    elif isinstance(target, Mapping):
+        if splitted_names[-1] not in target:
+            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
         target[splitted_names[-1]] = value
     else:
+        if not hasattr(target, splitted_names[-1]):
+            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
         setattr(target, splitted_names[-1], value)

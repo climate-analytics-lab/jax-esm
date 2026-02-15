@@ -2,20 +2,22 @@
 
 import time
 from typing import Any, Dict, Optional, Callable
+import typeguard 
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
     JEMComponent,
-    JEMForcingMapper,
+    MapperFunction,
     Workflow,
     Pytree,
-    History,
+    Predictions,
     TrajectoryFunction,
+    CoupledCarry,
 )
 
 import jax
 import jax.numpy as jnp
-
+from jax.tree_util import tree_structure
 from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
 
 from jax_tqdm import scan_tqdm
@@ -53,19 +55,19 @@ class Coupler:
         components:
             A dict whose key is the name of the component and the value is the
             instantiated component.
-        forcing_mappers: 
-            A dict whose key is the name of :code:`JEMForcingMapper`-compatible
+        mappers: 
+            A dict whose key is the name of :code:`MapperFunction`-compatible
             object that is responsible for sending information between 
             components.
     """
    
     components: Dict[str, JEMComponent]
-    forcing_mappers: Dict[str, JEMForcingMapper]
+    mappers: Dict[str, MapperFunction]
     
     def __init__(
         self,
         components: Optional[Dict[str, Any]] = None,
-        forcing_mappers: Optional[Dict[str, Any]] = None,
+        mappers: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the coupler.
 
@@ -82,13 +84,13 @@ class Coupler:
         for name, component in self.components.items():
             self.add_component(name, component)
 
-        self.forcing_mappers = forcing_mappers or {}
-        for name, forcing_mapper in self.forcing_mappers.items():
-            self.add_forcing_mapper(name, forcing_mapper)
+        self.mappers = mappers or {}
+        for name, mapper in self.mappers.items():
+            self.add_mapper(name, mapper)
 
     def initialize(
         self,
-    ) -> Dict[str, tuple[type, type]]:
+    ) -> CoupledCarry:
         """Initialize all components.
 
         Args:
@@ -97,14 +99,10 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
-        initial_value = {}
-        for component_name, component in self.components.items():
-            _state_derived_forcing = component.initialize()
-            if len(_state_derived_forcing) != 3:
-                raise ValueError(f"Component `{component_name:s}`'s initialize function needs 3 return values (state, derived and forcing).")
-            initial_value[component_name] = _state_derived_forcing
-        return initial_value
-
+        return {
+            component_name : component.initialize()
+            for component_name, component in self.components.items()
+        }
 
     def generate_step_function(
         self,
@@ -129,45 +127,52 @@ class Coupler:
             print("Flattened workflow: ", ", ".join(flattened_workflow))
         
         # Get step functions of each component
-        component_step_functions = {
-            component_name: component.generate_step_function(jitted=jitted)  # type: ignore
-            for component_name, component in self.components.items()
-        }
+        component_step_functions = {}
+        for component_name, component in self.components.items():
+            _component_step_function = component.generate_step_function()
+            if jitted:
+                _component_step_function = jax.jit(_component_step_function)
+            component_step_functions[component_name] = _component_step_function
 
-        def step_function(carry, step):
-
-            states = carry["states"]
-            forcings = carry["forcings"]
-            deriveds = carry["deriveds"]
-        
-            unstacked_predictions = { component_name : [] for component_name in self.components.keys() }
-        
+        def step_function(carry: CoupledCarry, step):
+            _unstacked_predictions = { component_name : [] for component_name in self.components.keys() } # type: ignore
+            input_carry_structure = tree_structure(carry)
             for name in flattened_workflow:
-                if name in self.components: 
-                    states[name], deriveds[name], _predictions = component_step_functions[name](states[name], forcings[name], step)
-                    unstacked_predictions[name].append(_predictions)
-                elif name in self.forcing_mappers:
-                    forcing_mapper = self.forcing_mappers[name]
-                    sub_states = { component_name : states[component_name] for component_name in forcing_mapper.involved_component_names }
-                    sub_deriveds = { component_name : deriveds[component_name] for component_name in forcing_mapper.involved_component_names }
-                    sub_forcings = { component_name : forcings[component_name] for component_name in forcing_mapper.involved_component_names }
-                    sub_forcings = forcing_mapper.map_forcings(sub_states, sub_deriveds, sub_forcings)
-                    for name in sub_forcings.keys():
-                        forcings[name] = sub_forcings[name]
+                if name in self.components:
+                    carry[name], _predictions = component_step_functions[name](carry[name], step)
+                    _unstacked_predictions[name].append(_predictions)
+                elif name in self.mappers:
+                    carry = self.mappers[name](carry)
                 else:
-                    raise Exception(f"Unknown error: Cannot find `{name}` in components or forcing_mappers.")        
+                    raise Exception(f"Unknown error: Cannot find `{name}` in components or mappers.")        
+                if input_carry_structure != tree_structure(carry): # type: ignore
+                    print(f"Warning: carry value structure changed after workflow element `{name:s}` is used.")
 
             predictions = {
-                name : unwrap_leading_dims(stack_objects(unstacked_predictions[name]), first_n_dim=2)
-                for name in unstacked_predictions.keys()
+                name : unwrap_leading_dims(stack_objects(_unstacked_predictions[name]), first_n_dim=2)
+                for name in _unstacked_predictions.keys()
             }
-            
-            return dict(states=states, deriveds=deriveds, forcings=forcings), predictions
 
-        if jitted:
-            step_function = jax.jit(step_function)
+            return carry, predictions
 
-        return step_function
+        return jax.jit(step_function) if jitted else step_function
+
+    def run(
+        self,
+        workflow: Workflow,
+        iterations: int,
+        jitted: bool = True,
+        show_progress: bool = True,
+        tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+    ) -> TrajectoryFunction:
+        initial_carry = self.initialize()
+        return initial_carry, *self.generate_trajectory_function(
+            workflow=workflow,
+            iterations=iterations,
+            jitted=jitted,
+            show_progress=show_progress,
+            tqdm_kwargs=tqdm_kwargs,
+        )(initial_carry)
 
     def generate_trajectory_function(
         self,
@@ -198,18 +203,12 @@ class Coupler:
                 steps = tqdm(steps, **tqdm_kwargs)
 
         def trajectory_function(
-            initial_coupled_state_derived_forcing: Dict[str, tuple[type, type, type]],
-        ) -> tuple[Pytree, History]:
+            initial_coupled_carry: CoupledCarry,
+        ) -> tuple[Pytree, Predictions]:
 
-            initial_carry_value = dict(states={}, deriveds={}, forcings={})
-            for component_name, (_state, _derived, _forcing) in initial_coupled_state_derived_forcing.items():
-                initial_carry_value["states"][component_name] = _state
-                initial_carry_value["deriveds"][component_name] = _derived
-                initial_carry_value["forcings"][component_name] = _forcing
-            
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
-                initial_carry_value,
+                initial_coupled_carry,
                 xs=steps,
             )
             predictions = unwrap_leading_dims(predictions, first_n_dim=2)
@@ -233,7 +232,13 @@ class Coupler:
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
-            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component"], verbose=True)
+            **resolve_interface(
+                component,
+                reference_class=JEMComponent,
+                skip=["name", "raw_component"],
+                optional=["predictions_to_xarray", "get_info"],
+                verbose=True
+            )
         )
 
         self._validate_components()
@@ -249,31 +254,31 @@ class Coupler:
         
         self._validate_components()
 
-    def add_forcing_mapper(
+    def add_mapper(
         self,
         name: str,
-        forcing_mapper: Any,
+        mapper: Any,
     ) -> None:
         """Add a new forcing mapper to the coupler.
         Args:
             name: Forcing mapper name
-            forcing_mapper: Forcing mapper
+            mapper: Forcing mapper
         """
-        self.forcing_mappers[name] = JEMForcingMapper(
-            raw_forcing_mapper = forcing_mapper,
-            name = name,
-            **resolve_interface(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
-        )
+        #try:
+        #    typeguard.check_type(mapper, MapperFunction)
+        #except typeguard.TypeCheckError as e:
+        #    raise typeguard.TypeCheckError(f"The mapper {name} is not a valid MapperFunction.")
         
+        self.mappers[name] = mapper
 
-    def remove_forcing_mapper(self, name: str) -> None:
+    def remove_mapper(self, name: str) -> None:
         """Remove a forcing mapper from the coupler.
 
         Args:
             name: Forcing mapper name to remove
         """
-        if name in self.forcing_mappers:
-            del self.forcing_mappers[name]
+        if name in self.mappers:
+            del self.mappers[name]
 
 
     def predictions_to_xarray(
@@ -292,14 +297,27 @@ class Coupler:
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])
             for component_name, component in self.components.items()
+            if getattr(component, "predictions_to_xarray") is not None
         }
 
     def get_info(self):
+        component_info = {}
+        mapper_info = {}
+
+        for component_name, component in self.components.items():
+            if getattr(component, "get_info", None) is not None:
+                component_info[component_name] = component.get_info()
+            else:
+                component_info[component_name] = { "message" : "get_info not provided." }
+
+        for name, mapper in self.mappers.items():
+            if getattr(mapper, "get_info", None) is not None:
+                mapper_info[name] = mapper.get_info()
+            else:
+                mapper_info[name] = { "message" : "get_info not provided." }
         return {
-            "component_info" : {
-                component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
-            },
-            "forcing_mappers" : "None" if self.forcing_mappers is None else { name: forcing_mapper.get_info() for name, forcing_mapper in self.forcing_mappers.items() } ,
+            "component_info" : component_info,
+            "mappers" : mapper_info,
         }
 
     def _validate_components(self):
@@ -307,7 +325,7 @@ class Coupler:
 
     def _verify_name_uniqueness(self) -> None:
         
-        all_names = list(self.components.keys()) + list(self.forcing_mappers.keys())
+        all_names = list(self.components.keys()) + list(self.mappers.keys())
         counts = { name : 0 for name in all_names }
         for name in all_names:
             counts[name] += 1
@@ -325,7 +343,7 @@ class Coupler:
         for action in flattened_workflow:
             if not isinstance(action, str):
                 raise ValueError("Actions in the workflow have to be strings.")
-            if action not in self.components and action not in self.forcing_mappers:
+            if action not in self.components and action not in self.mappers:
                 raise ValueError(f"Action `{action:s}` does not map to any component or forcing mapper.")
         
 

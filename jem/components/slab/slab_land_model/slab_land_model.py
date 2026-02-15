@@ -258,13 +258,16 @@ class SlabLandModel(SlabModelBase):
         
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
-        return self.component_state_class.zeros().copy({
-            "land_surface_temperature" : init_T,
-            "sim_time" : 0,
-            "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
-            "snowd" : self.snowd_clim[:, :, init_time_idx],
-            "soilw" : self.soilw_clim[:, :, init_time_idx],
-        }), {}, self.component_forcing_class.zeros()
+        return dict(
+            state=self.component_state_class.zeros().copy({
+                "land_surface_temperature" : init_T,
+                "sim_time" : 0,
+                "heatflx" : jnp.zeros(D2_nodal_shape, dtype=jnp.float32),
+                "snowd" : self.snowd_clim[:, :, init_time_idx],
+                "soilw" : self.soilw_clim[:, :, init_time_idx],
+            }),
+            forcing=self.component_forcing_class.zeros()
+        )
     
     def _idealized_land_temperature(self, shape: Tuple[int, int]) -> jnp.ndarray:
         """Create idealized land temperature climatology.
@@ -313,7 +316,7 @@ class SlabLandModel(SlabModelBase):
         start_day_offset = self._compute_start_day_offset()
         length_of_a_cycle = self.stl_clim.shape[2]
         
-        def step_function(state, forcing, t):
+        def step_function(carry, t):
             """Land model time step.
             
             Implements the slab land model from Fortran run_land_model subroutine:
@@ -330,6 +333,9 @@ class SlabLandModel(SlabModelBase):
             Returns:
                 Tuple of (new_state, predictions_dict)
             """
+            
+            state = carry["state"]
+            forcing = carry["forcing"]
             
             # =====================================================================
             # Time and climatology management
@@ -390,10 +396,15 @@ class SlabLandModel(SlabModelBase):
             })
             
             # Return new state and predictions for output
-            return new_state, {}, stack_objects([dict(
-                state=new_state,
-                forcing=forcing,
-            )])
+            return (
+                dict(
+                    state=new_state, 
+                    forcing=forcing,
+                ), stack_objects([dict(
+                    state=new_state,
+                    forcing=forcing,
+                )])
+            )
         
         return step_function
     

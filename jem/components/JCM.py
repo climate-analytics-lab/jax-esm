@@ -3,17 +3,13 @@
 import numpy as np
 
 from jcm.model import Model
-from jcm.forcing import ForcingData
 from jcm.forcing import default_forcing
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics_interface import dynamics_state_to_physics_state
-from jcm.physics_interface import PhysicsState
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 
-from jem.utils.bulk_op import mean_leaf
 
 def safe_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
@@ -34,7 +30,6 @@ def asfloat64(tree):
 def make_jem_compatible(
     model: Model,
     coupling_timestep: jdt.Timedelta,
-    save_interval: jdt.Timedelta = jdt.to_timedelta(1, "day"),
     land_model_active: bool = True,
 ) -> Model:
     """Adapt the input jcm model to jem framework
@@ -45,17 +40,17 @@ def make_jem_compatible(
     
     """    
    
+    # Check if couopling_timestep is a multiple of jcm's native timestep
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
-   
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
         raise Exception("Coupling timestep should be a multiple of timestep.")
 
-    D2_nodal_shape = model.coords.nodal_shape[1:] 
+    D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
-        return (
-            model._prepare_initial_modal_state(),
-            {
-                "phydata" : asfloat64(
+        return dict(
+            state=model._prepare_initial_modal_state(),
+            derived={ # Derived
+                "physics" : asfloat64(
                     PhysicsData.zeros(
                         model.coords.horizontal.nodal_shape,
                         model.coords.vertical.layers,
@@ -63,41 +58,49 @@ def make_jem_compatible(
                 ),
                 "total_heat_flux" : jnp.zeros(D2_nodal_shape),
             },
-            default_forcing(model.coords.horizontal).copy(
+            forcing=default_forcing(model.coords.horizontal).copy(
                 lfluxland = jnp.bool_(land_model_active),
             )
         )
 
-    def generate_step_function(jitted: bool = True):
+    def generate_step_function():
         # Notice: since save_interval and total_time are claimed
         #         static parameters, we cannot pass in traceable
         #         object. So use item() to convert from scalar
         #         jax.Array to float.
-        save_interval_day=(save_interval / jdt.to_timedelta(1, "day")).item() 
+        save_interval_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item() 
         total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
-        def step_function(state, forcing, step):
+        def step_function(carry, step):
+            state = carry["state"]
+            forcing = carry["forcing"]
             new_atm_modal_state, predictions = model.run_from_state(
                 initial_state=state,
                 save_interval=save_interval_day,  
                 total_time=total_time_day,
                 forcing=forcing,
+                output_averages=True,
             )
-            
-            # phydata is a stacked object, so I take the mean here.
-            # Howwever, this action will be done by jcm in the new jcm PR.
-            phydata = asfloat64(mean_leaf(predictions.physics, axis=0))
-            total_heat_flux = - jnp.sum(phydata.surface_flux.hfluxn, axis=2) # upward positive
+            physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
+            total_heat_flux = - physics_no_time_dimension.surface_flux.hfluxn[..., 2] # upward positive
+
+            # This is a bug in jcm: Time dimension vanishes when save_interval == total_time
+            if len(predictions.dynamics.normalized_surface_pressure.shape) == 2:
+                nsp = predictions.dynamics.normalized_surface_pressure
+                predictions.dynamics.normalized_surface_pressure = jnp.reshape(nsp, (1,) + nsp.shape)
             
             return (
-                new_atm_modal_state,
-                {
-                    "phydata" : phydata,
-                    "total_heat_flux" : total_heat_flux,
-                },
+                dict(
+                    state=new_atm_modal_state,
+                    derived={
+                        "physics" : physics_no_time_dimension,
+                        "total_heat_flux" : total_heat_flux,
+                    },
+                    forcing=forcing,
+                ),
                 predictions
             )
 
-        return jax.jit(step_function) if jitted else step_function
+        return step_function
 
     def predictions_to_xarray(predictions):
         return predictions.to_xarray()
