@@ -38,7 +38,7 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
 from jem.components import JCM, SlabLandModel, SlabOceanModel
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
-import jem.utils.tree_tools as tree_tools
+
 
 # %% [markdown]
 # ## Configurations
@@ -113,39 +113,17 @@ mapper.add_mapping(
 )
 
 # %% [markdown]
-# ## Create Coupled Model
-
+# ## Create and Run Coupled Model
 # %%
 model = Coupler(
     components=components,
     mappers=dict(mapper=mapper),
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
-
-# %% [markdown]
-# ## Run Coupled Model
-
-# %%
-# Obtain initial condition
-initial_coupled_state_forcing = model.initialize()
-
-print(initial_coupled_state_forcing["ocn"]["state"]["mixed_layer_depth"])
-
-print("Model state:")
-tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
-
-print("Create model trajectory function...")
-trajectory_function = model.generate_trajectory_function(
+initial_carry, final_carry, predictions = model.run(
     workflow=["mapper", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
 )
-
-# Run coupled model
-print("Running model...")
-state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
-print("Simulation finished.")
 # %% [markdown]
 # ## Output into NetCDF
 

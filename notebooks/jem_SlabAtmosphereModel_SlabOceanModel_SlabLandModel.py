@@ -79,42 +79,18 @@ mapper.add_mapping(
     regridder = identity_regridder,
 )
 # %% [markdown]
-# ## Create Coupled Model
-
+# ## Create and Run Coupled Model
 # %%
 model = Coupler(
     components=components,
     mappers=dict(mapper=mapper),
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
-
-# %% [markdown]
-# ## Run Coupled Model
-
-# %%
-# Obtain initial condition
-initial_coupled_state_forcing = model.initialize()
-
-print(initial_coupled_state_forcing["ocn"]["state"]["mixed_layer_depth"])
-
-print("Model state:")
-tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
-
-print("Create model trajectory function...")
-trajectory_function = model.generate_trajectory_function(
+initial_carry, final_carry, predictions = model.run(
     workflow=["mapper", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
 )
-
-# Run coupled model
-print("Running model...")
-state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
-print("Simulation finished.")
-# %% [markdown]
 # ## Output into NetCDF
-
 # %%
 output_dict = model.predictions_to_xarray(predictions)
 for component_name, ds in output_dict.items():
