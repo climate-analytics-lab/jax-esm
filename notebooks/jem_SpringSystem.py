@@ -1,3 +1,20 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.18.1
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+# %% [markdown]
+# # JEM application: Spring System
+#
+# %%
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
@@ -7,6 +24,9 @@ import tree_math
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
+# %% [markdown]
+# # Define Model
+# %%
 @tree_math.struct
 @dataclass
 class SpringCarry:
@@ -53,6 +73,7 @@ class Spring:
         return step_function
 
 
+# %%
 interaction_strength = 1.0
 def mapper(coupled_carry):
     f = (coupled_carry["spring2"].x - coupled_carry["spring1"].x) * interaction_strength
@@ -69,7 +90,7 @@ model = Coupler(
     mappers=dict(mapper=mapper),
 )
 
-print("Create model trajectory function...")
+# %%
 iterations = int(total_time / dt)
 initial_coupled_carry, final_coupled_carry, predictions = model.run(
     workflow=["mapper", "spring1", "spring2"],
@@ -77,7 +98,9 @@ initial_coupled_carry, final_coupled_carry, predictions = model.run(
 )
 
 
-# Display
+# %% [markdown]
+# # Display
+# %%
 import matplotlib.pyplot as plt
 
 x1 = predictions["spring1"]["x"]
@@ -85,7 +108,7 @@ v1 = predictions["spring1"]["v"]
 x2 = predictions["spring2"]["x"]
 v2 = predictions["spring2"]["v"]
 t = jnp.arange(iterations) * dt
- 
+
 fig, ax = plt.subplots(2,1)
 ax[0].plot(t, x1, label="x1")
 ax[0].plot(t, x2, label="x2")
