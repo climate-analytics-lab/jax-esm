@@ -70,9 +70,6 @@ class BasicMapper:
     components: Dict[str, JEMComponentType]
     mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, MapperFunction]
-    component_state_variable_registries: Dict[str, VariableRegistry]
-    component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
 
     @typechecked
@@ -88,10 +85,6 @@ class BasicMapper:
         self.mappings = mappings or {}
         self.regridders = regridders or {}
 
-        # validate
-        #check_type(self.component_state_variable_registries, Dict[str, VariableRegistry])
-        #check_type(self.component_forcing_variable_registries, Dict[str, VariableRegistry])
- 
         # Build connectivity graph
         self.connections = self._build_connections()
 
