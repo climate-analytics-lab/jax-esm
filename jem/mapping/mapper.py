@@ -12,7 +12,6 @@ from jem.base.typing import (
 from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
-MapperFunctionType = MapperFunction | Any
 JEMComponentType = JEMComponent | Any
 
 class BasicMapper:
@@ -71,7 +70,7 @@ class BasicMapper:
     components: Dict[str, JEMComponentType]
     mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, MapperFunctionType]
+    component_forcing_classes: Dict[str, MapperFunction]
     component_state_variable_registries: Dict[str, VariableRegistry]
     component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
