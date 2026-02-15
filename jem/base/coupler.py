@@ -7,7 +7,7 @@ import typeguard
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
     JEMComponent,
-    JEMMapper,
+    MapperFunction,
     Workflow,
     Pytree,
     Predictions,
@@ -56,13 +56,13 @@ class Coupler:
             A dict whose key is the name of the component and the value is the
             instantiated component.
         mappers: 
-            A dict whose key is the name of :code:`JEMMapper`-compatible
+            A dict whose key is the name of :code:`MapperFunction`-compatible
             object that is responsible for sending information between 
             components.
     """
    
     components: Dict[str, JEMComponent]
-    mappers: Dict[str, JEMMapper]
+    mappers: Dict[str, MapperFunction]
     
     def __init__(
         self,
@@ -259,9 +259,9 @@ class Coupler:
             mapper: Forcing mapper
         """
         try:
-            typeguard.check_type(mapper, JEMMapper)
+            typeguard.check_type(mapper, MapperFunction)
         except typeguard.TypeCheckError as e:
-            raise typeguard.TypeCheckError(f"The mapper {name} is not a valid JEMMapper.")
+            raise typeguard.TypeCheckError(f"The mapper {name} is not a valid MapperFunction.")
         
         self.mappers[name] = mapper
 
