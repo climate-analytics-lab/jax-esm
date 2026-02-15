@@ -4,8 +4,9 @@ Tutorial: Integrate an Existing Model into JEM
 JEM philosopy
 -------------
 Each component has its own :code:`ComponentCarry`, a Pytree. JEM collects them
-together to form a :code:`CoupledCarry`. Then, JEM use `MapperFunction` to
-exchange the information within to achieve coupling.
+together to form a :code:`CoupledCarry: Dict[ComponentName, ComponentCarry]`.
+Then, JEM use `MapperFunction` to exchange the information within to achieve 
+coupling.
 
 JEM compatibility
 -----------------
