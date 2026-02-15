@@ -85,6 +85,8 @@ def mapper(coupled_carry):
 
 # %% [markdown]
 # # Create Model
+
+# %%
 total_time = 50
 dt = 0.01
 spring1 = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt)
