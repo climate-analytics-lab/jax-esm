@@ -232,7 +232,13 @@ class Coupler:
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
-            **resolve_interface(component, reference_class=JEMComponent, skip=["name", "raw_component", "predictions_to_xarray", "get_info"], verbose=True)
+            **resolve_interface(
+                component,
+                reference_class=JEMComponent,
+                skip=["name", "raw_component"],
+                optional=["predictions_to_xarray", "get_info"],
+                verbose=True
+            )
         )
 
         self._validate_components()
@@ -291,6 +297,7 @@ class Coupler:
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])
             for component_name, component in self.components.items()
+            if getattr(component, "predictions_to_xarray") is not None
         }
 
     def get_info(self):

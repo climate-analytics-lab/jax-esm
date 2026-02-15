@@ -20,6 +20,7 @@ def resolve_interface(
     reference_class: type,
     verbose: bool = False,
     customized_mapping_name:str = "__JEM_CUSTOMIZED_MAPPING__",
+    optional: str | List[str] = [],
     skip: str | List[str] = [],
 ) -> Dict[str, Any]:
     
@@ -31,15 +32,26 @@ def resolve_interface(
     for member_name, member_type in metadata.items():
         resolved_name = None
         if member_name in skip:
-            continue
-        if verbose:
-            print(f"Checking `{member_name:s}` => `{str(member_type)}`")
-        if get_origin(member_type) is get_origin(Callable):
-            resolved_name = _resolve_function(target, member_name, member_type, customized_mapping)
+            pass
         else:
-            resolved_name = _resolve_member(target, member_name, member_type, customized_mapping)
+            if verbose:
+                print(f"Checking `{member_name:s}` => `{str(member_type)}`")
 
-        result[member_name] = getattr(target, resolved_name)
+            try:
+                if get_origin(member_type) is get_origin(Callable):
+                    resolved_name = _resolve_function(target, member_name, member_type, customized_mapping)
+                else:
+                    resolved_name = _resolve_member(target, member_name, member_type, customized_mapping)
+            except Exception as e:
+                print(f"Exception happens when resolving `{member_name}`: {str(e)}.")
+                if member_name in optional:
+                    print(f"Member name `{member_name}` is optional. Now set to None..")
+                    resolved_name = None
+
+            if resolved_name is None:
+                result[member_name] = None
+            else:
+                result[member_name] = getattr(target, resolved_name)
 
     return result
 

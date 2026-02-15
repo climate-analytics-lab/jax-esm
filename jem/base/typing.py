@@ -33,12 +33,13 @@ class JEMComponent:
     initialize: InitializeFunction
     generate_step_function: StepFunctionGenerator
 
+    # optional 
+    predictions_to_xarray: PredictionsToXarrayFunction
+    get_info: GetInfoFunction
+
+
     # jem-internal
     raw_component: Any
     name: str
- 
-    predictions_to_xarray: Optional[PredictionsToXarrayFunction] = None
-    get_info: Optional[GetInfoFunction] = None
-
 
 
