@@ -159,3 +159,63 @@ A Coupled Example
 
                 carry.v = new_v
                 carry.x = new_x
+
+                return carry, dict(x=new_x, v=new_v)
+            return step_function
+
+
+    def mapper(coupled_carry):
+        d = coupled_carry["spring2"].x - coupled_carry["spring1"].x
+        f = d * 1.0
+        coupled_carry["spring1"].f = f
+        coupled_carry["spring2"].f = - f
+        return coupled_carry
+
+    total_time = 50
+    dt = 0.01
+    spring1 = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt)
+    spring2 = Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt)
+    model = Coupler(
+        components=dict(spring1=spring1, spring2=spring2),
+        mappers=dict(mapper=mapper),
+    )
+
+    initial_coupled_carry = model.initialize()
+    print("Create model trajectory function...")
+    iterations = int(total_time / dt)
+    trajectory_function = model.generate_trajectory_function(
+        workflow=["mapper", "spring1", "spring2"],
+        iterations = iterations,
+    )
+
+    # Run coupled model
+    print("Running model...")
+    final_coupled_carry, predictions = trajectory_function(initial_coupled_carry)
+    print("Simulation finished.")
+
+    # Display
+    import matplotlib.pyplot as plt
+
+    x1 = predictions["spring1"]["x"]
+    v1 = predictions["spring1"]["v"]
+    x2 = predictions["spring2"]["x"]
+    v2 = predictions["spring2"]["v"]
+    t = jnp.arange(iterations) * dt
+     
+    fig, ax = plt.subplots(2,1)
+    ax[0].plot(t, x1, label="x1")
+    ax[0].plot(t, x2, label="x2")
+    ax[1].plot(t, v1, label="v1")
+    ax[1].plot(t, v2, label="v2")
+
+    ax[0].legend()
+    ax[1].legend()
+
+    fig, ax = plt.subplots(2,1)
+    ax[0].plot(x1, x2, label="x")
+    ax[1].plot(v1, v2, label="v")
+
+    ax[0].legend()
+    ax[1].legend()
+
+    plt.show()
