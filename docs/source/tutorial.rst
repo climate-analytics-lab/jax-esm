@@ -11,15 +11,14 @@ JEM compatibility
 -----------------
 JEM expects each of the component to provide
 
-- :code:`initialize: Callable[[], ComponentCarry]` : Returns the initial carry
+- :code:`initialize: Callable[[], ComponentCarry]`: Returns the initial carry
     value.
-- :code:`generate_step_function: Callable[[ComponentCarry], tuple[
-    ComponentCarry, Predictions]]` : Returns the new carry value and predictions.
-    The returned carry value must be consistent with the ones returned from
-    :code:`initialize`. User can test if two Pytrees are equivalent by using
-    `jax.tree_utils.tree_structure`. The first dimension of leaf nodes in 
-    :code:`Predictions` is expected to be time. The coupler will concat 
-    multiple predictions along this dimension.
+- :code:`generate_step_function: Callable[[ComponentCarry], tuple[ComponentCarry, Predictions]]`: 
+    Returns the new carry value and predictions. The returned carry value must
+    be consistent with the ones returned from :code:`initialize`. User can test
+    if two Pytrees are equivalent by using `jax.tree_utils.tree_structure`. The
+    first dimension of leaf nodes in :code:`Predictions` is expected to be time
+    . The coupler will concat multiple predictions along this dimension.
 
 What is a Mapper?
 -----------------
