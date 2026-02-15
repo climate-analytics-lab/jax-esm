@@ -9,11 +9,9 @@ from jem.base.typing import (
     JEMForcingMapper,
     Workflow,
     Pytree,
-    State,
-    Derived,
-    Forcing,
     History,
     TrajectoryFunction,
+    ComponentCarry,
     CoupledCarry,
 )
 
@@ -101,11 +99,10 @@ class Coupler:
         Returns:
             Dictionary of initial states for all components
         """
-        initial_value = {}
-        for component_name, component in self.components.items():
-            state, derived, forcing = component.initialize()
-            initial_value[component_name] = dict(state=state, derived=derived, forcing=forcing)
-        return initial_value
+        return {
+            component_name : component.initialize()
+            for component_name, component in self.components.items()
+        }
 
 
     def generate_step_function(
@@ -143,12 +140,7 @@ class Coupler:
             input_carry_structure = tree_structure(carry)
             for name in flattened_workflow:
                 if name in self.components:
-                    component_carry = carry[name]
-                    component_carry["state"], component_carry["derived"], _predictions = component_step_functions[name](
-                        component_carry["state"],
-                        component_carry["forcing"],
-                        step
-                    )
+                    carry[name], _predictions = component_step_functions[name](carry[name], step)
                     unstacked_predictions[name].append(_predictions)
                 elif name in self.forcing_mappers:
                     carry = self.forcing_mappers[name].map_forcings(carry)

@@ -12,26 +12,24 @@ ComponentName = str
 
 Pytree = Any
 Workflow = Pytree
-State = Pytree
-Derived = Pytree
-Forcing = Pytree
-CoupledCarry = Dict[ComponentName, Dict[str, State | Derived | Forcing]]
+ComponentCarry = Pytree
+CoupledCarry = Dict[ComponentName, ComponentCarry]
 SimulationTime = float
 
 History = TypeVar('History')
 
-InitializeFunction = Callable[[], tuple[State, Derived, Forcing]]
-
-StepFunction = Callable[[State, Forcing, SimulationTime], tuple[State, History]]
+InitializeFunction = Callable[[], ComponentCarry]
+StepFunction = Callable[[ComponentCarry, SimulationTime], tuple[ComponentCarry, History]]
 StepFunctionGenerator = Callable[[], StepFunction]
-TrajectoryFunction = Callable[[Pytree], tuple[Pytree, History]]
+ForcingMapperFunction = Callable[ [ CoupledCarry ], CoupledCarry ]
+TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, History]]
 
 HistoryToXarray = Callable[[History], xr.Dataset]
 
 GetInfoFunction = Callable[[], Dict]
 
 
-ForcingMapperFunction = Callable[ [ CoupledCarry ], CoupledCarry ]
+
 
 
 VariableName = str
