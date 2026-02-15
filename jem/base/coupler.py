@@ -134,22 +134,22 @@ class Coupler:
             component_step_functions[component_name] = _component_step_function
 
         def step_function(carry: CoupledCarry, step):
-            unstacked_predictions = { component_name : [] for component_name in self.components.keys() }
+            _unstacked_predictions = { component_name : [] for component_name in self.components.keys() } # type: ignore
             input_carry_structure = tree_structure(carry)
             for name in flattened_workflow:
                 if name in self.components:
                     carry[name], _predictions = component_step_functions[name](carry[name], step)
-                    unstacked_predictions[name].append(_predictions)
+                    _unstacked_predictions[name].append(_predictions)
                 elif name in self.mappers:
                     carry = self.mappers[name](carry)
                 else:
                     raise Exception(f"Unknown error: Cannot find `{name}` in components or mappers.")        
-                if input_carry_structure != tree_structure(carry):
+                if input_carry_structure != tree_structure(carry): # type: ignore
                     print(f"Warning: carry value structure changed after workflow element `{name:s}` is used.")
 
             predictions = {
-                name : unwrap_leading_dims(stack_objects(unstacked_predictions[name]), first_n_dim=2)
-                for name in unstacked_predictions.keys()
+                name : unwrap_leading_dims(stack_objects(_unstacked_predictions[name]), first_n_dim=2)
+                for name in _unstacked_predictions.keys()
             }
 
             return carry, predictions
