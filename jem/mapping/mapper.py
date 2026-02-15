@@ -1,9 +1,9 @@
 """Flux exchange and boundary condition translation utilities."""
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from collections.abc import Sequence, Mapping
-
+import jax.numpy as jnp
+import numpy as np
 from jem.base.typing import (
-    Array,
     JEMComponent,
     JEMMapper,
     CoupledCarry,
@@ -12,6 +12,7 @@ from jem.base.typing import (
 
 from typeguard import typechecked
 
+Array = jnp.ndarray | np.ndarray
 RegridderFunction = Callable[[Array], Array]
 JEMMapperType = JEMMapper | Any
 JEMComponentType = JEMComponent | Any
