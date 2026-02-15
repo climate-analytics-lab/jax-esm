@@ -4,7 +4,7 @@ from collections.abc import Sequence, Mapping
 from jax.typing import ArrayLike as Array
 from jem.base.typing import (
     JEMComponent,
-    JEMMapper,
+    MapperFunction,
     CoupledCarry,
     VariableRegistry,
 )
@@ -12,7 +12,7 @@ from jem.base.typing import (
 from typeguard import typechecked
 
 RegridderFunction = Callable[[Array], Array]
-JEMMapperType = JEMMapper | Any
+MapperFunctionType = MapperFunction | Any
 JEMComponentType = JEMComponent | Any
 
 class BasicMapper:
@@ -71,7 +71,7 @@ class BasicMapper:
     components: Dict[str, JEMComponentType]
     mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    component_forcing_classes: Dict[str, JEMMapperType]
+    component_forcing_classes: Dict[str, MapperFunctionType]
     component_state_variable_registries: Dict[str, VariableRegistry]
     component_forcing_variable_registries: Dict[str, VariableRegistry]
     involved_component_names: List[str]
