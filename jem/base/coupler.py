@@ -258,10 +258,10 @@ class Coupler:
             name: Forcing mapper name
             mapper: Forcing mapper
         """
-        try:
-            typeguard.check_type(mapper, MapperFunction)
-        except typeguard.TypeCheckError as e:
-            raise typeguard.TypeCheckError(f"The mapper {name} is not a valid MapperFunction.")
+        #try:
+        #    typeguard.check_type(mapper, MapperFunction)
+        #except typeguard.TypeCheckError as e:
+        #    raise typeguard.TypeCheckError(f"The mapper {name} is not a valid MapperFunction.")
         
         self.mappers[name] = mapper
 
@@ -298,13 +298,13 @@ class Coupler:
         mapper_info = {}
 
         for component_name, component in self.components.items():
-            if hasattr(component, "get_info"):
+            if getattr(component, "get_info", None) is not None:
                 component_info[component_name] = component.get_info()
             else:
                 component_info[component_name] = { "message" : "get_info not provided." }
 
         for name, mapper in self.mappers.items():
-            if hasattr(mapper, "get_info"):
+            if getattr(mapper, "get_info", None) is not None:
                 mapper_info[name] = mapper.get_info()
             else:
                 mapper_info[name] = { "message" : "get_info not provided." }
