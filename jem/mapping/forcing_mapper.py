@@ -1,5 +1,7 @@
 """Flux exchange and boundary condition translation utilities."""
 from typing import Any, Dict, List, Optional, Tuple, Callable
+from collections.abc import Sequence, Mapping
+
 from jem.base.typing import (
     Array,
     JEMComponentType,
@@ -127,24 +129,16 @@ class BasicForcingMapper:
                 f"can be found in coupled_carry ({str(list(coupled_carry.keys()))})"
             )
 
-        # Crop state and derived out. 
-        component_states_and_deriveds = {
-            component_name: {
-                "state": component_carry["state"],
-                "derived": component_carry["derived"],
-            } for component_name, component_carry in coupled_carry.items()
-        }
-
         # Loop through each involved component. 
         # If there are N component involves, this loop is N by N.
         # The combination is not valid when source == target
         for target_component_name in coupled_carry.keys():
-            target_forcing = coupled_carry[target_component_name]["forcing"]
+            target_carry = coupled_carry[target_component_name]
             for source_component_name in coupled_carry.keys():
                 if source_component_name == target_component_name:
                     continue
                 
-                source_component_state_and_derived = component_states_and_deriveds[source_component_name]
+                source_component_carry = coupled_carry[source_component_name]
                 
                 # Get mapping of variable names for this source-target pair
                 mapping = self.forcing_mappings.get(
@@ -158,7 +152,7 @@ class BasicForcingMapper:
                 # Apply mappings and regridders
                 for source_variable_name, target_variable_name in mapping.items():
                     source_variable = strget(
-                        source_component_state_and_derived, source_variable_name
+                        source_component_carry, source_variable_name
                     )
                     # Apply regridder if defined
                     regrid_key = (
@@ -175,12 +169,12 @@ class BasicForcingMapper:
                         f"Doing: {source_component_name:s}.{source_variable_name:s} -> {target_component_name:s}.{target_variable_name:s}"
                     )
                     strset(
-                        target_forcing,
+                        target_carry,
                         target_variable_name,
                         source_variable,
                     )
-            # update forcing
-            coupled_carry[target_component_name]["forcing"] = target_forcing
+            # update carry
+            coupled_carry[target_component_name] = target_carry
         
         return coupled_carry
 
@@ -308,7 +302,9 @@ def strget(obj, flattened_variable_name):
     splitted_names = flattened_variable_name.split(".")
     target = obj
     for splitted_name in splitted_names:
-        if isinstance(target, dict):
+        if isinstance(target, Sequence):
+            target = target[int(splitted_name)]
+        elif isinstance(target, Mapping):
             target = target[splitted_name]
         else:
             target = getattr(target, splitted_name)
@@ -318,15 +314,18 @@ def strget(obj, flattened_variable_name):
 
 def strset(obj, flattened_variable_name, value):
     splitted_names = flattened_variable_name.split(".")
-
-    target = obj
-    for splitted_name in splitted_names[:-1]:
-        if isinstance(target, dict):
-            target = target[splitted_name]
-        else:
-            target = getattr(target, splitted_name)
-
-    if isinstance(target, dict):
+    target = strget(obj, ".".join(splitted_names[:-1]))
+    if isinstance(target, Sequence):
+        try:
+            target[int(splitted_names[-1])] = value
+        except (TypeError, IndexError) as e:
+            print(f"Cannot update: {flattened_variable_name}. Maybe the leaf is not mutable?")
+            raise e
+    elif isinstance(target, Mapping):
+        if splitted_names[-1] not in target:
+            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
         target[splitted_names[-1]] = value
     else:
+        if not hasattr(target, splitted_names[-1]):
+            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
         setattr(target, splitted_names[-1], value)
