@@ -70,12 +70,12 @@ identity_regridder = IdentityRegridder()
 forcing_mapper = BasicForcingMapper(components=components)
 forcing_mapper.add_forcing_mapping(
     source = ("atm", "derived.internal_total_heat_flux"),
-    target = ("ocn", "total_heat_flux"),
+    target = ("ocn", "forcing.total_heat_flux"),
     regridder = identity_regridder,
 )
 forcing_mapper.add_forcing_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
-    target = ("atm", "sea_surface_temperature"),
+    target = ("atm", "forcing.sea_surface_temperature"),
     regridder = identity_regridder,
 )
 # %% [markdown]
