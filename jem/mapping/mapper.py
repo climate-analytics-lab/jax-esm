@@ -251,7 +251,6 @@ class BasicMapper:
         ] = regridder
 
     def get_info(self):
-
         regridder_info = dict()
         for i, key in enumerate(self.regridders.keys()):
             source_component_name, target_component_name, source_variable_name, target_variable_name = key
