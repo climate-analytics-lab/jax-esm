@@ -27,10 +27,6 @@ class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     q_flux: Annotated[float, ("month", "longitude", "latitude"), "two_dimensional_with_month"]
 
-@data_structure.typed_and_dimensioned
-class OceanDerived:
-    pass
-
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
 
@@ -150,7 +146,6 @@ class SlabOceanModel(SlabModelBase):
         )
         self.component_state_class = decorator(OceanState)
         self.component_forcing_class = decorator(OceanForcing)
-        self.component_derived_class = decorator(OceanDerived)
 
     def _create_variable_registries(self) -> None:
         self.state_variable_registry = {}
@@ -215,13 +210,12 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
 
-        return (
-            self.component_state_class.zeros().copy({
+        return dict(
+            state=self.component_state_class.zeros().copy({
                 "mixed_layer_depth": init_mixed_layer_depth,
                 "sea_surface_temperature": init_sea_surface_temperature,
             }),
-            self.component_derived_class.zeros(),
-            self.component_forcing_class.zeros(),
+            forcing=self.component_forcing_class.zeros()
         )
 
     def _create_step_function_body(self):
@@ -230,7 +224,9 @@ class SlabOceanModel(SlabModelBase):
         ocn_idx = self.horizontal_grids["T"].bmask == 0
         nonocn_idx = self.horizontal_grids["T"].bmask != 0
 
-        def step_function(state, forcing, step):
+        def step_function(carry, step):
+            state = carry["state"]
+            forcing = carry["forcing"]
             new_sea_surface_temperature_anom = state.sea_surface_temperature
             total_heat_flux = forcing.total_heat_flux
             predictions = {}
@@ -300,12 +296,10 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
-            new_derived = self.component_derived_class.zeros()
-            predictions["state"] = new_state
-            predictions["forcing"] = forcing
-            if self.forcing_method == "Qflux":
-                predictions["Qflux"] = snapshot_Qflux
-            return new_state, new_derived, stack_objects(
+            return dict(
+                state=new_state,
+                forcing=forcing
+            ), stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
 
