@@ -53,9 +53,9 @@ class Spring:
         return step_function
 
 
+interaction_strength = 1.0
 def mapper(coupled_carry):
-    d = coupled_carry["spring2"].x - coupled_carry["spring1"].x
-    f = d * 1.0 * 0
+    f = (coupled_carry["spring2"].x - coupled_carry["spring1"].x) * interaction_strength
     coupled_carry["spring1"].f = f
     coupled_carry["spring2"].f = - f
     return coupled_carry
