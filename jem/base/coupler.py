@@ -9,7 +9,7 @@ from jem.base.typing import (
     JEMMapper,
     Workflow,
     Pytree,
-    Prediction,
+    Predictions,
     TrajectoryFunction,
     CoupledCarry,
 )
@@ -186,7 +186,7 @@ class Coupler:
 
         def trajectory_function(
             initial_coupled_carry: CoupledCarry,
-        ) -> tuple[Pytree, Prediction]:
+        ) -> tuple[Pytree, Predictions]:
 
             final_coupled_state, predictions = scan_func(
                 coupled_step_function,
