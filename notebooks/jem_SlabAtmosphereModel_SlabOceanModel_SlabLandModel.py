@@ -31,7 +31,7 @@ sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
 import jax_datetime as jdt
 from jem.components import SlabAtmosphereModel, SlabOceanModel
 from jem.mapping import IdentityRegridder
-from jem.mapping import BasicForcingMapper
+from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
@@ -67,13 +67,13 @@ components = dict(
 # %%
 # Creating regridders and mapping
 identity_regridder = IdentityRegridder()
-forcing_mapper = BasicForcingMapper(components=components)
-forcing_mapper.add_forcing_mapping(
+mapper = BasicMapper(components=components)
+mapper.add_mapping(
     source = ("atm", "derived.internal_total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
     regridder = identity_regridder,
 )
-forcing_mapper.add_forcing_mapping(
+mapper.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
     target = ("atm", "forcing.sea_surface_temperature"),
     regridder = identity_regridder,
@@ -84,7 +84,7 @@ forcing_mapper.add_forcing_mapping(
 # %%
 model = Coupler(
     components=components,
-    forcing_mappers=dict(fm=forcing_mapper),
+    mappers=dict(mapper=mapper),
 )
 
 print("Model info: ") 
@@ -104,7 +104,7 @@ tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
 
 print("Create model trajectory function...")
 trajectory_function = model.generate_trajectory_function(
-    workflow=["fm", "atm", "ocn"],
+    workflow=["mapper", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
 )
 
