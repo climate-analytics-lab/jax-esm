@@ -251,17 +251,18 @@ class BasicMapper:
         ] = regridder
 
     def get_info(self):
-
         regridder_info = dict()
         for i, key in enumerate(self.regridders.keys()):
             source_component_name, target_component_name, source_variable_name, target_variable_name = key
             regridder_info[f"regridder {i:d}"] = {
                 'source variable' : f"{source_component_name}[{source_variable_name}]",
                 'target variable' : f"{target_component_name}[{target_variable_name}]",
-                'regridder' : self.regridders[key].get_info(),
             }
-            
 
+            if getattr(self.regridders, "get_info", None) is not None:
+                regridder_info['regridder_info'] = self.regridders[key].get_info()
+            else:
+                regridder_info['regridder_info'] = "get_info not provided."
 
         return {
             "mappings": self.mappings, 
