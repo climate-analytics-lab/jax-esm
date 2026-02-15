@@ -15,22 +15,16 @@ Workflow = Pytree
 ComponentCarry = Pytree
 CoupledCarry = Dict[ComponentName, ComponentCarry]
 SimulationTime = float
+Prediction = Pytree
 
-History = TypeVar('History')
 
 InitializeFunction = Callable[[], ComponentCarry]
-StepFunction = Callable[[ComponentCarry, SimulationTime], tuple[ComponentCarry, History]]
+StepFunction = Callable[[ComponentCarry, SimulationTime], tuple[ComponentCarry, Prediction]]
 StepFunctionGenerator = Callable[[], StepFunction]
 MapperFunction = Callable[ [ CoupledCarry ], CoupledCarry ]
-TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, History]]
-
-HistoryToXarray = Callable[[History], xr.Dataset]
-
+TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, Prediction]]
+PredictionToXarrayFunction = Callable[[Prediction], xr.Dataset]
 GetInfoFunction = Callable[[], Dict]
-
-
-
-
 
 VariableName = str
 VariableShape = tuple[int, ...]
@@ -44,7 +38,7 @@ class JEMComponent:
     # mandatory
     initialize : InitializeFunction
     generate_step_function : StepFunctionGenerator
-    predictions_to_xarray : HistoryToXarray
+    predictions_to_xarray : PredictionToXarrayFunction
     get_info : GetInfoFunction
 
     # jem-internal
