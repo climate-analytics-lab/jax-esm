@@ -68,7 +68,7 @@ class JEMMapper:
     # =====================================================
     # Since dataclass will treat the __call__ above as an instance field, the
     # resulting JEMMapper will not be callable. Therefore, we have to define
-    # a __call__ here to get around
+    # a __call__ here as a workaround.
     def __call__(self, carry):
         # Fetching the __call__ in the instance field and execute it.
         # This is the same as `self.raw_mapper(carry)`

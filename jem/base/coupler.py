@@ -11,7 +11,6 @@ from jem.base.typing import (
     Pytree,
     History,
     TrajectoryFunction,
-    ComponentCarry,
     CoupledCarry,
 )
 
@@ -103,7 +102,6 @@ class Coupler:
             component_name : component.initialize()
             for component_name, component in self.components.items()
         }
-
 
     def generate_step_function(
         self,
