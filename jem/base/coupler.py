@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, Callable
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
     JEMComponent,
-    JEMForcingMapper,
+    JEMMapper,
     Workflow,
     Pytree,
     History,
@@ -55,19 +55,19 @@ class Coupler:
         components:
             A dict whose key is the name of the component and the value is the
             instantiated component.
-        forcing_mappers: 
-            A dict whose key is the name of :code:`JEMForcingMapper`-compatible
+        mappers: 
+            A dict whose key is the name of :code:`JEMMapper`-compatible
             object that is responsible for sending information between 
             components.
     """
    
     components: Dict[str, JEMComponent]
-    forcing_mappers: Dict[str, JEMForcingMapper]
+    mappers: Dict[str, JEMMapper]
     
     def __init__(
         self,
         components: Optional[Dict[str, Any]] = None,
-        forcing_mappers: Optional[Dict[str, Any]] = None,
+        mappers: Optional[Dict[str, Any]] = None,
     ):
         """Initialize the coupler.
 
@@ -84,9 +84,9 @@ class Coupler:
         for name, component in self.components.items():
             self.add_component(name, component)
 
-        self.forcing_mappers = forcing_mappers or {}
-        for name, forcing_mapper in self.forcing_mappers.items():
-            self.add_forcing_mapper(name, forcing_mapper)
+        self.mappers = mappers or {}
+        for name, mapper in self.mappers.items():
+            self.add_mapper(name, mapper)
 
     def initialize(
         self,
@@ -142,10 +142,10 @@ class Coupler:
                 if name in self.components:
                     carry[name], _predictions = component_step_functions[name](carry[name], step)
                     unstacked_predictions[name].append(_predictions)
-                elif name in self.forcing_mappers:
-                    carry = self.forcing_mappers[name].map_forcings(carry)
+                elif name in self.mappers:
+                    carry = self.mappers[name](carry)
                 else:
-                    raise Exception(f"Unknown error: Cannot find `{name}` in components or forcing_mappers.")        
+                    raise Exception(f"Unknown error: Cannot find `{name}` in components or mappers.")        
                 if input_carry_structure != tree_structure(carry):
                     print(f"Warning: carry value structure changed after workflow element `{name:s}` is used.")
 
@@ -235,31 +235,31 @@ class Coupler:
         
         self._validate_components()
 
-    def add_forcing_mapper(
+    def add_mapper(
         self,
         name: str,
-        forcing_mapper: Any,
+        mapper: Any,
     ) -> None:
         """Add a new forcing mapper to the coupler.
         Args:
             name: Forcing mapper name
-            forcing_mapper: Forcing mapper
+            mapper: Forcing mapper
         """
-        self.forcing_mappers[name] = JEMForcingMapper(
-            raw_forcing_mapper = forcing_mapper,
+        self.mappers[name] = JEMMapper(
+            raw_mapper = mapper,
             name = name,
-            **resolve_interface(forcing_mapper, reference_class=JEMForcingMapper, skip=["name", "raw_forcing_mapper"], verbose=True)
+            **resolve_interface(mapper, reference_class=JEMMapper, skip=["name", "raw_mapper"], verbose=True)
         )
         
 
-    def remove_forcing_mapper(self, name: str) -> None:
+    def remove_mapper(self, name: str) -> None:
         """Remove a forcing mapper from the coupler.
 
         Args:
             name: Forcing mapper name to remove
         """
-        if name in self.forcing_mappers:
-            del self.forcing_mappers[name]
+        if name in self.mappers:
+            del self.mappers[name]
 
 
     def predictions_to_xarray(
@@ -285,7 +285,7 @@ class Coupler:
             "component_info" : {
                 component_name : component.get_info() for component_name, component in self.components.items() if hasattr(component, "get_info")
             },
-            "forcing_mappers" : "None" if self.forcing_mappers is None else { name: forcing_mapper.get_info() for name, forcing_mapper in self.forcing_mappers.items() } ,
+            "mappers" : "None" if self.mappers is None else { name: mapper.get_info() for name, mapper in self.mappers.items() } ,
         }
 
     def _validate_components(self):
@@ -293,7 +293,7 @@ class Coupler:
 
     def _verify_name_uniqueness(self) -> None:
         
-        all_names = list(self.components.keys()) + list(self.forcing_mappers.keys())
+        all_names = list(self.components.keys()) + list(self.mappers.keys())
         counts = { name : 0 for name in all_names }
         for name in all_names:
             counts[name] += 1
@@ -311,7 +311,7 @@ class Coupler:
         for action in flattened_workflow:
             if not isinstance(action, str):
                 raise ValueError("Actions in the workflow have to be strings.")
-            if action not in self.components and action not in self.forcing_mappers:
+            if action not in self.components and action not in self.mappers:
                 raise ValueError(f"Action `{action:s}` does not map to any component or forcing mapper.")
         
 
