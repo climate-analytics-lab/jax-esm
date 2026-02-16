@@ -30,6 +30,7 @@ import jem.utils.tree_tools as tree_tools
 @tree_math.struct
 @dataclass
 class SpringCarry:
+    t: ArrayLike  # time
     x: ArrayLike  # position
     v: ArrayLike  # velocity
     m: ArrayLike  # mass
@@ -47,6 +48,7 @@ class Spring:
 
     def initialize(self):
         return SpringCarry(
+            t = jnp.array(0),
             x = jnp.array(self.init_x),
             v = jnp.array(self.init_v),
             m = jnp.array(self.m),
@@ -68,8 +70,9 @@ class Spring:
 
             carry.v = new_v
             carry.x = new_x
+            carry.t += dt
 
-            return carry, dict(x=new_x, v=new_v)
+            return carry, dict(t=carry.t, x=carry.x, v=carry.v)
         return step_function
 
 # %% [markdown]
@@ -89,20 +92,20 @@ def mapper(coupled_carry):
 # %%
 total_time = 50
 dt = 0.01
-spring1 = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt)
-spring2 = Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt)
 model = Coupler(
-    components=dict(spring1=spring1, spring2=spring2),
+    components=dict(
+        spring1=Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt),
+        spring2=Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt),
+    ),
     mappers=dict(mapper=mapper),
 )
 
 # %% [markdown]
 # # Run Model
 # %%
-iterations = int(total_time / dt)
 initial_coupled_carry, final_coupled_carry, predictions = model.run(
     workflow=["mapper", "spring1", "spring2"],
-    iterations = iterations,
+    iterations = int(total_time / dt),
 )
 
 
@@ -115,7 +118,7 @@ x1 = predictions["spring1"]["x"]
 v1 = predictions["spring1"]["v"]
 x2 = predictions["spring2"]["x"]
 v2 = predictions["spring2"]["v"]
-t = jnp.arange(iterations) * dt
+t = predictions["spring1"]["t"]
 
 fig, ax = plt.subplots(2,1)
 ax[0].plot(t, x1, label="x1")
