@@ -117,6 +117,7 @@ With JEM, you can put two springs together (no interactions yet),
         ),
     )
 
+    # Run two spring system without interactions
     initial_coupled_carry, final_coupled_carry, predictions = model.run(
         workflow=["mapper", "spring1", "spring2"],
         iterations = int(total_time / dt),
@@ -137,6 +138,7 @@ Add in interaction
     
     model.add_mapper("mapper", mapper)
     
+    # Run two spring system with interactions
     initial_coupled_carry, final_coupled_carry, predictions = model.run(
         workflow=["mapper", "spring1", "spring2"],
         iterations = int(total_time / dt),
