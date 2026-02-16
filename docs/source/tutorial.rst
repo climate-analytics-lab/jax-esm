@@ -32,6 +32,8 @@ to do more sophisticated checks.
 Adapting a Model to be JEM Compatible
 -------------------------------------
 
+The following code is a spring system.
+
 .. code-block:: python
 
     import jax
@@ -43,6 +45,7 @@ Adapting a Model to be JEM Compatible
     @tree_math.struct
     @dataclass
     class SpringCarry:
+        t: ArrayLike  # time
         x: ArrayLike  # position
         v: ArrayLike  # velocity
         m: ArrayLike  # mass
@@ -57,9 +60,10 @@ Adapting a Model to be JEM Compatible
             self.k = k
             self.m = m
             self.dt = dt
-         
+
         def initialize(self):
             return SpringCarry(
+                t = jnp.array(0),
                 x = jnp.array(self.init_x),
                 v = jnp.array(self.init_v),
                 m = jnp.array(self.m),
@@ -71,21 +75,26 @@ Adapting a Model to be JEM Compatible
             dt = self.dt
             def step_function(carry, step):
                 """Integrates one time step of a harmonic oscillator."""
-                
+
                 # Physics: a = -k/m * x + f
                 acceleration = - (carry.k * carry.x + carry.f) / carry.m
-                
+
                 # Update state (Semi-implicit Euler for better stability)
                 new_v = carry.v + acceleration * dt
                 new_x = carry.x + new_v * dt
-               
+
                 carry.v = new_v
                 carry.x = new_x
-                
-                return carry, dict(x=new_x, v=new_v)
+                carry.t += dt
+
+                return carry, dict(t=carry.t, x=carry.x, v=carry.v)
             return step_function
 
-    #Simulation 
+
+And this is how you run it
+
+.. code-block:: python
+
     total_time = 10
     spring = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=0.01)
     final_carry, predictions = jax.lax.scan(
@@ -94,60 +103,58 @@ Adapting a Model to be JEM Compatible
         jnp.arange(int(total_time / spring.dt)),
     )
 
-    # Display
-    import matplotlib.pyplot as plt
-    x = predictions["x"]
-    v = predictions["v"]
-    fig, ax = plt.subplots(1,1)
-    ax.plot(jnp.arange(len(x)), x, label="x")
-    ax.plot(jnp.arange(len(v)), v, label="v")
-    ax.legend()
-    plt.show()
 
-A Coupled Example
------------------
+With JEM, you can put two springs together (no interactions yet),
 
 .. code-block:: python
 
-    # Assume the above `Spring` is defined
-
-    from jem.base.coupler import Coupler
-
-    def mapper(coupled_carry):
-        d = coupled_carry["spring2"].x - coupled_carry["spring1"].x
-        f = d * 1.0
-        coupled_carry["spring1"].f = f
-        coupled_carry["spring2"].f = - f
-        return coupled_carry
-
     total_time = 50
     dt = 0.01
-    spring1 = Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt)
-    spring2 = Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt)
     model = Coupler(
-        components=dict(spring1=spring1, spring2=spring2),
+        components=dict(
+            spring1=Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt),
+            spring2=Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt),
+        ),
         mappers=dict(mapper=mapper),
     )
 
-    initial_coupled_carry = model.initialize()
-    iterations = int(total_time / dt)
-    trajectory_function = model.generate_trajectory_function(
+    initial_coupled_carry, final_coupled_carry, predictions = model.run(
         workflow=["mapper", "spring1", "spring2"],
-        iterations = iterations,
+        iterations = int(total_time / dt),
     )
 
-    # Run coupled model
-    final_coupled_carry, predictions = trajectory_function(initial_coupled_carry)
 
-    # Display
+Add in interaction
+
+.. code-block:: python
+
+
+    interaction_strength = 1.0
+    def mapper(coupled_carry):
+        f = (coupled_carry["spring2"].x - coupled_carry["spring1"].x) * interaction_strength
+        coupled_carry["spring1"].f = f
+        coupled_carry["spring2"].f = - f
+        return coupled_carry
+    
+    model.add_mapper("mapper", mapper)
+    
+    initial_coupled_carry, final_coupled_carry, predictions = model.run(
+        workflow=["mapper", "spring1", "spring2"],
+        iterations = int(total_time / dt),
+    )
+
+To display the result
+
+.. code-block:: python
+
     import matplotlib.pyplot as plt
 
     x1 = predictions["spring1"]["x"]
     v1 = predictions["spring1"]["v"]
     x2 = predictions["spring2"]["x"]
     v2 = predictions["spring2"]["v"]
-    t = jnp.arange(iterations) * dt
-     
+    t = predictions["spring1"]["t"]
+
     fig, ax = plt.subplots(2,1)
     ax[0].plot(t, x1, label="x1")
     ax[0].plot(t, x2, label="x2")
