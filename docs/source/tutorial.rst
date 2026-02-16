@@ -115,7 +115,6 @@ With JEM, you can put two springs together (no interactions yet),
             spring1=Spring(init_x=0, init_v=2, k=5.0, m=1.0, dt=dt),
             spring2=Spring(init_x=2, init_v=5, k=5.0, m=5.0, dt=dt),
         ),
-        mappers=dict(mapper=mapper),
     )
 
     initial_coupled_carry, final_coupled_carry, predictions = model.run(
