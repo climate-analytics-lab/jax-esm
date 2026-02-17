@@ -141,7 +141,7 @@ class SlabOceanModel(SlabModelBase):
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
             {
                 "two_dimensional": self.grid_shape,
-                "two_dimensional_with_month": (12,) + self.grid_shape,
+                "two_dimensional_with_month": self.grid_shape + (12,),
             }
         )
         self.component_state_class = decorator(OceanState)
@@ -209,13 +209,17 @@ class SlabOceanModel(SlabModelBase):
         tau = jnp.ones_like(cd) * self.relaxation_time
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
-
+        
+        forcing = self.component_forcing_class.zeros()
+        forcing = forcing.copy({
+            "q_flux": forcing.q_flux - 300.0    
+        })
         return dict(
             state=self.component_state_class.zeros().copy({
                 "mixed_layer_depth": init_mixed_layer_depth,
                 "sea_surface_temperature": init_sea_surface_temperature,
             }),
-            forcing=self.component_forcing_class.zeros()
+            forcing=forcing,
         )
 
     def _create_step_function_body(self):
@@ -298,12 +302,14 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
-            new_derived = self.component_derived_class.zeros()
             predictions["state"] = new_state
             predictions["forcing"] = forcing
             if self.forcing_method == "Qflux":
                 predictions["Qflux"] = snapshot_Qflux
-            return new_state, new_derived, stack_objects(
+            return dict(
+                state=new_state,
+                forcing = forcing,
+            ), stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
 
