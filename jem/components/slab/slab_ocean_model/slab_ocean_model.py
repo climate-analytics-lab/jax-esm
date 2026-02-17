@@ -25,7 +25,7 @@ class OceanState:
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    q_flux: Annotated[float, ("month", "longitude", "latitude"), "two_dimensional_with_month"]
+    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -302,13 +302,9 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
-            predictions["state"] = new_state
-            predictions["forcing"] = forcing
-            if self.forcing_method == "Qflux":
-                predictions["Qflux"] = snapshot_Qflux
             return dict(
                 state=new_state,
-                forcing = forcing,
+                forcing=forcing
             ), stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
