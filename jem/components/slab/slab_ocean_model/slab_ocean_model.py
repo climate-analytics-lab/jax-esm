@@ -266,8 +266,6 @@ class SlabOceanModel(SlabModelBase):
                 )
 
                 snapshot_Qflux = forcing.q_flux[:, :, Qflux_beg_idx]
-                ocn_idx = self.domain.horizontal_grids["T"].bmask == 0
-                snapshot_Qflux = self.Qflux[:, :, clim_beg_idx]
                 snapshot_Qflux = jnp.where(
                     ocn_idx, snapshot_Qflux, 0.0
                 )
@@ -302,12 +300,19 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
+            predictions = dict(
+                state=new_state,
+                forcing=dict(
+                    total_heat_flux=total_heat_flux,
+                )
+            )
+            if self.forcing_method == "Qflux":
+                predictions["forcing"]["q_flux"] = snapshot_Qflux
+
             return dict(
                 state=new_state,
                 forcing=forcing
-            ), stack_objects(
-                [dict(state=new_state, forcing=forcing)]
-            )
+            ), stack_objects([predictions])
 
         return step_function
 
@@ -320,7 +325,7 @@ class SlabOceanModel(SlabModelBase):
         data_vars = dict(
             sea_surface_temperature=(
                 T_grid_dims,
-                state.sea_surface_temperature,
+                state["sea_surface_temperature"],
                 {
                     "long_name": "Sea surface temperature",
                     "units": "K",
@@ -328,7 +333,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             mixed_layer_depth=(
                 T_grid_dims,
-                state.mixed_layer_depth,
+                state["mixed_layer_depth"],
                 {
                     "long_name": "Mixed layer depth",
                     "units": "m",
@@ -336,7 +341,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             total_heat_flux=(
                 T_grid_dims,
-                forcing.total_heat_flux,
+                forcing["total_heat_flux"],
                 {
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
@@ -345,10 +350,10 @@ class SlabOceanModel(SlabModelBase):
             ),
         )
 
-        if "Qflux" in predictions:
-            data_vars["Qflux"] = (
+        if self.forcing_method == "Qflux":
+            data_vars["q_flux"] = (
                 T_grid_dims,
-                predictions["Qflux"],
+                forcing["q_flux"],
                 {
                     "long_name": "Q-flux",
                     "units": "W m-2",
