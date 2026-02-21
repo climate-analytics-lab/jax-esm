@@ -47,21 +47,19 @@ def make_jem_compatible(
 
     D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
-        return dict(
+        return asfloat64(dict(
             state=model._prepare_initial_modal_state(),
             derived={ # Derived
-                "physics" : asfloat64(
-                    PhysicsData.zeros(
-                        model.coords.horizontal.nodal_shape,
-                        model.coords.vertical.layers,
-                    )
+                "physics" : PhysicsData.zeros(
+                    model.coords.horizontal.nodal_shape,
+                    model.coords.vertical.layers,
                 ),
                 "total_heat_flux" : jnp.zeros(D2_nodal_shape),
             },
             forcing=default_forcing(model.coords.horizontal).copy(
                 lfluxland = jnp.bool_(land_model_active),
             )
-        )
+        ))
 
     def generate_step_function():
         # Notice: since save_interval and total_time are claimed
@@ -72,7 +70,7 @@ def make_jem_compatible(
         total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
         def step_function(carry, step):
             state = carry["state"]
-            forcing = carry["forcing"]
+            forcing = asfloat64(carry["forcing"])
             new_atm_modal_state, predictions = model.run_from_state(
                 initial_state=state,
                 save_interval=save_interval_day,  
@@ -89,14 +87,14 @@ def make_jem_compatible(
                 predictions.dynamics.normalized_surface_pressure = jnp.reshape(nsp, (1,) + nsp.shape)
             
             return (
-                dict(
+                asfloat64(dict(
                     state=new_atm_modal_state,
                     derived={
                         "physics" : physics_no_time_dimension,
                         "total_heat_flux" : total_heat_flux,
                     },
                     forcing=forcing,
-                ),
+                )),
                 predictions
             )
 
