@@ -216,7 +216,9 @@ class ACCSetup(VerosSetup):
     def set_diagnostics(self, state):
         settings = state.settings
         diagnostics = state.diagnostics
-
+        diagnostics.clear()       
+        
+        """
         diagnostics["snapshot"].output_frequency = 86400 * 10
         diagnostics["averages"].output_variables = (
             "salt",
@@ -235,7 +237,7 @@ class ACCSetup(VerosSetup):
         diagnostics["tracer_monitor"].output_frequency = 365 * 86400.0 / 12.0
         diagnostics["energy"].output_frequency = 365 * 86400.0 / 48
         diagnostics["energy"].sampling_frequency = settings.dt_tracer * 10
-
+        """
     @veros_routine
     def after_timestep(self, state):
         pass

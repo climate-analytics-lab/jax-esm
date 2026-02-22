@@ -9,7 +9,7 @@ setattr(runtime_settings, 'linear_solver', 'scipy_jax')
 setattr(runtime_settings, 'device', 'cpu')
 
 
-from acc_online import ACCSetup
+from acc import ACCSetup
 
 veros_object = ACCSetup()
 veros_object.setup()
