@@ -5,8 +5,11 @@ from veros import runtime_settings
 
 setattr(runtime_settings, "backend", "jax")
 setattr(runtime_settings, "force_overwrite", True)
+setattr(runtime_settings, 'linear_solver', 'scipy_jax')
+setattr(runtime_settings, 'device', 'cpu')
 
-from acc import ACCSetup
+
+from acc_online import ACCSetup
 
 veros_object = ACCSetup()
 veros_object.setup()
