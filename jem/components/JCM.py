@@ -30,7 +30,7 @@ def asfloat64(tree):
 def make_jem_compatible(
     model: Model,
     coupling_timestep: jdt.Timedelta,
-    land_model_active: bool = True,
+    land_model_active: bool,
 ) -> Model:
     """Adapt the input jcm model to jem framework
     
@@ -79,8 +79,7 @@ def make_jem_compatible(
                 output_averages=True,
             )
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
-            total_heat_flux = - physics_no_time_dimension.surface_flux.hfluxn[..., 2] # upward positive
-
+            total_heat_flux = jnp.sum(physics_no_time_dimension.surface_flux.hfluxn, axis=2) # upward positive
             # This is a bug in jcm: Time dimension vanishes when save_interval == total_time
             if len(predictions.dynamics.normalized_surface_pressure.shape) == 2:
                 nsp = predictions.dynamics.normalized_surface_pressure

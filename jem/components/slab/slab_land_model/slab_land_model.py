@@ -95,7 +95,7 @@ class SlabLandModel(SlabModelBase):
         # Physical parameters from Fortran defaults
         self.depth_soil = depth_soil  # m
         self.depth_lice = depth_lice  # m
-        self.tdland = tdland  # days
+        self.tdland = tdland  # seconds
         self.flandmin = flandmin
         self.land_threshold = land_threshold
         
@@ -235,7 +235,7 @@ class SlabLandModel(SlabModelBase):
         # cdland = dissipation coefficient (Fortran: line 165)
         # cdland = dmask * tdland / (1 + dmask * tdland)
         # Convert tdland from days to timesteps
-        tdland_timesteps = self.tdland * 86400.0 / self.timestep
+        tdland_timesteps = self.tdland / self.timestep
         self.cdland = (self.dmask * tdland_timesteps / (1.0 + self.dmask * tdland_timesteps))
         
         print(f"Heat capacity range: {self.rhcapl.min():.2e} - {self.rhcapl.max():.2e}")
@@ -367,7 +367,7 @@ class SlabLandModel(SlabModelBase):
             
             # Get heat flux from forcing (positive downward into land)
             # Negate because atmosphere uses positive upward convention
-            heatflx = -forcing.total_heat_flux
+            heatflx = forcing.total_heat_flux
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
             T_anom = (state.land_surface_temperature - stl_clim_beg)
