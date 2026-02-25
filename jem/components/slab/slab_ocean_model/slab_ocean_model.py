@@ -1,6 +1,7 @@
 """Slab ocean model component."""
 
 from typing import Optional, Dict, Any, Annotated
+from pathlib import Path
 
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -129,8 +130,8 @@ class SlabOceanModel(SlabModelBase):
                 print("Notice: `SST_clim_file` is not given. Default values (zeros) will be used.")
             elif not Path(self.SST_clim_file).exists():
                 raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" is specified but does not exist.")
-            elif ( not self.relaxation_time > 0 ) or not jnp.isinf(self.relaxation_time):
-                raise ValueError("`relaxation_time` must be a positive number of infinity.")
+            elif (self.relaxation_time < 0) or jnp.isnan(self.relaxation_time):
+                raise ValueError("`relaxation_time` must be a positive number or infinity.")
         else: 
             raise ValueError(f"Unknown `forcing_method` is given: \"{str(forcing_method):s}\" ")
  
@@ -206,13 +207,18 @@ class SlabOceanModel(SlabModelBase):
             * constants.ocean_specific_heat_capacity
             * init_mixed_layer_depth
         )
-        tau = jnp.ones_like(cd) * self.relaxation_time
+
+        if self.forcing_method == "relaxation":
+            tau = jnp.ones_like(cd) * self.relaxation_time
+        else:
+            tau = jnp.inf
+        
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
         
         forcing = self.component_forcing_class.zeros()
         forcing = forcing.copy({
-            "q_flux": forcing.q_flux - 300.0    
+            "q_flux": forcing.q_flux   
         })
         return dict(
             state=self.component_state_class.zeros().copy({
@@ -234,6 +240,7 @@ class SlabOceanModel(SlabModelBase):
             new_sea_surface_temperature_anom = state.sea_surface_temperature
             total_heat_flux = forcing.total_heat_flux
             predictions = {}
+            print(f"Using method: {self.forcing_method}")
             if self.forcing_method == "relaxation":
                 # Get climatology at begin and end of timestep
                 length_of_a_cycle = self.SST_clim.shape[2]
