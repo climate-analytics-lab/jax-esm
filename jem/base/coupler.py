@@ -150,7 +150,7 @@ class Coupler:
 
             predictions = {
                 name : unwrap_leading_dims(stack_objects(_unstacked_predictions[name]), first_n_dim=2)
-                for name in _unstacked_predictions.keys()
+                for name in _unstacked_predictions.keys() if len(_unstacked_predictions[name]) != 0
             }
 
             return carry, predictions
@@ -296,7 +296,7 @@ class Coupler:
         """
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])
-            for component_name, component in self.components.items()
+            for component_name, component in self.components.items() if component_name in predictions
             if getattr(component, "predictions_to_xarray") is not None
         }
 
