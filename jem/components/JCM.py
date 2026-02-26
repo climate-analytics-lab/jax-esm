@@ -55,6 +55,7 @@ def make_jem_compatible(
                     model.coords.vertical.layers,
                 ),
                 "total_heat_flux" : jnp.zeros(D2_nodal_shape),
+                "total_freshwater_flux" : jnp.zeros(D2_nodal_shape),
             },
             forcing=default_forcing(model.coords.horizontal).copy(
                 lfluxland = jnp.bool_(land_model_active),
@@ -80,6 +81,14 @@ def make_jem_compatible(
             )
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
             total_heat_flux = jnp.sum(physics_no_time_dimension.surface_flux.hfluxn, axis=2) # upward positive
+            evaporation = jnp.sum(physics_no_time_dimension.surface_flux.evap, axis=2) # upward positive
+
+            total_freshwater_flux = (
+                evaporation
+                 - physics_no_time_dimension.convection.precnv
+                 - physics_no_time_dimension.condensation.precls
+            ) / 1000.0 # The number 1000.0 is the convert factor of mass density flux of freshwater from g/m^2/s to kg/m^2/s
+
             # This is a bug in jcm: Time dimension vanishes when save_interval == total_time
             if len(predictions.dynamics.normalized_surface_pressure.shape) == 2:
                 nsp = predictions.dynamics.normalized_surface_pressure
@@ -91,6 +100,7 @@ def make_jem_compatible(
                     derived={
                         "physics" : physics_no_time_dimension,
                         "total_heat_flux" : total_heat_flux,
+                        "total_freshwater_flux" : total_freshwater_flux,
                     },
                     forcing=forcing,
                 )),
