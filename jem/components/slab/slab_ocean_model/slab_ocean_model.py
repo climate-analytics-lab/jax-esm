@@ -78,6 +78,7 @@ class SlabOceanModel(SlabModelBase):
         Q_flux_file: Optional[str] = None,
         forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
+        mask_value: float = 0.0,
     ):
         """Initialize slab ocean model.
 
@@ -112,6 +113,7 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = None
         self.cd_factor = None
         self.forcing_method = forcing_method or "None"
+        self.mask_value = mask_value
 
         self.validate()
 
@@ -161,7 +163,7 @@ class SlabOceanModel(SlabModelBase):
 
     def initialize(self):
         """Initialize ocean model fields."""
-        nonocn_idx = self.horizontal_grids["T"].bmask != 0
+        nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
 
         # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
@@ -231,8 +233,8 @@ class SlabOceanModel(SlabModelBase):
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
-        ocn_idx = self.horizontal_grids["T"].bmask == 0
-        nonocn_idx = self.horizontal_grids["T"].bmask != 0
+        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
+        nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
 
         def step_function(carry, step):
             state = carry["state"]
