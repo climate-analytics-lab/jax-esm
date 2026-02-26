@@ -36,10 +36,9 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
     generate_jcm_forcing_and_topography_files,
 )
 from jem.components import JCM, SlabLandModel, SlabOceanModel
-from jem.mapping import IdentityRegridder
-from jem.mapping import BasicForcingMapper
+from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
-import jem.utils.tree_tools as tree_tools
+
 
 # %% [markdown]
 # ## Configurations
@@ -90,63 +89,41 @@ components = dict(
 
 # %%
 # Creating regridders and mapping
-identity_regridder = IdentityRegridder()
-forcing_mapper = BasicForcingMapper(components=components)
-forcing_mapper.add_forcing_mapping(
+identity = lambda x: x
+mapper = BasicMapper(components=components)
+mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
-    target = ("ocn", "total_heat_flux"),
-    regridder = identity_regridder,
+    target = ("ocn", "forcing.total_heat_flux"),
+    regridder = identity,
 )
-forcing_mapper.add_forcing_mapping(
+mapper.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
-    target = ("atm", "sea_surface_temperature"),
-    regridder = identity_regridder,
+    target = ("atm", "forcing.sea_surface_temperature"),
+    regridder = identity,
 )
-forcing_mapper.add_forcing_mapping(
+mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
-    target = ("lnd", "total_heat_flux"),
-    regridder = identity_regridder,
+    target = ("lnd", "forcing.total_heat_flux"),
+    regridder = identity,
 )
-forcing_mapper.add_forcing_mapping(
+mapper.add_mapping(
     source = ("lnd", "state.land_surface_temperature"),
-    target = ("atm", "stl_am"),
-    regridder = identity_regridder,
+    target = ("atm", "forcing.stl_am"),
+    regridder = identity,
 )
 
 # %% [markdown]
-# ## Create Coupled Model
-
+# ## Create and Run Coupled Model
 # %%
 model = Coupler(
     components=components,
-    forcing_mappers=dict(fm=forcing_mapper),
+    mappers=dict(mapper=mapper),
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
-
-# %% [markdown]
-# ## Run Coupled Model
-
-# %%
-# Obtain initial condition
-initial_coupled_state_forcing = model.initialize()
-
-print(initial_coupled_state_forcing["ocn"][0]["mixed_layer_depth"])
-
-print("Model state:")
-tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
-
-print("Create model trajectory function...")
-trajectory_function = model.generate_trajectory_function(
-    workflow=["fm", "atm", "ocn", "lnd"],
+initial_carry, final_carry, predictions = model.run(
+    workflow=["mapper", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
 )
-
-# Run coupled model
-print("Running model...")
-state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
-print("Simulation finished.")
 # %% [markdown]
 # ## Output into NetCDF
 

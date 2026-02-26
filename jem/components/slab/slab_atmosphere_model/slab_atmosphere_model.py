@@ -135,16 +135,16 @@ class SlabAtmosphereModel(SlabModelBase):
         )
         self.cd_factor = self.timestep / cd
 
-        return self.component_state_class.zeros().copy(
-            {
+        return dict(
+            state=self.component_state_class.zeros().copy({
                 "mean_air_temperature": init_mean_air_temperature,
                 "mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
                 "mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
-            }
-        ), self.component_derived_class.zeros(), self.component_forcing_class.zeros().copy(
-            {
+            }),
+            derived=self.component_derived_class.zeros(),
+            forcing=self.component_forcing_class.zeros().copy({
                 "bulk_drag_coefficient": jnp.array(1e-3),
-            }
+            })
         )
 
     def _create_step_function_body(self):
@@ -152,7 +152,10 @@ class SlabAtmosphereModel(SlabModelBase):
         land_index = self.horizontal_grids["T"].bmask == 1
         ocean_index = self.horizontal_grids["T"].bmask == 0
 
-        def step_function(state, forcing, step):
+        def step_function(carry, step):
+            state = carry["state"]
+            forcing = carry["forcing"]
+ 
             # Compute wind speed
             wind_speed = (
                 state.mean_zonal_wind_velocity**2
@@ -210,7 +213,11 @@ class SlabAtmosphereModel(SlabModelBase):
                 "internal_total_heat_flux" : total_heat_flux,
             })
 
-            return new_state, new_derived, stack_objects(
+            return dict(
+                state=new_state,
+                derived=new_derived,
+                forcing=forcing,
+            ), stack_objects(
                 [dict(state=new_state, forcing=forcing)]
             )
 
