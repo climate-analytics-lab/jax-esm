@@ -90,8 +90,7 @@ The following code is a spring system.
                 return carry, dict(t=carry.t, x=carry.x, v=carry.v)
             return step_function
 
-
-And this is how you run it
+Without JEM, this is how you run it with :code:`jax.lax.scan`:
 
 .. code-block:: python
 
@@ -102,6 +101,8 @@ And this is how you run it
         spring.initialize(),
         jnp.arange(int(total_time / spring.dt)),
     )
+
+If we want to have two springs
 
 
 With JEM, you can put two springs together (no interactions yet),
