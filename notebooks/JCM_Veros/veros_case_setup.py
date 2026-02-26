@@ -31,17 +31,6 @@ from veros.core.operators import numpy as npx, update, at
 import jax.numpy as npx
 import xarray as xr
 
-dxt = 3.75
-dyt = 3.75
-nx = 96
-ny = 40
-x_origin = 0.0
-
-lat_skip = 4
-# 1: land, 0: ocean
-land_sea_mask = 1 - xr.open_dataset("funky_earth_add_cap.nc")["lsm"].to_numpy()[:, lat_skip:-lat_skip]
-
-
 # For some reason if I set y_origin to -90 and dyt = 3.75,
 # the initialization will throw exception. I guess it is 
 # related to singularity at poles. So the current ad-hoc
@@ -49,8 +38,24 @@ land_sea_mask = 1 - xr.open_dataset("funky_earth_add_cap.nc")["lsm"].to_numpy()[
 # atmosphere [-90, 90], just to match the grid shape.
 y_origin = -75.0
 
-class ACCSetup(VerosSetup):
-    """A model using spherical coordinates with a partially closed domain representing the Atlantic and ACC.
+dxt = 3.75
+dyt = 3.75
+nx = 96
+ny = 40
+x_origin = 0.0
+
+lat_skip = 4
+
+land_sea_mask_file = None
+
+def get_land_sea_mask():
+    global land_sea_mask_file
+    # 1: land, 0: ocean
+    land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()[:, lat_skip:-lat_skip]
+    return land_sea_mask
+
+class VerosCaseSetup(VerosSetup):
+    """A model using spherical coordinates with a partially closed domain.
 
     Wind forcing over the channel part and buoyancy relaxation drive a large-scale meridional overturning circulation.
 
@@ -65,8 +70,8 @@ class ACCSetup(VerosSetup):
     @veros_routine
     def set_parameter(self, state):
         settings = state.settings
-        settings.identifier = "acc"
-        settings.description = "My ACC setup"
+        settings.identifier = "output_veros"
+        settings.description = "My Veros setup"
 
         settings.nx, settings.ny, settings.nz = nx, ny, 15
         settings.dt_mom = 4800
@@ -152,7 +157,7 @@ class ACCSetup(VerosSetup):
        
          
         vs.kbot = npx.ones_like(x)
-        vs.kbot = vs.kbot.at[2:-2, 2:-2].set(land_sea_mask)
+        vs.kbot = vs.kbot.at[2:-2, 2:-2].set(get_land_sea_mask())
         #vs.kbot = npx.ones_like(x)
         #vs.kbot *= npx.where(npx.abs(y) > 75.0, 0, 1)
         #vs.kbot *= npx.where(npx.logical_and(npx.abs(x) < 5.0, y > -20.0), 0, 1)
