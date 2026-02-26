@@ -19,8 +19,6 @@ if __name__ == "__main__":
 # -- end of auto-generated header, original file below --
 
 import veros
-veros.runtime_settings.backend = "jax"
-
 print(f"Veros path: {veros.__file__:s}")
 
 from veros import VerosSetup, veros_routine
@@ -158,9 +156,6 @@ class VerosCaseSetup(VerosSetup):
          
         vs.kbot = npx.ones_like(x)
         vs.kbot = vs.kbot.at[2:-2, 2:-2].set(get_land_sea_mask())
-        #vs.kbot = npx.ones_like(x)
-        #vs.kbot *= npx.where(npx.abs(y) > 75.0, 0, 1)
-        #vs.kbot *= npx.where(npx.logical_and(npx.abs(x) < 5.0, y > -20.0), 0, 1)
 
 
     @veros_routine

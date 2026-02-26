@@ -71,12 +71,23 @@ def modify_jcm_terrain(
         raise Exception(f"Unknown `--planet-type`: {args.planet_type}") 
     
     ds["lsm"].data[:] = mask
+    
+    # Setting the height of cap is 0-meter
     ds["orog"].data[:] = np.where(
         (np.abs(llat) >= cap_threshold_latitude),
-        5.0,
+        0.0,
         ds["orog"].data
     )
-    
+
+    # In aqua planet, the orography at the point is still realistic earth, even
+    # though the much of the surface is now ocean. Therefore, we need to set
+    # the height of ocean grid to 0-meter, such that JCM does not see an invi-
+    # sible mountain. 
+    ds["orog"].data[:] = np.where(
+        mask == 0,
+        0.0,
+        ds["orog"].data
+    )
     
     print(f"Writing result to: {str(output_file)}")
     ds.to_netcdf(output_file)
