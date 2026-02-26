@@ -367,7 +367,7 @@ class SlabLandModel(SlabModelBase):
             
             # Get heat flux from forcing (positive downward into land)
             # Negate because atmosphere uses positive upward convention
-            heatflx = forcing.total_heat_flux
+            heatflx = - forcing.total_heat_flux
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
             T_anom = (state.land_surface_temperature - stl_clim_beg)
