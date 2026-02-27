@@ -43,7 +43,7 @@ interaction_between_atm_and_ocn.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
 )
-mapper.add_mapping(
+interaction_between_atm_and_ocn.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
     target = ("atm", "forcing.sea_surface_temperature"),
 )
