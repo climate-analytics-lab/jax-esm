@@ -3,7 +3,18 @@ Tutorial: Integrate an Existing Model into JEM
 
 In this tutorial, we are going to couple a differentiable global atmosphere
 model `JCM <https://github.com/climate-analytics-lab/jax-gcm>`__ to a slab
-ocean model provided by JEM.
+ocean model provided by JEM (Figure 1).
+
+.. figure:: _static/jcm_som.svg
+   :scale: 25 %
+   :alt: Schematic diagram showing the relationshipe between JCM and slab 
+         ocean model
+   :align: center
+
+   Figure 1: Schematic diagram showing the relationshipe between JCM and
+   the slab ocean model. The atmosphere model needs the sea surface
+   temperature, and the ocean model needs the heat flux. 
+
 
 Step 1: Identifying the Gap to be JEM-compatible
 ------------------------------------------------
