@@ -25,7 +25,7 @@ pip install -e "."
 
 ## Quick Start
 
-Here is an example to run an aquaplanet simulation.
+Here is an example to run an aquaplanet simulation coupling JCM and an slab ocean model.
 
 ```
 import jcm
