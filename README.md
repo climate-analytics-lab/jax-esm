@@ -11,141 +11,74 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 - **Direct Component Coupling**: Components can directly access each other's state for tight integration
 - **xarray Integration**: Built-in conversion to xarray Datasets for analysis
 
-## Lightning Start: Installation + Run
-Copy and paste in your terminal to set up a fresh Conda environment and run example code.
-```
-conda create -y -n jem_fresh python=3.13
-conda activate jem_fresh
-
-# Remember to replace `your_credential`.
-git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
-cd jax-esm
-
-pip3 install -e ".[jcm,plot]"
-
-export PYTHONPATH=`pwd`
-
-# You can run the following file directly, or with Notebook+Jupytext.
-python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
-```
-
 ## Installation 
 
-Please install `jax-gcm` (hereafter `jcm`) and `matplotlib` with
-```bash
-pip install -e ".[jcm,plot]"
 ```
+# Install published jem
+pip install jem
 
-For development, please run additionally
-```bash
-pip install -e ".[dev]"
+# Using locally cloned jem
+git clone -b [version_tag] https://github.com/climate-analytics-lab/jax-esm
+cd jax-esm
+pip install -e "."
 ```
 
 ## Quick Start
 
-You can run a Jax-gcm coupled run with
+Here is an example to run an aquaplanet simulation.
+
 ```
-python3 jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py
-```
-whose essential code is below
-```python
-# Same as jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py 
-# but only the essential part
 import jcm
-from jcm.geometry import Geometry
 import jax_datetime as jdt
 
-from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
-    generate_jcm_forcing_and_topography_files,
-)
-from jem.components import JCM, SlabLandModel, SlabOceanModel
-from jem.mapping import IdentityRegridder
-from jem.mapping import BasicForcingMapper
-from jem.base.coupler import Coupler
-import jem.utils.tree_tools as tree_tools
+from jem import Coupler
+from jem.components import JCM, SlabOceanModel
+from jem.mapping import BasicMapper
 
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_interval = jdt.to_timedelta(10, "day")
-output_dir = Path("output/JCM_SOM_SLM").resolve()
-
-external_files = generate_jcm_forcing_and_topography_files()
-output_dir.mkdir(exist_ok=True, parents=True)
-geometry = Geometry.from_file(external_files["terrain"])
 one_second = jdt.to_timedelta(1, "second")
 
-# Creating components
+mapper = BasicMapper()
+mapper.add_mapping(
+    source = ("atm", "derived.total_heat_flux"),
+    target = ("ocn", "forcing.total_heat_flux"),
+)
+mapper.add_mapping(
+    source = ("ocn", "state.sea_surface_temperature"),
+    target = ("atm", "forcing.sea_surface_temperature"),
+)
+
 atm_model = jcm.model.Model(
     start_date=start_datetime,
-    geometry=geometry
 )
 
-JCM.make_jem_compatible(
+atm_model = JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
-    save_interval=jdt.to_timedelta(12, "hour"),
+    land_model_active=False,
 )
 
-components = dict(
-    atm=atm_model,
-    ocn=SlabOceanModel(
-        start_datetime=start_datetime,
-        mask_file=external_files["terrain"],
-        SST_clim_file=external_files["forcing"],
-    ),
-    lnd=SlabLandModel(
-        start_datetime=start_datetime,
-        topography_file=external_files["terrain"],
-        mask_file=external_files["terrain"],
-        land_clim_file=external_files["forcing"],
-    ),
-)
-
-# Creating regridders and mapping
-identity_regridder = IdentityRegridder()
-forcing_mapper = BasicForcingMapper(components=components)
-forcing_mapper.add_forcing_mapping(
-    source = ("atm", "extra.total_heat_flux"),
-    target = ("ocn", "flux.total_heat_flux"),
-    regridder = identity_regridder,
-)
-forcing_mapper.add_forcing_mapping(
-    source = ("ocn", "prog.sea_surface_temperature"),
-    target = ("atm", "sea_surface_temperature"),
-    regridder = identity_regridder,
-)
-forcing_mapper.add_forcing_mapping(
-    source = ("atm", "extra.total_heat_flux"),
-    target = ("lnd", "flux.total_heat_flux"),
-    regridder = identity_regridder,
-)
-forcing_mapper.add_forcing_mapping(
-    source = ("lnd", "prog.land_surface_temperature"),
-    target = ("atm", "stl_am"),
-    regridder = identity_regridder,
-)
-
-# Make coupled model
 model = Coupler(
-    components=components,
-    forcing_mappers=dict(fm=forcing_mapper),
+    components=dict(
+        atm=atm_model,
+        ocn=SlabOceanModel(
+            start_datetime=start_datetime,
+            timestep=coupling_timestep / one_second,
+        ),
+    ),
+    mappers=dict(mapper=mapper),
 )
 
-initial_coupled_state_forcing = model.initialize()
-trajectory_function = model.generate_trajectory_function(
-    workflow=["fm", "atm", "ocn", "lnd"],
+simulation_interval = jdt.to_timedelta(30, "day")
+initial_state, final_state, predictions = model.run(
+    workflow=["mapper", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
 )
 
-# Run coupled model
-state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
-
-# Write output to netcdf files
-for component_name, ds in output_dict.items():
-    output_file = output_dir / f"{component_name:s}.nc"
-    print("Output file: ", str(output_file))
-    ds.to_netcdf(output_file, engine="netcdf4")
-
+output_dict = model.predictions_to_xarray(predictions)
+print(output_dict["atm"]) # xarray.Dataset
+print(output_dict["ocn"])
 ```
 
 ## Architecture
