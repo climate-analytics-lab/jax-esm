@@ -37,7 +37,6 @@ from jem.mapping import BasicMapper
 
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-one_second = jdt.to_timedelta(1, "second")
 
 interaction_between_atm_and_ocn = BasicMapper()
 interaction_between_atm_and_ocn.add_mapping(
@@ -64,7 +63,7 @@ model = Coupler(
         atm=atm_model,
         ocn=SlabOceanModel(
             start_datetime=start_datetime,
-            timestep=coupling_timestep / one_second,
+            timestep=coupling_timestep / jdt.to_timedelta(1, "second"),
         ),
     ),
     mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
