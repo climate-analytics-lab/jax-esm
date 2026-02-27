@@ -34,6 +34,8 @@ dependencies = [
     "xarray",
     "tree_math",
     "coordax",
+    "jcm>=0.1.0",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
@@ -42,16 +44,6 @@ dev = [
     "pytest-cov>=3.0",
     "mypy>=0.900",
     "ruff",
-]
-
-jcm = [
-    "dinosaur",
-    "flax",
-    "jcm",
-]
-
-plot = [
-    "matplotlib",
 ]
 
 docs = [
