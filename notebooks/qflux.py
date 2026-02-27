@@ -13,9 +13,9 @@
 # ---
 
 # %% [markdown]
-# # JEM - Coupling Quick Start
+# # Slab Ocean Model and inverse Q-flux
 #
-# This notebook demonstrates a JAX-ESM (JEM) example using JAX-GCM (JCM), Slab Ocean Model, and Slab Land Model.
+# This notebook attempts to inverse Q-flux of slab ocean model.
 
 # %% [markdown]
 # ## Import Packages
@@ -26,6 +26,7 @@ from pathlib import Path
 
 # or `export PYTHONPATH=/path/to/jax-esm/root/directory`
 sys.path.append( (Path(os.getcwd()) / ".." ).resolve())
+print(f"sys.path = {str(sys.path)}")
 
 # %%
 import jcm
@@ -38,7 +39,7 @@ from jem.tool_scripts.generate_jcm_forcing_and_topography_files import (
 from jem.components import JCM, SlabLandModel, SlabOceanModel
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
-
+import jem.utils.tree_tools as tree_tools
 
 # %% [markdown]
 # ## Configurations
@@ -46,8 +47,8 @@ from jem.base.coupler import Coupler
 # %%
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_interval = jdt.to_timedelta(10, "day")
-output_dir = Path("output/JCM_SOM_SLM").resolve()
+simulation_interval = jdt.to_timedelta(3, "day")
+output_dir = Path("output/Qflux").resolve()
 
 external_files = generate_jcm_forcing_and_topography_files()
 output_dir.mkdir(exist_ok=True, parents=True)
@@ -74,7 +75,7 @@ components = dict(
     ocn=SlabOceanModel(
         start_datetime=start_datetime,
         mask_file=external_files["terrain"],
-        SST_clim_file=external_files["forcing"],
+        forcing_method="Qflux",
     ),
     lnd=SlabLandModel(
         start_datetime=start_datetime,
@@ -113,17 +114,39 @@ mapper.add_mapping(
 )
 
 # %% [markdown]
-# ## Create and Run Coupled Model
+# ## Create Coupled Model
+
 # %%
 model = Coupler(
     components=components,
     mappers=dict(mapper=mapper),
 )
 
-initial_carry, final_carry, predictions = model.run(
+print("Model info: ") 
+tree_tools.print_tree(model.get_info(), root="Model")
+
+# %% [markdown]
+# ## Run Coupled Model
+
+# %%
+# Obtain initial condition
+initial_coupled_state_forcing = model.initialize()
+
+print(initial_coupled_state_forcing["ocn"]["state"]["mixed_layer_depth"])
+
+print("Model state:")
+tree_tools.print_tree(initial_coupled_state_forcing, root="ModelState")
+
+print("Create model trajectory function...")
+trajectory_function = model.generate_trajectory_function(
     workflow=["mapper", "atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
 )
+
+# Run coupled model
+print("Running model...")
+state_holder, predictions = trajectory_function(initial_coupled_state_forcing)
+print("Simulation finished.")
 # %% [markdown]
 # ## Output into NetCDF
 
@@ -134,80 +157,3 @@ for component_name, ds in output_dict.items():
     print("Output file: ", str(output_file))
     ds.to_netcdf(output_file, engine="netcdf4")
 
-
-# %% [markdown]
-# ## Visualization
-
-# %%
-import matplotlib.pyplot as plt
-
-# %% [markdown]
-# ### Atmosphere
-
-# %%
-ds = output_dict["atm"]
-print(str(ds))
-
-# %% [markdown]
-# #### Precipitation
-
-# %%
-ds['condensation.precls'].plot(x='lon', y='lat', col='time', col_wrap=2, aspect=2)
-ds['convection.precnv'].plot(x='lon', y='lat', col='time', col_wrap=2, aspect=2)
-
-# %% [markdown]
-# #### Moisture
-
-# %%
-ds['specific_humidity'].mean('lon').plot(x='lat', y='level', col='time', col_wrap=3, aspect=6, yincrease=False)
-ds['specific_humidity'].isel(level=3).plot(x='lon', y='lat', col='time', col_wrap=3, aspect=2)
-
-# %% [markdown]
-# #### Clouds
-
-# %% jupyter={"outputs_hidden": true}
-ds['shortwave_rad.cloudc'].plot(x='lon', y='lat', col='time', col_wrap=3, aspect=2)
-ds['shortwave_rad.qcloud'].plot(x='lon', y='lat', col='time', col_wrap=3, aspect=2)
-
-# %% [markdown]
-# ### Ocean
-
-# %%
-ds = output_dict["ocn"]
-print(str(ds))
-
-# %% [markdown]
-# #### Sea Surface Temperature
-# We plot both the SST and its difference with respect to the initial condition.
-
-# %%
-g = (ds['sea_surface_temperature'] - 273.15).plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, cmap="gnuplot")
-g.fig.suptitle("Sea Surface Temperature [${}^\\circ \\mathrm{C}$]", fontsize=16)
-
-# %%
-g = (ds['sea_surface_temperature'] - ds['sea_surface_temperature'].isel(time=0)).plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, center=0)
-g.fig.suptitle("Difference of Sea Surface Temperature between labeled time and initial condition [${}^\\circ \\mathrm{C}$]", fontsize=16)
-
-# %% [markdown]
-# #### Total heat flux
-
-# %%
-g = ds['total_heat_flux'].plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, cmap="bwr_r", center=0.0)
-g.fig.suptitle("Total heat flux (upward positive) [$\\mathrm{W} / \\mathrm{m}^2$]", fontsize=16)
-
-# %% [markdown]
-# ### Land
-
-# %%
-ds = output_dict["lnd"]
-print(str(ds))
-
-# %% [markdown]
-# #### Land Surface Temperature
-
-# %%
-g = (ds['land_surface_temperature'] - 273.15).plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, cmap="bwr", center=0)
-g.fig.suptitle("Land Surface Temperature [${}^\\circ \\mathrm{C}$]", fontsize=16, y=1.02)
-
-# %%
-plt.show()
