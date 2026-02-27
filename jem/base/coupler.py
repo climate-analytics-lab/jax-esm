@@ -161,11 +161,12 @@ class Coupler:
         self,
         workflow: Workflow,
         iterations: int,
+        initial_carry: CoupledCarry = None,
         jitted: bool = True,
         show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
     ) -> TrajectoryFunction:
-        initial_carry = self.initialize()
+        initial_carry = initial_carry or self.initialize()
         return initial_carry, *self.generate_trajectory_function(
             workflow=workflow,
             iterations=iterations,
