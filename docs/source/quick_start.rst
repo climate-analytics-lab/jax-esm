@@ -76,5 +76,58 @@ Here is an example to run an aquaplanet simulation.
     print(output_dict["atm"]) # xarray.Dataset
     print(output_dict["ocn"]) 
 
+Here we provide a template code to make an animation of surface specific
+humidity.
+
+.. code-block:: python
+
+    from matplotlib.animation import FuncAnimation
+    from IPython.display import Image
+    import cartopy.crs as ccrs
+    from cartopy.util import add_cyclic_point
+    import numpy as np
+
+    data = output_dict["atm"]["specific_humidity"]
+
+    fig = plt.figure(figsize=(10, 6))
+    ax = plt.axes(projection=ccrs.PlateCarree())
+
+    ax.gridlines(draw_labels=True)
+    cb = None
+    cf = None
+
+    def update(frame):
+        global cf, cb   
+        _data = data.isel(time=frame, level=0)
+     
+        if cf is not None:
+            for coll in cf.collections:
+                coll.remove()
+       
+        # Plot the humidity field for the current time step
+        lat = _data.coords["lat"]
+        lon = _data.coords["lon"]
+        cyclic_data, cyclic_lon = add_cyclic_point(_data.to_numpy().transpose(), coord=lon)
+        mappable = ax.contourf(
+            cyclic_lon, lat,
+            cyclic_data,
+            levels=1 + np.linspace(0, 1, 21) * 10,
+            transform=ccrs.PlateCarree(), 
+            cmap='GnBu',
+            extend="both",
+        )
+        
+        ax.set_title(f"[{_data['time'].dt.strftime('%Y-%m-%d').to_numpy().item()}] Surface specific humidity")
+        if cb is None:
+            cb = plt.colorbar(ax=ax, mappable=mappable, orientation='vertical', shrink=0.7, pad=0.07)
+            cb.set_label("[g/kg]", fontsize=12)
+        
+        return [cf,]
+        
+    # Generate and save
+    ani = FuncAnimation(fig, update, frames=len(data.coords["time"]), interval=120, blit=False)
+    ani.save('humidity_map.gif', writer='pillow', dpi=200)
+    display(Image('humidity_map.gif'))
+
 
 
