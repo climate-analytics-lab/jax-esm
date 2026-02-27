@@ -208,14 +208,13 @@ not have to make one on your own. Also, the following code use
 
     start_datetime = jdt.to_datetime("2000-01-01")
     coupling_timestep = jdt.to_timedelta(1, "day")
-    one_second = jdt.to_timedelta(1, "second")
 
     interaction_between_atm_and_ocn = BasicMapper()
     interaction_between_atm_and_ocn.add_mapping(
         source = ("atm", "derived.total_heat_flux"),
         target = ("ocn", "forcing.total_heat_flux"),
     )
-    mapper.add_mapping(
+    interaction_between_atm_and_ocn.add_mapping(
         source = ("ocn", "state.sea_surface_temperature"),
         target = ("atm", "forcing.sea_surface_temperature"),
     )
@@ -235,7 +234,7 @@ not have to make one on your own. Also, the following code use
             atm=atm_model,
             ocn=SlabOceanModel(
                 start_datetime=start_datetime,
-                timestep=coupling_timestep / one_second,
+                timestep=coupling_timestep / jdt.to_timedelta(1, "second"),
             ),
         ),
         mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
