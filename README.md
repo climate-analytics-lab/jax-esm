@@ -69,7 +69,7 @@ model = Coupler(
     mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
 )
 
-simulation_interval = jdt.to_timedelta(30, "day")
+simulation_interval = jdt.to_timedelta(60, "day")
 initial_state, final_state, predictions = model.run(
     workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
