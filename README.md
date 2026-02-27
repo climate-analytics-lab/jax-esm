@@ -39,8 +39,8 @@ start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 one_second = jdt.to_timedelta(1, "second")
 
-mapper = BasicMapper()
-mapper.add_mapping(
+interaction_between_atm_and_ocn = BasicMapper()
+interaction_between_atm_and_ocn.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
 )
@@ -67,12 +67,12 @@ model = Coupler(
             timestep=coupling_timestep / one_second,
         ),
     ),
-    mappers=dict(mapper=mapper),
+    mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
 )
 
 simulation_interval = jdt.to_timedelta(30, "day")
 initial_state, final_state, predictions = model.run(
-    workflow=["mapper", "atm", "ocn"],
+    workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
     iterations = int(simulation_interval / coupling_timestep),
 )
 
@@ -80,6 +80,8 @@ output_dict = model.predictions_to_xarray(predictions)
 print(output_dict["atm"]) # xarray.Dataset
 print(output_dict["ocn"])
 ```
+
+![Surface specific humidity](gallery/JCM_SOM_demo.gif)
 
 ## Architecture
 
