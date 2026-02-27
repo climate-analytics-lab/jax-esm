@@ -2,29 +2,79 @@ Quick Start
 =============
 
 
-Install jem
+Install JEM
 -----------
 
 
 .. code-block::
-   
-   pip install jem
+ 
+    # Install published jem
+    pip install jem
+    
+    # Using locally cloned jem
+    git clone -b [version_tag] https://github.com/climate-analytics-lab/jax-esm
+    cd jax-esm
+    pip install -e "."
 
-Run the first coupled run
+
+Run the First Coupled Run
 -------------------------
+
+Here is an example to run an aquaplanet simulation.
 
 .. code-block::
 
-   jem create_shell --directory exp --shell JCM_SlabOceanModel_SlabLandModel
-   python3 exp/main.py
+    import jcm
+    import jax_datetime as jdt
+
+    from jem import Coupler
+    from jem.components import JCM, SlabOceanModel
+    from jem.mapping import BasicMapper
+
+    start_datetime = jdt.to_datetime("2000-01-01")
+    coupling_timestep = jdt.to_timedelta(1, "day")
+    one_second = jdt.to_timedelta(1, "second")
+    
+    mapper = BasicMapper()
+    mapper.add_mapping(
+        source = ("atm", "derived.total_heat_flux"),
+        target = ("ocn", "forcing.total_heat_flux"),
+    )
+    mapper.add_mapping(
+        source = ("ocn", "state.sea_surface_temperature"),
+        target = ("atm", "forcing.sea_surface_temperature"),
+    )
+
+    atm_model = jcm.model.Model(
+        start_date=start_datetime,
+    )
+
+    atm_model = JCM.make_jem_compatible(
+        atm_model,
+        coupling_timestep=coupling_timestep,
+        land_model_active=False,
+    )
+
+    model = Coupler(
+        components=dict(
+            atm=atm_model,
+            ocn=SlabOceanModel(
+                start_datetime=start_datetime,
+                timestep=coupling_timestep / one_second,
+            ),
+        ),
+        mappers=dict(mapper=mapper),
+    )
+
+    simulation_interval = jdt.to_timedelta(30, "day")
+    initial_state, final_state, predictions = model.run(
+        workflow=["mapper", "atm", "ocn"],
+        iterations = int(simulation_interval / coupling_timestep),
+    )
+
+    output_dict = model.predictions_to_xarray(predictions)
+    print(output_dict["atm"]) # xarray.Dataset
+    print(output_dict["ocn"]) 
 
 
-To integrate your model with jem, you need to create an adapter function similar to `make_jem_compatible` as in `jem/components/JCM.py`. In this adapter function, you need to make sure Samudra model object provide the following functions:
-
-1. `initialize`: returns `(initial_state, initial_derived, initial_forcing)` which are all pytrees.
-2. `generate_step_function`: Create a step_function that returns `(new_state, new_derived, predictions)`. This `new_derived` must match the structure of `initial_derived` returned by `initialize`
-3. (Optional) `predictions_to_xarray`: Convert the received prediction object into an xarray, which will be used when couple models `predictions_to_xarray` is called.
-4. (Optional) `get_info`: Returns a dict describing the model, which will be printed when coupled model's `get_info` is called.
-
-Happy coupling!
 
