@@ -1,5 +1,5 @@
-Quick Start
-=============
+Copy-and-paste Quick Start
+==========================
 
 
 Install JEM
@@ -8,12 +8,15 @@ Install JEM
 
 .. code-block::
  
-    # Install published jem
-    pip install jem
-    
-    # Using locally cloned jem
-    git clone -b [version_tag] https://github.com/climate-analytics-lab/jax-esm
+    # Install JEM
+    git clone -b v0.1 https://github.com/climate-analytics-lab/jax-esm
     cd jax-esm
+    pip install -e "."
+    cd ..
+
+    # Install jittable Veros (temporary solution)
+    git clone https://github.com/meteorologytoday/veros-jittable.git
+    cd veros-jittable
     pip install -e "."
 
 

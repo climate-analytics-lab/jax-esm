@@ -17,9 +17,10 @@ documentation for details.
 
    quick_start
    tutorial
+   examples
+
    developers
-   api
-   api_automodule
+   api_superset
 
 Indices and tables
 ==================

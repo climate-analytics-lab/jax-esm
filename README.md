@@ -24,7 +24,6 @@ cd ..
 git clone https://github.com/meteorologytoday/veros-jittable.git
 cd veros-jittable
 pip install -e "."
-cd ..
 ```
 
 ## Quick Start
@@ -85,6 +84,18 @@ print(output_dict["ocn"])
 ```
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
+
+## Documentation
+
+For more details, build it locally with:
+
+```
+cd jax-esm/docs
+pip install -r /path/to/requirements.txt
+make html
+```
+
+Then open `docs/build/html/index.html` in your browser.
 
 ## Architecture
 
