@@ -190,17 +190,26 @@ class SlabLandModel(SlabModelBase):
                 # Transpose from (12, lat, lon) to (lat, lon, 12)
                 self.stl_clim = jnp.transpose(ideal_clim, (1, 2, 0))
                 self.n_clim_steps = 12
-            
+
             # Snow depth climatology (mm water equivalent)
             if "snowd" in ds:
+                print("Notice: found 'snowd' in boundary file.")
                 self.snowd_clim = jnp.array(ds["snowd"].values)
+            elif "snowc" in ds:
+                # Tien-Yiao [2016/03/01]: jax-gcm forcing file seems to use snowc instead of snowd
+                self.snowd_clim = jnp.array(ds["snowc"].values)
             else:
-                print("Warning: 'snowd' not in boundary file, using zero snow")
+                print("Warning: cannot find 'snowd' or 'snowc' not in boundary file, using zero snow")
                 self.snowd_clim = jnp.zeros(D2_nodal_shape + (self.n_clim_steps,))
             
             # Soil water availability climatology (0-1)
             if "soilw" in ds:
+                print("Notice: found 'soilw' in boundary file.")
                 self.soilw_clim = jnp.array(ds["soilw"].values)
+            elif "soilw_am" in ds:
+                # Tien-Yiao [2016/03/01]: jax-gcm forcing file use soilw_am instead of soilw
+                print("Notice: found 'snowd_am' in boundary file.")
+                self.soilw_clim = jnp.array(ds["soilw_am"].values)
             else:
                 print("Warning: 'soilw' not in boundary file, using uniform soil moisture")
                 self.soilw_clim = jnp.ones(D2_nodal_shape + (self.n_clim_steps,)) * 0.5
@@ -367,7 +376,7 @@ class SlabLandModel(SlabModelBase):
             
             # Get heat flux from forcing (positive downward into land)
             # Negate because atmosphere uses positive upward convention
-            heatflx = -forcing.total_heat_flux
+            heatflx = - forcing.total_heat_flux
             
             # Temperature anomaly w.r.t. climatology (Fortran: line 204)
             T_anom = (state.land_surface_temperature - stl_clim_beg)

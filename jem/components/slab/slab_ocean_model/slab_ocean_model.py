@@ -169,7 +169,7 @@ class SlabOceanModel(SlabModelBase):
         init_mixed_layer_depth = (
             self.mixed_layer_depth_max
             + (self.mixed_layer_depth_min - self.mixed_layer_depth_max)
-            * jnp.cos(self.llat_rad) ** 3
+            * jnp.cos(self.latitude_radian) ** 3
         )
 
         # Load or create initial SST
@@ -181,7 +181,7 @@ class SlabOceanModel(SlabModelBase):
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_sea_surface_temperature = (
-                positive_cosine_cubic_latitude_squared(self.llat_rad) * 27.0
+                positive_cosine_cubic_latitude_squared(self.latitude_radian) * 27.0
                 + constants.freezing_point_K
             )
 

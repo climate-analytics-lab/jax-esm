@@ -94,7 +94,7 @@ class SlabModelBase(ABC):
     def _setup_lat_lon_grids(self) -> None:
         """Set up 2D latitude and longitude grids in radians.
 
-        Creates self.llat_rad and self.llon_rad as 2D arrays matching
+        Creates self.latitude_radian and self.longitude_radian as 2D arrays matching
         the T-grid shape.
         """
         T_grid = self.horizontal_grids["T"]
@@ -111,7 +111,7 @@ class SlabModelBase(ABC):
             if axis_name == "longitude"
         )
 
-        self.llat_rad = jnp.repeat(
+        self.latitude_radian = jnp.repeat(
             jnp.expand_dims(
                 T_grid.coordinate.fields["latitude"].data,  # [lat_dim_idx],
                 axis=lon_dim_idx,
@@ -120,7 +120,7 @@ class SlabModelBase(ABC):
             axis=lon_dim_idx,
         )
 
-        self.llon_rad = jnp.repeat(
+        self.longitude_radian = jnp.repeat(
             jnp.expand_dims(
                 T_grid.coordinate.fields["longitude"].data,  # [lon_dim_idx],
                 axis=lat_dim_idx,
@@ -220,8 +220,8 @@ class SlabModelBase(ABC):
                 predictions["state"].sim_time / 3600.0,
                 {"units": f"hours since {start_datetime_str:s}"},
             ),
-            latitude2D=(T_grid_axis_names, self.llat_rad * 180 / jnp.pi),
-            longitude2D=(T_grid_axis_names, self.llon_rad * 180 / jnp.pi),
+            latitude2D=(T_grid_axis_names, self.latitude_radian * 180 / jnp.pi),
+            longitude2D=(T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
         )
 
         return xr.Dataset(
