@@ -52,4 +52,4 @@ def evaluate_periodic(
     return (1.0 - alpha) * reordered_data.data[idx] + alpha * reordered_data.data[idx_next]
 
 # Define a vectorized version
-vmap_evaluate_periodic = @jax.vmap(evaluate_periodic, in_axes=(0, None, None))  # vmap over x, keep data and name constant
+vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None))  # vmap over x, keep data and name constant
