@@ -88,6 +88,8 @@ class Coupler:
         for name, mapper in self.mappers.items():
             self.add_mapper(name, mapper)
 
+        self.trajectory_holder = None
+
     def initialize(
         self,
     ) -> CoupledCarry:
@@ -165,15 +167,26 @@ class Coupler:
         jitted: bool = True,
         show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+        reuse_last_available_trajectory: bool = False,
+        verbose: bool=True,
     ) -> TrajectoryFunction:
         initial_carry = initial_carry or self.initialize()
-        return initial_carry, *self.generate_trajectory_function(
-            workflow=workflow,
-            iterations=iterations,
-            jitted=jitted,
-            show_progress=show_progress,
-            tqdm_kwargs=tqdm_kwargs,
-        )(initial_carry)
+
+        if reuse_last_available_trajectory and self.trajectory_holder is not None:
+            verbose and print("Reuse last available trajectory.")
+            trajectory = self.trajectory_holder
+        else:
+            trajectory = self.generate_trajectory_function(
+                workflow=workflow,
+                iterations=iterations,
+                jitted=jitted,
+                show_progress=show_progress,
+                tqdm_kwargs=tqdm_kwargs,
+            )
+
+        self.trajectory_holder = trajectory
+        
+        return initial_carry, *trajectory(initial_carry)
 
     def generate_trajectory_function(
         self,
