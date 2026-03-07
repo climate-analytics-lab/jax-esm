@@ -16,8 +16,9 @@ documentation for details.
    :caption: Contents:
 
    quick_start
-   tutorial
    examples
+   tutorial
+   experimental
 
    developers
    api_superset
