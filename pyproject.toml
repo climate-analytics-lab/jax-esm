@@ -34,8 +34,9 @@ dependencies = [
     "xarray",
     "tree_math",
     "coordax",
-    "jcm>=0.1.0",
+    "jcm>=1.1.1",
     "matplotlib",
+    "cartopy",
 ]
 
 [project.optional-dependencies]
