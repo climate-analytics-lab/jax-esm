@@ -54,13 +54,9 @@ def make_jem_compatible(
     
     decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": (nxt, nyt)})
     VerosForcing = decorator(AbstractVerosForcing)
-    D2_shape = (nxt, nyt)
-    D2_information = (D2_shape, ("longitude", "latitude"))
-    check_before_setattr(model, "state_variable_registry", {
-        varname : D2_information for varname in [
-            "sea_surface_temperature",
-        ]
-    })
+    horizontal_T_shape = (nxt, nyt)
+    horizontal_U_shape = (nxt, nyt)
+    horizontal_V_shape = (nxt, nyt)
 
     def set_forcing(state):
         print("The original set_forcing in the VerosSetup object is replaced "
@@ -70,9 +66,12 @@ def make_jem_compatible(
     def initialize():
         initial_state = model.state
         initial_derived = {
-            'sea_surface_temperature' : jnp.zeros(D2_shape) + 273.15,
+            'sea_surface_temperature' : jnp.zeros(horizontal_T_shape) + 273.15,
+            'sea_surface_u' : jnp.zeros(horizontal_U_shape),
+            'sea_surface_v' : jnp.zeros(horizontal_V_shape),
         }
         initial_forcing = VerosForcing.zeros()
+        print(f"initial_forcing.surface_taux.shape = {str(initial_forcing.surface_taux.shape)}")
         return dict(state=initial_state, derived=initial_derived, forcing=initial_forcing)
     
     def generate_step_function():
@@ -95,7 +94,6 @@ def make_jem_compatible(
                     )
                 vs.surface_taux = update(vs.surface_taux, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing["surface_taux"])
                 vs.surface_tauy = update(vs.surface_tauy, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing["surface_tauy"])
-
                 # The following computation is learned from
                 # `veros/setups/global_1deg/global_1deg.py`
                 if settings.enable_tke:
@@ -129,16 +127,26 @@ def make_jem_compatible(
             sea_surface_temperature = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau] + 273.15
             sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
             sea_surface_salinity = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
+ 
+            print(f"vs.u.shape = {str(vs.u.shape)}")
+            print(f"vs.v.shape = {str(vs.v.shape)}")
+           
+            sea_surface_u = vs.u[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
+            sea_surface_v = vs.v[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
 
             return dict(
                 state=state,
                 derived={
                     "sea_surface_temperature" : sea_surface_temperature,
+                    "sea_surface_u" : sea_surface_u,
+                    "sea_surface_v" : sea_surface_v,
                 },
                 forcing=forcing,
             ), stack_objects([dict(
                     sea_surface_temperature = sea_surface_temperature,
                     sea_surface_salinity = sea_surface_salinity,
+                    sea_surface_u = sea_surface_u,
+                    sea_surface_v = sea_surface_v,
                     surface_air_temperature = forcing.surface_air_temperature,
                     surface_taux = forcing.surface_taux,
                     surface_tauy = forcing.surface_tauy,
@@ -153,6 +161,8 @@ def make_jem_compatible(
         return xr.Dataset(
             data_vars=dict(
                 sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
+                sea_surface_u = (["time", "longitude", "latitude"], predictions["sea_surface_u"]),
+                sea_surface_v = (["time", "longitude", "latitude"], predictions["sea_surface_v"]),
                 sea_surface_salinity = (["time", "longitude", "latitude"], predictions["sea_surface_salinity"]),
                 surface_air_temperature = (["time", "longitude", "latitude"], predictions["surface_air_temperature"]),
                 surface_taux = (["time", "longitude", "latitude"], predictions["surface_taux"]),
