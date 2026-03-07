@@ -30,7 +30,6 @@ def asfloat64(tree):
 def make_jem_compatible(
     model: Model,
     coupling_timestep: jdt.Timedelta,
-    land_model_active: bool,
 ) -> Model:
     """Adapt the input jcm model to jem framework
     
@@ -47,19 +46,32 @@ def make_jem_compatible(
 
     D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
+
+        state=model._prepare_initial_modal_state()
+        forcing = default_forcing(model.coords.horizontal)
+        
+        # Predictions shape is still morphing in the development.
+        # Use run_from_state to get the shape of predictions. This might
+        # cost a few second extra but will be resilience to major code 
+        # update in jcm
+        save_interval_day = (timestep / jdt.to_timedelta(1, "day")).item() 
+        _, predictions = model.run_from_state(
+            initial_state=state,
+            save_interval=save_interval_day,  
+            total_time=save_interval_day,
+            forcing=forcing,
+            output_averages=True,
+        )
+        physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
+
         return asfloat64(dict(
-            state=model._prepare_initial_modal_state(),
+            state=state,
             derived={ # Derived
-                "physics" : PhysicsData.zeros(
-                    model.coords.horizontal.nodal_shape,
-                    model.coords.vertical.layers,
-                ),
+                "physics" : physics_no_time_dimension,
                 "total_heat_flux" : jnp.zeros(D2_nodal_shape),
                 "total_freshwater_flux" : jnp.zeros(D2_nodal_shape),
             },
-            forcing=default_forcing(model.coords.horizontal).copy(
-                lfluxland = jnp.bool_(land_model_active),
-            )
+            forcing=forcing,
         ))
 
     def generate_step_function():
@@ -89,11 +101,6 @@ def make_jem_compatible(
                  - physics_no_time_dimension.condensation.precls
             ) / 1000.0 # The number 1000.0 is the convert factor of mass density flux of freshwater from g/m^2/s to kg/m^2/s
 
-            # This is a bug in jcm: Time dimension vanishes when save_interval == total_time
-            if len(predictions.dynamics.normalized_surface_pressure.shape) == 2:
-                nsp = predictions.dynamics.normalized_surface_pressure
-                predictions.dynamics.normalized_surface_pressure = jnp.reshape(nsp, (1,) + nsp.shape)
-            
             return (
                 asfloat64(dict(
                     state=new_atm_modal_state,
