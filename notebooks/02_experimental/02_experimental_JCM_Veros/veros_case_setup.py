@@ -72,8 +72,8 @@ class VerosCaseSetup(VerosSetup):
         settings.description = "My Veros setup"
 
         settings.nx, settings.ny, settings.nz = nx, ny, 15
-        settings.dt_mom = 4800
-        settings.dt_tracer = 86400 / 2.0
+        settings.dt_mom = 3600.0
+        settings.dt_tracer = 3600.0 * 3
         settings.runlen = 86400 * 365
 
         settings.x_origin = x_origin
