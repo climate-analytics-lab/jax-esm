@@ -152,15 +152,12 @@ def generateVerosSetup(
         def set_topography(self, state):
             vs = state.variables
             x, y = npx.meshgrid(vs.xt, vs.yt, indexing="ij")
-            nz = len(vs.zt) 
              
             vs.kbot = npx.zeros_like(x)
-            print("vs.kbot.shape = ", vs.kbot.shape)
-            print("get_land_sea_mask().shape = ", get_land_sea_mask().shape)
             vs.kbot = update(
                 vs.kbot,
                 at[2:-2, 2:-2],
-                get_land_sea_mask() * nz
+                get_land_sea_mask()
             )
 
 
@@ -170,13 +167,12 @@ def generateVerosSetup(
             settings = state.settings
 
             # initial conditions
-
             y_center = 10.0
             sigma = 15.0
             amplitude = 5.0
             distace_square = ((vs.yt[None, :, None] - y_center) ** 2) / (2 * sigma ** 2)
             temp_anomaly = 5.0 * npx.exp(-distace_square) * vs.maskT * 0
-            
+           
             vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * 15 * vs.maskT + temp_anomaly)[..., None] )
             vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
 

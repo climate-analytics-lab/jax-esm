@@ -1,0 +1,274 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # Coupling JCM and Veros
+#
+# Couple JCM and Veros using JAX-ESM (JEM).
+# %%
+from pathlib import Path
+import jax
+#jax.config.update("jax_enable_x64", False) 
+import jax.numpy as jnp # for interaction
+import numpy as np # to take average of output
+import jcm
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.terrain import TerrainData
+from jcm.forcing import ForcingData
+from importlib import resources
+
+import jax_datetime as jdt
+import xarray as xr
+
+from jem.components import JCM, Veros, SlabOceanModel
+from jem.mapping import IdentityRegridder
+from jem.mapping import BasicMapper
+from jem.base.coupler import Coupler
+import jem.utils.tree_tools as tree_tools
+
+use_ipython = 'get_ipython' in globals()
+
+# Check available devices
+print(f"Available devices: {jax.devices()}")
+print(f"Number of devices: {len(jax.devices())}")
+
+# %% [markdown]
+# ## Choose terrain
+# In this example, you can specify one of the three configurations, "aquaplanet", "toy_earth", and "capped_earth", when calling the function `modify_jcm_terrain`. Because Veros cannot simulate poles, this example uses a slab model to cap the poles. We choose slab ocean model to be "fake land". Using slab land model currently will yield unrealistic temperature at poles because the albedo of ice and snow is not implemented in idealize setup.
+
+# %%
+from modify_jcm_terrain import modify_jcm_terrain
+from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
+
+truncation_number = 31
+
+jcm_files = generate_jcm_forcing_and_topography_files(
+    resolution=truncation_number,
+)
+# There are three choices: "aquaplanet", "toy_earth", and "capped_earth". The outcome will be saved in the folder "data"
+coords = get_speedy_coords(spectral_truncation=truncation_number)
+modified_jcm_terrain_file = modify_jcm_terrain(jcm_files["terrain"], "toy_earth", "./data")
+terrain = TerrainData.from_file(
+    modified_jcm_terrain_file,
+    coords=coords
+)
+
+# %% [markdown]
+# ## Configurations
+# %%
+start_datetime = jdt.to_datetime("2000-01-01")
+coupling_timestep = jdt.to_timedelta(1, "day")
+output_dir = Path("output/JCM_VEROS_SLM").resolve()
+
+output_dir.mkdir(exist_ok=True, parents=True)
+one_second = jdt.to_timedelta(1, "second")
+
+# %% [markdown]
+# ## Create Components
+# %% [markdown]
+# ### Create JCM
+# %%
+atm_model = jcm.model.Model(
+    coords = coords,
+    start_date=start_datetime,
+    terrain = terrain,
+)
+
+JCM.make_jem_compatible(
+    atm_model,
+    coupling_timestep=coupling_timestep,
+)
+    
+atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
+# %% [markdown]
+# ### Create Veros
+#
+# First need to remove `output_veros.*.nc` files, otherwise veros complains.
+# %%
+import glob
+import os
+files = glob.glob("output_veros.*.nc")
+for f in files:
+    print(f"Deleting: {f}")
+    os.remove(f)
+
+# %%
+from veros_case_setup import generateVerosSetup
+ocn_model = generateVerosSetup(
+    nx = atm_D2_nodal_shape[0],
+    ny = atm_D2_nodal_shape[1],
+    land_sea_mask_file = modified_jcm_terrain_file,
+    dt_mom = 3600.0,
+    dt_tracer = 3600.0,
+)()
+ocn_model.setup()
+Veros.make_jem_compatible(
+    ocn_model,
+    coupling_timestep=coupling_timestep,
+)
+# %% [markdown]
+# ### Create Slab Ocean model
+# %%
+slab_ocn_model=SlabOceanModel(
+    grid_specification=f"JCM::T{truncation_number:d}",
+    start_datetime=start_datetime,
+    timestep=coupling_timestep/one_second,
+    mask_file=modified_jcm_terrain_file,
+    forcing_method=None,
+    mask_value=1.0,
+)
+# %% [markdown]
+# ## Creating Flux and Scalar Exchange between Components
+#
+# Here we demonstrote the flexibility of JEM: You do not have to use the `BasicMapper` that JEM provides. You can define your own mapping function. In this example, we simply define a function `interaction` as below.
+# %%
+# Creating regridders and mapping
+def veros_to_jcm_regridder(arr):
+    return arr #jnp.pad(arr, ((0, 0), (4, 4)), constant_values=150)
+def jcm_to_veros_regridder(arr):
+    return arr#[:, 4:-4]
+
+# Note: Remember to return the `coupled_carry` at the end.
+def interaction(coupled_carry):
+    atm = coupled_carry["atm"]
+    ocn = coupled_carry["ocn"]
+    slab_ocn = coupled_carry["slab_ocn"]
+
+    # ===== compute wind stress begin =====
+    # Tien-Yiao's ad-hoc way to compute wind stress
+    # This conveniently demonstrates how the flux computation can be its own
+    # function or module
+    drag_coefficient = 1e-3 # dimensionless
+    air_density = 1.22 # kg / m^3
+    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
+    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)    
+    vs = ocn["state"].variables
+    surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
+    surface_tauy = drag_coefficient * air_density * wind_velocity * wind_y
+    # ===== compute wind stress end =====
+
+    # Mapping
+    ocn["forcing"].surface_taux = surface_taux
+    ocn["forcing"].surface_tauy = surface_tauy     
+    ocn["forcing"].heat_flux = jcm_to_veros_regridder(atm["derived"]["total_heat_flux"])
+    ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
+    ocn["forcing"].wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
+    ocn["forcing"].wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    slab_ocn["forcing"].total_heat_flux = atm["derived"]["total_heat_flux"]
+    atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
+    atm["forcing"].stl_am = slab_ocn["state"]["sea_surface_temperature"]
+
+    return coupled_carry
+    
+# %% [markdown]
+# ## Create Coupled Model
+# %%
+model = Coupler(
+    components=dict(
+        atm=atm_model,
+        ocn=ocn_model,
+        slab_ocn=slab_ocn_model,
+    ),
+    mappers=dict(mapper=interaction),
+)
+
+print("Model info: ") 
+tree_tools.print_tree(model.get_info(), root="Model")
+# %% [markdown]
+# ## Run Coupled Model
+
+# %%
+initial_carry = model.initialize()
+simulation_interval = jdt.to_timedelta(5, "day")
+batches = int(jdt.to_timedelta(360 * 5, "day") / simulation_interval)
+
+for b in range(batches):
+    
+    print(f"[batch={b:d}/{batches:d}] Simulation...")
+    
+    _, final_carry, predictions = model.run(
+        initial_carry = initial_carry,
+        workflow=["mapper", "ocn", "atm", "slab_ocn"],
+        iterations = int(simulation_interval / coupling_timestep),
+        jitted=True,
+        reuse_last_available_trajectory=True,
+    )
+   
+ 
+    output_dict = model.predictions_to_xarray(predictions)
+
+    ds_atm = output_dict["atm"]
+    output_dict["atm"] = xr.merge([
+        ds_atm["specific_humidity"].isel(level=0),
+        ds_atm["surface_flux.tsfc"],
+        ds_atm["surface_flux.tskin"],
+        ds_atm["convection.precnv"],
+        ds_atm["normalized_surface_pressure"],
+        ds_atm["normalized_surface_pressure"],
+    ])
+    output_dict["ocn"] = output_dict["ocn"].reduce(np.mean, dim="time", keepdims=True)
+
+    for component_name, ds in output_dict.items():
+        output_file = output_dir / f"{component_name:s}-{b:03d}.nc"
+        print("Output file: ", str(output_file))
+        ds.to_netcdf(output_file, engine="netcdf4")
+        ds.close()
+    
+    initial_carry = final_carry
+
+
+"""
+# %% [markdown]
+# ## Visualization
+
+# %%
+import matplotlib.pyplot as plt
+
+# %% [markdown]
+# ### Atmosphere
+
+# %%
+ds = output_dict["atm"]
+ds['condensation.precls'].plot(x='lon', y='lat', col='time', col_wrap=2, aspect=2)
+ds['convection.precnv'].plot(x='lon', y='lat', col='time', col_wrap=2, aspect=2)
+
+# %%
+ds['specific_humidity'].mean('lon').plot(x='lat', y='level', col='time', col_wrap=3, aspect=6, yincrease=False)
+ds['specific_humidity'].isel(level=3).plot(x='lon', y='lat', col='time', col_wrap=3, aspect=2)
+
+# %% [markdown]
+# ### Ocean
+
+# %%
+ds = output_dict["ocn"]
+print(str(ds))
+
+# %%
+g = (ds['sea_surface_temperature'] - 273.15).plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, cmap="gnuplot")
+g.fig.suptitle("Sea Surface Temperature [${}^\\circ \\mathrm{C}$]", fontsize=16)
+
+# %% [markdown]
+# ### Slab Ocean Model (fake land)
+
+# %%
+ds = output_dict["slab_ocn"]
+print(str(ds))
+
+# %%
+g = (ds['sea_surface_temperature'] - 273.15).plot(x='longitude', y='latitude', col='time', col_wrap=3, aspect=2, cmap="bwr", center=0)
+g.fig.suptitle("Land Surface Temperature [${}^\\circ \\mathrm{C}$]", fontsize=16, y=1.02)
+
+# %%
+"""
