@@ -127,10 +127,10 @@ def make_jem_compatible(
             sea_surface_temperature = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau] + 273.15
             sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
             sea_surface_salinity = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
- 
-            print(f"vs.u.shape = {str(vs.u.shape)}")
-            print(f"vs.v.shape = {str(vs.v.shape)}")
-           
+            
+            temp = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
+            salt = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
+
             sea_surface_u = vs.u[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
             sea_surface_v = vs.v[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
 
@@ -147,6 +147,8 @@ def make_jem_compatible(
                     sea_surface_salinity = sea_surface_salinity,
                     sea_surface_u = sea_surface_u,
                     sea_surface_v = sea_surface_v,
+                    temp = temp,
+                    salt = salt,
                     surface_air_temperature = forcing.surface_air_temperature,
                     surface_taux = forcing.surface_taux,
                     surface_tauy = forcing.surface_tauy,
@@ -160,6 +162,8 @@ def make_jem_compatible(
     def predictions_to_xarray(predictions):
         return xr.Dataset(
             data_vars=dict(
+                temp = (["time", "longitude", "latitude", "depth"], predictions["temp"]),
+                salt = (["time", "longitude", "latitude", "depth"], predictions["salt"]),
                 sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
                 sea_surface_u = (["time", "longitude", "latitude"], predictions["sea_surface_u"]),
                 sea_surface_v = (["time", "longitude", "latitude"], predictions["sea_surface_v"]),
