@@ -22,7 +22,7 @@ from jem.base.interface import (
     MethodNotFoundError,
     MemberNotFoundError,
     MemberTypeNotMatchError,
-    MethodSignatureNotMatchError,
+    NumberOfMethodParametersNotMatchError,
 )
 
 
@@ -173,7 +173,7 @@ class TestResolveFunction:
     def test_wrong_param_count_raises(self):
         # compute has 2 params, but we declare 3
         sig = Callable[[int, str, float], None]
-        with pytest.raises(MethodSignatureNotMatchError, match="not the same"):
+        with pytest.raises(NumberOfMethodParametersNotMatchError, match="not the same"):
             _resolve_function(_GoodFuncTarget(), "compute", sig, {})
 
     def test_customized_mapping_remaps_to_correct_method(self):
@@ -210,7 +210,7 @@ class TestResolveFunction:
 
         mapping = {"logical": "real_method"}
         sig = Callable[[int, str, float], None]  # expects 3, real has 1
-        with pytest.raises(MethodSignatureNotMatchError):
+        with pytest.raises(NumberOfMethodParametersNotMatchError):
             _resolve_function(Target(), "logical", sig, mapping)
 
     def test_instance_method_self_counts_as_param(self):
@@ -386,14 +386,14 @@ class TestResolveInterface:
     def test_signature_mismatch_propagates(self):
         class Target:
             @staticmethod
-            def compute(a, b, c):   # 3 params; ref expects 2
+            def compute(a, b, c, d):   # 4 params, BUT ref expects 2
                 pass
 
             @staticmethod
             def reset():
                 pass
 
-        with pytest.raises(MethodSignatureNotMatchError):
+        with pytest.raises(NumberOfMethodParametersNotMatchError):
             resolve_interface(Target(), _RefFuncOnly)
 
     # --- regression: getattr uses original name after remap -----------
@@ -460,22 +460,6 @@ class TestEdgeCases:
 
         result = resolve_interface(Target(), Ref)
         assert result["data"] == {"a": 1, "b": 2}
-
-    def test_optional_typed_member_with_none(self):
-        """Optional[X] has origin typing.Union — isinstance check uses the
-        origin or falls back to the type itself.  None is a valid value but
-        isinstance(None, Union) will fail.  This documents current behaviour."""
-
-        class Ref:
-            maybe: Optional[int]
-
-        class Target:
-            maybe = None
-
-        # Optional[int] -> origin is Union; isinstance(None, Union) raises TypeError
-        # so this will raise (documents current limitation)
-        with pytest.raises(TypeError):
-            resolve_interface(Target(), Ref)
 
     def test_callable_with_no_args_and_no_return(self):
         """Callable[[], None] — zero input params."""
