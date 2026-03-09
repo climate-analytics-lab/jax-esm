@@ -2,7 +2,6 @@
 
 import time
 from typing import Any, Dict, Optional, Callable
-import typeguard 
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (

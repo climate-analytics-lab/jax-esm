@@ -1,15 +1,11 @@
 """Veros adapter to JEM"""
-from typing import Annotated, Any, Dict, Optional, Tuple
-from dataclasses import dataclass
+from typing import Annotated, Any
 
-import jax
 import jax.numpy as jnp
-from jax import Array
 import jax_datetime as jdt
 import xarray as xr
-import tree_math
 
-from jem.utils.bulk_op import mean_leaf, stack_objects
+from jem.utils.bulk_op import stack_objects
 import jem.utils.data_structure as data_structure
 
 from veros import runtime_settings
@@ -18,8 +14,7 @@ setattr(runtime_settings, "backend", "jax")
 setattr(runtime_settings, "force_overwrite", True)
 setattr(runtime_settings, 'linear_solver', 'scipy_jax')
 setattr(runtime_settings, 'device', 'cpu')
-from veros import veros_routine
-from veros.core.operators import numpy as npx, update, at
+from veros.core.operators import numpy as npx, update, at # noqa: E402
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):

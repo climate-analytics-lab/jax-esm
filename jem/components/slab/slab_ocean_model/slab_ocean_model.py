@@ -135,7 +135,7 @@ class SlabOceanModel(SlabModelBase):
             elif (self.relaxation_time < 0) or jnp.isnan(self.relaxation_time):
                 raise ValueError("`relaxation_time` must be a positive number or infinity.")
         else: 
-            raise ValueError(f"Unknown `forcing_method` is given: \"{str(forcing_method):s}\" ")
+            raise ValueError(f"Unknown `forcing_method` is given: \"{str(self.forcing_method):s}\" ")
  
 
     def _create_state_and_forcing_classes(self) -> None:

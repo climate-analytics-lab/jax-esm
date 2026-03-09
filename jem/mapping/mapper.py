@@ -4,9 +4,7 @@ from collections.abc import Sequence, Mapping
 from jax.typing import ArrayLike as Array
 from jem.base.typing import (
     JEMComponent,
-    MapperFunction,
     CoupledCarry,
-    VariableRegistry,
 )
 
 from typeguard import typechecked

@@ -1,4 +1,4 @@
-from typing import Any, Callable, List, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import xarray as xr
 from dataclasses import dataclass
 from typeguard import typechecked

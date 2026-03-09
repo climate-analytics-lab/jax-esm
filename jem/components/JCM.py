@@ -4,7 +4,6 @@ import numpy as np
 
 from jcm.model import Model
 from jcm.forcing import default_forcing
-from jcm.physics.speedy.physics_data import PhysicsData
 
 import jax
 import jax.numpy as jnp

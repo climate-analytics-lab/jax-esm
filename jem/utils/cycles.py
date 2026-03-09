@@ -2,7 +2,6 @@ import coordax as cx
 
 import jax
 import jax.numpy as jnp
-from jax import Array
 from jax.typing import ArrayLike
 
 def evaluate_periodic(
