@@ -51,7 +51,7 @@ print(f"Number of devices: {len(jax.devices())}")
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
-truncation_number = 31
+truncation_number = 85
 
 jcm_files = generate_jcm_forcing_and_topography_files(
     resolution=truncation_number,
@@ -69,7 +69,7 @@ terrain = TerrainData.from_file(
 # %%
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-output_dir = Path("output/JCM_VEROS_SLM").resolve()
+output_dir = (Path(f"output_T{truncation_number}") /"02-02_experimental_JCM_Veros").resolve()
 
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
@@ -191,8 +191,9 @@ tree_tools.print_tree(model.get_info(), root="Model")
 
 # %%
 initial_carry = model.initialize()
+total_simulation_time = jdt.to_timedelta(400, "day")
 simulation_interval = jdt.to_timedelta(5, "day")
-batches = int(jdt.to_timedelta(360 * 5, "day") / simulation_interval)
+batches = int(total_simulation_time / simulation_interval)
 
 for b in range(batches):
     
@@ -218,7 +219,14 @@ for b in range(batches):
         ds_atm["normalized_surface_pressure"],
         ds_atm["normalized_surface_pressure"],
     ])
-    output_dict["ocn"] = output_dict["ocn"].reduce(np.mean, dim="time", keepdims=True)
+    
+    ocn = output_dict["ocn"]
+    output_dict["ocn_daily"] = xr.merge([
+        ocn["sea_surface_temperature"],
+        ocn["sea_surface_u"],
+        ocn["sea_surface_v"],
+    ])
+    output_dict["ocn_mean"] = ocn.reduce(np.mean, dim="time", keepdims=True)
 
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:03d}.nc"
