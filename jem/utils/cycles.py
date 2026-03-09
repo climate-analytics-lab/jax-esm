@@ -1,13 +1,15 @@
 import coordax as cx
+
+import jax
 import jax.numpy as jnp
 from jax import Array
-from jax.numpy import scipy
+from jax.typing import ArrayLike
 
 def evaluate_periodic(
-    x: jnp.ArrayLike,
+    x: ArrayLike,
     data: cx.Field,
     name_of_interpolated_axis: str = "time",
-) -> Array:
+) -> ArrayLike:
     """Interpolate sparse data to equally spaced
        on a periodic cycle over domain [0, 1). 
       
@@ -49,7 +51,7 @@ def evaluate_periodic(
     # Linear interpolation weight
     alpha = distance_to_the_left_point / spacing_between_coarse_data
     
-    return (1.0 - alpha) * reordered_data.data[idx] + alpha * reordered_data.data[idx_next]
+    return (1.0 - alpha) * reordered_data.data[idx] + alpha * reordered_data.data[idx_next]  # type: ignore
 
 # Define a vectorized version
 vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None))  # vmap over x, keep data and name constant

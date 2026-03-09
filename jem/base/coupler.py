@@ -63,7 +63,8 @@ class Coupler:
    
     components: Dict[str, JEMComponent]
     mappers: Dict[str, MapperFunction]
-    
+    tracjectory_holder: TrajectoryFunction | None
+     
     def __init__(
         self,
         components: Optional[Dict[str, Any]] = None,
@@ -163,13 +164,13 @@ class Coupler:
         self,
         workflow: Workflow,
         iterations: int,
-        initial_carry: CoupledCarry = None,
+        initial_carry: Optional[CoupledCarry] = None,
         jitted: bool = True,
         show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
         reuse_last_available_trajectory: bool = False,
         verbose: bool=True,
-    ) -> TrajectoryFunction:
+    ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
         initial_carry = initial_carry or self.initialize()
 
         if reuse_last_available_trajectory and self.trajectory_holder is not None:
@@ -184,7 +185,7 @@ class Coupler:
                 tqdm_kwargs=tqdm_kwargs,
             )
 
-        self.trajectory_holder = trajectory
+        self.trajectory_holder = trajectory  # type: ignore
         
         return initial_carry, *trajectory(initial_carry)
 

@@ -28,7 +28,7 @@ def resolve_interface(
     customized_mapping = getattr(target, customized_mapping_name, {})
     if isinstance(skip, str):
         skip = [skip,]
-    result = {}
+    result: Dict[str, str | None] = {}
     for member_name, member_type in metadata.items():
         resolved_name = None
         if member_name in skip:

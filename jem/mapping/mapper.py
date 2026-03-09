@@ -90,7 +90,7 @@ class BasicMapper:
                 connections[source] = []
             connections[source].append(target)
 
-        self.connections = connections
+        return connections
 
     @typechecked
     def __call__(
