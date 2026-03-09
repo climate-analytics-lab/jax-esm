@@ -27,7 +27,7 @@ jobs:
     - name: Get jittable veros
       uses: actions/checkout@v4
       with:
-        repository: meteorologytoday/veros-jittable.git
+        repository: meteorologytoday/veros-jittable
         path: veros-jittable
 
     - name: Show Working directory
