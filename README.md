@@ -102,33 +102,32 @@ Then open `docs/build/html/index.html` in your browser.
 
 ### Component Interface
 
-Each component must inherit from `CoupledComponent` and implement:
+Each component needs to provide two methods:
 
-- **`__init__(config)`**: Initialize with ComponentConfig, need to define `component_state_class` and `component_forcing_class`.
-- **`initialize()`**: Return initial component state and forcing
+- **`initialize()`**: Return initial component carry value, a pytree.
 - **`generate_step_function()`**: Return a JIT-compiled step function
-  - Signature: `step_function(state, forcing, time) -> (new_component_state, predictions)`
-
-`component_class_class` and `component_forcing_class` are JAX pytrees with arithmetic operations via `tree_math.struct`.
+  - Signature: `step_function(component_carry, step) -> (new_component_carry, predictions)`
 
 ### Component Coupling
 
 The current implementation uses direct coupling:
-- Coupler creates a `CoupledState` with fields for each component
-- Coupler passes the state of each component and forcing to the corresponding component's `step_function`.
+- Coupler creates a dictionary of componenet carry values.
+- Coupler passes the carry value of each component to the corresponding component's `step_function`.
+- To exchange variables llike fluxes, pass mapper functions to Coupler. A mapper function receives
+  the dictionary of component carry values and returns a new one. 
 
 ### Time Integration
 
 - Uses `jax.lax.scan` for efficient time stepping
 - Components advance in parallel each coupling timestep
-- Each component can use internal sub-stepping (`substeps` parameter)
 - Debug mode available with `jax_scan=False` (uses Python loop)
 
 ## Examples
-- `jupytext_notebooks/jem_JCM_SlabOceanModel_SlabLandModel.py`: JAX-GCM coupled with slab ocean and slab land models with Earth landscape.
+- `notebooks/01_basic`: Provide aquaplanet setup.
+- `notebooks/02_experimental`: Features under developmenet, such as earth-like topography and JCM-Veros coupling
 
 ## Integration with JAX-GCM (JCM)
-JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean models:
+JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean models.
 
 ### Included Components
 
@@ -147,11 +146,6 @@ JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean
    - Location: `jem/components/SlabLandModel/`
    - One layer land with climatological relaxation
    - Anomaly-based land surface temperature evolution using Euler backward scheme
-
-## Current Limitations
-- **JCM Dependency**: Component tests require JCM (jax-gcm) to be installed
-
-See `CODE_REVIEW.md` for detailed analysis and improvement recommendations.
 
 ## Contributing
 
