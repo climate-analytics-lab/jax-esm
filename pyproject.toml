@@ -45,6 +45,8 @@ dev = [
     "pytest-cov>=3.0",
     "mypy>=0.900",
     "ruff",
+    "nbformat",
+    "nbconvert",
 ]
 
 docs = [
