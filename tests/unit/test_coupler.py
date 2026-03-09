@@ -4,7 +4,7 @@ Tests for base/coupler.py
 Covers:
   - adhoc_scan (empty, single, multi-step, dict carry)
   - generate_scan_function (selector logic)
-  - Coupler construction, add/remove component & forcing_mapper
+  - Coupler construction, add/remove component & mapper
   - Coupler.initialize delegation
   - _verify_name_uniqueness (happy + collision)
   - _verify_workflow (happy + every error branch)
@@ -12,8 +12,6 @@ Covers:
   - generate_trajectory_function end-to-end (unjitted)
   - predictions_to_xarray delegation
   - get_info (including dead-code regression + empty-mapper edge case)
-  - BUG: loop-variable shadowing in step_function when a forcing mapper
-    returns keys that would re-order the outer workflow iteration
 
 External deps (jax, xarray, jax_datetime, typeguard, jax_tqdm,
 jem.utils.bulk_op) are stubbed via sys.modules before any source import.
@@ -104,22 +102,19 @@ from jem.utils.bulk_op import stack_objects
 # 2.  TEST HELPERS
 # ===========================================================================
 
-def _make_raw_component(name="comp", state=None, forcing=None, prediction=None):
+def _make_raw_component(name="comp"):
     """
     Returns a concrete class instance whose attributes satisfy
     resolve_interface against JEMComponent.  All Callable fields have the
     exact parameter counts the type-hints require.
     """
-    state      = state      or {"value": 0.0}
-    forcing    = forcing    or {"flux":  1.0}
-    prediction = prediction or {"out":   42.0}
+    init_carry = {
+        "state" : {"value": 0.0},
+        "forcing" : {"flux": 1.0},
+    }
 
     class _Raw:
         # non-Callable members (Any-typed in JEMComponent, so any value is fine)
-        component_state_class     = type(state)
-        component_forcing_class   = type(forcing)
-        state_variable_registry   = {}          # Dict
-        forcing_variable_registry = {}          # Dict
 
         # Callable members — param counts must match the type aliases in typing.py:
         #   InitializeFunction        = Callable[[], ...]                -> 0 params
@@ -129,12 +124,13 @@ def _make_raw_component(name="comp", state=None, forcing=None, prediction=None):
 
         @staticmethod
         def initialize():                                   # 0 params
-            return (dict(state), dict(forcing))
+            return init_carry
 
         @staticmethod
-        def generate_step_function(jitted):                 # 1 param
-            def _step(s, f, t):
-                return dict(s), dict(state=s)
+        def generate_step_function():                       # 0 params
+            def _step(c, t):
+                c["state"]["value"] += 1
+                return c, dict(state=c["state"], forcing=c["forcing"])
             return _step
 
         @staticmethod
@@ -148,34 +144,18 @@ def _make_raw_component(name="comp", state=None, forcing=None, prediction=None):
     return _Raw()
 
 
-def _make_raw_forcing_mapper(involved=("comp_a", "comp_b")):
-    """
-    Returns a concrete class instance satisfying resolve_interface against
-    JEMForcingMapper.
-      involved_component_names : List[str]          -> non-Callable member
-      map_forcings             : Callable[[D, D], D] -> 2 params
-      get_info                 : Callable[[], Dict]  -> 0 params
-    """
+def _make_raw_mapper():
 
-    class _RawFM:
-        involved_component_names = list(involved)
+    def mapper(coupled_carry):
+        return coupled_carry
 
-        @staticmethod
-        def map_forcings(states, forcings):                 # 2 params
-            return dict(forcings)                           # identity mapper
+    return mapper
 
-        @staticmethod
-        def get_info():                                     # 0 params
-            return {"involved": list(involved)}
-
-    return _RawFM()
-
-
-def _build_coupler(comp_names=("comp_a", "comp_b"), mappers=(("fm", ("comp_a", "comp_b")),)):
+def _build_coupler(comp_names=("comp_a", "comp_b"), mappers=("fm",)):
     """Factory: Coupler with the given components and forcing mappers."""
     components = {n: _make_raw_component(name=n) for n in comp_names}
-    fm_dict    = {n: _make_raw_forcing_mapper(involved=inv) for n, inv in mappers}
-    return Coupler(components=components, forcing_mappers=fm_dict)
+    mapper_dict = {n: _make_raw_mapper() for n in mappers}
+    return Coupler(components=components, mappers=mapper_dict)
 
 
 # ===========================================================================
@@ -254,12 +234,12 @@ class TestCouplerConstruction:
     def test_empty_coupler(self):
         c = Coupler()
         assert c.components == {}
-        assert c.forcing_mappers == {}
+        assert c.mappers == {}
 
     def test_none_arguments_default_to_empty(self):
-        c = Coupler(components=None, forcing_mappers=None)
+        c = Coupler(components=None, mappers=None)
         assert c.components == {}
-        assert c.forcing_mappers == {}
+        assert c.mappers == {}
 
     def test_components_registered_on_init(self):
         raw = _make_raw_component("atm")
@@ -269,15 +249,14 @@ class TestCouplerConstruction:
         assert hasattr(c.components["atm"], "name")
         assert c.components["atm"].name == "atm"
 
-    def test_forcing_mappers_registered_on_init(self):
+    def test_mappers_registered_on_init(self):
         raw_c = _make_raw_component("a")
-        raw_fm = _make_raw_forcing_mapper(involved=("a",))
+        raw_fm = _make_raw_mapper()
         c = Coupler(
             components={"a": raw_c},
-            forcing_mappers={"fm": raw_fm},
+            mappers={"fm": raw_fm},
         )
-        assert "fm" in c.forcing_mappers
-        assert c.forcing_mappers["fm"].name == "fm"
+        assert "fm" in c.mappers
 
 
 class TestAddRemoveComponent:
@@ -308,21 +287,21 @@ class TestAddRemoveComponent:
 
 class TestAddRemoveForcingMapper:
 
-    def test_add_forcing_mapper_after_construction(self):
+    def test_add_mapper_after_construction(self):
         c = _build_coupler(comp_names=("x", "y"), mappers=())
-        raw_fm = _make_raw_forcing_mapper(involved=("x", "y"))
-        c.add_forcing_mapper("coupler_xy", raw_fm)
-        assert "coupler_xy" in c.forcing_mappers
+        raw_fm = _make_raw_mapper()
+        c.add_mapper("coupler_xy", raw_fm)
+        assert "coupler_xy" in c.mappers
 
-    def test_remove_existing_forcing_mapper(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=(("fm", ("a", "b")),))
-        c.remove_forcing_mapper("fm")
-        assert "fm" not in c.forcing_mappers
+    def test_remove_existing_mapper(self):
+        c = _build_coupler(comp_names=("a", "b"), mappers=("fm",))
+        c.remove_mapper("fm")
+        assert "fm" not in c.mappers
 
-    def test_remove_nonexistent_forcing_mapper_is_noop(self):
+    def test_remove_nonexistent_mapper_is_noop(self):
         c = _build_coupler(comp_names=("a",), mappers=())
-        c.remove_forcing_mapper("ghost")     # should not raise
-        assert c.forcing_mappers == {}
+        c.remove_mapper("ghost")     # should not raise
+        assert c.mappers == {}
 
 
 # ===========================================================================
@@ -336,9 +315,10 @@ class TestCouplerInitialize:
         result = c.initialize()
         assert set(result.keys()) == {"a", "b"}
         for name in ("a", "b"):
-            state, forcing = result[name]
-            assert isinstance(state, dict)
-            assert isinstance(forcing, dict)
+            assert isinstance(result, dict)
+            assert {"state", "forcing"} == set(result[name].keys())
+            assert isinstance(result[name]["state"], dict)
+            assert isinstance(result[name]["forcing"], dict)
 
     def test_empty_coupler_initialize_returns_empty(self):
         c = Coupler()
@@ -359,7 +339,7 @@ class TestVerifyNameUniqueness:
         """A component and a forcing mapper share the same name."""
         c = _build_coupler(comp_names=("a", "b"), mappers=())
         # Manually inject a mapper with the same key as component "a"
-        c.forcing_mappers["a"] = MagicMock()
+        c.mappers["a"] = MagicMock()
         with pytest.raises(Exception, match="not unique"):
             c._verify_name_uniqueness()
 
@@ -374,7 +354,7 @@ class TestVerifyNameUniqueness:
 class TestVerifyWorkflow:
 
     def test_valid_workflow_passes(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=(("fm", ("a", "b")),))
+        c = _build_coupler(comp_names=("a", "b"), mappers=("fm",))
         c._verify_workflow(["a", "fm", "b"])   # all names exist
 
     def test_unknown_action_raises_valueerror(self):
@@ -399,38 +379,37 @@ class TestVerifyWorkflow:
 
 class TestGenerateStepFunction:
 
-    def _make_coupler_and_carry(self):
+    def _make_coupler(self):
         """Two components, one identity forcing mapper between them."""
         c = _build_coupler(
             comp_names=("atm", "ocean"),
-            mappers=(("fm", ("atm", "ocean")),),
+            mappers=("fm",),
         )
         init = c.initialize()
-        carry = dict(
-            states   = {n: s for n, (s, _) in init.items()},
-            forcings = {n: f for n, (_, f) in init.items()},
-        )
-        return c, carry
+        return c
 
     def test_returns_callable(self):
-        c, _ = self._make_coupler_and_carry()
+        c = self._make_coupler()
         step_fn = c.generate_step_function(
-            workflow=["atm", "fm", "ocean"], jitted=False, verbose=False
+            workflow=["atm", "fm", "ocean"],
+            jitted=False,
+            verbose=False
         )
         assert callable(step_fn)
 
     def test_step_function_returns_updated_carry_and_predictions(self):
-        c, carry = self._make_coupler_and_carry()
+        c = self._make_coupler()
+        carry = c.initialize()
         step_fn = c.generate_step_function(
             workflow=["atm", "fm", "ocean"], jitted=False, verbose=False
         )
-        new_carry, preds = step_fn(carry, 0)
+        final_carry, preds = step_fn(carry, 0)
 
         # carry structure preserved
-        assert "states" in new_carry
-        assert "forcings" in new_carry
-        assert set(new_carry["states"].keys())   == {"atm", "ocean"}
-        assert set(new_carry["forcings"].keys()) == {"atm", "ocean"}
+        for comp_name in ["atm", "ocean"]:
+            assert comp_name in final_carry
+            for check_key in ["state", "forcing"]:
+                assert check_key in final_carry[comp_name]
 
         # predictions keyed by component name
         assert set(preds.keys()) == {"atm", "ocean"}
@@ -439,7 +418,8 @@ class TestGenerateStepFunction:
         """If a component appears twice in the workflow its predictions are
         collected into a list per output key (via stack_objects transpose).
         E.g. two appearances each yielding {"out": 42.0} become {"out": [42.0, 42.0]}."""
-        c, carry = self._make_coupler_and_carry()
+        c = self._make_coupler()
+        carry = c.initialize()
         # atm appears twice
         step_fn = c.generate_step_function(
             workflow=["atm", "atm", "ocean"], jitted=False, verbose=False
@@ -452,134 +432,15 @@ class TestGenerateStepFunction:
     def test_component_only_workflow(self):
         """Workflow with no forcing mapper — just components in sequence."""
         c = _build_coupler(comp_names=("a", "b"), mappers=())
-        init  = c.initialize()
-        carry = dict(
-            states   = {n: s for n, (s, _) in init.items()},
-            forcings = {n: f for n, (_, f) in init.items()},
-        )
+        init_carry  = c.initialize()
         step_fn = c.generate_step_function(
             workflow=["a", "b"], jitted=False, verbose=False
         )
-        new_carry, preds = step_fn(carry, 0)
+        new_carry, preds = step_fn(init_carry, 0)
         assert set(preds.keys()) == {"a", "b"}
 
-
 # ===========================================================================
-# 10.  generate_step_function — loop-variable shadowing bug
-# ===========================================================================
-
-class TestStepFunctionLoopShadowBug:
-    """
-    BUG (coupler.py line 152):
-        for name in sub_forcings.keys():
-            forcings[name] = sub_forcings[name]
-
-    The inner `for name` shadows the outer `for name in flattened_workflow`.
-    After the forcing-mapper branch executes, `name` is set to the LAST key
-    yielded by sub_forcings, not the next workflow entry.  This corrupts the
-    outer loop if the mapper returns keys that happen to be valid component
-    names appearing later in the workflow.
-
-    The test below documents this behaviour.  A workflow of
-        ["comp_a", "fm", "comp_b"]
-    works correctly because after the fm branch, `name` ends up as "comp_b"
-    (the last key in the identity mapper's output), and the outer loop's next
-    iteration would have been "comp_b" anyway — so the bug is masked.
-
-    To expose it we use a workflow where the mapper returns keys in a different
-    order than the remaining workflow expects.
-    """
-
-    def test_shadow_bug_corrupts_outer_loop(self):
-        """
-        Workflow: ["comp_a", "fm", "comp_b"]
-        The forcing mapper returns keys in order ("comp_b", "comp_a").
-        After the inner loop, `name` == "comp_a" (last key iterated).
-        The outer for-loop then continues from where it left off in the
-        flattened_workflow list — but `name` is now stale.
-
-        We detect the bug indirectly: comp_b's step function should be called
-        once (for the third workflow slot), but if the shadow corrupts iteration
-        the call count may differ.  We instrument via a mutable counter.
-        """
-        call_counts = {"comp_a": 0, "comp_b": 0}
-
-        class _TrackedComp:
-            component_state_class     = dict
-            component_forcing_class   = dict
-            state_variable_registry   = {}
-            forcing_variable_registry = {}
-
-            def __init__(self, comp_name):
-                self._name = comp_name
-
-            def initialize(self):
-                return ({"x": 0.0}, {"f": 0.0})
-
-            def generate_step_function(self, jitted):
-                name = self._name
-                def _step(s, f, t):
-                    call_counts[name] += 1
-                    return dict(s), {"out": 1}
-                return _step
-
-            @staticmethod
-            def predictions_to_xarray(h):
-                return h
-
-            @staticmethod
-            def get_info():
-                return {}
-
-        class _ReverseFM:
-            # Returns keys in REVERSE order so the last key differs from
-            # what the outer loop expects next.
-            involved_component_names = ["comp_a", "comp_b"]
-
-            @staticmethod
-            def map_forcings(states, forcings):
-                # Return an OrderedDict-like dict with comp_b first
-                return {"comp_b": forcings["comp_b"], "comp_a": forcings["comp_a"]}
-
-            @staticmethod
-            def get_info():
-                return {}
-
-        c = Coupler(
-            components={
-                "comp_a": _TrackedComp("comp_a"),
-                "comp_b": _TrackedComp("comp_b"),
-            },
-            forcing_mappers={"fm": _ReverseFM()},
-        )
-
-        init  = c.initialize()
-        carry = dict(
-            states   = {n: s for n, (s, _) in init.items()},
-            forcings = {n: f for n, (_, f) in init.items()},
-        )
-
-        step_fn = c.generate_step_function(
-            workflow=["comp_a", "fm", "comp_b"], jitted=False, verbose=False
-        )
-        step_fn(carry, 0)
-
-        # In a correct implementation both would be called exactly once.
-        # The shadow bug means the outer loop variable is clobbered after fm,
-        # so the actual counts depend on Python dict iteration order.
-        # We assert what ACTUALLY happens to document the bug:
-        assert call_counts["comp_a"] == 1   # first slot — runs fine
-        # comp_b: the outer loop still advances correctly in CPython 3.7+
-        # because for-loops over lists use an index counter, not the loop var.
-        # So comp_b is still called once.  The bug manifests as `name` being
-        # wrong INSIDE the predictions dict-comprehension at the end (line 158),
-        # where `name` is reused.  We verify predictions are still keyed
-        # correctly (they use unstacked_predictions.keys(), not `name`).
-        assert call_counts["comp_b"] == 1
-
-
-# ===========================================================================
-# 11.  generate_trajectory_function  (unjitted, end-to-end)
+# 10.  generate_trajectory_function  (unjitted, end-to-end)
 # ===========================================================================
 
 class TestGenerateTrajectoryFunction:
@@ -587,7 +448,7 @@ class TestGenerateTrajectoryFunction:
     def _setup(self):
         c = _build_coupler(
             comp_names=("atm", "ocean"),
-            mappers=(("fm", ("atm", "ocean")),),
+            mappers=("fm",),
         )
         workflow = ["atm", "fm", "ocean"]
         traj_fn  = c.generate_trajectory_function(
@@ -603,9 +464,10 @@ class TestGenerateTrajectoryFunction:
         traj_fn, init = self._setup()
         final_carry, preds = traj_fn(init)
 
-        assert "states" in final_carry
-        assert "forcings" in final_carry
-        assert set(final_carry["states"].keys()) == {"atm", "ocean"}
+        for comp_name in ["atm", "ocean"]:
+            assert comp_name in final_carry
+            for check_key in ["state", "forcing"]:
+                assert check_key in final_carry[comp_name]
 
         # preds is keyed by component; each component ran 3 times
         assert set(preds.keys()) == {"atm", "ocean"}
@@ -635,17 +497,16 @@ class TestGenerateTrajectoryFunction:
             jitted=False,
             show_progress=False,
         )
-        init = c.initialize()
-        final_carry, preds = traj_fn(init)
+        init_carry = c.initialize()
+        final_carry, preds = traj_fn(init_carry)
 
         # No iterations -> states unchanged, predictions empty
-        state_a, _ = init["a"]
-        assert final_carry["states"]["a"] == state_a
+        assert final_carry["a"]["state"] == init_carry["a"]["state"]
         assert list(preds) == []
 
 
 # ===========================================================================
-# 12.  predictions_to_xarray
+# 11.  predictions_to_xarray
 # ===========================================================================
 
 class TestPredictionsToXarray:
@@ -662,7 +523,7 @@ class TestPredictionsToXarray:
 
 
 # ===========================================================================
-# 13.  get_info
+# 12.  get_info
 # ===========================================================================
 
 class TestGetInfo:
@@ -670,25 +531,25 @@ class TestGetInfo:
     def test_returns_component_and_mapper_info(self):
         c = _build_coupler(
             comp_names=("atm", "ocean"),
-            mappers=(("fm", ("atm", "ocean")),),
+            mappers=("fm",),
         )
         info = c.get_info()
         assert "component_info" in info
-        assert "forcing_mappers" in info
+        assert "mappers" in info
         assert set(info["component_info"].keys()) == {"atm", "ocean"}
-        assert "fm" in info["forcing_mappers"]
+        assert "fm" in info["mappers"]
 
-    def test_empty_forcing_mappers_is_empty_dict_not_none_string(self):
+    def test_empty_mappers_is_empty_dict_not_none_string(self):
         """
-        get_info checks `if self.forcing_mappers is None` to decide whether to
-        emit the string "None".  But __init__ sets forcing_mappers to {} (not
-        None) when no mappers are provided.  So an empty coupler's forcing_mappers
+        get_info checks `if self.mappers is None` to decide whether to
+        emit the string "None".  But __init__ sets mappers to {} (not
+        None) when no mappers are provided.  So an empty coupler's mappers
         value should be an empty dict, NOT the string "None".
         """
         c = _build_coupler(comp_names=("a",), mappers=())
         info = c.get_info()
-        assert info["forcing_mappers"] == {}
-        assert info["forcing_mappers"] != "None"
+        assert info["mappers"] == {}
+        assert info["mappers"] != "None"
 
     def test_dead_code_return_info_is_unreachable(self):
         """
@@ -712,7 +573,7 @@ class TestFullSimulationCycle:
     def test_full_cycle_does_not_raise(self):
         c = _build_coupler(
             comp_names=("atm", "ocean"),
-            mappers=(("fm", ("atm", "ocean")),),
+            mappers=("fm",),
         )
 
         # 1. initialize
@@ -727,7 +588,8 @@ class TestFullSimulationCycle:
             show_progress=False,
         )
         final_carry, preds = traj_fn(init)
-        assert "states" in final_carry
+        assert "atm" in final_carry
+        assert "ocean" in final_carry
 
         # 3. convert predictions to xarray-like dicts
         xr_out = c.predictions_to_xarray(preds)
