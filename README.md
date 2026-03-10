@@ -60,7 +60,6 @@ atm_model = jcm.model.Model(
 atm_model = JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
-    land_model_active=False,
 )
 
 model = Coupler(
