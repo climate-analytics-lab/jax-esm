@@ -32,6 +32,7 @@ Here is an example to run an aquaplanet simulation coupling JCM and an slab ocea
 
 ```
 import jcm
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
 
 from jem import Coupler
@@ -53,6 +54,7 @@ interaction_between_atm_and_ocn.add_mapping(
 
 atm_model = jcm.model.Model(
     start_date=start_datetime,
+    coords=get_speedy_coords(),
 )
 
 atm_model = JCM.make_jem_compatible(
