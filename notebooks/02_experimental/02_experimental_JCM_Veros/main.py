@@ -51,14 +51,15 @@ print(f"Number of devices: {len(jax.devices())}")
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
-truncation_number = 85
+truncation_number = 31
+total_simulation_time = jdt.to_timedelta(360, "day")
 
 jcm_files = generate_jcm_forcing_and_topography_files(
     resolution=truncation_number,
 )
 # There are three choices: "aquaplanet", "toy_earth", and "capped_earth". The outcome will be saved in the folder "data"
 coords = get_speedy_coords(spectral_truncation=truncation_number)
-modified_jcm_terrain_file = modify_jcm_terrain(jcm_files["terrain"], "toy_earth", "./data")
+modified_jcm_terrain_file = modify_jcm_terrain(jcm_files["terrain"], "aquaplanet", "./data")
 terrain = TerrainData.from_file(
     modified_jcm_terrain_file,
     coords=coords
@@ -68,7 +69,7 @@ terrain = TerrainData.from_file(
 # ## Configurations
 # %%
 start_datetime = jdt.to_datetime("2000-01-01")
-coupling_timestep = jdt.to_timedelta(1, "day")
+coupling_timestep = jdt.to_timedelta(3, "hour")
 output_dir = (Path(f"output_T{truncation_number}") /"02-02_experimental_JCM_Veros").resolve()
 
 output_dir.mkdir(exist_ok=True, parents=True)
@@ -159,17 +160,20 @@ def interaction(coupled_carry):
     surface_tauy = drag_coefficient * air_density * wind_velocity * wind_y
     # ===== compute wind stress end =====
 
+    # Cap total heat flux for now. There seems to be instability coming from JCM. Need investigation
+    total_heat_flux = jnp.clip(atm["derived"]["total_heat_flux"], min=-1372.0, max=1372.0)
+
     # Mapping
     ocn["forcing"].surface_taux = surface_taux
     ocn["forcing"].surface_tauy = surface_tauy     
-    ocn["forcing"].heat_flux = jcm_to_veros_regridder(atm["derived"]["total_heat_flux"])
+    ocn["forcing"].heat_flux = jcm_to_veros_regridder(total_heat_flux)
     ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
     ocn["forcing"].wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
     ocn["forcing"].wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
-    slab_ocn["forcing"].total_heat_flux = atm["derived"]["total_heat_flux"]
+    slab_ocn["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
     atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
     atm["forcing"].stl_am = slab_ocn["state"]["sea_surface_temperature"]
-
+    
     return coupled_carry
     
 # %% [markdown]
@@ -191,7 +195,7 @@ tree_tools.print_tree(model.get_info(), root="Model")
 
 # %%
 initial_carry = model.initialize()
-total_simulation_time = jdt.to_timedelta(400, "day")
+
 simulation_interval = jdt.to_timedelta(5, "day")
 batches = int(total_simulation_time / simulation_interval)
 
@@ -203,21 +207,25 @@ for b in range(batches):
         initial_carry = initial_carry,
         workflow=["mapper", "ocn", "atm", "slab_ocn"],
         iterations = int(simulation_interval / coupling_timestep),
-        jitted=True,
+        jitted=False,
         reuse_last_available_trajectory=True,
     )
-   
- 
+    
     output_dict = model.predictions_to_xarray(predictions)
 
     ds_atm = output_dict["atm"]
+    wind_mag = ((ds_atm["surface_flux.u0"]**2 + ds_atm["surface_flux.v0"]**2)**0.5).rename("wind_mag")
+
     output_dict["atm"] = xr.merge([
         ds_atm["specific_humidity"].isel(level=0),
         ds_atm["surface_flux.tsfc"],
         ds_atm["surface_flux.tskin"],
+        ds_atm["shortwave_rad.rsns"],
         ds_atm["convection.precnv"],
         ds_atm["normalized_surface_pressure"],
-        ds_atm["normalized_surface_pressure"],
+        ds_atm["surface_flux.u0"],
+        ds_atm["surface_flux.v0"],
+        wind_mag,
     ])
     
     ocn = output_dict["ocn"]
@@ -225,16 +233,23 @@ for b in range(batches):
         ocn["sea_surface_temperature"],
         ocn["sea_surface_u"],
         ocn["sea_surface_v"],
+        ocn["heat_flux"],
     ])
     output_dict["ocn_mean"] = ocn.reduce(np.mean, dim="time", keepdims=True)
-
+    del output_dict["ocn"]
+    
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:03d}.nc"
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, engine="netcdf4")
         ds.close()
-    
+   
+    if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
+        print("Error: Model exploded. End program")
+        break
+
     initial_carry = final_carry
+
 
 
 """
