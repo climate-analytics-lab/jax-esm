@@ -18,7 +18,7 @@ import numpy as np
 def plot(frame):
     fig, ax = plt.subplots(
         3, 1,
-        figsize=(10, 9),
+        figsize=(10, 8),
         subplot_kw = dict(
             projection=ccrs.PlateCarree(),
         ),
@@ -30,8 +30,8 @@ def plot(frame):
     _data_q = output_dict_animation["atm"]["specific_humidity"].isel(time=frame)
     _data_tskin = output_dict_animation["atm"]["surface_flux.tsfc"].isel(time=frame)
     _data_ocean_kinetic_energy = 0.5 * (
-          output_dict_animation["ocn"]["sea_surface_u"].isel(time=int(frame // atm_ocn_speed_ratio))**2
-        + output_dict_animation["ocn"]["sea_surface_v"].isel(time=int(frame // atm_ocn_speed_ratio))**2
+          output_dict_animation["ocn_daily"]["sea_surface_u"].isel(time=int(frame // atm_ocn_speed_ratio))**2
+        + output_dict_animation["ocn_daily"]["sea_surface_v"].isel(time=int(frame // atm_ocn_speed_ratio))**2
     )
 
     coords = _data_q.coords
@@ -44,19 +44,22 @@ def plot(frame):
     cyclic_data_tskin, cyclic_lon = add_cyclic_point(_data_tskin.to_numpy().transpose(), coord=lon)
     cyclic_data_ocean_kinetic_energy, cyclic_lon = add_cyclic_point(_data_ocean_kinetic_energy.to_numpy().transpose(), coord=lon)
 
-    _ax = ax[0]
+    ax_i = 0
+
+    _ax = ax[ax_i] ; ax_i+=1
     mappable = _ax.contourf(
         cyclic_lon, lat,
         cyclic_data_q,
-        levels=1.0 + np.linspace(0, 1, 21) * 7,
+        levels=1.0 + np.linspace(0, 1, 21) * 10,
         transform=ccrs.PlateCarree(), 
         cmap='GnBu',
         extend="both",
     )
     cb = plt.colorbar(ax=_ax, mappable=mappable, orientation='vertical', shrink=0.7, pad=0.07)
     cb.set_label("[g/kg]", fontsize=12)
+    _ax.set_title("(a) Surface specific humidity")
 
-    _ax = ax[1]
+    _ax = ax[ax_i] ; ax_i+=1
     mappable = _ax.contourf(
         cyclic_lon, lat,
         cyclic_data_tskin - 273.15,
@@ -67,24 +70,26 @@ def plot(frame):
     )
     cb = plt.colorbar(ax=_ax, mappable=mappable, orientation='vertical', shrink=0.7, pad=0.07)
     cb.set_label("[degC]", fontsize=12)
+    _ax.set_title("(b) Surface temperature")
 
-    _ax = ax[2]
+    _ax = ax[ax_i] ; ax_i+=1
     mappable = _ax.contourf(
         cyclic_lon, lat,
-        cyclic_data_ocean_kinetic_energy,
-        levels=np.linspace(0, 1, 21) * (0.01**2),
+        cyclic_data_ocean_kinetic_energy**0.5,
+        levels=np.linspace(0, 1, 21) ,#* (0.05**2),
         transform=ccrs.PlateCarree(), 
         cmap='hot_r',
         extend="max",
     )
     cb = plt.colorbar(ax=_ax, mappable=mappable, orientation='vertical', shrink=0.7, pad=0.07)
     cb.set_label("[$\\mathrm{m}^2 / \\mathrm{s}^2$]", fontsize=12)
+    _ax.set_title("(c) Surface ocean kinectic energy")
 
     fig.suptitle(f"[{time_str:s}]")
     
-    ax[0].set_title("(a) Surface specific humidity")
-    ax[1].set_title("(b) Surface temperature")
-    ax[2].set_title("(c) Surface ocean kinectic energy")
+
+
+
  
     return fig
 
@@ -95,13 +100,13 @@ if __name__ == "__main__":
 
     output_dict_animation = {
         component_name : xr.open_mfdataset([
-            f"output_T85_old/02-02_experimental_JCM_Veros/{component_name:s}-{i:03d}.nc"
-            for i in range(80)
+            f"output_T85/02-02_experimental_JCM_Veros/{component_name:s}-{i:03d}.nc"
+            for i in range(12)
         ], concat_dim='time', combine='nested')
-        for component_name in ["atm", "ocn"]
+        for component_name in ["atm", "ocn_daily"]
     }
 
-    atm_ocn_speed_ratio = len(output_dict_animation["atm"].coords["time"]) / len(output_dict_animation["ocn"].coords["time"])
+    atm_ocn_speed_ratio = len(output_dict_animation["atm"].coords["time"]) / len(output_dict_animation["ocn_daily"].coords["time"])
 
     print("Ratio: ", atm_ocn_speed_ratio)
 
