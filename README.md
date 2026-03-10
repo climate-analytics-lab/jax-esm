@@ -97,7 +97,7 @@ For more details, build it locally with:
 
 ```
 cd jax-esm/docs
-pip install -r /path/to/requirements.txt
+pip install -r requirements.txt
 make html
 ```
 
