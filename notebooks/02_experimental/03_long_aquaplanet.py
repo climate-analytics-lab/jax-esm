@@ -33,17 +33,26 @@ from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 use_ipython = 'get_ipython' in globals()
 
+def positive_cosine_cubic_latitude_squared(
+    lat: jnp.ndarray,
+    amplitude: float = 1.0,
+) -> jnp.ndarray:
+    return jnp.where(
+        jnp.abs(lat) < jnp.pi / 3, amplitude * jnp.cos(3 * lat / 2) ** 2, 0
+    )
+
+
+
 # %% [markdown]
 # ## Configurations
 
 # %%
-total_simulation_time = jdt.to_timedelta(360 * 50, "day")
+total_simulation_time = jdt.to_timedelta(100, "day")
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-03_long_aquaplanet"
 output_dir = (Path("output") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
-output_figure = output_dir / "animation_humidity_sst.gif"
 one_second = jdt.to_timedelta(1, "second")
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
@@ -53,7 +62,7 @@ mapper = BasicMapper()
 mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
-    regridder = lambda x: x,  # identity is default
+    regridder = lambda x: x * 0,  # identity is default
 )
 mapper.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
@@ -75,6 +84,23 @@ atm_model = JCM.make_jem_compatible(
     coupling_timestep=coupling_timestep,
 )
 
+
+hgrid = atm_model.coords.horizontal
+lat = hgrid.latitudes
+lon = hgrid.longitudes
+
+llat = jnp.repeat(
+    lat[None, :],
+    repeats=len(lon),
+    axis=0,
+)
+llon = jnp.repeat(
+    lon[:, None],
+    repeats=len(lat),
+    axis=1,
+)
+
+
 model = Coupler(
     components=dict(
         atm=atm_model,
@@ -95,8 +121,12 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 
 initial_carry = model.initialize()
-simulation_interval = jdt.to_timedelta(3, "day")
+simulation_interval = jdt.to_timedelta(1, "day")
 batches = int(total_simulation_time / simulation_interval)
+
+initial_carry["ocn"]["state"].sea_surface_temperature = (
+    273.15 + positive_cosine_cubic_latitude_squared(llat) * 50.0
+) 
 
 for b in range(batches):
     print(f"[batch={b:d}/{batches:d}] Simulation...")
