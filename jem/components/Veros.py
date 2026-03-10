@@ -92,6 +92,7 @@ def make_jem_compatible(
                 # The following computation is learned from
                 # `veros/setups/global_1deg/global_1deg.py`
                 if settings.enable_tke:
+                    print("Veros: settings.enable_tke is set true")
                     vs.forc_tke_surface = update(
                         vs.forc_tke_surface,
                         at[1:-1, 1:-1],
@@ -125,6 +126,8 @@ def make_jem_compatible(
             
             temp = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
             salt = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
+            u = vs.u[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
+            v = vs.v[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, :, vs.tau]
 
             sea_surface_u = vs.u[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
             sea_surface_v = vs.v[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
@@ -144,6 +147,8 @@ def make_jem_compatible(
                     sea_surface_v = sea_surface_v,
                     temp = temp,
                     salt = salt,
+                    u = u,
+                    v = v,
                     surface_air_temperature = forcing.surface_air_temperature,
                     surface_taux = forcing.surface_taux,
                     surface_tauy = forcing.surface_tauy,
@@ -159,6 +164,8 @@ def make_jem_compatible(
             data_vars=dict(
                 temp = (["time", "longitude", "latitude", "depth"], predictions["temp"]),
                 salt = (["time", "longitude", "latitude", "depth"], predictions["salt"]),
+                u = (["time", "longitude", "latitude", "depth"], predictions["u"]),
+                v = (["time", "longitude", "latitude", "depth"], predictions["v"]),
                 sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
                 sea_surface_u = (["time", "longitude", "latitude"], predictions["sea_surface_u"]),
                 sea_surface_v = (["time", "longitude", "latitude"], predictions["sea_surface_v"]),
