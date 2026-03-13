@@ -33,7 +33,7 @@ class LandState:
     land_surface_temperature: Annotated[
         float, ("longitude", "latitude"), "two_dimensional"
     ]
-    snowd: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    snowc: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     soilw: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 
@@ -274,7 +274,7 @@ class SlabLandModel(SlabModelBase):
                 "land_surface_temperature" : init_T,
                 "sim_time" : 0,
                 "heatflx" : jnp.zeros(D2_nodal_shape),
-                "snowd" : self.snowd_clim[:, :, init_time_idx],
+                "snowc" : jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
                 "soilw" : self.soilw_clim[:, :, init_time_idx],
             }),
             forcing=self.component_forcing_class.zeros()
@@ -402,7 +402,7 @@ class SlabLandModel(SlabModelBase):
             new_state = state.copy({
                 "sim_time" : new_sim_time,
                 "land_surface_temperature" : new_T,
-                "snowd" : snowd_clim_beg,
+                "snowc" : jnp.minimum(1.0, snowd_clim_beg / self.sd2sc),
                 "soilw" : soilw_clim_beg,
             })
             
@@ -445,11 +445,11 @@ class SlabLandModel(SlabModelBase):
                     "units": "K",
                 }
             ),
-            snowd = (
-                T_grid_dims, state.snowd,
+            snowc = (
+                T_grid_dims, state.snowc,
                 {
-                    "long_name": "Snow depth (water equivalent)",
-                    "units": "mm",
+                    "long_name": "Snow cover fraction",
+                    "units": "1",
                 }
             ),
             soilw = (
