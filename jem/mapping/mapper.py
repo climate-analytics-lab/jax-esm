@@ -183,9 +183,10 @@ class BasicMapper:
         """
         source_component_name, source_variable_name = source
         target_component_name, target_variable_name = target
-        self.mappings[(source_component_name, target_component_name)] = {
-            source_variable_name: target_variable_name
-        }
+        pair = (source_component_name, target_component_name)
+        if pair not in self.mappings:
+            self.mappings[pair] = {}
+        self.mappings[pair][source_variable_name] = target_variable_name
         self.connections = self._build_connections()
 
         regridder = regridder or ( lambda x: x )
