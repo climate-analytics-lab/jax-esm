@@ -71,6 +71,11 @@ def generate_jcm_forcing_and_topography_files(
 
         for destination_file in files_to_check.values():
             source_file = Path(raw_data_directory / destination_file.name)
+            if not source_file.exists():
+                raise FileNotFoundError(
+                    f"File `{str(source_file)}` is not found. Please check."
+                )
+
             print(f"Copying: {str(source_file):s} => {str(destination_file):s}")
             shutil.copy(source_file, destination_file)
 
