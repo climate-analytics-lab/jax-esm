@@ -47,13 +47,15 @@ def positive_cosine_cubic_latitude_squared(
 # ## Configurations
 
 # %%
-total_simulation_time = jdt.to_timedelta(100, "day")
+spectral_truncation = 106
+total_simulation_time = jdt.to_timedelta(360 * 100, "day")
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-03_long_aquaplanet"
-output_dir = (Path("output") / simulation_name).resolve()
+output_dir = (Path(f"output_T{spectral_truncation:d}") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
+
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 
@@ -62,7 +64,7 @@ mapper = BasicMapper()
 mapper.add_mapping(
     source = ("atm", "derived.total_heat_flux"),
     target = ("ocn", "forcing.total_heat_flux"),
-    regridder = lambda x: x * 0,  # identity is default
+    regridder = lambda x: x,  # identity is default
 )
 mapper.add_mapping(
     source = ("ocn", "state.sea_surface_temperature"),
@@ -74,7 +76,7 @@ mapper.add_mapping(
 
 # %%
 atm_model = jcm.model.Model(
-    coords=get_speedy_coords(),  # T31 spectral resolution with 8 vertical levels
+    coords=get_speedy_coords(spectral_truncation=spectral_truncation),
     start_date=start_datetime,
     time_step=10.0,
 )
@@ -105,6 +107,7 @@ model = Coupler(
     components=dict(
         atm=atm_model,
         ocn=SlabOceanModel(
+            grid_specification=f"JCM::T{spectral_truncation:d}",
             start_datetime=start_datetime,
             timestep=coupling_timestep / one_second,
         ),
@@ -121,7 +124,7 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 
 initial_carry = model.initialize()
-simulation_interval = jdt.to_timedelta(1, "day")
+simulation_interval = jdt.to_timedelta(30, "day")
 batches = int(total_simulation_time / simulation_interval)
 
 initial_carry["ocn"]["state"].sea_surface_temperature = (
