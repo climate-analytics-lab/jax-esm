@@ -31,15 +31,15 @@ import xarray as xr
 class LandState:
     sim_time: Annotated[float, (), "zero_dimensional"]
     land_surface_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
+        float, ("longitude", "latitude"), "two_dimensional"
     ]
-    snowd: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    soilw: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    snowc: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    soilw: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 
 @data_structure.typed_and_dimensioned
 class LandForcing:
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
+    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
 class SlabLandModel(SlabModelBase):
     """
@@ -177,11 +177,11 @@ class SlabLandModel(SlabModelBase):
             ds = xr.open_dataset(self.land_clim_file)
             
             # Land surface temperature climatology
-            # Note: Data format is (lat, lon, time) not (time, lat, lon)
+            # Note: Data format is (lon, lat, time) to match JCM nodal ordering
             if "stl" in ds:
                 stl_data = jnp.array(ds["stl"].values)
                 print(f"Loaded stl climatology with shape: {stl_data.shape}")
-                # Store as (lat, lon, time) to match input format
+                # Store as (lon, lat, time) to match JCM nodal ordering
                 self.stl_clim = stl_data
                 self.n_clim_steps = stl_data.shape[2]  # Number of time steps
             else:
@@ -261,7 +261,7 @@ class SlabLandModel(SlabModelBase):
         else:  # Assume monthly data
             init_time_idx = self.start_datetime.to_pydatetime().month - 1
         
-        # Initial land surface temperature from climatology (lat, lon, time)
+        # Initial land surface temperature from climatology (lon, lat, time)
         init_T = self.stl_clim[:, :, init_time_idx]
         
         # Apply land mask (set ocean points to reasonable value)
@@ -274,7 +274,7 @@ class SlabLandModel(SlabModelBase):
                 "land_surface_temperature" : init_T,
                 "sim_time" : 0,
                 "heatflx" : jnp.zeros(D2_nodal_shape),
-                "snowd" : self.snowd_clim[:, :, init_time_idx],
+                "snowc" : jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
                 "soilw" : self.soilw_clim[:, :, init_time_idx],
             }),
             forcing=self.component_forcing_class.zeros()
@@ -362,7 +362,7 @@ class SlabLandModel(SlabModelBase):
             # Commented the following out because it is not used.
             # time_weight = 0.0  # Use current snapshot only for simplicity
             
-            # Get climatology at current time (data format is lat, lon, time)
+            # Get climatology at current time (data format is lon, lat, time)
 
             stl_clim_beg = self.stl_clim[:, :, clim_beg_idx]
             stl_clim_end = self.stl_clim[:, :, clim_end_idx]
@@ -402,7 +402,7 @@ class SlabLandModel(SlabModelBase):
             new_state = state.copy({
                 "sim_time" : new_sim_time,
                 "land_surface_temperature" : new_T,
-                "snowd" : snowd_clim_beg,
+                "snowc" : jnp.minimum(1.0, snowd_clim_beg / self.sd2sc),
                 "soilw" : soilw_clim_beg,
             })
             
@@ -445,11 +445,11 @@ class SlabLandModel(SlabModelBase):
                     "units": "K",
                 }
             ),
-            snowd = (
-                T_grid_dims, state.snowd,
+            snowc = (
+                T_grid_dims, state.snowc,
                 {
-                    "long_name": "Snow depth (water equivalent)",
-                    "units": "mm",
+                    "long_name": "Snow cover fraction",
+                    "units": "1",
                 }
             ),
             soilw = (
