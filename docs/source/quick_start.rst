@@ -9,7 +9,7 @@ Install JEM
 .. code-block::
  
     # Install JEM
-    git clone -b dev/prep-v0.1 https://github.com/climate-analytics-lab/jax-esm
+    git clone https://github.com/climate-analytics-lab/jax-esm
     cd jax-esm
     pip install -e "."
     cd ..
