@@ -34,6 +34,11 @@ dependencies = [
     "xarray",
     "tree_math",
     "coordax",
+    "jcm>=1.1.1",
+    "matplotlib",
+    "cartopy",
+    "sphinx",
+    "shibuya",
 ]
 
 [project.optional-dependencies]
@@ -42,21 +47,8 @@ dev = [
     "pytest-cov>=3.0",
     "mypy>=0.900",
     "ruff",
-]
-
-jcm = [
-    "dinosaur",
-    "flax",
-    "jcm",
-]
-
-plot = [
-    "matplotlib",
-]
-
-docs = [
-    "sphinx",
-    "shibuya",
+    "nbformat",
+    "nbconvert",
 ]
 
 [project.urls]

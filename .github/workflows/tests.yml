@@ -24,6 +24,12 @@ jobs:
         repository: climate-analytics-lab/jax-gcm
         path: jax-gcm
 
+    - name: Get jittable veros
+      uses: actions/checkout@v4
+      with:
+        repository: meteorologytoday/veros-jittable
+        path: veros-jittable
+
     - name: Show Working directory
       run: ls
 
@@ -35,11 +41,14 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e ".[jcm,dev]"
+        pip install -e ".[dev]"
+        pip install jupyter nbconvert nbformat ipykernel
+        python -m ipykernel install --user --name python3 --display-name "Python 3"
+        python -m jupyter kernelspec list
 
     - name: Run tests with pytest
       run: |
-        export PYTHONPATH=./jax-gcm:$PYTHONPATH
+        export PYTHONPATH=./jax-gcm:./veros-jittable:$PYTHONPATH
         pytest tests/ -v --tb=short --cov=jem --cov-report=xml --cov-report=term --ignore=tests/ignore
 
     - name: Upload coverage to Codecov
@@ -65,7 +74,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff mypy
+        pip install ruff mypy 
+
 
     - name: Check import sorting with ruff
       run: |

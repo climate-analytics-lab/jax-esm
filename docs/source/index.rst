@@ -15,8 +15,14 @@ documentation for details.
    :maxdepth: 2
    :caption: Contents:
 
-   api
-   api_automodule
+   quick_start
+   examples
+   tutorial
+   experimental
+
+   issues
+   developers
+   api_superset
 
 Indices and tables
 ==================

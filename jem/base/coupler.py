@@ -2,7 +2,6 @@
 
 import time
 from typing import Any, Dict, Optional, Callable
-import typeguard 
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
@@ -14,7 +13,6 @@ from jem.base.typing import (
     TrajectoryFunction,
     CoupledCarry,
 )
-import jem.utils.tree_tools as tree_tools
 
 import jax
 import jax.numpy as jnp
@@ -64,7 +62,8 @@ class Coupler:
    
     components: Dict[str, JEMComponent]
     mappers: Dict[str, MapperFunction]
-    
+    tracjectory_holder: TrajectoryFunction | None
+     
     def __init__(
         self,
         components: Optional[Dict[str, Any]] = None,
@@ -88,6 +87,8 @@ class Coupler:
         self.mappers = mappers or {}
         for name, mapper in self.mappers.items():
             self.add_mapper(name, mapper)
+
+        self.trajectory_holder = None
 
     def initialize(
         self,
@@ -151,7 +152,7 @@ class Coupler:
 
             predictions = {
                 name : unwrap_leading_dims(stack_objects(_unstacked_predictions[name]), first_n_dim=2)
-                for name in _unstacked_predictions.keys()
+                for name in _unstacked_predictions.keys() if len(_unstacked_predictions[name]) != 0
             }
 
             return carry, predictions
@@ -162,27 +163,30 @@ class Coupler:
         self,
         workflow: Workflow,
         iterations: int,
+        initial_carry: Optional[CoupledCarry] = None,
         jitted: bool = True,
         show_progress: bool = True,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
-        verbose:bool = True,
-    ) -> TrajectoryFunction:
+        reuse_last_available_trajectory: bool = False,
+        verbose: bool=True,
+    ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
+        initial_carry = initial_carry or self.initialize()
+
+        if reuse_last_available_trajectory and self.trajectory_holder is not None:
+            verbose and print("Reuse last available trajectory.")
+            trajectory = self.trajectory_holder
+        else:
+            trajectory = self.generate_trajectory_function(
+                workflow=workflow,
+                iterations=iterations,
+                jitted=jitted,
+                show_progress=show_progress,
+                tqdm_kwargs=tqdm_kwargs,
+            )
+
+        self.trajectory_holder = trajectory  # type: ignore
         
-        initial_carry = self.initialize()
-
-        if verbose:
-            print("Model info: ") 
-            tree_tools.print_tree(self.get_info(), root="Model")
-            print("Initial Carry: ") 
-            tree_tools.print_tree(initial_carry, root="CoupledCarry")
-
-        return initial_carry, *self.generate_trajectory_function(
-            workflow=workflow,
-            iterations=iterations,
-            jitted=jitted,
-            show_progress=show_progress,
-            tqdm_kwargs=tqdm_kwargs,
-        )(initial_carry)
+        return initial_carry, *trajectory(initial_carry)
 
     def generate_trajectory_function(
         self,
@@ -306,7 +310,7 @@ class Coupler:
         """
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])
-            for component_name, component in self.components.items()
+            for component_name, component in self.components.items() if component_name in predictions
             if getattr(component, "predictions_to_xarray") is not None
         }
 

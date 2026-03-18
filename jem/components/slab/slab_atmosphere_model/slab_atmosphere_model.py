@@ -122,11 +122,11 @@ class SlabAtmosphereModel(SlabModelBase):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.llat_rad) * 17.0
+            positive_cosine_cubic_latitude_squared(self.latitude_radian) * 17.0
             + constants.freezing_point_K
         )
-        init_mean_zonal_wind_velocity = jnp.zeros_like(self.llat_rad) + 10.0
-        init_mean_meridional_wind_velocity = jnp.zeros_like(self.llat_rad)
+        init_mean_zonal_wind_velocity = jnp.zeros_like(self.latitude_radian) + 10.0
+        init_mean_meridional_wind_velocity = jnp.zeros_like(self.latitude_radian)
 
         # Compute heat capacity factor for Euler forward scheme
         cd = (

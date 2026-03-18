@@ -12,7 +12,7 @@ class MemberNotFoundError(Exception):
 class MemberTypeNotMatchError(Exception):
     pass
 
-class MethodSignatureNotMatchError(Exception):
+class NumberOfMethodParametersNotMatchError(Exception):
     pass
 
 def resolve_interface(
@@ -28,7 +28,7 @@ def resolve_interface(
     customized_mapping = getattr(target, customized_mapping_name, {})
     if isinstance(skip, str):
         skip = [skip,]
-    result = {}
+    result: Dict[str, str | None] = {}
     for member_name, member_type in metadata.items():
         resolved_name = None
         if member_name in skip:
@@ -45,8 +45,10 @@ def resolve_interface(
             except Exception as e:
                 print(f"Exception happens when resolving `{member_name}`: {str(e)}.")
                 if member_name in optional:
-                    print(f"Member name `{member_name}` is optional. Now set to None..")
+                    print(f"Member name `{member_name}` is optional. Now set to None.")
                     resolved_name = None
+                else:
+                    raise e
 
             if resolved_name is None:
                 result[member_name] = None
@@ -79,7 +81,7 @@ def _resolve_function(
     goal_argument_types, output_type = get_args(function_signature)
 
     if len(target_function_sigature.parameters.keys()) != len(goal_argument_types):
-        raise MethodSignatureNotMatchError(f"The number of parameters in the method `{function_name:s}` ({len(target_function_sigature.parameters.keys()):d}) is not the same as given `{str(function_signature)}` ({len(goal_argument_types):d})")
+        raise NumberOfMethodParametersNotMatchError(f"The number of parameters in the method `{function_name:s}` ({len(target_function_sigature.parameters.keys()):d}) is not the same as given `{str(function_signature)}` ({len(goal_argument_types):d})")
 
     return function_name
 

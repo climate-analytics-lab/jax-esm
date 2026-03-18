@@ -23,6 +23,7 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
     'sphinx.ext.napoleon',
+    'nbsphinx',
 ]
 
 templates_path = ['_templates']
@@ -40,3 +41,13 @@ napoleon_numpy_docstring = True
 
 html_theme = 'shibuya'
 html_static_path = ['_static']
+
+
+#nbsphinx_prolog = """
+#{% if env.doc2path(env.docname, base=None).endswith('.ipynb') %}
+#Download `current notebook <{{ env.doc2path(env.docname, base=None) }}>`_
+#{% endif %}
+#----
+#"""
+
+

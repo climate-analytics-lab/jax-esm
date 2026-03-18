@@ -5,7 +5,5 @@ API Reference
    :toctree: generated
    :recursive:
 
-   jem.Grid
-   jem.GridSpecification
-   jem.Transformer
-   jem.IdentityTransformer
+   jem.base.coupler.Coupler
+   jem.base.typing

@@ -4,9 +4,7 @@ from collections.abc import Sequence, Mapping
 from jax.typing import ArrayLike as Array
 from jem.base.typing import (
     JEMComponent,
-    MapperFunction,
     CoupledCarry,
-    VariableRegistry,
 )
 
 from typeguard import typechecked
@@ -70,31 +68,25 @@ class BasicMapper:
     components: Dict[str, JEMComponentType]
     mappings: Dict[Tuple[str, str], Dict[str, str]]
     regridders: Dict[Tuple[str, str, str, str], Callable]
-    involved_component_names: List[str]
 
     @typechecked
     def __init__(
         self,
-        components: Dict[str, JEMComponentType],
-        mappings: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
-        regridders: Optional[Dict[Tuple[str, str, str, str], Callable]] = None,
     ):
         """Initialize flux exchanger."""
-        self.components = components
-        self.component_names = list(self.components.keys())
-        self.mappings = mappings or {}
-        self.regridders = regridders or {}
-
+        self.mappings = {}
+        self.regridders = {}
+        
         # Build connectivity graph
-        self.connections = self._build_connections()
+        self._build_connections()
 
     def _build_connections(self) -> Dict[str, List[str]]:
         """Build connectivity graph between components."""
-        connections: Dict[str, List[str]] = {name: [] for name in self.component_names}
-
+        connections: Dict[str, List[str]] = {}
         for source, target in self.mappings.keys():
-            if source in connections:
-                connections[source].append(target)
+            if source not in connections:
+                connections[source] = []
+            connections[source].append(target)
 
         return connections
 
@@ -115,12 +107,6 @@ class BasicMapper:
             A dict that maps component names to the resulting
             forcing obejcts.
         """
-
-        if not set(self.involved_component_names).issubset(set(coupled_carry.keys())):
-            raise Exception(
-                f"Not all involved_component_names ({str(self.involved_component_names)})"
-                f"can be found in coupled_carry ({str(list(coupled_carry.keys()))})"
-            )
 
         # Loop through each involved component. 
         # If there are N component involves, this loop is N by N.
@@ -197,30 +183,21 @@ class BasicMapper:
         """
         source_component_name, source_variable_name = source
         target_component_name, target_variable_name = target
-        self.mappings[(source_component_name, target_component_name)] = {
-            source_variable_name: target_variable_name
-        }
+        pair = (source_component_name, target_component_name)
+        if pair not in self.mappings:
+            self.mappings[pair] = {}
+        self.mappings[pair][source_variable_name] = target_variable_name
         self.connections = self._build_connections()
 
-        if regridder is not None:
-            
-            # Check if regridder is valid
-            
-            self.add_regridder(
-                source_component_name,
-                target_component_name,
-                source_variable_name,
-                target_variable_name,
-                regridder,
-            )
-
-        involved_component_names = []
-        for source_component_name, target_variable_name, _, _ in self.regridders.keys():
-            involved_component_names.append(source_component_name)
-            involved_component_names.append(target_variable_name)
+        regridder = regridder or ( lambda x: x )
         
-        # Use "set" to achieve uniqueness
-        self.involved_component_names = list(set(involved_component_names))
+        self.add_regridder(
+            source_component_name,
+            target_component_name,
+            source_variable_name,
+            target_variable_name,
+            regridder,
+        )
 
     @typechecked
     def add_regridder(
