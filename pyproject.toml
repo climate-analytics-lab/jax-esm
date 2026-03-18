@@ -37,6 +37,8 @@ dependencies = [
     "jcm>=1.1.1",
     "matplotlib",
     "cartopy",
+    "sphinx",
+    "shibuya",
 ]
 
 [project.optional-dependencies]
@@ -47,11 +49,6 @@ dev = [
     "ruff",
     "nbformat",
     "nbconvert",
-]
-
-docs = [
-    "sphinx",
-    "shibuya",
 ]
 
 [project.urls]

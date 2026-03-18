@@ -20,6 +20,7 @@ documentation for details.
    tutorial
    experimental
 
+   issues
    developers
    api_superset
 

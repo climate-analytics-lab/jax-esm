@@ -15,7 +15,7 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 
 ```
 # Install JEM
-git clone -b v0.1 https://github.com/climate-analytics-lab/jax-esm
+git clone -b dev/prep-v0.1 https://github.com/climate-analytics-lab/jax-esm
 cd jax-esm
 pip install -e "."
 cd ..
@@ -31,7 +31,9 @@ pip install -e "."
 Here is an example to run an aquaplanet simulation coupling JCM and an slab ocean model.
 
 ```
+from pathlib import Path
 import jcm
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
 
 from jem import Coupler
@@ -53,12 +55,12 @@ interaction_between_atm_and_ocn.add_mapping(
 
 atm_model = jcm.model.Model(
     start_date=start_datetime,
+    coords=get_speedy_coords(),
 )
 
 atm_model = JCM.make_jem_compatible(
     atm_model,
     coupling_timestep=coupling_timestep,
-    land_model_active=False,
 )
 
 model = Coupler(
@@ -79,8 +81,12 @@ initial_state, final_state, predictions = model.run(
 )
 
 output_dict = model.predictions_to_xarray(predictions)
-print(output_dict["atm"]) # xarray.Dataset
-print(output_dict["ocn"])
+output_dir = Path("output")
+output_dir.mkdir(parents=True, exist_ok=True)
+for component_name, ds in output_dict.items():
+    output_file = output_dir / f"{component_name:s}.nc"
+    print(f"Saving: {component_name:s} => {str(output_file)}")
+    ds.to_netcdf(output_file)
 ```
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
@@ -91,8 +97,7 @@ For more details, build it locally with:
 
 ```
 cd jax-esm/docs
-pip install -r /path/to/requirements.txt
-ln -s ../notebooks .
+pip install -r requirements.txt
 make html
 ```
 

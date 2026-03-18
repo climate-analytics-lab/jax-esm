@@ -9,7 +9,7 @@ SOURCEDIR     = source
 BUILDDIR      = build
 
 copy_notebook:
-	rm -r ./source/notebooks
+	rm -rf ./source/notebooks
 	cp -r ../notebooks ./source/
 
 
