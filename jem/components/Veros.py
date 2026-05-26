@@ -13,7 +13,7 @@ print("Setting veros.runtime_settings...")
 setattr(runtime_settings, "backend", "jax")
 setattr(runtime_settings, "force_overwrite", True)
 setattr(runtime_settings, 'linear_solver', 'scipy_jax')
-setattr(runtime_settings, 'device', 'cpu')
+#setattr(runtime_settings, 'device', 'cpu')
 from veros.core.operators import numpy as npx, update, at # noqa: E402
 
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):

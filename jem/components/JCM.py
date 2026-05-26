@@ -54,7 +54,7 @@ def make_jem_compatible(
         # cost a few second extra but will be resilience to major code 
         # update in jcm
         save_interval_day = (timestep / jdt.to_timedelta(1, "day")).item() 
-        _, predictions = model.run_from_state(
+        _, _, predictions = model.run_from_state_with_carry(
             initial_state=state,
             save_interval=save_interval_day,  
             total_time=save_interval_day,
@@ -83,7 +83,7 @@ def make_jem_compatible(
         def step_function(carry, step):
             state = carry["state"]
             forcing = asfloat64(carry["forcing"])
-            new_atm_modal_state, predictions = model.run_from_state(
+            new_atm_modal_state, _, predictions = model.run_from_state_with_carry(
                 initial_state=state,
                 save_interval=save_interval_day,  
                 total_time=total_time_day,
@@ -91,13 +91,13 @@ def make_jem_compatible(
                 output_averages=True,
             )
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
-            total_heat_flux = - jnp.sum(physics_no_time_dimension.surface_flux.hfluxn, axis=2) # convert to upward positive
-            evaporation = jnp.sum(physics_no_time_dimension.surface_flux.evap, axis=2) # upward positive
+            total_heat_flux = - jnp.sum(physics_no_time_dimension["_surface_flux"].hfluxn, axis=2) # convert to upward positive
+            evaporation = jnp.sum(physics_no_time_dimension["_surface_flux"].evap, axis=2) # upward positive
 
             total_freshwater_flux = (
                 evaporation
-                 - physics_no_time_dimension.convection.precnv
-                 - physics_no_time_dimension.condensation.precls
+                 - physics_no_time_dimension["_convection"].precnv
+                 - physics_no_time_dimension["_condensation"].precls
             ) / 1000.0 # The number 1000.0 is the convert factor of mass density flux of freshwater from g/m^2/s to kg/m^2/s
 
             return (
@@ -116,7 +116,10 @@ def make_jem_compatible(
         return step_function
 
     def predictions_to_xarray(predictions):
-        return predictions.to_xarray()
+        from jcm.model import ModelPredictions
+        # Re-attach coords and physics lost during pytree flatten/unflatten
+        full_predictions = ModelPredictions(predictions._predictions, model.coords, model.physics)
+        return full_predictions.to_xarray()
 
     def get_info():
         return {
