@@ -110,6 +110,7 @@ atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
 # %%
 import glob
 import os
+import pickle
 files = glob.glob("output_veros.*.nc")
 for f in files:
     print(f"Deleting: {f}")
@@ -140,6 +141,80 @@ fakelnd_model=SlabOceanModel(
     forcing_method=None,
     mask_value=1.0,
 )
+# %% [markdown]
+# ## Checkpoint Save/Load
+
+# %%
+def set_veros_runtime_setting(name, value):
+    from veros import runtime_settings as veros_runtime_settings
+    object.__setattr__(veros_runtime_settings, "__locked__", False)
+    setattr(veros_runtime_settings, name, value)
+    object.__setattr__(veros_runtime_settings, "__locked__", True)
+
+
+def save_coupled_carry(coupled_carry, checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(exist_ok=True, parents=True)
+
+    # ATM carry: pure JAX pytree
+    atm_carry_numpy = jax.tree_util.tree_map(np.array, coupled_carry["atm"])
+    with open(checkpoint_dir / "atm_carry.pkl", "wb") as f:
+        pickle.dump(atm_carry_numpy, f)
+
+    # OCN state: use Veros HDF5 restart mechanism
+    from veros.restart import write_restart
+    ocn_state = coupled_carry["ocn"]["state"]
+    with ocn_state.settings.unlock():
+        ocn_state.settings.restart_output_filename = str(checkpoint_dir / "veros.restart.h5")
+    write_restart(ocn_state, force=True)
+
+    # OCN derived + forcing: plain JAX arrays
+    ocn_aux = jax.tree_util.tree_map(np.array, {
+        "derived": coupled_carry["ocn"]["derived"],
+        "forcing": coupled_carry["ocn"]["forcing"],
+    })
+    with open(checkpoint_dir / "ocn_aux.pkl", "wb") as f:
+        pickle.dump(ocn_aux, f)
+
+    # fakelnd carry: pure JAX pytree (OceanState + OceanForcing)
+    fakelnd_carry_numpy = jax.tree_util.tree_map(np.array, coupled_carry["fakelnd"])
+    with open(checkpoint_dir / "fakelnd_carry.pkl", "wb") as f:
+        pickle.dump(fakelnd_carry_numpy, f)
+
+
+def load_coupled_carry(checkpoint_dir, ocn_model):
+    checkpoint_dir = Path(checkpoint_dir)
+
+    # ATM carry
+    with open(checkpoint_dir / "atm_carry.pkl", "rb") as f:
+        atm_carry = pickle.load(f)
+    atm_carry = jax.tree_util.tree_map(jnp.array, atm_carry)
+
+    # OCN state: read_restart mutates the state in-place
+    from veros.restart import read_restart
+    ocn_state = ocn_model.state
+    set_veros_runtime_setting("force_overwrite", False)
+    with ocn_state.settings.unlock():
+        ocn_state.settings.restart_input_filename = str(checkpoint_dir / "veros.restart.h5")
+    read_restart(ocn_state)
+    set_veros_runtime_setting("force_overwrite", True)
+
+    # OCN derived + forcing
+    with open(checkpoint_dir / "ocn_aux.pkl", "rb") as f:
+        ocn_aux = pickle.load(f)
+    ocn_aux = jax.tree_util.tree_map(jnp.array, ocn_aux)
+
+    # fakelnd carry
+    with open(checkpoint_dir / "fakelnd_carry.pkl", "rb") as f:
+        fakelnd_carry = pickle.load(f)
+    fakelnd_carry = jax.tree_util.tree_map(jnp.array, fakelnd_carry)
+
+    return dict(
+        atm=atm_carry,
+        ocn=dict(state=ocn_state, **ocn_aux),
+        fakelnd=fakelnd_carry,
+    )
+
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 #
@@ -214,8 +289,16 @@ tree_tools.print_tree(model.get_info(), root="Model")
 initial_carry = model.initialize()
 
 batches = int(total_simulation_time / simulation_interval)
+checkpoint_dir = output_dir / "checkpoint"
+resume_batch = 0
+if checkpoint_dir.exists():
+    saved = sorted(checkpoint_dir.glob("batch_*"))
+    if saved:
+        resume_batch = int(saved[-1].name.split("_")[1]) + 1
+        print(f"Resuming from batch {resume_batch}")
+        initial_carry = load_coupled_carry(saved[-1], ocn_model)
 
-for b in range(batches):
+for b in range(resume_batch, resume_batch + batches):
     
     print(f"[batch={b:d}/{batches:d}] Simulation...")
     
@@ -270,5 +353,6 @@ for b in range(batches):
         break
 
     initial_carry = final_carry
+    save_coupled_carry(final_carry, checkpoint_dir / f"batch_{b:05d}")
 
 
