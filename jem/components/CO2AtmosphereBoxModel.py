@@ -7,10 +7,9 @@ import tree_math
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
-
 earth_radius = 6.371e6          # Unit: m
-total_air_mass_per_area = 1e4   # Unit: kg / m^2
-default_total_atmosphere_mass = 4 * jnp.pi * earth_radius**2 * total_air_mass_per_area 
+total_air_mass_per_unit_area = 1e4   # Unit: kg / m^2
+default_total_atmosphere_mass = 4 * jnp.pi * earth_radius**2 * total_air_mass_per_unit_area 
 dry_air_molecular_weight = 28.9e-3 # Unit: kg / mole
 co2_gas_molecular_weight = 44e-3   # Unit: kg / mole
 
