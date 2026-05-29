@@ -12,11 +12,7 @@ from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 import jem.utils.data_structure as data_structure
 from jem.components.slab.base import SlabModelBase
-from jem.components.slab.slab_ocean_model.biogeochem_coefficients import (
-    compute_solubility_K0,
-    compute_gas_transfer_velocity,
-    compute_carbonate_constants_K,
-)
+from jem.components.slab.slab_ocean_model.biogeochem_coefficients import compute_co2_flux
 
 default_land_surface_temperature = 288.15
 
@@ -37,8 +33,9 @@ class OceanState:
 @data_structure.typed_and_dimensioned
 class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    U10: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
+    U10: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    air_co2_volume_mixing_ratio: Annotated[float, (), "zero_dimensional"]
 
 class SlabOceanModelBGC(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -322,8 +319,20 @@ class SlabOceanModelBGC(SlabModelBase):
                 forcing.U10,
             )
             solubility_K0 = compute_solubility_K0(state.sea_surface_temperature, salinity=35.0)
+            co2_flux = compute_co2_flux(
+                co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio, # ppm
+                surface_dry_air_pressure = 1.0,    # atm
+                wind_10m = U10,                    # m/s
+                dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon,  # M
+                total_alkalinity = state.mixed_layer_total_alkalinity,                       # M
+                seawater_temperature = state.sea_surface_temperature,                        # K
+                salinity = 35.0,                                                             # psu
+            )
             
-
+            new_mixed_layer_dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon + (
+                 self.timestep * co2_flux / state.mixed_layer_depth
+            )
+           
             # Add climatology back
             new_sea_surface_temperature = new_sea_surface_temperature_anom
             if self.forcing_method == "relaxation":
@@ -336,9 +345,14 @@ class SlabOceanModelBGC(SlabModelBase):
                 nonocn_idx
             ].set(default_land_surface_temperature)
 
+            co2_flux = co2_flux.at[
+                nonocn_idx
+            ].set(0.0)
+
             new_state = state.copy(
                 {
                     "sea_surface_temperature": new_sea_surface_temperature,
+                    "mixed_layer_dissolved_inorganic_carbon": new_mixed_layer_dissolved_inorganic_carbon,
                     "sim_time": new_sim_time,
                 }
             )
@@ -347,14 +361,17 @@ class SlabOceanModelBGC(SlabModelBase):
                 state=new_state,
                 forcing=dict(
                     total_heat_flux=total_heat_flux,
-                )
+                ),
+                flux=dict(
+                    co2_flux = co2_flux,
+                ),
             )
             if self.forcing_method == "Qflux":
                 predictions["forcing"]["q_flux"] = snapshot_Qflux
 
             return dict(
                 state=new_state,
-                forcing=forcing
+                forcing=forcing,
             ), stack_objects([predictions])
 
         return step_function
