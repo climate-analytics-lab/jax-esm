@@ -148,11 +148,8 @@ def compute_co2_flux(
 
     Returns:
     --------
-    co2_flux_in_volume_mixing_ratio : float or ndarray
-        CO2 flux expressed as k * (pCO2_sea - pCO2_air) / P * 1e6 in m/s * ppm.
-        Positive upward (ocean to atmosphere).
     co2_flux_in_concentration : float or ndarray
-        CO2 flux expressed as k * K0 * (pCO2_sea - pCO2_air) in m/s * mol/L.
+        CO2 flux expressed as k * K0 * (pCO2_sea - pCO2_air) in m/s * mol/L = mol / m^2 / s.
         Positive upward (ocean to atmosphere).
     """
     
@@ -169,8 +166,5 @@ def compute_co2_flux(
     K0 = compute_solubility_K0(seawater_temperature, salinity)
     pco2_seawater = co2_aq / K0 # in atm
 
-    co2_flux_in_volume_mixing_ratio = gas_transfer_velocity * (pco2_seawater - pco2_air) / surface_dry_air_pressure * 1e6 
-    co2_flux_in_concentration = gas_transfer_velocity * K0 * (pco2_seawater - pco2_air)
-    
-    return co2_flux_in_volume_mixing_ratio, co2_flux_in_concentration
+    return gas_transfer_velocity * K0 * (pco2_seawater - pco2_air)
 
