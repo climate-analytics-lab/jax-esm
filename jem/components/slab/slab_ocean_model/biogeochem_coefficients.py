@@ -1,7 +1,7 @@
 """Helper functions for computing biogeochemical coefficients."""
 
+import jax
 import jax.numpy as jnp
-from jax.experimental import checkify
 
 def compute_solubility_K0(temp, salinity):
     """
@@ -83,11 +83,6 @@ def compute_carbonate_constants_K(temp_kelvin, salinity):
 
     return K1, K2
 
-@checkify.checkify
-def check_positive(x):
-  checkify.check(x > 0, "must be positive!")
-  return x
-
 def solve_for_co2_aq(
     dissolved_inorganic_carbon,
     total_alkalinity,
@@ -95,15 +90,19 @@ def solve_for_co2_aq(
     salinity,
 ):
 
-    K1, K2 = compute_carbonate_constants_K(temperature, salinity) 
+    K1, K2 = compute_carbonate_constants_K(temperature, salinity)
     DIC_over_TA = dissolved_inorganic_carbon / total_alkalinity
-    
+
     # Solving second order polynomial problem
     b = K1 * (1.0 - DIC_over_TA)
     c = K1 * K2 * (1.0 - 2 * DIC_over_TA)
-    errors, determinant = check_positive(b**2 - 4*c)
-    checkify.check_error(errors)
-    
+    determinant = b**2 - 4*c
+
+    def _assert_positive(x):
+        if not bool(jnp.all(x > 0)):
+            raise ValueError("Discriminant is non-positive in solve_for_co2_aq")
+    jax.debug.callback(_assert_positive, determinant)
+
     H = 0.5 * ( - b + jnp.sqrt(determinant) ) # solve for [H+]
     #co2_aq = dissolved_inorganic_carbon / ( 1.0 + K1 / H +  K1*K2 / H**2 )
     co2_aq = total_alkalinity / ( K1 / H +  2 * K1*K2 / H**2 )
