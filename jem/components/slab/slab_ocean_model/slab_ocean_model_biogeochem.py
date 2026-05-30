@@ -33,6 +33,7 @@ class OceanForcing:
     total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
     U10: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    co2_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
     air_co2_volume_mixing_ratio: Annotated[float, (), "zero_dimensional"]
 
 class SlabOceanModelBGC(SlabModelBase):
@@ -87,8 +88,10 @@ class SlabOceanModelBGC(SlabModelBase):
         forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
         mask_value: float = 0.0,
-        init_deep_layer_dissolved_inorganic_carbon: float = 0.0,
-        total_alkalinity: float = 1.0,
+        init_mixed_layer_dissolved_inorganic_carbon: float = 2.0,  # mol / m^3
+        init_deep_layer_dissolved_inorganic_carbon: float = 2.0,   # mol / m^3
+        mixed_deep_layer_exchange_time_scale: float = 86400 * 365 * 1000, # 1000 years
+        total_alkalinity: float = 2.3,
     ):
         """Initialize slab ocean model.
 
@@ -109,6 +112,7 @@ class SlabOceanModelBGC(SlabModelBase):
         self.deep_layer_depth = deep_layer_depth
         self.SST_clim_file = SST_clim_file
         self.Q_flux_file = Q_flux_file
+        self.init_mixed_layer_dissolved_inorganic_carbon = init_mixed_layer_dissolved_inorganic_carbon
         self.init_deep_layer_dissolved_inorganic_carbon = init_deep_layer_dissolved_inorganic_carbon
         self.total_alkalinity = total_alkalinity
 
@@ -176,6 +180,7 @@ class SlabOceanModelBGC(SlabModelBase):
 
     def initialize(self):
         """Initialize ocean model fields."""
+        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
         nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
 
         # Initialize mixed layer depth with latitudinal variation
@@ -203,7 +208,7 @@ class SlabOceanModelBGC(SlabModelBase):
             default_land_surface_temperature
         )
 
-        init_mixed_layer_dissolved_inorganic_carbon = jnp.zeros_like(init_sea_surface_temperature).at[nonocn_idx].set(0.0)
+        init_mixed_layer_dissolved_inorganic_carbon = jnp.zeros_like(init_sea_surface_temperature).at[ocn_idx].set(self.init_mixed_layer_dissolved_inorganic_carbon)
         init_deep_layer_dissolved_inorganic_carbon = jnp.array(self.init_deep_layer_dissolved_inorganic_carbon)
 
         # Validate mask consistency
@@ -238,6 +243,7 @@ class SlabOceanModelBGC(SlabModelBase):
         forcing = forcing.copy({
             "q_flux": forcing.q_flux   
         })
+
         return dict(
             state=self.component_state_class.zeros().copy({
                 "mixed_layer_depth": init_mixed_layer_depth,
@@ -246,6 +252,9 @@ class SlabOceanModelBGC(SlabModelBase):
                 "deep_layer_dissolved_inorganic_carbon": init_deep_layer_dissolved_inorganic_carbon,
             }),
             forcing=forcing,
+            derived={
+                "total_carbon_flux": jnp.array(0.0),
+            },
         )
 
     def _create_step_function_body(self):
@@ -254,6 +263,7 @@ class SlabOceanModelBGC(SlabModelBase):
         ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
         nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
         total_alkalinity = self.total_alkalinity
+        area = self.horizontal_grids["T"].area
         def step_function(carry, step):
             state = carry["state"]
             forcing = carry["forcing"]
@@ -297,7 +307,6 @@ class SlabOceanModelBGC(SlabModelBase):
                     ocn_idx, snapshot_Qflux, 0.0
                 )
 
-
                 total_heat_flux = total_heat_flux + snapshot_Qflux
 
 
@@ -308,19 +317,23 @@ class SlabOceanModelBGC(SlabModelBase):
                 + self.cd_factor * (- total_heat_flux)
             )
 
-            co2_flux = compute_co2_flux(
-                co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio, # ppm
-                surface_dry_air_pressure = 1.0,    # atm
-                wind_10m = forcing.U10,                    # m/s
-                dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon,  # M
-                total_alkalinity = total_alkalinity,                                        # M
+            co2_flux, pco2_seawater = compute_co2_flux(
+                co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio,              # ppm
+                surface_dry_air_pressure = 1.0,                                             # atm
+                wind_10m = forcing.U10,                                                     # m/s
+                dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon*1e-3,  # mol/m^3 => M (mol/dm^3)
+                total_alkalinity = total_alkalinity*1e-3,                                        # mol/m^3 => M (mol/dm^3)
                 seawater_temperature = state.sea_surface_temperature,                        # K
                 salinity = 35.0,                                                             # psu
             )
-            
-            # Euler forward step
+ 
+            co2_flux = co2_flux.at[
+                nonocn_idx
+            ].set(0.0)
+           
+            # Euler forward step: co2_flux [mol/m²/s] / depth [m] = mol/m³/s → adds to DIC state [mol/m³]
             new_mixed_layer_dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon + (
-                 self.timestep * co2_flux / state.mixed_layer_depth
+                 self.timestep *  (- co2_flux) / state.mixed_layer_depth
             )
            
             # Add climatology back
@@ -335,10 +348,6 @@ class SlabOceanModelBGC(SlabModelBase):
                 nonocn_idx
             ].set(default_land_surface_temperature)
 
-            co2_flux = co2_flux.at[
-                nonocn_idx
-            ].set(0.0)
-
             new_state = state.copy(
                 {
                     "sea_surface_temperature": new_sea_surface_temperature,
@@ -347,13 +356,23 @@ class SlabOceanModelBGC(SlabModelBase):
                 }
             )
 
+            total_carbon = jnp.sum(new_mixed_layer_dissolved_inorganic_carbon * area * state.mixed_layer_depth) * 0.012
+            total_carbon_flux = jnp.sum(co2_flux * area) * 0.012
+
+
+            derived = dict(total_carbon_flux=total_carbon_flux)
+
             predictions = dict(
                 state=new_state,
                 forcing=dict(
                     total_heat_flux=total_heat_flux,
                 ),
-                flux=dict(
+                bgc=dict(
+                    air_co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio,
                     co2_flux = co2_flux,
+                    total_carbon = total_carbon,
+                    total_carbon_flux = total_carbon_flux,
+                    pco2_seawater = pco2_seawater,
                 ),
             )
             if self.forcing_method == "Qflux":
@@ -362,6 +381,7 @@ class SlabOceanModelBGC(SlabModelBase):
             return dict(
                 state=new_state,
                 forcing=forcing,
+                derived=derived,
             ), stack_objects([predictions])
 
         return step_function
@@ -370,6 +390,7 @@ class SlabOceanModelBGC(SlabModelBase):
         """Create xarray data variables for ocean output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
+        bgc = predictions["bgc"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
         data_vars = dict(
             sea_surface_temperature=(
@@ -413,6 +434,49 @@ class SlabOceanModelBGC(SlabModelBase):
                     "positive": "upward",
                 }
             ),
+            co2_flux=(
+                T_grid_dims,
+                bgc["co2_flux"],
+                {
+                    "long_name": "Flux of co2",
+                    "units": "mol / m^2 / s",
+                    "positive": "upward",
+                }
+            ),
+            pco2_seawater=(
+                T_grid_dims,
+                bgc["pco2_seawater"],
+                {
+                    "long_name": "pCO2 of seawater",
+                    "units": "atm",
+                }
+            ),
+            total_carbon=(
+                ("time",),
+                bgc["total_carbon"],
+                {
+                    "long_name": "Total carbon mass in the ocean",
+                    "units": "kg",
+                }
+            ),
+            total_carbon_flux=(
+                ("time",),
+                bgc["total_carbon_flux"],
+                {
+                    "long_name": "Total carbon mass flux",
+                    "units": "kg / s",
+                    "positive": "upward",
+                }
+            ),
+            air_co2_volume_mixing_ratio=(
+                ("time",),
+                bgc["air_co2_volume_mixing_ratio"],
+                {
+                    "long_name": "Atmosphere co2 mixing ratio",
+                    "units": "ppm",
+                }
+            ),
+
         )
 
         if self.forcing_method == "Qflux":
