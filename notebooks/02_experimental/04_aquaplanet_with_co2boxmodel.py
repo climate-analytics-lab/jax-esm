@@ -20,6 +20,7 @@
 # %%
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -35,6 +36,10 @@ from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 use_ipython = 'get_ipython' in globals()
 
+jax.config.update('jax_platform_name', 'cpu')
+print("Print devices: ", jax.devices())
+
+
 def positive_cosine_cubic_latitude_squared(
     lat: jnp.ndarray,
     amplitude: float = 1.0,
@@ -47,7 +52,7 @@ def positive_cosine_cubic_latitude_squared(
 # ## Configurations
 
 # %%
-spectral_truncation = 31
+spectral_truncation = 21
 total_simulation_time = jdt.to_timedelta(60, "day")
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
@@ -68,11 +73,20 @@ def interactions(coupled_carry):
     ocn = coupled_carry["ocn"]
     co2_atm_boxmodel = coupled_carry["co2_atm_boxmodel"]
 
-
     # Mapping
     ocn["forcing"].total_heat_flux = atm["derived"]["total_heat_flux"]
     atm["forcing"].sea_surface_temperature = ocn["state"]["sea_surface_temperature"]
+    
+    # Carbon coupling
+    u0 = atm["derived"]["physics"]["_surface_flux"].u0
+    v0 = atm["derived"]["physics"]["_surface_flux"].v0
+    ocn["forcing"].U10 = jnp.sqrt(u0**2 + v0**2)
+    ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
+    co2_atm_boxmodel.forcing_source_and_sink = (
+        jnp.array(12e3 / 86400) * 0 
+        + ocn["derived"]["total_carbon_flux"]
+    )
     
     return coupled_carry
 
@@ -83,7 +97,7 @@ def interactions(coupled_carry):
 
 co2_atm_boxmodel = CO2AtmosphereBoxModel(
     timestep=coupling_timestep / one_second,
-    initial_co2_mixing_ratio = 560.0,
+    initial_co2_mixing_ratio = 0.0,
 )
 
 atm_model = jcm.model.Model(
@@ -170,7 +184,7 @@ for b in range(resume_batch, resume_batch + batches):
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
-        ds = ds.reduce(np.mean, dim="time", keepdims=True)
+        #ds = ds.reduce(np.mean, dim="time", keepdims=True)
         ds.to_netcdf(output_file, engine="netcdf4")
         ds.close()
 
