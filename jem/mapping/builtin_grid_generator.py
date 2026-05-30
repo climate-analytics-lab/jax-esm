@@ -9,7 +9,7 @@ import dinosaur
 import jax.numpy as jnp
 import xarray as xr
 
-R_EARTH = 6.371e6  # m
+earth_radius = 6.371e6  # m
 
 def generate_grids_from_grid_specification(
     grid_specification: str,
@@ -127,7 +127,7 @@ def get_jcm_grids(
     )
 
     hgrid = one_layer_coords.horizontal
-    area = hgrid.quadrature_weights * R_EARTH**2  # shape (n_lon, n_lat), units m²
+    area = hgrid.quadrature_weights * earth_radius**2  # shape (n_lon, n_lat), units m^2
 
     coordinate_T = generate_coordinate_from_latitude_longitude(
         latitude=hgrid.latitudes,
