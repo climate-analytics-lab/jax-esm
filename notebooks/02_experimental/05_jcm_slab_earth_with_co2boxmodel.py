@@ -41,8 +41,9 @@ def positive_cosine_cubic_latitude_squared(
 # ## Configurations
 
 # %%
+calendar = "365_day"
 spectral_truncation = 31
-total_simulation_time = jdt.to_timedelta(60, "day")
+total_simulation_months = 36
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-04_aquaplanet_co2boxmodel"
@@ -71,14 +72,15 @@ forcing = ForcingData.from_file(forcing_file, coords=coords)
 
 # Note: Remember to return the `coupled_carry` at the end.
 def interactions(coupled_carry):
+    print(list(coupled_carry.keys()))
     atm = coupled_carry["atm"]
     lnd = coupled_carry["lnd"]
     ocn = coupled_carry["ocn"]
     co2_atm_boxmodel = coupled_carry["co2_atm_boxmodel"]
 
     # Mapping
-    ocn["forcing"].total_heat_flux = atm["derived"]["total_heat_flux"]
-    lnd["forcing"].total_heat_flux = atm["derived"]["total_heat_flux"]
+    ocn["forcing"].total_heat_flux = atm["derived"]["ocean_heat_flux"]
+    lnd["forcing"].total_heat_flux = atm["derived"]["land_heat_flux"]
     atm["forcing"].sea_surface_temperature = ocn["state"]["sea_surface_temperature"]
     atm["forcing"].stl_am = lnd["state"]["land_surface_temperature"]
     atm["forcing"].snowc_am = lnd["state"]["snowc"]
@@ -91,7 +93,7 @@ def interactions(coupled_carry):
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
     co2_atm_boxmodel.forcing_source_and_sink = (
-        jnp.array(12e3 / 86400) * 0 
+        jnp.array(10e12 / (86400*365)) 
         + ocn["derived"]["total_carbon_flux"]
     )
     
@@ -111,6 +113,8 @@ atm_model = jcm.model.Model(
     coords=get_speedy_coords(spectral_truncation=spectral_truncation),
     start_date=start_datetime,
     time_step=10.0,
+    calendar=calendar,
+    terrain=terrain,
 )
 
 atm_model = JCM.make_jem_compatible(
@@ -146,15 +150,15 @@ model = Coupler(
             SST_clim_file=forcing_file,
             forcing_method="relaxation",
             relaxation_time= 30 * 86400.0,
+            calendar=calendar,
         ),
         lnd=SlabLandModel(
             start_datetime=start_datetime,
             topography_file=terrain_file,
             mask_file=terrain_file,
             land_clim_file=forcing_file,
-            # Strong relaxation because land model seems to have a bug such 
-            # that temperature get unrealistic cold/hot.
-            tdland = 86400.0, 
+            tdland =  30 * 86400.0, 
+            calendar=calendar,
         ),
     ),
     mappers=dict(interactions=interactions),
@@ -169,10 +173,12 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 
 initial_carry = model.initialize()
-simulation_interval = jdt.to_timedelta(30, "day")
-batches = int(total_simulation_time / simulation_interval)
+days_of_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+simulation_intervals = [ jdt.to_timedelta(_d, "day") for _d in days_of_month ]
+batches = total_simulation_months
 checkpoint_dir = output_dir / "checkpoint"
 resume_batch = 0
+trajectory_functions = dict()
 
 if checkpoint_dir.exists():
     saved = sorted(checkpoint_dir.glob("batch_*"))
@@ -191,14 +197,19 @@ else:
 
 for b in range(resume_batch, resume_batch + batches):
     print(f"[batch={b:d}/{batches:d}] Simulation...")
-    _, final_carry, predictions = model.run(
-        initial_carry = initial_carry,
-        workflow=["interactions", "co2_atm_boxmodel", "atm", "ocn", "lnd"],
-        iterations = int(simulation_interval / coupling_timestep),
-        jitted=True,
-        reuse_last_available_trajectory=True,
-    )
+    simulation_interval = simulation_intervals[b % len(simulation_intervals)]
+    iterations = int(simulation_interval / coupling_timestep)
 
+    if iterations not in trajectory_functions:
+        print(f"Trajectory for iterations {iterations:d} does not exist. Create one.")
+        trajectory_functions[iterations] = model.generate_trajectory_function(
+            workflow=["interactions", "co2_atm_boxmodel", "atm", "ocn", "lnd"],
+            iterations = int(simulation_interval / coupling_timestep),
+            jitted=True,
+        )
+    
+    
+    final_carry, predictions = trajectory_functions[iterations](initial_carry)
     output_dict = model.predictions_to_xarray(predictions)
 
     for component_name, ds in output_dict.items():
