@@ -64,6 +64,7 @@ class SlabLandModel(SlabModelBase):
         tdland: float = 40.0 * 86400.0,
         flandmin: float = 1.0/3.0,
         land_threshold: float = 0.1,
+        calendar: str = "365_day",
     ):
         """Initialize land surface model.
         
@@ -88,6 +89,7 @@ class SlabLandModel(SlabModelBase):
             timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
+            calendar=calendar,
         )
 
         self.land_clim_file = land_clim_file
@@ -323,7 +325,6 @@ class SlabLandModel(SlabModelBase):
             Step function with signature: (state, forcing, t) -> (new_state, predictions)
         """
         
-        # Compute reference for climatology indexing
         start_day_offset = self._compute_start_day_offset()
         length_of_a_cycle = self.stl_clim.shape[2]
         

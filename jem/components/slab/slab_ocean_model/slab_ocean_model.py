@@ -79,6 +79,7 @@ class SlabOceanModel(SlabModelBase):
         forcing_method: Optional[str] = None,
         initialization_sea_surface_temperature: float = 288.15,
         mask_value: float = 0.0,
+        calendar: str = "365_day",
     ):
         """Initialize slab ocean model.
 
@@ -106,6 +107,7 @@ class SlabOceanModel(SlabModelBase):
             timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
+            calendar=calendar,
         )
 
         # Climatology data (loaded during initialize)

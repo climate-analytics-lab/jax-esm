@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
+from jcm.date import days_per_year as jcm_days_per_year
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 class SlabModelBase(ABC):
@@ -43,6 +44,7 @@ class SlabModelBase(ABC):
         timestep: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
+        calendar: str = "365_day",
     ):
         """Initialize slab model base.
 
@@ -60,6 +62,8 @@ class SlabModelBase(ABC):
         self.timestep = timestep
         self.topography_file = topography_file
         self.mask_file = mask_file
+        self.calendar = calendar
+        self.days_per_year = jcm_days_per_year(calendar)
 
         # Initialize domain
         self.horizontal_grids = generate_grids_from_grid_specification(
@@ -130,14 +134,10 @@ class SlabModelBase(ABC):
         )
 
     def _compute_start_day_offset(self) -> float:
-        """Compute the day offset from start of year for climatology lookup.
-
-        Returns:
-            Number of seconds from Jan 1 of start year to start_datetime
-        """
+        """Seconds from Jan 1 of start year to start_datetime."""
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        return float( (self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second") )
+        return float((self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second"))
 
     def _get_climatology_indices(
         self,
@@ -145,24 +145,26 @@ class SlabModelBase(ABC):
         start_day_offset: float,
         cycle_length: int,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Compute climatology indices for begin and end of timestep.
+        """Map simulation time to climatology indices.
+
+        Uses days_per_year from jcm.date so the cycle length correctly spans
+        one full year under the chosen calendar ('365_day' or 'gregorian').
 
         Args:
-            t: Current simulation time in seconds
-            start_day_offset: Offset from start of year in seconds
-            cycle_length: Number of days in the climatology cycle
+            t: Current simulation time in seconds since simulation start
+            start_day_offset: Seconds from Jan 1 of start year to start_datetime
+            cycle_length: Number of records in the climatology (e.g. 12 for monthly)
 
         Returns:
             Tuple of (begin_index, end_index) for climatology lookup
         """
-        clim_beg_idx = jnp.mod(
-            jnp.int_(jnp.floor((start_day_offset + t) / 86400.0)),
-            cycle_length,
-        )
-        clim_end_idx = jnp.mod(
-            jnp.int_(jnp.floor((start_day_offset + t + self.timestep) / 86400.0)),
-            cycle_length,
-        )
+        seconds_per_record = 86400.0 * self.days_per_year / cycle_length
+        clim_beg_idx = jnp.int_(
+            jnp.floor((start_day_offset + t) / seconds_per_record)
+        ) % cycle_length
+        clim_end_idx = jnp.int_(
+            jnp.floor((start_day_offset + t + self.timestep) / seconds_per_record)
+        ) % cycle_length
         return clim_beg_idx, clim_end_idx
 
     @abstractmethod

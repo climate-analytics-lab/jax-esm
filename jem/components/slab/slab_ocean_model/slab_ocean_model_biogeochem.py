@@ -92,6 +92,7 @@ class SlabOceanModelBGC(SlabModelBase):
         init_deep_layer_dissolved_inorganic_carbon: float = 2.0,   # mol / m^3
         mixed_deep_layer_exchange_time_scale: float = 86400 * 365 * 1000, # 1000 years
         total_alkalinity: float = 2.3,
+        calendar: str = "365_day",
     ):
         """Initialize slab ocean model.
 
@@ -123,6 +124,7 @@ class SlabOceanModelBGC(SlabModelBase):
             timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
+            calendar=calendar,
         )
 
         # Climatology data (loaded during initialize)
