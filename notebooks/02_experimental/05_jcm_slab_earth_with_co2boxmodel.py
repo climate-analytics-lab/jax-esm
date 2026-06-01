@@ -93,8 +93,8 @@ def interactions(coupled_carry):
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
     co2_atm_boxmodel.forcing_source_and_sink = (
-        jnp.array(10e12 / (86400*365)) 
-        + ocn["derived"]["total_carbon_flux"]
+        #jnp.array(10e12 / (86400*365)) 
+        ocn["derived"]["total_carbon_flux"]
     )
     
     return coupled_carry
