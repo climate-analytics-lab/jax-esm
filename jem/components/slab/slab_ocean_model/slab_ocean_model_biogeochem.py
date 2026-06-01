@@ -274,41 +274,23 @@ class SlabOceanModelBGC(SlabModelBase):
             predictions = {}
             print(f"Using method: {self.forcing_method}")
             if self.forcing_method == "relaxation":
-                # Get climatology at begin and end of timestep
-                length_of_a_cycle = self.SST_clim.shape[2]
-                clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                    state.sim_time, start_day_offset, length_of_a_cycle
+                sst_clim_beg = jnp.where(
+                    ocn_idx,
+                    self._interpolate_cyclic(state.sim_time, start_day_offset, self.SST_clim),
+                    default_land_surface_temperature,
                 )
-
-                snapshot_SST_clim_beg = self.SST_clim[:, :, clim_beg_idx]
-                snapshot_SST_clim_beg = jnp.where(
-                    ocn_idx, snapshot_SST_clim_beg, default_land_surface_temperature
+                sst_clim_end = jnp.where(
+                    ocn_idx,
+                    self._interpolate_cyclic(state.sim_time + self.timestep, start_day_offset, self.SST_clim),
+                    default_land_surface_temperature,
                 )
-
-                snapshot_SST_clim_end = self.SST_clim[:, :, clim_end_idx]
-                snapshot_SST_clim_end = jnp.where(
-                    ocn_idx, snapshot_SST_clim_end, default_land_surface_temperature
-                )
-
-                SST_clim_trend = (
-                    snapshot_SST_clim_end - snapshot_SST_clim_beg
-                ) / 86400.0  # per second
-
-                new_sea_surface_temperature_anom = (
-                    state.sea_surface_temperature - snapshot_SST_clim_beg
-                )
+                new_sea_surface_temperature_anom = state.sea_surface_temperature - sst_clim_beg
             elif self.forcing_method == "Qflux":
-                
-                length_of_a_cycle = forcing.q_flux.shape[2]
-                Qflux_beg_idx, _ = self._get_climatology_indices(
-                    state.sim_time, start_day_offset, length_of_a_cycle
-                )
-
-                snapshot_Qflux = forcing.q_flux[:, :, Qflux_beg_idx]
                 snapshot_Qflux = jnp.where(
-                    ocn_idx, snapshot_Qflux, 0.0
+                    ocn_idx,
+                    self._interpolate_cyclic(state.sim_time, start_day_offset, forcing.q_flux),
+                    0.0,
                 )
-
                 total_heat_flux = total_heat_flux + snapshot_Qflux
 
 
@@ -341,9 +323,7 @@ class SlabOceanModelBGC(SlabModelBase):
             # Add climatology back
             new_sea_surface_temperature = new_sea_surface_temperature_anom
             if self.forcing_method == "relaxation":
-                new_sea_surface_temperature += (
-                    snapshot_SST_clim_beg + SST_clim_trend * self.timestep
-                )
+                new_sea_surface_temperature += sst_clim_end
             
             # Apply land mask
             new_sea_surface_temperature = new_sea_surface_temperature.at[

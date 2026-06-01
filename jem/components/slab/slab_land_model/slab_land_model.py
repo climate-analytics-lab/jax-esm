@@ -245,7 +245,6 @@ class SlabLandModel(SlabModelBase):
         
         # cdland = dissipation coefficient (Fortran: line 165)
         # cdland = dmask * tdland / (1 + dmask * tdland)
-        # Convert tdland from days to timesteps
         tdland_timesteps = self.tdland / self.timestep
         self.cdland = (self.dmask * tdland_timesteps / (1.0 + self.dmask * tdland_timesteps))
         
@@ -326,7 +325,6 @@ class SlabLandModel(SlabModelBase):
         """
         
         start_day_offset = self._compute_start_day_offset()
-        length_of_a_cycle = self.stl_clim.shape[2]
         
         def step_function(carry, t):
             """Land model time step.
@@ -353,23 +351,11 @@ class SlabLandModel(SlabModelBase):
             # Time and climatology management
             # =====================================================================
             
-            # Get current climatology index (wraps around for perpetual year)
-            clim_beg_idx, clim_end_idx = self._get_climatology_indices(
-                state.sim_time, start_day_offset, length_of_a_cycle
-            )
-
-            # For daily data, use linear interpolation; for monthly, could use more sophisticated
-            # Here we just use simple linear interpolation for all cases
-            # Commented the following out because it is not used.
-            # time_weight = 0.0  # Use current snapshot only for simplicity
-            
-            # Get climatology at current time (data format is lon, lat, time)
-
-            stl_clim_beg = self.stl_clim[:, :, clim_beg_idx]
-            stl_clim_end = self.stl_clim[:, :, clim_end_idx]
-            
-            snowd_clim_beg = self.snowd_clim[:, :, clim_beg_idx]
-            soilw_clim_beg = self.soilw_clim[:, :, clim_beg_idx]
+            # Linearly interpolate climatology at current and end-of-step time
+            stl_clim_beg  = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.stl_clim)
+            stl_clim_end  = self._interpolate_cyclic(state.sim_time + self.timestep, start_day_offset, self.stl_clim)
+            snowd_clim    = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.snowd_clim)
+            soilw_clim    = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.soilw_clim)
             
             # =====================================================================
             # Land surface temperature evolution (Fortran: run_land_model)
@@ -403,8 +389,8 @@ class SlabLandModel(SlabModelBase):
             new_state = state.copy({
                 "sim_time" : new_sim_time,
                 "land_surface_temperature" : new_T,
-                "snowc" : jnp.minimum(1.0, snowd_clim_beg / self.sd2sc),
-                "soilw" : soilw_clim_beg,
+                "snowc" : jnp.minimum(1.0, snowd_clim / self.sd2sc),
+                "soilw" : soilw_clim,
             })
             
             # Return new state and predictions for output

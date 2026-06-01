@@ -14,6 +14,7 @@ import jax_datetime as jdt
 import xarray as xr
 
 from jcm.date import days_per_year as jcm_days_per_year
+from jem.utils.cycles import evaluate_cyclic_linear
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 class SlabModelBase(ABC):
@@ -139,33 +140,37 @@ class SlabModelBase(ABC):
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
         return float((self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second"))
 
-    def _get_climatology_indices(
+    def _year_fraction(self, t: float, start_day_offset: float) -> jnp.ndarray:
+        """Return cycle position in [0, 1) for simulation time t.
+
+        Args:
+            t: Simulation time in seconds since start
+            start_day_offset: Seconds from Jan 1 of start year to start_datetime
+        """
+        return jnp.mod(
+            (start_day_offset + t) / (86400.0 * self.days_per_year), 1.0
+        )
+
+    def _interpolate_cyclic(
         self,
         t: float,
         start_day_offset: float,
-        cycle_length: int,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Map simulation time to climatology indices.
+        data: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Linearly interpolate cyclic climatology data at simulation time t.
 
-        Uses days_per_year from jcm.date so the cycle length correctly spans
-        one full year under the chosen calendar ('365_day' or 'gregorian').
+        Records in data (last axis) are assumed equally spaced over one year.
+        Interpolation is continuous and periodic across year boundaries.
 
         Args:
-            t: Current simulation time in seconds since simulation start
+            t: Simulation time in seconds since start
             start_day_offset: Seconds from Jan 1 of start year to start_datetime
-            cycle_length: Number of records in the climatology (e.g. 12 for monthly)
+            data: Array of shape (..., n_records)
 
         Returns:
-            Tuple of (begin_index, end_index) for climatology lookup
+            Interpolated array of shape (...)
         """
-        seconds_per_record = 86400.0 * self.days_per_year / cycle_length
-        clim_beg_idx = jnp.int_(
-            jnp.floor((start_day_offset + t) / seconds_per_record)
-        ) % cycle_length
-        clim_end_idx = jnp.int_(
-            jnp.floor((start_day_offset + t + self.timestep) / seconds_per_record)
-        ) % cycle_length
-        return clim_beg_idx, clim_end_idx
+        return evaluate_cyclic_linear(self._year_fraction(t, start_day_offset), data)
 
     @abstractmethod
     def initialize(self):
