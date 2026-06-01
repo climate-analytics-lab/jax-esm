@@ -166,7 +166,7 @@ def compute_co2_flux(
     pco2_seawater = co2_aq / K0 # in atm
 
     return (
-        gas_transfer_velocity * K0 * (pco2_seawater - pco2_air) * 0.001, # from (m/s) * (mol/L) to mol / m^2 / s
+        gas_transfer_velocity * K0 * (pco2_seawater - pco2_air) * 1e3, # from (m/s) * (mol/L) to mol / m^2 / s
         pco2_seawater,
     )
 
