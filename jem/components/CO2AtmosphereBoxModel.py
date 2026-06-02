@@ -96,6 +96,11 @@ class CO2AtmosphereBoxModel:
                     np.array(predictions["forcing_source_and_sink"]),
                     {"long_name": "CO2 source and sink forcing", "units": "kg / s"},
                 ),
+                total_source_and_sink=(
+                    ["time"],
+                    np.array(predictions["emission"]) + np.array(predictions["forcing_source_and_sink"]),
+                    {"long_name": "Total CO2 source and sink (emission + ocean flux)", "units": "kg / s"},
+                ),
                 total_carbon=(
                     ["time"],
                     np.array(predictions["total_carbon"]),

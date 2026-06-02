@@ -41,9 +41,10 @@ def positive_cosine_cubic_latitude_squared(
 # ## Configurations
 
 # %%
+average_output_of_each_batch = True
 calendar = "365_day"
 spectral_truncation = 31
-total_simulation_months = 6#24 * 100
+total_simulation_months = 24 * 100
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-04_aquaplanet_co2boxmodel"
@@ -69,7 +70,7 @@ forcing = ForcingData.from_file(forcing_file, coords=coords)
 
 # %%
 
-def emission(days_after_start):
+def emission_stepwise(days_after_start):
     emission_rate = 10e12 / (86400 * 365)
     return jnp.select(
         condlist=[
@@ -82,6 +83,13 @@ def emission(days_after_start):
         ],
         default=emission_rate,
     )
+
+def emission_linear(days_after_start):
+    emission_rate_base = 10e12 / (86400 * 365)
+    emission_rate_change_per_decade = 10e12 / (86400 * 365)
+    return emission_rate_base + emission_rate_change_per_decade * days_after_start / (365*10) 
+
+
 
 # Note: Remember to return the `coupled_carry` at the end.
 def interactions(coupled_carry):
@@ -105,7 +113,7 @@ def interactions(coupled_carry):
     ocn["forcing"].U10 = jnp.sqrt(u0**2 + v0**2)
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
-    co2_atm_boxmodel.emission = emission(co2_atm_boxmodel.t / 86400.0)
+    co2_atm_boxmodel.emission = emission_linear(co2_atm_boxmodel.t / 86400.0)
     co2_atm_boxmodel.forcing_source_and_sink = (
         ocn["derived"]["total_carbon_flux"]
     )
@@ -228,10 +236,11 @@ for b in range(resume_batch, resume_batch + batches):
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
-        first_time = ds.coords["time"][:1]
-        ds = ds.reduce(np.mean, dim="time", keepdims=True)
-        ds = ds.assign_coords(time=first_time)
-        ds.to_netcdf(output_file, engine="netcdf4")
+        if average_output_of_each_batch:
+            first_time = ds.coords["time"][:1]
+            ds = ds.reduce(np.mean, dim="time", keepdims=True)
+            ds = ds.assign_coords(time=first_time)
+        ds.to_netcdf(output_file, engine="netcdf4", unlimited_dims=["time"])
         ds.close()
 
     if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
