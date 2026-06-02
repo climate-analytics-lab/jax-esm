@@ -21,6 +21,7 @@ class CO2AtmosphereBoxModelCarry:
     t: ArrayLike                       # Unit: seconds
     co2_mixing_ratio: ArrayLike        # Unit: ppm
     forcing_source_and_sink: ArrayLike # Unit: kg / second
+    emission: ArrayLike                # Unit: kg / second
 
 class CO2AtmosphereBoxModel:
 
@@ -41,6 +42,7 @@ class CO2AtmosphereBoxModel:
             t = jnp.array(0),
             co2_mixing_ratio = jnp.array(self.initial_co2_mixing_ratio),
             forcing_source_and_sink = jnp.array(self.initial_forcing_source_and_sink),
+            emission = jnp.array(0),
         )
 
     def generate_step_function(self):
@@ -49,8 +51,11 @@ class CO2AtmosphereBoxModel:
         def step_function(carry, step):
             """Integrates one time step of the CO2 atmosphere box model."""
 
-            # Physics: dco2_mixing_ratio/dt = (forcing_source_and_sink / carbon_molecular_weight) / (total_atmosphere_mass / dry_air_molecular_weight) * 1e6 (ppm)
-            dco2_mixing_ratio = (carry.forcing_source_and_sink / carbon_molecular_weight) / (total_atmosphere_mass / dry_air_molecular_weight) * 1e6 * dt
+            
+            total_source_and_sink = carry.forcing_source_and_sink + carry.emission
+
+            # Physics: dco2_mixing_ratio/dt = (total_source_and_sink / carbon_molecular_weight) / (total_atmosphere_mass / dry_air_molecular_weight) * 1e6 (ppm)
+            dco2_mixing_ratio = (total_source_and_sink / carbon_molecular_weight) / (total_atmosphere_mass / dry_air_molecular_weight) * 1e6 * dt
                 
             new_co2_mixing_ratio = carry.co2_mixing_ratio + dco2_mixing_ratio
             total_carbon = (new_co2_mixing_ratio * 1e-6) * (total_atmosphere_mass / dry_air_molecular_weight) * carbon_molecular_weight
@@ -58,6 +63,7 @@ class CO2AtmosphereBoxModel:
                 t = carry.t + dt,
                 co2_mixing_ratio = new_co2_mixing_ratio,
                 forcing_source_and_sink = carry.forcing_source_and_sink,
+                emission = carry.emission,
             )
 
             return new_carry, dict(
@@ -65,6 +71,7 @@ class CO2AtmosphereBoxModel:
                 total_carbon=total_carbon,
                 co2_mixing_ratio=new_carry.co2_mixing_ratio,
                 forcing_source_and_sink=new_carry.forcing_source_and_sink,
+                emission = carry.emission,
             )
 
         return step_function
@@ -77,6 +84,13 @@ class CO2AtmosphereBoxModel:
                     np.array(predictions["co2_mixing_ratio"]),
                     {"long_name": "Atmospheric CO2 volume mixing ratio", "units": "ppm"},
                 ),
+
+                emission=(
+                    ["time"],
+                    np.array(predictions["emission"]),
+                    {"long_name": "CO2 emission rate", "units": "kg / s"},
+                ),
+
                 forcing_source_and_sink=(
                     ["time"],
                     np.array(predictions["forcing_source_and_sink"]),

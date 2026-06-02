@@ -43,7 +43,7 @@ def positive_cosine_cubic_latitude_squared(
 # %%
 calendar = "365_day"
 spectral_truncation = 31
-total_simulation_months = 24 * 100
+total_simulation_months = 6#24 * 100
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-04_aquaplanet_co2boxmodel"
@@ -69,6 +69,19 @@ forcing = ForcingData.from_file(forcing_file, coords=coords)
 
 # %%
 
+def emission(days_after_start):
+    emission_rate = 10e12 / (86400 * 365)
+    return jnp.select(
+        condlist=[
+            days_after_start < 41.0,
+            days_after_start < 80.0,
+        ],
+        choicelist=[
+            0.0,
+            emission_rate / 3,
+        ],
+        default=emission_rate,
+    )
 
 # Note: Remember to return the `coupled_carry` at the end.
 def interactions(coupled_carry):
@@ -92,8 +105,8 @@ def interactions(coupled_carry):
     ocn["forcing"].U10 = jnp.sqrt(u0**2 + v0**2)
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
+    co2_atm_boxmodel.emission = emission(co2_atm_boxmodel.t / 86400.0)
     co2_atm_boxmodel.forcing_source_and_sink = (
-        #jnp.array(10e12 / (86400*365)) 
         ocn["derived"]["total_carbon_flux"]
     )
     
@@ -106,7 +119,7 @@ def interactions(coupled_carry):
 
 co2_atm_boxmodel = CO2AtmosphereBoxModel(
     timestep=coupling_timestep / one_second,
-    initial_co2_mixing_ratio = 0.0,
+    initial_co2_mixing_ratio = 400.0,
 )
 
 atm_model = jcm.model.Model(
