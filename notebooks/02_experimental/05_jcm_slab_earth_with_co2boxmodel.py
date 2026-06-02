@@ -215,7 +215,7 @@ for b in range(resume_batch, resume_batch + batches):
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
-        first_time = ds.coords["time"].values[:1]
+        first_time = ds.coords["time"][:1]
         ds = ds.reduce(np.mean, dim="time", keepdims=True)
         ds = ds.assign_coords(time=first_time)
         ds.to_netcdf(output_file, engine="netcdf4")
