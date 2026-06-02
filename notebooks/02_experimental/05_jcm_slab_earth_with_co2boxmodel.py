@@ -43,7 +43,7 @@ def positive_cosine_cubic_latitude_squared(
 # %%
 calendar = "365_day"
 spectral_truncation = 31
-total_simulation_months = 1
+total_simulation_months = 24 * 100
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-04_aquaplanet_co2boxmodel"
@@ -149,7 +149,7 @@ model = Coupler(
             mask_file=terrain_file,
             SST_clim_file=forcing_file,
             forcing_method="relaxation",
-            relaxation_time= 30 * 86400.0,
+            relaxation_time= 360 * 86400.0,
             calendar=calendar,
         ),
         lnd=SlabLandModel(
@@ -157,7 +157,7 @@ model = Coupler(
             topography_file=terrain_file,
             mask_file=terrain_file,
             land_clim_file=forcing_file,
-            tdland =  30 * 86400.0, 
+            tdland =  360 * 86400.0, 
             calendar=calendar,
         ),
     ),
@@ -173,7 +173,7 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 
 initial_carry = model.initialize()
-days_of_month = [3, 2, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+days_of_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 simulation_intervals = [ jdt.to_timedelta(_d, "day") for _d in days_of_month ]
 batches = total_simulation_months
 checkpoint_dir = output_dir / "checkpoint"
@@ -215,7 +215,9 @@ for b in range(resume_batch, resume_batch + batches):
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
-        #ds = ds.reduce(np.mean, dim="time", keepdims=True)
+        first_time = ds.coords["time"].values[:1]
+        ds = ds.reduce(np.mean, dim="time", keepdims=True)
+        ds = ds.assign_coords(time=first_time)
         ds.to_netcdf(output_file, engine="netcdf4")
         ds.close()
 

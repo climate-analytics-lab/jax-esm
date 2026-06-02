@@ -231,8 +231,10 @@ class SlabModelBase(ABC):
             longitude2D=(T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
         )
 
+        data_vars = self._create_xarray_data_vars(predictions)
+
         return xr.Dataset(
-            data_vars=self._create_xarray_data_vars(predictions),
+            data_vars=data_vars,
             coords=coords,
             attrs=self._create_xarray_global_attributes(),
         )

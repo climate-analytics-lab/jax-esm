@@ -87,7 +87,6 @@ class CO2AtmosphereBoxModel:
                     np.array(predictions["total_carbon"]),
                     {"long_name": "Total carbon (of CO2) in the atmosphere", "units": "kg"},
                 ),
-
             ),
             coords=dict(
                 time=(
