@@ -15,6 +15,7 @@ from jem.components.slab.base import SlabModelBase
 from jem.components.slab.slab_ocean_model.biogeochem_coefficients import compute_co2_flux
 
 default_land_surface_temperature = 288.15
+carbon_molecular_weight = 12e-3  # kg / mol
 
 
 @data_structure.typed_and_dimensioned
@@ -90,7 +91,7 @@ class SlabOceanModelBGC(SlabModelBase):
         mask_value: float = 0.0,
         init_mixed_layer_dissolved_inorganic_carbon: float = 2.0,  # mol / m^3
         init_deep_layer_dissolved_inorganic_carbon: float = 2.0,   # mol / m^3
-        mixed_deep_layer_exchange_time_scale: float = 86400 * 365 * 1000, # 1000 years
+        mixed_deep_layer_exchange_time_scale: float = 86400.0 * 365 * 1000, # 1000 years
         total_alkalinity: float = 2.3,
         calendar: str = "365_day",
     ):
@@ -115,6 +116,7 @@ class SlabOceanModelBGC(SlabModelBase):
         self.Q_flux_file = Q_flux_file
         self.init_mixed_layer_dissolved_inorganic_carbon = init_mixed_layer_dissolved_inorganic_carbon
         self.init_deep_layer_dissolved_inorganic_carbon = init_deep_layer_dissolved_inorganic_carbon
+        self.mixed_deep_layer_exchange_time_scale = mixed_deep_layer_exchange_time_scale
         self.total_alkalinity = total_alkalinity
 
         super().__init__(
@@ -266,6 +268,9 @@ class SlabOceanModelBGC(SlabModelBase):
         nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
         total_alkalinity = self.total_alkalinity
         area = self.horizontal_grids["T"].area
+        exchange_timescale = self.mixed_deep_layer_exchange_time_scale
+        V_deep = jnp.sum(area * ocn_idx) * self.deep_layer_depth
+
         def step_function(carry, step):
             state = carry["state"]
             forcing = carry["forcing"]
@@ -311,13 +316,23 @@ class SlabOceanModelBGC(SlabModelBase):
                 salinity = 35.0,                                                             # psu
             )
  
-            co2_flux = co2_flux.at[
-                nonocn_idx
-            ].set(0.0)
-           
-            # Euler forward step: co2_flux [mol/m²/s] / depth [m] = mol/m³/s → adds to DIC state [mol/m³]
+            co2_flux = co2_flux.at[nonocn_idx].set(0.0)
+
+            # Exchange flux [mol/m²/s]: positive = carbon flows from deep box into mixed layer
+            exchange_flux = (
+                (state.deep_layer_dissolved_inorganic_carbon - state.mixed_layer_dissolved_inorganic_carbon)
+                * state.mixed_layer_depth / exchange_timescale
+            )
+            exchange_flux = exchange_flux.at[nonocn_idx].set(0.0)
+
+            # Mixed layer DIC: Euler forward, air-sea flux + deep-mixed exchange
             new_mixed_layer_dissolved_inorganic_carbon = state.mixed_layer_dissolved_inorganic_carbon + (
-                 self.timestep *  (- co2_flux) / state.mixed_layer_depth
+                self.timestep * (-co2_flux + exchange_flux) / state.mixed_layer_depth
+            )
+
+            # Deep box DIC: loses exactly what all mixed layer columns gain (mass conserving)
+            new_deep_layer_dissolved_inorganic_carbon = state.deep_layer_dissolved_inorganic_carbon - (
+                jnp.sum(exchange_flux * area) * self.timestep / V_deep
             )
            
             # Add climatology back
@@ -334,12 +349,15 @@ class SlabOceanModelBGC(SlabModelBase):
                 {
                     "sea_surface_temperature": new_sea_surface_temperature,
                     "mixed_layer_dissolved_inorganic_carbon": new_mixed_layer_dissolved_inorganic_carbon,
+                    "deep_layer_dissolved_inorganic_carbon": new_deep_layer_dissolved_inorganic_carbon,
                     "sim_time": new_sim_time,
                 }
             )
 
-            total_carbon = jnp.sum(new_mixed_layer_dissolved_inorganic_carbon * area * state.mixed_layer_depth) * 0.012
-            total_carbon_flux = jnp.sum(co2_flux * area) * 0.012
+            total_carbon_mixed_layer = jnp.sum(new_mixed_layer_dissolved_inorganic_carbon * area * state.mixed_layer_depth) * carbon_molecular_weight
+            total_carbon_deep_layer = new_deep_layer_dissolved_inorganic_carbon * V_deep * carbon_molecular_weight
+            total_carbon = total_carbon_mixed_layer + total_carbon_deep_layer
+            total_carbon_flux = jnp.sum(co2_flux * area) * carbon_molecular_weight
 
 
             derived = dict(total_carbon_flux=total_carbon_flux)
@@ -352,6 +370,8 @@ class SlabOceanModelBGC(SlabModelBase):
                 bgc=dict(
                     air_co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio,
                     co2_flux = co2_flux,
+                    total_carbon_mixed_layer = total_carbon_mixed_layer,
+                    total_carbon_deep_layer = total_carbon_deep_layer,
                     total_carbon = total_carbon,
                     total_carbon_flux = total_carbon_flux,
                     pco2_seawater = pco2_seawater,
@@ -433,11 +453,27 @@ class SlabOceanModelBGC(SlabModelBase):
                     "units": "atm",
                 }
             ),
+            total_carbon_mixed_layer=(
+                ("time",),
+                bgc["total_carbon_mixed_layer"],
+                {
+                    "long_name": "Total carbon mass in the mixed layer",
+                    "units": "kg",
+                }
+            ),
+            total_carbon_deep_layer=(
+                ("time",),
+                bgc["total_carbon_deep_layer"],
+                {
+                    "long_name": "Total carbon mass in the deep ocean box",
+                    "units": "kg",
+                }
+            ),
             total_carbon=(
                 ("time",),
                 bgc["total_carbon"],
                 {
-                    "long_name": "Total carbon mass in the ocean",
+                    "long_name": "Total carbon mass in the ocean (mixed + deep)",
                     "units": "kg",
                 }
             ),

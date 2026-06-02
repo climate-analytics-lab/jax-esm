@@ -43,7 +43,7 @@ def positive_cosine_cubic_latitude_squared(
 # %%
 calendar = "365_day"
 spectral_truncation = 31
-total_simulation_months = 36
+total_simulation_months = 1
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-04_aquaplanet_co2boxmodel"
@@ -173,7 +173,7 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 
 initial_carry = model.initialize()
-days_of_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+days_of_month = [3, 2, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 simulation_intervals = [ jdt.to_timedelta(_d, "day") for _d in days_of_month ]
 batches = total_simulation_months
 checkpoint_dir = output_dir / "checkpoint"
@@ -185,7 +185,7 @@ if checkpoint_dir.exists():
     if saved:
         resume_batch = int(saved[-1].name.split("_")[1]) + 1
         print(f"Resuming from batch {resume_batch}")
-        initial_carry = load_coupled_carry(saved[-1])
+        initial_carry = load_coupled_carry(saved[-1], list(model.components.keys()))
     else:
         initial_carry["ocn"]["state"].sea_surface_temperature = (
             273.15 + positive_cosine_cubic_latitude_squared(llat) * 50.0
