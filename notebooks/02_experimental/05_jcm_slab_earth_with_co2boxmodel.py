@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from checkpoint_aquaplanet_co2boxmodel import save_coupled_carry, load_coupled_carry
+from jem.utils.checkpoints import save_coupled_carry, load_coupled_carry
 
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
