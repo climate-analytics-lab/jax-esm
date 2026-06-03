@@ -1,6 +1,17 @@
 # CLEWS modeling
 
 
+## Setting up a Python environment with Miniconda
+
+If you don't have a Python environment set up, [Miniconda](https://docs.conda.io/en/latest/miniconda.html) is a lightweight way to manage one.
+
+```
+conda create -n clews python=3.11
+conda activate clews
+```
+
+All `pip install` commands below should be run inside this activated environment.
+
 ## Prerequisites
 
 - Python 3.10+
