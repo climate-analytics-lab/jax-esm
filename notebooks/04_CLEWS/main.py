@@ -20,11 +20,6 @@ from jem.components import JCM, SlabOceanModelBGC, SlabLandModel, CO2AtmosphereB
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
-use_ipython = 'get_ipython' in globals()
-
-jax.config.update('jax_platform_name', 'cpu')
-print("Print devices: ", jax.devices())
-
 
 def positive_cosine_cubic_latitude_squared(
     lat: jnp.ndarray,
@@ -42,7 +37,7 @@ spectral_truncation = 31
 total_simulation_months = 12 * 1
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_name = "default"
+simulation_name = "default_simulation"
 output_dir = (Path(f"output_T{spectral_truncation:d}") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
