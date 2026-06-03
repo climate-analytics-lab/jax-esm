@@ -47,7 +47,7 @@ spectral_truncation = 31
 total_simulation_months = 24 * 100
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_name = "02-04_aquaplanet_co2boxmodel"
+simulation_name = "default"
 output_dir = (Path(f"output_T{spectral_truncation:d}") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
@@ -89,6 +89,8 @@ def emission_linear(days_after_start):
     emission_rate_change_per_decade = 10e12 / (86400 * 365)
     return emission_rate_base + emission_rate_change_per_decade * days_after_start / (365*10) 
 
+def emission_zero(days_after_start):
+    return jnp.array(0.0)
 
 
 # Note: Remember to return the `coupled_carry` at the end.
@@ -113,7 +115,7 @@ def interactions(coupled_carry):
     ocn["forcing"].U10 = jnp.sqrt(u0**2 + v0**2)
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
-    co2_atm_boxmodel.emission = emission_linear(co2_atm_boxmodel.t / 86400.0)
+    co2_atm_boxmodel.emission = emission_zero(co2_atm_boxmodel.t / 86400.0) #emission_linear(co2_atm_boxmodel.t / 86400.0)
     co2_atm_boxmodel.forcing_source_and_sink = (
         ocn["derived"]["total_carbon_flux"]
     )
@@ -170,7 +172,7 @@ model = Coupler(
             mask_file=terrain_file,
             SST_clim_file=forcing_file,
             forcing_method="relaxation",
-            relaxation_time= 360 * 86400.0,
+            relaxation_time= 360 * 86400.0 * 1000,
             calendar=calendar,
         ),
         lnd=SlabLandModel(
@@ -178,7 +180,7 @@ model = Coupler(
             topography_file=terrain_file,
             mask_file=terrain_file,
             land_clim_file=forcing_file,
-            tdland =  360 * 86400.0, 
+            tdland =  360 * 86400.0 * 1000, 
             calendar=calendar,
         ),
     ),
