@@ -103,7 +103,7 @@ def interactions(coupled_carry):
     ocn["forcing"].U10 = jnp.sqrt(u0**2 + v0**2)
     ocn["forcing"].air_co2_volume_mixing_ratio = co2_atm_boxmodel.co2_mixing_ratio
     atm["forcing"].co2_vmr = co2_atm_boxmodel.co2_mixing_ratio
-    co2_atm_boxmodel.emission = emission_zero(days_after_start) #emission_linear(co2_atm_boxmodel.t / 86400.0)
+    co2_atm_boxmodel.emission = emission_zero(co2_atm_boxmodel.t / 86400.0)
     co2_atm_boxmodel.forcing_source_and_sink = (
         ocn["derived"]["total_carbon_flux"]
     )
