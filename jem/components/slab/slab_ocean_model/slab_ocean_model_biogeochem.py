@@ -12,7 +12,7 @@ from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 import jem.utils.data_structure as data_structure
 from jem.components.slab.base import SlabModelBase
-from jem.components.slab.slab_ocean_model.biogeochem_coefficients import compute_co2_flux
+from jem.components.slab.slab_ocean_model.biogeochem_coefficients import compute_co2_flux_and_pH
 
 default_land_surface_temperature = 288.15
 carbon_molecular_weight = 12e-3  # kg / mol
@@ -90,8 +90,8 @@ class SlabOceanModelBGC(SlabModelBase):
         initialization_sea_surface_temperature: float = 288.15,
         mask_value: float = 0.0,
         init_mixed_layer_dissolved_inorganic_carbon: float = 2.0,  # mol / m^3
-        init_deep_layer_dissolved_inorganic_carbon: float = 2.0,   # mol / m^3
-        mixed_deep_layer_exchange_time_scale: float = 86400.0 * 365 * 1000, # 1000 years
+        init_deep_layer_dissolved_inorganic_carbon: float = 1.0,   # mol / m^3
+        mixed_deep_layer_exchange_time_scale: float = 86400.0 * 365 * 200, # 200 years
         total_alkalinity: float = 2.3,
         calendar: str = "365_day",
     ):
@@ -306,7 +306,7 @@ class SlabOceanModelBGC(SlabModelBase):
                 + self.cd_factor * (- total_heat_flux)
             )
 
-            co2_flux, pco2_seawater = compute_co2_flux(
+            co2_flux, pco2_seawater, pH = compute_co2_flux_and_pH(
                 co2_volume_mixing_ratio = forcing.air_co2_volume_mixing_ratio,              # ppm
                 surface_dry_air_pressure = 1.0,                                             # atm
                 wind_10m = forcing.U10,                                                     # m/s
@@ -317,6 +317,7 @@ class SlabOceanModelBGC(SlabModelBase):
             )
  
             co2_flux = co2_flux.at[nonocn_idx].set(0.0)
+            pH = pH.at[nonocn_idx].set(-999.0)
 
             # Exchange flux [mol/m²/s]: positive = carbon flows from deep box into mixed layer
             exchange_flux = (
@@ -375,6 +376,7 @@ class SlabOceanModelBGC(SlabModelBase):
                     total_carbon = total_carbon,
                     total_carbon_flux = total_carbon_flux,
                     pco2_seawater = pco2_seawater,
+                    mixed_layer_pH = pH,
                 ),
             )
             if self.forcing_method == "Qflux":
@@ -411,6 +413,15 @@ class SlabOceanModelBGC(SlabModelBase):
                     "units": "m",
                 }
             ),
+            mixed_layer_pH=(
+                T_grid_dims,
+                bgc["mixed_layer_pH"],
+                {
+                    "long_name": "pH value of mixed layer",
+                    "units": "none",
+                }
+            ),
+
             mixed_layer_dissolved_inorganic_carbon=(
                 T_grid_dims,
                 state["mixed_layer_dissolved_inorganic_carbon"],

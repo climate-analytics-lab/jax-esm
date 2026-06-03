@@ -83,7 +83,7 @@ def compute_carbonate_constants_K(temp_kelvin, salinity):
 
     return K1, K2
 
-def solve_for_co2_aq(
+def solve_for_co2_aq_and_pH(
     dissolved_inorganic_carbon,
     total_alkalinity,
     temperature,
@@ -107,10 +107,10 @@ def solve_for_co2_aq(
     #co2_aq = dissolved_inorganic_carbon / ( 1.0 + K1 / H +  K1*K2 / H**2 )
     co2_aq = total_alkalinity / ( K1 / H +  2 * K1*K2 / H**2 )
    
-    return co2_aq
+    return co2_aq, - jnp.log10(H)
  
 
-def compute_co2_flux(
+def compute_co2_flux_and_pH(
     co2_volume_mixing_ratio,            # ppm
     surface_dry_air_pressure,    # atm
     wind_10m,                    # m/s
@@ -156,7 +156,7 @@ def compute_co2_flux(
     pco2_air = (co2_volume_mixing_ratio * 1e-6) * surface_dry_air_pressure
 
     gas_transfer_velocity = compute_gas_transfer_velocity(seawater_temperature, wind_10m)
-    co2_aq = solve_for_co2_aq(
+    co2_aq, pH = solve_for_co2_aq_and_pH(
         dissolved_inorganic_carbon = dissolved_inorganic_carbon,
         total_alkalinity = total_alkalinity,
         temperature = seawater_temperature,
@@ -168,5 +168,6 @@ def compute_co2_flux(
     return (
         gas_transfer_velocity * K0 * (pco2_seawater - pco2_air) * 1e3, # from (m/s) * (mol/L) to mol / m^2 / s
         pco2_seawater,
+        pH,
     )
 
