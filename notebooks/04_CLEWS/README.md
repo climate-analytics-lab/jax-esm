@@ -10,21 +10,6 @@ conda create -n clews python=3.11
 conda activate clews
 ```
 
-All `pip install` commands below should be run inside this activated environment.
-
-## Prerequisites
-
-- Python 3.10+
-- JAX (CPU or GPU build — see [JAX installation](https://github.com/google/jax#installation))
-- `jax_datetime`, `numpy`, `xarray`, `netCDF4`
-
-Install extra dependencies:
-
-```
-pip install jax-datetime numpy xarray netCDF4
-```
-
-
 ## Getting JAX-GCM and JAX-ESM
 
 ```
@@ -103,3 +88,11 @@ output_T{spectral_truncation}/{simulation_name}/checkpoint/batch_NNNNN/
 ```
 
 If this directory exists when `main.py` starts, the run resumes automatically from the latest saved batch. Delete the checkpoint directory to restart from scratch.
+
+
+# Tools
+
+If you are new to linux command line, there are tools that you will find useful:
+
+1. [Linux Command Cheat Sheet](https://www.geeksforgeeks.org/linux-unix/linux-commands-cheat-sheet/)
+2. [Vim](https://www.vim-hero.com/)
