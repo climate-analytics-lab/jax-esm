@@ -16,15 +16,18 @@ conda activate clews
 mkdir working_directory
 cd working_directory
 
-git clone -b jem_CLEWS https://github.com/climate-analytics-lab/jax-esm.git
+git clone https://github.com/neuralgcm/dinosaur.git
 git clone -b dev https://github.com/climate-analytics-lab/jax-gcm.git
-
+git clone -b jem_CLEWS https://github.com/climate-analytics-lab/jax-esm.git
 ```
 
 For each package, install them and their dependencies.
 
 ```
-cd jax-gcm
+cd dinosaur
+pip install -e .
+
+cd ../jax-gcm
 pip install -e .
 
 cd ../jax-esm
