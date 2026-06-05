@@ -18,7 +18,11 @@
 # Couple JCM and Veros using JAX-ESM (JEM).
 # %%
 from pathlib import Path
+
 import jax
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)  # only cache if compile took >1s
+
 #jax.config.update("jax_enable_x64", False) 
 import jax.numpy as jnp # for interaction
 import numpy as np # to take average of output
@@ -31,6 +35,7 @@ from importlib import resources
 import jax_datetime as jdt
 import xarray as xr
 
+import jem
 from jem.components import JCM, Veros, SlabOceanModel
 from jem.mapping import IdentityRegridder
 from jem.mapping import BasicMapper
@@ -39,9 +44,14 @@ import jem.utils.tree_tools as tree_tools
 
 use_ipython = 'get_ipython' in globals()
 
+print(f"jcm library is located at: {jcm.__file__}")
+print(f"jem library is located at: {jem.__file__}")
+
 # Check available devices
 print(f"Available devices: {jax.devices()}")
 print(f"Number of devices: {len(jax.devices())}")
+
+
 
 # %% [markdown]
 # ## Choose terrain
@@ -51,8 +61,8 @@ print(f"Number of devices: {len(jax.devices())}")
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
-truncation_number = 106
-total_simulation_time = jdt.to_timedelta(365*10, "day")
+truncation_number = 21
+total_simulation_time = jdt.to_timedelta(10, "day")
 simulation_interval = jdt.to_timedelta(10, "day")
 jcm_files = generate_jcm_forcing_and_topography_files(
     resolution=truncation_number,
@@ -84,7 +94,7 @@ atm_model = jcm.model.Model(
     coords = coords,
     start_date=start_datetime,
     terrain = terrain,
-    time_step = 10,
+    time_step = 30,
 )
 
 JCM.make_jem_compatible(
@@ -100,6 +110,7 @@ atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
 # %%
 import glob
 import os
+import pickle
 files = glob.glob("output_veros.*.nc")
 for f in files:
     print(f"Deleting: {f}")
@@ -131,6 +142,80 @@ fakelnd_model=SlabOceanModel(
     mask_value=1.0,
 )
 # %% [markdown]
+# ## Checkpoint Save/Load
+
+# %%
+def set_veros_runtime_setting(name, value):
+    from veros import runtime_settings as veros_runtime_settings
+    object.__setattr__(veros_runtime_settings, "__locked__", False)
+    setattr(veros_runtime_settings, name, value)
+    object.__setattr__(veros_runtime_settings, "__locked__", True)
+
+
+def save_coupled_carry(coupled_carry, checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(exist_ok=True, parents=True)
+
+    # ATM carry: pure JAX pytree
+    atm_carry_numpy = jax.tree_util.tree_map(np.array, coupled_carry["atm"])
+    with open(checkpoint_dir / "atm_carry.pkl", "wb") as f:
+        pickle.dump(atm_carry_numpy, f)
+
+    # OCN state: use Veros HDF5 restart mechanism
+    from veros.restart import write_restart
+    ocn_state = coupled_carry["ocn"]["state"]
+    with ocn_state.settings.unlock():
+        ocn_state.settings.restart_output_filename = str(checkpoint_dir / "veros.restart.h5")
+    write_restart(ocn_state, force=True)
+
+    # OCN derived + forcing: plain JAX arrays
+    ocn_aux = jax.tree_util.tree_map(np.array, {
+        "derived": coupled_carry["ocn"]["derived"],
+        "forcing": coupled_carry["ocn"]["forcing"],
+    })
+    with open(checkpoint_dir / "ocn_aux.pkl", "wb") as f:
+        pickle.dump(ocn_aux, f)
+
+    # fakelnd carry: pure JAX pytree (OceanState + OceanForcing)
+    fakelnd_carry_numpy = jax.tree_util.tree_map(np.array, coupled_carry["fakelnd"])
+    with open(checkpoint_dir / "fakelnd_carry.pkl", "wb") as f:
+        pickle.dump(fakelnd_carry_numpy, f)
+
+
+def load_coupled_carry(checkpoint_dir, ocn_model):
+    checkpoint_dir = Path(checkpoint_dir)
+
+    # ATM carry
+    with open(checkpoint_dir / "atm_carry.pkl", "rb") as f:
+        atm_carry = pickle.load(f)
+    atm_carry = jax.tree_util.tree_map(jnp.array, atm_carry)
+
+    # OCN state: read_restart mutates the state in-place
+    from veros.restart import read_restart
+    ocn_state = ocn_model.state
+    set_veros_runtime_setting("force_overwrite", False)
+    with ocn_state.settings.unlock():
+        ocn_state.settings.restart_input_filename = str(checkpoint_dir / "veros.restart.h5")
+    read_restart(ocn_state)
+    set_veros_runtime_setting("force_overwrite", True)
+
+    # OCN derived + forcing
+    with open(checkpoint_dir / "ocn_aux.pkl", "rb") as f:
+        ocn_aux = pickle.load(f)
+    ocn_aux = jax.tree_util.tree_map(jnp.array, ocn_aux)
+
+    # fakelnd carry
+    with open(checkpoint_dir / "fakelnd_carry.pkl", "rb") as f:
+        fakelnd_carry = pickle.load(f)
+    fakelnd_carry = jax.tree_util.tree_map(jnp.array, fakelnd_carry)
+
+    return dict(
+        atm=atm_carry,
+        ocn=dict(state=ocn_state, **ocn_aux),
+        fakelnd=fakelnd_carry,
+    )
+
+# %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 #
 # Here we demonstrote the flexibility of JEM: You do not have to use the `BasicMapper` that JEM provides. You can define your own mapping function. In this example, we simply define a function `interaction` as below.
@@ -153,8 +238,8 @@ def interaction(coupled_carry):
     # function or module
     drag_coefficient = 1e-3 # dimensionless
     air_density = 1.22 # kg / m^3
-    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
-    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].u0)
+    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].v0)
     wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)    
     vs = ocn["state"].variables
     surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
@@ -170,8 +255,8 @@ def interaction(coupled_carry):
     ocn["forcing"].surface_tauy = surface_tauy     
     ocn["forcing"].heat_flux = jcm_to_veros_regridder(total_heat_flux)
     ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
-    ocn["forcing"].wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
-    ocn["forcing"].wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    ocn["forcing"].wind_x = jcm_to_veros_regridder(wind_x)
+    ocn["forcing"].wind_y = jcm_to_veros_regridder(wind_y)
     fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
     fakelnd["state"].sea_surface_temperature = jnp.clip(
         fakelnd["state"].sea_surface_temperature,
@@ -204,8 +289,16 @@ tree_tools.print_tree(model.get_info(), root="Model")
 initial_carry = model.initialize()
 
 batches = int(total_simulation_time / simulation_interval)
+checkpoint_dir = output_dir / "checkpoint"
+resume_batch = 0
+if checkpoint_dir.exists():
+    saved = sorted(checkpoint_dir.glob("batch_*"))
+    if saved:
+        resume_batch = int(saved[-1].name.split("_")[1]) + 1
+        print(f"Resuming from batch {resume_batch}")
+        initial_carry = load_coupled_carry(saved[-1], ocn_model)
 
-for b in range(batches):
+for b in range(resume_batch, resume_batch + batches):
     
     print(f"[batch={b:d}/{batches:d}] Simulation...")
     
@@ -213,7 +306,7 @@ for b in range(batches):
         initial_carry = initial_carry,
         workflow=["mapper", "ocn", "atm", "fakelnd"],
         iterations = int(simulation_interval / coupling_timestep),
-        jitted=True,
+        jitted=False,
         reuse_last_available_trajectory=True,
     )
     
@@ -260,5 +353,6 @@ for b in range(batches):
         break
 
     initial_carry = final_carry
+    save_coupled_carry(final_carry, checkpoint_dir / f"batch_{b:05d}")
 
 
