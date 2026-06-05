@@ -66,6 +66,32 @@ def modify_jcm_terrain(
             , 1
             , 0
         ).astype(int)
+    elif planet_type == "double_drake":
+    
+        cap_edge_latitude = 75.0
+        divider_width = 3.75
+        basin1_lon_beg = 0.0
+        basin1_lat_edge = -10.0
+        
+        basin2_lon_beg = 120.0
+        basin2_lat_edge = -50.0
+     
+        mask = np.where(
+            (np.abs(llat) >= cap_edge_latitude)
+            | (
+                (llat >= basin1_lat_edge)
+                & (llon >= basin1_lon_beg)
+                & (llon < basin1_lon_beg + divider_width)
+            )
+            | (
+                (llat >= basin2_lat_edge)
+                & (llon >= basin2_lon_beg)
+                & (llon < basin2_lon_beg + divider_width)
+            )
+            , 1
+            , 0
+        ).astype(int)
+        
     else:
         raise Exception(f"Unknown `--planet-type`: {args.planet_type}") 
     

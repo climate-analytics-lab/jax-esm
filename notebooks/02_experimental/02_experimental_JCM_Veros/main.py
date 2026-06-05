@@ -1,22 +1,5 @@
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: percent
-#       format_version: '1.3'
-#       jupytext_version: 1.19.1
-#   kernelspec:
-#     display_name: Python 3 (ipykernel)
-#     language: python
-#     name: python3
-# ---
-
-# %% [markdown]
-# # Coupling JCM and Veros
-#
 # Couple JCM and Veros using JAX-ESM (JEM).
-# %%
+
 from pathlib import Path
 
 import jax
@@ -46,7 +29,12 @@ from jem.utils.checkpoints import (
     save_veros_carry, load_veros_carry,
 )
 
-use_ipython = 'get_ipython' in globals()
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--total-simulation-days", type=int, help="Total time of simulation in days", default=10)
+parser.add_argument("--simulation-interval-days", type=int, help="Simulation interval in days", default=5)
+parser.add_argument("--simulation-name", type=str, help="Simulation name for output", default="default")
+args = parser.parse_args()
 
 print(f"jcm library is located at: {jcm.__file__}")
 print(f"jem library is located at: {jem.__file__}")
@@ -55,45 +43,36 @@ print(f"jem library is located at: {jem.__file__}")
 print(f"Available devices: {jax.devices()}")
 print(f"Number of devices: {len(jax.devices())}")
 
-
-
-# %% [markdown]
-# ## Choose terrain
-# In this example, you can specify one of the three configurations, "aquaplanet", "toy_earth", and "capped_earth", when calling the function `modify_jcm_terrain`. Because Veros cannot simulate poles, this example uses a slab model to cap the poles. We choose slab ocean model to be "fake land". Using slab land model currently will yield unrealistic temperature at poles because the albedo of ice and snow is not implemented in idealize setup.
-
-# %%
+# Create terrain
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
-truncation_number = 21
-total_simulation_time = jdt.to_timedelta(10, "day")
-simulation_interval = jdt.to_timedelta(10, "day")
+truncation_number = 31
+total_simulation_time = jdt.to_timedelta(args.total_simulation_days, "day")
+simulation_interval = jdt.to_timedelta(args.simulation_interval_days, "day")
 jcm_files = generate_jcm_forcing_and_topography_files(
     resolution=truncation_number,
 )
-# There are three choices: "aquaplanet", "toy_earth", and "capped_earth". The outcome will be saved in the folder "data"
+
 coords = get_speedy_coords(spectral_truncation=truncation_number)
-modified_jcm_terrain_file = modify_jcm_terrain(jcm_files["terrain"], "toy_earth", "./data")
+modified_jcm_terrain_file = modify_jcm_terrain(jcm_files["terrain"], "double_drake", "./data")
 terrain = TerrainData.from_file(
     modified_jcm_terrain_file,
     coords=coords
 )
 
-# %% [markdown]
-# ## Configurations
-# %%
+# Configurations
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(24, "hour")
-output_dir = (Path(f"output_T{truncation_number}") /"02-02_experimental_JCM_Veros").resolve()
+
+output_dir = (Path(f"output_T{truncation_number}") / args.simulation_name).resolve()
 
 output_dir.mkdir(exist_ok=True, parents=True)
 one_second = jdt.to_timedelta(1, "second")
 
-# %% [markdown]
-# ## Create Components
-# %% [markdown]
-# ### Create JCM
-# %%
+# Create Component
+
+# Create JCM
 atm_model = jcm.model.Model(
     coords = coords,
     start_date=start_datetime,
@@ -107,11 +86,10 @@ JCM.make_jem_compatible(
 )
     
 atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
-# %% [markdown]
-# ### Create Veros
-#
+
+# Create Veros
 # First need to remove `output_veros.*.nc` files, otherwise veros complains.
-# %%
+
 import glob
 import os
 files = glob.glob("output_veros.*.nc")
@@ -119,7 +97,6 @@ for f in files:
     print(f"Deleting: {f}")
     os.remove(f)
 
-# %%
 from veros_case_setup import generateVerosSetup
 ocn_model = generateVerosSetup(
     nx = atm_D2_nodal_shape[0],
@@ -133,9 +110,8 @@ Veros.make_jem_compatible(
     ocn_model,
     coupling_timestep=coupling_timestep,
 )
-# %% [markdown]
-# ### Create Slab Ocean model
-# %%
+
+# Create Slab Ocean model
 fakelnd_model=SlabOceanModel(
     grid_specification=f"JCM::T{truncation_number:d}",
     start_datetime=start_datetime,
@@ -145,11 +121,10 @@ fakelnd_model=SlabOceanModel(
     mask_value=1.0,
 )
 
-# %% [markdown]
-# ## Creating Flux and Scalar Exchange between Components
+# Creating Flux and Scalar Exchange between Components
 #
 # Here we demonstrote the flexibility of JEM: You do not have to use the `BasicMapper` that JEM provides. You can define your own mapping function. In this example, we simply define a function `interaction` as below.
-# %%
+
 # Creating regridders and mapping
 def veros_to_jcm_regridder(arr):
     return arr #jnp.pad(arr, ((0, 0), (4, 4)), constant_values=150)
@@ -198,9 +173,7 @@ def interaction(coupled_carry):
     
     return coupled_carry
 
-# %% [markdown]
-# ## Create Coupled Model
-# %%
+# Create Coupled Model
 model = Coupler(
     components=dict(
         atm=atm_model,
@@ -212,12 +185,9 @@ model = Coupler(
 
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
-# %% [markdown]
-# ## Run Coupled Model
 
-# %%
+# Run Coupled Model
 initial_carry = model.initialize()
-
 batches = int(total_simulation_time / simulation_interval)
 checkpoint_dir = output_dir / "checkpoint"
 resume_batch = 0
