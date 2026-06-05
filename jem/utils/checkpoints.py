@@ -24,7 +24,9 @@ def save_coupled_carry(coupled_carry, checkpoint_dir, component_savers=None):
 
     for name, carry in coupled_carry.items():
         if name in component_savers:
-            component_savers[name](carry, checkpoint_dir / name)
+            component_checkpoint_dir = checkpoint_dir / name
+            component_checkpoint_dir.mkdir(exist_ok=True, parents=True)
+            component_savers[name](carry, component_checkpoint_dir)
         else:
             carry_numpy = jax.tree_util.tree_map(np.array, carry)
             with open(checkpoint_dir / f"{name}_carry.pkl", "wb") as f:
@@ -80,6 +82,7 @@ def save_veros_carry(ocn_carry, checkpoint_dir):
     ocn_state = ocn_carry["state"]
     with ocn_state.settings.unlock():
         ocn_state.settings.restart_output_filename = str(checkpoint_dir / "veros.restart.h5")
+        print("Saving ocean restart file to: ", ocn_state.settings.restart_output_filename)
     write_restart(ocn_state, force=True)
 
     save_coupled_carry(
