@@ -1,6 +1,7 @@
 """Veros adapter to JEM"""
 from typing import Annotated, Any
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
@@ -117,8 +118,11 @@ def make_jem_compatible(
                      forcing["freshwater_flux"] * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / settings.rho_0 * salinity_ref
                 )
 
-            for _ in range(steps_per_coupling_timestep):
+            def _sub_step_function(_, state):
                 model.step(state)
+                return state
+
+            state = jax.lax.fori_loop(0, steps_per_coupling_timestep, _sub_step_function, state)
             
             sea_surface_temperature = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau] + 273.15
             sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
