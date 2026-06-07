@@ -176,6 +176,7 @@ class Coupler:
             verbose and print("Reuse last available trajectory.")
             trajectory = self.trajectory_holder
         else:
+            _start_time = time.time()
             trajectory = self.generate_trajectory_function(
                 workflow=workflow,
                 iterations=iterations,
@@ -183,6 +184,8 @@ class Coupler:
                 show_progress=show_progress,
                 tqdm_kwargs=tqdm_kwargs,
             )
+            elapsed_time = time.time() - _start_time
+            print(f"generate_trajectory_function took {_elapsed_time:.2f} seconds.")
 
         self.trajectory_holder = trajectory  # type: ignore
         
