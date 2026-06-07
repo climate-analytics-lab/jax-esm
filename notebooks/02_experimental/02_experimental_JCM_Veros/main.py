@@ -1,5 +1,6 @@
 # Couple JCM and Veros using JAX-ESM (JEM).
 
+import sys
 from pathlib import Path
 
 import jax
@@ -47,6 +48,9 @@ print(f"Number of devices: {len(jax.devices())}")
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
+
+calendar = "365_day"
+
 truncation_number = 31
 total_simulation_time = jdt.to_timedelta(args.total_simulation_days, "day")
 simulation_interval = jdt.to_timedelta(args.simulation_interval_days, "day")
@@ -78,6 +82,7 @@ atm_model = jcm.model.Model(
     start_date=start_datetime,
     terrain = terrain,
     time_step = 30,
+    calendar = calendar,
 )
 
 JCM.make_jem_compatible(
@@ -119,6 +124,7 @@ fakelnd_model=SlabOceanModel(
     mask_file=modified_jcm_terrain_file,
     forcing_method=None,
     mask_value=1.0,
+    calendar = calendar,
 )
 
 # Creating Flux and Scalar Exchange between Components
@@ -201,7 +207,11 @@ if checkpoint_dir.exists():
             component_loaders={"ocn": lambda path: load_veros_carry(path, ocn_model)},
         )
 
-for b in range(resume_batch, resume_batch + batches):
+if resume_batch == batches:
+    print(f"Target batches: {batches:d} is all done. Exit the program.")
+    sys.exit()
+
+for b in range(resume_batch, batches):
     
     print(f"[batch={b:d}/{batches:d}] Simulation...")
     
@@ -209,49 +219,22 @@ for b in range(resume_batch, resume_batch + batches):
         initial_carry = initial_carry,
         workflow=["mapper", "ocn", "atm", "fakelnd"],
         iterations = int(simulation_interval / coupling_timestep),
-        jitted=False,
+        jitted=True,
         reuse_last_available_trajectory=True,
     )
     
     output_dict = model.predictions_to_xarray(predictions)
 
-    ds_atm = output_dict["atm"]
-    output_dict["atm_mean"] = ds_atm.reduce(np.mean, dim="time", keepdims=True)
-    output_dict["atm_daily"] = xr.merge([
-        ds_atm["specific_humidity"].isel(level=0),
-        ds_atm["surface_flux.tsfc"],
-        ds_atm["surface_flux.tskin"],
-        ds_atm["shortwave_rad.rsns"],
-        ds_atm["convection.precnv"],
-        ds_atm["normalized_surface_pressure"],
-        ds_atm["surface_flux.u0"],
-        ds_atm["surface_flux.v0"],
-        ((ds_atm["surface_flux.u0"]**2 + ds_atm["surface_flux.v0"]**2)**0.5).rename("wind_mag"),
-    ])
-    del output_dict["atm"]
-    
-    ds_ocn = output_dict["ocn"]
-    output_dict["ocn_daily"] = xr.merge([
-        ds_ocn["sea_surface_temperature"],
-        ds_ocn["sea_surface_salinity"],
-        ds_ocn["sea_surface_u"],
-        ds_ocn["sea_surface_v"],
-        ds_ocn["heat_flux"],
-    ])
-    output_dict["ocn_mean"] = ds_ocn.reduce(np.mean, dim="time", keepdims=True)
-    del output_dict["ocn"]
-    
-    ds_fakelnd = output_dict["fakelnd"]
-    output_dict["fakelnd_mean"] = ds_fakelnd.reduce(np.mean, dim="time", keepdims=True)
-    del output_dict["fakelnd"]
+    for component_name, ds in output_dict.items():
+        output_dict[component_name] = ds.reduce(np.mean, dim="time", keepdims=True)
  
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
-        ds.to_netcdf(output_file, engine="netcdf4")
+        ds.to_netcdf(output_file, unlimited_dims="time", engine="netcdf4")
         ds.close()
-   
-    if jnp.any( jnp.isnan(output_dict["atm_mean"]["specific_humidity"].to_numpy()) ):
+  
+    if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
         print("Error: Model exploded. End program")
         break
 
@@ -261,4 +244,5 @@ for b in range(resume_batch, resume_batch + batches):
         component_savers={"ocn": save_veros_carry},
     )
 
+print(f"Program ends.")
 

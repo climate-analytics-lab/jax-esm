@@ -184,7 +184,7 @@ class Coupler:
                 show_progress=show_progress,
                 tqdm_kwargs=tqdm_kwargs,
             )
-            elapsed_time = time.time() - _start_time
+            _elapsed_time = time.time() - _start_time
             print(f"generate_trajectory_function took {_elapsed_time:.2f} seconds.")
 
         self.trajectory_holder = trajectory  # type: ignore

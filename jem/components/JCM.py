@@ -93,11 +93,9 @@ def make_jem_compatible(
                 output_averages=True,
             )
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
-            #total_heat_flux = - jnp.sum(physics_no_time_dimension["_surface_flux"].hfluxn, axis=2) # convert to upward positive
             land_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 0] # convert to upward positive
             ocean_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 1] # convert to upward positive
             total_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 2] # convert to upward positive
-            #evaporation = jnp.sum(physics_no_time_dimension["_surface_flux"].evap, axis=2) # upward positive
             evaporation = physics_no_time_dimension["_surface_flux"].evap[:, :, 2] # upward positive
 
             total_freshwater_flux = (
