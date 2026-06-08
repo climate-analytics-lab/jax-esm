@@ -97,14 +97,24 @@ def make_jem_compatible(
                 # `veros/setups/global_1deg/global_1deg.py`
                 if settings.enable_tke:
                     print("Veros: settings.enable_tke is set true")
+                    surface_stress_squared = (
+                        (0.5 * (vs.surface_taux[1:-1, 1:-1] + vs.surface_taux[:-2, 1:-1]) / settings.rho_0) ** 2
+                        + (0.5 * (vs.surface_tauy[1:-1, 1:-1] + vs.surface_tauy[1:-1, :-2]) / settings.rho_0) ** 2
+                    )
+                    # `sqrt` has an infinite derivative at 0, so AD through `sqrt(x)`
+                    # blows up to NaN as x -> 0, even though the primal value (0)
+                    # stays finite. Floor the *squared* magnitude -- sqrt's argument
+                    # -- at min_stress_magnitude**2 so sqrt and its derivative stay
+                    # bounded; this naturally caps the resulting magnitude from below
+                    # at min_stress_magnitude.
+                    min_stress_magnitude = 1e-3
+                    surface_stress_magnitude = npx.sqrt(
+                        npx.maximum(surface_stress_squared, min_stress_magnitude ** 2)
+                    )
                     vs.forc_tke_surface = update(
                         vs.forc_tke_surface,
                         at[1:-1, 1:-1],
-                        npx.sqrt(
-                            (0.5 * (vs.surface_taux[1:-1, 1:-1] + vs.surface_taux[:-2, 1:-1]) / settings.rho_0) ** 2
-                            + (0.5 * (vs.surface_tauy[1:-1, 1:-1] + vs.surface_tauy[1:-1, :-2]) / settings.rho_0) ** 2
-                        )
-                        ** 1.5,
+                        surface_stress_magnitude ** 1.5,
                     )
 
                 # W/m^2 K kg/J m^3/kg = K m/s
@@ -126,7 +136,11 @@ def make_jem_compatible(
                 return state
 
             state = jax.lax.fori_loop(0, steps_per_coupling_timestep, _sub_step_function, state)
-            
+            # `fori_loop` reconstructs the carry into fresh VerosState/VerosVariables
+            # instances (via tree_unflatten), so the `vs` bound above is now stale;
+            # rebind it to the evolved state before reading diagnostics from it.
+            vs = state.variables
+
             sea_surface_temperature = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau] + 273.15
             sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
             sea_surface_salinity = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
