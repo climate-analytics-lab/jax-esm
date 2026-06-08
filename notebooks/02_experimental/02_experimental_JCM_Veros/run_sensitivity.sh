@@ -7,7 +7,4 @@ export PYTHONHASHSEED=0
 
 echo "PYTOHNPATH=$PYTHONPATH"
 
-python3 main.py \
-    --total-simulation-days $(( 365 * 200 ))       \
-    --simulation-interval-days 365                 \
-    --simulation-name test
+python3 main_sensitivity.py
