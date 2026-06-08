@@ -17,6 +17,9 @@ setattr(runtime_settings, 'linear_solver', 'scipy_jax')
 setattr(runtime_settings, 'device', 'cpu')
 from veros.core.operators import numpy as npx, update, at # noqa: E402
 
+def copy_veros_state(state):
+    return jax.tree_util.tree_map(lambda x: x, state)
+    
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
