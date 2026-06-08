@@ -147,7 +147,16 @@ def build_model(
         air_density = 1.22  # kg / m^3
         wind_x = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].u0)
         wind_y = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].v0)
-        wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)
+        # `sqrt` has an infinite derivative at 0, so AD through `sqrt(x)`
+        # blows up to NaN as x -> 0, even though the primal value (0) stays
+        # finite. Floor the *squared* speed -- sqrt's argument -- at
+        # min_speed_magnitude**2 so sqrt and its derivative stay bounded;
+        # this naturally caps the resulting wind speed from below at
+        # min_speed_magnitude. Mirrors the analogous fix in
+        # `jem.components.Veros.make_jem_compatible` for `forc_tke_surface`.
+        min_speed_magnitude = 1e-3
+        wind_speed_squared = wind_x**2 + wind_y**2
+        wind_velocity = jnp.sqrt(jnp.maximum(wind_speed_squared, min_speed_magnitude ** 2))
         surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
         surface_tauy = drag_coefficient * air_density * wind_velocity * wind_y
         # ===== compute wind stress end =====
