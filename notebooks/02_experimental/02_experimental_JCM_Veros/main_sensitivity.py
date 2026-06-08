@@ -83,6 +83,18 @@ tangent_sst_initial = jnp.zeros_like(sst_initial).at[shape2D[0]//2, shape2D[1]//
 print("Compute sensitivity using jax.jvp...")
 (sst_final, v_final), (tangent_sst_final, tangent_v_final) = jax.jvp(forecast, (sst_initial,), (tangent_sst_initial,))
 
+def report_tangent(name, tangent):
+    tangent = jnp.asarray(tangent)
+    print(
+        f"[{name}] max|tangent| = {float(jnp.max(jnp.abs(tangent))):.6e}, "
+        f"sum|tangent| = {float(jnp.sum(jnp.abs(tangent))):.6e}, "
+        f"any nonzero = {bool(jnp.any(tangent != 0.0))}, "
+        f"any nan = {bool(jnp.any(jnp.isnan(tangent)))}"
+    )
+
+report_tangent("tangent_sst_final (jvp)", tangent_sst_final)
+report_tangent("tangent_v_final (jvp)", tangent_v_final)
+
 print("Compute sensitivity using direct method")
 epsilon = 0.01
 sst_final1, v_final1 = forecast(sst_initial)
