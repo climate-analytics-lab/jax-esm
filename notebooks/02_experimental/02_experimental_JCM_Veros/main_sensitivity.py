@@ -24,7 +24,11 @@ print(f"jem library is located at: {jem.__file__}")
 print(f"Available devices: {jax.devices()}")
 print(f"Number of devices: {len(jax.devices())}")
 
-
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--total-simulation-days", type=int, help="Total time of simulation in days", default=5)
+parser.add_argument("--truncation-number", type=int, help="Truncation number", default=31)
+args = parser.parse_args()
 # Configurations
 
 start_datetime = jdt.to_datetime("2000-01-01")
@@ -49,7 +53,7 @@ ocn_model = model.components["ocn"].raw_component
 print("Model info: ") 
 tree_tools.print_tree(model.get_info(), root="Model")
 
-simulation_interval = jdt.to_timedelta(5, "day")
+simulation_interval = jdt.to_timedelta(args.total_simulation_days, "day")
 initial_coupled_carry = model.initialize()
 trajectory_function = model.generate_trajectory_function(
     workflow=config["workflow"],
@@ -77,7 +81,21 @@ sst_initial = get_ocean_surface_temperature(initial_coupled_carry["ocn"]["state"
 
 # Put a point SST perturbation in the middle of domain
 shape2D = sst_initial.shape
-tangent_sst_initial = jnp.zeros_like(sst_initial).at[shape2D[0]//2, shape2D[1]//2].set(1.0)
+
+
+atm_model = model.components["atm"].raw_component
+llon, llat = jnp.meshgrid(
+    atm_model.coords.horizontal.longitudes * 180/jnp.pi,
+    atm_model.coords.horizontal.latitudes  * 180/jnp.pi,
+    indexing="ij",
+)
+
+def gaussian(x, y, xc, yc, sigma_x, sigma_y):
+    return jnp.exp( -  (x-xc)**2 / (2*sigma_x**2) - (y-yc)**2 / (2*sigma_y**2) )
+    
+tangent_sst_initial = gaussian(llon, llat, 180.0, 0.0, 5, 8) * 1
+tangent_sst_initial /= jnp.sum(tangent_sst_initial**2)**0.5
+#tangent_sst_initial = jnp.zeros_like(sst_initial).at[shape2D[0]//2, shape2D[1]//2].set(1.0)
 
 # Use jax.jvp to obtain the sensitivity of surface meridional wind and SST
 print("Compute sensitivity using jax.jvp...")
@@ -98,9 +116,28 @@ report_tangent("tangent_v_final (jvp)", tangent_v_final)
 print("Compute sensitivity using direct method")
 epsilon = 0.01
 sst_final1, v_final1 = forecast(sst_initial)
-sst_final2, v_final2 = forecast(sst_initial + tangent_sst_initial * epsilon)
-sensitivity_sst = (sst_final2 - sst_final1) / epsilon
-sensitivity_v = (v_final2 - v_final1) / epsilon
+
+ensemble_members = 10
+ensemble_collection = []
+for i in range(ensemble_members):
+    print(f"Running ensemble member ({i:d}/{ensemble_members:d})")
+    _sst_final, _v_final = forecast(sst_initial + tangent_sst_initial * epsilon * (jax.random.normal(key=jax.random.PRNGKey(i), shape=sst_initial.shape) * 0.05 + 1) )
+    _sensitivity_sst = (_sst_final - sst_final1) / epsilon
+    _sensitivity_v = (_v_final - v_final1) / epsilon
+
+    ensemble_collection.append(dict(
+        sst_final = sst_final1,
+        v_final = v_final1,
+        sensitivity_sst = _sensitivity_sst,
+        sensitivity_v   = _sensitivity_v,
+    ))
+
+test_ensemble_members = [1, ensemble_members // 2, ensemble_members]
+
+ensemble_mean_of_sensitivity = {}
+for number in test_ensemble_members:
+     ensemble_mean_of_sensitivity[number] = jax.tree.map(lambda *x: jnp.mean(jnp.stack(x), axis=0), *ensemble_collection[:number])
+    
 
 print("Visualization...")
 import matplotlib as mplt
@@ -108,45 +145,75 @@ mplt.use("Agg")
 import matplotlib.pyplot as plt
 
 atm_model = model.components["atm"].raw_component
-
 lat = atm_model.coords.horizontal.latitudes * 180/jnp.pi
 lon = atm_model.coords.horizontal.longitudes * 180/jnp.pi
 
 sst_levels = jnp.linspace(-2, 35, 11)
-tangent_sst_levels = jnp.linspace(-1, 1, 11) * 0.5
+tangent_sst_levels = jnp.linspace(-1, 1, 11) * 0.01
 v_levels = jnp.linspace(-1, 1, 11) * 5
-tangent_v_levels = jnp.linspace(-1, 1, 11) * 0.2
+tangent_v_levels = jnp.linspace(-1, 1, 11) * 0.05
 
-def plot_sensitivity(sst_final, tangent_sst_final, v_final, tangent_v_final, output_figure, method_name):
+# Each column is a method; each row is a quantity (perturbation/initial
+# SST, SST response, meridional wind response). The reference column shows
+# the actual fields, while the jvp and ensemble columns show the
+# perturbation/sensitivity fields for direct comparison.
+reference_column = (
+    "Reference run",
+    [
+        ((sst_initial - 273.15), sst_levels,         {},              "$\\mathrm{SST}_\\mathrm{init}$"),
+        ((sst_final - 273.15),   sst_levels,         {},              "$\\mathrm{SST}_\\mathrm{final}$"),
+        (v_final,                v_levels,           {"cmap": "bwr"}, "$\\mathrm{v}_\\mathrm{final}$"),
+    ],
+)
 
-    fig, ax = plt.subplots(3, 2, figsize=(12, 16))
+jvp_column = (
+    "jax.jvp",
+    [
+        (tangent_sst_initial, tangent_sst_levels, {"cmap": "bwr"}, "$\\partial \\mathrm{SST}_\\mathrm{init}$"),
+        (tangent_sst_final,   tangent_sst_levels, {"cmap": "bwr"}, "$\\partial \\mathrm{SST}_\\mathrm{final}$"),
+        (tangent_v_final,     tangent_v_levels,   {"cmap": "bwr"}, "$\\partial \\mathrm{v}_\\mathrm{final}$"),
+    ],
+)
 
-    ax[0, 0].contourf(lon, lat, (sst_initial-273.15).transpose(), levels=sst_levels)
-    ax[0, 1].contourf(lon, lat, tangent_sst_initial.transpose(), levels=tangent_sst_levels, cmap="bwr")
-    ax[1, 0].contourf(lon, lat, (sst_final-273.15).transpose(), levels=sst_levels)
-    ax[1, 1].contourf(lon, lat, tangent_sst_final.transpose(), levels=tangent_sst_levels, cmap="bwr")
-    ax[2, 0].contourf(lon, lat, v_final.transpose(), levels=v_levels, cmap="bwr")
-    ax[2, 1].contourf(lon, lat, tangent_v_final.transpose(), levels=tangent_v_levels, cmap="bwr")
+ensemble_columns = [
+    (
+        f"direct (ens={number:d})",
+        [
+            (tangent_sst_initial,        tangent_sst_levels, {"cmap": "bwr"}, "$\\partial \\mathrm{SST}_\\mathrm{init}$"),
+            (data["sensitivity_sst"],    tangent_sst_levels, {"cmap": "bwr"}, "$\\partial \\mathrm{SST}_\\mathrm{final}$"),
+            (data["sensitivity_v"],      tangent_v_levels,   {"cmap": "bwr"}, "$\\partial \\mathrm{v}_\\mathrm{final}$"),
+        ],
+    )
+    for number, data in ensemble_mean_of_sensitivity.items()
+]
 
-    ax[0, 0].set_title("(a) $\\mathrm{SST}_\\mathrm{init}$")
-    ax[0, 1].set_title("(b) $\\partial \\mathrm{SST}_\\mathrm{init}$")
-    ax[1, 0].set_title("(c) $\\mathrm{SST}_\\mathrm{final}$")
-    ax[1, 1].set_title("(d) $\\partial \\mathrm{SST}_\\mathrm{final}$")
-    ax[2, 0].set_title("(e) $\\mathrm{v}_\\mathrm{final}$")
-    ax[2, 1].set_title("(f) $\\partial \\mathrm{v}_\\mathrm{final}$")
+columns = [reference_column, jvp_column] + ensemble_columns
 
-    fig.suptitle(f"[{method_name}] Response time: {simulation_interval / jdt.to_timedelta(1, 'day'):.1f} days")
-    for _ax in ax.flatten():
-        _ax.set_xlabel("longitude [deg]")
-        _ax.set_ylabel("latitude [deg]")
 
+def plot_sensitivity_comparison(columns, output_figure, suptitle):
+
+    nrows = 3
+    ncols = len(columns)
+    fig, ax = plt.subplots(nrows, ncols, figsize=(6 * ncols, 14), squeeze=False)
+
+    for col_idx, (col_title, rows) in enumerate(columns):
+        for row_idx, (data, levels, kwargs, row_title) in enumerate(rows):
+            _ax = ax[row_idx, col_idx]
+            cf = _ax.contourf(lon, lat, jnp.asarray(data).transpose(), levels=levels, extend="both", **kwargs)
+            fig.colorbar(cf, ax=_ax, orientation="vertical", shrink=0.85, pad=0.02)
+            _ax.set_title(row_title if row_idx > 0 else f"{col_title}\n{row_title}")
+            _ax.set_xlabel("longitude [deg]")
+            _ax.set_ylabel("latitude [deg]")
+
+    fig.suptitle(suptitle)
     print(f"Saving result figure into: {output_figure}")
-    plt.savefig(output_figure, dpi=200)
+    plt.savefig(output_figure, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-output_figure_jvp = output_dir / "sensitivity_jvp.png"
-output_figure_direct = output_dir / "sensitivity_direct.png"
-
-plot_sensitivity(sst_final, tangent_sst_final, v_final, tangent_v_final, output_figure_jvp, "jax.jvp")
-plot_sensitivity(sst_final1, sensitivity_sst, v_final1, sensitivity_v, output_figure_direct, "direct finite-difference")
+output_figure = output_dir / "sensitivity_comparison.png"
+plot_sensitivity_comparison(
+    columns,
+    output_figure,
+    f"Response time: {simulation_interval / jdt.to_timedelta(1, 'day'):.1f} days",
+)
