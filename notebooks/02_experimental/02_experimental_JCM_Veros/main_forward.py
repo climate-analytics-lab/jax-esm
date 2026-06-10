@@ -31,6 +31,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--total-simulation-days", type=int, help="Total time of simulation in days", default=10)
 parser.add_argument("--simulation-interval-days", type=int, help="Simulation interval in days", default=5)
 parser.add_argument("--simulation-name", type=str, help="Simulation name for output", default="default")
+parser.add_argument("--truncation-number", type=int, help="Truncation number", default=31)
+parser.add_argument("--do-not-average-time", action="store_true", help="Do not average time dimension for each interval.")
 args = parser.parse_args()
 
 print(f"jcm library is located at: {jcm.__file__}")
@@ -42,7 +44,7 @@ print(f"Number of devices: {len(jax.devices())}")
 
 # Configurations
 calendar = "365_day"
-truncation_number = 31
+truncation_number = args.truncation_number
 total_simulation_time = jdt.to_timedelta(args.total_simulation_days, "day")
 simulation_interval = jdt.to_timedelta(args.simulation_interval_days, "day")
 start_datetime = jdt.to_datetime("2000-01-01")
@@ -84,11 +86,11 @@ if checkpoint_dir.exists():
 if resume_batch == batches:
     print(f"Target batches: {batches:d} is all done. Exit the program.")
     sys.exit()
-
+    
 for b in range(resume_batch, batches):
     
     print(f"[batch={b:d}/{batches:d}] Simulation...")
-    
+ 
     _, final_carry, predictions = model.run(
         initial_carry = initial_carry,
         workflow=["mapper", "ocn", "atm", "fakelnd"],
@@ -99,8 +101,9 @@ for b in range(resume_batch, batches):
     
     output_dict = model.predictions_to_xarray(predictions)
 
-    for component_name, ds in output_dict.items():
-        output_dict[component_name] = ds.reduce(np.mean, dim="time", keepdims=True)
+    if not args.do_not_average_time:
+        for component_name, ds in output_dict.items():
+            output_dict[component_name] = ds.reduce(np.mean, dim="time", keepdims=True)
  
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
