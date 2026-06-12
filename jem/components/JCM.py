@@ -46,7 +46,7 @@ def make_jem_compatible(
     D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
 
-        state=model._prepare_initial_modal_state()
+        state=model._prepare_initial_dycore_state()
         forcing = default_forcing(model.coords.horizontal)
         
         # Predictions shape is still morphing in the development.
@@ -129,7 +129,7 @@ def make_jem_compatible(
 
     def get_info():
         return {
-            "diffusion" : str(model.diffusion),
+            "Basic" : str(model),
         }
 
     safe_setattr(model, "initialize", initialize)
