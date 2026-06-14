@@ -6,6 +6,7 @@
 import glob
 import os
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 
@@ -66,6 +67,7 @@ def build_model(
     terrain_output_directory="./data",
     veros_dt_mom=3600.0,
     veros_dt_tracer=3600.0,
+    debug_mode=False,
 ):
     """Build the coupled JCM + Veros + SlabOceanModel system.
 
@@ -92,6 +94,11 @@ def build_model(
     )
     JCM.make_jem_compatible(atm_model, coupling_timestep=coupling_timestep)
     atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
+
+    # Longitude/latitude (in degrees) of the atmosphere's nodal grid, used by
+    # `report_first_nonfinite` in `interaction` to locate non-finite values.
+    lon_deg = atm_model.coords.horizontal.longitudes * 180 / jnp.pi
+    lat_deg = atm_model.coords.horizontal.latitudes * 180 / jnp.pi
 
     # Create Veros
     # First need to remove `output_veros.*.nc` files, otherwise veros complains.
@@ -132,6 +139,48 @@ def build_model(
 
     def jcm_to_veros_regridder(arr):
         return arr  # arr[:, 4:-4]
+
+    def is_pytree_all_finite(tree):
+        return jax.tree_util.tree_reduce(
+            lambda acc, x: acc & jnp.all(jnp.isfinite(x)),
+            tree,
+            jnp.array(True),
+        )
+
+    def report_first_nonfinite(name, x, lon=None, lat=None):
+        """If `x` has any non-finite value, debug-print the index of its
+        first occurrence (and lon/lat, if `x` is a 2D (lon, lat) field).
+
+        `jax.debug.print` cannot format a tuple-of-tracers (e.g. the result
+        of `jnp.unravel_index`) directly, so each index component is passed
+        as its own scalar kwarg. The format string is built in Python from
+        `x.ndim`, which is static under tracing.
+        """
+        x = jnp.asarray(x)
+        finite = jnp.isfinite(x)
+        any_bad = jnp.any(~finite)
+        flat_idx = jnp.argmin(finite.ravel().astype(jnp.int32))
+        idx = jnp.unravel_index(flat_idx, x.shape)
+        val = x.ravel()[flat_idx]
+
+        idx_fmt = ", ".join(f"{{i{d}}}" for d in range(x.ndim))
+        idx_kwargs = {f"i{d}": idx[d] for d in range(x.ndim)}
+
+        def report(_):
+            fmt = name + f": first non-finite at idx=({idx_fmt}), value={{val:.6e}}"
+            kwargs = dict(idx_kwargs, val=val)
+            if lon is not None and lat is not None and x.ndim == 2:
+                fmt += ", lon={lo:.2f}, lat={la:.2f}"
+                # `lon`/`lat` are plain numpy arrays (since `jnp.pi` is a
+                # Python float, `numpy_array * 180 / jnp.pi` stays numpy).
+                # Indexing a numpy array with a JAX tracer raises
+                # TracerArrayConversionError, so convert to jnp first.
+                kwargs["lo"] = jnp.asarray(lon)[idx[0]]
+                kwargs["la"] = jnp.asarray(lat)[idx[1]]
+            jax.debug.print(fmt, **kwargs)
+
+        jax.lax.cond(any_bad, report, lambda _: None, None)
+
 
     # Note: Remember to return the `coupled_carry` at the end.
     def interaction(coupled_carry):
@@ -176,11 +225,49 @@ def build_model(
         fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
         fakelnd["state"].sea_surface_temperature = jnp.clip(
             fakelnd["state"].sea_surface_temperature,
-            200.0,
+            200.0, #273.15 - 50.0,
             273.15 + 30.0,
         )
         atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
         atm["forcing"].stl_am = fakelnd["state"]["sea_surface_temperature"]
+
+        # Debug: report wind speed (atm), ocean velocity, and stratification (ocn) extremes
+        vs_ocn = ocn["state"].variables
+        jax.debug.print(
+            "max|wind_u| (atm) = {wu:.6e}, max|wind_v| (atm) = {wv:.6e}, "
+            "max|u| (ocn) = {ou:.6e}, max|v| (ocn) = {ov:.6e}, min(Nsqr) (ocn) = {nsqr:.6e}",
+            wu=jnp.max(jnp.abs(wind_x)),
+            wv=jnp.max(jnp.abs(wind_y)),
+            ou=jnp.max(jnp.abs(vs_ocn.u[..., vs_ocn.tau])),
+            ov=jnp.max(jnp.abs(vs_ocn.v[..., vs_ocn.tau])),
+            nsqr=jnp.min(vs_ocn.Nsqr[..., vs_ocn.tau]),
+        )
+
+        if debug_mode:
+            # Debug model explosion
+            def breakpoint_if_nonfinite(x):
+                all_finite = is_pytree_all_finite(x)
+                def true_fn(x):
+                    pass
+                def false_fn(x):
+                    jax.debug.print("Model exploded. Activate breakpoint to see what happened.")
+                    report_first_nonfinite("wind_x", wind_x, lon_deg, lat_deg)
+                    report_first_nonfinite("wind_y", wind_y, lon_deg, lat_deg)
+                    report_first_nonfinite("ocn.forcing.heat_flux", ocn["forcing"].heat_flux, lon_deg, lat_deg)
+                    report_first_nonfinite("atm.forcing.stl_am", atm["forcing"].stl_am, lon_deg, lat_deg)
+                    # The crash was first seen in the ocean state (u, v, Nsqr
+                    # all NaN while the atmosphere was still finite), so check
+                    # the ocean's prognostic fields too (3D: x, y, depth).
+                    report_first_nonfinite("ocn.state.temp", vs_ocn.temp[..., vs_ocn.tau])
+                    report_first_nonfinite("ocn.state.salt", vs_ocn.salt[..., vs_ocn.tau])
+                    report_first_nonfinite("ocn.state.u", vs_ocn.u[..., vs_ocn.tau])
+                    report_first_nonfinite("ocn.state.v", vs_ocn.v[..., vs_ocn.tau])
+                    report_first_nonfinite("ocn.state.Nsqr", vs_ocn.Nsqr[..., vs_ocn.tau])
+                    jax.debug.breakpoint()
+                jax.lax.cond(all_finite, true_fn, false_fn, x)
+
+            breakpoint_if_nonfinite(coupled_carry) 
+
 
         return coupled_carry
 
