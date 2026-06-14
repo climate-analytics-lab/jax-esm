@@ -14,7 +14,7 @@ print("Setting veros.runtime_settings...")
 setattr(runtime_settings, "backend", "jax")
 setattr(runtime_settings, "force_overwrite", True)
 setattr(runtime_settings, 'linear_solver', 'scipy_jax')
-setattr(runtime_settings, 'device', 'cpu')
+#setattr(runtime_settings, 'device', 'cpu')
 from veros.core.operators import numpy as npx, update, at # noqa: E402
 
 def copy_veros_state(state):
@@ -50,12 +50,16 @@ def make_jem_compatible(
     
     nxt = model.state.dimensions["xt"]
     nyt = model.state.dimensions["yt"]
+    ghost_cell = 2 # Veros hard-coded ghost cell number
     
     decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": (nxt, nyt)})
     VerosForcing = decorator(AbstractVerosForcing)
     horizontal_T_shape = (nxt, nyt)
     horizontal_U_shape = (nxt, nyt)
     horizontal_V_shape = (nxt, nyt)
+    
+    mask_T = jnp.array(model.state.variables.maskT)
+    mask_T = mask_T[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell]
 
     def set_forcing(state):
         print("The original set_forcing in the VerosSetup object is replaced "
@@ -79,7 +83,6 @@ def make_jem_compatible(
             
             state = carry["state"]
             forcing = carry["forcing"]
-            ghost_cell = 2 # Veros hard-coded ghost cell number
             cp_0 = 3991.86795711963
             salinity_ref = 35.0 # PSU
             vs = state.variables
@@ -196,6 +199,8 @@ def make_jem_compatible(
                 surface_tauy = (["time", "longitude", "latitude"], predictions["surface_tauy"]),
                 heat_flux = (["time", "longitude", "latitude"], predictions["heat_flux"]),
                 freshwater_flux = (["time", "longitude", "latitude"], predictions["freshwater_flux"]),
+                mask_T = (["longitude", "latitude", "depth"], mask_T),
+                mask_surface_T = (["longitude", "latitude"], mask_T[:, :, -1]),
             ),
         )
 
