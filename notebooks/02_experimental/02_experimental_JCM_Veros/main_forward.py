@@ -33,6 +33,7 @@ parser.add_argument("--simulation-interval-days", type=int, help="Simulation int
 parser.add_argument("--simulation-name", type=str, help="Simulation name for output", default="default")
 parser.add_argument("--truncation-number", type=int, help="Truncation number", default=31)
 parser.add_argument("--do-not-average-time", action="store_true", help="Do not average time dimension for each interval.")
+parser.add_argument("--debug-mode", action="store_true", help="Turn on debug mode. Detect NaN and enter breakpoint.")
 args = parser.parse_args()
 
 print(f"jcm library is located at: {jcm.__file__}")
@@ -62,6 +63,7 @@ model, config = build_model(
     start_datetime=start_datetime,
     coupling_timestep=coupling_timestep,
     calendar=calendar,
+    debug_mode=args.debug_mode,
 )
 ocn_model = model.components["ocn"].raw_component
 
@@ -105,16 +107,16 @@ for b in range(resume_batch, batches):
         for component_name, ds in output_dict.items():
             output_dict[component_name] = ds.reduce(np.mean, dim="time", keepdims=True)
  
+    if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
+        print("Error: Model exploded. End program")
+        break
+
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:05d}.nc"
         print("Output file: ", str(output_file))
         ds.to_netcdf(output_file, unlimited_dims="time", engine="netcdf4")
         ds.close()
   
-    if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
-        print("Error: Model exploded. End program")
-        break
-
     initial_carry = final_carry
     save_coupled_carry(
         final_carry, checkpoint_dir / f"batch_{b:05d}",
