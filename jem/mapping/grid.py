@@ -61,7 +61,7 @@ class GridSpecification:
 @dataclass
 class Grid:
     """
-    Grid specifies the coordinate (shape the most important) and additionally weights and masks.
+    Grid specifies the coordinate (shape the most important) and additionally area and masks.
     The binary mask `bmask` values adopt the convention that 1 means land, and 0 means ocean
     The fraction mask `fmask` means the fraction of grid area occupied by land.
     """
@@ -71,14 +71,14 @@ class Grid:
         None  # "T" for tracer grid (most common), "U" for U grid (arakawa-grid context), ... and such.
     )
     grid_specification: Optional[GridSpecification] = None
-    weights: Optional[Array] = None
+    area: Optional[Array] = None
     bmask: Optional[Array] = None
     fmask: Optional[Array] = None
 
     def __post_init__(self):
-        if self.weights is not None:
-            assert self.grid_weights.shape == self.shape, (
-                "Area weights must match grid shape"
+        if self.area is not None:
+            assert self.area.shape == self.shape, (
+                "Area must match grid shape"
             )
         if self.bmask is not None:
             assert self.bmask.shape == self.shape, "Binary mask must match grid shape"
@@ -115,15 +115,15 @@ class Grid:
                 'count 0' : f"{count_zeros:d} / {total:d} ({100*count_zeros/total:.1f}%)",
             }
  
-        weights_info = None
-        if self.weights is not None:
-            weights_info = {
-                'shape' : str(self.weights.shape),
-                'sum of weights' : f"{jnp.sum(self.weights):f}",
+        area_info = None
+        if self.area is not None:
+            area_info = {
+                'shape' : str(self.area.shape),
+                'sum of area' : f"{jnp.sum(self.area):f}",
             }
         
         return {
             'grid_specification' : str(self.grid_specification),
             'bmask' : bmask_info,
-            'weights' : weights_info,
+            'area' : area_info,
         }
