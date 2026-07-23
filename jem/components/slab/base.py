@@ -13,6 +13,8 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
+from jcm.date import days_per_year as jcm_days_per_year
+from jem.utils.cycles import evaluate_cyclic_linear
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 
 class SlabModelBase(ABC):
@@ -43,6 +45,7 @@ class SlabModelBase(ABC):
         timestep: float = 86400.0,
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
+        calendar: str = "365_day",
     ):
         """Initialize slab model base.
 
@@ -60,6 +63,8 @@ class SlabModelBase(ABC):
         self.timestep = timestep
         self.topography_file = topography_file
         self.mask_file = mask_file
+        self.calendar = calendar
+        self.days_per_year = jcm_days_per_year(calendar)
 
         # Initialize domain
         self.horizontal_grids = generate_grids_from_grid_specification(
@@ -130,40 +135,42 @@ class SlabModelBase(ABC):
         )
 
     def _compute_start_day_offset(self) -> float:
-        """Compute the day offset from start of year for climatology lookup.
-
-        Returns:
-            Number of seconds from Jan 1 of start year to start_datetime
-        """
+        """Seconds from Jan 1 of start year to start_datetime."""
         ref_year = self.start_datetime.to_pydatetime().year
         ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        return float( (self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second") )
+        return float((self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second"))
 
-    def _get_climatology_indices(
+    def _year_fraction(self, t: float, start_day_offset: float) -> jnp.ndarray:
+        """Return cycle position in [0, 1) for simulation time t.
+
+        Args:
+            t: Simulation time in seconds since start
+            start_day_offset: Seconds from Jan 1 of start year to start_datetime
+        """
+        return jnp.mod(
+            (start_day_offset + t) / (86400.0 * self.days_per_year), 1.0
+        )
+
+    def _interpolate_cyclic(
         self,
         t: float,
         start_day_offset: float,
-        cycle_length: int,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Compute climatology indices for begin and end of timestep.
+        data: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Linearly interpolate cyclic climatology data at simulation time t.
+
+        Records in data (last axis) are assumed equally spaced over one year.
+        Interpolation is continuous and periodic across year boundaries.
 
         Args:
-            t: Current simulation time in seconds
-            start_day_offset: Offset from start of year in seconds
-            cycle_length: Number of days in the climatology cycle
+            t: Simulation time in seconds since start
+            start_day_offset: Seconds from Jan 1 of start year to start_datetime
+            data: Array of shape (..., n_records)
 
         Returns:
-            Tuple of (begin_index, end_index) for climatology lookup
+            Interpolated array of shape (...)
         """
-        clim_beg_idx = jnp.mod(
-            jnp.int_(jnp.floor((start_day_offset + t) / 86400.0)),
-            cycle_length,
-        )
-        clim_end_idx = jnp.mod(
-            jnp.int_(jnp.floor((start_day_offset + t + self.timestep) / 86400.0)),
-            cycle_length,
-        )
-        return clim_beg_idx, clim_end_idx
+        return evaluate_cyclic_linear(self._year_fraction(t, start_day_offset), data)
 
     @abstractmethod
     def initialize(self):
@@ -224,8 +231,10 @@ class SlabModelBase(ABC):
             longitude2D=(T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
         )
 
+        data_vars = self._create_xarray_data_vars(predictions)
+
         return xr.Dataset(
-            data_vars=self._create_xarray_data_vars(predictions),
+            data_vars=data_vars,
             coords=coords,
             attrs=self._create_xarray_global_attributes(),
         )
