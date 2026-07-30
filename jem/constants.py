@@ -43,3 +43,12 @@ default_land_depth_max = 60.0  # Maximum land depth (m)
 # Default temperatures
 # =============================================================================
 freezing_point_K = 273.15  # Freezing point of water (K) = 0°C
+
+# =============================================================================
+# Sea ice properties
+# =============================================================================
+ice_density = 917.0  # Density of sea ice (kg/m³)
+ice_thermal_conductivity = 2.03  # Thermal conductivity of sea ice (W/m/K)
+ice_latent_heat_fusion = 3.34e5  # Latent heat of fusion of ice (J/kg)
+seawater_freezing_point_K = 271.35  # Freezing point of seawater (K) = -1.8°C
+ice_melting_point_K = 273.15  # Melting point of (fresh) ice/snow surface (K) = 0°C
