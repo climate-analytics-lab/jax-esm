@@ -3,6 +3,7 @@ from typing import Optional, Dict, List
 
 import jem
 from jem.mapping.grid import Grid, GridSpecification
+from jem.mapping.scrip import read_scrip_grid_file
 
 import coordax as cx
 import dinosaur
@@ -43,6 +44,12 @@ def generate_grids_from_grid_specification(
 
     elif parsed_grid_specification.grid_universe == "Veros":
         grids = get_veros_grids(
+            parsed_grid_specification.grid_family,
+            mask_file=mask_file,
+        )
+
+    elif parsed_grid_specification.grid_universe == "SCRIP":
+        grids = get_scrip_grids(
             parsed_grid_specification.grid_family,
             mask_file=mask_file,
         )
@@ -226,5 +233,40 @@ def get_veros_grids(
             ),
             bmask=bmask,
             fmask=fmask,
+        ),
+    )
+
+
+def get_scrip_grids(
+    grid_family: str,
+    mask_file: Optional[str],
+) -> Dict[str, Grid]:
+    """
+    Build grids from a SCRIP-style grid/mask netCDF file. Unlike JCM/Veros, the
+    grid geometry and the land-sea mask both come from the same file.
+    """
+
+    if mask_file is None:
+        raise ValueError("mask_file (the SCRIP grid file) is required for grid_universe 'SCRIP'.")
+
+    scrip_grid_data = read_scrip_grid_file(mask_file)
+
+    coordinate_T = generate_coordinate_from_latitude_longitude(
+        latitude=scrip_grid_data.latitude,
+        longitude=scrip_grid_data.longitude,
+        order="latitude_longitude",
+    )
+
+    return dict(
+        T=Grid(
+            coordinate=coordinate_T,
+            grid_type="T",
+            grid_specification=GridSpecification(
+                grid_universe="SCRIP", grid_family=grid_family
+            ),
+            bmask=scrip_grid_data.bmask,
+            fmask=scrip_grid_data.fmask,
+            true_latitude=scrip_grid_data.true_latitude,
+            true_longitude=scrip_grid_data.true_longitude,
         ),
     )

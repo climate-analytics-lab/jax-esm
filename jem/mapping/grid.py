@@ -74,6 +74,12 @@ class Grid:
     area: Optional[Array] = None
     bmask: Optional[Array] = None
     fmask: Optional[Array] = None
+    true_latitude: Optional[Array] = (
+        None  # Actual geographic latitude per cell, radians. Differs from `coordinate` on rotated/curvilinear grids.
+    )
+    true_longitude: Optional[Array] = (
+        None  # Actual geographic longitude per cell, radians. Differs from `coordinate` on rotated/curvilinear grids.
+    )
 
     def __post_init__(self):
         if self.area is not None:
@@ -85,6 +91,14 @@ class Grid:
         if self.fmask is not None:
             assert self.fmask.shape == self.shape, (
                 "Fractional mask must match grid shape"
+            )
+        if self.true_latitude is not None:
+            assert self.true_latitude.shape == self.shape, (
+                "True latitude must match grid shape"
+            )
+        if self.true_longitude is not None:
+            assert self.true_longitude.shape == self.shape, (
+                "True longitude must match grid shape"
             )
 
     @property
