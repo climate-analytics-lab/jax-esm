@@ -3,7 +3,7 @@ from typing import Optional, Dict, List
 
 import jem
 from jem.mapping.grid import Grid, GridSpecification
-from jem.mapping.scrip import read_scrip_grid_file
+from jem.mapping.curvilinear_grid import read_curvilinear_grid_file
 
 import coordax as cx
 import dinosaur
@@ -48,8 +48,8 @@ def generate_grids_from_grid_specification(
             mask_file=mask_file,
         )
 
-    elif parsed_grid_specification.grid_universe == "SCRIP":
-        grids = get_scrip_grids(
+    elif parsed_grid_specification.grid_universe == "Curvilinear":
+        grids = get_curvilinear_grids(
             parsed_grid_specification.grid_family,
             mask_file=mask_file,
         )
@@ -237,23 +237,24 @@ def get_veros_grids(
     )
 
 
-def get_scrip_grids(
+def get_curvilinear_grids(
     grid_family: str,
     mask_file: Optional[str],
 ) -> Dict[str, Grid]:
     """
-    Build grids from a SCRIP-style grid/mask netCDF file. Unlike JCM/Veros, the
-    grid geometry and the land-sea mask both come from the same file.
+    Build grids from a curvilinear grid/mask netCDF file (e.g. rotated-pole,
+    displaced-pole). Unlike JCM/Veros, the grid geometry and the land-sea mask
+    both come from the same file.
     """
 
     if mask_file is None:
-        raise ValueError("mask_file (the SCRIP grid file) is required for grid_universe 'SCRIP'.")
+        raise ValueError("mask_file (the curvilinear grid file) is required for grid_universe 'Curvilinear'.")
 
-    scrip_grid_data = read_scrip_grid_file(mask_file)
+    curvilinear_grid_data = read_curvilinear_grid_file(mask_file)
 
     coordinate_T = generate_coordinate_from_latitude_longitude(
-        latitude=scrip_grid_data.latitude,
-        longitude=scrip_grid_data.longitude,
+        latitude=curvilinear_grid_data.latitude,
+        longitude=curvilinear_grid_data.longitude,
         order="longitude_latitude",
     )
 
@@ -262,11 +263,11 @@ def get_scrip_grids(
             coordinate=coordinate_T,
             grid_type="T",
             grid_specification=GridSpecification(
-                grid_universe="SCRIP", grid_family=grid_family
+                grid_universe="Curvilinear", grid_family=grid_family
             ),
-            bmask=scrip_grid_data.bmask,
-            fmask=scrip_grid_data.fmask,
-            true_latitude=scrip_grid_data.true_latitude,
-            true_longitude=scrip_grid_data.true_longitude,
+            bmask=curvilinear_grid_data.bmask,
+            fmask=curvilinear_grid_data.fmask,
+            true_latitude=curvilinear_grid_data.true_latitude,
+            true_longitude=curvilinear_grid_data.true_longitude,
         ),
     )
