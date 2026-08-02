@@ -254,7 +254,7 @@ def get_scrip_grids(
     coordinate_T = generate_coordinate_from_latitude_longitude(
         latitude=scrip_grid_data.latitude,
         longitude=scrip_grid_data.longitude,
-        order="latitude_longitude",
+        order="longitude_latitude",
     )
 
     return dict(
