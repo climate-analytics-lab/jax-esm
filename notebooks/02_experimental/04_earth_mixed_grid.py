@@ -16,9 +16,15 @@ from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 
+from jem.mapping.builtin_grid_generator import (
+    generate_grids_from_grid_specification,
+)
+
+from jem.tool_scripts.convert_landsea_mask_to_terrain import convert_landsea_mask_to_terrain
+
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-simulation_name = "02-01_earth"
+simulation_name = "02-04_mixed_grid"
 output_dir = (Path("output") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
 output_figures = {
@@ -31,10 +37,23 @@ coords = get_speedy_coords()  # T31 spectral resolution with 8 vertical levels
 
 # Load realistic orography and land-sea mask, interpolated to T31 grid
 data_dir = resources.files("jem.data.grid")
-rotated_grid_landsea_mask_file = data_dir / "landsea_mask_RG_4.00deg.nc"
 
-#terrain_file = data_dir / "terrain.nc"
-#terrain = TerrainData.from_file(terrain_file, coords=coords)
+rotated_grid_specification = "Curvilinear::RG4"
+rotated_grid_landsea_mask_file = data_dir / "landsea_mask_RG_4.00deg.nc"
+rotated_grid_terrain_file = data_dir / "terrain_RG_4.00deg.nc"
+rotated_grids = generate_grids_from_grid_specification(
+    rotated_grid_specification,
+    mask_file=str(rotated_grid_landsea_mask_file)
+)
+
+JCM_landsea_mask_file = data_dir / "landsea_mask_JCM_T31.nc"
+JCM_terrain_file = data_dir / "terrain_JCM_T31.nc"
+
+print("Converting landsea mask to JCM's terrain")
+convert_landsea_mask_to_terrain(str(JCM_landsea_mask_file), JCM_terrain_file)
+print(rotated_grids["T"].shape)
+    
+JCM_terrain = TerrainData.from_file(JCM_terrain_file, coords=coords)
 
 # Load realistic forcing data (SST, sea ice, soil moisture, etc.) interpolated to T31 grid
 #forcing_file = data_dir / "forcing.nc"
@@ -78,7 +97,7 @@ mapper.add_mapping(
 atm_model = jcm.model.Model(
     coords = coords, 
     start_date=start_datetime,
-    terrain = terrain,
+    terrain = JCM_terrain,
 )
 
 atm_model = JCM.make_jem_compatible(
@@ -90,12 +109,15 @@ model = Coupler(
     components=dict(
         atm=atm_model,
         ocn=SlabOceanModel(
+            grid_specification=rotated_grid_specification,
             start_datetime=start_datetime,
-            mask_file=terrain_file,
+            mask_file=rotated_grid_landsea_mask_file,
         ),
         lnd=SlabLandModel(
             start_datetime=start_datetime,
-            topography_file=terrain_file,
+            grid_specification=rotated_grid_specification,
+            mask_file=rotated_grid_landsea_mask_file,
+            topography_file=rotated_grid_landsea_mask_file,
             tdland = 86400.0, 
         ),
     ),
@@ -111,7 +133,8 @@ tree_tools.print_tree(model.get_info(), root="Model")
 # %%
 simulation_interval = jdt.to_timedelta(5, "day")
 initial_state, final_state, predictions = model.run(
-    workflow=["mapper", "atm", "ocn", "lnd"],
+    #workflow=["mapper", "atm", "ocn", "lnd"],
+    workflow=["atm", "ocn", "lnd"],
     iterations = int(simulation_interval / coupling_timestep),
 )
 # %% [markdown]
@@ -203,9 +226,3 @@ ani = FuncAnimation(fig, update, frames=len(output_dict_animation["atm"].coords[
 print("Saving animation: ", output_figures['animation'])
 ani.save(output_figures['animation'], writer='pillow', dpi=200)
 
-if use_ipython:
-    from IPython.display import Image
-    display(Image(output_figures['animation']))
-
-
-# %%
