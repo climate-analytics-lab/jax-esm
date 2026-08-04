@@ -120,7 +120,7 @@ def make_jem_compatible(
 
     def get_info():
         return {
-            "diffusion" : str(model.diffusion),
+            "diffusion" : str(model),
         }
 
     safe_setattr(model, "initialize", initialize)
