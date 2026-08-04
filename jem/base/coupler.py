@@ -169,6 +169,7 @@ class Coupler:
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
         reuse_last_available_trajectory: bool = False,
         verbose: bool=True,
+        checkpoint: bool = False,
     ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
         initial_carry = initial_carry or self.initialize()
 
@@ -176,13 +177,17 @@ class Coupler:
             verbose and print("Reuse last available trajectory.")
             trajectory = self.trajectory_holder
         else:
+            _start_time = time.time()
             trajectory = self.generate_trajectory_function(
                 workflow=workflow,
                 iterations=iterations,
                 jitted=jitted,
                 show_progress=show_progress,
                 tqdm_kwargs=tqdm_kwargs,
+                checkpoint=checkpoint,
             )
+            _elapsed_time = time.time() - _start_time
+            print(f"generate_trajectory_function took {_elapsed_time:.2f} seconds.")
 
         self.trajectory_holder = trajectory  # type: ignore
         
@@ -194,6 +199,7 @@ class Coupler:
         iterations: int,
         jitted: bool = True,
         show_progress: bool = True,
+        checkpoint: bool = False,
         tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
     ) -> TrajectoryFunction:
 
@@ -203,6 +209,10 @@ class Coupler:
             show_progress=show_progress,
             jitted=jitted,
         )
+
+        if checkpoint:
+            coupled_step_function = jax.checkpoint(coupled_step_function)
+        
         steps = jnp.arange(iterations)
         
         if not jitted:
