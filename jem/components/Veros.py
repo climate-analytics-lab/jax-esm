@@ -1,6 +1,7 @@
 """Veros adapter to JEM"""
 from typing import Annotated, Any
 
+import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
@@ -13,9 +14,12 @@ print("Setting veros.runtime_settings...")
 setattr(runtime_settings, "backend", "jax")
 setattr(runtime_settings, "force_overwrite", True)
 setattr(runtime_settings, 'linear_solver', 'scipy_jax')
-setattr(runtime_settings, 'device', 'cpu')
+#setattr(runtime_settings, 'device', 'cpu')
 from veros.core.operators import numpy as npx, update, at # noqa: E402
 
+def copy_veros_state(state):
+    return jax.tree_util.tree_map(lambda x: x, state)
+    
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
@@ -28,11 +32,11 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
 
 @data_structure.typed_and_dimensioned
 class AbstractVerosForcing:
-    heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    freshwater_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    surface_taux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    surface_tauy: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    surface_air_temperature: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    heat_flux: Annotated[float, ("lon", "lat"), "two_dimensional"]
+    freshwater_flux: Annotated[float, ("lon", "lat"), "two_dimensional"]
+    surface_taux: Annotated[float, ("lon", "lat"), "two_dimensional"]
+    surface_tauy: Annotated[float, ("lon", "lat"), "two_dimensional"]
+    surface_air_temperature: Annotated[float, ("lon", "lat"), "two_dimensional"]
 
 def make_jem_compatible(
     model: Any,
@@ -46,12 +50,33 @@ def make_jem_compatible(
     
     nxt = model.state.dimensions["xt"]
     nyt = model.state.dimensions["yt"]
+    ghost_cell = 2 # Veros hard-coded ghost cell number
     
     decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": (nxt, nyt)})
     VerosForcing = decorator(AbstractVerosForcing)
     horizontal_T_shape = (nxt, nyt)
     horizontal_U_shape = (nxt, nyt)
     horizontal_V_shape = (nxt, nyt)
+    
+    mask_T = jnp.array(model.state.variables.maskT)
+    mask_T = mask_T[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell]
+
+    dzt = jnp.array(model.state.variables.dzt)
+    longitude  = jnp.array(model.state.variables.xt)[ghost_cell:-ghost_cell]
+    latitude   = jnp.array(model.state.variables.yt)[ghost_cell:-ghost_cell]
+    dlongitude = jnp.array(model.state.variables.dxt)[ghost_cell:-ghost_cell]
+    dlatitude  = jnp.array(model.state.variables.dyt)[ghost_cell:-ghost_cell]
+
+    lon_units = "degrees_east" if model.state.settings.coord_degree else "km"
+    lat_units = "degrees_north" if model.state.settings.coord_degree else "km"
+
+    model.__JEM_TOOL__ = dict(
+        mask_T = mask_T,
+        latitude   = latitude,
+        longitude  = longitude,
+        dlatitude  = dlatitude,
+        dlongitude = dlongitude,
+    )
 
     def set_forcing(state):
         print("The original set_forcing in the VerosSetup object is replaced "
@@ -75,7 +100,6 @@ def make_jem_compatible(
             
             state = carry["state"]
             forcing = carry["forcing"]
-            ghost_cell = 2 # Veros hard-coded ghost cell number
             cp_0 = 3991.86795711963
             salinity_ref = 35.0 # PSU
             vs = state.variables
@@ -93,14 +117,24 @@ def make_jem_compatible(
                 # `veros/setups/global_1deg/global_1deg.py`
                 if settings.enable_tke:
                     print("Veros: settings.enable_tke is set true")
+                    surface_stress_squared = (
+                        (0.5 * (vs.surface_taux[1:-1, 1:-1] + vs.surface_taux[:-2, 1:-1]) / settings.rho_0) ** 2
+                        + (0.5 * (vs.surface_tauy[1:-1, 1:-1] + vs.surface_tauy[1:-1, :-2]) / settings.rho_0) ** 2
+                    )
+                    # `sqrt` has an infinite derivative at 0, so AD through `sqrt(x)`
+                    # blows up to NaN as x -> 0, even though the primal value (0)
+                    # stays finite. Floor the *squared* magnitude -- sqrt's argument
+                    # -- at min_stress_magnitude**2 so sqrt and its derivative stay
+                    # bounded; this naturally caps the resulting magnitude from below
+                    # at min_stress_magnitude.
+                    min_stress_magnitude = 1e-3
+                    surface_stress_magnitude = npx.sqrt(
+                        npx.maximum(surface_stress_squared, min_stress_magnitude ** 2)
+                    )
                     vs.forc_tke_surface = update(
                         vs.forc_tke_surface,
                         at[1:-1, 1:-1],
-                        npx.sqrt(
-                            (0.5 * (vs.surface_taux[1:-1, 1:-1] + vs.surface_taux[:-2, 1:-1]) / settings.rho_0) ** 2
-                            + (0.5 * (vs.surface_tauy[1:-1, 1:-1] + vs.surface_tauy[1:-1, :-2]) / settings.rho_0) ** 2
-                        )
-                        ** 1.5,
+                        surface_stress_magnitude ** 1.5,
                     )
 
                 # W/m^2 K kg/J m^3/kg = K m/s
@@ -117,9 +151,16 @@ def make_jem_compatible(
                      forcing["freshwater_flux"] * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / settings.rho_0 * salinity_ref
                 )
 
-            for _ in range(steps_per_coupling_timestep):
+            def _sub_step_function(_, state):
                 model.step(state)
-            
+                return state
+
+            state = jax.lax.fori_loop(0, steps_per_coupling_timestep, _sub_step_function, state)
+            # `fori_loop` reconstructs the carry into fresh VerosState/VerosVariables
+            # instances (via tree_unflatten), so the `vs` bound above is now stale;
+            # rebind it to the evolved state before reading diagnostics from it.
+            vs = state.variables
+
             sea_surface_temperature = vs.temp[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau] + 273.15
             sea_surface_temperature = jnp.where( sea_surface_temperature < 100, 288.15, sea_surface_temperature )
             sea_surface_salinity = vs.salt[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
@@ -160,23 +201,62 @@ def make_jem_compatible(
         return step_function
 
     def predictions_to_xarray(predictions):
-        return xr.Dataset(
+        ds = xr.Dataset(
             data_vars=dict(
-                temp = (["time", "longitude", "latitude", "depth"], predictions["temp"]),
-                salt = (["time", "longitude", "latitude", "depth"], predictions["salt"]),
-                u = (["time", "longitude", "latitude", "depth"], predictions["u"]),
-                v = (["time", "longitude", "latitude", "depth"], predictions["v"]),
-                sea_surface_temperature = (["time", "longitude", "latitude"], predictions["sea_surface_temperature"]),
-                sea_surface_u = (["time", "longitude", "latitude"], predictions["sea_surface_u"]),
-                sea_surface_v = (["time", "longitude", "latitude"], predictions["sea_surface_v"]),
-                sea_surface_salinity = (["time", "longitude", "latitude"], predictions["sea_surface_salinity"]),
-                surface_air_temperature = (["time", "longitude", "latitude"], predictions["surface_air_temperature"]),
-                surface_taux = (["time", "longitude", "latitude"], predictions["surface_taux"]),
-                surface_tauy = (["time", "longitude", "latitude"], predictions["surface_tauy"]),
-                heat_flux = (["time", "longitude", "latitude"], predictions["heat_flux"]),
-                freshwater_flux = (["time", "longitude", "latitude"], predictions["freshwater_flux"]),
+                temp = (["time", "lon", "lat", "depth"], predictions["temp"]),
+                salt = (["time", "lon", "lat", "depth"], predictions["salt"]),
+                u = (["time", "lon", "lat", "depth"], predictions["u"]),
+                v = (["time", "lon", "lat", "depth"], predictions["v"]),
+                sea_surface_temperature = (["time", "lon", "lat"], predictions["sea_surface_temperature"]),
+                sea_surface_u = (["time", "lon", "lat"], predictions["sea_surface_u"]),
+                sea_surface_v = (["time", "lon", "lat"], predictions["sea_surface_v"]),
+                sea_surface_salinity = (["time", "lon", "lat"], predictions["sea_surface_salinity"]),
+                surface_air_temperature = (["time", "lon", "lat"], predictions["surface_air_temperature"]),
+                surface_taux = (["time", "lon", "lat"], predictions["surface_taux"]),
+                surface_tauy = (["time", "lon", "lat"], predictions["surface_tauy"]),
+                heat_flux = (["time", "lon", "lat"], predictions["heat_flux"]),
+                freshwater_flux = (["time", "lon", "lat"], predictions["freshwater_flux"]),
+                mask_T = (["lon", "lat", "depth"], mask_T),
+                mask_surface_T = (["lon", "lat"], mask_T[:, :, -1]),
+                dzt = (["depth"], dzt),
+            ),
+            coords=dict(
+                lon = (["lon"], longitude),
+                lat = (["lat"], latitude),
             ),
         )
+
+        ds.lon.attrs = dict(long_name="T-grid longitude", units=lon_units)
+        ds.lat.attrs = dict(long_name="T-grid latitude", units=lat_units)
+
+        var_attrs = dict(
+            temp = dict(long_name="ocean potential temperature", units="deg C"),
+            salt = dict(long_name="ocean salinity", units="g/kg"),
+            u = dict(long_name="zonal ocean velocity", units="m/s"),
+            v = dict(long_name="meridional ocean velocity", units="m/s"),
+            sea_surface_temperature = dict(
+                long_name="sea surface temperature", units="K",
+                comment="unlike `temp`, this field is shifted by +273.15 to Kelvin",
+            ),
+            sea_surface_u = dict(long_name="sea surface zonal velocity", units="m/s"),
+            sea_surface_v = dict(long_name="sea surface meridional velocity", units="m/s"),
+            sea_surface_salinity = dict(long_name="sea surface salinity", units="g/kg"),
+            surface_air_temperature = dict(
+                long_name="surface air temperature forcing", units="K",
+                comment="unit inferred by convention; not dimensionally enforced anywhere in this module",
+            ),
+            surface_taux = dict(long_name="zonal surface wind stress forcing", units="N/m^2"),
+            surface_tauy = dict(long_name="meridional surface wind stress forcing", units="N/m^2"),
+            heat_flux = dict(long_name="net surface heat flux forcing (upward positive)", units="W/m^2"),
+            freshwater_flux = dict(long_name="net surface freshwater flux forcing (upward positive)", units="kg/m^2/s"),
+            mask_T = dict(long_name="land-sea mask on T grid", units="1"),
+            mask_surface_T = dict(long_name="land-sea mask on T grid, surface level", units="1"),
+            dzt = dict(long_name="vertical grid spacing (T)", units="m"),
+        )
+        for name, attrs in var_attrs.items():
+            ds[name].attrs = attrs
+
+        return ds
 
     def get_info():
         return {

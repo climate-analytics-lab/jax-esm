@@ -60,6 +60,7 @@ class SlabAtmosphereModel(SlabModelBase):
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         topography_file: Optional[str] = None,
         mask_file: Optional[str] = None,
+        calendar: str = "365_day",
     ):
         """Initialize slab atmosphere model.
 
@@ -78,6 +79,7 @@ class SlabAtmosphereModel(SlabModelBase):
             timestep=timestep,
             topography_file=topography_file,
             mask_file=mask_file,
+            calendar=calendar,
         )
 
         # Atmospheric constants
