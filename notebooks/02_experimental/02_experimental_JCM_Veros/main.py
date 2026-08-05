@@ -51,8 +51,8 @@ print(f"Number of devices: {len(jax.devices())}")
 from modify_jcm_terrain import modify_jcm_terrain
 from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
-truncation_number = 106
-total_simulation_time = jdt.to_timedelta(365*10, "day")
+truncation_number = 31
+total_simulation_time = jdt.to_timedelta(20, "day")
 simulation_interval = jdt.to_timedelta(10, "day")
 jcm_files = generate_jcm_forcing_and_topography_files(
     resolution=truncation_number,
@@ -153,8 +153,8 @@ def interaction(coupled_carry):
     # function or module
     drag_coefficient = 1e-3 # dimensionless
     air_density = 1.22 # kg / m^3
-    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
-    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].u0)
+    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].v0)
     wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)    
     vs = ocn["state"].variables
     surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
@@ -170,8 +170,8 @@ def interaction(coupled_carry):
     ocn["forcing"].surface_tauy = surface_tauy     
     ocn["forcing"].heat_flux = jcm_to_veros_regridder(total_heat_flux)
     ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
-    ocn["forcing"].wind_x = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.u0)
-    ocn["forcing"].wind_y = jcm_to_veros_regridder(atm["derived"]["physics"].surface_flux.v0)
+    ocn["forcing"].wind_x = wind_x
+    ocn["forcing"].wind_y = wind_y
     fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
     fakelnd["state"].sea_surface_temperature = jnp.clip(
         fakelnd["state"].sea_surface_temperature,
