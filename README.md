@@ -116,41 +116,56 @@ Each component needs to provide two methods:
 ### Component Coupling
 
 The current implementation uses direct coupling:
-- Coupler creates a dictionary of componenet carry values.
+- Coupler creates a dictionary of component carry values.
 - Coupler passes the carry value of each component to the corresponding component's `step_function`.
-- To exchange variables llike fluxes, pass mapper functions to Coupler. A mapper function receives
+- To exchange variables like fluxes, pass mapper functions to Coupler. A mapper function receives
   the dictionary of component carry values and returns a new one. 
 
 ### Time Integration
 
 - Uses `jax.lax.scan` for efficient time stepping
 - Components advance in parallel each coupling timestep
-- Debug mode available with `jax_scan=False` (uses Python loop)
+- Debug mode available with `jitted=False` (uses Python loop)
 
 ## Examples
 - `notebooks/01_basic`: Provide aquaplanet setup.
-- `notebooks/02_experimental`: Features under developmenet, such as earth-like topography and JCM-Veros coupling
+- `notebooks/02_experimental`: Features under development, such as earth-like topography and JCM-Veros coupling
 
 ## Integration with JAX-GCM (JCM)
-JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean models.
+JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean, land, and sea-ice models.
 
 ### Included Components
 
 1. **JCM (Atmosphere)**
-   - Location: `jem/components/JCM/`
+   - Location: `jem/components/jcm_component.py`
    - Wraps JCM atmosphere model from jax-gcm
    - Handles conversion between Dinosaur dynamics states and physics states
    - Supports internal sub-stepping
 
-2. **SlabOceanModel**
-   - Location: `jem/components/SlabOceanModel/`
+2. **Veros (Ocean, full 3D)**
+   - Location: `jem/components/veros_component.py`
+   - Wraps the [jittable Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM
+   - Optional dependency; lazily imported so `jem.components` works without `veros` installed
+
+3. **SlabOceanModel**
+   - Location: `jem/components/slab/slab_ocean_model/`
    - Mixed-layer ocean with climatological relaxation
    - Anomaly-based SST evolution using Euler backward scheme
+   - Reports `ice_frazil_melt_energy`, a freeze/melt heat diagnostic for coupling to `SlabSeaiceModel`
 
-3. **SlabLandModel**
-   - Location: `jem/components/SlabLandModel/`
+4. **SlabLandModel**
+   - Location: `jem/components/slab/slab_land_model/`
    - One layer land with climatological relaxation
    - Anomaly-based land surface temperature evolution using Euler backward scheme
+
+5. **SlabAtmosphereModel**
+   - Location: `jem/components/slab/slab_atmosphere_model/`
+   - Idealized slab atmosphere, used for testing and non-geoscience examples
+
+6. **SlabSeaiceModel**
+   - Location: `jem/components/slab/slab_seaice_model/`
+   - Basal-only sea-ice thickness model driven by `SlabOceanModel`'s freeze/melt potential
+   - Exposes a smooth thickness-to-fraction closure for an atmosphere model's ice-fraction boundary condition
 
 ## Contributing
 

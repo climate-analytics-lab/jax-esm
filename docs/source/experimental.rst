@@ -1,8 +1,8 @@
 Experimental Setups
 ===================
 
-The simulations presented here are not tested extensively and serve as 
-prototypes for future developement.
+The simulations presented here are not tested extensively and serve as
+prototypes for future development.
 
 
 JCM with Slabs

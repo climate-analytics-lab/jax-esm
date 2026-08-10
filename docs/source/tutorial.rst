@@ -194,6 +194,7 @@ not have to make one on your own. Also, the following code use
 .. code-block:: python
 
     import jcm
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
     import jax_datetime as jdt
 
     from jem import Coupler
@@ -215,12 +216,12 @@ not have to make one on your own. Also, the following code use
 
     atm_model = jcm.model.Model(
         start_date=start_datetime,
+        coords=get_speedy_coords(),
     )
 
     atm_model = JCM.make_jem_compatible(
         atm_model,
         coupling_timestep=coupling_timestep,
-        land_model_active=False,
     )
 
     model = Coupler(
@@ -243,7 +244,4 @@ not have to make one on your own. Also, the following code use
     output_dict = model.predictions_to_xarray(predictions)
     print(output_dict["atm"]) # xarray.Dataset
     print(output_dict["ocn"])
- 
-Optional: Auxilary Functions
-----------------------------
 

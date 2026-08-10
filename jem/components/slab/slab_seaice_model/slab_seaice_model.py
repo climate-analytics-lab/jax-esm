@@ -45,14 +45,12 @@ class SlabSeaiceModel(SlabModelBase):
         h_new = max(0, h + ice_frazil_melt_energy / (rho_ice * L_ice))
 
     where:
-        ice_frazil_melt_energy:  forcing input (J/m^2, this coupling step's energy, not
-                                  a flux). Positive means the ocean mixed layer had a
-                                  heat deficit relative to freezing -- that deficit
-                                  freezes new ice at the base. Negative means the ocean
-                                  had surplus heat above freezing -- that surplus melts
-                                  ice from below.
-        rho_ice:  ice_density
-        L_ice:    ice_latent_heat_fusion
+        - ``ice_frazil_melt_energy``: forcing input (J/m^2, this coupling step's energy,
+          not a flux). Positive means the ocean mixed layer had a heat deficit relative
+          to freezing -- that deficit freezes new ice at the base. Negative means the
+          ocean had surplus heat above freezing -- that surplus melts ice from below.
+        - ``rho_ice``: ice_density
+        - ``L_ice``: ice_latent_heat_fusion
 
     Because `ice_frazil_melt_energy` is already a per-step energy (its host ocean model
     folds the coupling step directly into the diagnostic, matching CESM's convention of a
