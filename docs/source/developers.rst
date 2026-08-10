@@ -8,5 +8,5 @@ Install jem Locally
 
    git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
    cd jax-esm
-   pip3 install -e ".[jcm,plot]"
+   pip3 install -e ".[dev]"
 

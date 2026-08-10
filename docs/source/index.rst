@@ -6,9 +6,15 @@
 JAX-ESM documentation
 =====================
 
-Add your content using ``reStructuredText`` syntax. See the
-`reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
-documentation for details.
+JAX-ESM (imported as ``jem``) is a JAX-based, differentiable coupling framework for Earth
+system components. It couples independent atmosphere, ocean, land, and sea-ice models —
+such as JCM, Veros, and JEM's own slab models — into a single JIT-compilable simulation loop
+built on ``jax.lax.scan``.
+
+- New to JEM? Start with :doc:`quick_start` for a copy-and-paste aquaplanet example.
+- Want to see it in action first? Browse :doc:`examples`.
+- Integrating your own model? Follow :doc:`tutorial`.
+- Looking for a specific class or function? See :doc:`api_superset`.
 
 
 .. toctree::
