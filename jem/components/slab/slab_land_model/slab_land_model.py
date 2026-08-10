@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
 
-from jem.components.slab.base import SlabModelBase
+from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 
@@ -53,7 +53,7 @@ class SlabLandModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         topography_file: str | None = None,
         mask_file: str | None = None,

@@ -8,7 +8,7 @@ import jax_datetime as jdt
 import xarray as xr
 
 from jem import constants
-from jem.components.slab.base import SlabModelBase
+from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
@@ -67,7 +67,7 @@ class SlabOceanModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         relaxation_time: float = 60 * 86400.0,
         mixed_layer_depth_min: float = 40.0,

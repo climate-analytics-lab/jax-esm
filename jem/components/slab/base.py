@@ -17,6 +17,8 @@ from jem.base.typing import VariableRegistry
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
 from jem.utils.cycles import evaluate_cyclic_linear
 
+_DEFAULT_START_DATETIME = jdt.to_datetime("2001-01-01")
+
 
 class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
@@ -42,7 +44,7 @@ class SlabModelBase(ABC):
         self,
         name: str,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         topography_file: str | None = None,
         mask_file: str | None = None,
