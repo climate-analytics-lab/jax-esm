@@ -1,14 +1,14 @@
 """Slab sea-ice model component."""
 
-from typing import Optional, Dict, Any, Annotated
+from typing import Annotated, Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
 
 from jem import constants
+from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
-import jem.utils.data_structure as data_structure
-from jem.components.slab.base import SlabModelBase
 
 default_land_surface_temperature = 288.15
 
@@ -94,10 +94,10 @@ class SlabSeaiceModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
+        topography_file: str | None = None,
+        mask_file: str | None = None,
         initialization_ice_thickness: float = 0.0,
         min_ice_thickness: float = 1e-3,
         ice_fraction_thickness_scale: float = 0.5,
@@ -181,18 +181,18 @@ class SlabSeaiceModel(SlabModelBase):
             0.0,
         )
 
-        return dict(
-            state=self.component_state_class.zeros().copy(
+        return {
+            "state": self.component_state_class.zeros().copy(
                 {
                     "ice_thickness": init_ice_thickness,
                     "ice_surface_temperature": init_ice_surface_temperature,
                 }
             ),
-            forcing=self.component_forcing_class.zeros(),
-            derived=dict(
-                ice_fraction=init_ice_fraction,
-            ),
-        )
+            "forcing": self.component_forcing_class.zeros(),
+            "derived": {
+                "ice_fraction": init_ice_fraction,
+            },
+        }
 
     def _create_step_function_body(self):
         """Create the step function for the sea-ice model."""
@@ -235,33 +235,33 @@ class SlabSeaiceModel(SlabModelBase):
                 }
             )
 
-            predictions = dict(
-                state=new_state,
-                forcing=dict(
-                    ice_frazil_melt_energy=ice_frazil_melt_energy,
-                ),
-                derived=dict(
-                    ice_fraction=new_ice_fraction,
-                ),
-            )
+            predictions = {
+                "state": new_state,
+                "forcing": {
+                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
+                },
+                "derived": {
+                    "ice_fraction": new_ice_fraction,
+                },
+            }
 
-            return dict(
-                state=new_state,
-                forcing=forcing,
-                derived=dict(ice_fraction=new_ice_fraction),
-            ), stack_objects([predictions])
+            return {
+                "state": new_state,
+                "forcing": forcing,
+                "derived": {"ice_fraction": new_ice_fraction},
+            }, stack_objects([predictions])
 
         return step_function
 
-    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create xarray data variables for sea-ice output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
         derived = predictions["derived"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
-        return dict(
-            ice_thickness=(
+        return {
+            "ice_thickness": (
                 T_grid_dims,
                 state["ice_thickness"],
                 {
@@ -269,7 +269,7 @@ class SlabSeaiceModel(SlabModelBase):
                     "units": "m",
                 },
             ),
-            ice_surface_temperature=(
+            "ice_surface_temperature": (
                 T_grid_dims,
                 state["ice_surface_temperature"],
                 {
@@ -277,7 +277,7 @@ class SlabSeaiceModel(SlabModelBase):
                     "units": "K",
                 },
             ),
-            ice_frazil_melt_energy=(
+            "ice_frazil_melt_energy": (
                 T_grid_dims,
                 forcing["ice_frazil_melt_energy"],
                 {
@@ -285,7 +285,7 @@ class SlabSeaiceModel(SlabModelBase):
                     "units": "J m-2",
                 },
             ),
-            ice_fraction=(
+            "ice_fraction": (
                 T_grid_dims,
                 derived["ice_fraction"],
                 {
@@ -293,7 +293,7 @@ class SlabSeaiceModel(SlabModelBase):
                     "units": "1",
                 },
             ),
-        )
+        }
 
     def get_info(self):
         return {

@@ -1,7 +1,7 @@
-from .slab_seaice_model import SlabSeaiceModel, SeaiceState, SeaiceForcing
+from .slab_seaice_model import SeaiceForcing, SeaiceState, SlabSeaiceModel
 
 __all__ = [
-    "SlabSeaiceModel",
-    "SeaiceState",
     "SeaiceForcing",
+    "SeaiceState",
+    "SlabSeaiceModel",
 ]
