@@ -4,12 +4,14 @@ from jem.components import jcm_component as JCM
 from jem.components.slab.slab_atmosphere_model import SlabAtmosphereModel
 from jem.components.slab.slab_land_model import SlabLandModel
 from jem.components.slab.slab_ocean_model import SlabOceanModel
+from jem.components.slab.slab_seaice_model import SlabSeaiceModel
 
 __all__ = [
     "JCM",
     "SlabAtmosphereModel",
     "SlabLandModel",
     "SlabOceanModel",
+    "SlabSeaiceModel",
 ]
 
 

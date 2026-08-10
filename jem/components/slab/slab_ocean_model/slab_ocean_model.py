@@ -60,8 +60,27 @@ class SlabOceanModel(SlabModelBase):
             forcing = - (T - T_clim) / tau
 
         where tau is the relaxation timescale to climatology (can be jnp.inf), and T_clim
-        is the climatology read from `SST_clim_file`. If `SST_clim_file` is not provided, 
+        is the climatology read from `SST_clim_file`. If `SST_clim_file` is not provided,
         then T_clim will be all zeros, which is possible when doing training.
+
+    Freeze/melt potential
+    ----------------------
+    Following CESM's slab-ocean/CICE coupling convention: after the update above,
+    `sea_surface_temperature` is clamped so it never drops below `T_freezing` (the seawater
+    freezing point), and the heat that clamp removes (or, symmetrically, the heat available
+    above freezing) is reported as a single signed diagnostic, `ice_frazil_melt_energy`
+    (J/m^2, energy released over this coupling step -- not a flux):
+
+        ice_frazil_melt_energy = (T_freezing - T_unclamped)
+            * mixed_layer_depth * ocean_density * ocean_specific_heat_capacity
+
+    Positive values mean the mixed layer would have gone sub-freezing -- that deficit forms
+    new (frazil) ice. Negative values mean the mixed layer sits above freezing -- that surplus
+    is available to melt existing ice from below. This is exactly CESM's `frzmlt`: one signed
+    quantity, computed once per coupling step with no separate relaxation timescale (the
+    coupling step itself is the timescale). This ocean model has no ice physics of its own, so
+    `ice_frazil_melt_energy` is meant to be consumed by a sea-ice component (e.g.
+    `SlabSeaiceModel`) via the coupler.
     """
 
     def __init__(
@@ -136,9 +155,8 @@ class SlabOceanModel(SlabModelBase):
                 raise FileNotFoundError(f"SST climatology file \"{self.SST_clim_file!s:s}\" is specified but does not exist.")
             elif (self.relaxation_time < 0) or jnp.isnan(self.relaxation_time):
                 raise ValueError("`relaxation_time` must be a positive number or infinity.")
-        else: 
+        else:
             raise ValueError(f"Unknown `forcing_method` is given: \"{self.forcing_method!s:s}\" ")
- 
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
@@ -183,7 +201,7 @@ class SlabOceanModel(SlabModelBase):
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_sea_surface_temperature = (
-                positive_cosine_cubic_latitude_squared(self.latitude_radian) * 27.0
+                positive_cosine_cubic_latitude_squared(self.latitude_radian) * 10.0
                 + constants.freezing_point_K
             )
 
@@ -222,7 +240,7 @@ class SlabOceanModel(SlabModelBase):
         
         forcing = self.component_forcing_class.zeros()
         forcing = forcing.copy({
-            "q_flux": forcing.q_flux   
+            "q_flux": forcing.q_flux
         })
         return {
             "state": self.component_state_class.zeros().copy({
@@ -230,6 +248,9 @@ class SlabOceanModel(SlabModelBase):
                 "sea_surface_temperature": init_sea_surface_temperature,
             }),
             "forcing": forcing,
+            "derived": {
+                "ice_frazil_melt_energy": jnp.zeros(self.grid_shape),
+            },
         }
 
     def _create_step_function_body(self):
@@ -283,6 +304,26 @@ class SlabOceanModel(SlabModelBase):
                 nonocn_idx
             ].set(default_land_surface_temperature)
 
+            # Freeze/melt potential (CESM's `frzmlt`): heat surplus/deficit of the mixed
+            # layer relative to freezing, for this coupling step. Positive -> forms new ice;
+            # negative -> available to melt existing ice from below.
+            ice_frazil_melt_energy = jnp.where(
+                ocn_idx,
+                (constants.seawater_freezing_point_K - new_sea_surface_temperature)
+                * state.mixed_layer_depth
+                * constants.ocean_density
+                * constants.ocean_specific_heat_capacity,
+                0.0,
+            )
+
+            # The ocean itself never carries a sub-freezing SST -- that deficit was just
+            # diverted into ice_frazil_melt_energy above.
+            new_sea_surface_temperature = jnp.where(
+                ocn_idx,
+                jnp.maximum(new_sea_surface_temperature, constants.seawater_freezing_point_K),
+                new_sea_surface_temperature,
+            )
+
             new_state = state.copy(
                 {
                     "sea_surface_temperature": new_sea_surface_temperature,
@@ -294,14 +335,20 @@ class SlabOceanModel(SlabModelBase):
                 "state": new_state,
                 "forcing": {
                     "total_heat_flux": total_heat_flux,
-                }
+                },
+                "derived": {
+                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
+                },
             }
             if self.forcing_method == "Qflux":
                 predictions["forcing"]["q_flux"] = snapshot_Qflux
 
             return {
                 "state": new_state,
-                "forcing": forcing
+                "forcing": forcing,
+                "derived": {
+                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
+                },
             }, stack_objects([predictions])
 
         return step_function
@@ -310,6 +357,7 @@ class SlabOceanModel(SlabModelBase):
         """Create xarray data variables for ocean output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
+        derived = predictions["derived"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
         data_vars = {
@@ -336,6 +384,14 @@ class SlabOceanModel(SlabModelBase):
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
                     "positive": "upward",
+                }
+            ),
+            "ice_frazil_melt_energy": (
+                T_grid_dims,
+                derived["ice_frazil_melt_energy"],
+                {
+                    "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
+                    "units": "J m-2",
                 }
             ),
         }
