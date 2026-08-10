@@ -272,9 +272,9 @@ def strset(obj, flattened_variable_name, value):
             raise
     elif isinstance(target, Mapping):
         if splitted_names[-1] not in target:
-            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
+            raise KeyError(f"Error: Cannot find {flattened_variable_name:s}.")
         target[splitted_names[-1]] = value
     else:
         if not hasattr(target, splitted_names[-1]):
-            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
+            raise AttributeError(f"Error: Cannot find {flattened_variable_name:s}.")
         setattr(target, splitted_names[-1], value)

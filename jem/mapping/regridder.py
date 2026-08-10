@@ -100,7 +100,7 @@ class BasicRegridder(ABC):
     def _validate_shape(self, target_data: Array):
         """Validate that output has correct shape."""
         if not self.target_grid:
-            raise Exception("target_grid was not provided. Cannot validate shape")
+            raise ValidationError("target_grid was not provided. Cannot validate shape")
 
         if (not self.target_grid) and (target_data.shape != self.target_grid.shape):
             raise ValidationError(

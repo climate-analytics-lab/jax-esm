@@ -47,7 +47,7 @@ def generate_grids_from_grid_specification(
         )
 
     if grids is None:
-        raise Exception("Error: grids is not created.")
+        raise ValueError("Error: grids is not created.")
 
     return grids
 

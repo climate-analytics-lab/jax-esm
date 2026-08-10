@@ -20,7 +20,7 @@ def typed_and_dimensioned(cls):
             if hasattr(hint, "is_typed_and_dimensioned") and hint.is_typed_and_dimensioned:
                 cls._fields[name] = hint  # nested schema
             else:
-                raise Exception("Cannot contain class that is not typed_and_dimensioned, or Annotated")
+                raise TypeError("Cannot contain class that is not typed_and_dimensioned, or Annotated")
                 
 
     cls.is_typed_and_dimensioned = True
@@ -44,7 +44,7 @@ def typed_and_dimensioned(cls):
                     }
                 )
             else:
-                raise Exception("Error: Should not be here.")
+                raise RuntimeError("Error: Should not be here.")
 
         return children, aux_data
 
@@ -69,7 +69,7 @@ def typed_and_dimensioned(cls):
 def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
     def decorator(cls):
         if getattr(cls, "is_typed_and_dimensioned", None) is None:
-            raise Exception("Cannot apply build_dataclass on a non-schemaed class.")
+            raise TypeError("Cannot apply build_dataclass on a non-schemaed class.")
 
         cls.shape_dict = shape_dict or {}
 
@@ -97,7 +97,7 @@ def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
                     setattr(obj, name, node_obj)
 
                 else:
-                    raise Exception("Should not be here. Please type check")
+                    raise RuntimeError("Should not be here. Please type check")
 
         # Recursive replacement helper
         def _replace(obj, replace_dict):
@@ -152,7 +152,7 @@ def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
                 elif isinstance(info, type) and hasattr(info, "_fields"):  # nested
                     result.extend(_collect_info(info, parent_name=full_name))
                 else:
-                    raise Exception("Should not be here. Please type check")
+                    raise RuntimeError("Should not be here. Please type check")
             return result
 
         # Attribute introspection method

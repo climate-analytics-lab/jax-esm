@@ -12,7 +12,7 @@ def safe_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
         if raise_exception:
-            raise Exception(message)
+            raise AttributeError(message)
         else:
             print(f"Warning: {message:s}")
     
@@ -39,7 +39,7 @@ def make_jem_compatible(
     # Check if couopling_timestep is a multiple of jcm's native timestep
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
-        raise Exception("Coupling timestep should be a multiple of timestep.")
+        raise ValueError("Coupling timestep should be a multiple of timestep.")
 
     D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():

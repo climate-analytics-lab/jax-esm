@@ -26,7 +26,7 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
         if raise_exception:
-            raise Exception(message)
+            raise AttributeError(message)
         else:
             print(f"Warning: {message:s}")
     
@@ -47,7 +47,7 @@ def make_jem_compatible(
 
     timestep = jdt.to_timedelta(int(model.state.settings.dt_tracer), "second")
     if timestep * jnp.floor(coupling_timestep / timestep) != coupling_timestep:
-        raise Exception("Coupling timestep should be a multiple of timestep.")
+        raise ValueError("Coupling timestep should be a multiple of timestep.")
     steps_per_coupling_timestep = int(coupling_timestep / timestep)
     
     nxt = model.state.dimensions["xt"]

@@ -196,8 +196,8 @@ class SlabOceanModel(SlabModelBase):
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
             print("grid.bmask and SST_clim do share the same mask.")
         else:
-            raise Exception(
-                "Warning: fmask_ocn and sea_surface_temperature_init do not share the same mask."
+            raise ValueError(
+                "fmask_ocn and sea_surface_temperature_init do not share the same mask."
             )
 
         # Set relaxation time to infinity if no climatology

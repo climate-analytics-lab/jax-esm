@@ -147,7 +147,7 @@ class Coupler:
                 elif name in self.mappers:
                     carry = self.mappers[name](carry)
                 else:
-                    raise Exception(f"Unknown error: Cannot find `{name}` in components or mappers.")        
+                    raise RuntimeError(f"Unknown error: Cannot find `{name}` in components or mappers.")
                 if input_carry_structure != tree_structure(carry): # type: ignore
                     print(f"Warning: carry value structure changed after workflow element `{name:s}` is used.")
 
@@ -361,7 +361,7 @@ class Coupler:
 
         for name, count in counts.items():
             if count != 1:
-                raise Exception(f"The name `{name}` is not unique. There are {count:d} of the same name.")
+                raise ValueError(f"The name `{name}` is not unique. There are {count:d} of the same name.")
 
     def _verify_workflow(
         self,
