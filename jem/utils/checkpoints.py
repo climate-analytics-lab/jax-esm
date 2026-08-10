@@ -1,5 +1,5 @@
-from pathlib import Path
 import pickle
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp

@@ -1,5 +1,4 @@
 import coordax as cx
-
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike

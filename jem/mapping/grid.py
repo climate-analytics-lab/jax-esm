@@ -1,9 +1,10 @@
-from typing import Optional
+import re
+from dataclasses import dataclass
+
+import coordax as cx
 import jax.numpy as jnp
 from jax import Array
-from dataclasses import dataclass
-import re
-import coordax as cx
+
 
 @dataclass
 class GridSpecification:
@@ -67,13 +68,13 @@ class Grid:
     """
 
     coordinate: cx.Coordinate
-    grid_type: Optional[str] = (
+    grid_type: str | None = (
         None  # "T" for tracer grid (most common), "U" for U grid (arakawa-grid context), ... and such.
     )
-    grid_specification: Optional[GridSpecification] = None
-    area: Optional[Array] = None
-    bmask: Optional[Array] = None
-    fmask: Optional[Array] = None
+    grid_specification: GridSpecification | None = None
+    area: Array | None = None
+    bmask: Array | None = None
+    fmask: Array | None = None
 
     def __post_init__(self):
         if self.area is not None:

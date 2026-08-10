@@ -1,13 +1,14 @@
 """Flux exchange and boundary condition translation utilities."""
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from collections.abc import Sequence, Mapping
-from jax.typing import ArrayLike as Array
-from jem.base.typing import (
-    JEMComponent,
-    CoupledCarry,
-)
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
+from jax.typing import ArrayLike as Array
 from typeguard import typechecked
+
+from jem.base.typing import (
+    CoupledCarry,
+    JEMComponent,
+)
 
 RegridderFunction = Callable[[Array], Array]
 JEMComponentType = JEMComponent | Any
@@ -65,9 +66,9 @@ class BasicMapper:
        )
 
     """
-    components: Dict[str, JEMComponentType]
-    mappings: Dict[Tuple[str, str], Dict[str, str]]
-    regridders: Dict[Tuple[str, str, str, str], Callable]
+    components: dict[str, JEMComponentType]
+    mappings: dict[tuple[str, str], dict[str, str]]
+    regridders: dict[tuple[str, str, str, str], Callable]
 
     @typechecked
     def __init__(
@@ -80,10 +81,10 @@ class BasicMapper:
         # Build connectivity graph
         self._build_connections()
 
-    def _build_connections(self) -> Dict[str, List[str]]:
+    def _build_connections(self) -> dict[str, list[str]]:
         """Build connectivity graph between components."""
-        connections: Dict[str, List[str]] = {}
-        for source, target in self.mappings.keys():
+        connections: dict[str, list[str]] = {}
+        for source, target in self.mappings:
             if source not in connections:
                 connections[source] = []
             connections[source].append(target)
@@ -111,9 +112,9 @@ class BasicMapper:
         # Loop through each involved component. 
         # If there are N component involves, this loop is N by N.
         # The combination is not valid when source == target
-        for target_component_name in coupled_carry.keys():
+        for target_component_name in coupled_carry:
             target_carry = coupled_carry[target_component_name]
-            for source_component_name in coupled_carry.keys():
+            for source_component_name in coupled_carry:
                 if source_component_name == target_component_name:
                     continue
                 
@@ -159,20 +160,19 @@ class BasicMapper:
 
     def _check_conservation(
         self,
-        output_fluxes: Dict[str, Any],
-        input_fluxes: Dict[str, Any],
+        output_fluxes: dict[str, Any],
+        input_fluxes: dict[str, Any],
     ) -> None:
         """Check conservation of fluxes (placeholder for conservation checks)."""
         # This could check that total heat/moisture/momentum is conserved
         # across the coupling interface
-        pass
 
     @typechecked
     def add_mapping(
         self,
-        source: Tuple[str, str],
-        target: Tuple[str, str],
-        regridder: Optional[RegridderFunction] = None,
+        source: tuple[str, str],
+        target: tuple[str, str],
+        regridder: RegridderFunction | None = None,
     ) -> None:
         """Add or update flux mapping between components.
 
@@ -228,7 +228,7 @@ class BasicMapper:
         ] = regridder
 
     def get_info(self):
-        regridder_info = dict()
+        regridder_info = {}
         for i, key in enumerate(self.regridders.keys()):
             source_component_name, target_component_name, source_variable_name, target_variable_name = key
             regridder_info[f"regridder {i:d}"] = {
@@ -267,14 +267,14 @@ def strset(obj, flattened_variable_name, value):
     if isinstance(target, Sequence):
         try:
             target[int(splitted_names[-1])] = value
-        except (TypeError, IndexError) as e:
+        except (TypeError, IndexError):
             print(f"Cannot update: {flattened_variable_name}. Maybe the leaf is not mutable?")
-            raise e
+            raise
     elif isinstance(target, Mapping):
         if splitted_names[-1] not in target:
-            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
+            raise KeyError(f"Error: Cannot find {flattened_variable_name:s}.")
         target[splitted_names[-1]] = value
     else:
         if not hasattr(target, splitted_names[-1]):
-            raise Exception("Error: Cannot find {flattened_variable_name:s}.")
+            raise AttributeError(f"Error: Cannot find {flattened_variable_name:s}.")
         setattr(target, splitted_names[-1], value)

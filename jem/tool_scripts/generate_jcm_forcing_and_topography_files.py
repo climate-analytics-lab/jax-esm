@@ -1,13 +1,13 @@
-from typing import Optional, Dict
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+
 def generate_jcm_forcing_and_topography_files(
     resolution: int = 31,
-    data_directory: Optional[Path] = None,
-) -> Dict[str, Path]:
+    data_directory: Path | None = None,
+) -> dict[str, Path]:
 
     import jcm
 
@@ -24,26 +24,26 @@ def generate_jcm_forcing_and_topography_files(
 
         data_directory = data_directory / ".cache/jcm"
 
-        print(f'Using input data directory: "{str(data_directory)}".')
+        print(f'Using input data directory: "{data_directory!s}".')
 
     raw_data_directory = Path(jcm.__file__).parent / "data/bc"
 
     # Prepare boundary file
-    files_to_check = dict(
-        terrain=(data_directory / f"terrain_t{resolution:d}.nc").resolve(),
-        forcing=(data_directory / f"forcing_t{resolution:d}.nc").resolve(),
-    )
+    files_to_check = {
+        "terrain": (data_directory / f"terrain_t{resolution:d}.nc").resolve(),
+        "forcing": (data_directory / f"forcing_t{resolution:d}.nc").resolve(),
+    }
 
     def check_if_file_exist(
-        file_dict: Dict[str, Path], verbose: bool = True
-    ) -> Dict[Path, bool]:
+        file_dict: dict[str, Path], verbose: bool = True
+    ) -> dict[Path, bool]:
 
         file_status = {file: Path(file).exists() for _, file in file_dict.items()}
 
         if verbose:
             for file, result in file_status.items():
                 print(
-                    f"Check file: {str(file):s}...",
+                    f"Check file: {file!s:s}...",
                     "found." if result else "not found.",
                 )
 

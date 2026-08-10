@@ -1,9 +1,10 @@
-from typing import get_type_hints, Annotated, get_origin, get_args
-from typing import Any, List, Tuple
-import jax.numpy as jnp
 from copy import deepcopy
-from jax.tree_util import register_pytree_node_class
 from dataclasses import dataclass
+from typing import Annotated, Any, get_args, get_origin, get_type_hints
+
+import jax.numpy as jnp
+from jax.tree_util import register_pytree_node_class
+
 
 def typed_and_dimensioned(cls):
     hints = get_type_hints(cls, include_extras=True)
@@ -12,14 +13,14 @@ def typed_and_dimensioned(cls):
     for name, hint in hints.items():
         if get_origin(hint) is Annotated:
             meta = get_args(hint)
-            cls._fields[name] = dict(
-                data_type=meta[0], dimension_names=meta[1], shape_name=meta[2]
-            )
+            cls._fields[name] = {
+                "data_type": meta[0], "dimension_names": meta[1], "shape_name": meta[2]
+            }
         else:
             if hasattr(hint, "is_typed_and_dimensioned") and hint.is_typed_and_dimensioned:
                 cls._fields[name] = hint  # nested schema
             else:
-                raise Exception("Cannot contain class that is not typed_and_dimensioned, or Annotated")
+                raise TypeError("Cannot contain class that is not typed_and_dimensioned, or Annotated")
                 
 
     cls.is_typed_and_dimensioned = True
@@ -33,17 +34,17 @@ def typed_and_dimensioned(cls):
             obj = getattr(self, name)
             if isinstance(info, dict):  # leaf
                 children.append(obj)
-                aux_data.append(dict(name=name, is_leaf=True))
+                aux_data.append({"name": name, "is_leaf": True})
             elif isinstance(info, type) and hasattr(info, "_fields"):  # nested
                 _children, _children_aux_data = obj.tree_flatten()
                 children.append(_children)
                 aux_data.append(
-                    dict(
-                        name=name, is_leaf=False, cls=info, aux_data=_children_aux_data
-                    )
+                    {
+                        "name": name, "is_leaf": False, "cls": info, "aux_data": _children_aux_data
+                    }
                 )
             else:
-                raise Exception("Error: Should not be here.")
+                raise RuntimeError("Error: Should not be here.")
 
         return children, aux_data
 
@@ -68,7 +69,7 @@ def typed_and_dimensioned(cls):
 def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
     def decorator(cls):
         if getattr(cls, "is_typed_and_dimensioned", None) is None:
-            raise Exception("Cannot apply build_dataclass on a non-schemaed class.")
+            raise TypeError("Cannot apply build_dataclass on a non-schemaed class.")
 
         cls.shape_dict = shape_dict or {}
 
@@ -96,7 +97,7 @@ def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
                     setattr(obj, name, node_obj)
 
                 else:
-                    raise Exception("Should not be here. Please type check")
+                    raise RuntimeError("Should not be here. Please type check")
 
         # Recursive replacement helper
         def _replace(obj, replace_dict):
@@ -134,7 +135,7 @@ def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
         # Recursive introspection
         def _collect_info(
             obj_or_class, parent_name=""
-        ) -> List[Tuple[str, Any, Any, Any]]:
+        ) -> list[tuple[str, Any, Any, Any]]:
             result = []
             flds = getattr(obj_or_class, "_fields", {})
             for name, info in flds.items():
@@ -151,12 +152,12 @@ def build_dataclass_from_typed_and_dimensioned(shape_dict: dict):
                 elif isinstance(info, type) and hasattr(info, "_fields"):  # nested
                     result.extend(_collect_info(info, parent_name=full_name))
                 else:
-                    raise Exception("Should not be here. Please type check")
+                    raise RuntimeError("Should not be here. Please type check")
             return result
 
         # Attribute introspection method
         @classmethod
-        def typed_and_dimensioned_info(cls) -> List[Tuple[str, Any, Any, Any]]:
+        def typed_and_dimensioned_info(cls) -> list[tuple[str, Any, Any, Any]]:
             """Return list of tuples: (full_name, data_type, dim_names, shape)"""
             return _collect_info(cls)
 

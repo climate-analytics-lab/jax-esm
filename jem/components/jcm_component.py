@@ -1,20 +1,18 @@
 """JCM adapter to JEM"""
 
-import numpy as np
-
-from jcm.model import Model
-from jcm.forcing import default_forcing
-
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
+from jcm.forcing import default_forcing
+from jcm.model import Model
 
 
 def safe_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
         if raise_exception:
-            raise Exception(message)
+            raise AttributeError(message)
         else:
             print(f"Warning: {message:s}")
     
@@ -41,7 +39,7 @@ def make_jem_compatible(
     # Check if couopling_timestep is a multiple of jcm's native timestep
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:
-        raise Exception("Coupling timestep should be a multiple of timestep.")
+        raise ValueError("Coupling timestep should be a multiple of timestep.")
 
     D2_nodal_shape = model.coords.nodal_shape[1:]
     def initialize():
@@ -63,17 +61,17 @@ def make_jem_compatible(
         )
         physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
 
-        return asfloat64(dict(
-            state=state,
-            derived={ # Derived
+        return asfloat64({
+            "state": state,
+            "derived": { # Derived
                 "physics" : physics_no_time_dimension,
                 "land_heat_flux" : jnp.zeros(D2_nodal_shape),
                 "ocean_heat_flux" : jnp.zeros(D2_nodal_shape),
                 "total_heat_flux" : jnp.zeros(D2_nodal_shape),
                 "total_freshwater_flux" : jnp.zeros(D2_nodal_shape),
             },
-            forcing=forcing,
-        ))
+            "forcing": forcing,
+        })
 
     def generate_step_function():
         # Notice: since save_interval and total_time are claimed
@@ -105,17 +103,17 @@ def make_jem_compatible(
             ) / 1000.0 # The number 1000.0 is the convert factor of mass density flux of freshwater from g/m^2/s to kg/m^2/s
 
             return (
-                asfloat64(dict(
-                    state=new_atm_modal_state,
-                    derived={
+                asfloat64({
+                    "state": new_atm_modal_state,
+                    "derived": {
                         "physics" : physics_no_time_dimension,
                         "land_heat_flux" : land_heat_flux,
                         "ocean_heat_flux" : ocean_heat_flux,
                         "total_heat_flux" : total_heat_flux,
                         "total_freshwater_flux" : total_freshwater_flux,
                     },
-                    forcing=forcing,
-                )),
+                    "forcing": forcing,
+                }),
                 predictions
             )
 
