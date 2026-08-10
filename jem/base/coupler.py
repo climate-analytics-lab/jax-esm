@@ -371,7 +371,7 @@ class Coupler:
         flattened_workflow, _ = jax.tree.flatten(workflow)
         for action in flattened_workflow:
             if not isinstance(action, str):
-                raise ValueError("Actions in the workflow have to be strings.")
+                raise TypeError("Actions in the workflow have to be strings.")
             if action not in self.components and action not in self.mappers:
                 raise ValueError(f"Action `{action:s}` does not map to any component or forcing mapper.")
         
