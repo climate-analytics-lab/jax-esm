@@ -1,6 +1,9 @@
 import inspect
-from collections.abc import Callable
-from typing import Any, get_args, get_origin, get_type_hints
+
+# `Callable` must come from `typing`, not `collections.abc`: this module compares
+# `get_origin(...)` against `get_origin(Callable)`, and only `typing.Callable`
+# (unsubscripted) has a `get_origin` matching a subscripted Callable's origin.
+from typing import Any, Callable, get_args, get_origin, get_type_hints  # noqa: UP035
 
 
 class MethodNotFoundError(Exception):

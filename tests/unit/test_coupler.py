@@ -362,10 +362,10 @@ class TestVerifyWorkflow:
         with pytest.raises(ValueError, match="does not map"):
             c._verify_workflow(["a", "unknown"])
 
-    def test_non_string_action_raises_valueerror(self):
+    def test_non_string_action_raises_typeerror(self):
         c = _build_coupler(comp_names=("a",), mappers=())
         # jax.tree.flatten is stubbed to just list(), so [123] flattens to [123]
-        with pytest.raises(ValueError, match="have to be strings"):
+        with pytest.raises(TypeError, match="have to be strings"):
             c._verify_workflow([123])
 
     def test_empty_workflow_passes(self):
