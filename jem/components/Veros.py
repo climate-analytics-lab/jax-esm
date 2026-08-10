@@ -5,17 +5,19 @@ import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
-
-from jem.utils.bulk_op import stack_objects
-import jem.utils.data_structure as data_structure
-
 from veros import runtime_settings
+
+from jem.utils import data_structure
+from jem.utils.bulk_op import stack_objects
+
 print("Setting veros.runtime_settings...")
-setattr(runtime_settings, "backend", "jax")
-setattr(runtime_settings, "force_overwrite", True)
-setattr(runtime_settings, 'linear_solver', 'scipy_jax')
+runtime_settings.backend = "jax"
+runtime_settings.force_overwrite = True
+runtime_settings.linear_solver = 'scipy_jax'
 #setattr(runtime_settings, 'device', 'cpu')
-from veros.core.operators import numpy as npx, update, at # noqa: E402
+from veros.core.operators import at, update
+from veros.core.operators import numpy as npx
+
 
 def copy_veros_state(state):
     return jax.tree_util.tree_map(lambda x: x, state)
@@ -70,13 +72,13 @@ def make_jem_compatible(
     lon_units = "degrees_east" if model.state.settings.coord_degree else "km"
     lat_units = "degrees_north" if model.state.settings.coord_degree else "km"
 
-    model.__JEM_TOOL__ = dict(
-        mask_T = mask_T,
-        latitude   = latitude,
-        longitude  = longitude,
-        dlatitude  = dlatitude,
-        dlongitude = dlongitude,
-    )
+    model.__JEM_TOOL__ = {
+        "mask_T": mask_T,
+        "latitude": latitude,
+        "longitude": longitude,
+        "dlatitude": dlatitude,
+        "dlongitude": dlongitude,
+    }
 
     def set_forcing(state):
         print("The original set_forcing in the VerosSetup object is replaced "
@@ -91,8 +93,8 @@ def make_jem_compatible(
             'sea_surface_v' : jnp.zeros(horizontal_V_shape),
         }
         initial_forcing = VerosForcing.zeros()
-        print(f"initial_forcing.surface_taux.shape = {str(initial_forcing.surface_taux.shape)}")
-        return dict(state=initial_state, derived=initial_derived, forcing=initial_forcing)
+        print(f"initial_forcing.surface_taux.shape = {initial_forcing.surface_taux.shape!s}")
+        return {"state": initial_state, "derived": initial_derived, "forcing": initial_forcing}
     
     def generate_step_function():
 
@@ -173,86 +175,86 @@ def make_jem_compatible(
             sea_surface_u = vs.u[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
             sea_surface_v = vs.v[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1, vs.tau]
 
-            return dict(
-                state=state,
-                derived={
+            return {
+                "state": state,
+                "derived": {
                     "sea_surface_temperature" : sea_surface_temperature,
                     "sea_surface_u" : sea_surface_u,
                     "sea_surface_v" : sea_surface_v,
                 },
-                forcing=forcing,
-            ), stack_objects([dict(
-                    sea_surface_temperature = sea_surface_temperature,
-                    sea_surface_salinity = sea_surface_salinity,
-                    sea_surface_u = sea_surface_u,
-                    sea_surface_v = sea_surface_v,
-                    temp = temp,
-                    salt = salt,
-                    u = u,
-                    v = v,
-                    surface_air_temperature = forcing.surface_air_temperature,
-                    surface_taux = forcing.surface_taux,
-                    surface_tauy = forcing.surface_tauy,
-                    heat_flux = forcing.heat_flux,
-                    freshwater_flux = forcing.freshwater_flux,
-            )])
+                "forcing": forcing,
+            }, stack_objects([{
+                    "sea_surface_temperature": sea_surface_temperature,
+                    "sea_surface_salinity": sea_surface_salinity,
+                    "sea_surface_u": sea_surface_u,
+                    "sea_surface_v": sea_surface_v,
+                    "temp": temp,
+                    "salt": salt,
+                    "u": u,
+                    "v": v,
+                    "surface_air_temperature": forcing.surface_air_temperature,
+                    "surface_taux": forcing.surface_taux,
+                    "surface_tauy": forcing.surface_tauy,
+                    "heat_flux": forcing.heat_flux,
+                    "freshwater_flux": forcing.freshwater_flux,
+            }])
 
 
         return step_function
 
     def predictions_to_xarray(predictions):
         ds = xr.Dataset(
-            data_vars=dict(
-                temp = (["time", "lon", "lat", "depth"], predictions["temp"]),
-                salt = (["time", "lon", "lat", "depth"], predictions["salt"]),
-                u = (["time", "lon", "lat", "depth"], predictions["u"]),
-                v = (["time", "lon", "lat", "depth"], predictions["v"]),
-                sea_surface_temperature = (["time", "lon", "lat"], predictions["sea_surface_temperature"]),
-                sea_surface_u = (["time", "lon", "lat"], predictions["sea_surface_u"]),
-                sea_surface_v = (["time", "lon", "lat"], predictions["sea_surface_v"]),
-                sea_surface_salinity = (["time", "lon", "lat"], predictions["sea_surface_salinity"]),
-                surface_air_temperature = (["time", "lon", "lat"], predictions["surface_air_temperature"]),
-                surface_taux = (["time", "lon", "lat"], predictions["surface_taux"]),
-                surface_tauy = (["time", "lon", "lat"], predictions["surface_tauy"]),
-                heat_flux = (["time", "lon", "lat"], predictions["heat_flux"]),
-                freshwater_flux = (["time", "lon", "lat"], predictions["freshwater_flux"]),
-                mask_T = (["lon", "lat", "depth"], mask_T),
-                mask_surface_T = (["lon", "lat"], mask_T[:, :, -1]),
-                dzt = (["depth"], dzt),
-            ),
-            coords=dict(
-                lon = (["lon"], longitude),
-                lat = (["lat"], latitude),
-            ),
+            data_vars={
+                "temp": (["time", "lon", "lat", "depth"], predictions["temp"]),
+                "salt": (["time", "lon", "lat", "depth"], predictions["salt"]),
+                "u": (["time", "lon", "lat", "depth"], predictions["u"]),
+                "v": (["time", "lon", "lat", "depth"], predictions["v"]),
+                "sea_surface_temperature": (["time", "lon", "lat"], predictions["sea_surface_temperature"]),
+                "sea_surface_u": (["time", "lon", "lat"], predictions["sea_surface_u"]),
+                "sea_surface_v": (["time", "lon", "lat"], predictions["sea_surface_v"]),
+                "sea_surface_salinity": (["time", "lon", "lat"], predictions["sea_surface_salinity"]),
+                "surface_air_temperature": (["time", "lon", "lat"], predictions["surface_air_temperature"]),
+                "surface_taux": (["time", "lon", "lat"], predictions["surface_taux"]),
+                "surface_tauy": (["time", "lon", "lat"], predictions["surface_tauy"]),
+                "heat_flux": (["time", "lon", "lat"], predictions["heat_flux"]),
+                "freshwater_flux": (["time", "lon", "lat"], predictions["freshwater_flux"]),
+                "mask_T": (["lon", "lat", "depth"], mask_T),
+                "mask_surface_T": (["lon", "lat"], mask_T[:, :, -1]),
+                "dzt": (["depth"], dzt),
+            },
+            coords={
+                "lon": (["lon"], longitude),
+                "lat": (["lat"], latitude),
+            },
         )
 
-        ds.lon.attrs = dict(long_name="T-grid longitude", units=lon_units)
-        ds.lat.attrs = dict(long_name="T-grid latitude", units=lat_units)
+        ds.lon.attrs = {"long_name": "T-grid longitude", "units": lon_units}
+        ds.lat.attrs = {"long_name": "T-grid latitude", "units": lat_units}
 
-        var_attrs = dict(
-            temp = dict(long_name="ocean potential temperature", units="deg C"),
-            salt = dict(long_name="ocean salinity", units="g/kg"),
-            u = dict(long_name="zonal ocean velocity", units="m/s"),
-            v = dict(long_name="meridional ocean velocity", units="m/s"),
-            sea_surface_temperature = dict(
-                long_name="sea surface temperature", units="K",
-                comment="unlike `temp`, this field is shifted by +273.15 to Kelvin",
-            ),
-            sea_surface_u = dict(long_name="sea surface zonal velocity", units="m/s"),
-            sea_surface_v = dict(long_name="sea surface meridional velocity", units="m/s"),
-            sea_surface_salinity = dict(long_name="sea surface salinity", units="g/kg"),
-            surface_air_temperature = dict(
-                long_name="surface air temperature forcing", units="K",
-                comment="unit inferred by convention; not dimensionally enforced anywhere in this module",
-            ),
-            surface_taux = dict(long_name="zonal surface wind stress forcing", units="N/m^2"),
-            surface_tauy = dict(long_name="meridional surface wind stress forcing", units="N/m^2"),
-            heat_flux = dict(long_name="net surface heat flux forcing (upward positive)", units="W/m^2"),
-            freshwater_flux = dict(long_name="net surface freshwater flux forcing (upward positive)", units="kg/m^2/s"),
-            mask_T = dict(long_name="land-sea mask on T grid", units="1"),
-            mask_surface_T = dict(long_name="land-sea mask on T grid, surface level", units="1"),
-            dzt = dict(long_name="vertical grid spacing (T)", units="m"),
-        )
+        var_attrs = {
+            "temp": {"long_name": "ocean potential temperature", "units": "deg C"},
+            "salt": {"long_name": "ocean salinity", "units": "g/kg"},
+            "u": {"long_name": "zonal ocean velocity", "units": "m/s"},
+            "v": {"long_name": "meridional ocean velocity", "units": "m/s"},
+            "sea_surface_temperature": {
+                "long_name": "sea surface temperature", "units": "K",
+                "comment": "unlike `temp`, this field is shifted by +273.15 to Kelvin",
+            },
+            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s"},
+            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s"},
+            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg"},
+            "surface_air_temperature": {
+                "long_name": "surface air temperature forcing", "units": "K",
+                "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
+            },
+            "surface_taux": {"long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
+            "surface_tauy": {"long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
+            "heat_flux": {"long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
+            "freshwater_flux": {"long_name": "net surface freshwater flux forcing (upward positive)", "units": "kg/m^2/s"},
+            "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
+            "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
+            "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
+        }
         for name, attrs in var_attrs.items():
             ds[name].attrs = attrs
 

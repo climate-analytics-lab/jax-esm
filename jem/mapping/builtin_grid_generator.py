@@ -1,21 +1,20 @@
 from pathlib import Path
-from typing import Optional, Dict, List
-
-import jem
-from jem.mapping.grid import Grid, GridSpecification
 
 import coordax as cx
 import dinosaur
 import jax.numpy as jnp
 import xarray as xr
 
+import jem
+from jem.mapping.grid import Grid, GridSpecification
+
 earth_radius = 6.371e6  # m
 
 def generate_grids_from_grid_specification(
     grid_specification: str,
-    mask_file: Optional[str] = None,
-    topography_file: Optional[str] = None,
-) -> Dict[str, Grid]:
+    mask_file: str | None = None,
+    topography_file: str | None = None,
+) -> dict[str, Grid]:
     """
     Construct :code:`Domain` based on known :code:`GridSpecification`
     strings.
@@ -54,8 +53,8 @@ def generate_grids_from_grid_specification(
 
 
 def generate_coordinate_from_latitude_longitude(
-    latitude: List[float] | jnp.ndarray,
-    longitude: List[float] | jnp.ndarray,
+    latitude: list[float] | jnp.ndarray,
+    longitude: list[float] | jnp.ndarray,
     order: str = "latitude_longitude",
 ) -> cx.Coordinate:
     axis_latitude = cx.LabeledAxis("latitude", jnp.array(latitude))
@@ -71,7 +70,7 @@ def generate_coordinate_from_latitude_longitude(
 
     else:
         raise ValueError(
-            f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`"
+            f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{order!s:s}`"
         )
 
     return cx.coords.compose(*args)
@@ -103,8 +102,8 @@ def load_jcm_topography_file(
 
 def get_jcm_grids(
     horizontal_resolution: int,
-    mask_file: Optional[str] = None,
-) -> Dict[str, Grid]:
+    mask_file: str | None = None,
+) -> dict[str, Grid]:
     """
     Returns a CoordinateSystem object for the given number of layers and 
     horizontal resolution (21, 31, 42, 85, 106, 119, 170, 213, 340, or 425).
@@ -142,8 +141,8 @@ def get_jcm_grids(
     else:
         fmask, bmask = load_jcm_mask(mask_file)
 
-    return dict(
-        T=Grid(
+    return {
+        "T": Grid(
             coordinate=coordinate_T,
             grid_type="T",
             grid_specification=GridSpecification(
@@ -153,7 +152,7 @@ def get_jcm_grids(
             bmask=bmask,
             fmask=fmask,
         ),
-    )
+    }
 
 
 def load_veros_mask(mask_file):
@@ -178,8 +177,8 @@ def load_veros_mask(mask_file):
 
 def get_veros_grids(
     grid_family: str,
-    mask_file: Optional[str],
-) -> Dict[str, Grid]:
+    mask_file: str | None,
+) -> dict[str, Grid]:
     grids = None
     try:
         ds = xr.open_dataset(
@@ -191,19 +190,19 @@ def get_veros_grids(
         longitude = jnp.array(ds["xt"]) * jnp.pi / 180.0
         latitude = jnp.array(ds["yt"]) * jnp.pi / 180.0
 
-        grids = dict(
-            T=generate_coordinate_from_latitude_longitude(
+        grids = {
+            "T": generate_coordinate_from_latitude_longitude(
                 latitude=latitude,
                 longitude=longitude,
                 order="latitude_longitude",
             )
-        )
+        }
 
-    except Exception as e:
+    except Exception:
         import traceback
 
         traceback.print_exc()
-        raise e
+        raise
 
     coordinate_T = generate_coordinate_from_latitude_longitude(
         latitude=grids["T"].latitudes,
@@ -217,8 +216,8 @@ def get_veros_grids(
     else:
         fmask, bmask = load_veros_mask(mask_file)
 
-    return dict(
-        T=Grid(
+    return {
+        "T": Grid(
             coordinate=coordinate_T,
             grid_type="T",
             grid_specification=GridSpecification(
@@ -227,4 +226,4 @@ def get_veros_grids(
             bmask=bmask,
             fmask=fmask,
         ),
-    )
+    }

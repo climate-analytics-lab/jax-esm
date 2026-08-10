@@ -1,15 +1,15 @@
 from abc import ABC, abstractmethod
+from typing import Any
+
 import jax.numpy as jnp
-from typing import Dict, Any, Optional
+from jax import Array
+from typeguard import typechecked
 
 from jem.base.exceptions import ValidationError
 from jem.base.typing import (
     VariableMetadata,
 )
 from jem.mapping.grid import Grid
-
-from jax import Array
-from typeguard import typechecked
 
 
 class BasicRegridder(ABC):
@@ -27,16 +27,16 @@ class BasicRegridder(ABC):
          
     """
 
-    source_grid: Optional[Grid] = None
-    target_grid: Optional[Grid] = None
+    source_grid: Grid | None = None
+    target_grid: Grid | None = None
 
     validate_shape: bool
 
     @typechecked
     def __init__(
         self,
-        source_grid: Optional[Grid] = None,
-        target_grid: Optional[Grid] = None,
+        source_grid: Grid | None = None,
+        target_grid: Grid | None = None,
         validate_shape: bool = True,
     ):
         """Initialize the regridder."""
@@ -46,7 +46,7 @@ class BasicRegridder(ABC):
         self.validate_shape = validate_shape
 
         # Store validation results
-        self.last_validation: Dict[str, Any] = {}
+        self.last_validation: dict[str, Any] = {}
 
     def __call__(self, data: Array) -> Array:
         """Apply regridation with validation.
@@ -116,7 +116,6 @@ class BasicRegridder(ABC):
         target_metadata: VariableMetadata,
     ):
         """Validate the metadata"""
-        pass
 
     def get_info(self):
        
@@ -138,7 +137,7 @@ class IdentityRegridder(BasicRegridder):
         self, source_metadata: VariableMetadata, target_metadata: VariableMetadata
     ):
         if source_metadata[0] != target_metadata[0]: # shape
-            raise ValidationError(f"Source {str(source_metadata[0])} and target metadata {str(target_metadata[0])} must have the same shape")
+            raise ValidationError(f"Source {source_metadata[0]!s} and target metadata {target_metadata[0]!s} must have the same shape")
 
 
 class BilinearRegridder(BasicRegridder):

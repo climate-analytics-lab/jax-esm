@@ -1,13 +1,13 @@
 """Earth system components module."""
 
-import jem.components.JCM as JCM
+from jem.components import JCM
 from jem.components.slab.slab_atmosphere_model import SlabAtmosphereModel
-from jem.components.slab.slab_ocean_model import SlabOceanModel
 from jem.components.slab.slab_land_model import SlabLandModel
+from jem.components.slab.slab_ocean_model import SlabOceanModel
 
 __all__ = [
     "JCM",
-    "SlabLandModel",
     "SlabAtmosphereModel",
+    "SlabLandModel",
     "SlabOceanModel",
 ]

@@ -15,17 +15,16 @@ Programmer: Aya Lalou
 
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
-from typing import Annotated, Any, Dict, Optional, Tuple
+from typing import Annotated, Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
-
-from jem import constants as constants
-from jem.utils.bulk_op import stack_objects
-import jem.utils.data_structure as data_structure
-from jem.components.slab.base import SlabModelBase
-
 import xarray as xr
+
+from jem.components.slab.base import SlabModelBase
+from jem.utils import data_structure
+from jem.utils.bulk_op import stack_objects
+
 
 @data_structure.typed_and_dimensioned
 class LandState:
@@ -56,9 +55,9 @@ class SlabLandModel(SlabModelBase):
         grid_specification: str = "JCM::T31",
         start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
         timestep: float = 86400.0,
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
-        land_clim_file: Optional[str] = None,
+        topography_file: str | None = None,
+        mask_file: str | None = None,
+        land_clim_file: str | None = None,
         depth_soil: float = 1.0,
         depth_lice: float = 5.0,
         tdland: float = 40.0 * 86400.0,
@@ -270,18 +269,18 @@ class SlabLandModel(SlabModelBase):
         
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
-        return dict(
-            state=self.component_state_class.zeros().copy({
+        return {
+            "state": self.component_state_class.zeros().copy({
                 "land_surface_temperature" : init_T,
                 "sim_time" : 0,
                 "heatflx" : jnp.zeros(D2_nodal_shape),
                 "snowc" : jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
                 "soilw" : self.soilw_clim[:, :, init_time_idx],
             }),
-            forcing=self.component_forcing_class.zeros()
-        )
+            "forcing": self.component_forcing_class.zeros()
+        }
     
-    def _idealized_land_temperature(self, shape: Tuple[int, int]) -> jnp.ndarray:
+    def _idealized_land_temperature(self, shape: tuple[int, int]) -> jnp.ndarray:
         """Create idealized land temperature climatology.
         
         Args:
@@ -395,21 +394,21 @@ class SlabLandModel(SlabModelBase):
             
             # Return new state and predictions for output
             return (
-                dict(
-                    state=new_state, 
-                    forcing=forcing,
-                ), stack_objects([dict(
-                    state=new_state,
-                    forcing=forcing,
-                )])
+                {
+                    "state": new_state, 
+                    "forcing": forcing,
+                }, stack_objects([{
+                    "state": new_state,
+                    "forcing": forcing,
+                }])
             )
         
         return step_function
     
     def _create_xarray_data_vars(
         self,
-        predictions: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        predictions: dict[str, Any],
+    ) -> dict[str, Any]:
         """Convert predictions to xarray Dataset.
         
         Args:
@@ -423,8 +422,8 @@ class SlabLandModel(SlabModelBase):
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
         
-        return dict( 
-            land_surface_temperature = (
+        return { 
+            "land_surface_temperature": (
                 T_grid_dims,
                 state.land_surface_temperature, 
                 {
@@ -432,14 +431,14 @@ class SlabLandModel(SlabModelBase):
                     "units": "K",
                 }
             ),
-            snowc = (
+            "snowc": (
                 T_grid_dims, state.snowc,
                 {
                     "long_name": "Snow cover fraction",
                     "units": "1",
                 }
             ),
-            soilw = (
+            "soilw": (
                 T_grid_dims,
                 state.soilw,
                 {
@@ -447,7 +446,7 @@ class SlabLandModel(SlabModelBase):
                     "units": "1",
                 }
             ),
-            total_heat_flux = (
+            "total_heat_flux": (
                 T_grid_dims,
                 forcing.total_heat_flux, 
                 {
@@ -456,12 +455,12 @@ class SlabLandModel(SlabModelBase):
                     "positive": "upward",
                 }
             ),
-        )
+        }
 
-    def _create_xarray_global_attributes(self) -> Dict[str, Any]:
-        return dict(
-            description = "SPEEDY-based slab land surface model output",
-            depth_soil = f"{self.depth_soil} m",
-            depth_lice = f"{self.depth_lice} m",
-            tdland = f"{self.tdland} days",
-        )
+    def _create_xarray_global_attributes(self) -> dict[str, Any]:
+        return {
+            "description": "SPEEDY-based slab land surface model output",
+            "depth_soil": f"{self.depth_soil} m",
+            "depth_lice": f"{self.depth_lice} m",
+            "tdland": f"{self.tdland} days",
+        }

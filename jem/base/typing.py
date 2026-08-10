@@ -1,6 +1,8 @@
-from typing import Any, Callable, Dict, Optional
-import xarray as xr
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
+
+import xarray as xr
 from typeguard import typechecked
 
 Pytree = Any
@@ -8,7 +10,7 @@ Pytree = Any
 ComponentName = str
 Workflow = Pytree  # Any nested sequence of ComponentName
 ComponentCarry = Pytree
-CoupledCarry = Dict[ComponentName, ComponentCarry]
+CoupledCarry = dict[ComponentName, ComponentCarry]
 SimulationTime = float
 Predictions = Pytree
 
@@ -18,13 +20,13 @@ StepFunctionGenerator = Callable[[], StepFunction]
 MapperFunction = Callable[[ CoupledCarry ], CoupledCarry ]
 TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, Predictions]]
 PredictionsToXarrayFunction = Callable[[Predictions], xr.Dataset]
-GetInfoFunction = Callable[[], Dict]
+GetInfoFunction = Callable[[], dict]
 
 VariableName = str
 VariableShape = tuple[int, ...]
 VariableDimension = tuple[str, ...]
-VariableMetadata = tuple[VariableShape, Optional[VariableDimension]]
-VariableRegistry = Dict[VariableName, VariableMetadata]
+VariableMetadata = tuple[VariableShape, VariableDimension | None]
+VariableRegistry = dict[VariableName, VariableMetadata]
 
 @typechecked
 @dataclass

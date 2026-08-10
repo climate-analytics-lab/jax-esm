@@ -1,26 +1,27 @@
 """Main coupler class for Earth system model coupling."""
 
 import time
-from typing import Any, Dict, Optional, Callable
-
-from jem.base.interface import resolve_interface
-from jem.base.typing import (
-    JEMComponent,
-    MapperFunction,
-    Workflow,
-    Pytree,
-    Predictions,
-    TrajectoryFunction,
-    CoupledCarry,
-)
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_structure
-from jem.utils.bulk_op import unwrap_leading_dims, stack_objects
-
 from jax_tqdm import scan_tqdm
 from tqdm import tqdm
+
+from jem.base.interface import resolve_interface
+from jem.base.typing import (
+    CoupledCarry,
+    JEMComponent,
+    MapperFunction,
+    Predictions,
+    Pytree,
+    TrajectoryFunction,
+    Workflow,
+)
+from jem.utils.bulk_op import stack_objects, unwrap_leading_dims
+
 
 # Python Equivalent. See https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html
 def adhoc_scan(f, init, xs):
@@ -60,14 +61,14 @@ class Coupler:
             components.
     """
    
-    components: Dict[str, JEMComponent]
-    mappers: Dict[str, MapperFunction]
+    components: dict[str, JEMComponent]
+    mappers: dict[str, MapperFunction]
     tracjectory_holder: TrajectoryFunction | None
      
     def __init__(
         self,
-        components: Optional[Dict[str, Any]] = None,
-        mappers: Optional[Dict[str, Any]] = None,
+        components: dict[str, Any] | None = None,
+        mappers: dict[str, Any] | None = None,
     ):
         """Initialize the coupler.
 
@@ -137,7 +138,7 @@ class Coupler:
             component_step_functions[component_name] = _component_step_function
 
         def step_function(carry: CoupledCarry, step):
-            _unstacked_predictions = { component_name : [] for component_name in self.components.keys() } # type: ignore
+            _unstacked_predictions = { component_name : [] for component_name in self.components } # type: ignore
             input_carry_structure = tree_structure(carry)
             for name in flattened_workflow:
                 if name in self.components:
@@ -152,7 +153,7 @@ class Coupler:
 
             predictions = {
                 name : unwrap_leading_dims(stack_objects(_unstacked_predictions[name]), first_n_dim=2)
-                for name in _unstacked_predictions.keys() if len(_unstacked_predictions[name]) != 0
+                for name in _unstacked_predictions if len(_unstacked_predictions[name]) != 0
             }
 
             return carry, predictions
@@ -163,14 +164,16 @@ class Coupler:
         self,
         workflow: Workflow,
         iterations: int,
-        initial_carry: Optional[CoupledCarry] = None,
+        initial_carry: CoupledCarry | None = None,
         jitted: bool = True,
         show_progress: bool = True,
-        tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+        tqdm_kwargs: dict[str, Any] | None = None,
         reuse_last_available_trajectory: bool = False,
         verbose: bool=True,
         checkpoint: bool = False,
     ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
+        if tqdm_kwargs is None:
+            tqdm_kwargs = {"desc": "Simulation"}
         initial_carry = initial_carry or self.initialize()
 
         if reuse_last_available_trajectory and self.trajectory_holder is not None:
@@ -200,9 +203,11 @@ class Coupler:
         jitted: bool = True,
         show_progress: bool = True,
         checkpoint: bool = False,
-        tqdm_kwargs: Dict[str, Any] = dict(desc="Simulation"),
+        tqdm_kwargs: dict[str, Any] | None = None,
     ) -> TrajectoryFunction:
 
+        if tqdm_kwargs is None:
+            tqdm_kwargs = {"desc": "Simulation"}
         scan_func = generate_scan_function(jitted=jitted)
         coupled_step_function = self.generate_step_function(
             workflow=workflow,
@@ -321,7 +326,7 @@ class Coupler:
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])
             for component_name, component in self.components.items() if component_name in predictions
-            if getattr(component, "predictions_to_xarray") is not None
+            if component.predictions_to_xarray is not None
         }
 
     def get_info(self):

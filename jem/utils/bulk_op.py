@@ -1,4 +1,5 @@
-from typing import Any, List
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 
@@ -47,7 +48,7 @@ def unwrap_leading_dims(
 
 
 def stack_objects(
-    objs: List,
+    objs: list,
 ):
     """
     A tool function that stack dataclasses together.
@@ -67,7 +68,7 @@ def stack_objects(
 
 
 def concat_objects(
-    objs: List,
+    objs: list,
     axis: int,
 ):
     """
