@@ -1,17 +1,17 @@
 """Slab ocean model component."""
 
-from typing import Optional, Dict, Any, Annotated
 from pathlib import Path
+from typing import Annotated, Any
 
-import jax_datetime as jdt
 import jax.numpy as jnp
+import jax_datetime as jdt
 import xarray as xr
 
 from jem import constants
+from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
-import jem.utils.data_structure as data_structure
-from jem.components.slab.base import SlabModelBase
 
 default_land_surface_temperature = 288.15
 
@@ -86,16 +86,16 @@ class SlabOceanModel(SlabModelBase):
     def __init__(
         self,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         relaxation_time: float = 60 * 86400.0,
         mixed_layer_depth_min: float = 40.0,
         mixed_layer_depth_max: float = 60.0,
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
-        SST_clim_file: Optional[str] = None,
-        Q_flux_file: Optional[str] = None,
-        forcing_method: Optional[str] = None,
+        topography_file: str | None = None,
+        mask_file: str | None = None,
+        SST_clim_file: str | None = None,
+        Q_flux_file: str | None = None,
+        forcing_method: str | None = None,
         initialization_sea_surface_temperature: float = 288.15,
         mask_value: float = 0.0,
         calendar: str = "365_day",
@@ -147,17 +147,16 @@ class SlabOceanModel(SlabModelBase):
             if self.Q_flux_file is None:
                 print("Notice: `Q_flux_file` is not given. Default values (zeros) will be used.")
             elif not Path(self.Q_flux_file).exists():
-                raise FileNotFoundError(f"Q-flux file \"{str(self.Q_flux_file):s}\" is specified but it does not exist.")
+                raise FileNotFoundError(f"Q-flux file \"{self.Q_flux_file!s:s}\" is specified but it does not exist.")
         elif self.forcing_method == "relaxation":
             if self.SST_clim_file is None:
                 print("Notice: `SST_clim_file` is not given. Default values (zeros) will be used.")
             elif not Path(self.SST_clim_file).exists():
-                raise FileNotFoundError(f"SST climatology file \"{str(self.SST_clim_file):s}\" is specified but does not exist.")
+                raise FileNotFoundError(f"SST climatology file \"{self.SST_clim_file!s:s}\" is specified but does not exist.")
             elif (self.relaxation_time < 0) or jnp.isnan(self.relaxation_time):
                 raise ValueError("`relaxation_time` must be a positive number or infinity.")
         else:
-            raise ValueError(f"Unknown `forcing_method` is given: \"{str(self.forcing_method):s}\" ")
-
+            raise ValueError(f"Unknown `forcing_method` is given: \"{self.forcing_method!s:s}\" ")
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
@@ -215,8 +214,8 @@ class SlabOceanModel(SlabModelBase):
         if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
             print("grid.bmask and SST_clim do share the same mask.")
         else:
-            raise Exception(
-                "Warning: fmask_ocn and sea_surface_temperature_init do not share the same mask."
+            raise ValueError(
+                "fmask_ocn and sea_surface_temperature_init do not share the same mask."
             )
 
         # Set relaxation time to infinity if no climatology
@@ -243,16 +242,16 @@ class SlabOceanModel(SlabModelBase):
         forcing = forcing.copy({
             "q_flux": forcing.q_flux
         })
-        return dict(
-            state=self.component_state_class.zeros().copy({
+        return {
+            "state": self.component_state_class.zeros().copy({
                 "mixed_layer_depth": init_mixed_layer_depth,
                 "sea_surface_temperature": init_sea_surface_temperature,
             }),
-            forcing=forcing,
-            derived=dict(
-                ice_frazil_melt_energy=jnp.zeros(self.grid_shape),
-            ),
-        )
+            "forcing": forcing,
+            "derived": {
+                "ice_frazil_melt_energy": jnp.zeros(self.grid_shape),
+            },
+        }
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
@@ -332,35 +331,37 @@ class SlabOceanModel(SlabModelBase):
                 }
             )
 
-            predictions = dict(
-                state=new_state,
-                forcing=dict(
-                    total_heat_flux=total_heat_flux,
-                ),
-                derived=dict(
-                    ice_frazil_melt_energy=ice_frazil_melt_energy,
-                ),
-            )
+            predictions = {
+                "state": new_state,
+                "forcing": {
+                    "total_heat_flux": total_heat_flux,
+                },
+                "derived": {
+                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
+                },
+            }
             if self.forcing_method == "Qflux":
                 predictions["forcing"]["q_flux"] = snapshot_Qflux
 
-            return dict(
-                state=new_state,
-                forcing=forcing,
-                derived=dict(ice_frazil_melt_energy=ice_frazil_melt_energy),
-            ), stack_objects([predictions])
+            return {
+                "state": new_state,
+                "forcing": forcing,
+                "derived": {
+                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
+                },
+            }, stack_objects([predictions])
 
         return step_function
 
-    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create xarray data variables for ocean output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
         derived = predictions["derived"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
-        data_vars = dict(
-            sea_surface_temperature=(
+        data_vars = {
+            "sea_surface_temperature": (
                 T_grid_dims,
                 state["sea_surface_temperature"],
                 {
@@ -368,7 +369,7 @@ class SlabOceanModel(SlabModelBase):
                     "units": "K",
                 }
             ),
-            mixed_layer_depth=(
+            "mixed_layer_depth": (
                 T_grid_dims,
                 state["mixed_layer_depth"],
                 {
@@ -376,7 +377,7 @@ class SlabOceanModel(SlabModelBase):
                     "units": "m",
                 }
             ),
-            total_heat_flux=(
+            "total_heat_flux": (
                 T_grid_dims,
                 forcing["total_heat_flux"],
                 {
@@ -385,7 +386,7 @@ class SlabOceanModel(SlabModelBase):
                     "positive": "upward",
                 }
             ),
-            ice_frazil_melt_energy=(
+            "ice_frazil_melt_energy": (
                 T_grid_dims,
                 derived["ice_frazil_melt_energy"],
                 {
@@ -393,7 +394,7 @@ class SlabOceanModel(SlabModelBase):
                     "units": "J m-2",
                 }
             ),
-        )
+        }
 
         if self.forcing_method == "Qflux":
             data_vars["q_flux"] = (

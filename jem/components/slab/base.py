@@ -6,16 +6,19 @@ code duplication.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Dict, Any
-from jem.base.typing import VariableRegistry
+from typing import Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
 import xarray as xr
-
 from jcm.date import days_per_year as jcm_days_per_year
-from jem.utils.cycles import evaluate_cyclic_linear
+
+from jem.base.typing import VariableRegistry
 from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
+from jem.utils.cycles import evaluate_cyclic_linear
+
+_DEFAULT_START_DATETIME = jdt.to_datetime("2001-01-01")
+
 
 class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
@@ -41,10 +44,10 @@ class SlabModelBase(ABC):
         self,
         name: str,
         grid_specification: str = "JCM::T31",
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
+        topography_file: str | None = None,
+        mask_file: str | None = None,
         calendar: str = "365_day",
     ):
         """Initialize slab model base.
@@ -89,12 +92,10 @@ class SlabModelBase(ABC):
         - self.component_state_class
         - self.component_forcing_class
         """
-        pass
 
     @abstractmethod
     def _create_variable_registries(self) -> None:
         """Create state_variable_registry and forcing_variable_registry"""
-        pass
 
     def _setup_lat_lon_grids(self) -> None:
         """Set up 2D latitude and longitude grids in radians.
@@ -179,7 +180,6 @@ class SlabModelBase(ABC):
         Returns:
             Initial component state and forcing
         """
-        pass
 
     def generate_step_function(self):
         """Generate the step function for time integration.
@@ -201,11 +201,9 @@ class SlabModelBase(ABC):
         Returns:
             Step function with signature (state, forcing, t) -> (new_state, predictions)
         """
-        pass
 
     def validate(self):
         """Validate the model configuration."""
-        pass
 
     def predictions_to_xarray(self, predictions) -> xr.Dataset:
         """Convert predictions to xarray Dataset.
@@ -221,15 +219,15 @@ class SlabModelBase(ABC):
             "%Y-%m-%d %H:%M:%S"
         )
 
-        coords = dict(
-            time=(
+        coords = {
+            "time": (
                 ["time"],
                 predictions["state"].sim_time / 3600.0,
                 {"units": f"hours since {start_datetime_str:s}"},
             ),
-            latitude2D=(T_grid_axis_names, self.latitude_radian * 180 / jnp.pi),
-            longitude2D=(T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
-        )
+            "latitude2D": (T_grid_axis_names, self.latitude_radian * 180 / jnp.pi),
+            "longitude2D": (T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
+        }
 
         data_vars = self._create_xarray_data_vars(predictions)
 
@@ -240,7 +238,7 @@ class SlabModelBase(ABC):
         )
 
     @abstractmethod
-    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create model-specific xarray data variables.
 
         Args:
@@ -249,9 +247,8 @@ class SlabModelBase(ABC):
         Returns:
             Dict of data variables for xarray Dataset
         """
-        pass
     
-    def _create_xarray_global_attributes(self) -> Dict[str, Any]:
+    def _create_xarray_global_attributes(self) -> dict[str, Any]:
         """Create model-specific xarray Dataset global attributes.
 
         Returns:
@@ -259,7 +256,7 @@ class SlabModelBase(ABC):
         """
         return {}
 
-    def get_info(self) -> Dict[str, Any]:
-        return dict(
-            name = self.name,
-        )
+    def get_info(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+        }

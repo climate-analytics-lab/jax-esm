@@ -1,7 +1,11 @@
-from .slab_atmosphere_model import SlabAtmosphereModel, AtmosphereState, AtmosphereForcing
+from .slab_atmosphere_model import (
+    AtmosphereForcing,
+    AtmosphereState,
+    SlabAtmosphereModel,
+)
 
 __all__ = [
-    "SlabAtmosphereModel",
-    "AtmosphereState",
     "AtmosphereForcing",
+    "AtmosphereState",
+    "SlabAtmosphereModel",
 ]

@@ -1,15 +1,16 @@
 """Slab atmosphere model component."""
 
-from typing import Optional, Dict, Any, Annotated
+from typing import Annotated, Any
 
-import jax_datetime as jdt
 import jax.numpy as jnp
+import jax_datetime as jdt
 
 from jem import constants
+from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
-from jem.components.slab.base import SlabModelBase
-import jem.utils.data_structure as data_structure
+
 
 @data_structure.typed_and_dimensioned
 class AtmosphereState:
@@ -57,9 +58,9 @@ class SlabAtmosphereModel(SlabModelBase):
         self,
         grid_specification: str = "JCM::T31",
         timestep: float = 86400.0,
-        start_datetime: jdt.Datetime = jdt.to_datetime("2001-01-01"),
-        topography_file: Optional[str] = None,
-        mask_file: Optional[str] = None,
+        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
+        topography_file: str | None = None,
+        mask_file: str | None = None,
         calendar: str = "365_day",
     ):
         """Initialize slab atmosphere model.
@@ -137,17 +138,17 @@ class SlabAtmosphereModel(SlabModelBase):
         )
         self.cd_factor = self.timestep / cd
 
-        return dict(
-            state=self.component_state_class.zeros().copy({
+        return {
+            "state": self.component_state_class.zeros().copy({
                 "mean_air_temperature": init_mean_air_temperature,
                 "mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
                 "mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
             }),
-            derived=self.component_derived_class.zeros(),
-            forcing=self.component_forcing_class.zeros().copy({
+            "derived": self.component_derived_class.zeros(),
+            "forcing": self.component_forcing_class.zeros().copy({
                 "bulk_drag_coefficient": jnp.array(1e-3),
             })
-        )
+        }
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
@@ -215,24 +216,24 @@ class SlabAtmosphereModel(SlabModelBase):
                 "internal_total_heat_flux" : total_heat_flux,
             })
 
-            return dict(
-                state=new_state,
-                derived=new_derived,
-                forcing=forcing,
-            ), stack_objects(
-                [dict(state=new_state, forcing=forcing)]
+            return {
+                "state": new_state,
+                "derived": new_derived,
+                "forcing": forcing,
+            }, stack_objects(
+                [{"state": new_state, "forcing": forcing}]
             )
 
         return step_function
 
-    def _create_xarray_data_vars(self, predictions) -> Dict[str, Any]:
+    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create xarray data variables for atmosphere output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
 
-        return dict(
-            total_heat_flux=(
+        return {
+            "total_heat_flux": (
                 T_grid_dims,
                 forcing.total_heat_flux,
                 {
@@ -241,7 +242,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "positive": "upward",
                 }                   
             ),
-            mean_air_temperature=(
+            "mean_air_temperature": (
                 T_grid_dims,
                 state.mean_air_temperature,
                 {
@@ -249,7 +250,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "units": "K",
                 }
             ),
-            mean_zonal_wind_velocity=(
+            "mean_zonal_wind_velocity": (
                 T_grid_dims,
                 state.mean_zonal_wind_velocity,
                 {
@@ -258,7 +259,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "positive": "east",
                 } 
             ),
-            mean_meridional_wind_velocity=(
+            "mean_meridional_wind_velocity": (
                 T_grid_dims,
                 state.mean_meridional_wind_velocity,
                 {
@@ -267,4 +268,4 @@ class SlabAtmosphereModel(SlabModelBase):
                     "positive": "north",
                 }
             ),
-        )
+        }

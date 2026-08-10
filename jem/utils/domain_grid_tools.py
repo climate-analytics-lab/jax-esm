@@ -1,13 +1,11 @@
-from typing import List
+
+import coordax as cx
 import jax.numpy as jnp
 
 
-import coordax as cx
-
-
 def generate_coordinate_from_latitude_longitude(
-    latitude: List[float] | jnp.ndarray,
-    longitude: List[float] | jnp.ndarray,
+    latitude: list[float] | jnp.ndarray,
+    longitude: list[float] | jnp.ndarray,
     order: str = "latitude_longitude",
 ) -> cx.Coordinate:
     axis_latitude = cx.LabeledAxis("latitude", jnp.array(latitude))
@@ -23,7 +21,7 @@ def generate_coordinate_from_latitude_longitude(
 
     else:
         raise ValueError(
-            f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{str(order):s}`"
+            f"Error: `order` has to be either `longitude_latitude` or `latitude_longitude`. User here input `{order!s:s}`"
         )
 
     return cx.coords.compose(*args)
