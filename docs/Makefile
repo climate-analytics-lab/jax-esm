@@ -9,8 +9,8 @@ SOURCEDIR     = source
 BUILDDIR      = build
 
 copy_notebook:
-	rm -rf ./source/notebooks
-	cp -r ../notebooks ./source/
+	mkdir -p ./source/notebooks
+	rsync -a --delete ../notebooks/ ./source/notebooks/
 
 
 # Put it first so that "make" without argument is like "make help".
