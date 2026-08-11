@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath('../..'))
 
 project = 'JAX-ESM'
 copyright = '2026, Climate Analytics Lab'
-author = 'Climate Analytics Lab'
+author = 'Tien-Yiao Hsu and Climate Analytics Lab'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -25,6 +25,9 @@ extensions = [
     'sphinx.ext.napoleon',
     'nbsphinx',
 ]
+
+# Only execute notebooks that don't already have saved output cells.
+nbsphinx_execute = 'auto'
 
 templates_path = ['_templates']
 exclude_patterns = []
