@@ -15,15 +15,9 @@ JCM with Slabs
    notebooks/02_experimental/01_earth
 
 
-
-
-
 JCM with Veros
 --------------
 
-.. toctree::
-   :maxdepth: 1
-   :caption: Contents:
-
-   notebooks/02_experimental/02_experimental_JCM_Veros/main
- 
+Documentation for this example is not yet available. See
+:code:`notebooks/02_experimental/02_experimental_JCM_Veros/README.md`
+in the repository for now.
