@@ -1,0 +1,201 @@
+"""Minimal grid concept owned by the slab models.
+
+Slab models do no advection, so unlike a full coupling-layer grid they only
+need a fractional (land) mask and the coordinates that go with it -- shape
+and the binary mask are both derived from fractional_mask, so nothing here
+can drift out of sync.
+"""
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import dinosaur
+import jax.numpy as jnp
+import xarray as xr
+from jax import Array
+
+import jem
+
+
+@dataclass
+class SlabGrid:
+    """Grid information needed by slab models.
+
+    fractional_mask, latitude_radian, and longitude_radian fully specify the
+    grid: shape and the derived binary mask both come from fractional_mask
+    alone, so there's a single source of truth instead of several attributes
+    that could drift out of sync.
+
+    Attributes:
+        fractional_mask: Fraction of each grid cell occupied by land, in [0, 1].
+        latitude_radian: 2D array of latitudes in radians, matching
+            fractional_mask.shape.
+        longitude_radian: 2D array of longitudes in radians, matching
+            fractional_mask.shape.
+        threshold: Fractional-mask value at or above which a cell counts as
+            land in `binary_mask`.
+        dims: Axis names for fractional_mask/latitude_radian/longitude_radian,
+            in shape order (used for xarray output labeling).
+    """
+
+    fractional_mask: Array
+    latitude_radian: Array
+    longitude_radian: Array
+    threshold: float = 1.0
+    dims: tuple[str, str] = ("longitude", "latitude")
+
+    def __post_init__(self):
+        assert self.latitude_radian.shape == self.fractional_mask.shape, (
+            "latitude_radian must match fractional_mask shape"
+        )
+        assert self.longitude_radian.shape == self.fractional_mask.shape, (
+            "longitude_radian must match fractional_mask shape"
+        )
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.fractional_mask.shape
+
+    @property
+    def binary_mask(self) -> Array:
+        """Binary land(1)/ocean(0) mask, derived from fractional_mask."""
+        return jnp.where(self.fractional_mask >= self.threshold, 1.0, 0.0)
+
+
+def _parse_grid_specification(grid_specification_string: str) -> tuple[str, str]:
+    """Parse a grid specification string of format "<grid_universe>::<grid_family>".
+
+    Returns:
+        (grid_universe, grid_family)
+    """
+    match = re.match(r"^([^:]+)::(.+)$", grid_specification_string)
+
+    if not match:
+        raise ValueError(
+            f"Invalid grid specification format: '{grid_specification_string}'. "
+            f"Expected format: '<grid_universe>::<grid_family>'"
+        )
+
+    return match.group(1), match.group(2)
+
+
+def _broadcast_separable_grid_to_2d(
+    latitude_1d: Array,
+    longitude_1d: Array,
+    shape: tuple[int, int],
+    dims: tuple[str, str],
+) -> tuple[Array, Array]:
+    """Broadcast independent 1D latitude/longitude axes into 2D fields.
+
+    Only valid for grids where latitude and longitude are separable (each
+    varies along a single axis, as for JCM/Veros regular lat-lon grids). A
+    curvilinear/displaced-pole grid builder would instead load its 2D
+    latitude/longitude fields directly and skip this helper.
+    """
+    lat_dim_idx = dims.index("latitude")
+    lon_dim_idx = dims.index("longitude")
+
+    latitude_2d = jnp.repeat(
+        jnp.expand_dims(latitude_1d, axis=lon_dim_idx),
+        repeats=shape[lon_dim_idx],
+        axis=lon_dim_idx,
+    )
+    longitude_2d = jnp.repeat(
+        jnp.expand_dims(longitude_1d, axis=lat_dim_idx),
+        repeats=shape[lat_dim_idx],
+        axis=lat_dim_idx,
+    )
+    return latitude_2d, longitude_2d
+
+
+def generate_slab_grid(
+    grid_specification: str,
+    fractional_mask: Array | None = None,
+) -> SlabGrid:
+    """Convenience helper: build a SlabGrid from one of JEM's canonical grid
+    specification strings, instead of assembling one by hand.
+
+    Loading a fractional mask from a file is the caller's responsibility --
+    see `load_jcm_fractional_mask` for the conventional per-universe loaders.
+
+    Args:
+        grid_specification: String in format "<grid_universe>::<grid_family>",
+            e.g. "JCM::T31"
+        fractional_mask: Fraction of each grid cell occupied by land, in
+            [0, 1], matching the grid's shape. If None, defaults to all-zero
+            (no land).
+
+    Returns:
+        A SlabGrid, with the binary-mask threshold set to the conventional
+        value for the grid_universe (0.95 for JCM).
+    """
+    grid_universe, grid_family = _parse_grid_specification(grid_specification)
+
+    if grid_universe == "JCM":
+        return _generate_jcm_slab_grid(
+            horizontal_resolution=int(grid_family[1:]),
+            fractional_mask=fractional_mask,
+        )
+    raise ValueError(f"Error: unrecognized grid_universe '{grid_universe}'.")
+
+
+def load_jcm_fractional_mask(mask_file: str) -> Array:
+    """Load a JCM land-sea mask file into a fractional_mask array."""
+    ds = xr.open_dataset(mask_file, engine="netcdf4")
+    fmask = jnp.asarray(ds["lsm"])
+
+    assert jnp.all((0.0 <= fmask) & (fmask <= 1.0)), (
+        "Land-sea mask must be between 0 and 1"
+    )
+
+    return fmask
+
+
+def _generate_jcm_slab_grid(
+    horizontal_resolution: int,
+    fractional_mask: Array | None = None,
+) -> SlabGrid:
+    """
+    Builds a SlabGrid for the given horizontal resolution (21, 31, 42, 85,
+    106, 119, 170, 213, 340, or 425).
+    """
+    try:
+        horizontal_grid = getattr(
+            dinosaur.spherical_harmonic.Grid, f"T{horizontal_resolution:d}"
+        )
+    except AttributeError:
+        raise ValueError(
+            f"Invalid horizontal grid name: T{horizontal_resolution:d}. Must be one "
+            "of: T21, T31, T42, T85, T106, T119, T170, T213, T340, or T425."
+        )
+
+    one_layer_coords = dinosaur.coordinate_systems.CoordinateSystem(
+        horizontal=horizontal_grid(radius=1.0),
+        vertical=dinosaur.sigma_coordinates.SigmaCoordinates([0.0, 1.0]),
+    )
+    hgrid = one_layer_coords.horizontal
+
+    latitude = jnp.asarray(hgrid.latitudes)
+    longitude = jnp.asarray(hgrid.longitudes)
+    dims = ("longitude", "latitude")
+    shape = (longitude.shape[0], latitude.shape[0])
+
+    if fractional_mask is None:
+        print("Notice: No fractional_mask given. Set fmask = 0.")
+        fmask = jnp.zeros(shape)
+    else:
+        fmask = fractional_mask
+
+    latitude_2d, longitude_2d = _broadcast_separable_grid_to_2d(
+        latitude, longitude, shape, dims
+    )
+
+    return SlabGrid(
+        fractional_mask=fmask,
+        latitude_radian=latitude_2d,
+        longitude_radian=longitude_2d,
+        threshold=0.95,
+        dims=dims,
+    )
+
+

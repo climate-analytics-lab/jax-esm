@@ -34,35 +34,19 @@ class BasicMapper:
     .. code-block:: python
        :linenos:
 
-       from jem.coupling.regridder import IdentityTransformer
-       from jem.coupling.mapper import Mapper
-       
-       # ... construct models ...
-       atm_model = ... 
-       ocn_model = ...
-       
+       from jem.mapping.regridder import IdentityRegridder
+       from jem.mapping.mapper import BasicMapper
 
-       mapper = Mapper(
-           components=dict(
-               atm=atm_model,
-               ocn=ocn_model,
-           )
-       )
+       mapper = BasicMapper()
        mapper.add_mapping(
            source = ("atm", "phydata.total_heat_flux"),
            target = ("ocn", "flux.total_heat_flux"),
-           regridder = IdentityTransformer(
-               source_grid=atm_model.grid,
-               target_grid=ocn_model.grid,
-           )
+           regridder = IdentityRegridder(),
        )
        mapper.add_mapping(
            source = ("ocn", "prog.sea_surface_temperature"),
            target = ("atm", "scalar.sea_surface_temperature"),
-           regridder = IdentityTransformer(
-               source_grid=ocn_model.grid,
-               target_grid=atm_model.grid,
-           )
+           regridder = IdentityRegridder(),
        )
 
     """

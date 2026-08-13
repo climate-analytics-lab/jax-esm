@@ -1,62 +1,8 @@
-import re
 from dataclasses import dataclass
 
 import coordax as cx
 import jax.numpy as jnp
 from jax import Array
-
-
-@dataclass
-class GridSpecification:
-    """
-    grid_universe : Top name for classification. Such as JCM, GFDL, CESM, ... , and such.
-    grid_family   : Such as T31, FV45, ..., gx1v6 and such.
-    """
-
-    grid_universe: str
-    grid_family: str
-
-    @classmethod
-    def parse_grid_specification(cls, grid_specification_string: str) -> "GridSpecification":
-        """
-        Parse a grid specification string of format "<grid_universe>::<grid_family>".
-
-        For grid_universe == "JCM", grid_family should be "T<truncation_number>"
-        where truncation_number is an integer.
-
-        For grid_universe == "Veros", grid_family should be "<resolution>"
-        where resolution is a float.
-
-        Args:
-            grid_specification (str): String in format "<grid_universe>::<grid_family>"
-
-        Returns:
-            dict: Dictionary with keys 'grid_universe', 'grid_family', and if applicable,
-                  'truncation_number'
-
-        Raises:
-            ValueError: If the format is invalid
-        """
-        # Parse the basic format: <grid_universe>::<grid_family>
-        match = re.match(r"^([^:]+)::(.+)$", grid_specification_string)
-
-        if not match:
-            raise ValueError(
-                f"Invalid grid specification format: '{grid_specification_string}'. "
-                f"Expected format: '<grid_universe>::<grid_family>'"
-            )
-
-        return GridSpecification(
-            grid_universe=match.group(1),
-            grid_family=match.group(2),
-        )
-
-    @property
-    def full_name(self):
-        return f"{self.grid_universe}::{self.grid_family}"
-
-    def __str__(self):
-        return self.full_name
 
 
 @dataclass
@@ -71,7 +17,7 @@ class Grid:
     grid_type: str | None = (
         None  # "T" for tracer grid (most common), "U" for U grid (arakawa-grid context), ... and such.
     )
-    grid_specification: GridSpecification | None = None
+    grid_specification: str | None = None
     area: Array | None = None
     bmask: Array | None = None
     fmask: Array | None = None
@@ -90,9 +36,7 @@ class Grid:
 
     @property
     def full_name(self):
-        grid_specification_full_name = (
-            "" if self.grid_specification is None else self.grid_specification.full_name
-        )
+        grid_specification_full_name = self.grid_specification or ""
         return f"{grid_specification_full_name}{self.grid_type}"
 
     @property

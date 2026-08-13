@@ -7,6 +7,7 @@ import jax_datetime as jdt
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.components.slab.grid import SlabGrid
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
@@ -56,30 +57,24 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         timestep: float = 86400.0,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         calendar: str = "365_day",
     ):
         """Initialize slab atmosphere model.
 
         Args:
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             timestep: Model timestep in seconds
             start_datetime: Simulation start datetime
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
         """
 
         super().__init__(
             name="SlabAtmosphereModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -102,8 +97,8 @@ class SlabAtmosphereModel(SlabModelBase):
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
             {
                 "zero_dimensional": (),
-                "two_dimensional": self.grid_shape,
-                "heatflux_dimension": self.grid_shape + (2,),
+                "two_dimensional": self.grid.shape,
+                "heatflux_dimension": self.grid.shape + (2,),
             }
         )
         self.component_state_class = decorator(AtmosphereState)
@@ -125,11 +120,11 @@ class SlabAtmosphereModel(SlabModelBase):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.latitude_radian) * 17.0
+            positive_cosine_cubic_latitude_squared(self.grid.latitude_radian) * 17.0
             + constants.freezing_point_K
         )
-        init_mean_zonal_wind_velocity = jnp.zeros_like(self.latitude_radian) + 10.0
-        init_mean_meridional_wind_velocity = jnp.zeros_like(self.latitude_radian)
+        init_mean_zonal_wind_velocity = jnp.zeros_like(self.grid.latitude_radian) + 10.0
+        init_mean_meridional_wind_velocity = jnp.zeros_like(self.grid.latitude_radian)
 
         # Compute heat capacity factor for Euler forward scheme
         cd = (
@@ -152,8 +147,8 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
-        land_index = self.horizontal_grids["T"].bmask == 1
-        ocean_index = self.horizontal_grids["T"].bmask == 0
+        land_index = self.grid.binary_mask == 1
+        ocean_index = self.grid.binary_mask == 0
 
         def step_function(carry, step):
             state = carry["state"]
@@ -230,7 +225,7 @@ class SlabAtmosphereModel(SlabModelBase):
         """Create xarray data variables for atmosphere output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        T_grid_dims = ("time",) + self.grid.dims
 
         return {
             "total_heat_flux": (

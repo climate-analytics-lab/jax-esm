@@ -22,6 +22,7 @@ import jax_datetime as jdt
 import xarray as xr
 
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.components.slab.grid import SlabGrid
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 
@@ -52,11 +53,9 @@ class SlabLandModel(SlabModelBase):
     
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         land_clim_file: str | None = None,
         depth_soil: float = 1.0,
         depth_lice: float = 5.0,
@@ -66,13 +65,11 @@ class SlabLandModel(SlabModelBase):
         calendar: str = "365_day",
     ):
         """Initialize land surface model.
-        
+
         Args:
-            grid_specification: Grid specification string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             start_datetime: Start datetime for simulation
             timestep: Model timestep in seconds
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to mask NetCDF file
             land_clim_file: Optional path to land climatology NetCDF file
             depth_soil: Soil layer depth in meters (default: 1.0)
             depth_lice: Land-ice depth in meters (default: 5.0)
@@ -80,14 +77,12 @@ class SlabLandModel(SlabModelBase):
             flandmin: Minimum land fraction for anomaly computation (default: 1/3)
             land_threshold: Land mask threshold (default: 0.1)
         """
-        
+
         super().__init__(
             name="LandModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -120,7 +115,7 @@ class SlabLandModel(SlabModelBase):
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for land model."""
 
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid.shape})
         self.component_state_class = decorator(LandState)
         self.component_forcing_class = decorator(LandForcing)
 
@@ -151,8 +146,8 @@ class SlabLandModel(SlabModelBase):
         
         # Use domain masks
         thrsh = self.land_threshold
-        fmask_raw = self.horizontal_grids["T"].fmask
-        D2_nodal_shape = self.horizontal_grids["T"].shape
+        fmask_raw = self.grid.fractional_mask
+        D2_nodal_shape = self.grid.shape
         
         # Create binary and fractional land masks (Fortran: land_model_init lines 72-82)
         self.fmask_l = jnp.where(
@@ -420,7 +415,7 @@ class SlabLandModel(SlabModelBase):
         
         state = predictions["state"]
         forcing = predictions["forcing"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        T_grid_dims = ("time",) + self.grid.dims
         
         return { 
             "land_surface_temperature": (

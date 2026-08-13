@@ -9,6 +9,7 @@ import xarray as xr
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.components.slab.grid import SlabGrid
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
@@ -85,14 +86,12 @@ class SlabOceanModel(SlabModelBase):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         relaxation_time: float = 60 * 86400.0,
         mixed_layer_depth_min: float = 40.0,
         mixed_layer_depth_max: float = 60.0,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         SST_clim_file: str | None = None,
         Q_flux_file: str | None = None,
         forcing_method: str | None = None,
@@ -103,14 +102,12 @@ class SlabOceanModel(SlabModelBase):
         """Initialize slab ocean model.
 
         Args:
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
             relaxation_time: Relaxation timescale to climatology in seconds
             mixed_layer_depth_min: Minimum mixed layer depth in meters
             mixed_layer_depth_max: Maximum mixed layer depth in meters
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
             SST_clim_file: Optional path to SST climatology NetCDF file
         """
         self.relaxation_time = relaxation_time
@@ -121,11 +118,9 @@ class SlabOceanModel(SlabModelBase):
 
         super().__init__(
             name="SlabOceanModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -160,11 +155,11 @@ class SlabOceanModel(SlabModelBase):
 
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for ocean model."""
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid_shape})
+        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid.shape})
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
             {
-                "two_dimensional": self.grid_shape,
-                "two_dimensional_with_month": self.grid_shape + (12,),
+                "two_dimensional": self.grid.shape,
+                "two_dimensional_with_month": self.grid.shape + (12,),
             }
         )
         self.component_state_class = decorator(OceanState)
@@ -183,13 +178,13 @@ class SlabOceanModel(SlabModelBase):
 
     def initialize(self):
         """Initialize ocean model fields."""
-        nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
+        nonocn_idx = self.grid.binary_mask != self.mask_value
 
         # Initialize mixed layer depth with latitudinal variation
         init_mixed_layer_depth = (
             self.mixed_layer_depth_max
             + (self.mixed_layer_depth_min - self.mixed_layer_depth_max)
-            * jnp.cos(self.latitude_radian) ** 3
+            * jnp.cos(self.grid.latitude_radian) ** 3
         )
 
         # Load or create initial SST
@@ -201,7 +196,7 @@ class SlabOceanModel(SlabModelBase):
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
             init_sea_surface_temperature = (
-                positive_cosine_cubic_latitude_squared(self.latitude_radian) * 10.0
+                positive_cosine_cubic_latitude_squared(self.grid.latitude_radian) * 10.0
                 + constants.freezing_point_K
             )
 
@@ -249,15 +244,15 @@ class SlabOceanModel(SlabModelBase):
             }),
             "forcing": forcing,
             "derived": {
-                "ice_frazil_melt_energy": jnp.zeros(self.grid_shape),
+                "ice_frazil_melt_energy": jnp.zeros(self.grid.shape),
             },
         }
 
     def _create_step_function_body(self):
         """Create the step function for ocean model."""
         start_day_offset = self._compute_start_day_offset()
-        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
-        nonocn_idx = self.horizontal_grids["T"].bmask != self.mask_value
+        ocn_idx = self.grid.binary_mask == self.mask_value
+        nonocn_idx = self.grid.binary_mask != self.mask_value
 
         def step_function(carry, step):
             state = carry["state"]
@@ -358,7 +353,7 @@ class SlabOceanModel(SlabModelBase):
         state = predictions["state"]
         forcing = predictions["forcing"]
         derived = predictions["derived"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        T_grid_dims = ("time",) + self.grid.dims
 
         data_vars = {
             "sea_surface_temperature": (

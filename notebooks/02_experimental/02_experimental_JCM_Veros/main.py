@@ -32,6 +32,7 @@ import jax_datetime as jdt
 import xarray as xr
 
 from jem.components import JCM, Veros, SlabOceanModel
+from jem.components.slab.grid import generate_slab_grid, load_jcm_fractional_mask
 from jem.mapping import IdentityRegridder
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
@@ -122,11 +123,14 @@ Veros.make_jem_compatible(
 # %% [markdown]
 # ### Create Slab Ocean model
 # %%
+fakelnd_grid = generate_slab_grid(
+    f"JCM::T{truncation_number:d}",
+    fractional_mask=load_jcm_fractional_mask(modified_jcm_terrain_file),
+)
 fakelnd_model=SlabOceanModel(
-    grid_specification=f"JCM::T{truncation_number:d}",
+    grid=fakelnd_grid,
     start_datetime=start_datetime,
     timestep=coupling_timestep/one_second,
-    mask_file=modified_jcm_terrain_file,
     forcing_method=None,
     mask_value=1.0,
 )

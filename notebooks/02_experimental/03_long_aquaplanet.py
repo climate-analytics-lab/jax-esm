@@ -28,6 +28,7 @@ from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
 
 from jem.components import JCM, SlabOceanModel
+from jem.components.slab.grid import generate_slab_grid
 from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
@@ -103,11 +104,14 @@ llon = jnp.repeat(
 )
 
 
+# Aquaplanet: no mask_file, so fractional_mask defaults to all-zero (no land).
+ocn_grid = generate_slab_grid(f"JCM::T{spectral_truncation:d}")
+
 model = Coupler(
     components=dict(
         atm=atm_model,
         ocn=SlabOceanModel(
-            grid_specification=f"JCM::T{spectral_truncation:d}",
+            grid=ocn_grid,
             start_datetime=start_datetime,
             timestep=coupling_timestep / one_second,
         ),

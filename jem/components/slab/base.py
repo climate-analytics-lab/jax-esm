@@ -14,7 +14,7 @@ import xarray as xr
 from jcm.date import days_per_year as jcm_days_per_year
 
 from jem.base.typing import VariableRegistry
-from jem.mapping.builtin_grid_generator import generate_grids_from_grid_specification
+from jem.components.slab.grid import SlabGrid
 from jem.utils.cycles import evaluate_cyclic_linear
 
 _DEFAULT_START_DATETIME = jdt.to_datetime("2001-01-01")
@@ -24,8 +24,9 @@ class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
 
     This base class handles:
-    - Domain initialization from grid specification
-    - Lat/lon grid construction
+    - Storing the model's SlabGrid (fractional_mask, latitude_radian,
+      longitude_radian fully specify it -- there is no separate grid
+      specification)
     - Time offset calculations for climatology lookup
     - Common xarray coordinate creation for predictions
 
@@ -38,51 +39,38 @@ class SlabModelBase(ABC):
 
     state_variable_registry: VariableRegistry
     forcing_variable_registry: VariableRegistry
+    grid: SlabGrid
 
 
     def __init__(
         self,
         name: str,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         calendar: str = "365_day",
     ):
         """Initialize slab model base.
 
         Args:
             name: Component name (e.g., "SlabOceanModel")
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See
+                `jem.components.slab.grid.SlabGrid`, and
+                `jem.components.slab.grid.generate_slab_grid` to build one
+                from one of JEM's canonical grid specifications.
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
         """
         self.name = name
-        self.grid_specification = grid_specification
+        self.grid = grid
         self.start_datetime = start_datetime
         self.timestep = timestep
-        self.topography_file = topography_file
-        self.mask_file = mask_file
         self.calendar = calendar
         self.days_per_year = jcm_days_per_year(calendar)
-
-        # Initialize domain
-        self.horizontal_grids = generate_grids_from_grid_specification(
-            grid_specification,
-            topography_file=topography_file,
-            mask_file=mask_file,
-        )
-
-        # Get grid shape for state/forcing class creation
-        self.grid_shape = self.horizontal_grids["T"].shape
 
         # Subclass creates state and forcing classes
         self._create_state_and_forcing_classes()
         self._create_variable_registries()
-        self._setup_lat_lon_grids()
 
     @abstractmethod
     def _create_state_and_forcing_classes(self) -> None:
@@ -96,44 +84,6 @@ class SlabModelBase(ABC):
     @abstractmethod
     def _create_variable_registries(self) -> None:
         """Create state_variable_registry and forcing_variable_registry"""
-
-    def _setup_lat_lon_grids(self) -> None:
-        """Set up 2D latitude and longitude grids in radians.
-
-        Creates self.latitude_radian and self.longitude_radian as 2D arrays matching
-        the T-grid shape.
-        """
-        T_grid = self.horizontal_grids["T"]
-        D2_nodal_shape = T_grid.shape
-
-        lat_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.coordinate.dims)
-            if axis_name == "latitude"
-        )
-        lon_dim_idx = next(
-            i
-            for i, axis_name in enumerate(T_grid.coordinate.dims)
-            if axis_name == "longitude"
-        )
-
-        self.latitude_radian = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.coordinate.fields["latitude"].data,  # [lat_dim_idx],
-                axis=lon_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lon_dim_idx],
-            axis=lon_dim_idx,
-        )
-
-        self.longitude_radian = jnp.repeat(
-            jnp.expand_dims(
-                T_grid.coordinate.fields["longitude"].data,  # [lon_dim_idx],
-                axis=lat_dim_idx,
-            ),
-            repeats=D2_nodal_shape[lat_dim_idx],
-            axis=lat_dim_idx,
-        )
 
     def _compute_start_day_offset(self) -> float:
         """Seconds from Jan 1 of start year to start_datetime."""
@@ -214,7 +164,7 @@ class SlabModelBase(ABC):
         Returns:
             xarray Dataset with model output
         """
-        T_grid_axis_names = self.horizontal_grids["T"].coordinate.dims
+        T_grid_axis_names = self.grid.dims
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -225,8 +175,8 @@ class SlabModelBase(ABC):
                 predictions["state"].sim_time / 3600.0,
                 {"units": f"hours since {start_datetime_str:s}"},
             ),
-            "latitude2D": (T_grid_axis_names, self.latitude_radian * 180 / jnp.pi),
-            "longitude2D": (T_grid_axis_names, self.longitude_radian * 180 / jnp.pi),
+            "latitude2D": (T_grid_axis_names, self.grid.latitude_radian * 180 / jnp.pi),
+            "longitude2D": (T_grid_axis_names, self.grid.longitude_radian * 180 / jnp.pi),
         }
 
         data_vars = self._create_xarray_data_vars(predictions)

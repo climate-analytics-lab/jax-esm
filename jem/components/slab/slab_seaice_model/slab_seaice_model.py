@@ -7,6 +7,7 @@ import jax_datetime as jdt
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.components.slab.grid import SlabGrid
 from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 
@@ -93,11 +94,9 @@ class SlabSeaiceModel(SlabModelBase):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         initialization_ice_thickness: float = 0.0,
         min_ice_thickness: float = 1e-3,
         ice_fraction_thickness_scale: float = 0.5,
@@ -107,11 +106,9 @@ class SlabSeaiceModel(SlabModelBase):
         """Initialize slab sea-ice model.
 
         Args:
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
             initialization_ice_thickness: Uniform initial ice thickness over ocean points (m)
             min_ice_thickness: Thickness above which a cell is diagnosed as ice-covered (m)
             ice_fraction_thickness_scale: Thickness scale (m) of the smooth
@@ -126,11 +123,9 @@ class SlabSeaiceModel(SlabModelBase):
 
         super().__init__(
             name="SlabSeaiceModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -146,7 +141,7 @@ class SlabSeaiceModel(SlabModelBase):
     def _create_state_and_forcing_classes(self) -> None:
         """Create state and forcing classes for the sea-ice model."""
         decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
-            {"two_dimensional": self.grid_shape}
+            {"two_dimensional": self.grid.shape}
         )
         self.component_state_class = decorator(SeaiceState)
         self.component_forcing_class = decorator(SeaiceForcing)
@@ -164,7 +159,7 @@ class SlabSeaiceModel(SlabModelBase):
 
     def initialize(self):
         """Initialize sea-ice model fields."""
-        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
+        ocn_idx = self.grid.binary_mask == self.mask_value
 
         init_ice_thickness = jnp.where(
             ocn_idx, self.initialization_ice_thickness, 0.0
@@ -196,7 +191,7 @@ class SlabSeaiceModel(SlabModelBase):
 
     def _create_step_function_body(self):
         """Create the step function for the sea-ice model."""
-        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
+        ocn_idx = self.grid.binary_mask == self.mask_value
         min_ice_thickness = self.min_ice_thickness
         ice_fraction_thickness_scale = self.ice_fraction_thickness_scale
 
@@ -258,7 +253,7 @@ class SlabSeaiceModel(SlabModelBase):
         state = predictions["state"]
         forcing = predictions["forcing"]
         derived = predictions["derived"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        T_grid_dims = ("time",) + self.grid.dims
 
         return {
             "ice_thickness": (
