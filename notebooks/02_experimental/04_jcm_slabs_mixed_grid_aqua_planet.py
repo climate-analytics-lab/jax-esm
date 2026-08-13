@@ -18,7 +18,7 @@ from jem.components import JCM, SlabOceanModel, SlabSeaiceModel
 from jem.components.slab.grid import generate_slab_grid_from_scrip
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
-from jem.utils.ESMF_regrid import ESMFRegridder
+from jem.utils.esmf_regrid import ESMFRegridder
 use_ipython = 'get_ipython' in globals()
 
 # Configurations
