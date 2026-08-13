@@ -7,6 +7,7 @@
 # (no-op passthrough) for now; the point of this notebook is only to verify
 # the slab models can load and run on this grid.
 
+from importlib import resources
 from pathlib import Path
 
 import jcm
@@ -36,8 +37,9 @@ one_second = jdt.to_timedelta(1, "second")
 # Only the slab models (ocn, seaice) use this grid -- JCM's atmosphere keeps
 # its own native spectral grid; with the mapper stubbed out above, no
 # regridding between the two grids is needed yet.
-grid_file = Path(__file__).resolve().parent.parent.parent / "data" / "DisplacedPoleGrid.SCRIP.nc"
-land_fraction_file = Path(__file__).resolve().parent.parent.parent / "data" / "landsea_mask_fraction_DisplacedPoleGrid.nc"
+jem_data_dir = resources.files("jem.data")
+grid_file = jem_data_dir / "DisplacedPoleGrid.SCRIP.nc"
+land_fraction_file = jem_data_dir / "landsea_mask_fraction_DisplacedPoleGrid.nc"
 displaced_pole_grid = generate_slab_grid_from_scrip(
     str(grid_file),
     fractional_mask=xr.open_dataset(land_fraction_file)["lsm"].to_numpy()[0].transpose(),
@@ -46,12 +48,12 @@ displaced_pole_grid = generate_slab_grid_from_scrip(
 
 regridder = {
     "o2a": {
-        "bilinear": ESMFRegridder("data/weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc"),
-        "conserve": ESMFRegridder("data/weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc"),
+        "bilinear": ESMFRegridder(str(jem_data_dir / "weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc")),
+        "conserve": ESMFRegridder(str(jem_data_dir / "weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc")),
     },
     "a2o": {
-        "bilinear": ESMFRegridder("data/weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc"),
-        "conserve": ESMFRegridder("data/weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc"),
+        "bilinear": ESMFRegridder(str(jem_data_dir / "weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc")),
+        "conserve": ESMFRegridder(str(jem_data_dir / "weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc")),
     }
 }
 
