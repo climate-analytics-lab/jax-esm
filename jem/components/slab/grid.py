@@ -7,14 +7,11 @@ can drift out of sync.
 """
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import dinosaur
 import jax.numpy as jnp
 import xarray as xr
 from jax import Array
-
-import jem
 
 
 @dataclass
