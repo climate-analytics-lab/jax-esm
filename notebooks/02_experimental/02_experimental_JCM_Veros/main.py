@@ -33,8 +33,6 @@ import xarray as xr
 
 from jem.components import JCM, Veros, SlabOceanModel
 from jem.components.slab.grid import generate_slab_grid, load_jcm_fractional_mask
-from jem.mapping import IdentityRegridder
-from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 

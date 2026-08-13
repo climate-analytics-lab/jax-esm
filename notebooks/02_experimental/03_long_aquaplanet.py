@@ -29,7 +29,6 @@ import jax_datetime as jdt
 
 from jem.components import JCM, SlabOceanModel
 from jem.components.slab.grid import generate_slab_grid
-from jem.mapping import BasicMapper
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 use_ipython = 'get_ipython' in globals()
@@ -61,16 +60,14 @@ one_second = jdt.to_timedelta(1, "second")
 # ## Creating Flux and Scalar Exchange between Components
 
 # %%
-mapper = BasicMapper()
-mapper.add_mapping(
-    source = ("atm", "derived.total_heat_flux"),
-    target = ("ocn", "forcing.total_heat_flux"),
-    regridder = lambda x: x,  # identity is default
-)
-mapper.add_mapping(
-    source = ("ocn", "state.sea_surface_temperature"),
-    target = ("atm", "forcing.sea_surface_temperature"),
-)
+def mapper(coupled_carry):
+    atm = coupled_carry["atm"]
+    ocn = coupled_carry["ocn"]
+
+    ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
+    atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
+
+    return coupled_carry
 
 # %% [markdown]
 # ## Create Components
