@@ -11,14 +11,15 @@ are `(n_lon, n_lat)` with `order='F'` -- matching JEM's `SlabGrid`
 convention (`jem/components/slab/grid.py`) with no transpose needed.
 """
 
-import jax
-import jax.numpy as jnp
-from jax import jit
-import numpy as np
-import xarray as xr
-from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import xarray as xr
+from jax import jit
 
 
 @dataclass
@@ -35,17 +36,17 @@ class ESMFWeights:
     weights: jnp.ndarray      # Interpolation weights
     
     # Grid dimensions
-    src_shape: Tuple[int, ...]
-    dst_shape: Tuple[int, ...]
+    src_shape: tuple[int, ...]
+    dst_shape: tuple[int, ...]
     
     # Optional mask information
-    src_mask: Optional[jnp.ndarray] = None
-    dst_mask: Optional[jnp.ndarray] = None
+    src_mask: jnp.ndarray | None = None
+    dst_mask: jnp.ndarray | None = None
     
     # Metadata
     method: str = "unknown"
-    src_grid_dims: Optional[Tuple[str, ...]] = None
-    dst_grid_dims: Optional[Tuple[str, ...]] = None
+    src_grid_dims: tuple[str, ...] | None = None
+    dst_grid_dims: tuple[str, ...] | None = None
     
     @property
     def n_weights(self) -> int:
@@ -77,8 +78,8 @@ class ESMFRegridder:
     
     def __init__(self,
         weight_file: str,
-        src_shape: Optional[Tuple[int, ...]] = None,
-        dst_shape: Optional[Tuple[int, ...]] = None,
+        src_shape: tuple[int, ...] | None = None,
+        dst_shape: tuple[int, ...] | None = None,
     ):
         """
         Initialize regridder from ESMF weight file.
@@ -309,7 +310,7 @@ class ESMFRegridder:
         return vectorized_interp(src_data)
     
     def regrid_xarray(self, da: xr.DataArray, 
-                      target_coords: Optional[Dict[str, np.ndarray]] = None) -> xr.DataArray:
+                      target_coords: dict[str, np.ndarray] | None = None) -> xr.DataArray:
         """
         Regrid an xarray DataArray and preserve metadata.
         
@@ -325,8 +326,7 @@ class ESMFRegridder:
         xr.DataArray
             Regridded data with updated coordinates
         """
-        # Extract grid dimensions (last N dims matching src_shape)
-        grid_dims = da.dims[-len(self.src_shape):]
+        # Extract batch dimensions (everything before the last N dims matching src_shape)
         batch_dims = da.dims[:-len(self.src_shape)]
         
         # Get data as numpy/jax array
@@ -410,7 +410,7 @@ class ESMFRegridder:
         
         return inv_regridder
     
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> dict[str, Any]:
         """Return diagnostic information about the regridder."""
         return {
             'method': self.weights.method,
@@ -433,9 +433,9 @@ class ESMFRegridder:
 def create_regridder_pair(
     src_to_dst_file: str,
     dst_to_src_file: str,
-    src_shape: Tuple[int, ...],
-    dst_shape: Tuple[int, ...]
-) -> Tuple[ESMFRegridder, ESMFRegridder]:
+    src_shape: tuple[int, ...],
+    dst_shape: tuple[int, ...]
+) -> tuple[ESMFRegridder, ESMFRegridder]:
     """
     Create a pair of regridders for bidirectional interpolation.
     
@@ -490,9 +490,9 @@ def create_regridder_from_xarray(
 def verify_conservation(
     regridder: ESMFRegridder,
     src_data: jnp.ndarray,
-    src_areas: Optional[jnp.ndarray] = None,
-    dst_areas: Optional[jnp.ndarray] = None
-) -> Dict[str, float]:
+    src_areas: jnp.ndarray | None = None,
+    dst_areas: jnp.ndarray | None = None
+) -> dict[str, float]:
     """
     Verify conservation properties of regridding.
     
@@ -569,7 +569,7 @@ def example_usage():
         attrs={'units': 'K', 'long_name': 'Temperature'}
     )
     
-    print(f"\nCreated sample xarray DataArray:")
+    print("\nCreated sample xarray DataArray:")
     print(sample_data)
     
     # Usage examples (would work with actual weight file)
