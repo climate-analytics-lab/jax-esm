@@ -13,7 +13,7 @@ convention (`jem/components/slab/grid.py`) with no transpose needed.
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -105,16 +105,20 @@ class ESMFRegridder:
             the weight file's own dst_grid_dims variable.
         """
         self.weight_file = weight_file
-        self.src_shape = src_shape
-        self.dst_shape = dst_shape
 
-        # Load weights
-        self.weights = self._load_weights()
+        # Load weights (also resolves src_shape/dst_shape if not supplied)
+        self.weights = self._load_weights(src_shape, dst_shape)
+        self.src_shape = self.weights.src_shape
+        self.dst_shape = self.weights.dst_shape
 
         # Create JIT-compiled interpolation function
         self._interp_fn = jit(self._interpolate_impl)
 
-    def _load_weights(self) -> ESMFWeights:
+    def _load_weights(
+        self,
+        src_shape: tuple[int, ...] | None,
+        dst_shape: tuple[int, ...] | None,
+    ) -> ESMFWeights:
         """
         Load ESMF weights from netCDF file using xarray.
 
@@ -151,51 +155,51 @@ class ESMFRegridder:
             # src_grid_dims/dst_grid_dims variables when not supplied.
             # Those variables are already (n_lon, n_lat), matching this
             # class's convention directly.
-            if self.src_shape is None:
+            if src_shape is None:
                 if 'src_grid_dims' not in ds.variables:
                     raise ValueError(
                         f"'{self.weight_file}' has no src_grid_dims variable and "
                         "no src_shape was supplied -- cannot determine source grid shape."
                     )
-                self.src_shape = tuple(int(n) for n in ds['src_grid_dims'].values)
-            if self.dst_shape is None:
+                src_shape = tuple(int(n) for n in ds['src_grid_dims'].values)
+            if dst_shape is None:
                 if 'dst_grid_dims' not in ds.variables:
                     raise ValueError(
                         f"'{self.weight_file}' has no dst_grid_dims variable and "
                         "no dst_shape was supplied -- cannot determine destination grid shape."
                     )
-                self.dst_shape = tuple(int(n) for n in ds['dst_grid_dims'].values)
+                dst_shape = tuple(int(n) for n in ds['dst_grid_dims'].values)
 
             # Validate dimensions
-            expected_src_size = int(np.prod(self.src_shape))
-            expected_dst_size = int(np.prod(self.dst_shape))
+            expected_src_size = int(np.prod(src_shape))
+            expected_dst_size = int(np.prod(dst_shape))
 
             if src_grid_size != expected_src_size:
                 raise ValueError(
                     f"Source grid size mismatch: file has {src_grid_size}, "
-                    f"expected {expected_src_size} from shape {self.src_shape}"
+                    f"expected {expected_src_size} from shape {src_shape}"
                 )
 
             if dst_grid_size != expected_dst_size:
                 raise ValueError(
                     f"Destination grid size mismatch: file has {dst_grid_size}, "
-                    f"expected {expected_dst_size} from shape {self.dst_shape}"
+                    f"expected {expected_dst_size} from shape {dst_shape}"
                 )
-            
+
             # Read masks if available
             src_mask = None
             dst_mask = None
-            
+
             if 'mask_a' in ds.variables:
                 src_mask_flat = ds['mask_a'].values
                 src_mask = jnp.array(
-                    np.asarray(src_mask_flat).reshape(self.src_shape, order='F')
+                    np.asarray(src_mask_flat).reshape(src_shape, order='F')
                 )
 
             if 'mask_b' in ds.variables:
                 dst_mask_flat = ds['mask_b'].values
                 dst_mask = jnp.array(
-                    np.asarray(dst_mask_flat).reshape(self.dst_shape, order='F')
+                    np.asarray(dst_mask_flat).reshape(dst_shape, order='F')
                 )
             
             # Try to extract grid dimension names if available
@@ -215,8 +219,8 @@ class ESMFRegridder:
             row_indices=jnp.array(row_indices, dtype=jnp.int32),
             col_indices=jnp.array(col_indices, dtype=jnp.int32),
             weights=jnp.array(weights, dtype=jnp.float32),
-            src_shape=self.src_shape,
-            dst_shape=self.dst_shape,
+            src_shape=src_shape,
+            dst_shape=dst_shape,
             src_mask=src_mask,
             dst_mask=dst_mask,
             method=method,
@@ -274,7 +278,7 @@ class ESMFRegridder:
         #        f"expected source shape {self.src_shape}"
         #    )
         
-        return self._interp_fn(src_data)
+        return cast(jnp.ndarray, self._interp_fn(src_data))
     
     def apply_batched(self, src_data: jnp.ndarray, 
                       batch_dims: int = 1) -> jnp.ndarray:
@@ -307,7 +311,7 @@ class ESMFRegridder:
         for _ in range(batch_dims):
             vectorized_interp = jax.vmap(vectorized_interp)
         
-        return vectorized_interp(src_data)
+        return cast(jnp.ndarray, vectorized_interp(src_data))
     
     def regrid_xarray(self, da: xr.DataArray, 
                       target_coords: dict[str, np.ndarray] | None = None) -> xr.DataArray:
