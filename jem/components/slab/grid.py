@@ -154,6 +154,7 @@ def load_jcm_fractional_mask(mask_file: str) -> Array:
 def _generate_jcm_slab_grid(
     horizontal_resolution: int,
     fractional_mask: Array | None = None,
+    threshold: float = 0.5,
 ) -> SlabGrid:
     """
     Builds a SlabGrid for the given horizontal resolution (21, 31, 42, 85,
@@ -194,7 +195,7 @@ def _generate_jcm_slab_grid(
         fractional_mask=fmask,
         latitude_radian=latitude_2d,
         longitude_radian=longitude_2d,
-        threshold=0.95,
+        threshold=threshold,
         dims=dims,
     )
 
@@ -239,7 +240,7 @@ def _load_ugrid_fractional_mask(ds: xr.Dataset, ny: int, nx: int) -> Array:
 def generate_slab_grid_from_ugrid(
     ugrid_file: str,
     fractional_mask: Array | None = None,
-    threshold: float = 1.0,
+    threshold: float = 0.5,
 ) -> SlabGrid:
     """Build a SlabGrid from a UGRID netCDF file describing a 2D structured
     (curvilinear) grid -- e.g. a displaced-pole ocean grid.
@@ -382,7 +383,7 @@ def _load_scrip_fractional_mask(ds: xr.Dataset, ni: int, nj: int) -> Array:
 def generate_slab_grid_from_scrip(
     scrip_file: str,
     fractional_mask: Array | None = None,
-    threshold: float = 1.0,
+    threshold: float = 0.5,
 ) -> SlabGrid:
     """Build a SlabGrid from a SCRIP-convention grid file describing a 2D
     structured (curvilinear) grid -- e.g. a displaced-pole ocean grid.
