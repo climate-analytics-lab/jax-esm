@@ -13,7 +13,6 @@ import jax_datetime as jdt
 import xarray as xr
 from jcm.date import days_per_year as jcm_days_per_year
 
-from jem.base.typing import VariableRegistry
 from jem.components.slab.grid import SlabGrid
 from jem.utils.cycles import evaluate_cyclic_linear
 
@@ -31,14 +30,11 @@ class SlabModelBase(ABC):
     - Common xarray coordinate creation for predictions
 
     Subclasses must implement:
-    - _create_state_and_forcing_classes(): Define state and forcing structure
-    - _initialize_fields(): Set up initial field values
+    - initialize(): Build the initial state/forcing/derived carry
     - _create_step_function_body(): Implement the physics for each timestep
     - _create_xarray_data_vars(): Define xarray data variables for output
     """
 
-    state_variable_registry: VariableRegistry
-    forcing_variable_registry: VariableRegistry
     grid: SlabGrid
 
 
@@ -67,23 +63,6 @@ class SlabModelBase(ABC):
         self.timestep = timestep
         self.calendar = calendar
         self.days_per_year = jcm_days_per_year(calendar)
-
-        # Subclass creates state and forcing classes
-        self._create_state_and_forcing_classes()
-        self._create_variable_registries()
-
-    @abstractmethod
-    def _create_state_and_forcing_classes(self) -> None:
-        """Create component_state_class and component_forcing_class.
-
-        Subclasses must set:
-        - self.component_state_class
-        - self.component_forcing_class
-        """
-
-    @abstractmethod
-    def _create_variable_registries(self) -> None:
-        """Create state_variable_registry and forcing_variable_registry"""
 
     def _compute_start_day_offset(self) -> float:
         """Seconds from Jan 1 of start year to start_datetime."""

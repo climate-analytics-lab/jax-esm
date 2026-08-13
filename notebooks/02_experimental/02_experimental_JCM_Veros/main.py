@@ -183,7 +183,7 @@ def interaction(coupled_carry):
         273.15 + 30.0,
     )
     atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
-    atm["forcing"].stl_am = fakelnd["state"]["sea_surface_temperature"]
+    atm["forcing"].stl_am = fakelnd["state"].sea_surface_temperature
     
     return coupled_carry
 

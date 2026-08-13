@@ -15,31 +15,52 @@ Programmer: Aya Lalou
 
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
-from typing import Annotated, Any
+from typing import Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
+import tree_math
 import xarray as xr
 
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
 from jem.components.slab.grid import SlabGrid
-from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
 class LandState:
-    sim_time: Annotated[float, (), "zero_dimensional"]
-    land_surface_temperature: Annotated[
-        float, ("longitude", "latitude"), "two_dimensional"
-    ]
-    snowc: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    soilw: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    sim_time: jnp.ndarray
+    land_surface_temperature: jnp.ndarray
+    snowc: jnp.ndarray
+    soilw: jnp.ndarray
+
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        sim_time=None,
+        land_surface_temperature=None,
+        snowc=None,
+        soilw=None,
+    ):
+        return cls(
+            sim_time if sim_time is not None else jnp.zeros(()),
+            land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
+            snowc if snowc is not None else jnp.zeros(shape),
+            soilw if soilw is not None else jnp.zeros(shape),
+        )
 
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
 class LandForcing:
-    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
+    total_heat_flux: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, total_heat_flux=None):
+        return cls(
+            total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+        )
+
 
 class SlabLandModel(SlabModelBase):
     """
@@ -111,25 +132,6 @@ class SlabLandModel(SlabModelBase):
  
     def validate(self):
         super().validate()
-
-    def _create_state_and_forcing_classes(self) -> None:
-        """Create state and forcing classes for land model."""
-
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid.shape})
-        self.component_state_class = decorator(LandState)
-        self.component_forcing_class = decorator(LandForcing)
-
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
 
     def initialize(self):
         """Initialize land surface model state and climatology.
@@ -265,14 +267,13 @@ class SlabLandModel(SlabModelBase):
         print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
         
         return {
-            "state": self.component_state_class.zeros().copy({
-                "land_surface_temperature" : init_T,
-                "sim_time" : 0,
-                "heatflx" : jnp.zeros(D2_nodal_shape),
-                "snowc" : jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
-                "soilw" : self.soilw_clim[:, :, init_time_idx],
-            }),
-            "forcing": self.component_forcing_class.zeros()
+            "state": LandState.zeros(
+                D2_nodal_shape,
+                land_surface_temperature=init_T,
+                snowc=jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
+                soilw=self.soilw_clim[:, :, init_time_idx],
+            ),
+            "forcing": LandForcing.zeros(D2_nodal_shape),
         }
     
     def _idealized_land_temperature(self, shape: tuple[int, int]) -> jnp.ndarray:
@@ -380,12 +381,12 @@ class SlabLandModel(SlabModelBase):
             # Create new state
             # =====================================================================
             
-            new_state = state.copy({
-                "sim_time" : new_sim_time,
-                "land_surface_temperature" : new_T,
-                "snowc" : jnp.minimum(1.0, snowd_clim / self.sd2sc),
-                "soilw" : soilw_clim,
-            })
+            new_state = state.replace(
+                sim_time=new_sim_time,
+                land_surface_temperature=new_T,
+                snowc=jnp.minimum(1.0, snowd_clim / self.sd2sc),
+                soilw=soilw_clim,
+            )
             
             # Return new state and predictions for output
             return (

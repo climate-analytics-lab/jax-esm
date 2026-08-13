@@ -1,33 +1,70 @@
 """Slab ocean model component."""
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
+import tree_math
 import xarray as xr
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
 from jem.components.slab.grid import SlabGrid
-from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
 default_land_surface_temperature = 288.15
 
-@data_structure.typed_and_dimensioned
-class OceanState:
-    sim_time: Annotated[float, (), "zero_dimensional"]
-    sea_surface_temperature: Annotated[
-        float, ("longitude", "latitude"), "two_dimensional"
-    ]
-    mixed_layer_depth: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
+class OceanState:
+    sim_time: jnp.ndarray
+    sea_surface_temperature: jnp.ndarray
+    mixed_layer_depth: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, sim_time=None, sea_surface_temperature=None, mixed_layer_depth=None):
+        return cls(
+            sim_time if sim_time is not None else jnp.zeros(()),
+            sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
+            mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
+        )
+
+
+@tree_math.struct
 class OceanForcing:
-    total_heat_flux: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    q_flux: Annotated[float, ("longitude", "latitude", "month"), "two_dimensional_with_month"]
+    total_heat_flux: jnp.ndarray
+    q_flux: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, total_heat_flux=None, q_flux=None):
+        return cls(
+            total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            q_flux if q_flux is not None else jnp.zeros(shape + (12,)),
+        )
+
+
+@tree_math.struct
+class OceanDerived:
+    ice_frazil_melt_energy: jnp.ndarray
+    effective_total_heat_flux: jnp.ndarray
+    q_flux_snapshot: jnp.ndarray
+
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        ice_frazil_melt_energy=None,
+        effective_total_heat_flux=None,
+        q_flux_snapshot=None,
+    ):
+        return cls(
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
+            effective_total_heat_flux if effective_total_heat_flux is not None else jnp.zeros(shape),
+            q_flux_snapshot if q_flux_snapshot is not None else jnp.zeros(shape),
+        )
+
 
 class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
@@ -153,29 +190,6 @@ class SlabOceanModel(SlabModelBase):
         else:
             raise ValueError(f"Unknown `forcing_method` is given: \"{self.forcing_method!s:s}\" ")
 
-    def _create_state_and_forcing_classes(self) -> None:
-        """Create state and forcing classes for ocean model."""
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": self.grid.shape})
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
-            {
-                "two_dimensional": self.grid.shape,
-                "two_dimensional_with_month": self.grid.shape + (12,),
-            }
-        )
-        self.component_state_class = decorator(OceanState)
-        self.component_forcing_class = decorator(OceanForcing)
-
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
     def initialize(self):
         """Initialize ocean model fields."""
         nonocn_idx = self.grid.binary_mask != self.mask_value
@@ -233,19 +247,14 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
         
-        forcing = self.component_forcing_class.zeros()
-        forcing = forcing.copy({
-            "q_flux": forcing.q_flux
-        })
         return {
-            "state": self.component_state_class.zeros().copy({
-                "mixed_layer_depth": init_mixed_layer_depth,
-                "sea_surface_temperature": init_sea_surface_temperature,
-            }),
-            "forcing": forcing,
-            "derived": {
-                "ice_frazil_melt_energy": jnp.zeros(self.grid.shape),
-            },
+            "state": OceanState.zeros(
+                self.grid.shape,
+                mixed_layer_depth=init_mixed_layer_depth,
+                sea_surface_temperature=init_sea_surface_temperature,
+            ),
+            "forcing": OceanForcing.zeros(self.grid.shape),
+            "derived": OceanDerived.zeros(self.grid.shape),
         }
 
     def _create_step_function_body(self):
@@ -259,7 +268,7 @@ class SlabOceanModel(SlabModelBase):
             forcing = carry["forcing"]
             new_sea_surface_temperature_anom = state.sea_surface_temperature
             total_heat_flux = forcing.total_heat_flux
-            predictions = {}
+            snapshot_Qflux = jnp.zeros(self.grid.shape)
             print(f"Using method: {self.forcing_method}")
             if self.forcing_method == "relaxation":
                 sst_clim_beg = jnp.where(
@@ -319,46 +328,37 @@ class SlabOceanModel(SlabModelBase):
                 new_sea_surface_temperature,
             )
 
-            new_state = state.copy(
-                {
-                    "sea_surface_temperature": new_sea_surface_temperature,
-                    "sim_time": new_sim_time,
-                }
+            new_state = state.replace(
+                sea_surface_temperature=new_sea_surface_temperature,
+                sim_time=new_sim_time,
             )
 
-            predictions = {
-                "state": new_state,
-                "forcing": {
-                    "total_heat_flux": total_heat_flux,
-                },
-                "derived": {
-                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
-                },
-            }
-            if self.forcing_method == "Qflux":
-                predictions["forcing"]["q_flux"] = snapshot_Qflux
+            new_derived = OceanDerived.zeros(
+                self.grid.shape,
+                ice_frazil_melt_energy=ice_frazil_melt_energy,
+                effective_total_heat_flux=total_heat_flux,
+                q_flux_snapshot=snapshot_Qflux,
+            )
 
-            return {
+            result = {
                 "state": new_state,
                 "forcing": forcing,
-                "derived": {
-                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
-                },
-            }, stack_objects([predictions])
+                "derived": new_derived,
+            }
+            return result, stack_objects([result])
 
         return step_function
 
     def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create xarray data variables for ocean output."""
         state = predictions["state"]
-        forcing = predictions["forcing"]
         derived = predictions["derived"]
         T_grid_dims = ("time",) + self.grid.dims
 
         data_vars = {
             "sea_surface_temperature": (
                 T_grid_dims,
-                state["sea_surface_temperature"],
+                state.sea_surface_temperature,
                 {
                     "long_name": "Sea surface temperature",
                     "units": "K",
@@ -366,7 +366,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             "mixed_layer_depth": (
                 T_grid_dims,
-                state["mixed_layer_depth"],
+                state.mixed_layer_depth,
                 {
                     "long_name": "Mixed layer depth",
                     "units": "m",
@@ -374,7 +374,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             "total_heat_flux": (
                 T_grid_dims,
-                forcing["total_heat_flux"],
+                derived.effective_total_heat_flux,
                 {
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
@@ -383,7 +383,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             "ice_frazil_melt_energy": (
                 T_grid_dims,
-                derived["ice_frazil_melt_energy"],
+                derived.ice_frazil_melt_energy,
                 {
                     "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
                     "units": "J m-2",
@@ -394,7 +394,7 @@ class SlabOceanModel(SlabModelBase):
         if self.forcing_method == "Qflux":
             data_vars["q_flux"] = (
                 T_grid_dims,
-                forcing["q_flux"],
+                derived.q_flux_snapshot,
                 {
                     "long_name": "Q-flux",
                     "units": "W m-2",
