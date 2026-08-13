@@ -333,3 +333,122 @@ def generate_slab_grid_from_ugrid(
     )
 
 
+def _reshape_scrip_field(values, ni: int, nj: int) -> Array:
+    """Reshape a flat (grid_size,) SCRIP field into JEM's (n_lon, n_lat).
+
+    SCRIP stores per-cell fields flat, in Fortran order (the first
+    grid_dims axis -- longitude -- varies fastest). grid_dims = [ni, nj]
+    already gives JEM's (n_lon, n_lat) shape directly, so an order='F'
+    reshape recovers it with no transpose needed (unlike the UGRID reader,
+    whose `shape` attribute is (nlat, nlon) and needs one).
+    """
+    return jnp.asarray(values).reshape((ni, nj), order="F")
+
+
+def _scrip_latlon_to_radians(da: xr.DataArray, ni: int, nj: int, scrip_file: str) -> Array:
+    """Reshape and unit-convert a SCRIP grid_center_lat/lon field to radians."""
+    values_2d = _reshape_scrip_field(da.values, ni, nj)
+    units = da.attrs.get("units")
+    if units == "degrees":
+        return jnp.deg2rad(values_2d)
+    elif units == "radians":
+        return values_2d
+    else:
+        raise ValueError(
+            f"'{scrip_file}' variable '{da.name}' has unrecognized units "
+            f"{units!r}; expected 'degrees' or 'radians'."
+        )
+
+
+def _load_scrip_fractional_mask(ds: xr.Dataset, ni: int, nj: int) -> Array:
+    """Derive a fractional_mask (1 = land) from a SCRIP grid_imask.
+
+    Unlike UGRID, SCRIP's grid_imask carries no CF-style flag_meanings
+    metadata, so the land/ocean polarity can't be verified from the file
+    itself. This follows the standard SCRIP/ESMF convention used by
+    ocean-model grid files (e.g. POP, CESM): imask=1 marks a valid/active
+    (ocean) cell, imask=0 marks a masked-out (land) cell -- the same
+    polarity as this codebase's UGRID reader ended up with. Pass
+    `fractional_mask` explicitly to `generate_slab_grid_from_scrip` if a
+    file uses the opposite convention.
+    """
+    if "grid_imask" not in ds:
+        print("Notice: No grid_imask in SCRIP file. Set fmask = 0.")
+        return jnp.zeros((ni, nj))
+    imask_2d = _reshape_scrip_field(ds["grid_imask"].values, ni, nj)
+    return jnp.where(imask_2d == 0, 1.0, 0.0)
+
+
+def generate_slab_grid_from_scrip(
+    scrip_file: str,
+    fractional_mask: Array | None = None,
+    threshold: float = 1.0,
+) -> SlabGrid:
+    """Build a SlabGrid from a SCRIP-convention grid file describing a 2D
+    structured (curvilinear) grid -- e.g. a displaced-pole ocean grid.
+
+    This is not a general unstructured-mesh reader: it only supports SCRIP
+    files with grid_rank == 2 (grid_dims has two entries), i.e. grids that
+    are topologically 2D. grid_dims = [n_lon, n_lat] already matches JEM's
+    SlabGrid convention directly; per-cell fields are stored flat in
+    Fortran order (longitude varies fastest) within that shape. Only
+    grid_center_lat/lon and grid_imask are used; grid_corner_lat/lon,
+    grid_area (present for regridding weight computation, which JEM's slab
+    models don't do) are not read.
+
+    Args:
+        scrip_file: Path to a SCRIP-convention netCDF grid file.
+        fractional_mask: Fraction of each grid cell occupied by land, in
+            [0, 1], matching the grid's shape. If None, read from the
+            file's own `grid_imask` variable (see `_load_scrip_fractional_mask`
+            for the assumed land/ocean convention).
+        threshold: Passed through to SlabGrid.
+
+    Returns:
+        A SlabGrid built from the file's cell-center coordinates and mask.
+    """
+    ds = xr.open_dataset(scrip_file)
+
+    if "grid_dims" not in ds:
+        raise ValueError(
+            f"'{scrip_file}' has no grid_dims variable -- not a SCRIP grid file."
+        )
+    grid_dims = ds["grid_dims"].values
+    if len(grid_dims) != 2:
+        raise ValueError(
+            "This reader only supports 2D SCRIP grids (grid_rank == 2); "
+            f"got grid_dims={grid_dims!r}."
+        )
+    ni, nj = (int(n) for n in grid_dims)
+
+    for name in ("grid_center_lat", "grid_center_lon"):
+        if name not in ds:
+            raise ValueError(f"'{scrip_file}' is missing required variable '{name}'.")
+
+    grid_size = ds["grid_center_lat"].shape[0]
+    if ni * nj != grid_size:
+        raise ValueError(
+            f"grid_dims {(ni, nj)} implies {ni * nj} cells, but "
+            f"'{scrip_file}' has grid_size={grid_size}."
+        )
+
+    longitude_2d = _scrip_latlon_to_radians(ds["grid_center_lon"], ni, nj, scrip_file)
+    latitude_2d = _scrip_latlon_to_radians(ds["grid_center_lat"], ni, nj, scrip_file)
+
+    if jnp.any((latitude_2d < -jnp.pi / 2) | (latitude_2d > jnp.pi / 2)):
+        raise ValueError(f"'{scrip_file}' has latitude values outside [-90, 90] degrees.")
+    if jnp.any((longitude_2d < -2 * jnp.pi) | (longitude_2d > 2 * jnp.pi)):
+        raise ValueError(f"'{scrip_file}' has longitude values outside [-360, 360] degrees.")
+
+    if fractional_mask is None:
+        fractional_mask = _load_scrip_fractional_mask(ds, ni, nj)
+
+    return SlabGrid(
+        fractional_mask=fractional_mask,
+        latitude_radian=latitude_2d,
+        longitude_radian=longitude_2d,
+        threshold=threshold,
+        dims=("longitude", "latitude"),
+    )
+
+
