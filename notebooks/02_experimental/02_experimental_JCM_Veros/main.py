@@ -157,8 +157,8 @@ def interaction(coupled_carry):
     # function or module
     drag_coefficient = 1e-3 # dimensionless
     air_density = 1.22 # kg / m^3
-    wind_x = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].u0)
-    wind_y = jcm_to_veros_regridder(atm["derived"]["physics"]["_surface_flux"].v0)
+    wind_x = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].u0)
+    wind_y = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].v0)
     wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)    
     vs = ocn["state"].variables
     surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
@@ -166,14 +166,14 @@ def interaction(coupled_carry):
     # ===== compute wind stress end =====
 
     # Cap total heat flux for now. There seems to be instability coming from JCM. Need investigation
-    #total_heat_flux = jnp.clip(atm["derived"]["total_heat_flux"], min=-1372.0, max=1372.0)
-    total_heat_flux = atm["derived"]["total_heat_flux"]
+    #total_heat_flux = jnp.clip(atm["derived"].total_heat_flux, min=-1372.0, max=1372.0)
+    total_heat_flux = atm["derived"].total_heat_flux
 
     # Mapping
     ocn["forcing"].surface_taux = surface_taux
     ocn["forcing"].surface_tauy = surface_tauy     
     ocn["forcing"].heat_flux = jcm_to_veros_regridder(total_heat_flux)
-    ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"]["total_freshwater_flux"])
+    ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"].total_freshwater_flux)
     ocn["forcing"].wind_x = wind_x
     ocn["forcing"].wind_y = wind_y
     fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
@@ -182,7 +182,7 @@ def interaction(coupled_carry):
         200.0,
         273.15 + 30.0,
     )
-    atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"]["sea_surface_temperature"])
+    atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"].sea_surface_temperature)
     atm["forcing"].stl_am = fakelnd["state"].sea_surface_temperature
     
     return coupled_carry
