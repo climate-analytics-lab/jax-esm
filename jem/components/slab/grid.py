@@ -51,7 +51,7 @@ class SlabGrid:
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return self.fractional_mask.shape
+        return tuple(self.fractional_mask.shape)
 
     @property
     def binary_mask(self) -> Array:
