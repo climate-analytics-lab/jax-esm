@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 
 
-def evaluate_cyclic_linear(x: ArrayLike, data: ArrayLike) -> ArrayLike:
+def evaluate_cyclic_linear(x: ArrayLike, data: jax.Array) -> jax.Array:
     """Linearly interpolate equally-spaced periodic records at cycle position x.
 
     Records are assumed equally spaced at positions 0, 1/n, 2/n, ..., (n-1)/n
