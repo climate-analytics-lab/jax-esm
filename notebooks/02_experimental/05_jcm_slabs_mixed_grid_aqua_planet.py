@@ -1,19 +1,4 @@
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: percent
-#       format_version: '1.3'
-#       jupytext_version: 1.19.1
-#   kernelspec:
-#     display_name: Python 3 (ipykernel)
-#     language: python
-#     name: python3
-# ---
-
-# %% [markdown]
-# # JCM + slab models on a displaced-pole (UGRID) grid
+# JCM + slab models on a displaced-pole (UGRID) grid
 #
 # This notebook demonstrates a JAX-ESM (JEM) example using JAX-GCM (JCM) and
 # Slab Ocean/Sea-ice Models as an aquaplanet -- except the slab models here
@@ -22,23 +7,22 @@
 # (no-op passthrough) for now; the point of this notebook is only to verify
 # the slab models can load and run on this grid.
 
-# %%
 from pathlib import Path
 
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
+import xarray as xr
 
 from jem.components import JCM, SlabOceanModel, SlabSeaiceModel
-from jem.components.slab.grid import generate_slab_grid_from_ugrid
+from jem.components.slab.grid import generate_slab_grid_from_scrip
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
+from jem.utils.ESMF_regrid import ESMFRegridder
 use_ipython = 'get_ipython' in globals()
 
-# %% [markdown]
-# ## Configurations
+# Configurations
 
-# %%
 start_datetime = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-05_jcm_slabs_mixed_grid_aqua_planet"
@@ -46,22 +30,44 @@ output_dir = (Path("output") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
 output_figure = output_dir / "animation_humidity_sst.gif"
 one_second = jdt.to_timedelta(1, "second")
-# %% [markdown]
-# ## Creating Flux and Scalar Exchange between Components
 
-# %%
+
+# Displaced-pole ocean grid, loaded from a UGRID-convention CF grid file.
+# Only the slab models (ocn, seaice) use this grid -- JCM's atmosphere keeps
+# its own native spectral grid; with the mapper stubbed out above, no
+# regridding between the two grids is needed yet.
+grid_file = Path(__file__).resolve().parent.parent.parent / "data" / "DisplacedPoleGrid.SCRIP.nc"
+land_fraction_file = Path(__file__).resolve().parent.parent.parent / "data" / "landsea_mask_fraction_DisplacedPoleGrid.nc"
+displaced_pole_grid = generate_slab_grid_from_scrip(
+    str(grid_file),
+    fractional_mask=xr.open_dataset(land_fraction_file)["lsm"].to_numpy()[0].transpose(),
+    threshold=0.5,
+)
+
+regridder = {
+    "o2a": {
+        "bilinear": ESMFRegridder("data/weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc"),
+        "conserve": ESMFRegridder("data/weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc"),
+    },
+    "a2o": {
+        "bilinear": ESMFRegridder("data/weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc"),
+        "conserve": ESMFRegridder("data/weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc"),
+    }
+}
+
+# Creating Flux and Scalar Exchange between Components
 def mapper(coupled_carry):
-    # Stubbed out for now -- just verifying the slab models can load and
-    # run on the displaced-pole grid below, not actual flux exchange yet.
-    #
-    # atm = coupled_carry["atm"]
-    # ocn = coupled_carry["ocn"]
-    # seaice = coupled_carry["seaice"]
-    #
-    # ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
-    # seaice["forcing"].ice_frazil_melt_energy = ocn["derived"].ice_frazil_melt_energy
-    # atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
-    # atm["forcing"].sice_am = seaice["derived"].ice_fraction
+    atm = coupled_carry["atm"]
+    ocn = coupled_carry["ocn"]
+    seaice = coupled_carry["seaice"]
+
+    # ESMFRegridder, SlabGrid, and JCM all use (n_lon, n_lat) -- no
+    # transpose needed. Flux/area quantities use conservative regridding to
+    # preserve budgets; state quantities (SST) use bilinear.
+    ocn["forcing"].total_heat_flux = regridder["a2o"]["conserve"](atm["derived"].total_heat_flux)
+    seaice["forcing"].ice_frazil_melt_energy = ocn["derived"].ice_frazil_melt_energy
+    atm["forcing"].sea_surface_temperature = regridder["o2a"]["bilinear"](ocn["state"].sea_surface_temperature)
+    atm["forcing"].sice_am = regridder["o2a"]["conserve"](seaice["derived"].ice_fraction)
 
     return coupled_carry
 
@@ -80,12 +86,6 @@ atm_model = JCM.make_jem_compatible(
     coupling_timestep=coupling_timestep,
 )
 
-# Displaced-pole ocean grid, loaded from a UGRID-convention CF grid file.
-# Only the slab models (ocn, seaice) use this grid -- JCM's atmosphere keeps
-# its own native spectral grid; with the mapper stubbed out above, no
-# regridding between the two grids is needed yet.
-ugrid_file = Path(__file__).resolve().parent.parent.parent / "data" / "grid_displaced_pole_logcosh_CF.nc"
-displaced_pole_grid = generate_slab_grid_from_ugrid(str(ugrid_file))
 
 model = Coupler(
     components=dict(
@@ -122,7 +122,7 @@ initial_state, final_state, predictions = model.run(
 # %%
 output_dict = model.predictions_to_xarray(predictions)
 output_dict_subsample = {}
-subsample_skip = 5
+subsample_skip = 1
 for component_name, ds in output_dict.items():
     output_file = output_dir / f"{component_name:s}.nc"
     print(f"Output file: {str(output_file)}, with subsample_skip = {subsample_skip:d}")
