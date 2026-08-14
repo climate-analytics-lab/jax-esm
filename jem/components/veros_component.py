@@ -1,13 +1,13 @@
 """Veros adapter to JEM"""
-from typing import Annotated, Any
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import tree_math
 import xarray as xr
 from veros import runtime_settings
 
-from jem.utils import data_structure
 from jem.utils.bulk_op import stack_objects
 
 print("Setting veros.runtime_settings...")
@@ -21,7 +21,7 @@ from veros.core.operators import numpy as npx
 
 def copy_veros_state(state):
     return jax.tree_util.tree_map(lambda x: x, state)
-    
+
 def check_before_setattr(target, attribute_name, value, *, raise_exception=True):
     if hasattr(target, attribute_name):
         message = f"Attribute name `{attribute_name:s}` already exists."
@@ -29,16 +29,51 @@ def check_before_setattr(target, attribute_name, value, *, raise_exception=True)
             raise AttributeError(message)
         else:
             print(f"Warning: {message:s}")
-    
+
     setattr(target, attribute_name, value)
 
-@data_structure.typed_and_dimensioned
-class AbstractVerosForcing:
-    heat_flux: Annotated[float, ("lon", "lat"), "two_dimensional"]
-    freshwater_flux: Annotated[float, ("lon", "lat"), "two_dimensional"]
-    surface_taux: Annotated[float, ("lon", "lat"), "two_dimensional"]
-    surface_tauy: Annotated[float, ("lon", "lat"), "two_dimensional"]
-    surface_air_temperature: Annotated[float, ("lon", "lat"), "two_dimensional"]
+
+@tree_math.struct
+class VerosForcing:
+    heat_flux: jnp.ndarray
+    freshwater_flux: jnp.ndarray
+    surface_taux: jnp.ndarray
+    surface_tauy: jnp.ndarray
+    surface_air_temperature: jnp.ndarray
+
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        heat_flux=None,
+        freshwater_flux=None,
+        surface_taux=None,
+        surface_tauy=None,
+        surface_air_temperature=None,
+    ):
+        return cls(
+            heat_flux if heat_flux is not None else jnp.zeros(shape),
+            freshwater_flux if freshwater_flux is not None else jnp.zeros(shape),
+            surface_taux if surface_taux is not None else jnp.zeros(shape),
+            surface_tauy if surface_tauy is not None else jnp.zeros(shape),
+            surface_air_temperature if surface_air_temperature is not None else jnp.zeros(shape),
+        )
+
+
+@tree_math.struct
+class VerosDerived:
+    sea_surface_temperature: jnp.ndarray
+    sea_surface_u: jnp.ndarray
+    sea_surface_v: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None):
+        return cls(
+            sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
+            sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
+            sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
+        )
+
 
 def make_jem_compatible(
     model: Any,
@@ -54,12 +89,8 @@ def make_jem_compatible(
     nyt = model.state.dimensions["yt"]
     ghost_cell = 2 # Veros hard-coded ghost cell number
     
-    decorator = data_structure.build_dataclass_from_typed_and_dimensioned({"two_dimensional": (nxt, nyt)})
-    VerosForcing = decorator(AbstractVerosForcing)
     horizontal_T_shape = (nxt, nyt)
-    horizontal_U_shape = (nxt, nyt)
-    horizontal_V_shape = (nxt, nyt)
-    
+
     mask_T = jnp.array(model.state.variables.maskT)
     mask_T = mask_T[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell]
 
@@ -87,12 +118,8 @@ def make_jem_compatible(
         
     def initialize():
         initial_state = model.state
-        initial_derived = {
-            'sea_surface_temperature' : jnp.zeros(horizontal_T_shape) + 273.15,
-            'sea_surface_u' : jnp.zeros(horizontal_U_shape),
-            'sea_surface_v' : jnp.zeros(horizontal_V_shape),
-        }
-        initial_forcing = VerosForcing.zeros()
+        initial_derived = VerosDerived.zeros(horizontal_T_shape)
+        initial_forcing = VerosForcing.zeros(horizontal_T_shape)
         print(f"initial_forcing.surface_taux.shape = {initial_forcing.surface_taux.shape!s}")
         return {"state": initial_state, "derived": initial_derived, "forcing": initial_forcing}
     
@@ -113,8 +140,8 @@ def make_jem_compatible(
                     print("Warning: settings.enable_tempsalt_sources = False. This is for the `temp_source` variable, "
                           "which is very similar to forc_temp_surface."
                     )
-                vs.surface_taux = update(vs.surface_taux, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing["surface_taux"])
-                vs.surface_tauy = update(vs.surface_tauy, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing["surface_tauy"])
+                vs.surface_taux = update(vs.surface_taux, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing.surface_taux)
+                vs.surface_tauy = update(vs.surface_tauy, at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell], forcing.surface_tauy)
                 # The following computation is learned from
                 # `veros/setups/global_1deg/global_1deg.py`
                 if settings.enable_tke:
@@ -143,14 +170,14 @@ def make_jem_compatible(
                 vs.forc_temp_surface = update(
                     vs.forc_temp_surface,
                     at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell],
-                    - forcing["heat_flux"] * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / cp_0 / settings.rho_0
+                    - forcing.heat_flux * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / cp_0 / settings.rho_0
                 )
 
                 # freshwater_flux is upward positive. Therefore, positive freshwater_flux should increase salinity
                 vs.forc_salt_surface = update(
                     vs.forc_salt_surface,
                     at[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell],
-                     forcing["freshwater_flux"] * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / settings.rho_0 * salinity_ref
+                     forcing.freshwater_flux * vs.maskT[ghost_cell:-ghost_cell, ghost_cell:-ghost_cell, -1] / settings.rho_0 * salinity_ref
                 )
 
             def _sub_step_function(_, state):
@@ -177,11 +204,7 @@ def make_jem_compatible(
 
             return {
                 "state": state,
-                "derived": {
-                    "sea_surface_temperature" : sea_surface_temperature,
-                    "sea_surface_u" : sea_surface_u,
-                    "sea_surface_v" : sea_surface_v,
-                },
+                "derived": VerosDerived(sea_surface_temperature, sea_surface_u, sea_surface_v),
                 "forcing": forcing,
             }, stack_objects([{
                     "sea_surface_temperature": sea_surface_temperature,

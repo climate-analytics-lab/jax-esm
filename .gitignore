@@ -12,3 +12,4 @@ CLAUDE.md
 .idea/
 env/
 *.nc
+!jem/data/*.nc

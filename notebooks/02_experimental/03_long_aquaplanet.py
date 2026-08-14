@@ -28,7 +28,7 @@ from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
 
 from jem.components import JCM, SlabOceanModel
-from jem.mapping import BasicMapper
+from jem.components.slab.grid import generate_slab_grid
 from jem.base.coupler import Coupler
 import jem.utils.tree_tools as tree_tools
 use_ipython = 'get_ipython' in globals()
@@ -60,16 +60,14 @@ one_second = jdt.to_timedelta(1, "second")
 # ## Creating Flux and Scalar Exchange between Components
 
 # %%
-mapper = BasicMapper()
-mapper.add_mapping(
-    source = ("atm", "derived.total_heat_flux"),
-    target = ("ocn", "forcing.total_heat_flux"),
-    regridder = lambda x: x,  # identity is default
-)
-mapper.add_mapping(
-    source = ("ocn", "state.sea_surface_temperature"),
-    target = ("atm", "forcing.sea_surface_temperature"),
-)
+def mapper(coupled_carry):
+    atm = coupled_carry["atm"]
+    ocn = coupled_carry["ocn"]
+
+    ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
+    atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
+
+    return coupled_carry
 
 # %% [markdown]
 # ## Create Components
@@ -103,11 +101,14 @@ llon = jnp.repeat(
 )
 
 
+# Aquaplanet: no mask_file, so fractional_mask defaults to all-zero (no land).
+ocn_grid = generate_slab_grid(f"JCM::T{spectral_truncation:d}")
+
 model = Coupler(
     components=dict(
         atm=atm_model,
         ocn=SlabOceanModel(
-            grid_specification=f"JCM::T{spectral_truncation:d}",
+            grid=ocn_grid,
             start_datetime=start_datetime,
             timestep=coupling_timestep / one_second,
         ),

@@ -1,42 +1,76 @@
 """Slab atmosphere model component."""
 
-from typing import Annotated, Any
+from typing import Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
+import tree_math
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
-from jem.utils import data_structure
+from jem.components.slab.grid import SlabGrid
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
 class AtmosphereState:
-    sim_time: Annotated[float, (), "zero_dimensional"]
-    mean_air_temperature: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-    mean_zonal_wind_velocity: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
-    mean_meridional_wind_velocity: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
+    sim_time: jnp.ndarray
+    mean_air_temperature: jnp.ndarray
+    mean_zonal_wind_velocity: jnp.ndarray
+    mean_meridional_wind_velocity: jnp.ndarray
 
-@data_structure.typed_and_dimensioned
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        sim_time=None,
+        mean_air_temperature=None,
+        mean_zonal_wind_velocity=None,
+        mean_meridional_wind_velocity=None,
+    ):
+        return cls(
+            sim_time if sim_time is not None else jnp.zeros(()),
+            mean_air_temperature if mean_air_temperature is not None else jnp.zeros(shape),
+            mean_zonal_wind_velocity if mean_zonal_wind_velocity is not None else jnp.zeros(shape),
+            mean_meridional_wind_velocity if mean_meridional_wind_velocity is not None else jnp.zeros(shape),
+        )
+
+
+@tree_math.struct
 class AtmosphereForcing:
-    land_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    sea_surface_temperature: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    total_heat_flux: Annotated[float, ("latitudinal", "longitude"), "two_dimensional"]
-    bulk_drag_coefficient: Annotated[float, (), "zero_dimensional"]
+    land_surface_temperature: jnp.ndarray
+    sea_surface_temperature: jnp.ndarray
+    total_heat_flux: jnp.ndarray
+    bulk_drag_coefficient: jnp.ndarray
 
-@data_structure.typed_and_dimensioned
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        land_surface_temperature=None,
+        sea_surface_temperature=None,
+        total_heat_flux=None,
+        bulk_drag_coefficient=None,
+    ):
+        return cls(
+            land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
+            sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
+            total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            bulk_drag_coefficient if bulk_drag_coefficient is not None else jnp.zeros(()),
+        )
+
+
+@tree_math.struct
 class AtmosphereDerived:
-    internal_total_heat_flux: Annotated[
-        float, ("latitudinal", "longitude"), "two_dimensional"
-    ]
+    internal_total_heat_flux: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, internal_total_heat_flux=None):
+        return cls(
+            internal_total_heat_flux if internal_total_heat_flux is not None else jnp.zeros(shape),
+        )
+
 
 class SlabAtmosphereModel(SlabModelBase):
     """Slab atmosphere model for simple air-sea-land heat exchange.
@@ -56,30 +90,24 @@ class SlabAtmosphereModel(SlabModelBase):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         timestep: float = 86400.0,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         calendar: str = "365_day",
     ):
         """Initialize slab atmosphere model.
 
         Args:
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             timestep: Model timestep in seconds
             start_datetime: Simulation start datetime
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
         """
 
         super().__init__(
             name="SlabAtmosphereModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -97,39 +125,15 @@ class SlabAtmosphereModel(SlabModelBase):
     def validate(self):
         super().validate()
 
-    def _create_state_and_forcing_classes(self) -> None:
-        """Create state and forcing classes for atmosphere model."""
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
-            {
-                "zero_dimensional": (),
-                "two_dimensional": self.grid_shape,
-                "heatflux_dimension": self.grid_shape + (2,),
-            }
-        )
-        self.component_state_class = decorator(AtmosphereState)
-        self.component_derived_class = decorator(AtmosphereDerived)
-        self.component_forcing_class = decorator(AtmosphereForcing)
-
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
     def initialize(self):
         """Initialize atmosphere model fields."""
         # Initialize air temperature with latitudinal variation
         init_mean_air_temperature = (
-            positive_cosine_cubic_latitude_squared(self.latitude_radian) * 17.0
+            positive_cosine_cubic_latitude_squared(self.grid.latitude_radian) * 17.0
             + constants.freezing_point_K
         )
-        init_mean_zonal_wind_velocity = jnp.zeros_like(self.latitude_radian) + 10.0
-        init_mean_meridional_wind_velocity = jnp.zeros_like(self.latitude_radian)
+        init_mean_zonal_wind_velocity = jnp.zeros_like(self.grid.latitude_radian) + 10.0
+        init_mean_meridional_wind_velocity = jnp.zeros_like(self.grid.latitude_radian)
 
         # Compute heat capacity factor for Euler forward scheme
         cd = (
@@ -139,21 +143,23 @@ class SlabAtmosphereModel(SlabModelBase):
         self.cd_factor = self.timestep / cd
 
         return {
-            "state": self.component_state_class.zeros().copy({
-                "mean_air_temperature": init_mean_air_temperature,
-                "mean_zonal_wind_velocity": init_mean_zonal_wind_velocity,
-                "mean_meridional_wind_velocity": init_mean_meridional_wind_velocity,
-            }),
-            "derived": self.component_derived_class.zeros(),
-            "forcing": self.component_forcing_class.zeros().copy({
-                "bulk_drag_coefficient": jnp.array(1e-3),
-            })
+            "state": AtmosphereState.zeros(
+                self.grid.shape,
+                mean_air_temperature=init_mean_air_temperature,
+                mean_zonal_wind_velocity=init_mean_zonal_wind_velocity,
+                mean_meridional_wind_velocity=init_mean_meridional_wind_velocity,
+            ),
+            "derived": AtmosphereDerived.zeros(self.grid.shape),
+            "forcing": AtmosphereForcing.zeros(
+                self.grid.shape,
+                bulk_drag_coefficient=jnp.array(1e-3),
+            ),
         }
 
     def _create_step_function_body(self):
         """Create the step function for atmosphere model."""
-        land_index = self.horizontal_grids["T"].bmask == 1
-        ocean_index = self.horizontal_grids["T"].bmask == 0
+        land_index = self.grid.binary_mask == 1
+        ocean_index = self.grid.binary_mask == 0
 
         def step_function(carry, step):
             state = carry["state"]
@@ -204,24 +210,21 @@ class SlabAtmosphereModel(SlabModelBase):
                 state.mean_air_temperature + self.cd_factor * total_heat_flux
             )
 
-            new_state = state.copy(
-                {
-                    "sim_time": new_sim_time,
-                    "mean_air_temperature": new_mean_air_temperature,
-                    "total_heat_flux": total_heat_flux,
-                }
+            new_state = state.replace(
+                sim_time=new_sim_time,
+                mean_air_temperature=new_mean_air_temperature,
             )
 
-            new_derived = self.component_derived_class.zeros().copy({
-                "internal_total_heat_flux" : total_heat_flux,
-            })
+            new_derived = AtmosphereDerived.zeros(
+                self.grid.shape, internal_total_heat_flux=total_heat_flux,
+            )
 
             return {
                 "state": new_state,
                 "derived": new_derived,
                 "forcing": forcing,
             }, stack_objects(
-                [{"state": new_state, "forcing": forcing}]
+                [{"state": new_state, "derived": new_derived, "forcing": forcing}]
             )
 
         return step_function
@@ -230,7 +233,8 @@ class SlabAtmosphereModel(SlabModelBase):
         """Create xarray data variables for atmosphere output."""
         state = predictions["state"]
         forcing = predictions["forcing"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        derived = predictions["derived"]
+        T_grid_dims = ("time",) + self.grid.dims
 
         return {
             "total_heat_flux": (
@@ -240,7 +244,16 @@ class SlabAtmosphereModel(SlabModelBase):
                     "long_name": "Total heat flux forcing",
                     "units": "W m^-2",
                     "positive": "upward",
-                }                   
+                }
+            ),
+            "internal_total_heat_flux": (
+                T_grid_dims,
+                derived.internal_total_heat_flux,
+                {
+                    "long_name": "Internally-computed total heat flux (ocean + land sensible)",
+                    "units": "W m^-2",
+                    "positive": "upward",
+                }
             ),
             "mean_air_temperature": (
                 T_grid_dims,

@@ -1,9 +1,12 @@
 """JCM adapter to JEM"""
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
+import tree_math
 from jcm.forcing import default_forcing
 from jcm.model import Model
 
@@ -15,7 +18,7 @@ def safe_setattr(target, attribute_name, value, *, raise_exception=True):
             raise AttributeError(message)
         else:
             print(f"Warning: {message:s}")
-    
+
     setattr(target, attribute_name, value)
 
 # This is a temporary solution to jcm's problem: some of the array's initiated
@@ -23,6 +26,34 @@ def safe_setattr(target, attribute_name, value, *, raise_exception=True):
 # jax.lax.scan to fail due to data type inconsistency.
 def asfloat64(tree):
     return jax.tree_util.tree_map(lambda arr: jnp.array(arr).astype(jnp.float64), tree)
+
+
+@tree_math.struct
+class JCMDerived:
+    physics: Any  # jcm's own PhysicsCarryState -- opaque passthrough, shape/keys
+                  # depend on which physics terms are configured on the Model
+    land_heat_flux: jnp.ndarray
+    ocean_heat_flux: jnp.ndarray
+    total_heat_flux: jnp.ndarray
+    total_freshwater_flux: jnp.ndarray
+
+    @classmethod
+    def zeros(
+        cls,
+        shape,
+        physics,
+        land_heat_flux=None,
+        ocean_heat_flux=None,
+        total_heat_flux=None,
+        total_freshwater_flux=None,
+    ):
+        return cls(
+            physics,
+            land_heat_flux if land_heat_flux is not None else jnp.zeros(shape),
+            ocean_heat_flux if ocean_heat_flux is not None else jnp.zeros(shape),
+            total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            total_freshwater_flux if total_freshwater_flux is not None else jnp.zeros(shape),
+        )
 
 def make_jem_compatible(
     model: Model,
@@ -63,13 +94,7 @@ def make_jem_compatible(
 
         return asfloat64({
             "state": state,
-            "derived": { # Derived
-                "physics" : physics_no_time_dimension,
-                "land_heat_flux" : jnp.zeros(D2_nodal_shape),
-                "ocean_heat_flux" : jnp.zeros(D2_nodal_shape),
-                "total_heat_flux" : jnp.zeros(D2_nodal_shape),
-                "total_freshwater_flux" : jnp.zeros(D2_nodal_shape),
-            },
+            "derived": JCMDerived.zeros(D2_nodal_shape, physics_no_time_dimension),
             "forcing": forcing,
         })
 
@@ -105,13 +130,13 @@ def make_jem_compatible(
             return (
                 asfloat64({
                     "state": new_atm_modal_state,
-                    "derived": {
-                        "physics" : physics_no_time_dimension,
-                        "land_heat_flux" : land_heat_flux,
-                        "ocean_heat_flux" : ocean_heat_flux,
-                        "total_heat_flux" : total_heat_flux,
-                        "total_freshwater_flux" : total_freshwater_flux,
-                    },
+                    "derived": JCMDerived(
+                        physics_no_time_dimension,
+                        land_heat_flux,
+                        ocean_heat_flux,
+                        total_heat_flux,
+                        total_freshwater_flux,
+                    ),
                     "forcing": forcing,
                 }),
                 predictions
