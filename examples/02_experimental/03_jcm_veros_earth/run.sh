@@ -1,6 +1,9 @@
 #!/bin/bash
+
 echo "PYTHONPATH=$PYTHONPATH"
-time python3 main_forward.py \
+python3 -c "import jcm ; print('jcm.__file__ = ', jcm.__file__);"
+python3 -c "import veros ; print('veros.__file__ = ', veros.__file__);"
+time python3 main.py \
     --total-simulation-days 60                      \
     --simulation-interval-days 30                   \
     --truncation-number 31                          \
