@@ -8,9 +8,9 @@ SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = source
 BUILDDIR      = build
 
-copy_notebook:
-	mkdir -p ./source/notebooks
-	rsync -a --delete ../notebooks/ ./source/notebooks/
+copy_examples:
+	mkdir -p ./source/examples
+	rsync -a --delete ../examples/ ./source/examples/
 
 
 # Put it first so that "make" without argument is like "make help".
@@ -21,5 +21,5 @@ help:
 
 # Catch-all target: route all unknown targets to Sphinx using the new
 # "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
-%: Makefile copy_notebook
+%: Makefile copy_examples
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)

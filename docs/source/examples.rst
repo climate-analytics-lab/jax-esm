@@ -1,5 +1,5 @@
-Examples with notebooks
-=======================
+Examples
+========
 
 JCM with slab models
 --------------------
@@ -8,9 +8,10 @@ JCM with slab models
    :maxdepth: 1
    :caption: Contents:
 
-   notebooks/01_basic/01_aquaplanet
-   notebooks/01_basic/02_aquaplanet_customized_initial_condition
-   notebooks/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient
+   examples/01_basic/01_aquaplanet
+   examples/01_basic/02_aquaplanet_customized_initial_condition
+   examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient
+   examples/01_basic/04_jcm_slabs_mixed_grid_aqua_planet
 
 Experimental
 ------------
@@ -19,7 +20,7 @@ Experimental
    :maxdepth: 1
    :caption: Contents:
 
-   notebooks/02_experimental/01_earth
+   examples/02_experimental/01_earth
 
 
 
