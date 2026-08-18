@@ -8,7 +8,7 @@ time python3 main.py \
     --total-simulation-days 60                      \
     --simulation-interval-days 30                   \
     --truncation-number 31                          \
-    --simulation-name $terrain_planet_type          \
+    --simulation-name example_02-02_jcm_veros_double_drake \
     --jcm-timestep-min 30                           \
     --veros-timestep-min 60                         \
     --terrain-planet-type $terrain_planet_type      \
