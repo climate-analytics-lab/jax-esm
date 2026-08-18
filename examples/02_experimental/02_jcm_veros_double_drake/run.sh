@@ -1,8 +1,10 @@
 #!/bin/bash
 
 echo "PYTHONPATH=$PYTHONPATH"
+python3 -c "import jcm ; print('jcm.__file__ = ', jcm.__file__);"
+python3 -c "import veros ; print('veros.__file__ = ', veros.__file__);"
 terrain_planet_type=double_drake
-time python3 main_forward.py \
+time python3 main.py \
     --total-simulation-days 60                      \
     --simulation-interval-days 30                   \
     --truncation-number 31                          \
