@@ -28,6 +28,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
+        ref: dev/naive-fix-AD-needs-physical-justification
         path: veros-jittable
 
     - name: Show Working directory
@@ -101,6 +102,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
+        ref: dev/naive-fix-AD-needs-physical-justification
         path: veros-jittable
 
     - name: Set up Python
