@@ -15,9 +15,6 @@ API Reference
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereModel
    jem.components.slab.slab_seaice_model.SlabSeaiceModel
 
-   jem.mapping.mapper.BasicMapper
-   jem.mapping.regridder.BasicRegridder
-   jem.mapping.regridder.IdentityRegridder
-   jem.mapping.regridder.BilinearRegridder
-   jem.mapping.grid.Grid
-   jem.mapping.grid.GridSpecification
+   jem.components.slab.grid.SlabGrid
+   jem.utils.esmf_regrid.ESMFRegridder
+   jem.utils.esmf_regrid.ESMFWeights
