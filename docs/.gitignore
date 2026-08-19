@@ -2,4 +2,5 @@ build/
 source/_autosummary/
 source/generated/
 source/examples/
+source/notebooks/
 
