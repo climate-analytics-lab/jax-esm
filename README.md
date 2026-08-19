@@ -184,3 +184,6 @@ Contributions are welcome! Please:
 - **Production Ready**: Core functionality stable
 - **API Stability**: Subject to change
 
+## Miscellaneous
+
+The regridding files are generated from repo [EarthSystemGrid.py](https://github.com/meteorologytoday/EarthSystemGrids.py). 
