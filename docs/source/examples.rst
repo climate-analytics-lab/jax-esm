@@ -13,17 +13,6 @@ JCM with slab models
    examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient
    examples/01_basic/04_jcm_slabs_mixed_grid_aqua_planet
 
-Experimental
-------------
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Contents:
-
-   examples/02_experimental/01_earth
-
-
-
 Miscellaneous
 -------------
 

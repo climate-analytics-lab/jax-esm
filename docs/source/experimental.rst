@@ -18,6 +18,9 @@ JCM with Slabs
 JCM with Veros
 --------------
 
-Documentation for these examples is not yet available. See
-:code:`examples/02_experimental/02_jcm_veros_double_drake/README.md`
-in the repository for now.
+.. toctree::
+   :maxdepth: 1
+   :caption: Contents:
+
+   examples/02_experimental/02_jcm_veros_double_drake/index
+   examples/02_experimental/03_jcm_veros_earth/index
