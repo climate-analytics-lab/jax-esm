@@ -31,6 +31,6 @@ Miscellaneous
    :maxdepth: 1
    :caption: Contents:
    
-   notebooks/03_non_geoscience/01_SpringSystem
+   examples/03_non_geoscience/01_SpringSystem
 
 

@@ -12,12 +12,12 @@ JCM with Slabs
    :maxdepth: 1
    :caption: Contents:
 
-   notebooks/02_experimental/01_earth
+   examples/02_experimental/01_earth
 
 
 JCM with Veros
 --------------
 
-Documentation for this example is not yet available. See
-:code:`notebooks/02_experimental/02_experimental_JCM_Veros/README.md`
+Documentation for these examples is not yet available. See
+:code:`examples/02_experimental/02_jcm_veros_double_drake/README.md`
 in the repository for now.
