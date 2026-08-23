@@ -49,7 +49,7 @@ jobs:
 
     - name: Run tests with pytest
       run: |
-        export PYTHONPATH=./jax-gcm:./veros-jittable:$PYTHONPATH
+        export PYTHONPATH=$(pwd)/jax-gcm:$(pwd)/veros-jittable:$PYTHONPATH
         pytest tests/ -v --tb=short --cov=jem --cov-report=xml --cov-report=term --ignore=tests/ignore
 
     - name: Upload coverage to Codecov
