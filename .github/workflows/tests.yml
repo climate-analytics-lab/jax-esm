@@ -123,5 +123,5 @@ jobs:
 
     - name: Build Sphinx docs
       run: |
-        export PYTHONPATH=./jax-gcm:./veros-jittable:$PYTHONPATH
+        export PYTHONPATH=$(pwd)/jax-gcm:$(pwd)/veros-jittable:$PYTHONPATH
         docs/build_docs.sh -c
