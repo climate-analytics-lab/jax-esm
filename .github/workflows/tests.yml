@@ -98,6 +98,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
+        ref: v2.0.1
         path: jax-gcm
 
     - name: Get jittable veros
