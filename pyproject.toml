@@ -59,6 +59,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
+[tool.setuptools.package-data]
+jem = ["data/*.nc"]
+
 [tool.black]
 line-length = 88
 target-version = ['py38']

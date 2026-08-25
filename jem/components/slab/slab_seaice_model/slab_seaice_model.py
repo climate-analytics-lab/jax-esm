@@ -1,32 +1,56 @@
 """Slab sea-ice model component."""
 
-from typing import Annotated, Any
+from typing import Any
 
 import jax.numpy as jnp
 import jax_datetime as jdt
+import tree_math
 
 from jem import constants
 from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
-from jem.utils import data_structure
+from jem.components.slab.grid import SlabGrid
 from jem.utils.bulk_op import stack_objects
 
 default_land_surface_temperature = 288.15
 
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
 class SeaiceState:
-    sim_time: Annotated[float, (), "zero_dimensional"]
-    ice_thickness: Annotated[float, ("longitude", "latitude"), "two_dimensional"]
-    ice_surface_temperature: Annotated[
-        float, ("longitude", "latitude"), "two_dimensional"
-    ]
+    sim_time: jnp.ndarray
+    ice_thickness: jnp.ndarray
+    ice_surface_temperature: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, sim_time=None, ice_thickness=None, ice_surface_temperature=None):
+        return cls(
+            sim_time if sim_time is not None else jnp.zeros(()),
+            ice_thickness if ice_thickness is not None else jnp.zeros(shape),
+            ice_surface_temperature if ice_surface_temperature is not None else jnp.zeros(shape),
+        )
 
 
-@data_structure.typed_and_dimensioned
+@tree_math.struct
 class SeaiceForcing:
-    ice_frazil_melt_energy: Annotated[
-        float, ("longitude", "latitude"), "two_dimensional"
-    ]
+    ice_frazil_melt_energy: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, ice_frazil_melt_energy=None):
+        return cls(
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
+        )
+
+
+@tree_math.struct
+class SeaiceDerived:
+    ice_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, ice_fraction=None, ice_frazil_melt_energy=None):
+        return cls(
+            ice_fraction if ice_fraction is not None else jnp.zeros(shape),
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
+        )
 
 
 class SlabSeaiceModel(SlabModelBase):
@@ -93,11 +117,9 @@ class SlabSeaiceModel(SlabModelBase):
 
     def __init__(
         self,
-        grid_specification: str = "JCM::T31",
+        grid: SlabGrid,
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
-        topography_file: str | None = None,
-        mask_file: str | None = None,
         initialization_ice_thickness: float = 0.0,
         min_ice_thickness: float = 1e-3,
         ice_fraction_thickness_scale: float = 0.5,
@@ -107,11 +129,9 @@ class SlabSeaiceModel(SlabModelBase):
         """Initialize slab sea-ice model.
 
         Args:
-            grid_specification: Grid spec string (e.g., "JCM::T31")
+            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
-            topography_file: Optional path to topography NetCDF file
-            mask_file: Optional path to land/ocean mask NetCDF file
             initialization_ice_thickness: Uniform initial ice thickness over ocean points (m)
             min_ice_thickness: Thickness above which a cell is diagnosed as ice-covered (m)
             ice_fraction_thickness_scale: Thickness scale (m) of the smooth
@@ -126,11 +146,9 @@ class SlabSeaiceModel(SlabModelBase):
 
         super().__init__(
             name="SlabSeaiceModel",
-            grid_specification=grid_specification,
+            grid=grid,
             start_datetime=start_datetime,
             timestep=timestep,
-            topography_file=topography_file,
-            mask_file=mask_file,
             calendar=calendar,
         )
 
@@ -143,28 +161,9 @@ class SlabSeaiceModel(SlabModelBase):
         if self.ice_fraction_thickness_scale <= 0:
             raise ValueError("`ice_fraction_thickness_scale` must be a positive number.")
 
-    def _create_state_and_forcing_classes(self) -> None:
-        """Create state and forcing classes for the sea-ice model."""
-        decorator = data_structure.build_dataclass_from_typed_and_dimensioned(
-            {"two_dimensional": self.grid_shape}
-        )
-        self.component_state_class = decorator(SeaiceState)
-        self.component_forcing_class = decorator(SeaiceForcing)
-
-    def _create_variable_registries(self) -> None:
-        self.state_variable_registry = {}
-        self.forcing_variable_registry = {}
-
-        for target_registry, target_class in [
-            (self.state_variable_registry, self.component_state_class),
-            (self.forcing_variable_registry, self.component_forcing_class),
-        ]:
-            for name, _, dimensions, shape in target_class.typed_and_dimensioned_info():
-                target_registry[name] = (shape, dimensions)
-
     def initialize(self):
         """Initialize sea-ice model fields."""
-        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
+        ocn_idx = self.grid.binary_mask == self.mask_value
 
         init_ice_thickness = jnp.where(
             ocn_idx, self.initialization_ice_thickness, 0.0
@@ -182,21 +181,18 @@ class SlabSeaiceModel(SlabModelBase):
         )
 
         return {
-            "state": self.component_state_class.zeros().copy(
-                {
-                    "ice_thickness": init_ice_thickness,
-                    "ice_surface_temperature": init_ice_surface_temperature,
-                }
+            "state": SeaiceState.zeros(
+                self.grid.shape,
+                ice_thickness=init_ice_thickness,
+                ice_surface_temperature=init_ice_surface_temperature,
             ),
-            "forcing": self.component_forcing_class.zeros(),
-            "derived": {
-                "ice_fraction": init_ice_fraction,
-            },
+            "forcing": SeaiceForcing.zeros(self.grid.shape),
+            "derived": SeaiceDerived.zeros(self.grid.shape, ice_fraction=init_ice_fraction),
         }
 
     def _create_step_function_body(self):
         """Create the step function for the sea-ice model."""
-        ocn_idx = self.horizontal_grids["T"].bmask == self.mask_value
+        ocn_idx = self.grid.binary_mask == self.mask_value
         min_ice_thickness = self.min_ice_thickness
         ice_fraction_thickness_scale = self.ice_fraction_thickness_scale
 
@@ -227,43 +223,37 @@ class SlabSeaiceModel(SlabModelBase):
 
             new_sim_time = state.sim_time + self.timestep
 
-            new_state = state.copy(
-                {
-                    "ice_thickness": new_ice_thickness,
-                    "ice_surface_temperature": new_surface_temperature,
-                    "sim_time": new_sim_time,
-                }
+            new_state = state.replace(
+                ice_thickness=new_ice_thickness,
+                ice_surface_temperature=new_surface_temperature,
+                sim_time=new_sim_time,
             )
 
-            predictions = {
-                "state": new_state,
-                "forcing": {
-                    "ice_frazil_melt_energy": ice_frazil_melt_energy,
-                },
-                "derived": {
-                    "ice_fraction": new_ice_fraction,
-                },
-            }
+            new_derived = SeaiceDerived.zeros(
+                self.grid.shape,
+                ice_fraction=new_ice_fraction,
+                ice_frazil_melt_energy=ice_frazil_melt_energy,
+            )
 
-            return {
+            result = {
                 "state": new_state,
                 "forcing": forcing,
-                "derived": {"ice_fraction": new_ice_fraction},
-            }, stack_objects([predictions])
+                "derived": new_derived,
+            }
+            return result, stack_objects([result])
 
         return step_function
 
     def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         """Create xarray data variables for sea-ice output."""
         state = predictions["state"]
-        forcing = predictions["forcing"]
         derived = predictions["derived"]
-        T_grid_dims = ("time",) + self.horizontal_grids["T"].coordinate.dims
+        T_grid_dims = ("time",) + self.grid.dims
 
         return {
             "ice_thickness": (
                 T_grid_dims,
-                state["ice_thickness"],
+                state.ice_thickness,
                 {
                     "long_name": "Sea ice thickness",
                     "units": "m",
@@ -271,7 +261,7 @@ class SlabSeaiceModel(SlabModelBase):
             ),
             "ice_surface_temperature": (
                 T_grid_dims,
-                state["ice_surface_temperature"],
+                state.ice_surface_temperature,
                 {
                     "long_name": "Sea ice surface temperature",
                     "units": "K",
@@ -279,7 +269,7 @@ class SlabSeaiceModel(SlabModelBase):
             ),
             "ice_frazil_melt_energy": (
                 T_grid_dims,
-                forcing["ice_frazil_melt_energy"],
+                derived.ice_frazil_melt_energy,
                 {
                     "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
                     "units": "J m-2",
@@ -287,7 +277,7 @@ class SlabSeaiceModel(SlabModelBase):
             ),
             "ice_fraction": (
                 T_grid_dims,
-                derived["ice_fraction"],
+                derived.ice_fraction,
                 {
                     "long_name": "Sea ice areal fraction (smooth closure from thickness)",
                     "units": "1",

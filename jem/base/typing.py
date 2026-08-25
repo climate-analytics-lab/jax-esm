@@ -22,12 +22,6 @@ TrajectoryFunction = Callable[[CoupledCarry], tuple[CoupledCarry, Predictions]]
 PredictionsToXarrayFunction = Callable[[Predictions], xr.Dataset]
 GetInfoFunction = Callable[[], dict]
 
-VariableName = str
-VariableShape = tuple[int, ...]
-VariableDimension = tuple[str, ...]
-VariableMetadata = tuple[VariableShape, VariableDimension | None]
-VariableRegistry = dict[VariableName, VariableMetadata]
-
 @typechecked
 @dataclass
 class JEMComponent:
