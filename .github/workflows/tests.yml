@@ -122,6 +122,8 @@ jobs:
         pip install -e ".[dev]"
         pip install -r veros-jittable/requirements.txt
         pip install -r docs/requirements.txt
+        pip install ipykernel
+        python -m ipykernel install --user --name python3 --display-name "Python 3"
 
     - name: Build Sphinx docs
       run: |
