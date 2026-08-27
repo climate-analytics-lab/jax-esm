@@ -118,15 +118,7 @@ def make_jem_compatible(
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
             land_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 0] # convert to upward positive
             ocean_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 1] # convert to upward positive
-            # jcm's hfluxn only has 2 channels (land, sea) and is missing the
-            # land/sea-fraction-weighted channel that its sibling flux arrays
-            # (ustr, vstr, shf, evap, rlus) compute at index 2 -- see
-            # https://github.com/climate-analytics-lab/jax-esm/issues/99.
-            # Blend land/ocean here with the same fractional mask jcm uses
-            # internally (weighted_average in speedy_surface_flux.py) until
-            # that's fixed upstream.
-            fmask = model.terrain.fmask
-            total_heat_flux = ocean_heat_flux + fmask * (land_heat_flux - ocean_heat_flux)
+            total_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 2] # convert to upward positive
             evaporation = physics_no_time_dimension["_surface_flux"].evap[:, :, 2] # upward positive
 
             total_freshwater_flux = (
