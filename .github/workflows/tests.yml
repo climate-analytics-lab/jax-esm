@@ -7,13 +7,41 @@ on:
     branches: [ main ]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install linters
+      # Ruff is pinned to the same version jax-gcm pins: an unpinned latest
+      # drifts new rules onto a clean repository and turns an unrelated PR red.
+      run: |
+        python -m pip install --upgrade pip
+        pip install ruff==0.15.17 mypy
+
+    - name: Lint with ruff
+      # The whole repository, not just jem/: examples and tests are code too,
+      # and lint-only-jem is how they drifted to 124 findings.
+      run: ruff check --output-format=github .
+
+    - name: Type check with mypy
+      run: mypy jem/ --ignore-missing-imports
+
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # ubuntu only, 3.11-3.12: macOS added ~15 min per run for a pure-Python
+        # package with no platform-specific code, and 3.13 is ahead of what the
+        # JAX/Veros stack is tested against. Revisit when a user needs either.
+        python-version: ["3.11", "3.12"]
 
     steps:
     - uses: actions/checkout@v4
@@ -22,7 +50,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        ref: v2.0.1
+        # `dev` until T2.0 pins an exact revision. `jcm>=2.1.0b0` is not on
+        # PyPI, so this checkout is the only thing that satisfies it.
+        ref: dev
         path: jax-gcm
 
     - name: Get jittable veros
@@ -32,30 +62,30 @@ jobs:
         ref: dev/naive-fix-AD-needs-physical-justification
         path: veros-jittable
 
-    - name: Show Working directory
-      run: ls
-
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
+      # jax-gcm goes in FIRST: installing it editable registers `jcm 2.1.0b0`
+      # with pip, so the `jcm>=2.1.0b0` requirement of jax-esm resolves against
+      # the checkout instead of failing to find it on PyPI.
       run: |
         python -m pip install --upgrade pip
+        pip install -e ./jax-gcm
         pip install -e ".[dev]"
         pip install -r veros-jittable/requirements.txt
-        pip install jupyter nbconvert nbformat ipykernel
-        python -m ipykernel install --user --name python3 --display-name "Python 3"
-        python -m jupyter kernelspec list
 
-    - name: Run tests with pytest
+    - name: Run unit tests with pytest
+      # veros-jittable is a source checkout, not a pip install, so it still
+      # needs PYTHONPATH; jax-gcm no longer does.
       run: |
-        export PYTHONPATH=$(pwd)/jax-gcm:$(pwd)/veros-jittable:$PYTHONPATH
-        pytest tests/ -v --tb=short --cov=jem --cov-report=xml --cov-report=term --ignore=tests/ignore
+        export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
+        pytest tests/unit -q -m "not slow" --cov=jem --cov-report=xml --cov-report=term
 
     - name: Upload coverage to Codecov
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.10'
+      if: matrix.python-version == '3.11'
       uses: codecov/codecov-action@v3
       with:
         file: ./coverage.xml
@@ -63,30 +93,48 @@ jobs:
         name: codecov-umbrella
         fail_ci_if_error: false
 
-  lint:
-    runs-on: ubuntu-latest 
+  examples:
+    # Notebooks and run.sh drivers execute whole coupled models, so they are
+    # far too slow for every push; a pull request is the point at which it is
+    # worth knowing whether the examples still run.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
+    - name: Get jax-gcm
+      uses: actions/checkout@v4
+      with:
+        repository: climate-analytics-lab/jax-gcm
+        ref: dev
+        path: jax-gcm
+
+    - name: Get jittable veros
+      uses: actions/checkout@v4
+      with:
+        repository: meteorologytoday/veros-jittable
+        ref: dev/naive-fix-AD-needs-physical-justification
+        path: veros-jittable
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: "3.10"
+        python-version: "3.11"
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff mypy 
+        pip install -e ./jax-gcm
+        pip install -e ".[dev,plot]"
+        pip install -r veros-jittable/requirements.txt
+        pip install jupyter ipykernel
+        python -m ipykernel install --user --name python3 --display-name "Python 3"
 
-
-    - name: Check import sorting with ruff
+    - name: Run example notebooks and run.sh drivers
       run: |
-        ruff check --output-format=github jem/
-
-    - name: Type check with mypy
-      run: |
-        mypy jem/ --ignore-missing-imports
+        export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
+        pytest tests/examples -q
 
   docs:
     runs-on: ubuntu-latest
@@ -98,7 +146,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        ref: v2.0.1
+        ref: dev
         path: jax-gcm
 
     - name: Get jittable veros
@@ -119,7 +167,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e ".[dev]"
+        pip install -e ./jax-gcm
+        pip install -e ".[dev,docs,plot]"
         pip install -r veros-jittable/requirements.txt
         pip install -r docs/requirements.txt
         pip install ipykernel
@@ -127,5 +176,5 @@ jobs:
 
     - name: Build Sphinx docs
       run: |
-        export PYTHONPATH=$(pwd)/jax-gcm:$(pwd)/veros-jittable:$PYTHONPATH
+        export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         docs/build_docs.sh -c

@@ -29,6 +29,18 @@ change is listed here.
   **That release is not on PyPI yet**: the floor is currently satisfied only
   by an editable install of a jax-gcm `dev` checkout, which is what CI does
   (`pip install -e ./jax-gcm` before `pip install -e ".[dev]"`).
+- CI (`.github/workflows/tests.yml`) now lints the *whole* repository with the
+  pinned `ruff==0.15.17` (it previously ran an unpinned ruff over `jem/`
+  only), runs `mypy jem/ --ignore-missing-imports` in the same job, checks out
+  jax-gcm at `dev` and installs it editable *before* `pip install -e ".[dev]"`
+  so `jcm>=2.1.0b0` resolves, and drops the jax-gcm `PYTHONPATH` export.
+  The test matrix is `ubuntu-latest` x Python 3.11/3.12 — macOS and 3.13 were
+  dropped (**maintainer decision, defaulted**: macOS added run time for a
+  pure-Python package with no platform-specific code, and 3.13 is ahead of
+  what the JAX/Veros stack is tested against). Notebook and `run.sh` example
+  tests moved to their own job that runs on pull requests only, and the
+  Codecov upload condition moved from Python 3.10 (which the matrix never
+  contained) to 3.11.
 - The `veros` extra is deliberately empty: the coupler needs a *jittable* fork
   of Veros that is not published on PyPI and must be installed from git (see
   the README).
