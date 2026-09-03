@@ -15,7 +15,7 @@ Programmer: Aya Lalou
 
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
-from typing import Any
+from typing import Any, Sequence
 
 import jax.numpy as jnp
 import jax_datetime as jdt
@@ -42,12 +42,13 @@ class LandState:
         land_surface_temperature=None,
         snowc=None,
         soilw=None,
+        n_soil_layers=2,
     ):
         return cls(
             sim_time if sim_time is not None else jnp.zeros(()),
             land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
             snowc if snowc is not None else jnp.zeros(shape),
-            soilw if soilw is not None else jnp.zeros(shape),
+            soilw if soilw is not None else jnp.zeros(shape + (n_soil_layers,)),
         )
 
 
@@ -80,11 +81,13 @@ class SlabLandModel(SlabModelBase):
         start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         land_clim_file: str | None = None,
-        depth_soil: float = 1.0,
+        depth_soil: Sequence[float] = (0.1, 0.9),
         depth_lice: float = 5.0,
         tdland: float = 40.0 * 86400.0,
         flandmin: float = 1.0/3.0,
-        bucket_retaining_time: float = 60 * 86400.0, 
+        tau_drain: Sequence[float] = (5.0 * 86400.0, 60.0 * 86400.0),
+        swcap: Sequence[float] = (0.30, 0.30),
+        swwil: Sequence[float] = (0.17, 0.17),
         land_threshold: float = 0.1,
         calendar: str = "365_day",
     ):
@@ -95,13 +98,22 @@ class SlabLandModel(SlabModelBase):
             start_datetime: Start datetime for simulation
             timestep: Model timestep in seconds
             land_clim_file: Optional path to land climatology NetCDF file
-            depth_soil: Soil layer depth in meters (default: 1.0)
+            depth_soil: Per-layer soil bucket depth in meters, one entry per
+                soil moisture layer (default: (0.1, 0.9), a thin surface
+                layer and a thick deep layer summing to 1.0 m). Land surface
+                temperature uses the combined depth of all layers.
             depth_lice: Land-ice depth in meters (default: 5.0)
             tdland: Dissipation timescale for anomalies in seconds (default: 40 days)
             flandmin: Minimum land fraction for anomaly computation (default: 1/3)
+            tau_drain: Per-layer soil moisture drainage timescale in seconds
+                (default: (5, 60) days). Layer 0 drains into layer 1; layer 1
+                drains out as deep drainage.
+            swcap: Per-layer field capacity, unitless 0-1 (default: (0.30, 0.30)).
+                Currently unused by the bucket dynamics.
+            swwil: Per-layer wilting point, unitless 0-1 (default: (0.17, 0.17)).
+                Currently unused by the bucket dynamics.
             land_threshold: Land mask threshold (default: 0.1)
         """
-        print("This is MARCO's EDITION.")
         super().__init__(
             name="LandModel",
             grid=grid,
@@ -111,24 +123,27 @@ class SlabLandModel(SlabModelBase):
         )
 
         self.land_clim_file = land_clim_file
-        
+
         # Physical parameters from Fortran defaults
-        self.depth_soil = depth_soil  # m
+        self.depth_soil = jnp.asarray(depth_soil)  # m, per soil moisture layer
+        self.n_soil_layers = self.depth_soil.shape[0]
         self.depth_lice = depth_lice  # m
         self.tdland = tdland  # seconds
         self.flandmin = flandmin
         self.land_threshold = land_threshold
-        self.bucket_retaining_time = bucket_retaining_time
- 
+        self.tau_drain = jnp.asarray(tau_drain)  # seconds, per soil moisture layer
+        self.rho_water = 1000.0  # kg/m^3
+
         # Heat capacities per m^2 (depth * volumetric_heat_capacity)
         # Fortran values: hcapl = depth_soil*2.50e+6, hcapli = depth_lice*1.93e+6
-        self.hcapl = self.depth_soil * 2.50e6  # J/(m^2 K) for soil
+        # Temperature is single-layer, spanning the combined depth of all soil moisture layers.
+        self.hcapl = jnp.sum(self.depth_soil) * 2.50e6  # J/(m^2 K) for soil
         self.hcapli = self.depth_lice * 1.93e6  # J/(m^2 K) for land ice
-        
+
         # Soil moisture parameters (not evolved, just for completeness)
-        self.swcap = 0.30  # Field capacity
-        self.swwil = 0.17  # Wilting point
-        
+        self.swcap = jnp.asarray(swcap)  # Field capacity, per soil moisture layer
+        self.swwil = jnp.asarray(swwil)  # Wilting point, per soil moisture layer
+
         # Snow depth to snow cover conversion parameter
         self.sd2sc = 60.0  # mm water equivalent
 
@@ -275,7 +290,7 @@ class SlabLandModel(SlabModelBase):
                 D2_nodal_shape,
                 land_surface_temperature=init_T,
                 snowc=jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
-                soilw=self.soilw_clim[:, :, init_time_idx] * 0,
+                soilw=jnp.zeros(D2_nodal_shape + (self.n_soil_layers,)),
             ),
             "forcing": LandForcing.zeros(D2_nodal_shape),
         }
@@ -379,10 +394,27 @@ class SlabLandModel(SlabModelBase):
             new_T = jnp.where(self.bmask_l > 0, new_T, 273.15 + 15.0)
 
             # =====================================================================
-            # Land surface soil moisture evolution
+            # Land surface soil moisture evolution (two-layer leaky bucket)
             # =====================================================================
-            new_soilw = state.soilw + ( forcing.precipitation / 1e3 / self.depth_soil - state.soilw / self.bucket_retaining_time ) * self.timestep
-            new_soilw = jnp.where(self.bmask_l > 0, new_soilw, 0.0 )
+            # Layer 0 (surface): receives precipitation, drains into layer 1.
+            # Layer 1 (deep): receives layer 0's drainage, drains out as deep drainage.
+            W1 = state.soilw[..., 0]
+            W2 = state.soilw[..., 1]
+
+            drain1 = W1 / self.tau_drain[0]
+            inflow2 = (self.depth_soil[0] / self.depth_soil[1]) * drain1
+
+            new_W1 = jnp.maximum(
+                0.0,
+                W1 + (forcing.precipitation / (self.rho_water * self.depth_soil[0]) - drain1) * self.timestep,
+            )
+            new_W2 = jnp.maximum(
+                0.0,
+                W2 + (inflow2 - W2 / self.tau_drain[1]) * self.timestep,
+            )
+
+            new_soilw = jnp.stack([new_W1, new_W2], axis=-1)
+            new_soilw = jnp.where(self.bmask_l[..., None] > 0, new_soilw, 0.0)
             
             # Update simulation time - keep as float32
             new_sim_time = state.sim_time + self.timestep
@@ -445,10 +477,10 @@ class SlabLandModel(SlabModelBase):
                 }
             ),
             "soilw": (
-                T_grid_dims,
+                T_grid_dims + ("soil_layer",),
                 state.soilw,
                 {
-                    "long_name": "Soil water availability",
+                    "long_name": "Soil water content by layer (0=surface, 1=deep)",
                     "units": "1",
                 }
             ),
@@ -475,8 +507,8 @@ class SlabLandModel(SlabModelBase):
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
         return {
             "description": "SPEEDY-based slab land surface model output",
-            "depth_soil": f"{self.depth_soil} m",
+            "depth_soil": f"{list(self.depth_soil)} m",
             "depth_lice": f"{self.depth_lice} m",
             "tdland": f"{self.tdland} days",
-            "bucket_retaining_time": f"{self.bucket_retaining_time/86400.0} days",
+            "tau_drain": f"{[t / 86400.0 for t in self.tau_drain]} days",
         }
