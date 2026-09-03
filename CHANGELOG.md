@@ -8,7 +8,16 @@ change is listed here.
 
 ## [Unreleased]
 
+### Added
+
+- `CHANGELOG.md` (this file). Every pre-1.0 API removal or rename is recorded
+  here rather than only in a commit message.
+
 ### Changed
+
+- The version is single-sourced from `jem.__version__` (setuptools reads it
+  via `[tool.setuptools.dynamic]`), so the package attribute and the installed
+  distribution metadata can no longer disagree. Bumped to `0.2.0`.
 
 - `pyproject.toml` now declares only the packages `jem` actually imports at
   runtime. Plotting (`matplotlib`, `cartopy`), documentation (`sphinx`,

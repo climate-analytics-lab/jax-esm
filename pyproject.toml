@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jax-esm"
-version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +18,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
+dynamic = ["version"]
+
 # Runtime requirements only: everything here is imported by `jem` itself.
 # Plotting, docs and the Veros ocean are opt-in extras below, so that
 # `pip install jax-esm` in a model-running environment pulls no matplotlib,
@@ -82,6 +83,12 @@ include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.setuptools.package-data]
 jem = ["data/*.nc"]
+
+# Single source of truth for the version: `jem.__version__`. Reading it from
+# the package rather than repeating it here means `jem.__version__` and the
+# installed distribution metadata can never disagree.
+[tool.setuptools.dynamic]
+version = {attr = "jem.__version__"}
 
 [tool.mypy]
 python_version = "3.11"
