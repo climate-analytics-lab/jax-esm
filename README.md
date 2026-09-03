@@ -203,3 +203,7 @@ Contributions are welcome! Please:
 ## Miscellaneous
 
 The regridding files are generated from repo [EarthSystemGrid.py](https://github.com/meteorologytoday/EarthSystemGrids.py). 
+
+## License
+
+MIT — see [LICENSE](LICENSE).
