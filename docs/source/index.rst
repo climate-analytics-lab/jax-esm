@@ -27,6 +27,7 @@ built on ``jax.lax.scan``.
    experimental
 
    issues
+   design
    developers
    api_superset
 
