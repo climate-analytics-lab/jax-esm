@@ -197,148 +197,13 @@ def _generate_jcm_slab_grid(
     )
 
 
-def _reshape_ugrid_face_field(values, ny: int, nx: int) -> Array:
-    """Reshape a flat (nface,) UGRID face array into JEM's (n_lon, n_lat).
-
-    UGRID stores per-face fields flat; a `shape` attribute (project-specific,
-    not part of the UGRID spec) gives the (ny, nx) raster shape the flat
-    array reshapes into, in row-major standard CF (lat, lon) axis order.
-    """
-    return jnp.asarray(values).reshape(ny, nx).T
-
-
-def _load_ugrid_fractional_mask(ds: xr.Dataset, ny: int, nx: int) -> Array:
-    """Derive a fractional_mask (1 = land) from a UGRID CF flag mask.
-
-    Reads the flag_values/flag_meanings that identify which value means
-    "land" rather than assuming a fixed convention, since UGRID/CF leaves
-    the flag ordering up to the file.
-    """
-    mask_var = ds["mask"]
-    flag_values = mask_var.attrs.get("flag_values")
-    flag_meanings = mask_var.attrs.get("flag_meanings")
-    if flag_values is None or flag_meanings is None:
-        raise ValueError(
-            "UGRID 'mask' variable is missing CF flag_values/flag_meanings "
-            "attributes -- cannot determine which value means land."
-        )
-
-    meanings = flag_meanings.split()
-    if "land" not in meanings:
-        raise ValueError(
-            f"mask flag_meanings {meanings!r} does not include 'land'."
-        )
-    land_value = flag_values[meanings.index("land")]
-
-    mask_2d = _reshape_ugrid_face_field(mask_var.values, ny, nx)
-    return jnp.where(mask_2d == land_value, 1.0, 0.0)
-
-
-def generate_slab_grid_from_ugrid(
-    ugrid_file: str,
-    fractional_mask: Array | None = None,
-    threshold: float = 0.5,
-) -> SlabGrid:
-    """Build a SlabGrid from a UGRID netCDF file describing a 2D structured
-    (curvilinear) grid -- e.g. a displaced-pole ocean grid.
-
-    This is not a general unstructured-mesh reader: it only supports UGRID
-    files that declare a `shape` global attribute giving the (ny, nx) raster
-    shape the flat per-face arrays reshape into (row-major, standard CF
-    (lat, lon) axis order) -- i.e. grids that are topologically 2D despite
-    being stored in UGRID's face-based layout. Node/edge connectivity
-    (face_nodes, face_edges, edge_nodes, node_lon/lat) is not used; this
-    reader only needs face-center coordinates (the mesh's face_coordinates).
-
-    Args:
-        ugrid_file: Path to a UGRID-convention netCDF file.
-        fractional_mask: Fraction of each grid cell occupied by land, in
-            [0, 1], matching the grid's shape. If None, read from the
-            file's own `mask` variable (a CF flag variable).
-        threshold: Passed through to SlabGrid -- the mask in the example
-            file is already strictly binary, so the default of 1.0 is
-            exactly right there.
-
-    Returns:
-        A SlabGrid built from the file's face-center coordinates and mask.
-    """
-    ds = xr.open_dataset(ugrid_file)
-
-    mesh_var_name = next(
-        (
-            name
-            for name, da in ds.variables.items()
-            if da.attrs.get("cf_role") == "mesh_topology"
-        ),
-        None,
-    )
-    if mesh_var_name is None:
-        raise ValueError(
-            f"No UGRID mesh_topology variable found in '{ugrid_file}'."
-        )
-    mesh_attrs = ds[mesh_var_name].attrs
-
-    if mesh_attrs.get("topology_dimension") != 2:
-        raise ValueError(
-            "This reader only supports 2D UGRID meshes; "
-            f"got topology_dimension={mesh_attrs.get('topology_dimension')!r}."
-        )
-
-    if "face_coordinates" not in mesh_attrs:
-        raise ValueError(
-            f"UGRID mesh '{mesh_var_name}' has no face_coordinates -- this "
-            "reader needs face-center lon/lat, not just node coordinates."
-        )
-    lon_name, lat_name = mesh_attrs["face_coordinates"].split()
-    if lon_name not in ds or lat_name not in ds:
-        raise ValueError(
-            f"face_coordinates names '{lon_name}', '{lat_name}' not found "
-            f"in '{ugrid_file}'."
-        )
-
-    if "shape" not in ds.attrs:
-        raise ValueError(
-            f"'{ugrid_file}' has no 'shape' attribute -- this reader only "
-            "supports UGRID files that declare their implied 2D (ny, nx) "
-            "raster shape; general unstructured meshes are not supported."
-        )
-    ny, nx = (int(n) for n in ds.attrs["shape"])
-
-    nface = ds[lon_name].shape[0]
-    if ny * nx != nface:
-        raise ValueError(
-            f"shape attribute {(ny, nx)} implies {ny * nx} faces, but "
-            f"'{ugrid_file}' has {nface} faces."
-        )
-
-    latitude_2d = jnp.deg2rad(_reshape_ugrid_face_field(ds[lat_name].values, ny, nx))
-    longitude_2d = jnp.deg2rad(_reshape_ugrid_face_field(ds[lon_name].values, ny, nx))
-
-    if jnp.any((latitude_2d < -jnp.pi / 2) | (latitude_2d > jnp.pi / 2)):
-        raise ValueError(f"'{ugrid_file}' has latitude values outside [-90, 90] degrees.")
-    if jnp.any((longitude_2d < -2 * jnp.pi) | (longitude_2d > 2 * jnp.pi)):
-        raise ValueError(f"'{ugrid_file}' has longitude values outside [-360, 360] degrees.")
-
-    if fractional_mask is None:
-        fractional_mask = _load_ugrid_fractional_mask(ds, ny, nx)
-
-    return SlabGrid(
-        fractional_mask=fractional_mask,
-        latitude_radian=latitude_2d,
-        longitude_radian=longitude_2d,
-        threshold=threshold,
-        dims=("longitude", "latitude"),
-    )
-
-
 def _reshape_scrip_field(values, ni: int, nj: int) -> Array:
     """Reshape a flat (grid_size,) SCRIP field into JEM's (n_lon, n_lat).
 
     SCRIP stores per-cell fields flat, in Fortran order (the first
     grid_dims axis -- longitude -- varies fastest). grid_dims = [ni, nj]
     already gives JEM's (n_lon, n_lat) shape directly, so an order='F'
-    reshape recovers it with no transpose needed (unlike the UGRID reader,
-    whose `shape` attribute is (nlat, nlon) and needs one).
+    reshape recovers it with no transpose needed.
     """
     return jnp.asarray(values).reshape((ni, nj), order="F")
 
@@ -361,14 +226,12 @@ def _scrip_latlon_to_radians(da: xr.DataArray, ni: int, nj: int, scrip_file: str
 def _load_scrip_fractional_mask(ds: xr.Dataset, ni: int, nj: int) -> Array:
     """Derive a fractional_mask (1 = land) from a SCRIP grid_imask.
 
-    Unlike UGRID, SCRIP's grid_imask carries no CF-style flag_meanings
-    metadata, so the land/ocean polarity can't be verified from the file
-    itself. This follows the standard SCRIP/ESMF convention used by
-    ocean-model grid files (e.g. POP, CESM): imask=1 marks a valid/active
-    (ocean) cell, imask=0 marks a masked-out (land) cell -- the same
-    polarity as this codebase's UGRID reader ended up with. Pass
-    `fractional_mask` explicitly to `generate_slab_grid_from_scrip` if a
-    file uses the opposite convention.
+    SCRIP's grid_imask carries no CF-style flag_meanings metadata, so the
+    land/ocean polarity can't be verified from the file itself. This follows
+    the standard SCRIP/ESMF convention used by ocean-model grid files (e.g.
+    POP, CESM): imask=1 marks a valid/active (ocean) cell, imask=0 marks a
+    masked-out (land) cell. Pass `fractional_mask` explicitly to
+    `generate_slab_grid_from_scrip` if a file uses the opposite convention.
     """
     if "grid_imask" not in ds:
         print("Notice: No grid_imask in SCRIP file. Set fmask = 0.")

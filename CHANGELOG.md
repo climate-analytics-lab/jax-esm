@@ -33,8 +33,28 @@ change is listed here.
   of Veros that is not published on PyPI and must be installed from git (see
   the README).
 
+### Fixed
+
+- `jem.components.slab.slab_ocean_model.__all__` listed `OceanForcing` and
+  `OceanState` without importing them, so `from ... import *` raised
+  `AttributeError`. Both are now imported.
+
 ### Removed
 
+- Unused code, none of which had a caller anywhere in `jem`, `tests`,
+  `examples` or `docs`:
+  - `jem.utils.datetime_tools` (whole module).
+  - `jem.utils.domain_grid_tools` (whole module).
+  - `jem.utils.cycles.evaluate_periodic` and `vmap_evaluate_periodic` (the
+    `coordax`-based interpolators; `evaluate_cyclic_linear`, which the slab
+    components use, stays).
+  - `jem.utils.bulk_op.concat_objects` and `mean_leaf`.
+  - `jem.utils.esmf_regrid.create_regridder_pair`,
+    `create_regridder_from_xarray`, `example_usage` and the module's
+    `__main__` demo block.
+  - `jem.components.slab.grid.generate_slab_grid_from_ugrid` and its private
+    helpers `_reshape_ugrid_face_field` / `_load_ugrid_fractional_mask`. The
+    SCRIP reader (`generate_slab_grid_from_scrip`) is unaffected.
 - Dependencies `dataclasses-json`, `coordax`, `typing-extensions`, `jax_tqdm`
   and `tqdm`: none of them are imported by `jem` any more.
 - **Progress bars.** `Coupler.run`, `Coupler.generate_trajectory_function` and
