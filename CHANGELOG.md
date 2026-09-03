@@ -35,6 +35,10 @@ change is listed here.
 
 ### Fixed
 
+- Importing `jem.components.veros_component` no longer mutates Veros'
+  process-global `runtime_settings` (or prints while doing so). The backend
+  configuration moved into `_configure_veros_runtime()`, called from
+  `make_jem_compatible`, which is the only entry point that needs it.
 - `jem.components.slab.slab_ocean_model.__all__` listed `OceanForcing` and
   `OceanState` without importing them, so `from ... import *` raised
   `AttributeError`. Both are now imported.

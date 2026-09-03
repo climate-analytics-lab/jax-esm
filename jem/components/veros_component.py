@@ -10,13 +10,21 @@ from veros import runtime_settings
 
 from jem.utils.bulk_op import stack_objects
 
-print("Setting veros.runtime_settings...")
-runtime_settings.backend = "jax"
-runtime_settings.force_overwrite = True
-runtime_settings.linear_solver = 'scipy_jax'
-#setattr(runtime_settings, 'device', 'cpu')
-from veros.core.operators import at, update
-from veros.core.operators import numpy as npx
+
+def _configure_veros_runtime() -> None:
+    """Point Veros at the JAX backend before any of its operators are bound.
+
+    Veros reads these process-global settings when `veros.core.operators` is
+    first imported, so the coupler has to set them before that import
+    happens. Doing it at *module* import time (as this file used to) makes
+    merely importing `jem.components.veros_component` mutate Veros' global
+    configuration, which is a surprise for anything that imports the module
+    without intending to run a Veros ocean. It is therefore called from
+    `make_jem_compatible`, the one entry point that does.
+    """
+    runtime_settings.backend = "jax"
+    runtime_settings.force_overwrite = True
+    runtime_settings.linear_solver = "scipy_jax"
 
 
 def copy_veros_state(state):
@@ -79,6 +87,15 @@ def make_jem_compatible(
     model: Any,
     coupling_timestep: jdt.Timedelta,
 ) -> Any:
+    """Wrap a Veros model so the JEM `Coupler` can drive it."""
+    _configure_veros_runtime()
+    # Imported here rather than at module scope: `veros.core.operators` binds
+    # its array backend (numpy or jax) at import time from
+    # `runtime_settings.backend`, so importing it before
+    # `_configure_veros_runtime()` has run would silently pin the coupler to
+    # numpy operators.
+    from veros.core.operators import at, update
+    from veros.core.operators import numpy as npx
 
     timestep = jdt.to_timedelta(int(model.state.settings.dt_tracer), "second")
     if timestep * jnp.floor(coupling_timestep / timestep) != coupling_timestep:
