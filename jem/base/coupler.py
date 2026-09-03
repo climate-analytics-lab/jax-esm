@@ -7,8 +7,6 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_structure
-from jax_tqdm import scan_tqdm
-from tqdm import tqdm
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
@@ -117,10 +115,17 @@ class Coupler:
         """Advance coupled system by one coupling timestep.
 
         Args:
+            workflow: Ordered components/mappers to execute per coupling step.
+            jitted: Whether to `jax.jit` the component and coupled steps.
+            show_progress: Deprecated and ignored; accepted so existing
+                callers keep working. Progress bars were removed with the
+                `tqdm`/`jax_tqdm` dependencies.
+            verbose: Whether to report the flattened workflow.
 
         Returns:
             New states after one coupling timestep
         """
+        del show_progress  # deprecated, see the docstring
 
         self._verify_name_uniqueness()
         self._verify_workflow(workflow)
@@ -172,8 +177,14 @@ class Coupler:
         verbose: bool=True,
         checkpoint: bool = False,
     ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
-        if tqdm_kwargs is None:
-            tqdm_kwargs = {"desc": "Simulation"}
+        """Run the coupled model for `iterations` coupling steps.
+
+        `show_progress` and `tqdm_kwargs` are deprecated and ignored; they
+        are still accepted so existing callers keep working. The progress
+        bars they configured went away with the `tqdm`/`jax_tqdm`
+        dependencies.
+        """
+        del tqdm_kwargs  # deprecated, see the docstring
         initial_carry = initial_carry or self.initialize()
 
         if reuse_last_available_trajectory and self.trajectory_holder is not None:
@@ -186,7 +197,6 @@ class Coupler:
                 iterations=iterations,
                 jitted=jitted,
                 show_progress=show_progress,
-                tqdm_kwargs=tqdm_kwargs,
                 checkpoint=checkpoint,
             )
             _elapsed_time = time.time() - _start_time
@@ -205,9 +215,12 @@ class Coupler:
         checkpoint: bool = False,
         tqdm_kwargs: dict[str, Any] | None = None,
     ) -> TrajectoryFunction:
+        """Build the function that scans the coupled step over `iterations`.
 
-        if tqdm_kwargs is None:
-            tqdm_kwargs = {"desc": "Simulation"}
+        `show_progress` and `tqdm_kwargs` are deprecated and ignored; see
+        `run`.
+        """
+        del tqdm_kwargs  # deprecated, see the docstring
         scan_func = generate_scan_function(jitted=jitted)
         coupled_step_function = self.generate_step_function(
             workflow=workflow,
@@ -222,14 +235,6 @@ class Coupler:
         
         if not jitted:
             steps = list(steps) # type: ignore
-
-        if show_progress:
-            if jitted:
-                coupled_step_function = scan_tqdm(n=iterations, **tqdm_kwargs)(
-                    coupled_step_function
-                )
-            else:
-                steps = tqdm(steps, **tqdm_kwargs)
 
         def trajectory_function(
             initial_coupled_carry: CoupledCarry,
