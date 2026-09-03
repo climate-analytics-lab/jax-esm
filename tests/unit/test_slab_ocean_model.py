@@ -16,7 +16,7 @@ TIMESTEP = 86400.0
 
 @pytest.fixture
 def uniform_grid() -> SlabGrid:
-    """A tiny all-ocean 4x3 lon-lat grid, built by hand so the tests own it."""
+    """Build a tiny all-ocean 4x3 lon-lat grid by hand so the tests own it."""
     longitude_2d, latitude_2d = np.meshgrid(
         np.deg2rad(LONGITUDE_DEGREES), np.deg2rad(LATITUDE_DEGREES), indexing="ij"
     )
@@ -48,7 +48,7 @@ def _write_climatology(
 
 
 def _monthly_ramp() -> np.ndarray:
-    """A (12, n_lat, n_lon) field whose every element is distinct."""
+    """Return a (12, n_lat, n_lon) field whose every element is distinct."""
     return np.arange(
         12 * len(LATITUDE_DEGREES) * len(LONGITUDE_DEGREES), dtype=np.float32
     ).reshape(12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES))

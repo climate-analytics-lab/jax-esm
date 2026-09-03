@@ -142,18 +142,19 @@ def _load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         longitude/latitude/time, it does not have exactly 12 time records, or
         its coordinates do not match the grid's. The message names the file
         and the check that failed.
+
     """
     dataset = xr.open_dataset(path)
 
     if var not in dataset:
         raise ValueError(
             f"Climatology file \"{path!s:s}\" has no variable \"{var:s}\" "
-            f"(it has {sorted(dataset.data_vars)!r})."
+            f"(it has {sorted(map(str, dataset.data_vars))!r})."
         )
     field = dataset[var]
 
     longitude_name, latitude_name, time_name = (
-        _resolve_dim_name(field.dims, aliases, path, var)
+        _resolve_dim_name(tuple(str(d) for d in field.dims), aliases, path, var)
         for aliases in _CLIMATOLOGY_DIM_ALIASES
     )
 
@@ -161,7 +162,7 @@ def _load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     if unexpected:
         raise ValueError(
             f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has extra "
-            f"dimensions {sorted(unexpected)!r}; only longitude, latitude and time "
+            f"dimensions {sorted(map(str, unexpected))!r}; only longitude, latitude and time "
             "are supported."
         )
 

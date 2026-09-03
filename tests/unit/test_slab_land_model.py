@@ -10,7 +10,7 @@ from jem.components.slab.slab_land_model import SlabLandModel
 
 @pytest.fixture
 def t31_grid():
-    """A T31 JCM grid whose eastern half is land, so both mask branches run."""
+    """Build a T31 JCM grid whose eastern half is land, so both mask branches run."""
     shape = generate_slab_grid("JCM::T31").shape
     n_lon = shape[0]
     fractional_mask = jnp.where(
