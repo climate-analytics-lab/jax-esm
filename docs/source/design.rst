@@ -9,3 +9,4 @@ implementation-specific details belong in the PR that introduced them.
    :maxdepth: 1
 
    design/api_and_usability_review
+   design/api_hardening_plan
