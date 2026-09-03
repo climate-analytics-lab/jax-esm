@@ -30,6 +30,7 @@ def configure_veros_runtime() -> None:
         If ``veros.core.operators`` was already imported with a non-JAX
         backend: the operators are bound and cannot be re-pointed, so the
         only fix is to import this module earlier.
+
     """
     if "veros.core.operators" in sys.modules and runtime_settings.backend != "jax":
         raise RuntimeError(

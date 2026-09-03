@@ -193,7 +193,9 @@ def test_qflux_positive_warms_ocean(uniform_grid, tmp_path):
     which is negated -- so Q has to enter with a minus sign there.
     """
     q_file = tmp_path / "qflux.nc"
-    _write_climatology(q_file, "qflux", uniform_grid, fill_value=50.0)
+    _write_climatology(
+        q_file, "qflux", np.full((12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)), 50.0)
+    )
     model = SlabOceanModel(
         grid=uniform_grid,
         forcing_method="Qflux",
