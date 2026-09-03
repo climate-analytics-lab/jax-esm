@@ -486,7 +486,13 @@ class SlabOceanModel(SlabModelBase):
                     self._interpolate_cyclic(state.sim_time, start_day_offset, forcing.q_flux),
                     0.0,
                 )
-                total_heat_flux = total_heat_flux + snapshot_Qflux
+                # Q is a heat SOURCE for the mixed layer (positive Q warms it,
+                # see the class docstring and the output attribute), while
+                # `total_heat_flux` is UPWARD positive (cools it) and is negated
+                # in the update below. Folding Q into the upward flux therefore
+                # needs a minus sign; adding it (as an earlier version did)
+                # silently reversed every prescribed Q-flux experiment.
+                total_heat_flux = total_heat_flux - snapshot_Qflux
 
 
             # Euler backward step

@@ -183,3 +183,26 @@ def test_freeze_melt_energy_sign(uniform_grid):
         constants.seawater_freezing_point_K,
         rtol=1e-6,
     )
+
+
+def test_qflux_positive_warms_ocean(uniform_grid, tmp_path):
+    """A positive Q-flux is a heat source: with no atmospheric flux the SST must rise.
+
+    Guards the sign convention: Q is defined as ``+Q/(rho cp h)`` in the SST
+    equation, but the step folds it into the UPWARD-positive total heat flux,
+    which is negated -- so Q has to enter with a minus sign there.
+    """
+    q_file = tmp_path / "qflux.nc"
+    _write_climatology(q_file, "qflux", uniform_grid, fill_value=50.0)
+    model = SlabOceanModel(
+        grid=uniform_grid,
+        forcing_method="Qflux",
+        Q_flux_file=str(q_file),
+        timestep=86400.0,
+    )
+    carry = model.initialize()
+    step = model.generate_step_function()
+    new_carry, _ = step(carry, 0)
+    sst_before = carry["state"].sea_surface_temperature
+    sst_after = new_carry["state"].sea_surface_temperature
+    assert bool(jnp.all(sst_after > sst_before)), "positive Q-flux must warm the mixed layer"
