@@ -54,11 +54,13 @@ class LandState:
 @tree_math.struct
 class LandForcing:
     total_heat_flux: jnp.ndarray
+    precipitation: jnp.ndarray     # kg/m^2/s => equivalent to mm/s if density = 1000 kg/m^3
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None):
+    def zeros(cls, shape, total_heat_flux=None, precipitation=None):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
         )
 
 
@@ -82,6 +84,7 @@ class SlabLandModel(SlabModelBase):
         depth_lice: float = 5.0,
         tdland: float = 40.0 * 86400.0,
         flandmin: float = 1.0/3.0,
+        bucket_retaining_time: float = 60 * 86400.0, 
         land_threshold: float = 0.1,
         calendar: str = "365_day",
     ):
@@ -98,7 +101,7 @@ class SlabLandModel(SlabModelBase):
             flandmin: Minimum land fraction for anomaly computation (default: 1/3)
             land_threshold: Land mask threshold (default: 0.1)
         """
-
+        print("This is MARCO's EDITION.")
         super().__init__(
             name="LandModel",
             grid=grid,
@@ -115,7 +118,8 @@ class SlabLandModel(SlabModelBase):
         self.tdland = tdland  # seconds
         self.flandmin = flandmin
         self.land_threshold = land_threshold
-        
+        self.bucket_retaining_time = bucket_retaining_time
+ 
         # Heat capacities per m^2 (depth * volumetric_heat_capacity)
         # Fortran values: hcapl = depth_soil*2.50e+6, hcapli = depth_lice*1.93e+6
         self.hcapl = self.depth_soil * 2.50e6  # J/(m^2 K) for soil
@@ -271,7 +275,7 @@ class SlabLandModel(SlabModelBase):
                 D2_nodal_shape,
                 land_surface_temperature=init_T,
                 snowc=jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
-                soilw=self.soilw_clim[:, :, init_time_idx],
+                soilw=self.soilw_clim[:, :, init_time_idx] * 0,
             ),
             "forcing": LandForcing.zeros(D2_nodal_shape),
         }
@@ -373,6 +377,12 @@ class SlabLandModel(SlabModelBase):
             
             # Apply land mask
             new_T = jnp.where(self.bmask_l > 0, new_T, 273.15 + 15.0)
+
+            # =====================================================================
+            # Land surface soil moisture evolution
+            # =====================================================================
+            new_soilw = state.soilw + ( forcing.precipitation / 1e3 / self.depth_soil - state.soilw / self.bucket_retaining_time ) * self.timestep
+            new_soilw = jnp.where(self.bmask_l > 0, new_soilw, 0.0 )
             
             # Update simulation time - keep as float32
             new_sim_time = state.sim_time + self.timestep
@@ -385,7 +395,7 @@ class SlabLandModel(SlabModelBase):
                 sim_time=new_sim_time,
                 land_surface_temperature=new_T,
                 snowc=jnp.minimum(1.0, snowd_clim / self.sd2sc),
-                soilw=soilw_clim,
+                soilw=new_soilw, #soilw_clim,
             )
             
             # Return new state and predictions for output
@@ -451,6 +461,15 @@ class SlabLandModel(SlabModelBase):
                     "positive": "upward",
                 }
             ),
+            "precipitation": (
+                T_grid_dims,
+                forcing.precipitation,
+                {
+                    "long_name": "Precipitation rate forcing",
+                    "units": "mm s-1",
+                    "positive": "downward",
+                }
+            ),
         }
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
@@ -459,4 +478,5 @@ class SlabLandModel(SlabModelBase):
             "depth_soil": f"{self.depth_soil} m",
             "depth_lice": f"{self.depth_lice} m",
             "tdland": f"{self.tdland} days",
+            "bucket_retaining_time": f"{self.bucket_retaining_time/86400.0} days",
         }
