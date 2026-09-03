@@ -251,11 +251,10 @@ class Coupler:
         component: Any,
     ) -> None:
         """Add a new component to the coupler.
-           If name is not provided, then simply re-extract component names and timesteps
+
         Args:
             name: Component name
             component: Component instance
-            flux_mappings: Optional flux mappings from this component to others
         """
 
         self.components[name] = JEMComponent(

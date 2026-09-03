@@ -87,3 +87,45 @@ jobs:
     - name: Type check with mypy
       run: |
         mypy jem/ --ignore-missing-imports
+
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get jax-gcm
+      uses: actions/checkout@v4
+      with:
+        repository: climate-analytics-lab/jax-gcm
+        ref: v2.0.1
+        path: jax-gcm
+
+    - name: Get jittable veros
+      uses: actions/checkout@v4
+      with:
+        repository: meteorologytoday/veros-jittable
+        ref: dev/naive-fix-AD-needs-physical-justification
+        path: veros-jittable
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Set up pandoc
+      uses: r-lib/actions/setup-pandoc@v2
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+        pip install -r veros-jittable/requirements.txt
+        pip install -r docs/requirements.txt
+        pip install ipykernel
+        python -m ipykernel install --user --name python3 --display-name "Python 3"
+
+    - name: Build Sphinx docs
+      run: |
+        export PYTHONPATH=$(pwd)/jax-gcm:$(pwd)/veros-jittable:$PYTHONPATH
+        docs/build_docs.sh -c

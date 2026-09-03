@@ -21,13 +21,14 @@ Step 1: Identifying the Gap to be JEM-compatible
 
 A model object will be JEM-compatible if it has two particular member functions:
 
-1. :code:`initialize: Callable[[], ComponentCarry]`: 
-    Returns the initial carry value.
-2. :code:`generate_step_function: Callable[[ComponentCarry], tuple[ComponentCarry, Predictions]]`: 
-    Returns the new carry value and predictions.
+1. :code:`initialize: Callable[[], ComponentCarry]`:
+   Returns the initial carry value.
+2. :code:`generate_step_function: Callable[[ComponentCarry], tuple[ComponentCarry, Predictions]]`:
+   Returns the new carry value and predictions.
+
    - The returned carry value must be consistent with the ones returned
      from :code:`initialize`. User can test if two Pytrees are equivalent by
-     using `jax.tree_utils.tree_structure`. 
+     using `jax.tree_utils.tree_structure`.
    - The first dimension of leaf nodes in :code:`Predictions` is expected to be
      time. The coupler will concat multiple predictions along this dimension.
 
@@ -194,6 +195,7 @@ not have to make one on your own. Also, the following code use
 .. code-block:: python
 
     import jcm
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
     import jax_datetime as jdt
 
     from jem import Coupler
@@ -215,12 +217,12 @@ not have to make one on your own. Also, the following code use
 
     atm_model = jcm.model.Model(
         start_date=start_datetime,
+        coords=get_speedy_coords(),
     )
 
     atm_model = JCM.make_jem_compatible(
         atm_model,
         coupling_timestep=coupling_timestep,
-        land_model_active=False,
     )
 
     model = Coupler(
@@ -243,7 +245,4 @@ not have to make one on your own. Also, the following code use
     output_dict = model.predictions_to_xarray(predictions)
     print(output_dict["atm"]) # xarray.Dataset
     print(output_dict["ocn"])
- 
-Optional: Auxilary Functions
-----------------------------
 

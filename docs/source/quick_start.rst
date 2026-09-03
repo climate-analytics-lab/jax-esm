@@ -16,7 +16,7 @@ Install JEM
 
     # Install jittable Veros (temporary solution)
     git clone https://github.com/meteorologytoday/veros-jittable.git
-   cd veros-jittable
+    cd veros-jittable
     pip install -e "."
 
 
