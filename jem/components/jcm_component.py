@@ -66,7 +66,6 @@ def make_jem_compatible(
     if jcm's time step `dt_si` can perfectly divide `coupling_timestep`.
     
     """    
-   
     # Check if couopling_timestep is a multiple of jcm's native timestep
     timestep = jdt.to_timedelta(int(model.dt_si.to_timedelta().total_seconds()), "second")
     if timestep * np.floor(coupling_timestep / timestep) != coupling_timestep:

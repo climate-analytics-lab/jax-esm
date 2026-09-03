@@ -1,5 +1,4 @@
-"""
-Tests for base/interface.py
+"""Tests for base/interface.py
 ============================
 Covers resolve_interface, _resolve_function, _resolve_member, every exception
 type, the skip normalisation, customized_mapping remapping, verbose output,
@@ -10,9 +9,10 @@ inspect, so it can be imported directly.
 """
 
 import pytest
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "base_extracted"))
 
 from jem.base.interface import (
@@ -33,6 +33,7 @@ from jem.base.interface import (
 
 class _RefMemberOnly:
     """Reference with only non-Callable members."""
+
     count: int
     label: str
     tags:  List[str]
@@ -41,18 +42,21 @@ class _RefMemberOnly:
 
 class _RefFuncOnly:
     """Reference with only Callable members."""
+
     compute: Callable[[int, str], float]        # 2 params
     reset:   Callable[[], None]                 # 0 params
 
 
 class _RefMixed:
     """Reference with both members and functions."""
+
     name:    str
     process: Callable[[float], float]           # 1 param
 
 
 class _RefSkippable:
     """Reference used to exercise the skip parameter."""
+
     keep_me:  int
     skip_me:  str
     also_skip: float
@@ -215,7 +219,8 @@ class TestResolveFunction:
 
     def test_instance_method_self_counts_as_param(self):
         """A bound instance method: self is NOT in the signature after binding,
-        so a 1-param Callable should match a method with (self, x)."""
+        so a 1-param Callable should match a method with (self, x).
+        """
 
         class Target:
             def compute(self, x: int) -> float:
@@ -311,7 +316,8 @@ class TestResolveInterface:
 
     def test_customized_mapping_remaps_member(self):
         """__JEM_CUSTOMIZED_MAPPING__ renames a member; resolve_interface
-        returns the remapped key."""
+        returns the remapped key.
+        """
 
         class Ref:
             logical_name: str
@@ -399,8 +405,7 @@ class TestResolveInterface:
     # --- regression: getattr uses original name after remap -----------
 
     def test_remap_bug_value_comes_from_original_name(self):
-        """
-        BUG in resolve_interface line 42:
+        """BUG in resolve_interface line 42:
             result[resolved_name] = getattr(target, member_name)
         After remapping, resolved_name is the NEW name but member_name is still
         the ORIGINAL.  So the value stored is from the original attribute.

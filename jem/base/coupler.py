@@ -57,6 +57,7 @@ class Coupler:
             A dict whose key is the name of :code:`MapperFunction`-compatible
             object that is responsible for sending information between 
             components.
+
     """
    
     components: dict[str, JEMComponent]
@@ -78,7 +79,6 @@ class Coupler:
             flux_exchangers: A list of flux_exchangers.
 
         """
-
         self.components = components or {}
         for name, component in self.components.items():
             self.add_component(name, component)
@@ -99,6 +99,7 @@ class Coupler:
 
         Returns:
             Dictionary of initial states for all components
+
         """
         return {
             component_name : component.initialize()
@@ -124,6 +125,7 @@ class Coupler:
 
         Returns:
             New states after one coupling timestep
+
         """
         del show_progress  # deprecated, see the docstring
 
@@ -260,8 +262,8 @@ class Coupler:
         Args:
             name: Component name
             component: Component instance
-        """
 
+        """
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
@@ -281,6 +283,7 @@ class Coupler:
 
         Args:
             name: Component name to remove
+
         """
         if name in self.components:
             del self.components[name]
@@ -293,9 +296,11 @@ class Coupler:
         mapper: Any,
     ) -> None:
         """Add a new forcing mapper to the coupler.
+
         Args:
             name: Forcing mapper name
             mapper: Forcing mapper
+
         """
         #try:
         #    typeguard.check_type(mapper, MapperFunction)
@@ -309,6 +314,7 @@ class Coupler:
 
         Args:
             name: Forcing mapper name to remove
+
         """
         if name in self.mappers:
             del self.mappers[name]
@@ -318,14 +324,14 @@ class Coupler:
         self,
         predictions,
     ):
-        """
-        A tool function that converts a trajectory into an xarray Dataset.
+        """Convert a trajectory into an xarray Dataset.
 
         Args:
             predictions : The predictions returned from `forward_func`
 
         Returns:
             ds : The resulting xarray dataset.
+
         """
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])

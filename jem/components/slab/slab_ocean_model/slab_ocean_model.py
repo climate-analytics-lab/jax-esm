@@ -146,6 +146,7 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth_min: Minimum mixed layer depth in meters
             mixed_layer_depth_max: Maximum mixed layer depth in meters
             SST_clim_file: Optional path to SST climatology NetCDF file
+
         """
         self.relaxation_time = relaxation_time
         self.mixed_layer_depth_min = mixed_layer_depth_min

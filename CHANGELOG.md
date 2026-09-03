@@ -66,5 +66,8 @@ change is listed here.
   Their `show_progress` and `tqdm_kwargs` parameters are still accepted so
   existing callers keep working, but are deprecated and ignored; they will be
   dropped in a later release once per-chunk logging replaces them.
+- The dead, string-quoted `sys.modules` stub-injection block at the top of
+  `tests/unit/test_coupler.py` (~70 lines). The tests have always run against
+  the real dependencies.
 - `[tool.black]` and `[tool.isort]` configuration: `ruff` (pinned to 0.15.17,
   matching jax-gcm) is the only linter.

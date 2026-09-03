@@ -56,6 +56,7 @@ class SlabModelBase(ABC):
                 from one of JEM's canonical grid specifications.
             start_datetime: Simulation start datetime
             timestep: Model timestep in seconds
+
         """
         self.name = name
         self.grid = grid
@@ -76,6 +77,7 @@ class SlabModelBase(ABC):
         Args:
             t: Simulation time in seconds since start
             start_day_offset: Seconds from Jan 1 of start year to start_datetime
+
         """
         return jnp.mod(
             (start_day_offset + t) / (86400.0 * self.days_per_year), 1.0
@@ -99,6 +101,7 @@ class SlabModelBase(ABC):
 
         Returns:
             Interpolated array of shape (...)
+
         """
         return evaluate_cyclic_linear(self._year_fraction(t, start_day_offset), data)
 
@@ -108,15 +111,15 @@ class SlabModelBase(ABC):
 
         Returns:
             Initial component state and forcing
+
         """
 
     def generate_step_function(self):
         """Generate the step function for time integration.
 
-        Args:
-
         Returns:
             Step function with signature (state, forcing, t) -> (new_state, predictions)
+
         """
         step_fn = self._create_step_function_body()
         return step_fn
@@ -129,6 +132,7 @@ class SlabModelBase(ABC):
 
         Returns:
             Step function with signature (state, forcing, t) -> (new_state, predictions)
+
         """
 
     def validate(self):
@@ -142,6 +146,7 @@ class SlabModelBase(ABC):
 
         Returns:
             xarray Dataset with model output
+
         """
         T_grid_axis_names = self.grid.dims
         start_datetime_str = self.start_datetime.to_pydatetime().strftime(
@@ -175,6 +180,7 @@ class SlabModelBase(ABC):
 
         Returns:
             Dict of data variables for xarray Dataset
+
         """
     
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
@@ -182,6 +188,7 @@ class SlabModelBase(ABC):
 
         Returns:
             Dict of global attributes for xarray Dataset
+
         """
         return {}
 

@@ -8,15 +8,12 @@ def unwrap_leading_dims(
     obj: Any,
     first_n_dim: int = 2,
 ) -> Any:
-    """
-    A tool function that unwraps the leading dimensions of jax arrays
+    """Unwrap the leading dimensions of jax arrays.
 
     Args:
-
         obj : A structure containining jax arrays
 
     Returns:
-
         unwrapped object.
 
     """
@@ -31,15 +28,12 @@ def unwrap_leading_dims(
 def stack_objects(
     objs: list,
 ):
-    """
-    A tool function that stack dataclasses together.
+    """Stack dataclasses together.
 
     Args:
-
         objs : A list of objects that need to be stacked
 
     Returns:
-
         stacked : Stacked object.
 
     """

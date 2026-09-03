@@ -1,5 +1,4 @@
 import traceback
-from datetime import datetime
 import multiprocessing
 from pathlib import Path
 
@@ -16,11 +15,9 @@ if not use_ipython:
     mplt.use("Agg")
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 import matplotlib.colors as mcolors
 import cmocean as cmo
 import cartopy.crs as ccrs
-from cartopy.util import add_cyclic_point
 import numpy as np
     
 ocean_kinetic_energy_scale = 0.1
@@ -56,7 +53,6 @@ def plot_simulation(detail):
 
         levels_q = 1.0 + np.linspace(0, 30, 50*3+1)
         levels_tskin = np.linspace(10, 35, 35+1)
-        levels_ocean_kinetic_energy = np.linspace(0, 1, 21) * ocean_kinetic_energy_scale
         levels_sea_surface_u = np.linspace(-1, 1, 51) * 1.0
         levels_sea_surface_salinity = np.linspace(34.5, 38, 51)
 
@@ -96,7 +92,6 @@ def plot_simulation(detail):
                 _data_sea_surface_u = plot_data["ocn_daily"]["sea_surface_u"].isel(time=i)
                 _data_sea_surface_salinity = plot_data["ocn_daily"]["sea_surface_salinity"].isel(time=i)
 
-                mean_tskin = np.mean(_data_tskin)
 
                     
                 coords = _data_q.coords
@@ -125,23 +120,27 @@ def plot_simulation(detail):
 
                 # Plot the humidity field for the current time step
                 ax_i = 0
-                _ax = ax[ax_i] ; ax_i+=1
+                _ax = ax[ax_i]
+                ax_i += 1
                 cb = pcolormesh(_ax, _data_q, levels=levels_q, cmap=cmo.cm.rain, extend="both")
                 cb.set_label("[g/kg]", fontsize=12)
                 _ax.set_title("(a) Surface specific humidity")
 
-                _ax = ax[ax_i] ; ax_i+=1
+                _ax = ax[ax_i]
+                ax_i += 1
                 cb = pcolormesh(_ax, _data_tskin, levels=levels_tskin, cmap=cmo.cm.thermal, extend="both")
                 cb.set_label("[degC]", fontsize=12)
                 _ax.set_title("(b) Surface temperature")
 
-                _ax = ax[ax_i] ; ax_i+=1
+                _ax = ax[ax_i]
+                ax_i += 1
                 cb = pcolormesh(_ax, _data_sea_surface_u, levels=levels_sea_surface_u, cmap=cmo.cm.balance, extend="both")
                 cb.set_label("[$\\mathrm{m} / \\mathrm{s}$]", fontsize=12)
                 _ax.set_title("(c) Surface ocean zonal velocity")
 
 
-                _ax = ax[ax_i] ; ax_i+=1
+                _ax = ax[ax_i]
+                ax_i += 1
                 cb = pcolormesh(_ax, _data_sea_surface_salinity, levels=levels_sea_surface_salinity, cmap=plt.get_cmap('hot_r'), extend="both")
                 cb.set_label("[PSU]", fontsize=12)
                 _ax.set_title("(d) Sea surface salinity")
@@ -152,12 +151,12 @@ def plot_simulation(detail):
                 fig.savefig(output_figure, dpi=200)
                 plt.close(fig)
 
-            except Exception as e:
+            except Exception:
 
                 traceback.print_exc()
                 result["status"] = "ERROR_individual_frame"
 
-    except Exception as e:
+    except Exception:
 
         traceback.print_exc()
         result["status"] = "ERROR"

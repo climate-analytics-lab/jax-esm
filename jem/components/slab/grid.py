@@ -33,6 +33,7 @@ class SlabGrid:
             land in `binary_mask`.
         dims: Axis names for fractional_mask/latitude_radian/longitude_radian,
             in shape order (used for xarray output labeling).
+
     """
 
     fractional_mask: Array
@@ -42,6 +43,7 @@ class SlabGrid:
     dims: tuple[str, str] = ("longitude", "latitude")
 
     def __post_init__(self):
+        """Check that the mask and both coordinate arrays share one shape."""
         assert self.latitude_radian.shape == self.fractional_mask.shape, (
             "latitude_radian must match fractional_mask shape"
         )
@@ -64,6 +66,7 @@ def _parse_grid_specification(grid_specification_string: str) -> tuple[str, str]
 
     Returns:
         (grid_universe, grid_family)
+
     """
     match = re.match(r"^([^:]+)::(.+)$", grid_specification_string)
 
@@ -109,8 +112,8 @@ def generate_slab_grid(
     grid_specification: str,
     fractional_mask: Array | None = None,
 ) -> SlabGrid:
-    """Convenience helper: build a SlabGrid from one of JEM's canonical grid
-    specification strings, instead of assembling one by hand.
+    """Build a SlabGrid from one of JEM's canonical grid specification
+    strings, instead of assembling one by hand.
 
     Loading a fractional mask from a file is the caller's responsibility --
     see `load_jcm_fractional_mask` for the conventional per-universe loaders.
@@ -125,6 +128,7 @@ def generate_slab_grid(
     Returns:
         A SlabGrid, with the binary-mask threshold set to the conventional
         value for the grid_universe (0.95 for JCM).
+
     """
     grid_universe, grid_family = _parse_grid_specification(grid_specification)
 
@@ -153,8 +157,7 @@ def _generate_jcm_slab_grid(
     fractional_mask: Array | None = None,
     threshold: float = 0.5,
 ) -> SlabGrid:
-    """
-    Builds a SlabGrid for the given horizontal resolution (21, 31, 42, 85,
+    """Build a SlabGrid for the given horizontal resolution (21, 31, 42, 85,
     106, 119, 170, 213, 340, or 425).
     """
     try:
@@ -267,6 +270,7 @@ def generate_slab_grid_from_scrip(
 
     Returns:
         A SlabGrid built from the file's cell-center coordinates and mask.
+
     """
     ds = xr.open_dataset(scrip_file)
 

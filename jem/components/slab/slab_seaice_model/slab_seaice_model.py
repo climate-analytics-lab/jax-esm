@@ -136,6 +136,7 @@ class SlabSeaiceModel(SlabModelBase):
                 `1 - exp(-h / scale)` closure used to derive `ice_fraction` from thickness
             mask_value: `bmask` value that identifies ocean grid points
             calendar: Calendar used for the simulation clock
+
         """
         self.initialization_ice_thickness = initialization_ice_thickness
         self.min_ice_thickness = min_ice_thickness

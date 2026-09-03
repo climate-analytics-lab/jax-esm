@@ -16,6 +16,7 @@ def evaluate_cyclic_linear(x: ArrayLike, data: jax.Array) -> jax.Array:
 
     Returns:
         Interpolated array of shape (...) with the record axis removed.
+
     """
     n = data.shape[-1]
     x_wrapped = jnp.mod(x, 1.0)

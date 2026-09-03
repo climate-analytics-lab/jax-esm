@@ -63,8 +63,7 @@ class LandForcing:
 
 
 class SlabLandModel(SlabModelBase):
-    """
-    Slab land-surface model with:
+    """Slab land-surface model with:
     - Heat capacity-based temperature evolution
     - Snow depth and soil moisture from climatology
     - Separate treatment of soil and ice sheets
@@ -97,8 +96,8 @@ class SlabLandModel(SlabModelBase):
             tdland: Dissipation timescale for anomalies in seconds (default: 40 days)
             flandmin: Minimum land fraction for anomaly computation (default: 1/3)
             land_threshold: Land mask threshold (default: 0.1)
-        """
 
+        """
         super().__init__(
             name="LandModel",
             grid=grid,
@@ -138,8 +137,8 @@ class SlabLandModel(SlabModelBase):
         
         Returns:
             Initial component state with land temperature, snow, and soil moisture
+
         """
-        
         # =========================================================================
         # Initialize land masks from domain
         # =========================================================================
@@ -284,6 +283,7 @@ class SlabLandModel(SlabModelBase):
             
         Returns:
             Monthly land temperature climatology (12, nlat, nlon) in Kelvin
+
         """
         nlat, nlon = shape
         
@@ -317,8 +317,8 @@ class SlabLandModel(SlabModelBase):
             
         Returns:
             Step function with signature: (state, forcing, t) -> (new_state, predictions)
+
         """
-        
         start_day_offset = self._compute_start_day_offset()
         
         def step_function(carry, t):
@@ -337,8 +337,8 @@ class SlabLandModel(SlabModelBase):
                 
             Returns:
                 Tuple of (new_state, predictions_dict)
+
             """
-            
             state = carry["state"]
             forcing = carry["forcing"]
             
@@ -412,8 +412,8 @@ class SlabLandModel(SlabModelBase):
             
         Returns:
             xarray Dataset with land surface variables and coordinates
+
         """
-        
         state = predictions["state"]
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.grid.dims

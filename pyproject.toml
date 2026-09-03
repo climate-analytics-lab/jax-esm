@@ -130,4 +130,11 @@ ignore = [
 # Notebooks legitimately break import/definition rules: names come from
 # earlier cells (F821), cells are re-run and redefine things (F811), imports
 # follow prose (E402), and demo cells import things they only show (F401).
-"*.ipynb" = ["F821", "F811", "E402", "F401"]
+"*.ipynb" = ["F821", "F811", "E402", "F401", "D107"]
+# The experimental JCM+Veros drivers import in a load-bearing order that E402
+# cannot express: matplotlib's backend is chosen before `pyplot` is imported,
+# JAX config is set before anything touches JAX, and the auto-generated Veros
+# setup header (with its "cannot be executed directly" guard) sits above the
+# imports by construction. Phase 3 (T3.1) rewrites these drivers against the
+# final API; reordering them now would only churn code that is about to go.
+"examples/02_experimental/**" = ["E402"]

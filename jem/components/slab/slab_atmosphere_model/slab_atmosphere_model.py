@@ -101,8 +101,8 @@ class SlabAtmosphereModel(SlabModelBase):
             grid: The model's grid. See jem.components.slab.grid.SlabGrid.
             timestep: Model timestep in seconds
             start_datetime: Simulation start datetime
-        """
 
+        """
         super().__init__(
             name="SlabAtmosphereModel",
             grid=grid,
