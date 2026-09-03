@@ -21,19 +21,11 @@ def safe_setattr(target, attribute_name, value, *, raise_exception=True):
 
     setattr(target, attribute_name, value)
 
-# This is a temporary solution to jcm's problem: some of the array's initiated
-# by jcm is int32, but it will change to float32 after step_function. This causes
-# jax.lax.scan to fail due to data type inconsistency.
-def asfloat64(tree):
-    return jax.tree_util.tree_map(lambda arr: jnp.array(arr).astype(jnp.float64), tree)
-
 
 @tree_math.struct
 class JCMDerived:
     physics: Any  # jcm's own PhysicsCarryState -- opaque passthrough, shape/keys
                   # depend on which physics terms are configured on the Model
-    land_heat_flux: jnp.ndarray
-    ocean_heat_flux: jnp.ndarray
     total_heat_flux: jnp.ndarray
     total_freshwater_flux: jnp.ndarray
 
@@ -42,15 +34,11 @@ class JCMDerived:
         cls,
         shape,
         physics,
-        land_heat_flux=None,
-        ocean_heat_flux=None,
         total_heat_flux=None,
         total_freshwater_flux=None,
     ):
         return cls(
             physics,
-            land_heat_flux if land_heat_flux is not None else jnp.zeros(shape),
-            ocean_heat_flux if ocean_heat_flux is not None else jnp.zeros(shape),
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
             total_freshwater_flux if total_freshwater_flux is not None else jnp.zeros(shape),
         )
@@ -92,11 +80,11 @@ def make_jem_compatible(
         )
         physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
 
-        return asfloat64({
+        return {
             "state": state,
             "derived": JCMDerived.zeros(D2_nodal_shape, physics_no_time_dimension),
             "forcing": forcing,
-        })
+        }
 
     def generate_step_function():
         # Notice: since save_interval and total_time are claimed
@@ -107,7 +95,7 @@ def make_jem_compatible(
         total_time_day=(coupling_timestep / jdt.to_timedelta(1, "day")).item()
         def step_function(carry, step):
             state = carry["state"]
-            forcing = asfloat64(carry["forcing"])
+            forcing = carry["forcing"]
             new_atm_modal_state, _, predictions = model.run_from_state_with_carry(
                 initial_state=state,
                 save_interval=save_interval_day,  
@@ -116,10 +104,18 @@ def make_jem_compatible(
                 output_averages=True,
             )
             physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
-            land_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 0] # convert to upward positive
-            ocean_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 1] # convert to upward positive
-            total_heat_flux = - physics_no_time_dimension["_surface_flux"].hfluxn[:, :, 2] # convert to upward positive
-            evaporation = physics_no_time_dimension["_surface_flux"].evap[:, :, 2] # upward positive
+
+            # jcm publishes only the (ix, il) GRID-MEAN surface fluxes: the
+            # per-tile (land/sea) breakdown it used to expose is gone, so a
+            # component that needs a tile-resolved flux has to compute it in
+            # the land/ocean component itself rather than read it here.
+            # Sign convention: jcm's `hfluxn` is positive DOWNWARD (into the
+            # surface) while every jem surface component takes heat flux
+            # positive UPWARD (out of the surface), hence the negation.
+            # `evap` is already upward-positive, in g m-2 s-1.
+            sf = physics_no_time_dimension["_surface_flux"]
+            total_heat_flux = -sf.hfluxn
+            evaporation = sf.evap
 
             total_freshwater_flux = (
                 evaporation
@@ -128,17 +124,15 @@ def make_jem_compatible(
             ) / 1000.0 # The number 1000.0 is the convert factor of mass density flux of freshwater from g/m^2/s to kg/m^2/s
 
             return (
-                asfloat64({
+                {
                     "state": new_atm_modal_state,
                     "derived": JCMDerived(
                         physics_no_time_dimension,
-                        land_heat_flux,
-                        ocean_heat_flux,
                         total_heat_flux,
                         total_freshwater_flux,
                     ),
                     "forcing": forcing,
-                }),
+                },
                 predictions
             )
 
