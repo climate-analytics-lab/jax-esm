@@ -33,6 +33,18 @@ Everything below was checked against `jax-esm main @ c7b5bda` and
   `_predictions`, `_final_*`) outside `jem/components/jcm/` (T2.2 confines
   the ones that still have no public equivalent to one helper each, with a
   comment naming the JCM issue that will remove them).
+- **Python is the primary interface; config is a thin wrapper.** `Coupler`,
+  the component classes, `Exchange` and `jem.run_chunked()` are the API and
+  carry every default. `jem/config/*.yaml` may contain only *wiring*: a
+  `_target_`, required inputs (`???`), and the non-default choices that
+  define a named configuration. **Never write a physics parameter or its
+  default value in YAML** — `relaxation_time`, `depth_soil`,
+  `ice_fraction_thickness_scale`, ... exist once, as Python defaults, and are
+  overridden from the CLI with Hydra's append syntax
+  (`+ocean.params.relaxation_time=2592000`), the convention JCM's
+  `physics/speedy.yaml` already documents. `runners.py` contains no
+  per-component code: every node is built with `hydra.utils.instantiate`,
+  so a YAML key *is* a constructor keyword and cannot drift from it.
 - Docstrings: NumPy style; comments explain *why* (jax-gcm `CLAUDE.md`).
 - Every task lists its tests. A task is not done until they exist and pass.
 - Commit messages: imperative subject ≤ 72 chars, body explains why.
@@ -274,69 +286,94 @@ Override spelling users will use (document it in `custom_help.yaml`):
 `atmosphere.run.time_step=20`, `terrain@atmosphere.terrain=from_file
 atmosphere.terrain.file=/path/terrain.nc`.
 
-**Group files (contents are the constructor arguments of T2.x components;
-until T2.x lands, `runners.py` maps them onto the current constructors):**
+**Group files — wiring only.** Each node is a Hydra `_target_` block, built
+with `hydra.utils.instantiate(node, grid=grid)` (the runner injects objects
+that come from other components; YAML never names them). No physics
+parameter appears here; no Python default is repeated here. The complete
+set of files:
+
 ```yaml
-# ocean/slab.yaml
-kind: slab
-grid: atmosphere            # `atmosphere` = share JCM's horizontal grid + terrain.fmask;
-                            # or a path to a SCRIP file (T1.2 resolves it)
-forcing_method: null        # null | Qflux | relaxation
-sst_clim_file: null
-q_flux_file: null
-relaxation_time_days: 60
-mixed_layer_depth_min: 40.0
-mixed_layer_depth_max: 60.0
-initial_sst: 288.15
-# ocean/slab_relax.yaml: same with forcing_method: relaxation, relaxation_time_days: 30, sst_clim_file: ???
-# ocean/slab_qflux.yaml:  same with forcing_method: Qflux, q_flux_file: ???
-# ocean/none.yaml:        kind: none
+# ocean/slab.yaml                      -- the default ocean: everything from Python defaults
+_target_: jem.components.SlabOceanModel
+params:
+  _target_: jem.components.slab.SlabOceanParameters   # wiring only, so that
+                                                       # +ocean.params.<field>=<value> works from the CLI
+
+# ocean/slab_relax.yaml                -- a named, non-default configuration worth highlighting
+_target_: jem.components.SlabOceanModel
+sst_clim_file: ???                     # required input, e.g. jcm-data://t30/clim/forcing.nc
+params:
+  _target_: jem.components.slab.SlabOceanParameters
+  forcing_method: relaxation           # the choice that defines this configuration
+
+# ocean/slab_qflux.yaml
+_target_: jem.components.SlabOceanModel
+q_flux_file: ???
+params:
+  _target_: jem.components.slab.SlabOceanParameters
+  forcing_method: qflux
+
+# ocean/veros.yaml
+_target_: jem.components.VerosComponent
+setup: ???                             # dotted path to a VerosSetup subclass, e.g. examples.veros.double_drake.Setup
+grid_file: ???                         # SCRIP file; the runner builds the SlabGrid/regridders from it
+
+# ocean/none.yaml, land/none.yaml, seaice/none.yaml
+null                                   # the group resolves to None; the runner skips it
+
 # land/slab_speedy.yaml
-kind: slab_speedy
-grid: atmosphere
-land_clim_file: null
-depth_soil: 1.0
-depth_lice: 5.0
-tdland_days: 40
+_target_: jem.components.SlabLandModel
+params:
+  _target_: jem.components.slab.SlabLandParameters
+
 # seaice/slab.yaml
-kind: slab
-grid: ${ocean.grid}
-initial_ice_thickness: 0.0
-ice_fraction_thickness_scale: 0.5
-# coupling/daily.yaml
-timestep: "1 day"            # jcm.date.parse_duration_days accepts this string form
-workflow: [exchange, atm, ocn, lnd, seaice]   # names absent from the model are skipped (runner filters)
-exchanges:                   # consumed by jem.exchange.Exchange (T1.3)
-  - {src: atm.derived.total_heat_flux,          dst: ocn.forcing.total_heat_flux,           regrid: a2o_conserve}
-  - {src: atm.derived.total_heat_flux,          dst: lnd.forcing.total_heat_flux}
-  - {src: ocn.state.sea_surface_temperature,    dst: atm.forcing.sea_surface_temperature,   regrid: o2a_bilinear}
-  - {src: ocn.derived.ice_frazil_melt_energy,   dst: seaice.forcing.ice_frazil_melt_energy}
-  - {src: seaice.derived.ice_fraction,          dst: atm.forcing.sice_am,                   regrid: o2a_conserve}
-  - {src: lnd.state.land_surface_temperature,   dst: atm.forcing.stl_am}
-  - {src: lnd.state.snowc,                      dst: atm.forcing.snowc_am}
-  - {src: lnd.state.soilw,                      dst: atm.forcing.soilw_am}
-mapper: null                 # optional dotted path to a Python callable used INSTEAD of `exchanges`
+_target_: jem.components.SlabSeaiceModel
+params:
+  _target_: jem.components.slab.SlabSeaiceParameters
+
+# coupling/daily.yaml                  -- coupling wiring; `null` means "use the Python default"
+timestep: "1 day"                      # jcm.date.parse_duration_days string form
+workflow: null                         # null -> jem.exchange.default_workflow(components): exchange first, then components in group order
+exchanges: null                        # null -> jem.exchange.default_exchanges(components): the standard atm/ocn/lnd/seaice wiring, defined ONCE in Python
+mapper: null                           # dotted path to a Python callable used INSTEAD of `exchanges` (Veros example)
+
 # regrid/same_grid.yaml
-kind: identity
+null                                   # identity
 # regrid/esmf.yaml
-kind: esmf
+_target_: jem.regrid.ESMFRegridders    # a dict-like of named ESMFRegridder built from weight files
 weights:
-  a2o_conserve: ???          # ESMF weight files; `jem://` prefix resolves into importlib.resources.files("jem.data")
+  a2o_conserve: ???                    # jem://<file> resolves into importlib.resources.files("jem.data")
   a2o_bilinear: ???
   o2a_conserve: ???
   o2a_bilinear: ???
-# run/default.yaml
+
+# run/default.yaml                     -- keyword arguments of jem.run_chunked(); defaults live on that function
 total_time: "30 days"
-chunk: "30 days"             # one output file per chunk; health check between chunks
-output_dir: null             # null -> hydra run dir
-output_averages: false       # true -> time-mean per chunk (what the long-run scripts did)
-subsample: 1                 # keep every n-th coupling step in output
-checkpoint_path: null        # null -> no restart files; else written after every chunk, resumed from if present
-health_check: true
-log_level: INFO
-# run/smoke.yaml: total_time "2 days", chunk "2 days"   (CI)
-# run/longrun.yaml: total_time "3600 days", chunk "30 days", output_averages true, checkpoint_path checkpoint.msgpack
+output_dir: null                       # null -> the Hydra run dir
+# run/smoke.yaml
+total_time: "2 days"
+chunk: "2 days"
+# run/longrun.yaml
+total_time: "3600 days"
+chunk: "30 days"
+output_averages: true
+checkpoint_path: checkpoint.msgpack
 ```
+
+Rules that keep this thin, to be checked at review:
+- A key may appear in a group file only if it is (a) `_target_`, (b) a
+  required input marked `???`, or (c) a value that differs from the Python
+  default *and* is what the named configuration is about. A test
+  (`test_config_has_no_python_defaults`) instantiates every group option and
+  fails if any supplied kwarg equals the target's default (compare against
+  `inspect.signature(...).parameters[k].default` and the params dataclass
+  fields).
+- The runner never reads a physics parameter. If a value needs computing
+  from other objects (the slab grid, the coupling timestep), the runner
+  passes the *object* as an injected kwarg; it does not compute anything.
+- `jem.run_chunked()` owns the run defaults (`chunk`, `output_averages`,
+  `subsample`, `health_check`, `checkpoint_path`, `log_level`). The `run`
+  group files list only what differs, so `run/default.yaml` is two lines.
 
 **Tests (`tests/unit/test_config.py`):** compose every group option with
 `hydra.compose` (parametrised over `ocean`, `land`, `seaice`, `run`) and
@@ -346,33 +383,60 @@ nudging, diffusion}`.
 
 ### T1.2 `jem/runners.py` builders
 
-**File (new):** `jem/runners.py`. Signatures (implement exactly these; each
-is pure config → object, no science):
+**Files (new):** `jem/driver.py` (the Python API) and `jem/runners.py`
+(config → Python API, nothing else).
 
+`jem/driver.py` — this is what a Python user calls, and what every example
+calls; the CLI adds nothing on top of it:
 ```python
-def build_atmosphere(cfg) -> tuple[JCMComponent | Model, ForcingData]:
-    """jcm.runners.build_model(cfg.atmosphere) + build_forcing; forcing falls back to
-    jcm.forcing.default_forcing(coords.horizontal) when build_forcing returns None.
-    Sets cfg.atmosphere.run.total_time = cfg.atmosphere.run.save_interval = coupling step (days)
-    and cfg.atmosphere.run.output_averages = True BEFORE building, with a comment: the
-    atmosphere is integrated one coupling step per call."""
-def build_slab_grid(grid_spec: str, model, terrain) -> SlabGrid:
-    """'atmosphere' -> SlabGrid.from_coords(model.coords.horizontal, terrain.fmask)  (T2.5; until then
-    generate_slab_grid(f'JCM::T{truncation}', fractional_mask=terrain.fmask)); a path -> generate_slab_grid_from_scrip."""
-def build_ocean(cfg, atm, terrain) -> Component | None
-def build_land(cfg, atm, terrain) -> Component | None
-def build_seaice(cfg, atm, terrain) -> Component | None
-def build_regridders(cfg) -> dict[str, Callable]:
-    """kind identity -> {} (Exchange treats a missing name as identity); kind esmf -> {name: ESMFRegridder(path)}."""
-def build_exchange(cfg, regridders) -> Callable[[CoupledCarry], CoupledCarry]:
-    """cfg.coupling.mapper (dotted path, hydra.utils.get_method) if set, else jem.exchange.Exchange(cfg.coupling.exchanges, regridders)."""
-def build_coupler(cfg) -> tuple[Coupler, dict]:
-    """Returns (coupler, info) where info = {'workflow': [...filtered...], 'coupling_timestep': jdt.Timedelta,
-    'components': {name: obj}}. Workflow entries whose component is None are dropped, and every exchange whose
-    src/dst component is absent is dropped with a logged INFO line."""
-def run(cfg) -> list[dict]:
-    """Chunked driver; returns the per-chunk health reports. See T1.3."""
+def run_chunked(
+    coupler: Coupler, *,
+    total_time: str | float,                 # "30 days" or days
+    chunk: str | float = "30 days",
+    initial_carry: CoupledCarry | None = None,
+    output_dir: Path | str = "outputs",
+    output_averages: bool = False,
+    subsample: int = 1,
+    health_check: bool = True,
+    checkpoint_path: Path | str | None = None,
+) -> list[dict]:
+    """The one chunked run loop (see T1.3 for the body). All defaults live HERE."""
 ```
+
+`jem/runners.py` — generic; contains no component names except the
+atmosphere (which is built by jcm's own runner):
+```python
+def build_atmosphere(cfg) -> JCMComponent:
+    """jcm.runners.build_model(cfg.atmosphere) + jcm.runners.build_forcing(...) -> JCMComponent(model, forcing=...).
+    Sets cfg.atmosphere.run.{total_time,save_interval} = coupling step and output_averages=True before
+    building (the atmosphere is integrated one coupling step per call) — wiring, not science."""
+def build_grid(node, atm) -> SlabGrid:
+    """node.grid_file absent -> SlabGrid.from_coords(atm.model.coords.horizontal, atm.terrain.fmask);
+    present -> SlabGrid.from_scrip(resolve(node.grid_file)). (T2.5; until then the equivalent generate_slab_grid calls.)"""
+def build_component(node, **injected):
+    """hydra.utils.instantiate(node, **injected) — grid and any other object kwargs are injected; None node -> None."""
+def build_coupler(cfg) -> Coupler:
+    atm = build_atmosphere(cfg)
+    components = {"atm": atm}
+    for group in ("ocean", "land", "seaice"):
+        node = cfg.get(group)
+        if node is not None:
+            components[GROUP_TO_NAME[group]] = build_component(node, grid=build_grid(node, atm))   # ocn / lnd / seaice
+    regridders = build_component(cfg.regrid) or {}
+    exchange = (hydra.utils.get_method(cfg.coupling.mapper) if cfg.coupling.mapper
+                else Exchange(cfg.coupling.exchanges or default_exchanges(components), regridders))
+    return Coupler(components, exchange,
+                   coupling_timestep=parse(cfg.coupling.timestep),
+                   workflow=cfg.coupling.workflow or default_workflow(components),
+                   start_date=..., calendar=...)                       # from cfg.atmosphere.run
+def run(cfg) -> list[dict]:
+    """return driver.run_chunked(build_coupler(cfg), **OmegaConf.to_container(cfg.run), output_dir=<hydra run dir if null>)"""
+```
+`GROUP_TO_NAME = {"ocean": "ocn", "land": "lnd", "seaice": "seaice"}` is the
+only table in the module. `default_exchanges` and `default_workflow` live in
+`jem/exchange.py` (T1.3) and are the single definition of the standard
+coupling; the YAML `null` defers to them.
+
 `jem/main.py`:
 ```python
 @hydra.main(version_base=None, config_path="config", config_name="config")
@@ -384,7 +448,7 @@ def main(cfg):
 Also add `[project.scripts] jem = "jem.main:main"` so `jem physics@…` works
 as well as `python -m jem.main`.
 
-**Tests (`tests/unit/test_runners.py`):** `test_build_coupler_default`
+**Tests (`tests/unit/test_runners.py`):** `test_runners_has_no_component_kwargs` (grep-style: `runners.py` never mentions a slab constructor keyword — assert none of the `SlabOceanParameters` field names appear in its source); `test_build_coupler_default`
 builds the default config (T31 aquaplanet + slab ocean + sea ice) and asserts
 component names `{atm, ocn, seaice}` and workflow
 `[exchange, atm, ocn, seaice]`; `test_build_coupler_earth` with
@@ -432,8 +496,8 @@ Components may override via optional `save_state(carry, dir)` /
 `save_veros_carry/load_veros_carry` into `veros_component.py` as those two
 methods.
 
-**`runners.run(cfg)`** — the one copy of the loop that the examples
-duplicate:
+**`driver.run_chunked(coupler, ...)`** — the one copy of the loop that the examples
+duplicate (`runners.run` only forwards `cfg.run` to it):
 ```
 coupler, info = build_coupler(cfg)
 carry = coupler.initialize()
@@ -456,7 +520,7 @@ atmosphere dataset; both exist in `ModelPredictions.to_xarray()` output.
 direction, identity regrid; asserts values moved and the input carry object
 was not mutated), `test_exchange_unknown_field_raises`,
 `test_checkpoint_roundtrip_tmp_path`,
-`test_run_smoke` (`run=smoke`, `@pytest.mark.slow`; asserts three netCDFs
+`test_run_chunked_python_api` (build a `Coupler` in Python with no config at all — two slab components on a 4×3 grid — and call `run_chunked(coupler, total_time="2 days", chunk="1 day", output_dir=tmp_path)`; two files per component), `test_run_smoke` (`run=smoke` through `jem.main`, `@pytest.mark.slow`; asserts three netCDFs
 exist and `reports[0]["ok"]`), `test_run_resumes_from_checkpoint`
 (run 2 chunks with `checkpoint_path`, delete chunk-1 output, run again,
 assert chunk 0 not re-run — check file mtimes or log).
@@ -468,8 +532,8 @@ assert chunk 0 not re-run — check file mtimes or log).
 | example | becomes |
 |---|---|
 | `01_basic/01_aquaplanet.ipynb` | `examples/01_aquaplanet.md`: the one-liner `python -m jem.main run=smoke` plus a 15-line plotting cell reading `outputs/.../atm-00000.nc`. Plotting helpers go to `jem/plot.py` (`animate_surface(ds_atm, ds_ocn, ds_ice, path)`), used by every example, behind the `[plot]` extra. |
-| `02_…customized_initial_condition.ipynb` | notebook of 3 cells: `cfg = compose(...)`; `coupler, info = build_coupler(cfg)`; `carry = coupler.initialize(); carry = replace_field(carry, "ocn.state.sea_surface_temperature", sst + bump)`; `runners.run(cfg, coupler=coupler, initial_carry=carry)`. (`run` gains optional `coupler=`, `initial_carry=` kwargs.) |
-| `03_…using_gradient.ipynb` | notebook: build coupler from cfg, `trajectory = coupler.generate_trajectory_function(...)`, the existing `jax.jvp` cell (no global mutation: build the perturbed carry with `replace_field`). |
+| `02_…customized_initial_condition.ipynb` | notebook of 3 cells, **pure Python, no config**: build `JCMComponent`, `SlabOceanModel`, `SlabSeaiceModel` and `Coupler` directly (this doubles as the README quick start); `carry = coupler.initialize(); carry = replace_field(carry, "ocn.state.sea_surface_temperature", sst + bump)`; `run_chunked(coupler, total_time="60 days", initial_carry=carry, output_dir=...)`. |
+| `03_…using_gradient.ipynb` | notebook: same Python construction as 02, `trajectory = coupler.generate_trajectory_function(...)`, the existing `jax.jvp` cell (no global mutation: build the perturbed carry with `replace_field`). |
 | `04_jcm_slabs_mixed_grid_aqua_planet.ipynb` | `python -m jem.main ocean.grid=jem://DisplacedPoleGrid.SCRIP.nc regrid=esmf regrid.weights.a2o_conserve=jem://weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc …` written as `examples/04_mixed_grid.yaml` (a Hydra config file) invoked with `--config-name`; plus the plotting cell. |
 | `02_experimental/01_earth.ipynb` | `examples/earth.yaml`: `terrain@atmosphere.terrain: from_file`, `forcing@atmosphere.forcing: from_file`, `land: slab_speedy`, `ocean: slab_relax`, files from `jcm.data.bc.t30.clim` (resolve with a `jcm-data://` prefix in `_resolve_data_path`). |
 | `03_long_aquaplanet.py` | delete; `python -m jem.main run=longrun grid@atmosphere.grid=speedy_t106_l8` (add that grid file to jcm or use `atmosphere.grid.spectral_truncation=106`). |
@@ -605,8 +669,8 @@ included in the carry as `carry["params"]` so `jax.grad` w.r.t. it works
 through `Coupler` without any special casing (**DECISION**: carry vs
 closure; default carry, because it makes calibration a plain
 `grad(lambda p: trajectory(replace_field(carry, "ocn.params", p)))`).
-`runners.build_ocean` maps the YAML keys (`relaxation_time_days*86400`
-etc.) onto the dataclass.
+Nothing in `runners.py` changes: `params: {_target_: ...SlabOceanParameters}` in the group file plus
+`+ocean.params.relaxation_time=...` on the CLI is the whole config surface, and every default stays in Python.
 
 **Tests:** `test_grad_wrt_relaxation_time_is_finite` (`jax.grad` of mean
 SST after 5 steps w.r.t. `relaxation_time`, relaxation mode, finite and
@@ -700,6 +764,7 @@ Phase 0 makes `main` releasable (v0.2). Phase 1 is the usability release
 - Every example in `examples/README.md` is a command or a ≤ 30-line
   notebook; `tests/examples` runs each at `run=smoke`.
 - `grep -rn "print(" jem/` → 0; `grep -rn "argparse" jem/ examples/` → 0.
+- No numeric physics value in `jem/config/**/*.yaml` (`test_config_has_no_python_defaults`); every example is reproducible from Python alone without Hydra.
 - `jax.grad` w.r.t. a slab parameter and `jax.jvp` w.r.t. initial SST both
   have tests.
 - CI runs `ruff check .`, unit tests with `--cov-fail-under=80`
