@@ -46,14 +46,16 @@ jax-esm/
 │   │   ├── typing.py             # all type aliases and JEMComponent dataclass
 │   │   └── exceptions.py        # ValidationError and friends
 │   ├── components/
-│   │   ├── __init__.py           # exports JCM, SlabOceanModel, SlabLandModel, SlabAtmosphereModel
-│   │   ├── JCM.py                # adapter for jcm (JAX Climate Model atmosphere)
-│   │   ├── Veros.py              # adapter for Veros ocean model
+│   │   ├── __init__.py           # exports JCM, SlabOceanModel, SlabLandModel, SlabAtmosphereModel,
+│   │   │                         # SlabSeaiceModel; lazily exports Veros (optional dependency)
+│   │   ├── jcm_component.py      # adapter for jcm (JAX Climate Model atmosphere)
+│   │   ├── veros_component.py    # adapter for Veros ocean model
 │   │   └── slab/
 │   │       ├── base.py           # SlabModelBase (shared grid/mask/timestep logic)
 │   │       ├── slab_ocean_model/ # SlabOceanModel
 │   │       ├── slab_land_model/  # SlabLandModel
-│   │       └── slab_atmosphere_model/ # SlabAtmosphereModel
+│   │       ├── slab_atmosphere_model/ # SlabAtmosphereModel
+│   │       └── slab_seaice_model/     # SlabSeaiceModel
 │   ├── mapping/
 │   │   ├── __init__.py           # exports BasicMapper, IdentityRegridder, Grid, GridSpecification
 │   │   ├── mapper.py             # BasicMapper — variable exchange between components
@@ -182,7 +184,7 @@ is called before every `generate_step_function` call to catch conflicts early.
 
 ## Built-in Components
 
-### JCM (`jem/components/JCM.py`)
+### JCM (`jem/components/jcm_component.py`)
 
 Wraps a `jcm.model.Model` (spectral atmosphere from `jax-gcm`). Does not subclass;
 instead, `make_jem_compatible(model, coupling_timestep)` monkey-patches the four JEM
@@ -217,11 +219,20 @@ where `time_factor = 1 / (1 + dt/tau)` accounts for climatological relaxation.
 
 Three `forcing_method` options: `"None"`, `"Qflux"`, `"relaxation"`.
 
+After the Euler backward update, `sea_surface_temperature` is clamped at the seawater freezing
+point (following CESM's slab-ocean/CICE convention), and the heat that clamp removes (or, when
+the mixed layer sits above freezing, the surplus available to melt ice) is reported as a single
+signed diagnostic, `ice_frazil_melt_energy` — CESM's `frzmlt`. It has no ice physics of its own;
+the diagnostic is meant to be consumed by a sea-ice component (`SlabSeaiceModel`) via the coupler.
+
 Carry structure:
 ```python
 {
     "state":   OceanState(sim_time, sea_surface_temperature, mixed_layer_depth),
     "forcing": OceanForcing(total_heat_flux, q_flux),
+    "derived": {
+        "ice_frazil_melt_energy": Array[lat, lon],  # J/m², signed; + forms ice, - can melt ice
+    },
 }
 ```
 
@@ -234,7 +245,25 @@ Same Euler backward scheme as `SlabOceanModel`.
 
 Idealized slab atmosphere. Used for testing and non-geoscience examples.
 
-### Veros (`jem/components/Veros.py`)
+### SlabSeaiceModel (`jem/components/slab/slab_seaice_model/`)
+
+Basal-only sea-ice thickness model: grows and melts purely from `SlabOceanModel`'s
+`ice_frazil_melt_energy` forcing (no dynamics, no lateral processes). Exposes a smooth
+thickness-to-fraction closure so an atmosphere model can use ice fraction as a boundary
+condition.
+
+Carry structure:
+```python
+{
+    "state":   SeaiceState(sim_time, ice_thickness, ice_surface_temperature),
+    "forcing": SeaiceForcing(ice_frazil_melt_energy),  # from SlabOceanModel, via a mapper
+    "derived": {
+        "ice_fraction": Array[lat, lon],  # smooth closure of thickness -> fraction
+    },
+}
+```
+
+### Veros (`jem/components/veros_component.py`)
 
 Adapter for Veros (a full 3D ocean GCM). Requires the `veros-jittable` fork.
 Uses monkey-patching (same pattern as JCM). **Not JIT-compilable** — the inner loop
@@ -430,7 +459,9 @@ pytest tests/notebooks/
 - **No commits without permission** — do not run `git commit` unless explicitly asked.
 - **Required packages**: `jax`, `xarray`, `argparse`, `netCDF4`.
 - **CLI scripts** must use `argparse` and be invoked via customizable bash scripts.
-- **Sign conventions**: heat flux positive upward; freshwater flux positive upward (evaporation).
+- **Sign conventions**: heat flux positive upward; freshwater flux positive upward (evaporation);
+  `ice_frazil_melt_energy` positive means the ocean mixed layer went sub-freezing (forms new ice),
+  negative means surplus heat is available to melt existing ice (CESM's `frzmlt` convention).
 - **Land mask**: `bmask == 1` means land; `bmask == 0` means ocean.
 - **Grid spec strings**: `"<universe>::<family>"` format, e.g. `"JCM::T31"`, `"Veros::1deg"`.
 - **No JAX tracing through Python conditionals** inside step functions — use `jnp.where`.

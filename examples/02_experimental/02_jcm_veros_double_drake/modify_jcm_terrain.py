@@ -66,28 +66,68 @@ def modify_jcm_terrain(
             , 1
             , 0
         ).astype(int)
+
+    elif planet_type == "double_drake":
+
+        # original setup    
+        cap_edge_latitude = 75.0
+        divider_width = 3.85
+        basin1_lon_beg = 0.0
+        basin1_lat_edge = -45.0
+        
+        basin2_lon_beg =   67.5
+        basin2_lat_edge = -45.0
+     
+        mask = np.where(
+            (np.abs(llat) >= cap_edge_latitude)
+            | (
+                (llat >= basin1_lat_edge)
+                & (llon >= basin1_lon_beg)
+                & (llon < basin1_lon_beg + divider_width)
+            )
+            | (
+                (llat >= basin2_lat_edge)
+                & (llon >= basin2_lon_beg)
+                & (llon < basin2_lon_beg + divider_width)
+            )
+            , 1
+            , 0
+        ).astype(int)
+ 
+    elif planet_type == "double_drake_equal_basin_width":
+
+        # original setup    
+        cap_edge_latitude = 75.0
+        divider_width     =  3.85
+
+        basin1_lon_beg    =   0.0
+        basin1_lat_edge   = -45.0
+        
+        basin2_lon_beg    = 180.0
+        basin2_lat_edge   = -45.0
+     
+        mask = np.where(
+            (np.abs(llat) >= cap_edge_latitude)
+            | (
+                (llat >= basin1_lat_edge)
+                & (llon >= basin1_lon_beg)
+                & (llon < basin1_lon_beg + divider_width)
+            )
+            | (
+                (llat >= basin2_lat_edge)
+                & (llon >= basin2_lon_beg)
+                & (llon < basin2_lon_beg + divider_width)
+            )
+            , 1
+            , 0
+        ).astype(int)
+ 
     else:
         raise Exception(f"Unknown `--planet-type`: {args.planet_type}") 
     
     ds["lsm"].data[:] = mask
-    
-    # Setting the height of cap is 0-meter
-    ds["orog"].data[:] = np.where(
-        (np.abs(llat) >= cap_threshold_latitude),
-        0.0,
-        ds["orog"].data
-    )
+    ds["orog"].data[:] = 0.0 
 
-    # In aqua planet, the orography at the point is still realistic earth, even
-    # though the much of the surface is now ocean. Therefore, we need to set
-    # the height of ocean grid to 0-meter, such that JCM does not see an invi-
-    # sible mountain. 
-    ds["orog"].data[:] = np.where(
-        mask == 0,
-        0.0,
-        ds["orog"].data
-    )
-    
     print(f"Writing result to: {str(output_file)}")
     ds.to_netcdf(output_file)
     ds.close()

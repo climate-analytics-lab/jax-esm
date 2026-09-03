@@ -25,26 +25,31 @@ from veros import VerosSetup, veros_routine
 from veros.variables import allocate, Variable
 from veros.distributed import global_min, global_max
 from veros.core.operators import numpy as npx, update, at
+from typing import Sequence
 
 import jax.numpy as npx
 import xarray as xr
-
-
 
 def generateVerosSetup(
     nx: int,
     ny: int,
     land_sea_mask_file: str,
-    dt_mom: float = 3600.0,
-    dt_tracer: float = 3600.0,
+    ddz: Sequence[float] = [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0],
+    dt_mom: float = 1800.0,
+    dt_tracer: float = 1800.0,
+    cold_start_ocean_temperature_reference_K: float = 15.0, 
 ):
 
     def get_land_sea_mask():
         land_sea_mask_file
         # original 1: land, 0: ocean
-        #land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()[:, lat_skip:-lat_skip]
         land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()
         return land_sea_mask
+
+    p = 1.4
+    
+    ddz = npx.array(ddz)
+    nz = len(ddz)
 
     dxt = 360.0 / nx
     dyt = 180.0 / ny
@@ -70,7 +75,10 @@ def generateVerosSetup(
             settings.identifier = "output_veros"
             settings.description = "My Veros setup"
 
-            settings.nx, settings.ny, settings.nz = nx, ny, 15
+            settings.enable_streamfunction = False  # then it solve linear free surface        
+            settings.enable_nan_checks = False
+
+            settings.nx, settings.ny, settings.nz = nx, ny, nz
             settings.dt_mom = dt_mom
             settings.dt_tracer = dt_tracer
             settings.runlen = 86400 * 365
@@ -81,7 +89,7 @@ def generateVerosSetup(
             settings.coord_degree = True
             settings.enable_cyclic_x = True
 
-            settings.enable_neutral_diffusion = True
+            settings.enable_neutral_diffusion = True # False # Test 2026/06/16: turn it off to see if model can integrate 1000 years
             settings.K_iso_0 = 1000.0
             settings.K_iso_steep = 500.0
             settings.iso_dslope = 0.005
@@ -89,12 +97,15 @@ def generateVerosSetup(
             settings.enable_skew_diffusion = True
 
             settings.enable_hor_friction = True
-            settings.A_h = (2 * settings.degtom) ** 3 * 2e-11
+            settings.A_h = ( (dxt+dyt)/2 * settings.degtom) ** 3 * 2e-11
             settings.enable_hor_friction_cos_scaling = True
             settings.hor_friction_cosPower = 1
 
             settings.enable_bottom_friction = True
             settings.r_bot = 1e-5
+            
+            #settings.enable_biharmonic_friction = True
+            #settings.A_hbi = 1e16
 
             settings.enable_implicit_vert_friction = True
 
@@ -121,7 +132,7 @@ def generateVerosSetup(
 
             settings.enable_idemix = False
 
-            settings.eq_of_state_type = 3
+            settings.eq_of_state_type = 1
 
             var_meta = state.var_meta
             var_meta.update(
@@ -132,12 +143,12 @@ def generateVerosSetup(
         @veros_routine
         def set_grid(self, state):
             vs = state.variables
-            ddz = npx.array(
-                [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0]
-            )
+            #ddz = npx.array(
+            #    [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0]
+            #)
             vs.dxt = update(vs.dxt, at[...], dxt)
             vs.dyt = update(vs.dyt, at[...], dyt)
-            vs.dzt = update(vs.dzt, at[...], ddz[::-1] / 2.5)
+            vs.dzt = update(vs.dzt, at[...], ddz[::-1]) # ocean grid starts from below
 
 
         @veros_routine
@@ -173,7 +184,7 @@ def generateVerosSetup(
             distace_square = ((vs.yt[None, :, None] - y_center) ** 2) / (2 * sigma ** 2)
             temp_anomaly = 5.0 * npx.exp(-distace_square) * vs.maskT * 0
            
-            vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * 15 * vs.maskT + temp_anomaly)[..., None] )
+            vs.temp = update(vs.temp, at[...], ((1 - vs.zt[None, None, :] / vs.zw[0]) * cold_start_ocean_temperature_reference_K * vs.maskT + temp_anomaly)[..., None] )
             vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
 
             # wind stress forcing
