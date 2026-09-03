@@ -24,7 +24,16 @@ extensions = [
     'sphinx.ext.autosummary',
     'sphinx.ext.napoleon',
     'nbsphinx',
+    # MyST lets sphinx parse docs/source/design/*.md alongside the .rst
+    # pages (same setup as jax-gcm).
+    'myst_parser',
 ]
+
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
+myst_heading_anchors = 3
 
 templates_path = ['_templates']
 exclude_patterns = []

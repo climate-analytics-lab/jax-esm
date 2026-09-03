@@ -21,6 +21,7 @@ documentation for details.
    experimental
 
    issues
+   design
    developers
    api_superset
 
