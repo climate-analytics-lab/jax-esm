@@ -71,15 +71,16 @@ config-group overrides — never as a standalone driver script:
  - The **target** is `python -m jem.main` with Hydra groups under
    `jem/config/` (atmosphere, ocean, land, seaice, coupling, run,
    experiment), mirroring how `jcm` is driven. That driver and its config
-   tree do not exist yet; they are Phase 2 of
-   `docs/source/design/api_hardening_plan.md`.
+   tree do not exist yet; they are Phase 2 of the API hardening plan (the
+   plan itself is not in the repository — `docs/source/design/architecture.md`
+   describes the API as it stands).
  - **Until it does exist, do not add new standalone command-line driver
    scripts (a hand-rolled CLI plus a `run.sh`).** A new runnable
    configuration is a notebook or a short snippet in
    the docs that calls the Python API (`Coupler`, the component classes,
-   `Coupler.generate_trajectory_function`); it is not a new bespoke driver. The bespoke drivers still
-   under `examples/02_experimental/` are legacy and are being folded into the
-   Hydra tree, not extended.
+   `Coupler.generate_trajectory_function`); it is not a new bespoke driver.
+   The bespoke drivers still under `examples/02_experimental/` are legacy and
+   are being folded into the Hydra tree, not extended.
  - **Python is the primary interface; config is a thin wrapper.** Every
    physical parameter and its default value lives once, as a Python default on
    the component class. YAML may carry only wiring (`_target_`, required
