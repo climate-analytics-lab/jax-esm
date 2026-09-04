@@ -245,3 +245,20 @@ def test_a_component_that_rejects_the_clock_is_not_registered():
     with pytest.raises(ValueError, match="clock rejected"):
         coupler.add_component("ice", ComponentRejectingClock(name="ice"))
     assert "ice" not in coupler.components
+
+
+def test_seconds_since_new_year_counts_in_the_model_calendar():
+    """The day of year follows the calendar: no leap day on ``365_day``."""
+    from jem.base.component import seconds_since_new_year
+
+    day = 86400.0
+    december_31_leap_year = jdt.to_datetime("2000-12-31")
+    assert seconds_since_new_year(december_31_leap_year, "365_day") == 364 * day
+    assert seconds_since_new_year(december_31_leap_year, "gregorian") == 365 * day
+    # 1 March is day 59 (31 + 28) without a leap day, day 60 with one.
+    assert seconds_since_new_year(jdt.to_datetime("2000-03-01"), "365_day") == 59 * day
+    assert seconds_since_new_year(jdt.to_datetime("2000-03-01"), "gregorian") == 60 * day
+    with pytest.raises(ValueError, match="29 February"):
+        seconds_since_new_year(jdt.to_datetime("2000-02-29"), "365_day")
+    with pytest.raises(ValueError, match="calendar"):
+        seconds_since_new_year(december_31_leap_year, "360_day")

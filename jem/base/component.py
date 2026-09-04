@@ -37,6 +37,7 @@ https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-
 from __future__ import annotations
 
 import dataclasses
+import datetime
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -105,7 +106,7 @@ def forcing_variable(name: str) -> str:
     return f"{FORCING_VARIABLE_PREFIX}{name}"
 
 
-def seconds_since_new_year(start_date: jdt.Datetime) -> float:
+def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:
     """Return the seconds from 1 January of ``start_date``'s year to ``start_date``.
 
     This offset is what turns simulation time (seconds since the start of the
@@ -113,16 +114,42 @@ def seconds_since_new_year(start_date: jdt.Datetime) -> float:
     reads the July record of a monthly climatology on its first step. The
     coupler puts it on every :class:`CouplingTime` as ``year_offset_seconds``.
 
-    The subtraction uses ``jax_datetime``'s proleptic-Gregorian arithmetic
-    while the annual cycle is closed with the *model* calendar's
-    ``days_per_year`` (see :func:`start_year_fraction`). The two disagree by
-    one day for a start date after 29 February of a leap year under a
-    ``365_day`` calendar. That is inherent in describing a real start date on
-    an idealised calendar; it is left visible here rather than hidden by a
-    second, home-made calendar.
+    The day of year is counted in the *model* calendar. On a ``365_day``
+    calendar there is no 29 February, so a Gregorian date after it is one
+    day earlier in the model year than the real-calendar subtraction would
+    say (31 December is day 364, not day 365, so the seasonal cycle does
+    not wrap a day early); a date that does not exist in that calendar is
+    rejected. On the ``gregorian`` calendar the real subtraction applies.
+
+    Parameters
+    ----------
+    start_date : jax_datetime.Datetime
+        The run's start date.
+    calendar : str
+        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
+
+    Raises
+    ------
+    ValueError
+        If ``start_date`` does not exist in ``calendar`` (29 February on a
+        365-day calendar), or the calendar is unknown to ``jcm.date``.
+
     """
-    year = start_date.to_pydatetime().year
-    new_year = jdt.to_datetime(f"{year:d}-01-01")
+    when = start_date.to_pydatetime()
+    if float(jcm_days_per_year(calendar)) == 365.0:
+        if when.month == 2 and when.day == 29:
+            raise ValueError(
+                f"{when.date()} does not exist in the {calendar!r} calendar, "
+                "which has no 29 February."
+            )
+        # Count the day of year in a year without a leap day: any non-leap
+        # reference year gives the same month/day -> day-of-year mapping.
+        reference = datetime.datetime(
+            2001, when.month, when.day, when.hour, when.minute, when.second,
+            when.microsecond,
+        )
+        return (reference - datetime.datetime(2001, 1, 1)).total_seconds()
+    new_year = jdt.to_datetime(f"{when.year:d}-01-01")
     return float((start_date - new_year) / jdt.to_timedelta(1, "second"))
 
 
@@ -148,10 +175,10 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
 
     """
     seconds_per_year = SECONDS_PER_DAY * float(jcm_days_per_year(calendar))
-    # The modulo matters for the leap-day case documented on
-    # `seconds_since_new_year`: 31 December of a Gregorian leap year is a full
-    # 365 days into a "365_day" year, which would otherwise report 1.0.
-    return (seconds_since_new_year(start_date) / seconds_per_year) % 1.0
+    # `seconds_since_new_year` already counts in the model calendar, so this
+    # is strictly below 1; the modulo only guards the boundary against
+    # rounding.
+    return (seconds_since_new_year(start_date, calendar) / seconds_per_year) % 1.0
 
 
 def _timedelta_days(delta: Any) -> float:
@@ -239,7 +266,11 @@ class CouplingTime:
             )
         else:
             seconds_into_year = self.year_offset_seconds + self.sim_time
-        return jnp.mod(seconds_into_year / self.seconds_per_year, 1.0)
+        # Reduce in seconds before dividing: the modulo of a quotient near 1.0
+        # keeps only the absolute float32 precision of that quotient (~1e-7),
+        # whereas the remainder in seconds is exact for whole-second steps and
+        # the division then has full relative precision.
+        return jnp.mod(seconds_into_year, self.seconds_per_year) / self.seconds_per_year
 
 
 @struct.dataclass

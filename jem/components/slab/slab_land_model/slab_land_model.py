@@ -441,12 +441,12 @@ class SlabLandModel(SlabModelBase):
         }
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
-        return {
-            "description": "SPEEDY-based slab land surface model output",
-            "depth_soil": f"{float(self.params.depth_soil)} m",
-            "depth_lice": f"{float(self.params.depth_lice)} m",
-            "tdland": f"{float(self.params.tdland)} s",
-        }
+        # No parameter values here: the dynamics read `carry["params"]`, which
+        # an experiment may replace or differentiate, while `self.params` is
+        # only what the model was constructed with. Metadata that can
+        # disagree with the run it describes is worse than none; the carry
+        # that produced the output holds the parameters actually used.
+        return {"description": "SPEEDY-based slab land surface model output"}
 
 
 def _land_fraction(grid: SlabGrid, params: SlabLandParameters) -> jnp.ndarray:

@@ -238,22 +238,19 @@ def test_components_share_clock():
 def test_year_fraction_wraps():
     """The annual cycle wraps at the year end rather than running past 1."""
     # A start date one day before the year end on a 365-day calendar: the run
-    # starts at 364/365 through the year and step 1 is New Year's Day. 2001 is
-    # not a leap year, so the real-calendar offset jax_datetime computes and
-    # the model's 365-day year agree (see `_seconds_since_new_year`).
+    # starts at 364/365 through the year and step 1 is New Year's Day. 2000 is
+    # a Gregorian leap year, so a real-calendar day count would say 365 days
+    # and wrap a day early; the offset is counted in the model calendar.
     coupler = Coupler(
         {"clock": ClockWatcher()},
         coupling_timestep=COUPLING_TIMESTEP,
-        start_date=jdt.to_datetime("2001-12-31"),
+        start_date=jdt.to_datetime("2000-12-31"),
         calendar="365_day",
     )
     assert float(coupler.coupling_time(0).year_fraction) == pytest.approx(364 / 365)
     assert float(coupler.coupling_time(1).year_fraction) == pytest.approx(0.0, abs=1e-6)
-    # Loose tolerance on purpose: `year_fraction` divides a large second count
-    # by the year length in float32, so just after a wrap the surviving
-    # precision is that of the *large* number, ~1e-7 relative to 1.0.
     assert float(coupler.coupling_time(2).year_fraction) == pytest.approx(
-        1 / 365, rel=1e-4
+        1 / 365, rel=1e-6
     )
 
 

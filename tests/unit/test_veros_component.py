@@ -240,3 +240,16 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component):
         component.to_xarray(
             stacked,
             TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP, CALENDAR))
+
+
+def test_rebinding_to_a_different_timestep_is_rejected(component):
+    """One instance belongs to one coupled model; a conflicting second bind raises."""
+    component.bind(
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar=CALENDAR
+    )
+    with pytest.raises(ValueError, match="already bound"):
+        component.bind(
+            coupling_timestep=COUPLING_TIMESTEP * 2,
+            start_date=START_DATE,
+            calendar=CALENDAR,
+        )

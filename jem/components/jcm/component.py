@@ -292,7 +292,9 @@ class JCMComponent:
             If the timestep does not divide, or either clock setting
             differs. The message names both values: a mismatch here means
             the atmosphere would date its own forcing and output
-            differently from every other component.
+            differently from every other component. Also if the component
+            is already bound to a different coupling timestep (binding it
+            again to the same clock is a no-op).
 
         """
         if str(calendar) != str(self.model.calendar):
@@ -318,8 +320,19 @@ class JCMComponent:
                 f" multiple of {self.name!r}'s model timestep"
                 f" {model_timestep!r}."
             )
-        self._coupling_days = float(
-            coupling_timestep / jdt.to_timedelta(1, "day"))
+        coupling_days = float(coupling_timestep / jdt.to_timedelta(1, "day"))
+        if self._coupling_days is not None and coupling_days != self._coupling_days:
+            # One instance belongs to one coupled model: `step` advances the
+            # atmosphere by `_coupling_days`, so a second coupler with another
+            # timestep would silently desynchronise the first coupler's runs
+            # from its own step counter.
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r} is already bound to a "
+                f"coupling timestep of {self._coupling_days:g} days and cannot "
+                f"also be bound to {coupling_days:g} days. Build a separate "
+                "instance per coupled model."
+            )
+        self._coupling_days = coupling_days
 
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.

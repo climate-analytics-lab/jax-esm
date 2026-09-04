@@ -169,7 +169,7 @@ class Coupler:
                 f"coupling_timestep must be positive; got {coupling_timestep!r} "
                 f"({self._dt_seconds:g} s)."
             )
-        self._year_offset_seconds = seconds_since_new_year(start_date)
+        self._year_offset_seconds = seconds_since_new_year(start_date, calendar)
         self._days_per_year = float(jcm_days_per_year(calendar))
 
         for name, exchanger in (exchangers or {}).items():

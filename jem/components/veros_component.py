@@ -266,7 +266,8 @@ class VerosComponent:
         ------
         ValueError
             If the coupling timestep is not a whole multiple of
-            ``dt_tracer``.
+            ``dt_tracer``, or the component is already bound to a
+            different coupling timestep (the same one again is a no-op).
 
         """
         self.start_date = start_date
@@ -281,7 +282,22 @@ class VerosComponent:
                 f" multiple of {self.name!r}'s tracer timestep"
                 f" {model_timestep!r}."
             )
-        self._steps_per_coupling_step = int(n_steps)
+        steps_per_coupling_step = int(n_steps)
+        if (
+            self._steps_per_coupling_step is not None
+            and steps_per_coupling_step != self._steps_per_coupling_step
+        ):
+            # One instance belongs to one coupled model: `step` runs this
+            # many tracer steps, so a second coupler with another timestep
+            # would silently advance the ocean by the wrong interval in the
+            # first coupler's runs.
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r} is already bound to a "
+                f"coupling timestep of {self._steps_per_coupling_step:d} tracer "
+                f"steps and cannot also be bound to {steps_per_coupling_step:d}. "
+                "Build a separate instance per coupled model."
+            )
+        self._steps_per_coupling_step = steps_per_coupling_step
 
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
