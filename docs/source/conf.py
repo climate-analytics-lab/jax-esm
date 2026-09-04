@@ -35,8 +35,14 @@ source_suffix = {
 }
 myst_heading_anchors = 3
 
-# Only execute notebooks that don't already have saved output cells.
-nbsphinx_execute = 'auto'
+# Never execute notebooks as part of the docs build. The example notebooks are
+# checked in with their outputs cleared, so 'auto' would execute every one of
+# them on every docs build (~16 minutes) -- and the docs environment does not
+# install the Veros fork the experimental examples need, so those would fail
+# outright. The examples CI job is what executes the notebooks and proves they
+# run; the docs show their code only. How (and whether) to publish executed
+# outputs is a Phase 3 decision.
+nbsphinx_execute = 'never'
 
 templates_path = ['_templates']
 exclude_patterns = []
