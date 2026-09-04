@@ -347,6 +347,12 @@ otherwise**; the code that has to change is named in each one.
   already-compiled step.
 - The coupled step never mutates its input carry; it rebuilds the carries dict
   and returns a new `CoupledCarry`.
+- `VerosComponent.to_xarray` writes the run's `time` coordinate. It was handed
+  a `TimeAxis`, checked the record count against it and then dropped it, so an
+  ocean dataset came out with a bare 0..n-1 integer `time` index: it could not
+  be merged with any other component's output, and the dates of a chunked run
+  were absent from the files entirely. It now uses
+  `jem.utils.time.time_coordinate`, the same call site the slab models use.
 - A run resumed from a checkpoint no longer restarts its seasonal cycle:
   `save_coupled_carry` writes the coupled step counter and `load_coupled_carry`
   restores it. A checkpoint written without one is refused with a `ValueError`

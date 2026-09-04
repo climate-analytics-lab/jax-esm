@@ -32,6 +32,7 @@ from jem.base.component import (
     forcing_variable,
 )
 from jem.utils.checkpoints import load_veros_carry, save_veros_carry
+from jem.utils.time import time_coordinate
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +465,12 @@ class VerosComponent:
             :func:`~jem.base.component.forcing_variable` applies, exactly as the
             slab models' output does, so merging this dataset with the
             atmosphere's does not collide on a name two components both hold.
+            The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
+            :func:`jem.utils.time.time_coordinate` builds from ``time``, the
+            same one every other component labels its output with, so
+            ``xr.merge`` joins the records instead of unioning two axes -- or,
+            as before this coordinate was written at all, leaving the ocean's
+            ``time`` as a bare 0..n-1 index that means nothing.
 
         """
         n_records = int(jnp.shape(diagnostics["sea_surface_temperature"])[0])
@@ -473,6 +480,8 @@ class VerosComponent:
                 f" coupler's time axis has {len(time)}; the diagnostics"
                 " passed here are not the ones this run produced."
             )
+
+        time_values, time_attrs = time_coordinate(time)
 
         dataset = xr.Dataset(
             data_vars={
@@ -499,6 +508,7 @@ class VerosComponent:
                 "dzt": (["depth"], self.dzt),
             },
             coords={
+                "time": (["time"], time_values, time_attrs),
                 "lon": (["lon"], self.longitude),
                 "lat": (["lat"], self.latitude),
             },

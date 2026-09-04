@@ -222,6 +222,11 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     }
     # ...and what the ocean computed keeps its plain name.
     assert "sea_surface_temperature" in dataset.data_vars
+    # The one time coordinate of the run, not a bare 0..n-1 index: an ocean
+    # dataset has to merge with the atmosphere's on the same instants.
+    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR)
+    np.testing.assert_array_equal(dataset.time.values, time_axis.datetimes())
+    assert dataset.time.attrs == time_axis.attrs
 
 
 @pytest.mark.slow

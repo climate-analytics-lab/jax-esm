@@ -258,7 +258,9 @@ dates.
 
 Each component is handed a `TimeAxis` (start date, the record's coupled-step
 indices, the timestep and the calendar) so every dataset from one run shares one
-time coordinate. The conventions, which are JCM's:
+time coordinate; `jem.utils.time.time_coordinate` unpacks it into the
+`(values, attrs)` pair xarray wants and is the one call site every component
+uses. The conventions, which are JCM's:
 
 - **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
   `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (and a CF

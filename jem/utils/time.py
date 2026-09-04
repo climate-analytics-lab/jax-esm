@@ -1,4 +1,4 @@
-"""The slab models' view of the output time coordinate.
+"""A component's view of the output time coordinate.
 
 A coupled run produces one dataset per component. They are only useful
 together if ``xr.merge`` aligns them, and that requires the ``time``
@@ -7,12 +7,13 @@ coordinate to carry not just the same *instants* but the same
 
 That representation is defined once, on
 :class:`jem.base.component.TimeAxis` -- the object the coupler hands to every
-component's ``to_xarray`` -- and this module is the slab-side call site, not a
-second implementation: :func:`time_coordinate` is the two-line convenience
-that unpacks a ``TimeAxis`` into the ``(values, attrs)`` pair
-:class:`xarray.Dataset` wants. See ``TimeAxis.datetimes`` for the convention
-itself (JCM's float64-days arithmetic, end-of-interval labelling, and the
-sub-day start date JCM drops and JAX-ESM keeps).
+component's ``to_xarray`` -- and this module is the call site every component
+shares (the slab models and the Veros adapter), not a second implementation:
+:func:`time_coordinate` is the two-line convenience that unpacks a
+``TimeAxis`` into the ``(values, attrs)`` pair :class:`xarray.Dataset` wants.
+See ``TimeAxis.datetimes`` for the convention itself (JCM's float64-days
+arithmetic, end-of-interval labelling, and the sub-day start date JCM drops
+and JAX-ESM keeps).
 """
 
 import numpy as np
