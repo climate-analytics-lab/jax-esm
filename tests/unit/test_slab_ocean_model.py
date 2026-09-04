@@ -6,6 +6,7 @@ import pytest
 import xarray as xr
 
 from jem import constants
+from jem.components.slab.base import load_monthly_climatology
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_ocean_model import SlabOceanModel
 
@@ -52,6 +53,17 @@ def _monthly_ramp() -> np.ndarray:
     return np.arange(
         12 * len(LATITUDE_DEGREES) * len(LONGITUDE_DEGREES), dtype=np.float32
     ).reshape(12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES))
+
+
+def test_load_monthly_climatology_is_shared_and_transposes_by_name(tmp_path, uniform_grid):
+    """The loader is public on the slab base module so every slab component can use it."""
+    values = _monthly_ramp()
+    path = _write_climatology(tmp_path / "field.nc", "field", values)
+
+    loaded = load_monthly_climatology(path, "field", uniform_grid)
+
+    # (time, lat, lon) in the file -> (lon, lat, time) on the model grid.
+    np.testing.assert_allclose(np.asarray(loaded), np.transpose(values, (2, 1, 0)))
 
 
 def test_qflux_file_is_loaded(tmp_path, uniform_grid):

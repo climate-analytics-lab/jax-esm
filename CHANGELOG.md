@@ -10,6 +10,10 @@ change is listed here.
 
 ### Added
 
+- The monthly-climatology loader written for `SlabOceanModel` is public on the
+  slab base module as `jem.components.slab.base.load_monthly_climatology`, so
+  the other slab components can read their boundary conditions through the
+  same name-based, grid-checked path.
 - `CHANGELOG.md` (this file). Every pre-1.0 API removal or rename is recorded
   here rather than only in a commit message.
 
