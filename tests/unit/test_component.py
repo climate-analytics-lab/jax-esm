@@ -1,8 +1,9 @@
 """Tests for the component contract in ``jem.base.component``.
 
 These cover what the coupler *requires* of a component and what it may
-optionally use: the required protocol, the three optional capabilities, and
-the clock handed to a component that asks for it at registration.
+optionally use: the required protocol, the three optional capabilities, the
+clock handed to a component that asks for it at registration, and the output
+time axis every component labels its diagnostics with.
 
 The components here are deliberately trivial toys. A slab or JCM component
 would drag a grid and boundary data into a test of the contract, and the
@@ -11,6 +12,7 @@ contract has nothing to do with either.
 
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import pytest
 
 from jem.base.component import (
@@ -18,8 +20,10 @@ from jem.base.component import (
     SupportsBind,
     SupportsCheckpoint,
     SupportsXarray,
+    TimeAxis,
 )
 from jem.base.coupler import Coupler
+from jem.utils.time import time_coordinate
 
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 START_DATE = jdt.to_datetime("2001-01-01")
@@ -164,3 +168,54 @@ def test_registered_component_is_the_object_passed_in():
         start_date=START_DATE,
     )
     assert coupler.components["minimal"] is component
+
+
+# ---------------------------------------------------------------------------
+# The output time axis
+# ---------------------------------------------------------------------------
+
+
+def test_datetimes_label_the_end_of_each_interval():
+    """Record ``k`` holds the interval that ENDS at ``start + (k+1) dt``."""
+    axis = TimeAxis(
+        start_date=jdt.to_datetime("2001-01-01"),
+        steps=np.arange(3),
+        dt=COUPLING_TIMESTEP,
+        calendar="365_day",
+    )
+    np.testing.assert_array_equal(
+        axis.datetimes(),
+        np.array(["2001-01-02", "2001-01-03", "2001-01-04"], dtype="datetime64[ns]"),
+    )
+    assert axis.datetimes().dtype == np.dtype("datetime64[ns]")
+
+
+def test_datetimes_reproduce_jcm_arithmetic_bit_for_bit():
+    """The labels are JCM's float64-days product, not an exact ns count.
+
+    Both models have to be inexact in the SAME way for ``xr.merge`` to align
+    them, so this pins the arithmetic and not just the answer.
+    """
+    start = jdt.to_datetime("2001-03-01")
+    steps = np.arange(5)
+    axis = TimeAxis(start, steps, jdt.to_timedelta(6, "hour"), "365_day")
+
+    nanoseconds_per_day = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
+    start_days = float(np.asarray(start.delta.days))
+    expected = (
+        (start_days + 0.25 * (steps.astype(np.float64) + 1.0)) * nanoseconds_per_day
+    ).astype("datetime64[ns]")
+
+    np.testing.assert_array_equal(axis.datetimes(), expected)
+
+
+def test_time_coordinate_delegates_to_the_time_axis():
+    """The slab helper is a call site, not a second implementation."""
+    axis = TimeAxis(START_DATE, np.arange(4), COUPLING_TIMESTEP, "365_day")
+
+    values, attrs = time_coordinate(axis)
+
+    np.testing.assert_array_equal(values, axis.datetimes())
+    assert attrs == axis.attrs
+    # A fresh dict each call: xarray keeps what it is handed.
+    assert attrs is not axis.attrs

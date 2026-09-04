@@ -57,6 +57,24 @@ Diagnostics = Any
 
 SECONDS_PER_DAY = 86400.0
 
+#: Nanoseconds in a day, as a float64 -- the exact factor JCM multiplies its
+#: float64 day counts by when it builds a ``datetime64[ns]`` time axis.
+NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
+
+
+def _timedelta_days(delta: Any) -> float:
+    """Return a ``jax_datetime`` days/seconds pair as a float64 count of days.
+
+    ``jdt.Timedelta`` (and the ``.delta`` of a ``jdt.Datetime``) stores whole
+    days and the seconds within the day separately. Dividing by a one-day
+    ``Timedelta`` would work but goes through jax; this stays in numpy so the
+    result is a plain float64 usable in the output-labelling arithmetic.
+    """
+    return (
+        float(np.asarray(delta.days))
+        + float(np.asarray(delta.seconds)) / SECONDS_PER_DAY
+    )
+
 
 @struct.dataclass
 class CouplingTime:
@@ -193,15 +211,45 @@ class TimeAxis:
         return len(self.steps)
 
     def datetimes(self) -> np.ndarray:
-        """Return the record labels as ``datetime64[ns]`` (end of each interval)."""
-        seconds_per_step = float(self.dt / jdt.to_timedelta(1, "second"))
-        start = np.datetime64(self.start_date.to_pydatetime(), "ns")
-        offsets = (np.asarray(self.steps) + 1) * seconds_per_step
-        return start + (offsets * 1e9).astype("timedelta64[ns]")
+        """Return the record labels as ``datetime64[ns]`` (end of each interval).
+
+        The arithmetic, not just the answer, is JCM's
+        (``jcm.predictions.ModelPredictions._trajectory_dataset``)::
+
+            times = start_date.delta.days + save_interval * (arange(n) + 1)
+            time  = (times * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
+
+        that is: a float64 count of **days** since the 1970 epoch, multiplied
+        into nanoseconds at the end. That product overflows the exactly
+        representable range of float64 (a 2001 date is ~9.5e17 ns, whose ulp
+        is 128 ns), so the instants are not exact to the nanosecond -- but
+        they are *identically* inexact for every component that comes through
+        here, which is the property that makes ``xr.merge`` align two
+        components' output on one time axis. Computing the exact integer
+        nanosecond count instead would be more accurate and would merge with
+        nothing.
+
+        Sub-day start dates are the one deliberate difference from JCM, which
+        takes ``start_date.delta.days`` and drops ``.seconds`` entirely, so a
+        run starting at 06:00 is labelled from midnight. That is a JCM bug
+        JAX-ESM cannot fix from the outside (jax-gcm#758) and reproducing it
+        would mislabel a slab dataset; the seconds are included here. For a
+        start date at midnight -- every configuration JAX-ESM ships -- the two
+        agree bit for bit, because the added term is exactly 0.0.
+        """
+        start_days = _timedelta_days(self.start_date.delta)
+        step_days = _timedelta_days(self.dt)
+        steps = np.asarray(self.steps, dtype=np.float64)
+        days = start_days + step_days * (steps + 1.0)
+        return (days * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
 
     @property
     def attrs(self) -> dict[str, str]:
-        """CF attributes JCM writes on its ``time`` coordinate."""
+        """CF attributes JCM writes on its ``time`` coordinate.
+
+        ``units`` is deliberately absent: xarray owns it through the datetime
+        encoding it chooses on write, and setting it here collides with that.
+        """
         return {"standard_name": "time", "axis": "T", "long_name": "time"}
 
 
