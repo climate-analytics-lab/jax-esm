@@ -1,5 +1,11 @@
 """Land surface model component."""
 
-from .slab_land_model import SlabLandModel
+from .params import SlabLandParameters
+from .slab_land_model import LandForcing, LandState, SlabLandModel
 
-__all__ = ["SlabLandModel"]
+__all__ = [
+    "LandForcing",
+    "LandState",
+    "SlabLandModel",
+    "SlabLandParameters",
+]

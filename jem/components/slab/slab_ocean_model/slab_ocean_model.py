@@ -1,34 +1,43 @@
 """Slab ocean model component."""
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
-import jax_datetime as jdt
 import tree_math
 
 from jem import constants
+from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
-    _DEFAULT_START_DATETIME,
+    MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
+    end_of_step,
     load_monthly_climatology,
 )
 from jem.components.slab.grid import SlabGrid
-from jem.utils.bulk_op import stack_objects
+from jem.components.slab.slab_ocean_model.params import (
+    FORCING_METHODS,
+    SlabOceanParameters,
+)
+from jem.utils.cycles import evaluate_cyclic_linear
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
-default_land_surface_temperature = 288.15
+logger = logging.getLogger(__name__)
+
+#: Equator-to-pole range (K) of the idealized initial SST profile used when no
+#: SST climatology is given.
+IDEALIZED_SST_RANGE = 10.0
+
 
 @tree_math.struct
 class OceanState:
-    sim_time: jnp.ndarray
     sea_surface_temperature: jnp.ndarray
     mixed_layer_depth: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sim_time=None, sea_surface_temperature=None, mixed_layer_depth=None):
+    def zeros(cls, shape, sea_surface_temperature=None, mixed_layer_depth=None):
         return cls(
-            sim_time if sim_time is not None else jnp.zeros(()),
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
             mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
         )
@@ -73,358 +82,362 @@ class SlabOceanModel(SlabModelBase):
 
     This model simulates sea surface temperature evolution using a simple
     thermodynamic equation with optional relaxation to climatology.
-        
-    dT/dt = F_net/(rho * cp * h) + forcing
 
+    dT/dt = -F_net/(rho * cp * h) + forcing
 
     where:
         T: sea surface temperature
-        F_net: total heat flux (positive upward)
+        F_net: total heat flux (positive upward, so it cools the mixed layer)
         rho: ocean density
         cp: ocean specific heat capacity
         h: mixed layer depth
-        forcing: the forcing of temperature. See below for explaination
-    
-    (1) If `forcing_method` == "None" (or just None), then forcing = 0.
+        forcing: the extra temperature forcing selected by
+            ``params.forcing_method``
 
-    (2) If `forcing_method` == "Qflux", then traditional Q-flux adjust, i.e., periodic forcing
-        over a year, is used:
- 
+    (1) ``forcing_method == "none"``: forcing = 0.
+
+    (2) ``forcing_method == "qflux"``: the traditional Q-flux adjustment, a
+        prescribed periodic heat source over the year,
+
             forcing = Q / (rho * cp * h)
 
-        where variable `Q` will be read from a file given in `Q_flux_file`. If `Q_flux_file`
-        is not provided, then Q will be all zeros, which is possible when doing training.
-    
-    (3) If `forcing_method` == "relaxation", then linear relaxation will be used
+        where ``Q`` is read from ``q_flux_file`` (variable ``qflux``). With no
+        file, Q is zero everywhere -- a valid setup when the Q-flux itself is
+        the thing being trained.
+
+    (3) ``forcing_method == "relaxation"``: linear relaxation to climatology,
 
             forcing = - (T - T_clim) / tau
 
-        where tau is the relaxation timescale to climatology (can be jnp.inf), and T_clim
-        is the climatology read from `SST_clim_file`. If `SST_clim_file` is not provided,
-        then T_clim will be all zeros, which is possible when doing training.
+        with ``tau = params.relaxation_time`` and ``T_clim`` read from
+        ``sst_clim_file`` (variable ``sst``). A relaxation run REQUIRES that
+        file: without a target there is nothing to relax to, and the previous
+        behaviour -- silently setting tau to infinity and then dereferencing a
+        climatology that was never loaded -- could not work.
+
+    Initial condition
+    -----------------
+    With an SST climatology, the initial SST is that climatology sampled at
+    ``params.initial_year_fraction``. Without one it is an idealized profile,
+    ``params.initial_sst`` at the poles rising by
+    :data:`IDEALIZED_SST_RANGE` towards the equator. ``initial_sst`` is what
+    the constructor has always accepted (as
+    ``initialization_sea_surface_temperature``) but never used: the base of the
+    idealized profile was hard-wired to the freezing point, making the
+    argument dead. Wiring it up moves the default idealized ocean from
+    273-283 K to 288-298 K, which is also the more sensible aquaplanet start.
 
     Freeze/melt potential
-    ----------------------
-    Following CESM's slab-ocean/CICE coupling convention: after the update above,
-    `sea_surface_temperature` is clamped so it never drops below `T_freezing` (the seawater
-    freezing point), and the heat that clamp removes (or, symmetrically, the heat available
-    above freezing) is reported as a single signed diagnostic, `ice_frazil_melt_energy`
-    (J/m^2, energy released over this coupling step -- not a flux):
+    ---------------------
+    Following CESM's slab-ocean/CICE coupling convention: after the update
+    above, ``sea_surface_temperature`` is clamped so it never drops below the
+    seawater freezing point, and the heat that clamp removes (or, symmetrically,
+    the heat available above freezing) is reported as a single signed
+    diagnostic, ``ice_frazil_melt_energy`` (J/m^2, energy released over this
+    coupling step -- not a flux):
 
         ice_frazil_melt_energy = (T_freezing - T_unclamped)
             * mixed_layer_depth * ocean_density * ocean_specific_heat_capacity
 
-    Positive values mean the mixed layer would have gone sub-freezing -- that deficit forms
-    new (frazil) ice. Negative values mean the mixed layer sits above freezing -- that surplus
-    is available to melt existing ice from below. This is exactly CESM's `frzmlt`: one signed
-    quantity, computed once per coupling step with no separate relaxation timescale (the
-    coupling step itself is the timescale). This ocean model has no ice physics of its own, so
-    `ice_frazil_melt_energy` is meant to be consumed by a sea-ice component (e.g.
-    `SlabSeaiceModel`) via the coupler.
+    Positive values mean the mixed layer would have gone sub-freezing -- that
+    deficit forms new (frazil) ice. Negative values mean the mixed layer sits
+    above freezing -- that surplus is available to melt existing ice from below.
+    This is exactly CESM's ``frzmlt``: one signed quantity, computed once per
+    coupling step with no separate relaxation timescale (the coupling step
+    itself is the timescale). This ocean model has no ice physics of its own,
+    so ``ice_frazil_melt_energy`` is meant to be consumed by a sea-ice
+    component (e.g. ``SlabSeaiceModel``) through the coupler.
     """
 
     def __init__(
         self,
         grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        timestep: float = 86400.0,
-        relaxation_time: float = 60 * 86400.0,
-        mixed_layer_depth_min: float = 40.0,
-        mixed_layer_depth_max: float = 60.0,
-        SST_clim_file: str | None = None,
-        Q_flux_file: str | None = None,
-        forcing_method: str | None = None,
-        initialization_sea_surface_temperature: float = 288.15,
-        mask_value: float = 0.0,
-        calendar: str = "365_day",
+        params: SlabOceanParameters | None = None,
+        *,
+        name: str = "ocn",
+        sst_clim_file: str | None = None,
+        q_flux_file: str | None = None,
     ):
-        """Initialize slab ocean model.
+        """Initialize the slab ocean model.
 
-        Args:
-            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
-            start_datetime: Simulation start datetime
-            timestep: Model timestep in seconds
-            relaxation_time: Relaxation timescale to climatology in seconds
-            mixed_layer_depth_min: Minimum mixed layer depth in meters
-            mixed_layer_depth_max: Maximum mixed layer depth in meters
-            SST_clim_file: Optional path to SST climatology NetCDF file
+        Parameters
+        ----------
+        grid : SlabGrid
+            The model's grid.
+        params : SlabOceanParameters, optional
+            Tunable parameters; defaults to
+            :meth:`SlabOceanParameters.default`.
+        name : str
+            Component name in the coupler's workflow and carry.
+        sst_clim_file : str, optional
+            netCDF file holding a 12-month ``sst`` climatology on the model
+            grid. Used for the initial condition, and required for
+            ``forcing_method == "relaxation"``.
+        q_flux_file : str, optional
+            netCDF file holding a 12-month ``qflux`` climatology on the model
+            grid. Only meaningful for ``forcing_method == "qflux"``.
+
+        Raises
+        ------
+        ValueError
+            If the configuration cannot run: an unknown forcing method,
+            relaxation without a climatology or with a non-positive timescale,
+            a Q-flux file a non-Q-flux run would ignore, or a climatology whose
+            ocean points are not finite.
+        FileNotFoundError
+            If a named file does not exist.
 
         """
-        self.relaxation_time = relaxation_time
-        self.mixed_layer_depth_min = mixed_layer_depth_min
-        self.mixed_layer_depth_max = mixed_layer_depth_max
-        self.SST_clim_file = SST_clim_file
-        self.Q_flux_file = Q_flux_file
+        super().__init__(name=name, grid=grid)
+        self.params = SlabOceanParameters.default() if params is None else params
+        self.sst_clim_file = sst_clim_file
+        self.q_flux_file = q_flux_file
 
-        super().__init__(
-            name="SlabOceanModel",
-            grid=grid,
-            start_datetime=start_datetime,
-            timestep=timestep,
-            calendar=calendar,
-        )
+        forcing_method = self.params.forcing_method
+        if forcing_method not in FORCING_METHODS:
+            raise ValueError(
+                f"Unknown forcing_method {forcing_method!r}; expected one of "
+                f"{list(FORCING_METHODS)!r}."
+            )
+        if q_flux_file is not None and forcing_method != "qflux":
+            raise ValueError(
+                f"q_flux_file was given but forcing_method is {forcing_method!r}, "
+                "which never reads it. Set forcing_method='qflux' or drop the file."
+            )
 
-        # Climatology data (loaded during initialize)
-        self.SST_clim = None
-        self.time_factor = None
-        self.cd_factor = None
-        self.forcing_method = forcing_method or "None"
-        self.mask_value = mask_value
+        if forcing_method == "relaxation":
+            if sst_clim_file is None:
+                raise ValueError(
+                    "forcing_method='relaxation' needs sst_clim_file: there is no "
+                    "climatology to relax towards without it."
+                )
+            relaxation_time = float(self.params.relaxation_time)
+            if not relaxation_time > 0.0:
+                raise ValueError(
+                    "relaxation_time must be a positive number of seconds; got "
+                    f"{relaxation_time!r}."
+                )
 
-        self.validate()
+        # Boundary data is *configuration*, so it is read here rather than in
+        # ``initialize()``: that keeps initialize() pure with respect to self
+        # (it only assembles arrays) and surfaces a bad file at construction,
+        # where the traceback still points at the caller's own line.
+        self.sst_climatology = self._load(sst_clim_file, "sst")
+        self.q_flux_climatology = self._load(q_flux_file, "qflux")
 
-    def validate(self):
-        super().validate()
-        if self.forcing_method == "None":
-            # Do nothing
-            pass
-        elif self.forcing_method == "Qflux":
-            if self.Q_flux_file is None:
-                print("Notice: `Q_flux_file` is not given. Default values (zeros) will be used.")
-            elif not Path(self.Q_flux_file).exists():
-                raise FileNotFoundError(f"Q-flux file \"{self.Q_flux_file!s:s}\" is specified but it does not exist.")
-        elif self.forcing_method == "relaxation":
-            if self.SST_clim_file is None:
-                print("Notice: `SST_clim_file` is not given. Default values (zeros) will be used.")
-            elif not Path(self.SST_clim_file).exists():
-                raise FileNotFoundError(f"SST climatology file \"{self.SST_clim_file!s:s}\" is specified but does not exist.")
-            elif (self.relaxation_time < 0) or jnp.isnan(self.relaxation_time):
-                raise ValueError("`relaxation_time` must be a positive number or infinity.")
-        else:
-            raise ValueError(f"Unknown `forcing_method` is given: \"{self.forcing_method!s:s}\" ")
+        if self.sst_climatology is not None:
+            ocean = self._ocean_cells(self.params)
+            if bool(jnp.any(jnp.isnan(self.sst_climatology) & ocean[..., None])):
+                raise ValueError(
+                    f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
+                    "points of this grid: the file's land mask and the grid's disagree."
+                )
 
-    def initialize(self):
-        """Initialize ocean model fields."""
-        nonocn_idx = self.grid.binary_mask != self.mask_value
+    def _load(self, path: str | None, var: str) -> jnp.ndarray | None:
+        """Load a monthly climatology, or return None when no file was given."""
+        if path is None:
+            return None
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Climatology file \"{path!s:s}\" does not exist.")
+        logger.info("%s: loading %r climatology from %s", self.name, var, path)
+        return load_monthly_climatology(path, var, self.grid)
 
-        # Initialize mixed layer depth with latitudinal variation
-        init_mixed_layer_depth = (
-            self.mixed_layer_depth_max
-            + (self.mixed_layer_depth_min - self.mixed_layer_depth_max)
+    def _ocean_cells(self, params: SlabOceanParameters) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates."""
+        return self.grid.binary_mask == params.ocean_mask_value
+
+    def initialize(self) -> Carry:
+        """Build the initial ocean carry."""
+        params = self.params
+        ocean = self._ocean_cells(params)
+
+        mixed_layer_depth = (
+            params.mixed_layer_depth_max
+            + (params.mixed_layer_depth_min - params.mixed_layer_depth_max)
             * jnp.cos(self.grid.latitude_radian) ** 3
         )
 
-        # Load or create initial SST
-        if self.SST_clim_file is not None:
-            print("SST climatology file. The given initial SST will be used.")
-            print("SST climatology file: ", self.SST_clim_file)
-            self.SST_clim = load_monthly_climatology(
-                self.SST_clim_file, "sst", self.grid
+        if self.sst_climatology is not None:
+            sea_surface_temperature = evaluate_cyclic_linear(
+                params.initial_year_fraction, self.sst_climatology
             )
-            init_sea_surface_temperature = self.SST_clim[:, :, 0].copy()
         else:
-            print("Boundary does not exist. Idealized initial SST will be used.")
-            init_sea_surface_temperature = (
-                positive_cosine_cubic_latitude_squared(self.grid.latitude_radian) * 10.0
-                + constants.freezing_point_K
+            sea_surface_temperature = params.initial_sst + IDEALIZED_SST_RANGE * (
+                positive_cosine_cubic_latitude_squared(self.grid.latitude_radian)
             )
-
-        # Apply mask
-        init_sea_surface_temperature = init_sea_surface_temperature.at[nonocn_idx].set(
-            default_land_surface_temperature
+        sea_surface_temperature = jnp.where(
+            ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
-
-        # Validate mask consistency
-        if jnp.sum(jnp.isnan(init_sea_surface_temperature)) == 0:
-            print("grid.bmask and SST_clim do share the same mask.")
-        else:
-            raise ValueError(
-                "fmask_ocn and sea_surface_temperature_init do not share the same mask."
-            )
-
-        # Set relaxation time to infinity if no climatology
-        if self.SST_clim_file is None:
-            print("Notice: Climaology SST does not exist. Set relaxation time to inifinity.")
-            self.relaxation_time = jnp.inf
-
-        # Compute heat capacity and time factors for Euler backward scheme
-        cd = (
-            constants.ocean_density
-            * constants.ocean_specific_heat_capacity
-            * init_mixed_layer_depth
-        )
-
-        if self.forcing_method == "relaxation":
-            tau = jnp.ones_like(cd) * self.relaxation_time
-        else:
-            tau = jnp.inf
-        
-        self.time_factor = (1.0 + self.timestep / tau) ** (-1)
-        self.cd_factor = self.timestep / cd
-        
-        # The Q-flux climatology lives in the forcing carry, so it has to be
-        # loaded here: `validate()` only checks that the file exists, and
-        # before this it was never read at all -- `forcing_method="Qflux"`
-        # silently ran with Q = 0 everywhere.
-        if self.forcing_method == "Qflux" and self.Q_flux_file is not None:
-            q_flux = load_monthly_climatology(self.Q_flux_file, "qflux", self.grid)
-        else:
-            q_flux = None
 
         return {
+            "params": params,
             "state": OceanState.zeros(
                 self.grid.shape,
-                mixed_layer_depth=init_mixed_layer_depth,
-                sea_surface_temperature=init_sea_surface_temperature,
+                mixed_layer_depth=mixed_layer_depth,
+                sea_surface_temperature=sea_surface_temperature,
             ),
-            "forcing": OceanForcing.zeros(self.grid.shape, q_flux=q_flux),
+            "forcing": OceanForcing.zeros(
+                self.grid.shape, q_flux=self.q_flux_climatology
+            ),
             "derived": OceanDerived.zeros(self.grid.shape),
         }
 
-    def _create_step_function_body(self):
-        """Create the step function for ocean model."""
-        start_day_offset = self._compute_start_day_offset()
-        ocn_idx = self.grid.binary_mask == self.mask_value
-        nonocn_idx = self.grid.binary_mask != self.mask_value
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Advance the mixed layer by one coupling step.
 
-        def step_function(carry, step):
-            state = carry["state"]
-            forcing = carry["forcing"]
-            new_sea_surface_temperature_anom = state.sea_surface_temperature
-            total_heat_flux = forcing.total_heat_flux
-            snapshot_Qflux = jnp.zeros(self.grid.shape)
-            print(f"Using method: {self.forcing_method}")
-            if self.forcing_method == "relaxation":
-                sst_clim_beg = jnp.where(
-                    ocn_idx,
-                    self._interpolate_cyclic(state.sim_time, start_day_offset, self.SST_clim),
-                    default_land_surface_temperature,
-                )
-                sst_clim_end = jnp.where(
-                    ocn_idx,
-                    self._interpolate_cyclic(state.sim_time + self.timestep, start_day_offset, self.SST_clim),
-                    default_land_surface_temperature,
-                )
-                new_sea_surface_temperature_anom = state.sea_surface_temperature - sst_clim_beg
-            elif self.forcing_method == "Qflux":
-                snapshot_Qflux = jnp.where(
-                    ocn_idx,
-                    self._interpolate_cyclic(state.sim_time, start_day_offset, forcing.q_flux),
-                    0.0,
-                )
-                # Q is a heat SOURCE for the mixed layer (positive Q warms it,
-                # see the class docstring and the output attribute), while
-                # `total_heat_flux` is UPWARD positive (cools it) and is negated
-                # in the update below. Folding Q into the upward flux therefore
-                # needs a minus sign; adding it (as an earlier version did)
-                # silently reversed every prescribed Q-flux experiment.
-                total_heat_flux = total_heat_flux - snapshot_Qflux
+        The temperature update is Euler backward in the relaxation term, which
+        is why the timescale appears as ``1 / (1 + dt/tau)`` rather than as an
+        explicit tendency: the relaxation is the stiff term here, and an
+        explicit step of it is unstable once ``dt`` approaches ``tau``.
+        """
+        params = carry["params"]
+        state = carry["state"]
+        forcing = carry["forcing"]
+        ocean = self._ocean_cells(params)
 
+        heat_capacity = (
+            constants.ocean_density
+            * constants.ocean_specific_heat_capacity
+            * state.mixed_layer_depth
+        )
 
-            # Euler backward step
-            new_sim_time = state.sim_time + self.timestep
-            new_sea_surface_temperature_anom = self.time_factor * (
-                new_sea_surface_temperature_anom
-                + self.cd_factor * (- total_heat_flux)
+        total_heat_flux = forcing.total_heat_flux
+        q_flux_snapshot = jnp.zeros(self.grid.shape)
+        anomaly = state.sea_surface_temperature
+        climatology_end = None
+        time_factor = 1.0
+
+        # ``forcing_method`` is static configuration, so this branches at trace
+        # time and only the selected term is ever compiled.
+        if params.forcing_method == "relaxation":
+            climatology_begin = self._climatology_at(time, ocean)
+            climatology_end = self._climatology_at(end_of_step(time), ocean)
+            anomaly = state.sea_surface_temperature - climatology_begin
+            time_factor = 1.0 / (1.0 + time.dt / params.relaxation_time)
+        elif params.forcing_method == "qflux":
+            q_flux_snapshot = jnp.where(
+                ocean, evaluate_cyclic_linear(time.year_fraction, forcing.q_flux), 0.0
             )
+            # Q is a heat SOURCE for the mixed layer (positive Q warms it, see
+            # the class docstring and the output attribute), while
+            # ``total_heat_flux`` is UPWARD positive (it cools the mixed layer)
+            # and is negated in the update below. Folding Q into the upward flux
+            # therefore needs a minus sign; adding it (as an earlier version
+            # did) silently reversed every prescribed Q-flux experiment.
+            total_heat_flux = total_heat_flux - q_flux_snapshot
 
-            # Add climatology back
-            new_sea_surface_temperature = new_sea_surface_temperature_anom
-            if self.forcing_method == "relaxation":
-                new_sea_surface_temperature += sst_clim_end
-            
-            # Apply land mask
-            new_sea_surface_temperature = new_sea_surface_temperature.at[
-                nonocn_idx
-            ].set(default_land_surface_temperature)
+        new_anomaly = time_factor * (
+            anomaly + time.dt / heat_capacity * (-total_heat_flux)
+        )
+        sea_surface_temperature = new_anomaly
+        if climatology_end is not None:
+            sea_surface_temperature = sea_surface_temperature + climatology_end
+        sea_surface_temperature = jnp.where(
+            ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
+        )
 
-            # Freeze/melt potential (CESM's `frzmlt`): heat surplus/deficit of the mixed
-            # layer relative to freezing, for this coupling step. Positive -> forms new ice;
-            # negative -> available to melt existing ice from below.
-            ice_frazil_melt_energy = jnp.where(
-                ocn_idx,
-                (constants.seawater_freezing_point_K - new_sea_surface_temperature)
-                * state.mixed_layer_depth
-                * constants.ocean_density
-                * constants.ocean_specific_heat_capacity,
-                0.0,
-            )
+        # Freeze/melt potential (CESM's ``frzmlt``): the heat surplus or deficit
+        # of the mixed layer relative to freezing, for this coupling step.
+        # Positive -> forms new ice; negative -> available to melt existing ice.
+        ice_frazil_melt_energy = jnp.where(
+            ocean,
+            (constants.seawater_freezing_point_K - sea_surface_temperature)
+            * state.mixed_layer_depth
+            * constants.ocean_density
+            * constants.ocean_specific_heat_capacity,
+            0.0,
+        )
 
-            # The ocean itself never carries a sub-freezing SST -- that deficit was just
-            # diverted into ice_frazil_melt_energy above.
-            new_sea_surface_temperature = jnp.where(
-                ocn_idx,
-                jnp.maximum(new_sea_surface_temperature, constants.seawater_freezing_point_K),
-                new_sea_surface_temperature,
-            )
+        # The ocean itself never carries a sub-freezing SST -- that deficit was
+        # just diverted into ice_frazil_melt_energy above.
+        sea_surface_temperature = jnp.where(
+            ocean,
+            jnp.maximum(
+                sea_surface_temperature, constants.seawater_freezing_point_K
+            ),
+            sea_surface_temperature,
+        )
 
-            new_state = state.replace(
-                sea_surface_temperature=new_sea_surface_temperature,
-                sim_time=new_sim_time,
-            )
+        new_state = state.replace(sea_surface_temperature=sea_surface_temperature)
+        new_derived = OceanDerived.zeros(
+            self.grid.shape,
+            ice_frazil_melt_energy=ice_frazil_melt_energy,
+            effective_total_heat_flux=total_heat_flux,
+            q_flux_snapshot=q_flux_snapshot,
+        )
 
-            new_derived = OceanDerived.zeros(
-                self.grid.shape,
-                ice_frazil_melt_energy=ice_frazil_melt_energy,
-                effective_total_heat_flux=total_heat_flux,
-                q_flux_snapshot=snapshot_Qflux,
-            )
+        diagnostics = {
+            "state": new_state,
+            "forcing": forcing,
+            "derived": new_derived,
+        }
+        return {"params": params, **diagnostics}, diagnostics
 
-            result = {
-                "state": new_state,
-                "forcing": forcing,
-                "derived": new_derived,
-            }
-            return result, stack_objects([result])
+    def _climatology_at(self, time: CouplingTime, ocean: jnp.ndarray) -> jnp.ndarray:
+        """SST climatology interpolated to ``time``, masked to ocean cells."""
+        # Only reachable with forcing_method="relaxation", which the constructor
+        # refuses to build without a climatology file.
+        assert self.sst_climatology is not None
+        return jnp.where(
+            ocean,
+            evaluate_cyclic_linear(time.year_fraction, self.sst_climatology),
+            MASKED_SURFACE_TEMPERATURE,
+        )
 
-        return step_function
-
-    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
+    def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
         """Create xarray data variables for ocean output."""
-        state = predictions["state"]
-        derived = predictions["derived"]
-        T_grid_dims = ("time",) + self.grid.dims
+        state = diagnostics["state"]
+        derived = diagnostics["derived"]
+        dims = ("time",) + self.grid.dims
 
         data_vars = {
             "sea_surface_temperature": (
-                T_grid_dims,
+                dims,
                 state.sea_surface_temperature,
                 {
                     "long_name": "Sea surface temperature",
                     "units": "K",
-                }
+                },
             ),
             "mixed_layer_depth": (
-                T_grid_dims,
+                dims,
                 state.mixed_layer_depth,
                 {
                     "long_name": "Mixed layer depth",
                     "units": "m",
-                }
+                },
             ),
             "total_heat_flux": (
-                T_grid_dims,
+                dims,
                 derived.effective_total_heat_flux,
                 {
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
                     "positive": "upward",
-                }
+                },
             ),
             "ice_frazil_melt_energy": (
-                T_grid_dims,
+                dims,
                 derived.ice_frazil_melt_energy,
                 {
-                    "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
+                    "long_name": (
+                        "Freeze/melt potential (frzmlt): positive forms ice, "
+                        "negative melts ice"
+                    ),
                     "units": "J m-2",
-                }
+                },
             ),
         }
 
-        if self.forcing_method == "Qflux":
+        if self.params.forcing_method == "qflux":
             data_vars["q_flux"] = (
-                T_grid_dims,
+                dims,
                 derived.q_flux_snapshot,
                 {
                     "long_name": "Q-flux",
                     "units": "W m-2",
                     "positive": "Heating the ocean",
-                }
+                },
             )
 
         return data_vars
-
-    def get_info(self):
-        return {
-            'relaxation_time' : self.relaxation_time,
-        }
