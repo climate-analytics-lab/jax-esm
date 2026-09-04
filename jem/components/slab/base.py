@@ -30,6 +30,15 @@ from jem.base.component import (
     TimeAxis,
     start_year_fraction,
 )
+# The forcing_ output-name convention belongs to the component contract, not to
+# the slab family -- every component that writes output follows it, the Veros
+# adapter included. Re-exported here (the redundant aliases make that explicit
+# to linters and type checkers) because this is where the slab models and the
+# documentation have always imported it from.
+from jem.base.component import (
+    FORCING_VARIABLE_PREFIX as FORCING_VARIABLE_PREFIX,
+    forcing_variable as forcing_variable,
+)
 from jem.components.slab.grid import SlabGrid, to_degrees
 from jem.utils.time import time_coordinate
 
@@ -61,10 +70,6 @@ _MONTHS_PER_YEAR = 12
 # on a genuinely different grid is rejected rather than silently regridded.
 _COORDINATE_TOLERANCE_DEGREES = 1e-3
 
-#: Prefix on the output name of a field a component was *given*, as opposed to
-#: one it computed. See :func:`forcing_variable`.
-FORCING_VARIABLE_PREFIX = "forcing_"
-
 #: CF attributes for the horizontal coordinates, copied from
 #: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
 #: describe their shared axes identically.
@@ -78,36 +83,6 @@ _LATITUDE_ATTRS = {
     "units": "degrees_north",
     "long_name": "latitude",
 }
-
-
-def forcing_variable(name: str) -> str:
-    """Return the output-variable name for a field the component was forced with.
-
-    A coupled run writes one dataset per component and they are meant to be
-    read -- and merged -- together. A field a component *received* through the
-    coupler is already written, unprefixed, by the component that produced it,
-    so writing the received copy under the same name puts two different
-    variables with one name into the merged dataset: different because coupling
-    is lagged, so the copy is one step behind the original. ``xr.merge`` then
-    refuses the two datasets outright.
-
-    Prefixing the received copy with ``forcing_`` fixes that and says the more
-    accurate thing anyway: ``forcing_total_heat_flux`` in the land model's
-    output is the flux the land was driven with, not a flux the land computed.
-    A component's own state and its derived diagnostics keep their plain names
-    -- they are that component's output, and match what JCM calls them.
-
-    Parameters
-    ----------
-    name : str
-        The physical field's name, as the component that produces it writes it.
-
-    Returns
-    -------
-    str
-
-    """
-    return f"{FORCING_VARIABLE_PREFIX}{name}"
 
 
 def _resolve_dim_name(

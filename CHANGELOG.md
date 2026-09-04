@@ -128,6 +128,17 @@ otherwise**; the code that has to change is named in each one.
 - **`Coupler.initialize()` returns a `CoupledCarry`**, not a plain
   `dict[str, carry]`. The per-component carries are under
   `.components`; rebuild one with `carry.replace(components=...)`.
+- **`VerosComponent.to_xarray` prefixes the fields the ocean was forced with**,
+  as the slab models already did: `heat_flux`, `freshwater_flux`,
+  `surface_taux`, `surface_tauy` and `surface_air_temperature` are written as
+  `forcing_*`. Without the prefix a Veros dataset could not be merged with the
+  dataset of the component that produced those fields. Anything reading them
+  out of a saved run (`ds_ocn["heat_flux"]`) reads `ds_ocn["forcing_heat_flux"]`
+  instead.
+- **`forcing_variable` and `FORCING_VARIABLE_PREFIX` moved to
+  `jem.base.component`**, since the convention belongs to the output contract
+  every component follows rather than to the slab family. They are still
+  importable from `jem.components.slab.base`.
 - **`jem.utils.checkpoints.save_coupled_carry`/`load_coupled_carry` take and
   return a `CoupledCarry`**, not a plain `dict[str, carry]`, and the
   checkpoint directory gains one file, `coupled_step.pkl`, holding the coupled

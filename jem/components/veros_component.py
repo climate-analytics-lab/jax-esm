@@ -24,7 +24,13 @@ import tree_math
 import xarray as xr
 from veros import runtime_settings
 
-from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
+from jem.base.component import (
+    Carry,
+    CouplingTime,
+    Diagnostics,
+    TimeAxis,
+    forcing_variable,
+)
 from jem.utils.checkpoints import load_veros_carry, save_veros_carry
 
 logger = logging.getLogger(__name__)
@@ -452,7 +458,12 @@ class VerosComponent:
         Returns
         -------
         xarray.Dataset
-            The ocean state and the forcing it was driven with.
+            The ocean state and the forcing it was driven with. The fields the
+            ocean was *given* -- everything that came out of ``carry["forcing"]``
+            -- carry the ``forcing_`` prefix
+            :func:`~jem.base.component.forcing_variable` applies, exactly as the
+            slab models' output does, so merging this dataset with the
+            atmosphere's does not collide on a name two components both hold.
 
         """
         n_records = int(jnp.shape(diagnostics["sea_surface_temperature"])[0])
@@ -473,11 +484,16 @@ class VerosComponent:
                 "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
-                "surface_air_temperature": (["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
-                "surface_taux": (["time", "lon", "lat"], diagnostics["surface_taux"]),
-                "surface_tauy": (["time", "lon", "lat"], diagnostics["surface_tauy"]),
-                "heat_flux": (["time", "lon", "lat"], diagnostics["heat_flux"]),
-                "freshwater_flux": (["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                forcing_variable("surface_air_temperature"): (
+                    ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
+                forcing_variable("surface_taux"): (
+                    ["time", "lon", "lat"], diagnostics["surface_taux"]),
+                forcing_variable("surface_tauy"): (
+                    ["time", "lon", "lat"], diagnostics["surface_tauy"]),
+                forcing_variable("heat_flux"): (
+                    ["time", "lon", "lat"], diagnostics["heat_flux"]),
+                forcing_variable("freshwater_flux"): (
+                    ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
                 "dzt": (["depth"], self.dzt),
@@ -503,14 +519,19 @@ class VerosComponent:
             "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s"},
             "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s"},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg"},
-            "surface_air_temperature": {
+            forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
                 "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
             },
-            "surface_taux": {"long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
-            "surface_tauy": {"long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
-            "heat_flux": {"long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
-            "freshwater_flux": {"long_name": "net surface freshwater flux forcing (upward positive)", "units": "kg/m^2/s"},
+            forcing_variable("surface_taux"): {
+                "long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
+            forcing_variable("surface_tauy"): {
+                "long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
+            forcing_variable("heat_flux"): {
+                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
+            forcing_variable("freshwater_flux"): {
+                "long_name": "net surface freshwater flux forcing (upward positive)",
+                "units": "kg/m^2/s"},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},

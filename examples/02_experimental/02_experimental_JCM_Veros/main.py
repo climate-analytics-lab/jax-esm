@@ -250,7 +250,7 @@ for b in range(batches):
         ds_ocn["sea_surface_salinity"],
         ds_ocn["sea_surface_u"],
         ds_ocn["sea_surface_v"],
-        ds_ocn["heat_flux"],
+        ds_ocn["forcing_heat_flux"],
     ])
     output_dict["ocn_mean"] = ds_ocn.reduce(np.mean, dim="time", keepdims=True)
     del output_dict["ocn"]

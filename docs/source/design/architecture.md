@@ -281,15 +281,22 @@ time coordinate. The conventions, which are JCM's:
   cycle and forcing selection, not the labels.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
-  `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
-  applied by `forcing_variable(name)`, which is what a slab model's
-  `_create_xarray_data_vars` calls. Two components legitimately hold the same
-  physical field — one produced it, the other received it — and without the
-  prefix the merge collides on the shared name. So the slab atmosphere and the
-  slab land model write `forcing_total_heat_flux` while the ocean writes its
-  own derived `total_heat_flux`; the sea ice writes
-  `forcing_ice_frazil_melt_energy` for the field the ocean published as
-  `ice_frazil_melt_energy`.
+  `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
+  `forcing_variable(name)`, which is what a slab model's
+  `_create_xarray_data_vars` and `VerosComponent.to_xarray` call. (It lives
+  with the contract rather than in the slab package, and is re-exported from
+  `jem.components.slab.base`, because it is a convention of the coupled output
+  that every component implementing `SupportsXarray` has to follow.) Two
+  components legitimately hold the same physical field — one produced it, the
+  other received it — and without the prefix the merge collides on the shared
+  name. So the slab atmosphere and the slab land model write
+  `forcing_total_heat_flux` while the ocean writes its own derived
+  `total_heat_flux`; the sea ice writes `forcing_ice_frazil_melt_energy` for
+  the field the ocean published as `ice_frazil_melt_energy`; and Veros writes
+  `forcing_heat_flux`, `forcing_freshwater_flux`, `forcing_surface_taux`,
+  `forcing_surface_tauy` and `forcing_surface_air_temperature` for the five
+  fields an exchanger hands it, keeping plain names for the `temp`, `salt`,
+  `u`, `v` and sea-surface fields it computes.
 
 Together these are what make `xr.merge([datasets["atm"], datasets["ocn"]])` an
 N-long join rather than a 2N-long outer union.

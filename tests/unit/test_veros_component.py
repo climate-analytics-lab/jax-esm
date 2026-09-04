@@ -26,6 +26,7 @@ from jem.base.component import (  # noqa: E402
     SupportsCheckpoint,
     SupportsXarray,
     TimeAxis,
+    forcing_variable,
 )
 from jem.components.veros_component import (  # noqa: E402
     GHOST_CELLS,
@@ -211,7 +212,16 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
 
     assert dataset.sizes["time"] == 2
     assert dataset.sizes["lon"], dataset.sizes["lat"] == grid_shape
-    assert dataset.heat_flux.attrs["units"] == "W/m^2"
+    # Fields the ocean was given carry the forcing_ prefix, as the slab
+    # models' do, so an atmosphere dataset and this one merge.
+    assert dataset.forcing_heat_flux.attrs["units"] == "W/m^2"
+    assert set(dataset.data_vars) >= {
+        forcing_variable(name)
+        for name in ("heat_flux", "freshwater_flux", "surface_taux",
+                     "surface_tauy", "surface_air_temperature")
+    }
+    # ...and what the ocean computed keeps its plain name.
+    assert "sea_surface_temperature" in dataset.data_vars
 
 
 @pytest.mark.slow
