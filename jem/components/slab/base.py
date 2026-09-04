@@ -329,8 +329,10 @@ class SlabModelBase(ABC):
         self.grid = grid
         # Where the run starts in the annual cycle; see `bind` and
         # `start_year_fraction`. An unbound model reads its climatologies at
-        # 1 January.
+        # 1 January. The clock it was bound to is kept so a second, different
+        # binding is refused rather than silently overwriting the first.
         self._start_year_fraction = 0.0
+        self._bound_clock: tuple[jdt.Datetime, str] | None = None
 
     def bind(
         self,
@@ -359,8 +361,29 @@ class SlabModelBase(ABC):
         calendar : str
             The run's calendar, which fixes the length of the year.
 
+        Raises
+        ------
+        ValueError
+            If the model is already bound to a different start date or
+            calendar. Binding it again to the same clock is a no-op.
+
         """
         del coupling_timestep
+        if self._bound_clock is not None:
+            bound_start, bound_calendar = self._bound_clock
+            if start_date != bound_start or calendar != bound_calendar:
+                # One instance belongs to one coupled model: the clock it was
+                # bound to decides what `initialize()` samples, so a second
+                # coupler with another start date or calendar would silently
+                # change the initial state the first coupler builds.
+                raise ValueError(
+                    f"{type(self).__name__} {self.name!r} is already bound to a "
+                    f"coupler starting {bound_start!r} on the {bound_calendar!r} "
+                    f"calendar; it cannot also be bound to {start_date!r} on "
+                    f"{calendar!r}. Build a separate instance per coupled model."
+                )
+            return
+        self._bound_clock = (start_date, calendar)
         self._start_year_fraction = start_year_fraction(start_date, calendar)
 
     @property

@@ -154,15 +154,17 @@ class SlabLandModel(SlabModelBase):
                 "snow_depth_to_cover_scale must be a positive snow depth in mm."
             )
 
-        if surface_albedo is None:
-            # A uniform albedo below `land_ice_albedo_threshold`, so a model
-            # built without a field is all soil. Nothing in JEM routes the
-            # albedo the atmosphere's boundary data already carries
-            # (`jcm.forcing.ForcingData.alb0`) to this argument, so that is
-            # what every packaged configuration gets, ice sheets included --
-            # see jax-esm#109.
-            self.surface_albedo = jnp.full(self.grid.shape, self.params.surface_albedo)
-        else:
+        # An explicit albedo field is boundary data and lives on the model;
+        # without one, `step` builds a uniform field from the *carried*
+        # `params.surface_albedo` each step, so the parameter stays live for
+        # anyone who replaces `carry["params"]` (it is below
+        # `land_ice_albedo_threshold` by default, so such a model is all
+        # soil). Nothing in JEM routes the albedo the atmosphere's boundary
+        # data already carries (`jcm.forcing.ForcingData.alb0`) to this
+        # argument, so that is what every packaged configuration gets, ice
+        # sheets included -- see jax-esm#109.
+        self.surface_albedo: jnp.ndarray | None = None
+        if surface_albedo is not None:
             surface_albedo = jnp.asarray(surface_albedo)
             if tuple(surface_albedo.shape) != self.grid.shape:
                 raise ValueError(
@@ -308,8 +310,13 @@ class SlabLandModel(SlabModelBase):
         # SPEEDY's rhcapl. Computed here rather than cached on the model because
         # both the depths and the coupling timestep are things a caller may vary
         # between runs -- and, for the depths, differentiate through.
+        surface_albedo = (
+            self.surface_albedo
+            if self.surface_albedo is not None
+            else jnp.full(self.grid.shape, params.surface_albedo)
+        )
         heat_capacity = jnp.where(
-            self.surface_albedo < params.land_ice_albedo_threshold,
+            surface_albedo < params.land_ice_albedo_threshold,
             params.depth_soil * params.soil_volumetric_heat_capacity,
             params.depth_lice * params.land_ice_volumetric_heat_capacity,
         )

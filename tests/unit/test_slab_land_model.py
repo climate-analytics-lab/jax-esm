@@ -303,3 +303,45 @@ def test_bind_sets_the_initial_climatology_month(half_land_grid):
     # Poleward cells carry the whole seasonal amplitude; the equator none, so
     # compare the largest difference rather than every cell.
     assert np.max(np.abs(july - january)) > 1.0
+
+
+def test_rebinding_to_a_different_clock_is_rejected(half_land_grid):
+    """One instance belongs to one coupled model; a conflicting second bind raises."""
+    model = SlabLandModel(half_land_grid)
+    clock = dict(coupling_timestep=jdt.to_timedelta(1, "day"), calendar="365_day")
+    Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-01-01"), **clock)
+    # The same clock again is harmless (a second coupler over the same run).
+    Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-01-01"), **clock)
+    with pytest.raises(ValueError, match="already bound"):
+        Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-07-01"), **clock)
+    with pytest.raises(ValueError, match="already bound"):
+        Coupler(
+            {"lnd": model},
+            start_date=jdt.to_datetime("2001-01-01"),
+            coupling_timestep=jdt.to_timedelta(1, "day"),
+            calendar="gregorian",
+        )
+    assert model.start_year_fraction == 0.0
+
+
+def test_default_albedo_follows_the_carried_params(half_land_grid):
+    """Without an explicit albedo field, the soil/ice choice reads carry["params"]."""
+    model = SlabLandModel(half_land_grid)
+    carry = model.initialize()
+    land = np.asarray(half_land_grid.fractional_mask) > 0.0
+    forcing = carry["forcing"].replace(
+        total_heat_flux=jnp.full(half_land_grid.shape, 100.0)
+    )
+    carry = dict(carry, forcing=forcing)
+
+    soil, _ = model.step(carry, coupling_time(0))
+    # Raising the carried albedo above the ice threshold switches every land
+    # cell to the (thicker, different heat capacity) ice-sheet slab, so the
+    # response to the same flux changes; snapshotting the albedo at
+    # construction would have left it unchanged.
+    ice_params = carry["params"].replace(surface_albedo=0.8)
+    ice, _ = model.step(dict(carry, params=ice_params), coupling_time(0))
+    assert not np.allclose(
+        np.asarray(soil["state"].land_surface_temperature)[land],
+        np.asarray(ice["state"].land_surface_temperature)[land],
+    )
