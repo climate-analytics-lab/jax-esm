@@ -7,8 +7,6 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_structure
-from jax_tqdm import scan_tqdm
-from tqdm import tqdm
 
 from jem.base.interface import resolve_interface
 from jem.base.typing import (
@@ -59,6 +57,7 @@ class Coupler:
             A dict whose key is the name of :code:`MapperFunction`-compatible
             object that is responsible for sending information between 
             components.
+
     """
    
     components: dict[str, JEMComponent]
@@ -80,7 +79,6 @@ class Coupler:
             flux_exchangers: A list of flux_exchangers.
 
         """
-
         self.components = components or {}
         for name, component in self.components.items():
             self.add_component(name, component)
@@ -101,6 +99,7 @@ class Coupler:
 
         Returns:
             Dictionary of initial states for all components
+
         """
         return {
             component_name : component.initialize()
@@ -117,10 +116,18 @@ class Coupler:
         """Advance coupled system by one coupling timestep.
 
         Args:
+            workflow: Ordered components/mappers to execute per coupling step.
+            jitted: Whether to `jax.jit` the component and coupled steps.
+            show_progress: Deprecated and ignored; accepted so existing
+                callers keep working. Progress bars were removed with the
+                `tqdm`/`jax_tqdm` dependencies.
+            verbose: Whether to report the flattened workflow.
 
         Returns:
             New states after one coupling timestep
+
         """
+        del show_progress  # deprecated, see the docstring
 
         self._verify_name_uniqueness()
         self._verify_workflow(workflow)
@@ -172,8 +179,14 @@ class Coupler:
         verbose: bool=True,
         checkpoint: bool = False,
     ) -> tuple[CoupledCarry, CoupledCarry, TrajectoryFunction]:
-        if tqdm_kwargs is None:
-            tqdm_kwargs = {"desc": "Simulation"}
+        """Run the coupled model for `iterations` coupling steps.
+
+        `show_progress` and `tqdm_kwargs` are deprecated and ignored; they
+        are still accepted so existing callers keep working. The progress
+        bars they configured went away with the `tqdm`/`jax_tqdm`
+        dependencies.
+        """
+        del tqdm_kwargs  # deprecated, see the docstring
         initial_carry = initial_carry or self.initialize()
 
         if reuse_last_available_trajectory and self.trajectory_holder is not None:
@@ -186,7 +199,6 @@ class Coupler:
                 iterations=iterations,
                 jitted=jitted,
                 show_progress=show_progress,
-                tqdm_kwargs=tqdm_kwargs,
                 checkpoint=checkpoint,
             )
             _elapsed_time = time.time() - _start_time
@@ -205,9 +217,12 @@ class Coupler:
         checkpoint: bool = False,
         tqdm_kwargs: dict[str, Any] | None = None,
     ) -> TrajectoryFunction:
+        """Build the function that scans the coupled step over `iterations`.
 
-        if tqdm_kwargs is None:
-            tqdm_kwargs = {"desc": "Simulation"}
+        `show_progress` and `tqdm_kwargs` are deprecated and ignored; see
+        `run`.
+        """
+        del tqdm_kwargs  # deprecated, see the docstring
         scan_func = generate_scan_function(jitted=jitted)
         coupled_step_function = self.generate_step_function(
             workflow=workflow,
@@ -222,14 +237,6 @@ class Coupler:
         
         if not jitted:
             steps = list(steps) # type: ignore
-
-        if show_progress:
-            if jitted:
-                coupled_step_function = scan_tqdm(n=iterations, **tqdm_kwargs)(
-                    coupled_step_function
-                )
-            else:
-                steps = tqdm(steps, **tqdm_kwargs)
 
         def trajectory_function(
             initial_coupled_carry: CoupledCarry,
@@ -255,8 +262,8 @@ class Coupler:
         Args:
             name: Component name
             component: Component instance
-        """
 
+        """
         self.components[name] = JEMComponent(
             raw_component = component,
             name = name,
@@ -276,6 +283,7 @@ class Coupler:
 
         Args:
             name: Component name to remove
+
         """
         if name in self.components:
             del self.components[name]
@@ -288,9 +296,11 @@ class Coupler:
         mapper: Any,
     ) -> None:
         """Add a new forcing mapper to the coupler.
+
         Args:
             name: Forcing mapper name
             mapper: Forcing mapper
+
         """
         #try:
         #    typeguard.check_type(mapper, MapperFunction)
@@ -304,6 +314,7 @@ class Coupler:
 
         Args:
             name: Forcing mapper name to remove
+
         """
         if name in self.mappers:
             del self.mappers[name]
@@ -313,14 +324,14 @@ class Coupler:
         self,
         predictions,
     ):
-        """
-        A tool function that converts a trajectory into an xarray Dataset.
+        """Convert a trajectory into an xarray Dataset.
 
         Args:
             predictions : The predictions returned from `forward_func`
 
         Returns:
             ds : The resulting xarray dataset.
+
         """
         return {
             component_name : component.predictions_to_xarray(predictions[component_name])

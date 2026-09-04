@@ -10,14 +10,53 @@ from veros import runtime_settings
 
 from jem.utils.bulk_op import stack_objects
 
-print("Setting veros.runtime_settings...")
-runtime_settings.backend = "jax"
-runtime_settings.force_overwrite = True
-runtime_settings.linear_solver = 'scipy_jax'
-#setattr(runtime_settings, 'device', 'cpu')
-from veros.core.operators import at, update
-from veros.core.operators import numpy as npx
 
+def configure_veros_runtime() -> None:
+    """Point Veros at the JAX backend before any of its operators are bound.
+
+    Veros binds its array backend when its core modules are first imported,
+    reading the process-global ``runtime_settings`` at that moment and then
+    locking them: any later assignment raises ``RuntimeError``. The settings
+    therefore have to be applied before *anything* in the process imports
+    ``veros.core`` -- including a user's own ``VerosSetup`` module. That is
+    why this module calls it at import time: importing
+    ``jem.components.veros_component`` (or ``jem.components.Veros``) is the
+    documented way to make Veros JAX-backed, and it must come before the
+    setup module is imported.
+
+    Calling it again after the core modules are imported is safe: the
+    locked settings are inspected instead of assigned, and an error is
+    raised only if they were bound to a non-JAX backend.
+
+    Raises
+    ------
+    RuntimeError
+        If Veros already bound its operators to a non-JAX backend. The
+        operators cannot be re-pointed, so the only fix is to import this
+        module before the Veros setup module.
+
+    """
+    try:
+        runtime_settings.backend = "jax"
+        runtime_settings.force_overwrite = True
+        runtime_settings.linear_solver = "scipy_jax"
+    except RuntimeError as exc:
+        # Settings are locked because veros.core was already imported. If
+        # they were locked with the JAX backend (this module was imported
+        # first, as documented) there is nothing left to do.
+        if runtime_settings.backend != "jax":
+            raise RuntimeError(
+                "Veros bound its operators to the"
+                f" {runtime_settings.backend!r} backend before jem could select"
+                " JAX, and the settings are now locked. Import"
+                " jem.components.veros_component (or call"
+                " configure_veros_runtime()) before importing any Veros setup"
+                " module or veros.core."
+            ) from exc
+
+# Deliberate import-time side effect: see configure_veros_runtime(). This is the
+# only way to guarantee the setting precedes the operator import that binds it.
+configure_veros_runtime()
 
 def copy_veros_state(state):
     return jax.tree_util.tree_map(lambda x: x, state)
@@ -79,6 +118,18 @@ def make_jem_compatible(
     model: Any,
     coupling_timestep: jdt.Timedelta,
 ) -> Any:
+    """Wrap a Veros model so the JEM `Coupler` can drive it."""
+    # The settings were applied when this module was imported; re-checking
+    # here catches the case where Veros operators were bound to another
+    # backend before that import happened (a setup module imported first).
+    configure_veros_runtime()
+    # Imported here rather than at module scope: `veros.core.operators` binds
+    # its array backend (numpy or jax) at import time from
+    # `runtime_settings.backend`, so importing it before
+    # `configure_veros_runtime()` has run would silently pin the coupler to
+    # numpy operators.
+    from veros.core.operators import at, update
+    from veros.core.operators import numpy as npx
 
     timestep = jdt.to_timedelta(int(model.state.settings.dt_tracer), "second")
     if timestep * jnp.floor(coupling_timestep / timestep) != coupling_timestep:

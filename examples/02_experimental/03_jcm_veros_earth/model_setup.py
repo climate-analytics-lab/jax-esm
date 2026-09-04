@@ -15,17 +15,14 @@ import xarray as xr
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.terrain import TerrainData
-from jem.tool_scripts.generate_jcm_forcing_and_topography_files import generate_jcm_forcing_and_topography_files
 
 from jem.components import JCM, Veros, SlabOceanModel
 from jem.components.slab.grid import generate_slab_grid
 from jem.base.coupler import Coupler
 from jem.utils.esmf_regrid import ESMFRegridder
 
-from modify_jcm_terrain import modify_jcm_terrain
 from veros_case_setup import generateVerosSetup
 
-from veros.core.operators import update, at
 
 one_second = jdt.to_timedelta(1, "second")
 
@@ -159,7 +156,6 @@ def build_model(
     climatological-forcing) cycle -- e.g. `0` pins it at `start_datetime`
     itself. The diurnal cycle keeps advancing normally. See `_freeze_season`.
     """
-
     landsea_mask_threshold = 0.5
     grid_folder = Path(grid_folder)
     data_files = {
@@ -169,7 +165,7 @@ def build_model(
         },
         "landsea_mask" : {
             "atm" : grid_folder / f"landsea_mask_fraction_JCM_T{truncation_number:d}.nc",
-            "ocn" : grid_folder / f"landsea_mask_fraction_RotatedGaussianLatLon.nc",
+            "ocn" : grid_folder / "landsea_mask_fraction_RotatedGaussianLatLon.nc",
         },
         "regrid" : {
             "a2o" : {
@@ -217,7 +213,6 @@ def build_model(
     JCM.make_jem_compatible(atm_model, coupling_timestep=coupling_timestep)
     if freeze_season_at_day is not None:
         _freeze_season(atm_model, freeze_season_at_day)
-    atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
 
     # Longitude/latitude (in degrees) of the atmosphere's nodal grid, used by
     # `report_first_nonfinite` in `interaction` to locate non-finite values.

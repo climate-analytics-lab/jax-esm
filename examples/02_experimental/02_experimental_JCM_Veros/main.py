@@ -25,8 +25,6 @@ import numpy as np # to take average of output
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.terrain import TerrainData
-from jcm.forcing import ForcingData
-from importlib import resources
 
 import jax_datetime as jdt
 import xarray as xr
@@ -158,7 +156,6 @@ def interaction(coupled_carry):
     wind_x = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].u0)
     wind_y = jcm_to_veros_regridder(atm["derived"].physics["_surface_flux"].v0)
     wind_velocity = jnp.sqrt(wind_x**2 + wind_y**2)    
-    vs = ocn["state"].variables
     surface_taux = drag_coefficient * air_density * wind_velocity * wind_x
     surface_tauy = drag_coefficient * air_density * wind_velocity * wind_y
     # ===== compute wind stress end =====

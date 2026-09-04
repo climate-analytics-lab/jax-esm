@@ -4,38 +4,16 @@ import jax
 import jax.numpy as jnp
 
 
-def mean_leaf(
-    tree: Any,
-    axis: int | list,
-) -> Any:
-    """
-    A tool function that does the jnp.mean to leaf nodes.
-
-    Args:
-
-        tree : a tree object
-
-    Returns:
-
-        tree_mean : tree with jnp.mean applied to each of its leaf node.
-
-    """
-    return jax.tree_util.tree_map(lambda arr: jnp.mean(arr, axis=axis), tree)
-
-
 def unwrap_leading_dims(
     obj: Any,
     first_n_dim: int = 2,
 ) -> Any:
-    """
-    A tool function that unwraps the leading dimensions of jax arrays
+    """Unwrap the leading dimensions of jax arrays.
 
     Args:
-
         obj : A structure containining jax arrays
 
     Returns:
-
         unwrapped object.
 
     """
@@ -50,41 +28,15 @@ def unwrap_leading_dims(
 def stack_objects(
     objs: list,
 ):
-    """
-    A tool function that stack dataclasses together.
+    """Stack dataclasses together.
 
     Args:
-
         objs : A list of objects that need to be stacked
 
     Returns:
-
         stacked : Stacked object.
 
     """
     # objs is a list of pytrees with same structure
     stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *objs)
     return stacked
-
-
-def concat_objects(
-    objs: list,
-    axis: int,
-):
-    """
-    A tool function that concats dataclasses together.
-
-    Args:
-
-        objs : A list of objects that need to be concat
-
-    Returns:
-
-        concatenated : Concatenated object.
-
-    """
-    # objs is a list of pytrees with same structure
-    concatenated = jax.tree_util.tree_map(
-        lambda *xs: jnp.concatenate(xs, axis=axis), *objs
-    )
-    return concatenated

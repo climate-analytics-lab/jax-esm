@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jax-esm"
-version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,34 +18,58 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
+dynamic = ["version"]
 
+# Runtime requirements only: everything here is imported by `jem` itself.
+# Plotting, docs and the Veros ocean are opt-in extras below, so that
+# `pip install jax-esm` in a model-running environment pulls no matplotlib,
+# cartopy or sphinx.
 dependencies = [
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
     "numpy>=1.21.0",
-    "typing-extensions>=4.0.0",
-    "dataclasses-json>=0.5.0",
-    "typeguard",
-    "jax_datetime",
-    "jax_tqdm",
-    "tqdm",
-    "netcdf4",
     "xarray",
+    "netcdf4",
     "tree_math",
-    "coordax",
-    "jcm>=1.1.1",
-    "matplotlib",
-    "cartopy",
-    "sphinx",
-    "shibuya",
+    "jax_datetime",
+    # 2.1.0b0 is the first jax-gcm release with the 2-D surface-flux layout
+    # the JCM adapter is being rewritten against (T0.2). It is not on PyPI
+    # yet, so this floor is currently satisfied only by an editable install
+    # of a jax-gcm `dev` checkout (CI does exactly that; see
+    # .github/workflows/tests.yml).
+    "jcm>=2.1.0b0",
+    "flax",
+    "hydra-core",
+    "omegaconf",
+    # Still required: `jem/base/typing.py` decorates the component protocols
+    # with `typeguard.typechecked`. Phase 1 (T1.1) replaces that protocol and
+    # drops this dependency.
+    "typeguard",
 ]
 
 [project.optional-dependencies]
+plot = [
+    "matplotlib",
+    "cartopy",
+]
+# Intentionally empty: the coupler talks to a *jittable* fork of Veros that is
+# not published on PyPI, so it has to be installed from git. `pip install
+# jax-esm[veros]` therefore only documents the intent; see the README for the
+# git install command.
+veros = []
+docs = [
+    "sphinx",
+    "shibuya",
+    "nbsphinx",
+    "myst-parser",
+]
 dev = [
+    "coordax",  # optional at runtime: only jem.utils.cycles.evaluate_periodic needs it
     "pytest>=7.0",
-    "pytest-cov>=3.0",
-    "mypy>=0.900",
-    "ruff",
+    "pytest-cov",
+    "pytest-xdist",
+    "mypy",
+    "ruff==0.15.17",
     "nbformat",
     "nbconvert",
 ]
@@ -62,13 +85,11 @@ include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 [tool.setuptools.package-data]
 jem = ["data/*.nc"]
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
+# Single source of truth for the version: `jem.__version__`. Reading it from
+# the package rather than repeating it here means `jem.__version__` and the
+# installed distribution metadata can never disagree.
+[tool.setuptools.dynamic]
+version = {attr = "jem.__version__"}
 
 [tool.mypy]
 python_version = "3.11"
@@ -80,3 +101,41 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
+]
+
+# Lint configuration mirrors jax-gcm's so a developer moving between the two
+# repositories meets one set of rules.
+[tool.ruff.lint]
+extend-select = ["D"]
+ignore = [
+    "D100", # missing public module docstrings
+    "D101", # missing public class docstrings
+    "D102", # missing public method docstrings
+    "D103", # missing public function docstrings
+    "D104", # missing public package docstrings
+    # One of each mutually-incompatible docstring pair (ruff would
+    # otherwise silently drop one): keep D211 (no blank line before
+    # docstring) and D212 (summary on first line).
+    "D203", # incompatible with D211
+    "D213", # incompatible with D212
+    "D205", # missing blank lines between summary line and description
+    "D400", # first lines missing period
+    "D415", # docstrings missing closing punctuation
+    "D417", # missing argument descriptions
+    "E731"
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebooks legitimately break import/definition rules: names come from
+# earlier cells (F821), cells are re-run and redefine things (F811), imports
+# follow prose (E402), and demo cells import things they only show (F401).
+"*.ipynb" = ["F821", "F811", "E402", "F401", "D107"]
+# The experimental JCM+Veros drivers import in a load-bearing order that E402
+# cannot express: matplotlib's backend is chosen before `pyplot` is imported,
+# JAX config is set before anything touches JAX, and the auto-generated Veros
+# setup header (with its "cannot be executed directly" guard) sits above the
+# imports by construction. Phase 3 (T3.1) rewrites these drivers against the
+# final API; reordering them now would only churn code that is about to go.
+"examples/02_experimental/**" = ["E402"]

@@ -22,7 +22,6 @@ from jem.components.slab.grid import generate_slab_grid
 from modify_jcm_terrain import modify_jcm_terrain
 from veros_case_setup import generateVerosSetup
 
-from veros.core.operators import update, at
 
 one_second = jdt.to_timedelta(1, "second")
 

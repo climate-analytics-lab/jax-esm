@@ -11,11 +11,8 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)  # only cac
 import jax.numpy as jnp # for interaction
 import numpy as np # to take average of output
 import jcm
-from jcm.forcing import ForcingData
-from importlib import resources
 
 import jax_datetime as jdt
-import xarray as xr
 
 import jem
 import jem.utils.tree_tools as tree_tools
@@ -165,5 +162,5 @@ for b in range(resume_batch, batches):
         component_savers={"ocn": save_veros_carry},
     )
 
-print(f"Program ends.")
+print("Program ends.")
 

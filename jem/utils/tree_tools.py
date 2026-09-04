@@ -46,8 +46,7 @@ def print_dict_tree(d, indent="", is_last=True, prefix=None, root=None, node_sym
             print_dict_tree(value, indent, is_last_item, f"{key} <{class_name}>: ")
 
 def tree_to_dict(obj: Any) -> Any:
-    """
-    Convert a tree containing dataclasses, dicts, lists, and tuples into a pure dict tree.
+    """Convert a tree containing dataclasses, dicts, lists, and tuples into a pure dict tree.
     
     Handles:
     - Dataclasses (recursively converts to dicts)
@@ -64,6 +63,7 @@ def tree_to_dict(obj: Any) -> Any:
         Pure dict tree (or list/primitive)
         
     Note: Both lists and tuples are converted to lists in the output
+
     """
     # Dataclass -> dict
     if is_dataclass(obj) and not isinstance(obj, type):

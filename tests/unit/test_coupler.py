@@ -1,5 +1,4 @@
-"""
-Tests for base/coupler.py
+"""Tests for base/coupler.py
 ==========================
 Covers:
   - adhoc_scan (empty, single, multi-step, dict carry)
@@ -13,89 +12,15 @@ Covers:
   - predictions_to_xarray delegation
   - get_info (including dead-code regression + empty-mapper edge case)
 
-External deps (jax, xarray, jax_datetime, typeguard, jax_tqdm,
-jem.utils.bulk_op) are stubbed via sys.modules before any source import.
+Everything runs against the real dependencies; nothing is stubbed.
 """
 
-import sys, types, os
-from typing import Any, Callable, Dict, List
 from unittest.mock import MagicMock
 import pytest
 
 import jax
 
-# ===========================================================================
-# 1.  STUB INJECTION  (before any source imports)
-# ===========================================================================
-
-"""
-# --- jax -----------------------------------------------------------
-_jax = types.ModuleType("jax")
-_jax.lax = types.ModuleType("jax.lax")
-_jax.lax.scan = "JAX_LAX_SCAN_SENTINEL"   # unique sentinel; never called
-_jax.jit = lambda fn: fn                  # identity — we only test unjitted
-
-# jax.tree.flatten: workflow is always a flat list of strings in our tests
-_jax.tree = MagicMock()
-_jax.tree.flatten = lambda w: (list(w), None)
-
-_jax_numpy = types.ModuleType("jax.numpy")
-_jax_numpy.arange = lambda n: list(range(n))
-_jax_numpy.ndarray = type(None)
-
-_jax.numpy = _jax_numpy
-sys.modules.setdefault("jax", _jax)
-sys.modules.setdefault("jax.numpy", _jax_numpy)
-sys.modules.setdefault("jax.lax", _jax.lax)
-
-# --- jax_datetime --------------------------------------------------
-sys.modules.setdefault("jax_datetime", types.ModuleType("jax_datetime"))
-
-# --- xarray --------------------------------------------------------
-_xr = types.ModuleType("xarray")
-_xr.Dataset = dict
-sys.modules.setdefault("xarray", _xr)
-
-# --- typeguard -----------------------------------------------------
-_typeguard = types.ModuleType("typeguard")
-_typeguard.typechecked = lambda cls: cls   # no-op so dataclasses construct freely
-sys.modules.setdefault("typeguard", _typeguard)
-
-# --- jax_tqdm ------------------------------------------------------
-_jax_tqdm = types.ModuleType("jax_tqdm")
-_jax_tqdm.scan_tqdm = lambda **kw: (lambda fn: fn)
-sys.modules.setdefault("jax_tqdm", _jax_tqdm)
-
-# --- tqdm ----------------------------------------------------------
-_tqdm_mod = types.ModuleType("tqdm")
-_tqdm_mod.tqdm = lambda iterable, **kw: iterable
-sys.modules.setdefault("tqdm", _tqdm_mod)
-"""
-# --- jem.utils.bulk_op ---------------------------------------------
-
-"""
-_bulk = types.ModuleType("jem.utils.bulk_op")
-_bulk.stack_objects = _stack_objects
-_bulk.unwrap_leading_dims = lambda x, first_n_dim=1: x   # identity
-
-sys.modules.setdefault("jem", types.ModuleType("jem"))
-sys.modules.setdefault("jem.utils", types.ModuleType("jem.utils"))
-sys.modules.setdefault("jem.utils.bulk_op", _bulk)
-sys.modules.setdefault("jem.base", types.ModuleType("jem.base"))
-
-# --- wire jem.base.interface / jem.base.typing from the extracted source --
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "base_extracted"))
-from base import interface as _iface_mod       # noqa: E402
-from base import typing as _typing_mod         # noqa: E402
-
-_jem_base_iface = types.ModuleType("jem.base.interface")
-_jem_base_iface.resolve_interface = _iface_mod.resolve_interface
-sys.modules["jem.base.interface"] = _jem_base_iface
-sys.modules["jem.base.typing"] = _typing_mod
-"""
-# --- NOW import the module under test ------------------------------
-from jem.base.coupler import adhoc_scan, generate_scan_function, Coupler  # noqa: E402
-from jem.utils.bulk_op import stack_objects 
+from jem.base.coupler import adhoc_scan, generate_scan_function, Coupler
 
 
 # ===========================================================================
@@ -103,8 +28,7 @@ from jem.utils.bulk_op import stack_objects
 # ===========================================================================
 
 def _make_raw_component(name="comp"):
-    """
-    Returns a concrete class instance whose attributes satisfy
+    """Return a concrete class instance whose attributes satisfy
     resolve_interface against JEMComponent.  All Callable fields have the
     exact parameter counts the type-hints require.
     """
@@ -152,7 +76,7 @@ def _make_raw_mapper():
     return mapper
 
 def _build_coupler(comp_names=("comp_a", "comp_b"), mappers=("fm",)):
-    """Factory: Coupler with the given components and forcing mappers."""
+    """Build a Coupler with the given components and forcing mappers."""
     components = {n: _make_raw_component(name=n) for n in comp_names}
     mapper_dict = {n: _make_raw_mapper() for n in mappers}
     return Coupler(components=components, mappers=mapper_dict)
@@ -385,7 +309,6 @@ class TestGenerateStepFunction:
             comp_names=("atm", "ocean"),
             mappers=("fm",),
         )
-        init = c.initialize()
         return c
 
     def test_returns_callable(self):
@@ -417,7 +340,8 @@ class TestGenerateStepFunction:
     def test_predictions_accumulate_per_component_appearance(self):
         """If a component appears twice in the workflow its predictions are
         collected into a list per output key (via stack_objects transpose).
-        E.g. two appearances each yielding {"out": 42.0} become {"out": [42.0, 42.0]}."""
+        E.g. two appearances each yielding {"out": 42.0} become {"out": [42.0, 42.0]}.
+        """
         c = self._make_coupler()
         carry = c.initialize()
         # atm appears twice
@@ -540,8 +464,7 @@ class TestGetInfo:
         assert "fm" in info["mappers"]
 
     def test_empty_mappers_is_empty_dict_not_none_string(self):
-        """
-        get_info checks `if self.mappers is None` to decide whether to
+        """get_info checks `if self.mappers is None` to decide whether to
         emit the string "None".  But __init__ sets mappers to {} (not
         None) when no mappers are provided.  So an empty coupler's mappers
         value should be an empty dict, NOT the string "None".
@@ -552,8 +475,7 @@ class TestGetInfo:
         assert info["mappers"] != "None"
 
     def test_dead_code_return_info_is_unreachable(self):
-        """
-        coupler.py line 309: `return info` after the first return statement.
+        """coupler.py line 309: `return info` after the first return statement.
         This is dead code — it can never execute.  We verify get_info still
         returns successfully (i.e. the dead line does not cause a NameError at
         import time or anything similar).

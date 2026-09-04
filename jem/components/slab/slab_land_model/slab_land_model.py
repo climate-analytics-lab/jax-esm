@@ -63,8 +63,7 @@ class LandForcing:
 
 
 class SlabLandModel(SlabModelBase):
-    """
-    Slab land-surface model with:
+    """Slab land-surface model with:
     - Heat capacity-based temperature evolution
     - Snow depth and soil moisture from climatology
     - Separate treatment of soil and ice sheets
@@ -97,8 +96,8 @@ class SlabLandModel(SlabModelBase):
             tdland: Dissipation timescale for anomalies in seconds (default: 40 days)
             flandmin: Minimum land fraction for anomaly computation (default: 1/3)
             land_threshold: Land mask threshold (default: 0.1)
-        """
 
+        """
         super().__init__(
             name="LandModel",
             grid=grid,
@@ -138,8 +137,8 @@ class SlabLandModel(SlabModelBase):
         
         Returns:
             Initial component state with land temperature, snow, and soil moisture
+
         """
-        
         # =========================================================================
         # Initialize land masks from domain
         # =========================================================================
@@ -184,9 +183,7 @@ class SlabLandModel(SlabModelBase):
                 self.n_clim_steps = stl_data.shape[2]  # Number of time steps
             else:
                 print("Warning: 'stl' not in boundary file, using idealized temperature")
-                ideal_clim = self._idealized_land_temperature(D2_nodal_shape)
-                # Transpose from (12, lat, lon) to (lat, lon, 12)
-                self.stl_clim = jnp.transpose(ideal_clim, (1, 2, 0))
+                self.stl_clim = self._idealized_land_temperature()
                 self.n_clim_steps = 12
 
             # Snow depth climatology (mm water equivalent)
@@ -215,9 +212,7 @@ class SlabLandModel(SlabModelBase):
         else:
             # Create idealized climatology
             print("No boundary file specified. Using idealized land climatology.")
-            ideal_clim = self._idealized_land_temperature(D2_nodal_shape)
-            # Transpose from (12, lat, lon) to (lat, lon, 12)
-            self.stl_clim = jnp.transpose(ideal_clim, (1, 2, 0))
+            self.stl_clim = self._idealized_land_temperature()
             self.n_clim_steps = 12
             self.snowd_clim = jnp.zeros(D2_nodal_shape + (12,))
             self.soilw_clim = jnp.ones(D2_nodal_shape + (12,)) * 0.5
@@ -276,39 +271,41 @@ class SlabLandModel(SlabModelBase):
             "forcing": LandForcing.zeros(D2_nodal_shape),
         }
     
-    def _idealized_land_temperature(self, shape: tuple[int, int]) -> jnp.ndarray:
-        """Create idealized land temperature climatology.
-        
-        Args:
-            shape: (nlat, nlon) shape for temperature field
-            
-        Returns:
-            Monthly land temperature climatology (12, nlat, nlon) in Kelvin
+    def _idealized_land_temperature(self) -> jnp.ndarray:
+        """Idealised monthly land-temperature climatology.
+
+        The latitude dependence is taken from the grid's own 2-D latitude
+        field rather than reconstructed from a shape tuple, so the axis order
+        cannot be confused: an earlier version unpacked `grid.shape` as
+        `(n_lat, n_lon)` when it is in fact `(n_lon, n_lat)`, and so laid the
+        pole-to-pole profile out along the LONGITUDE axis. On JCM grids the
+        two axis lengths differ only by a factor of two, so the shapes lined
+        up and the error was silent.
+
+        Returns
+        -------
+        jnp.ndarray
+            Monthly climatology of shape ``(n_lon, n_lat, 12)`` in Kelvin,
+            matching the model's ``(lon, lat, time)`` climatology layout.
+
         """
-        nlat, nlon = shape
-        
-        # Create latitude array
-        lat = jnp.linspace(-90, 90, nlat)
-        lat_rad = jnp.deg2rad(lat)
-        
-        # Base temperature with latitude dependence
-        base_T = 273.15 + 25.0 * jnp.cos(lat_rad)
-        
-        # Add seasonal cycle (12 months)
+        lat = self.grid.latitude_radian                      # (n_lon, n_lat)
         months = jnp.arange(12)
-        seasonal_phase = 2 * jnp.pi * (months - 2) / 12.0  # Peak in March
-        
-        # Seasonal amplitude stronger at mid-latitudes
-        seasonal_amp = 15.0 * jnp.sin(jnp.abs(lat_rad))**2
-        
-        # Combine: (12, nlat)
-        T_lat = base_T[None, :] + seasonal_amp[None, :] * jnp.cos(seasonal_phase[:, None])
-        
-        # Broadcast to (12, nlat, nlon)
-        T_clim = jnp.broadcast_to(T_lat[:, :, None], (12, nlat, nlon))
-        
-        return T_clim
-    
+
+        # Warm equator, cold poles.
+        base_T = 273.15 + 25.0 * jnp.cos(lat)
+
+        # Seasonal amplitude is largest at high latitudes, zero at the equator.
+        seasonal_amp = 15.0 * jnp.sin(jnp.abs(lat)) ** 2
+
+        # Peak in March (month index 2).
+        phase = 2 * jnp.pi * (months - 2) / 12.0
+
+        return (
+            base_T[..., None]
+            + seasonal_amp[..., None] * jnp.cos(phase)[None, None, :]
+        )
+
     def _create_step_function_body(self):
         """Generate step function for land model.
         
@@ -317,8 +314,8 @@ class SlabLandModel(SlabModelBase):
             
         Returns:
             Step function with signature: (state, forcing, t) -> (new_state, predictions)
+
         """
-        
         start_day_offset = self._compute_start_day_offset()
         
         def step_function(carry, t):
@@ -337,8 +334,8 @@ class SlabLandModel(SlabModelBase):
                 
             Returns:
                 Tuple of (new_state, predictions_dict)
+
             """
-            
             state = carry["state"]
             forcing = carry["forcing"]
             
@@ -412,8 +409,8 @@ class SlabLandModel(SlabModelBase):
             
         Returns:
             xarray Dataset with land surface variables and coordinates
+
         """
-        
         state = predictions["state"]
         forcing = predictions["forcing"]
         T_grid_dims = ("time",) + self.grid.dims

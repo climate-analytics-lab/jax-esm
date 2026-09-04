@@ -6,16 +6,18 @@ from typing import Any
 import jax.numpy as jnp
 import jax_datetime as jdt
 import tree_math
-import xarray as xr
 
 from jem import constants
-from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.components.slab.base import (
+    _DEFAULT_START_DATETIME,
+    SlabModelBase,
+    load_monthly_climatology,
+)
 from jem.components.slab.grid import SlabGrid
 from jem.utils.bulk_op import stack_objects
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
 
 default_land_surface_temperature = 288.15
-
 
 @tree_math.struct
 class OceanState:
@@ -146,6 +148,7 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth_min: Minimum mixed layer depth in meters
             mixed_layer_depth_max: Maximum mixed layer depth in meters
             SST_clim_file: Optional path to SST climatology NetCDF file
+
         """
         self.relaxation_time = relaxation_time
         self.mixed_layer_depth_min = mixed_layer_depth_min
@@ -205,7 +208,9 @@ class SlabOceanModel(SlabModelBase):
         if self.SST_clim_file is not None:
             print("SST climatology file. The given initial SST will be used.")
             print("SST climatology file: ", self.SST_clim_file)
-            self.SST_clim = jnp.array(xr.open_dataset(self.SST_clim_file)["sst"])
+            self.SST_clim = load_monthly_climatology(
+                self.SST_clim_file, "sst", self.grid
+            )
             init_sea_surface_temperature = self.SST_clim[:, :, 0].copy()
         else:
             print("Boundary does not exist. Idealized initial SST will be used.")
@@ -247,13 +252,22 @@ class SlabOceanModel(SlabModelBase):
         self.time_factor = (1.0 + self.timestep / tau) ** (-1)
         self.cd_factor = self.timestep / cd
         
+        # The Q-flux climatology lives in the forcing carry, so it has to be
+        # loaded here: `validate()` only checks that the file exists, and
+        # before this it was never read at all -- `forcing_method="Qflux"`
+        # silently ran with Q = 0 everywhere.
+        if self.forcing_method == "Qflux" and self.Q_flux_file is not None:
+            q_flux = load_monthly_climatology(self.Q_flux_file, "qflux", self.grid)
+        else:
+            q_flux = None
+
         return {
             "state": OceanState.zeros(
                 self.grid.shape,
                 mixed_layer_depth=init_mixed_layer_depth,
                 sea_surface_temperature=init_sea_surface_temperature,
             ),
-            "forcing": OceanForcing.zeros(self.grid.shape),
+            "forcing": OceanForcing.zeros(self.grid.shape, q_flux=q_flux),
             "derived": OceanDerived.zeros(self.grid.shape),
         }
 
@@ -288,7 +302,13 @@ class SlabOceanModel(SlabModelBase):
                     self._interpolate_cyclic(state.sim_time, start_day_offset, forcing.q_flux),
                     0.0,
                 )
-                total_heat_flux = total_heat_flux + snapshot_Qflux
+                # Q is a heat SOURCE for the mixed layer (positive Q warms it,
+                # see the class docstring and the output attribute), while
+                # `total_heat_flux` is UPWARD positive (cools it) and is negated
+                # in the update below. Folding Q into the upward flux therefore
+                # needs a minus sign; adding it (as an earlier version did)
+                # silently reversed every prescribed Q-flux experiment.
+                total_heat_flux = total_heat_flux - snapshot_Qflux
 
 
             # Euler backward step
