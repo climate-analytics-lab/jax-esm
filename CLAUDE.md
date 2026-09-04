@@ -327,10 +327,12 @@ conventions are JCM's, and every component follows them:
   The dates are proleptic Gregorian whatever the model calendar is.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
-  `forcing_` prefix (`forcing_total_heat_flux`,
-  `forcing_ice_frazil_melt_energy`). Two components legitimately hold the same
-  physical field — one produced it, the other received it — and without the
-  prefix the merge of their datasets collides on the shared name.
+  `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
+  applied by `forcing_variable(name)`. Two components legitimately hold the
+  same physical field — one produced it, the other received it — and without
+  the prefix the merge of their datasets collides on the shared name. A new
+  output variable that comes from `carry["forcing"]` goes through
+  `forcing_variable()`; one that comes from `state` or `derived` does not.
 
 ### Type hints and docstrings
 - Type hints in public signatures; `mypy jem/ --ignore-missing-imports` is a

@@ -204,10 +204,17 @@ otherwise**; the code that has to change is named in each one.
     JCM's convention;
   - state and derived variables keep their plain names and every variable that
     came from a component's *forcing* is written with a `forcing_` prefix
-    (`forcing_total_heat_flux`, `forcing_ice_frazil_melt_energy`). Two
-    components legitimately hold the same physical field — one produced it, the
-    other received it — and without the prefix the merge collides on the shared
-    name.
+    (`jem.components.slab.base.FORCING_VARIABLE_PREFIX` and the
+    `forcing_variable(name)` helper that applies it). Two components
+    legitimately hold the same physical field — one produced it, the other
+    received it — and without the prefix `xr.merge` of their datasets collides
+    on the shared name. The renames are: `SlabAtmosphereModel` and
+    `SlabLandModel` write `forcing_total_heat_flux` (was `total_heat_flux`),
+    `SlabOceanModel` in Q-flux mode writes `forcing_q_flux` (was `q_flux`), and
+    `SlabSeaiceModel` writes `forcing_ice_frazil_melt_energy` (was
+    `ice_frazil_melt_energy`). Everything else keeps its name, including the
+    ocean's own `total_heat_flux` (a derived quantity — the effective heat flux
+    applied to the mixed layer) and `ice_frazil_melt_energy`.
 - `Coupler.to_xarray(diagnostics, *, first_step=0)` replaces
   `predictions_to_xarray(predictions)`. Pass `first_step` — the `step` of the
   carry the chunk started from — when writing a chunked run, or every chunk is
