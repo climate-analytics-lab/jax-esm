@@ -1,9 +1,12 @@
+import logging
 import pickle
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def save_coupled_carry(coupled_carry, checkpoint_dir, component_savers=None):
@@ -85,7 +88,10 @@ def save_veros_carry(ocn_carry, checkpoint_dir):
     ocn_state = ocn_carry["state"]
     with ocn_state.settings.unlock():
         ocn_state.settings.restart_output_filename = str(checkpoint_dir / "veros.restart.h5")
-        print("Saving ocean restart file to: ", ocn_state.settings.restart_output_filename)
+        logger.info(
+            "Saving ocean restart file to %s",
+            ocn_state.settings.restart_output_filename,
+        )
     write_restart(ocn_state, force=True)
 
     save_coupled_carry(
