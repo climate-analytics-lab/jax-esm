@@ -27,10 +27,9 @@ import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 import jax_datetime as jdt
 
-from jem.components import JCM, SlabOceanModel
-from jem.components.slab.grid import generate_slab_grid
 from jem.base.coupler import Coupler
-import jem.utils.tree_tools as tree_tools
+from jem.components import JCMComponent, SlabOceanModel
+from jem.components.slab import SlabGrid
 use_ipython = 'get_ipython' in globals()
 
 def positive_cosine_cubic_latitude_squared(
@@ -54,20 +53,30 @@ coupling_timestep = jdt.to_timedelta(1, "day")
 simulation_name = "02-03_long_aquaplanet"
 output_dir = (Path(f"output_T{spectral_truncation:d}") / simulation_name).resolve()
 output_dir.mkdir(exist_ok=True, parents=True)
-one_second = jdt.to_timedelta(1, "second")
 
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 
 # %%
-def mapper(coupled_carry):
-    atm = coupled_carry["atm"]
-    ocn = coupled_carry["ocn"]
+def exchange(components, time):
+    """Send the surface heat flux down and the SST back up.
 
-    ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
-    atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
+    An exchanger is traced with the rest of the coupled step, so it builds new
+    carries with `.replace(...)` rather than writing into the ones it is handed.
+    """
+    del time  # this exchange does not depend on the date
 
-    return coupled_carry
+    atm = components["atm"]
+    ocn = components["ocn"]
+
+    ocn = dict(ocn, forcing=ocn["forcing"].replace(
+        total_heat_flux=atm["derived"].total_heat_flux,
+    ))
+    atm = dict(atm, forcing=atm["forcing"].replace(
+        sea_surface_temperature=ocn["state"].sea_surface_temperature,
+    ))
+
+    return dict(components, atm=atm, ocn=ocn)
 
 # %% [markdown]
 # ## Create Components
@@ -78,12 +87,6 @@ atm_model = jcm.model.Model(
     start_date=start_datetime,
     time_step=10.0,
 )
-
-atm_model = JCM.make_jem_compatible(
-    atm_model,
-    coupling_timestep=coupling_timestep,
-)
-
 
 hgrid = atm_model.coords.horizontal
 lat = hgrid.latitudes
@@ -101,62 +104,61 @@ llon = jnp.repeat(
 )
 
 
-# Aquaplanet: no mask_file, so fractional_mask defaults to all-zero (no land).
-ocn_grid = generate_slab_grid(f"JCM::T{spectral_truncation:d}")
+# Aquaplanet: no fractional mask, so every cell of the slab grid is ocean.
+ocn_grid = SlabGrid.from_coords(hgrid)
 
 model = Coupler(
-    components=dict(
-        atm=atm_model,
-        ocn=SlabOceanModel(
-            grid=ocn_grid,
-            start_datetime=start_datetime,
-            timestep=coupling_timestep / one_second,
-        ),
+    dict(
+        atm=JCMComponent(atm_model),
+        ocn=SlabOceanModel(ocn_grid),
     ),
-    mappers=dict(mapper=mapper),
+    dict(exchange=exchange),
+    coupling_timestep=coupling_timestep,
+    start_date=start_datetime,
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
+print(repr(model))
 
 # %% [markdown]
 # ## Run Coupled Model
 
 # %%
 
-initial_carry = model.initialize()
 simulation_interval = jdt.to_timedelta(30, "day")
+steps_per_batch = int(simulation_interval / coupling_timestep)
 batches = int(total_simulation_time / simulation_interval)
 
-initial_carry["ocn"]["state"].sea_surface_temperature = (
-    273.15 + positive_cosine_cubic_latitude_squared(llat) * 50.0
-) 
+# One trajectory function, compiled once and reused for every batch. The
+# coupled step counter lives in the carry, not in the scan index, so calling it
+# again on the carry it returned continues the run instead of restarting it.
+run = model.generate_trajectory_function(steps_per_batch)
+
+initial_carry = model.initialize()
+ocn_carry = initial_carry.components["ocn"]
+ocn_carry = dict(ocn_carry, state=ocn_carry["state"].replace(
+    sea_surface_temperature=(
+        273.15 + positive_cosine_cubic_latitude_squared(llat) * 50.0
+    ),
+))
+carry = initial_carry.replace(
+    components=dict(initial_carry.components, ocn=ocn_carry),
+)
 
 for b in range(batches):
     print(f"[batch={b:d}/{batches:d}] Simulation...")
-    _, final_carry, predictions = model.run(
-        initial_carry = initial_carry,
-        workflow=["mapper", "atm", "ocn"],
-        iterations = int(simulation_interval / coupling_timestep),
-        jitted=True,
-        reuse_last_available_trajectory=True,
-    )
-    
-    output_dict = model.predictions_to_xarray(predictions)
+    carry, diagnostics = run(carry)
 
+    # `first_step` is the coupled step this batch started from. Without it
+    # every batch would be labelled with the first batch's dates.
+    output_dict = model.to_xarray(diagnostics, first_step=b * steps_per_batch)
 
-    
     for component_name, ds in output_dict.items():
         output_file = output_dir / f"{component_name:s}-{b:03d}.nc"
         print("Output file: ", str(output_file))
         ds = ds.reduce(np.mean, dim="time", keepdims=True)
         ds.to_netcdf(output_file, engine="netcdf4")
         ds.close()
-   
+
     if jnp.any( jnp.isnan(output_dict["atm"]["specific_humidity"].to_numpy()) ):
         print("Error: Model exploded. End program")
         break
-
-    initial_carry = final_carry
-
-
