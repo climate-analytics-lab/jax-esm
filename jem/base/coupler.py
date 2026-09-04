@@ -2,11 +2,11 @@
 
 A ``Coupler`` is the whole definition of a coupled model:
 
-- **what is coupled** — the named components and the named exchangers that
+- **what is coupled** -- the named components and the named exchangers that
   move information between them;
-- **in what order** — the ``workflow``, one ordered list over the single
+- **in what order** -- the ``workflow``, one ordered list over the single
   namespace shared by exchangers and components;
-- **on what clock** — the coupling timestep, start date and calendar. The
+- **on what clock** -- the coupling timestep, start date and calendar. The
   coupler owns the only clock in the system. Components hold no time state of
   their own; each ``step`` is handed a :class:`~jem.base.component.CouplingTime`
   built from the step counter that lives in the carry, so two components can
@@ -191,7 +191,7 @@ class Coupler:
     def add_component(self, name: str, component: Component) -> None:
         """Register ``component`` under ``name``.
 
-        The object itself is stored — there is no wrapper — so
+        The object itself is stored -- there is no wrapper -- so
         ``coupler.components[name] is component``.
 
         Raises
