@@ -379,6 +379,12 @@ class Coupler:
 
         """
         workflow = self._validated_workflow(self.workflow)
+        # Snapshot the coupled model: the returned function is a description
+        # of the model as it stands now, so registering a component later
+        # cannot silently change what an already-generated (and possibly
+        # already-compiled) step does.
+        components_by_name = dict(self.components)
+        exchangers_by_name = dict(self.exchangers)
 
         def step(carry: CoupledCarry) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
             time = self.coupling_time(carry.step)
@@ -389,10 +395,10 @@ class Coupler:
             diagnostics: dict[str, Diagnostics] = {}
 
             for name in workflow:
-                if name in self.exchangers:
+                if name in exchangers_by_name:
                     # The exchanger gets a fresh dict, so whatever it does
                     # with it cannot reach the caller's carry.
-                    exchanged = self.exchangers[name](dict(components), time)
+                    exchanged = exchangers_by_name[name](dict(components), time)
                     if not isinstance(exchanged, dict):
                         raise TypeError(
                             f"Exchanger {name!r} returned {type(exchanged).__name__}; "
@@ -400,7 +406,7 @@ class Coupler:
                         )
                     components = exchanged
                 else:
-                    new_carry, component_diagnostics = self.components[name].step(
+                    new_carry, component_diagnostics = components_by_name[name].step(
                         components[name], time
                     )
                     components = dict(components, **{name: new_carry})

@@ -504,3 +504,15 @@ def test_to_xarray_skips_components_without_diagnostics():
         start_date=START_DATE,
     )
     assert coupler.to_xarray({}) == {}
+
+
+def test_step_function_snapshots_the_model():
+    """A generated step describes the model as it was; later edits do not leak in."""
+    coupler = _coupler()
+    carry = coupler.initialize()
+    step = coupler.step_function()
+
+    coupler.remove_component("sink")
+
+    _, diagnostics = step(carry)
+    assert set(diagnostics) == {"source", "sink"}
