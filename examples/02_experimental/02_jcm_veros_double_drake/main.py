@@ -101,18 +101,18 @@ if checkpoint_dir.exists():
     if saved:
         resume_batch = int(saved[-1].name.split("_")[1]) + 1
         print(f"Resuming from batch {resume_batch}")
-        # `save_coupled_carry` stores the per-component carries only, so the
-        # coupled step counter is restored from the batch index. (The Hydra
-        # driver of Phase 2 will checkpoint it directly.)
-        carry = carry.replace(
-            components=load_coupled_carry(
-                saved[-1], ["atm", "ocn", "fakelnd"],
-                component_loaders={
-                    "ocn": lambda path: load_veros_carry(path, ocn_model),
-                },
-            ),
-            step=jnp.int32(resume_batch * steps_per_batch),
+        # The checkpoint carries the coupled step counter, so the resumed run
+        # picks up the seasonal cycle where it left off. Reconstructing the
+        # step from the batch index would be right only while every batch has
+        # the same length, and wrong the moment --simulation-interval-days
+        # changes between runs.
+        carry = load_coupled_carry(
+            saved[-1], ["atm", "ocn", "fakelnd"],
+            component_loaders={
+                "ocn": lambda path: load_veros_carry(path, ocn_model),
+            },
         )
+        print(f"Resuming at coupled step {int(carry.step):d}")
 
 if resume_batch == batches:
     print(f"Target batches: {batches:d} is all done. Exit the program.")
@@ -130,9 +130,12 @@ for b in range(resume_batch, batches):
         final_carry, diagnostics = run(carry)
 
         # `first_step` is the coupled step this batch started from; without it
-        # every batch would be labelled with the first batch's dates.
+        # every batch would be labelled with the first batch's dates. It comes
+        # from the carry's own clock rather than from `b * steps_per_batch`,
+        # so a run resumed with a different --simulation-interval-days still
+        # labels its output with the dates it actually simulated.
         output_dict = model.to_xarray(
-            diagnostics, first_step=b * steps_per_batch
+            diagnostics, first_step=int(carry.step)
         )
 
     
@@ -170,7 +173,7 @@ for b in range(resume_batch, batches):
   
     carry = final_carry
     save_coupled_carry(
-        final_carry.components, checkpoint_dir / f"batch_{b:05d}",
+        final_carry, checkpoint_dir / f"batch_{b:05d}",
         component_savers={"ocn": save_veros_carry},
     )
 

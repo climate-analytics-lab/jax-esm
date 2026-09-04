@@ -128,6 +128,14 @@ otherwise**; the code that has to change is named in each one.
 - **`Coupler.initialize()` returns a `CoupledCarry`**, not a plain
   `dict[str, carry]`. The per-component carries are under
   `.components`; rebuild one with `carry.replace(components=...)`.
+- **`jem.utils.checkpoints.save_coupled_carry`/`load_coupled_carry` take and
+  return a `CoupledCarry`**, not a plain `dict[str, carry]`, and the
+  checkpoint directory gains one file, `coupled_step.pkl`, holding the coupled
+  step counter. A caller that passed `final_carry.components` passes
+  `final_carry`; a caller that rebuilt the carry around the loaded dict uses
+  the returned `CoupledCarry` directly. The mapping-only helpers are still
+  available as `save_component_carries` / `load_component_carries`, which is
+  what the Veros restart writer uses for the picklable half of its carry.
 - **`Coupler.generate_trajectory_function(iterations, *, remat=False,
   jit=True)`** takes neither `workflow` nor `checkpoint`/`show_progress`/
   `tqdm_kwargs`, and returns `carry -> (final_carry, diagnostics)`.
@@ -328,6 +336,12 @@ otherwise**; the code that has to change is named in each one.
   already-compiled step.
 - The coupled step never mutates its input carry; it rebuilds the carries dict
   and returns a new `CoupledCarry`.
+- A run resumed from a checkpoint no longer restarts its seasonal cycle:
+  `save_coupled_carry` writes the coupled step counter and `load_coupled_carry`
+  restores it. A checkpoint written without one is refused with a `ValueError`
+  naming the missing file, rather than resuming at step 0 or having its step
+  guessed from a batch index — a guess that is only right while every batch has
+  the same length.
 
 ### Known gaps
 

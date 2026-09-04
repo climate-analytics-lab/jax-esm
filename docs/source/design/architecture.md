@@ -62,6 +62,19 @@ index restarts at zero on every call: putting the clock in the carry is what
 makes a chunked run (or a restart from a checkpoint) continue the same
 simulation instead of replaying the first year.
 
+For the same reason `step` is part of a **checkpoint**.
+`jem.utils.checkpoints.save_coupled_carry(coupled_carry, directory)` writes one
+`{name}_carry.pkl` per component — or a subdirectory, for a component that
+implements `SupportsCheckpoint` and is passed in `component_savers` — plus
+`coupled_step.pkl` holding the counter, and `load_coupled_carry` returns the
+`CoupledCarry` a trajectory function can be handed straight back. A checkpoint
+directory with no `coupled_step.pkl` is refused with a `ValueError`: its
+position in the seasonal cycle is not recoverable, and resuming at step 0 (or
+at a step reconstructed from a batch index) would silently move the run's
+calendar. `save_component_carries` / `load_component_carries` are the
+mapping-only halves, for a sub-carry that has no clock of its own — which is
+how the Veros restart writer stores its `derived` and `forcing` structs.
+
 ### The component contract
 
 `jem.base.component.Component` is a runtime-checkable `typing.Protocol`, so
