@@ -25,6 +25,10 @@ from jem.base.component import (
     TimeAxis,
 )
 from jem.components.jcm import JCMComponent, exchange_fields
+from jem.components.jcm.component import (
+    CLOCK_TOLERANCE_SECONDS,
+    clock_tolerance_seconds,
+)
 
 START_DATE = jdt.to_datetime("2000-01-01")
 CALENDAR = "365_day"
@@ -193,6 +197,27 @@ def test_speedy_exchange_shapes_and_signs():
     np.testing.assert_allclose(exchange.v0, -2.5)
     for field in exchange:
         assert field.shape == GRID_SHAPE
+
+
+def test_clock_tolerance_floor_applies_to_a_young_run():
+    """Early in a run the tolerance is the fixed floor, well under one step."""
+    # 8 float32 ulps of one day is ~0.08 s, so the floor wins.
+    assert clock_tolerance_seconds(86400.0) == CLOCK_TOLERANCE_SECONDS
+    assert clock_tolerance_seconds(0.0) == CLOCK_TOLERANCE_SECONDS
+
+
+def test_clock_tolerance_grows_with_float32_resolution():
+    """After decades the tolerance follows float32's spacing, by a hand value.
+
+    At 3e9 s the float32 eps is 1.1920928955078125e-07, so eight ulps of the
+    simulation time is 8 * 1.1920928955078125e-07 * 3e9 = 2861.02294921875 s
+    -- above the ~256 s spacing of a float32 there, and so above the drift
+    that rounding alone can produce, while still far below the one-day
+    coupling step a real mismatch would be off by.
+    """
+    assert clock_tolerance_seconds(3.0e9) == pytest.approx(2861.02294921875)
+    # Sign of the simulation time cannot shrink the window.
+    assert clock_tolerance_seconds(-3.0e9) == clock_tolerance_seconds(3.0e9)
 
 
 def test_echam_not_implemented_names_issue():
