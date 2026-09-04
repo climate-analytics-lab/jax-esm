@@ -47,10 +47,17 @@ change is listed here.
 
 ### Fixed
 
-- Importing `jem.components.veros_component` no longer mutates Veros'
-  process-global `runtime_settings` (or prints while doing so). The backend
-  configuration moved into `_configure_veros_runtime()`, called from
-  `make_jem_compatible`, which is the only entry point that needs it.
+- `jem.components.veros_component` now selects the JAX backend through a
+  public `configure_veros_runtime()` (still run at import time, because the
+  jittable Veros fork locks `runtime_settings` as soon as `veros.core` is
+  imported) and raises a clear `RuntimeError` naming the import-order fix
+  when Veros was already bound to another backend, instead of failing later
+  inside `make_jem_compatible`. It no longer prints while doing so.
+- `jem.utils.cycles.evaluate_periodic` mis-weighted points in the wrap-around
+  interval (between the last and the first tick) when `x` lay above the last
+  tick: the distance from the left tick was computed as `x + 1 - t0` there,
+  over-counting by a full cycle. It now uses `(x - t0) mod 1`. The function
+  also accepts traced indices, so `vmap_evaluate_periodic` works.
 - `jem.components.slab.slab_ocean_model.__all__` listed `OceanForcing` and
   `OceanState` without importing them, so `from ... import *` raised
   `AttributeError`. Both are now imported.
@@ -61,9 +68,6 @@ change is listed here.
   `examples` or `docs`:
   - `jem.utils.datetime_tools` (whole module).
   - `jem.utils.domain_grid_tools` (whole module).
-  - `jem.utils.cycles.evaluate_periodic` and `vmap_evaluate_periodic` (the
-    `coordax`-based interpolators; `evaluate_cyclic_linear`, which the slab
-    components use, stays).
   - `jem.utils.bulk_op.concat_objects` and `mean_leaf`.
   - `jem.utils.esmf_regrid.create_regridder_pair`,
     `create_regridder_from_xarray`, `example_usage` and the module's
@@ -71,8 +75,12 @@ change is listed here.
   - `jem.components.slab.grid.generate_slab_grid_from_ugrid` and its private
     helpers `_reshape_ugrid_face_field` / `_load_ugrid_fractional_mask`. The
     SCRIP reader (`generate_slab_grid_from_scrip`) is unaffected.
-- Dependencies `dataclasses-json`, `coordax`, `typing-extensions`, `jax_tqdm`
-  and `tqdm`: none of them are imported by `jem` any more.
+- Dependencies `dataclasses-json`, `typing-extensions`, `jax_tqdm` and `tqdm`:
+  none of them are imported by `jem` any more. `coordax` is no longer a
+  runtime dependency either: its only user, `jem.utils.cycles.evaluate_periodic`
+  (kept at the maintainers' request although currently unused), imports it
+  lazily, so it is needed only when that function is called (it is in the
+  `dev` extra so the function stays tested).
 - **Progress bars.** `Coupler.run`, `Coupler.generate_trajectory_function` and
   `Coupler.generate_step_function` no longer display a `tqdm` progress bar.
   Their `show_progress` and `tqdm_kwargs` parameters are still accepted so

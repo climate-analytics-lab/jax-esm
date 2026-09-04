@@ -1,6 +1,11 @@
+from typing import TYPE_CHECKING
+
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only; coordax is optional
+    import coordax as cx
 
 
 def evaluate_cyclic_linear(x: ArrayLike, data: jax.Array) -> jax.Array:
@@ -25,3 +30,70 @@ def evaluate_cyclic_linear(x: ArrayLike, data: jax.Array) -> jax.Array:
     idx1 = (idx0 + 1) % n
     alpha = pos - jnp.floor(pos)              # weight toward idx1, in [0, 1)
     return (1.0 - alpha) * data[..., idx0] + alpha * data[..., idx1]
+
+
+def evaluate_periodic(
+    x: ArrayLike,
+    data: "cx.Field",
+    name_of_interpolated_axis: str = "time",
+) -> ArrayLike:
+    """Interpolate sparse data to equally spaced positions on a periodic cycle over [0, 1).
+
+    Kept even while unused (maintainer request): it is the coordax-aware
+    interpolator for irregularly spaced records, and re-deriving it is more
+    error-prone than keeping it tested here. ``coordax`` is imported lazily so
+    the core package does not depend on it; install it to use this function.
+      
+    Args:
+        x: A real number between that will be wrapped into [0, 1)
+        data: A coordax.Field whose `interpolate_axis` marking which
+              LabeledAxis will be used for interpolation.
+        name_of_interpolated_axis: Name of the axis that will be interapolated.
+              The value of this axis should be in [0, 1). If any value
+              goes beyond the interval [0, 1), ValueError will be raised.
+
+    Return:
+        The untagged interpolated data based on the value of `x`. The interpolated 
+        dimension is removed.
+         
+    """
+    import coordax as cx  # noqa: F401 -- optional dependency, needed only here
+
+    reordered_data = data.order_as(name_of_interpolated_axis, ...)
+    interpolated_axis = reordered_data.axes[name_of_interpolated_axis]
+    if not hasattr(interpolated_axis, "ticks"):  # Changed 'axis' to 'interpolated_axis'
+        raise ValueError("The input data's interpolation axis must be `LabeledAxis`.")
+
+    # LabeledAxis stores its ticks as a numpy array; convert once so the tick
+    # lookups below accept traced indices (needed under jax.vmap / jit).
+    ticks = jnp.asarray(interpolated_axis.ticks)
+
+    # Wrap x to [0, 1)
+    x_wrapped = jnp.mod(x, 1.0)
+
+    # Find the index of the left boundary
+    idx = jnp.searchsorted(ticks, x_wrapped, side='right') - 1
+
+    # Handle periodic boundary (wrap around)
+    idx_next = jnp.mod(idx + 1, len(ticks))
+
+    # Get the tick values
+    t0 = ticks[idx]
+    t1 = ticks[idx_next]
+    
+    # Handle wraparound for periodic interpolation. Both quantities are
+    # arc-lengths on the unit circle measured forward from t0: the wrapping
+    # interval (t0 = last tick, t1 = first tick) spans t1 + 1 - t0, and x lies
+    # either just after t0 (x >= t0) or just before t1 (x < t1, i.e. below the
+    # first tick), so its distance from t0 is (x - t0) modulo 1 -- not
+    # x + 1 - t0, which over-counts by a full cycle when x >= t0.
+    spacing_between_coarse_data = jnp.where(t0 < t1, t1 - t0, t1 + 1.0 - t0)
+    distance_to_the_left_point = jnp.mod(x_wrapped - t0, 1.0)
+    
+    # Linear interpolation weight
+    alpha = distance_to_the_left_point / spacing_between_coarse_data
+
+    return (1.0 - alpha) * reordered_data.data[idx] + alpha * reordered_data.data[idx_next]  # type: ignore
+
+# Define a vectorized version
+vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None))  # vmap over x, keep data and name constant
