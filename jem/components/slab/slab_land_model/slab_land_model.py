@@ -7,29 +7,48 @@ This module implements a slab land-surface model with:
 - Land/ice-sheet discrimination based on albedo
 
 Physics based on SPEEDY (Simplified Parameterizations, primiTivE-Equation DYnamics):
-Molteni, F. (2003). Atmospheric simulations using a GCM with simplified 
-physical parametrizations. I: model climatology and variability in 
+Molteni, F. (2003). Atmospheric simulations using a GCM with simplified
+physical parametrizations. I: model climatology and variability in
 multi-decadal experiments. Climate Dynamics, 20(2-3), 175-191.
 
 Programmer: Aya Lalou
 
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
+import logging
+from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
-import jax_datetime as jdt
 import tree_math
-import xarray as xr
 
-from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.components.slab.base import (
+    MASKED_SURFACE_TEMPERATURE,
+    SlabModelBase,
+    end_of_step,
+    first_present_variable,
+    load_monthly_climatology,
+)
 from jem.components.slab.grid import SlabGrid
-from jem.utils.bulk_op import stack_objects
+from jem.components.slab.slab_land_model.params import SlabLandParameters
+from jem.utils.cycles import evaluate_cyclic_linear
+
+logger = logging.getLogger(__name__)
+
+_MONTHS_PER_YEAR = 12
+
+# Names the same field goes by in the boundary files JEM is given: SPEEDY's
+# own spelling first, then jax-gcm's. Resolving by name (rather than by
+# position in the file, as this model used to) is what lets
+# ``load_monthly_climatology`` verify that the file is on the model grid.
+_SNOW_DEPTH_NAMES = ("snowd", "snowc")
+_SOIL_WATER_NAMES = ("soilw", "soilw_am")
+_SURFACE_TEMPERATURE_NAMES = ("stl",)
 
 
 @tree_math.struct
 class LandState:
-    sim_time: jnp.ndarray
     land_surface_temperature: jnp.ndarray
     snowc: jnp.ndarray
     soilw: jnp.ndarray
@@ -38,13 +57,11 @@ class LandState:
     def zeros(
         cls,
         shape,
-        sim_time=None,
         land_surface_temperature=None,
         snowc=None,
         soilw=None,
     ):
         return cls(
-            sim_time if sim_time is not None else jnp.zeros(()),
             land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
             snowc if snowc is not None else jnp.zeros(shape),
             soilw if soilw is not None else jnp.zeros(shape),
@@ -64,213 +81,270 @@ class LandForcing:
 
 class SlabLandModel(SlabModelBase):
     """Slab land-surface model with:
+
     - Heat capacity-based temperature evolution
     - Snow depth and soil moisture from climatology
     - Separate treatment of soil and ice sheets
-    
-    Based on SPEEDY land model with prescribed climatological boundary conditions.
+
+    Based on SPEEDY's land model with prescribed climatological boundary
+    conditions. The prognostic variable is the *anomaly* of the surface
+    temperature about its climatology: it is damped towards zero on
+    ``params.tdland`` and forced by the surface heat flux, and the climatology
+    is added back at the end of the step. Cells whose land fraction is below
+    ``params.flandmin`` have no anomaly at all (SPEEDY's ``dmask``), so a cell
+    that is mostly ocean simply follows the climatology.
     """
-    
+
     def __init__(
         self,
         grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        timestep: float = 86400.0,
+        params: SlabLandParameters | None = None,
+        *,
+        name: str = "lnd",
         land_clim_file: str | None = None,
-        depth_soil: float = 1.0,
-        depth_lice: float = 5.0,
-        tdland: float = 40.0 * 86400.0,
-        flandmin: float = 1.0/3.0,
-        land_threshold: float = 0.1,
-        calendar: str = "365_day",
+        surface_albedo: jnp.ndarray | None = None,
     ):
-        """Initialize land surface model.
+        """Initialize the land surface model.
 
-        Args:
-            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
-            start_datetime: Start datetime for simulation
-            timestep: Model timestep in seconds
-            land_clim_file: Optional path to land climatology NetCDF file
-            depth_soil: Soil layer depth in meters (default: 1.0)
-            depth_lice: Land-ice depth in meters (default: 5.0)
-            tdland: Dissipation timescale for anomalies in seconds (default: 40 days)
-            flandmin: Minimum land fraction for anomaly computation (default: 1/3)
-            land_threshold: Land mask threshold (default: 0.1)
+        Parameters
+        ----------
+        grid : SlabGrid
+            The model's grid.
+        params : SlabLandParameters, optional
+            Tunable parameters; defaults to
+            :meth:`SlabLandParameters.default`.
+        name : str
+            Component name in the coupler's workflow and carry.
+        land_clim_file : str, optional
+            netCDF file holding 12-month climatologies of surface temperature
+            (``stl``), snow depth (``snowd`` or ``snowc``) and soil water
+            availability (``soilw`` or ``soilw_am``) on the model grid. Fields
+            the file does not carry fall back to idealized ones.
+        surface_albedo : jnp.ndarray, optional
+            Surface albedo on the model grid, used to tell an ice sheet from
+            soil (SPEEDY reads it from its topography file). Defaults to a
+            uniform ``params.surface_albedo``, which is below the ice
+            threshold, so a model built without one is all soil everywhere.
+
+        Raises
+        ------
+        ValueError
+            If a parameter is out of range or ``surface_albedo`` is not on the
+            model grid.
+        FileNotFoundError
+            If ``land_clim_file`` does not exist.
 
         """
-        super().__init__(
-            name="LandModel",
-            grid=grid,
-            start_datetime=start_datetime,
-            timestep=timestep,
-            calendar=calendar,
-        )
-
+        super().__init__(name=name, grid=grid)
+        self.params = SlabLandParameters.default() if params is None else params
         self.land_clim_file = land_clim_file
-        
-        # Physical parameters from Fortran defaults
-        self.depth_soil = depth_soil  # m
-        self.depth_lice = depth_lice  # m
-        self.tdland = tdland  # seconds
-        self.flandmin = flandmin
-        self.land_threshold = land_threshold
-        
-        # Heat capacities per m^2 (depth * volumetric_heat_capacity)
-        # Fortran values: hcapl = depth_soil*2.50e+6, hcapli = depth_lice*1.93e+6
-        self.hcapl = self.depth_soil * 2.50e6  # J/(m^2 K) for soil
-        self.hcapli = self.depth_lice * 1.93e6  # J/(m^2 K) for land ice
-        
-        # Soil moisture parameters (not evolved, just for completeness)
-        self.swcap = 0.30  # Field capacity
-        self.swwil = 0.17  # Wilting point
-        
-        # Snow depth to snow cover conversion parameter
-        self.sd2sc = 60.0  # mm water equivalent
 
-        self.validate()
- 
-    def validate(self):
-        super().validate()
+        if not float(self.params.tdland) > 0.0:
+            raise ValueError("tdland must be a positive number of seconds.")
+        if not 0.0 <= float(self.params.land_threshold) <= 1.0:
+            raise ValueError("land_threshold must be a land fraction in [0, 1].")
+        if not 0.0 <= float(self.params.flandmin) <= 1.0:
+            raise ValueError("flandmin must be a land fraction in [0, 1].")
+        if float(self.params.snow_depth_to_cover_scale) <= 0.0:
+            raise ValueError(
+                "snow_depth_to_cover_scale must be a positive snow depth in mm."
+            )
 
-    def initialize(self):
-        """Initialize land surface model state and climatology.
-        
-        Returns:
-            Initial component state with land temperature, snow, and soil moisture
-
-        """
-        # =========================================================================
-        # Initialize land masks from domain
-        # =========================================================================
-        
-        print("Initializing land masks from domain...")
-        
-        # Use domain masks
-        thrsh = self.land_threshold
-        fmask_raw = self.grid.fractional_mask
-        D2_nodal_shape = self.grid.shape
-        
-        # Create binary and fractional land masks (Fortran: land_model_init lines 72-82)
-        self.fmask_l = jnp.where(
-            fmask_raw >= thrsh,
-            jnp.where(fmask_raw > (1.0 - thrsh), 1.0, fmask_raw),
-            0.0
-        )
-        
-        self.bmask_l = jnp.where(fmask_raw >= thrsh, 1.0, 0.0)
-        
-        # Domain mask for anomaly computation (Fortran: lines 149-154)
-        self.dmask = jnp.where(self.fmask_l >= self.flandmin, 1.0, 0.0)
-        
-        print(f"Total land grid count: {self.bmask_l.sum()}")
-        
-        # =========================================================================
-        # Load climatology fields
-        # =========================================================================
-        
-        if self.land_clim_file is not None:
-            print(f"Loading land climatology from: {self.land_clim_file}")
-            # Load monthly climatology from NetCDF
-            ds = xr.open_dataset(self.land_clim_file)
-            
-            # Land surface temperature climatology
-            # Note: Data format is (lon, lat, time) to match JCM nodal ordering
-            if "stl" in ds:
-                stl_data = jnp.array(ds["stl"].values)
-                print(f"Loaded stl climatology with shape: {stl_data.shape}")
-                # Store as (lon, lat, time) to match JCM nodal ordering
-                self.stl_clim = stl_data
-                self.n_clim_steps = stl_data.shape[2]  # Number of time steps
-            else:
-                print("Warning: 'stl' not in boundary file, using idealized temperature")
-                self.stl_clim = self._idealized_land_temperature()
-                self.n_clim_steps = 12
-
-            # Snow depth climatology (mm water equivalent)
-            if "snowd" in ds:
-                print("Notice: found 'snowd' in boundary file.")
-                self.snowd_clim = jnp.array(ds["snowd"].values)
-            elif "snowc" in ds:
-                # Tien-Yiao [2016/03/01]: jax-gcm forcing file seems to use snowc instead of snowd
-                self.snowd_clim = jnp.array(ds["snowc"].values)
-            else:
-                print("Warning: cannot find 'snowd' or 'snowc' not in boundary file, using zero snow")
-                self.snowd_clim = jnp.zeros(D2_nodal_shape + (self.n_clim_steps,))
-            
-            # Soil water availability climatology (0-1)
-            if "soilw" in ds:
-                print("Notice: found 'soilw' in boundary file.")
-                self.soilw_clim = jnp.array(ds["soilw"].values)
-            elif "soilw_am" in ds:
-                # Tien-Yiao [2016/03/01]: jax-gcm forcing file use soilw_am instead of soilw
-                print("Notice: found 'snowd_am' in boundary file.")
-                self.soilw_clim = jnp.array(ds["soilw_am"].values)
-            else:
-                print("Warning: 'soilw' not in boundary file, using uniform soil moisture")
-                self.soilw_clim = jnp.ones(D2_nodal_shape + (self.n_clim_steps,)) * 0.5
-                
+        if surface_albedo is None:
+            self.surface_albedo = jnp.full(self.grid.shape, self.params.surface_albedo)
         else:
-            # Create idealized climatology
-            print("No boundary file specified. Using idealized land climatology.")
-            self.stl_clim = self._idealized_land_temperature()
-            self.n_clim_steps = 12
-            self.snowd_clim = jnp.zeros(D2_nodal_shape + (12,))
-            self.soilw_clim = jnp.ones(D2_nodal_shape + (12,)) * 0.5
-        
-        # =========================================================================
-        # Compute heat capacity and dissipation time fields
-        # =========================================================================
-        
-        # Get albedo to discriminate soil vs ice (Fortran: lines 157-163)
-        # Default: assume all soil (low albedo) for now
-        # TODO: Could load from topography file if available
-        alb0 = jnp.ones(D2_nodal_shape) * 0.2
-        
-        # rhcapl = timestep / heat_capacity (Fortran uses delt which is timestep in seconds)
-        # Use ice heat capacity where albedo >= 0.4, else soil
-        self.rhcapl = jnp.where(
-            alb0 < 0.4,
-            self.timestep / self.hcapl,   # Soil
-            self.timestep / self.hcapli   # Ice
+            surface_albedo = jnp.asarray(surface_albedo)
+            if tuple(surface_albedo.shape) != self.grid.shape:
+                raise ValueError(
+                    f"surface_albedo has shape {tuple(surface_albedo.shape)}, but the "
+                    f"grid is {self.grid.shape} (n_lon, n_lat)."
+                )
+            self.surface_albedo = surface_albedo
+
+        # Boundary data is *configuration*, so it is read here rather than in
+        # ``initialize()``: that keeps initialize() pure with respect to self
+        # and surfaces a bad file at construction.
+        (
+            self.surface_temperature_climatology,
+            self.snow_depth_climatology,
+            self.soil_water_climatology,
+        ) = self._load_climatologies()
+
+    def _load_climatologies(self) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Load the three boundary climatologies, with idealized fallbacks.
+
+        Every field is read BY NAME through
+        :func:`~jem.components.slab.base.load_monthly_climatology`, which
+        checks it against the model grid. The previous positional read
+        (``jnp.array(ds["stl"].values)``) accepted any array whose shape
+        happened to fit, so a file on a different grid, or written in a
+        different axis order, loaded silently and wrongly.
+        """
+        shape = self.grid.shape
+        monthly = shape + (_MONTHS_PER_YEAR,)
+
+        if self.land_clim_file is None:
+            logger.info(
+                "%s: no land climatology file; using an idealized climatology.",
+                self.name,
+            )
+            return (
+                self._idealized_land_temperature(),
+                jnp.zeros(monthly),
+                jnp.full(monthly, 0.5),
+            )
+
+        if not Path(self.land_clim_file).exists():
+            raise FileNotFoundError(
+                f"Land climatology file \"{self.land_clim_file!s:s}\" does not exist."
+            )
+
+        surface_temperature = self._load_named(_SURFACE_TEMPERATURE_NAMES)
+        if surface_temperature is None:
+            logger.warning(
+                "%s: land climatology file %s has none of %r; using an idealized "
+                "surface-temperature climatology.",
+                self.name,
+                self.land_clim_file,
+                _SURFACE_TEMPERATURE_NAMES,
+            )
+            surface_temperature = self._idealized_land_temperature()
+
+        snow_depth = self._load_named(_SNOW_DEPTH_NAMES)
+        if snow_depth is None:
+            logger.warning(
+                "%s: land climatology file %s has none of %r; assuming no snow.",
+                self.name,
+                self.land_clim_file,
+                _SNOW_DEPTH_NAMES,
+            )
+            snow_depth = jnp.zeros(monthly)
+
+        soil_water = self._load_named(_SOIL_WATER_NAMES)
+        if soil_water is None:
+            logger.warning(
+                "%s: land climatology file %s has none of %r; assuming uniform soil "
+                "water availability of 0.5.",
+                self.name,
+                self.land_clim_file,
+                _SOIL_WATER_NAMES,
+            )
+            soil_water = jnp.full(monthly, 0.5)
+
+        return surface_temperature, snow_depth, soil_water
+
+    def _load_named(self, candidates: tuple[str, ...]) -> jnp.ndarray | None:
+        """Load whichever of `candidates` the climatology file carries."""
+        name = first_present_variable(self.land_clim_file, candidates)
+        if name is None:
+            return None
+        logger.info(
+            "%s: loading %r climatology from %s", self.name, name, self.land_clim_file
         )
-        
-        # cdland = dissipation coefficient (Fortran: line 165)
-        # cdland = dmask * tdland / (1 + dmask * tdland)
-        tdland_timesteps = self.tdland / self.timestep
-        self.cdland = (self.dmask * tdland_timesteps / (1.0 + self.dmask * tdland_timesteps))
-        
-        print(f"Heat capacity range: {self.rhcapl.min():.2e} - {self.rhcapl.max():.2e}")
-        print(f"Dissipation coefficient range: {self.cdland.min():.3f} - {self.cdland.max():.3f}")
-        
-        # =========================================================================
-        # Initialize land surface temperature from climatology
-        # =========================================================================
-        
-        # Get initial time index (0-based)
-        # For daily data, use day of year; for monthly, use month
-        if self.n_clim_steps > 100:  # Assume daily data
-            init_time_idx = self.start_datetime.to_pydatetime().timetuple().tm_yday - 1
-        else:  # Assume monthly data
-            init_time_idx = self.start_datetime.to_pydatetime().month - 1
-        
-        # Initial land surface temperature from climatology (lon, lat, time)
-        init_T = self.stl_clim[:, :, init_time_idx]
-        
-        # Apply land mask (set ocean points to reasonable value)
-        init_T = jnp.where(self.bmask_l > 0, init_T, 273.15 + 15.0)
-        
-        print(f"Initial land temperature range: {init_T.min():.2f} - {init_T.max():.2f} K")
-        
-        return {
-            "state": LandState.zeros(
-                D2_nodal_shape,
-                land_surface_temperature=init_T,
-                snowc=jnp.minimum(1.0, self.snowd_clim[:, :, init_time_idx] / self.sd2sc),
-                soilw=self.soilw_clim[:, :, init_time_idx],
+        return load_monthly_climatology(self.land_clim_file, name, self.grid)
+
+    def initialize(self) -> Carry:
+        """Build the initial land carry."""
+        params = self.params
+        land = _land_cells(self.grid, params)
+        cycle_position = params.initial_year_fraction
+
+        surface_temperature = jnp.where(
+            land,
+            evaluate_cyclic_linear(
+                cycle_position, self.surface_temperature_climatology
             ),
-            "forcing": LandForcing.zeros(D2_nodal_shape),
+            MASKED_SURFACE_TEMPERATURE,
+        )
+
+        return {
+            "params": params,
+            "state": LandState.zeros(
+                self.grid.shape,
+                land_surface_temperature=surface_temperature,
+                snowc=_snow_cover(
+                    evaluate_cyclic_linear(
+                        cycle_position, self.snow_depth_climatology
+                    ),
+                    params,
+                ),
+                soilw=evaluate_cyclic_linear(
+                    cycle_position, self.soil_water_climatology
+                ),
+            ),
+            "forcing": LandForcing.zeros(self.grid.shape),
         }
-    
+
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Advance the land surface by one coupling step.
+
+        Follows SPEEDY's ``run_land_model``: interpolate the climatology to the
+        start and end of the step, evolve the temperature anomaly about it with
+        the surface heat flux and the dissipation coefficient, then add the
+        end-of-step climatology back.
+        """
+        params = carry["params"]
+        state = carry["state"]
+        forcing = carry["forcing"]
+
+        land = _land_cells(self.grid, params)
+        land_fraction = _land_fraction(self.grid, params)
+        # SPEEDY's dmask: only cells that are mostly land carry an anomaly of
+        # their own; the rest follow the climatology exactly.
+        anomaly_mask = jnp.where(land_fraction >= params.flandmin, 1.0, 0.0)
+
+        # Heat capacity per unit area, and its reciprocal scaled by the step:
+        # SPEEDY's rhcapl. Computed here rather than cached on the model because
+        # both the depths and the coupling timestep are things a caller may vary
+        # between runs -- and, for the depths, differentiate through.
+        heat_capacity = jnp.where(
+            self.surface_albedo < params.land_ice_albedo_threshold,
+            params.depth_soil * params.soil_volumetric_heat_capacity,
+            params.depth_lice * params.land_ice_volumetric_heat_capacity,
+        )
+        inverse_heat_capacity = time.dt / heat_capacity
+
+        # SPEEDY's cdland, in units of the coupling step.
+        dissipation_steps = params.tdland / time.dt
+        dissipation = (anomaly_mask * dissipation_steps) / (
+            1.0 + anomaly_mask * dissipation_steps
+        )
+
+        climatology_begin = evaluate_cyclic_linear(
+            time.year_fraction, self.surface_temperature_climatology
+        )
+        climatology_end = evaluate_cyclic_linear(
+            end_of_step(time).year_fraction, self.surface_temperature_climatology
+        )
+        snow_depth = evaluate_cyclic_linear(
+            time.year_fraction, self.snow_depth_climatology
+        )
+        soil_water = evaluate_cyclic_linear(
+            time.year_fraction, self.soil_water_climatology
+        )
+
+        # The heat flux arrives in the coupler's upward-positive convention;
+        # the land is warmed by what flows into it, hence the negation.
+        downward_heat_flux = -forcing.total_heat_flux
+
+        anomaly = state.land_surface_temperature - climatology_begin
+        new_anomaly = dissipation * (anomaly + inverse_heat_capacity * downward_heat_flux)
+        surface_temperature = jnp.where(
+            land, new_anomaly + climatology_end, MASKED_SURFACE_TEMPERATURE
+        )
+
+        new_state = state.replace(
+            land_surface_temperature=surface_temperature,
+            snowc=_snow_cover(snow_depth, params),
+            soilw=soil_water,
+        )
+
+        diagnostics = {
+            "state": new_state,
+            "forcing": forcing,
+        }
+        return {"params": params, **diagnostics}, diagnostics
+
     def _idealized_land_temperature(self) -> jnp.ndarray:
         """Idealised monthly land-temperature climatology.
 
@@ -290,7 +364,7 @@ class SlabLandModel(SlabModelBase):
 
         """
         lat = self.grid.latitude_radian                      # (n_lon, n_lat)
-        months = jnp.arange(12)
+        months = jnp.arange(_MONTHS_PER_YEAR)
 
         # Warm equator, cold poles.
         base_T = 273.15 + 25.0 * jnp.cos(lat)
@@ -299,161 +373,80 @@ class SlabLandModel(SlabModelBase):
         seasonal_amp = 15.0 * jnp.sin(jnp.abs(lat)) ** 2
 
         # Peak in March (month index 2).
-        phase = 2 * jnp.pi * (months - 2) / 12.0
+        phase = 2 * jnp.pi * (months - 2) / _MONTHS_PER_YEAR
 
         return (
             base_T[..., None]
             + seasonal_amp[..., None] * jnp.cos(phase)[None, None, :]
         )
 
-    def _create_step_function_body(self):
-        """Generate step function for land model.
-        
-        Args:
-            jitted: Whether to JIT-compile the step function
-            
-        Returns:
-            Step function with signature: (state, forcing, t) -> (new_state, predictions)
+    def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
+        """Create xarray data variables for land output."""
+        state = diagnostics["state"]
+        forcing = diagnostics["forcing"]
+        dims = ("time",) + self.grid.dims
 
-        """
-        start_day_offset = self._compute_start_day_offset()
-        
-        def step_function(carry, t):
-            """Land model time step.
-            
-            Implements the slab land model from Fortran run_land_model subroutine:
-            1. Interpolate climatology to current day
-            2. Compute temperature anomaly w.r.t. climatology
-            3. Evolve anomaly with heat flux forcing and dissipation
-            4. Add climatology to get final temperature
-            
-            Args:
-                state: Land component state
-                forcing: Land component forcing
-                t: Current simulation time in seconds
-                
-            Returns:
-                Tuple of (new_state, predictions_dict)
-
-            """
-            state = carry["state"]
-            forcing = carry["forcing"]
-            
-            # =====================================================================
-            # Time and climatology management
-            # =====================================================================
-            
-            # Linearly interpolate climatology at current and end-of-step time
-            stl_clim_beg  = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.stl_clim)
-            stl_clim_end  = self._interpolate_cyclic(state.sim_time + self.timestep, start_day_offset, self.stl_clim)
-            snowd_clim    = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.snowd_clim)
-            soilw_clim    = self._interpolate_cyclic(state.sim_time,               start_day_offset, self.soilw_clim)
-            
-            # =====================================================================
-            # Land surface temperature evolution (Fortran: run_land_model)
-            # =====================================================================
-            
-            # Get heat flux from forcing (positive downward into land)
-            # Negate because atmosphere uses positive upward convention
-            heatflx = - forcing.total_heat_flux
-            
-            # Temperature anomaly w.r.t. climatology (Fortran: line 204)
-            T_anom = (state.land_surface_temperature - stl_clim_beg)
-            
-            # Time evolution of temperature anomaly (Fortran: line 207)
-            # tanom = cdland * (tanom + rhcapl * hfluxn)
-            # This is an implicit scheme: (1 - cdland) * T_anom + cdland * rhcapl * hfluxn
-            new_T_anom = (self.cdland * (T_anom + self.rhcapl * heatflx))
-            
-            # Full surface temperature (Fortran: line 210)
-            new_T = (new_T_anom + stl_clim_end)
-            
-            # Apply land mask
-            new_T = jnp.where(self.bmask_l > 0, new_T, 273.15 + 15.0)
-            
-            # Update simulation time - keep as float32
-            new_sim_time = state.sim_time + self.timestep
-            
-            # =====================================================================
-            # Create new state
-            # =====================================================================
-            
-            new_state = state.replace(
-                sim_time=new_sim_time,
-                land_surface_temperature=new_T,
-                snowc=jnp.minimum(1.0, snowd_clim / self.sd2sc),
-                soilw=soilw_clim,
-            )
-            
-            # Return new state and predictions for output
-            return (
-                {
-                    "state": new_state, 
-                    "forcing": forcing,
-                }, stack_objects([{
-                    "state": new_state,
-                    "forcing": forcing,
-                }])
-            )
-        
-        return step_function
-    
-    def _create_xarray_data_vars(
-        self,
-        predictions: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Convert predictions to xarray Dataset.
-        
-        Args:
-            predictions: Dictionary with 'state' and 'forcing' fields from model run
-            
-        Returns:
-            xarray Dataset with land surface variables and coordinates
-
-        """
-        state = predictions["state"]
-        forcing = predictions["forcing"]
-        T_grid_dims = ("time",) + self.grid.dims
-        
-        return { 
+        return {
             "land_surface_temperature": (
-                T_grid_dims,
-                state.land_surface_temperature, 
+                dims,
+                state.land_surface_temperature,
                 {
                     "long_name": "Land surface temperature",
                     "units": "K",
-                }
+                },
             ),
             "snowc": (
-                T_grid_dims, state.snowc,
+                dims,
+                state.snowc,
                 {
                     "long_name": "Snow cover fraction",
                     "units": "1",
-                }
+                },
             ),
             "soilw": (
-                T_grid_dims,
+                dims,
                 state.soilw,
                 {
                     "long_name": "Soil water availability",
                     "units": "1",
-                }
+                },
             ),
             "total_heat_flux": (
-                T_grid_dims,
-                forcing.total_heat_flux, 
+                dims,
+                forcing.total_heat_flux,
                 {
                     "long_name": "Total heat flux forcing",
                     "units": "W m-2",
                     "positive": "upward",
-                }
+                },
             ),
         }
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
         return {
             "description": "SPEEDY-based slab land surface model output",
-            "depth_soil": f"{self.depth_soil} m",
-            "depth_lice": f"{self.depth_lice} m",
-            "tdland": f"{self.tdland} days",
+            "depth_soil": f"{float(self.params.depth_soil)} m",
+            "depth_lice": f"{float(self.params.depth_lice)} m",
+            "tdland": f"{float(self.params.tdland)} s",
         }
+
+
+def _land_fraction(grid: SlabGrid, params: SlabLandParameters) -> jnp.ndarray:
+    """SPEEDY's fmask_l: land fraction, snapped to 0 or 1 near the ends."""
+    threshold = params.land_threshold
+    fractional_mask = grid.fractional_mask
+    return jnp.where(
+        fractional_mask >= threshold,
+        jnp.where(fractional_mask > (1.0 - threshold), 1.0, fractional_mask),
+        0.0,
+    )
+
+
+def _land_cells(grid: SlabGrid, params: SlabLandParameters) -> jnp.ndarray:
+    """Boolean mask of the cells this model integrates (SPEEDY's bmask_l)."""
+    return grid.fractional_mask >= params.land_threshold
+
+
+def _snow_cover(snow_depth: jnp.ndarray, params: SlabLandParameters) -> jnp.ndarray:
+    """Snow cover fraction from snow depth (SPEEDY's sd2sc closure)."""
+    return jnp.minimum(1.0, snow_depth / params.snow_depth_to_cover_scale)

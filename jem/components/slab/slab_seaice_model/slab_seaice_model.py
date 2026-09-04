@@ -3,27 +3,24 @@
 from typing import Any
 
 import jax.numpy as jnp
-import jax_datetime as jdt
+import jcm.constants as jcm_constants
 import tree_math
 
 from jem import constants
-from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE, SlabModelBase
 from jem.components.slab.grid import SlabGrid
-from jem.utils.bulk_op import stack_objects
-
-default_land_surface_temperature = 288.15
+from jem.components.slab.slab_seaice_model.params import SlabSeaiceParameters
 
 
 @tree_math.struct
 class SeaiceState:
-    sim_time: jnp.ndarray
     ice_thickness: jnp.ndarray
     ice_surface_temperature: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sim_time=None, ice_thickness=None, ice_surface_temperature=None):
+    def zeros(cls, shape, ice_thickness=None, ice_surface_temperature=None):
         return cls(
-            sim_time if sim_time is not None else jnp.zeros(()),
             ice_thickness if ice_thickness is not None else jnp.zeros(shape),
             ice_surface_temperature if ice_surface_temperature is not None else jnp.zeros(shape),
         )
@@ -73,8 +70,8 @@ class SlabSeaiceModel(SlabModelBase):
           not a flux). Positive means the ocean mixed layer had a heat deficit relative
           to freezing -- that deficit freezes new ice at the base. Negative means the
           ocean had surplus heat above freezing -- that surplus melts ice from below.
-        - ``rho_ice``: ice_density
-        - ``L_ice``: ice_latent_heat_fusion
+        - ``rho_ice``: ``jcm.constants.rhoi``
+        - ``L_ice``: ``jcm.constants.alhf``
 
     Because `ice_frazil_melt_energy` is already a per-step energy (its host ocean model
     folds the coupling step directly into the diagnostic, matching CESM's convention of a
@@ -87,14 +84,15 @@ class SlabSeaiceModel(SlabModelBase):
     diagnose whether a cell counts as ice-covered or open water, for
     `ice_surface_temperature` below. Since there is no conductive temperature profile to
     solve for, `ice_surface_temperature` is not physically diagnosed -- it is simply
-    reported as `T_melt` wherever a cell carries ice above `min_ice_thickness`, and
-    `T_freeze` over ice-free ocean, for output/diagnostic purposes only.
+    reported as the fresh-ice melting point ``jcm.constants.tmelt`` wherever a cell
+    carries ice above `min_ice_thickness`, and the seawater freezing point over ice-free
+    ocean, for output/diagnostic purposes only.
 
     This is a standalone component in the sense that it has no direct knowledge of SST or
     mixed layer depth -- all of that is folded into `ice_frazil_melt_energy` by the ocean
     model. Wiring an ocean model's `derived.ice_frazil_melt_energy` to this component's
-    `forcing.ice_frazil_melt_energy` via the coupler's mapper is required for this model
-    to do anything.
+    `forcing.ice_frazil_melt_energy` through the coupler's exchanger is required for this
+    model to do anything.
 
     Ice fraction
     ------------
@@ -109,149 +107,120 @@ class SlabSeaiceModel(SlabModelBase):
 
     `ice_fraction_thickness_scale` sets how quickly a cell "fills in" as it thickens:
     `ice_fraction -> 0` as `h -> 0` and `ice_fraction -> 1` as `h` grows well past that
-    scale. This is reported as `derived.ice_fraction`, for a mapper to route to an
+    scale. This is reported as `derived.ice_fraction`, for an exchanger to route to an
     atmosphere model's ice-fraction forcing.
     """
 
     def __init__(
         self,
         grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        timestep: float = 86400.0,
-        initialization_ice_thickness: float = 0.0,
-        min_ice_thickness: float = 1e-3,
-        ice_fraction_thickness_scale: float = 0.5,
-        mask_value: float = 0.0,
-        calendar: str = "365_day",
+        params: SlabSeaiceParameters | None = None,
+        *,
+        name: str = "ice",
     ):
-        """Initialize slab sea-ice model.
+        """Initialize the slab sea-ice model.
 
-        Args:
-            grid: The model's grid. See jem.components.slab.grid.SlabGrid.
-            start_datetime: Simulation start datetime
-            timestep: Model timestep in seconds
-            initialization_ice_thickness: Uniform initial ice thickness over ocean points (m)
-            min_ice_thickness: Thickness above which a cell is diagnosed as ice-covered (m)
-            ice_fraction_thickness_scale: Thickness scale (m) of the smooth
-                `1 - exp(-h / scale)` closure used to derive `ice_fraction` from thickness
-            mask_value: `bmask` value that identifies ocean grid points
-            calendar: Calendar used for the simulation clock
+        Parameters
+        ----------
+        grid : SlabGrid
+            The model's grid.
+        params : SlabSeaiceParameters, optional
+            Tunable parameters; defaults to
+            :meth:`SlabSeaiceParameters.default`.
+        name : str
+            Component name in the coupler's workflow and carry.
+
+        Raises
+        ------
+        ValueError
+            If a thickness scale is not positive, which would make the ice
+            fraction closure or the ice-cover diagnosis undefined.
 
         """
-        self.initialization_ice_thickness = initialization_ice_thickness
-        self.min_ice_thickness = min_ice_thickness
-        self.ice_fraction_thickness_scale = ice_fraction_thickness_scale
-        self.mask_value = mask_value
+        super().__init__(name=name, grid=grid)
+        self.params = SlabSeaiceParameters.default() if params is None else params
 
-        super().__init__(
-            name="SlabSeaiceModel",
-            grid=grid,
-            start_datetime=start_datetime,
-            timestep=timestep,
-            calendar=calendar,
-        )
+        if not float(self.params.min_ice_thickness) > 0.0:
+            raise ValueError("min_ice_thickness must be a positive number of metres.")
+        if not float(self.params.ice_fraction_thickness_scale) > 0.0:
+            raise ValueError(
+                "ice_fraction_thickness_scale must be a positive number of metres."
+            )
+        if float(self.params.initial_ice_thickness) < 0.0:
+            raise ValueError("initial_ice_thickness cannot be negative.")
 
-        self.validate()
+    def _ocean_cells(self, params: SlabSeaiceParameters) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates."""
+        return self.grid.binary_mask == params.ocean_mask_value
 
-    def validate(self):
-        super().validate()
-        if self.min_ice_thickness <= 0:
-            raise ValueError("`min_ice_thickness` must be a positive number.")
-        if self.ice_fraction_thickness_scale <= 0:
-            raise ValueError("`ice_fraction_thickness_scale` must be a positive number.")
+    def initialize(self) -> Carry:
+        """Build the initial sea-ice carry."""
+        params = self.params
+        ocean = self._ocean_cells(params)
 
-    def initialize(self):
-        """Initialize sea-ice model fields."""
-        ocn_idx = self.grid.binary_mask == self.mask_value
-
-        init_ice_thickness = jnp.where(
-            ocn_idx, self.initialization_ice_thickness, 0.0
-        )
-        init_ice_surface_temperature = jnp.where(
-            ocn_idx & (init_ice_thickness > self.min_ice_thickness),
-            constants.ice_melting_point_K,
-            jnp.where(ocn_idx, constants.seawater_freezing_point_K, default_land_surface_temperature),
-        )
-
-        init_ice_fraction = jnp.where(
-            ocn_idx,
-            1.0 - jnp.exp(-init_ice_thickness / self.ice_fraction_thickness_scale),
-            0.0,
-        )
+        ice_thickness = jnp.where(ocean, params.initial_ice_thickness, 0.0)
 
         return {
+            "params": params,
             "state": SeaiceState.zeros(
                 self.grid.shape,
-                ice_thickness=init_ice_thickness,
-                ice_surface_temperature=init_ice_surface_temperature,
+                ice_thickness=ice_thickness,
+                ice_surface_temperature=_surface_temperature(
+                    ice_thickness, ocean, params
+                ),
             ),
             "forcing": SeaiceForcing.zeros(self.grid.shape),
-            "derived": SeaiceDerived.zeros(self.grid.shape, ice_fraction=init_ice_fraction),
+            "derived": SeaiceDerived.zeros(
+                self.grid.shape,
+                ice_fraction=_ice_fraction(ice_thickness, ocean, params),
+            ),
         }
 
-    def _create_step_function_body(self):
-        """Create the step function for the sea-ice model."""
-        ocn_idx = self.grid.binary_mask == self.mask_value
-        min_ice_thickness = self.min_ice_thickness
-        ice_fraction_thickness_scale = self.ice_fraction_thickness_scale
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Grow or melt ice at the base by one coupling step.
 
-        def step_function(carry, step):
-            state = carry["state"]
-            forcing = carry["forcing"]
+        The step is independent of ``time``: the forcing it integrates is
+        already an energy per coupling step, not a flux, so there is no ``dt``
+        to apply and no seasonal cycle to look up.
+        """
+        params = carry["params"]
+        state = carry["state"]
+        forcing = carry["forcing"]
+        ocean = self._ocean_cells(params)
 
-            h = state.ice_thickness
-            ice_frazil_melt_energy = forcing.ice_frazil_melt_energy
+        ice_frazil_melt_energy = forcing.ice_frazil_melt_energy
+        ice_thickness = state.ice_thickness + ice_frazil_melt_energy / (
+            jcm_constants.rhoi * jcm_constants.alhf
+        )
+        ice_thickness = jnp.clip(ice_thickness, 0.0, None)
+        ice_thickness = jnp.where(ocean, ice_thickness, 0.0)
 
-            new_ice_thickness = h + ice_frazil_melt_energy / (
-                constants.ice_density * constants.ice_latent_heat_fusion
-            )
-            new_ice_thickness = jnp.clip(new_ice_thickness, 0.0, None)
-            new_ice_thickness = jnp.where(ocn_idx, new_ice_thickness, 0.0)
+        new_state = state.replace(
+            ice_thickness=ice_thickness,
+            ice_surface_temperature=_surface_temperature(ice_thickness, ocean, params),
+        )
+        new_derived = SeaiceDerived.zeros(
+            self.grid.shape,
+            ice_fraction=_ice_fraction(ice_thickness, ocean, params),
+            ice_frazil_melt_energy=ice_frazil_melt_energy,
+        )
 
-            new_surface_temperature = jnp.where(
-                ocn_idx & (new_ice_thickness > min_ice_thickness),
-                constants.ice_melting_point_K,
-                jnp.where(ocn_idx, constants.seawater_freezing_point_K, default_land_surface_temperature),
-            )
+        diagnostics = {
+            "state": new_state,
+            "forcing": forcing,
+            "derived": new_derived,
+        }
+        return {"params": params, **diagnostics}, diagnostics
 
-            new_ice_fraction = jnp.where(
-                ocn_idx,
-                1.0 - jnp.exp(-new_ice_thickness / ice_fraction_thickness_scale),
-                0.0,
-            )
-
-            new_sim_time = state.sim_time + self.timestep
-
-            new_state = state.replace(
-                ice_thickness=new_ice_thickness,
-                ice_surface_temperature=new_surface_temperature,
-                sim_time=new_sim_time,
-            )
-
-            new_derived = SeaiceDerived.zeros(
-                self.grid.shape,
-                ice_fraction=new_ice_fraction,
-                ice_frazil_melt_energy=ice_frazil_melt_energy,
-            )
-
-            result = {
-                "state": new_state,
-                "forcing": forcing,
-                "derived": new_derived,
-            }
-            return result, stack_objects([result])
-
-        return step_function
-
-    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
+    def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
         """Create xarray data variables for sea-ice output."""
-        state = predictions["state"]
-        derived = predictions["derived"]
-        T_grid_dims = ("time",) + self.grid.dims
+        state = diagnostics["state"]
+        derived = diagnostics["derived"]
+        dims = ("time",) + self.grid.dims
 
         return {
             "ice_thickness": (
-                T_grid_dims,
+                dims,
                 state.ice_thickness,
                 {
                     "long_name": "Sea ice thickness",
@@ -259,7 +228,7 @@ class SlabSeaiceModel(SlabModelBase):
                 },
             ),
             "ice_surface_temperature": (
-                T_grid_dims,
+                dims,
                 state.ice_surface_temperature,
                 {
                     "long_name": "Sea ice surface temperature",
@@ -267,15 +236,18 @@ class SlabSeaiceModel(SlabModelBase):
                 },
             ),
             "ice_frazil_melt_energy": (
-                T_grid_dims,
+                dims,
                 derived.ice_frazil_melt_energy,
                 {
-                    "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
+                    "long_name": (
+                        "Freeze/melt potential (frzmlt): positive forms ice, "
+                        "negative melts ice"
+                    ),
                     "units": "J m-2",
                 },
             ),
             "ice_fraction": (
-                T_grid_dims,
+                dims,
                 derived.ice_fraction,
                 {
                     "long_name": "Sea ice areal fraction (smooth closure from thickness)",
@@ -284,8 +256,32 @@ class SlabSeaiceModel(SlabModelBase):
             ),
         }
 
-    def get_info(self):
-        return {
-            "min_ice_thickness": self.min_ice_thickness,
-            "ice_fraction_thickness_scale": self.ice_fraction_thickness_scale,
-        }
+
+def _surface_temperature(
+    ice_thickness: jnp.ndarray,
+    ocean: jnp.ndarray,
+    params: SlabSeaiceParameters,
+) -> jnp.ndarray:
+    """Diagnose the surface temperature reported for each cell.
+
+    Shared by ``initialize`` and ``step`` so the initial carry and the stepped
+    carry cannot diverge in how a cell is classified.
+    """
+    return jnp.where(
+        ocean & (ice_thickness > params.min_ice_thickness),
+        jcm_constants.tmelt,
+        jnp.where(ocean, constants.seawater_freezing_point_K, MASKED_SURFACE_TEMPERATURE),
+    )
+
+
+def _ice_fraction(
+    ice_thickness: jnp.ndarray,
+    ocean: jnp.ndarray,
+    params: SlabSeaiceParameters,
+) -> jnp.ndarray:
+    """Areal ice fraction from thickness, by the smooth closure."""
+    return jnp.where(
+        ocean,
+        1.0 - jnp.exp(-ice_thickness / params.ice_fraction_thickness_scale),
+        0.0,
+    )

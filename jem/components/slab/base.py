@@ -1,23 +1,37 @@
-"""Base class for slab models.
+"""Shared infrastructure for the slab models.
 
-This module provides a common base class that extracts shared functionality
-from SlabOceanModel, SlabLandModel, and SlabAtmosphereModel to reduce
-code duplication.
+What lives here is what every slab component needs and none of them should own
+a copy of: the grid, the monthly-climatology loader, and the conversion of a
+run's stacked diagnostics into a CF-labelled :class:`xarray.Dataset`.
+
+What deliberately does *not* live here any more is the clock. The coupler owns
+the one clock of a coupled run and hands it to every component as a
+:class:`~jem.base.component.CouplingTime`; a slab model holds no start date, no
+timestep and no calendar, so two components cannot disagree about the date and
+the seasonal cycle survives a chunked or restarted run unbroken.
 """
 
+import dataclasses
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 import jax.numpy as jnp
-import jax_datetime as jdt
 import numpy as np
 import xarray as xr
-from jcm.date import days_per_year as jcm_days_per_year
 
-from jem.components.slab.grid import SlabGrid
-from jem.utils.cycles import evaluate_cyclic_linear
+from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
+from jem.components.slab.grid import SlabGrid, to_degrees
+from jem.utils.time import time_coordinate
 
-_DEFAULT_START_DATETIME = jdt.to_datetime("2001-01-01")
+logger = logging.getLogger(__name__)
+
+#: Temperature (K) reported for cells a component does not integrate -- ocean
+#: temperature over land, land temperature over ocean. It is a fill value for
+#: output and for the masked branch of an update, never a prognostic: nothing
+#: in any slab model reads it back. 288.15 K (15 degC) is what the models have
+#: always used.
+MASKED_SURFACE_TEMPERATURE = 288.15
 
 # Dimension names a monthly climatology file may use, per axis, in the order
 # the loader normalises them to: (longitude, latitude, time).
@@ -37,6 +51,20 @@ _MONTHS_PER_YEAR = 12
 # the ~0.4 degree spacing of the finest grid JEM supports, so a file written
 # on a genuinely different grid is rejected rather than silently regridded.
 _COORDINATE_TOLERANCE_DEGREES = 1e-3
+
+#: CF attributes for the horizontal coordinates, copied from
+#: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
+#: describe their shared axes identically.
+_LONGITUDE_ATTRS = {
+    "standard_name": "longitude",
+    "units": "degrees_east",
+    "long_name": "longitude",
+}
+_LATITUDE_ATTRS = {
+    "standard_name": "latitude",
+    "units": "degrees_north",
+    "long_name": "latitude",
+}
 
 
 def _resolve_dim_name(
@@ -58,29 +86,20 @@ def _resolve_dim_name(
 def _grid_axes_degrees(grid: SlabGrid, path) -> tuple[np.ndarray, np.ndarray]:
     """Return the grid's 1-D (longitude, latitude) axes in degrees.
 
-    A SlabGrid only stores 2-D radian fields, so the 1-D axes a climatology
-    file is written on have to be recovered from them. That is only
-    meaningful for a separable lat-lon grid, which is checked here rather
-    than left to surface later as a confusing coordinate mismatch.
+    Only a separable lat-lon grid has 1-D axes for a climatology file's
+    coordinates to be compared against, which is checked here rather than left
+    to surface later as a confusing coordinate mismatch.
     """
-    longitude = np.rad2deg(np.asarray(grid.longitude_radian, dtype=np.float64))
-    latitude = np.rad2deg(np.asarray(grid.latitude_radian, dtype=np.float64))
-    longitude_axis = longitude[:, 0]
-    latitude_axis = latitude[0, :]
-
-    separable = np.allclose(
-        longitude, longitude_axis[:, None], atol=_COORDINATE_TOLERANCE_DEGREES
-    ) and np.allclose(
-        latitude, latitude_axis[None, :], atol=_COORDINATE_TOLERANCE_DEGREES
-    )
-    if not separable:
+    if not grid.is_separable:
         raise ValueError(
             f"Climatology file \"{path!s:s}\" cannot be matched against this grid: "
             "the grid is curvilinear (longitude/latitude are not separable), so it "
             "has no 1-D longitude/latitude axes to compare the file's coordinates to."
         )
-
-    return longitude_axis, latitude_axis
+    return (
+        to_degrees(grid.longitude_axis_radian),
+        to_degrees(grid.latitude_axis_radian),
+    )
 
 
 def _check_axis_matches(
@@ -114,6 +133,29 @@ def _check_axis_matches(
         )
 
 
+def first_present_variable(path, candidates: tuple[str, ...]) -> str | None:
+    """Return the first of `candidates` present in the netCDF file at `path`.
+
+    Boundary files written by different tools spell the same field differently
+    (jax-gcm writes ``snowc`` and ``soilw_am`` where SPEEDY writes ``snowd``
+    and ``soilw``). Resolving the name *before* loading keeps
+    :func:`load_monthly_climatology` strict -- it still fails loudly on a
+    variable that is genuinely absent -- instead of each component reaching
+    into the dataset itself and losing the grid check.
+
+    Returns
+    -------
+    str or None
+        The first candidate that exists, or None if the file has none of them.
+
+    """
+    with xr.open_dataset(path) as dataset:
+        for candidate in candidates:
+            if candidate in dataset:
+                return candidate
+    return None
+
+
 def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     """Load a monthly climatology field onto the model grid.
 
@@ -124,8 +166,8 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
 
     Lives on the slab base module because every slab component reads its
     boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
-    model grid; the ocean uses it for SST and Q-flux, and the land model's
-    positional loader is scheduled to move onto it (api_hardening_plan T1.4).
+    model grid: the ocean uses it for SST and Q-flux, the land model for its
+    surface temperature, snow and soil water.
 
     Parameters
     ----------
@@ -209,151 +251,137 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     )
 
 
+def end_of_step(time: CouplingTime) -> CouplingTime:
+    """Return the clock as it will read at the *end* of ``time``'s step.
+
+    Several slab models need a boundary condition at both ends of a step (the
+    climatology an anomaly is measured against at the start, and added back to
+    at the end). Deriving the end from the start with the coupler's own type,
+    rather than by adding ``dt`` to a year fraction by hand, keeps one
+    definition of what "one step later" means.
+    """
+    return dataclasses.replace(time, sim_time=time.sim_time + time.dt)
+
+
 class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
 
-    This base class handles:
-    - Storing the model's SlabGrid (fractional_mask, latitude_radian,
-      longitude_radian fully specify it -- there is no separate grid
-      specification)
-    - Time offset calculations for climatology lookup
-    - Common xarray coordinate creation for predictions
+    A subclass is a :class:`~jem.base.component.Component`: it holds its
+    configuration (grid, parameters, boundary data) on ``self`` and its
+    evolving state in the carry it returns from :meth:`initialize` and threads
+    through :meth:`step`. The carry always contains a ``"params"`` entry, so
+    the model's tunables are pytree leaves of the coupled state and
+    ``jax.grad`` with respect to them works through the coupler with no special
+    casing.
 
     Subclasses must implement:
-    - initialize(): Build the initial state/forcing/derived carry
-    - _create_step_function_body(): Implement the physics for each timestep
-    - _create_xarray_data_vars(): Define xarray data variables for output
+
+    - ``initialize()`` -- build the initial carry. Pure with respect to
+      ``self``: boundary data is loaded in ``__init__``, so calling it twice
+      gives the same answer and calling it never mutates the component.
+    - ``step(carry, time)`` -- advance one coupling step.
+    - ``_create_xarray_data_vars(diagnostics)`` -- name the output variables.
+
+    Attributes
+    ----------
+    name : str
+        The component's name in the coupler's workflow and carry.
+    grid : SlabGrid
+        The model's grid.
+
     """
 
+    name: str
     grid: SlabGrid
 
+    def __init__(self, name: str, grid: SlabGrid):
+        """Initialize the shared slab-model state.
 
-    def __init__(
-        self,
-        name: str,
-        grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        timestep: float = 86400.0,
-        calendar: str = "365_day",
-    ):
-        """Initialize slab model base.
-
-        Args:
-            name: Component name (e.g., "SlabOceanModel")
-            grid: The model's grid. See
-                `jem.components.slab.grid.SlabGrid`, and
-                `jem.components.slab.grid.generate_slab_grid` to build one
-                from one of JEM's canonical grid specifications.
-            start_datetime: Simulation start datetime
-            timestep: Model timestep in seconds
+        Parameters
+        ----------
+        name : str
+            Component name, unique within a coupler.
+        grid : SlabGrid
+            The model's grid. Build one with
+            :meth:`~jem.components.slab.grid.SlabGrid.from_coords` (from the
+            atmosphere's horizontal grid) or
+            :meth:`~jem.components.slab.grid.SlabGrid.from_scrip`.
 
         """
         self.name = name
         self.grid = grid
-        self.start_datetime = start_datetime
-        self.timestep = timestep
-        self.calendar = calendar
-        self.days_per_year = jcm_days_per_year(calendar)
-
-    def _compute_start_day_offset(self) -> float:
-        """Seconds from Jan 1 of start year to start_datetime."""
-        ref_year = self.start_datetime.to_pydatetime().year
-        ref_dt = jdt.to_datetime(f"{ref_year:d}-01-01")
-        return float((self.start_datetime - ref_dt) / jdt.to_timedelta(1, "second"))
-
-    def _year_fraction(self, t: float, start_day_offset: float) -> jnp.ndarray:
-        """Return cycle position in [0, 1) for simulation time t.
-
-        Args:
-            t: Simulation time in seconds since start
-            start_day_offset: Seconds from Jan 1 of start year to start_datetime
-
-        """
-        return jnp.mod(
-            (start_day_offset + t) / (86400.0 * self.days_per_year), 1.0
-        )
-
-    def _interpolate_cyclic(
-        self,
-        t: float,
-        start_day_offset: float,
-        data: jnp.ndarray,
-    ) -> jnp.ndarray:
-        """Linearly interpolate cyclic climatology data at simulation time t.
-
-        Records in data (last axis) are assumed equally spaced over one year.
-        Interpolation is continuous and periodic across year boundaries.
-
-        Args:
-            t: Simulation time in seconds since start
-            start_day_offset: Seconds from Jan 1 of start year to start_datetime
-            data: Array of shape (..., n_records)
-
-        Returns:
-            Interpolated array of shape (...)
-
-        """
-        return evaluate_cyclic_linear(self._year_fraction(t, start_day_offset), data)
 
     @abstractmethod
-    def initialize(self):
-        """Initialize the slab model state.
-
-        Returns:
-            Initial component state and forcing
-
-        """
-
-    def generate_step_function(self):
-        """Generate the step function for time integration.
-
-        Returns:
-            Step function with signature (state, forcing, t) -> (new_state, predictions)
-
-        """
-        step_fn = self._create_step_function_body()
-        return step_fn
+    def initialize(self) -> Carry:
+        """Build the initial carry. Must not integrate the model."""
 
     @abstractmethod
-    def _create_step_function_body(self):
-        """Create the uncompiled step function body.
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Advance one coupling timestep, returning the new carry and this step's output."""
 
-        Subclasses implement the physics equations here.
+    def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
+        """Convert a run's stacked diagnostics to a CF-labelled Dataset.
 
-        Returns:
-            Step function with signature (state, forcing, t) -> (new_state, predictions)
+        The coupler stacks each step's diagnostics into a leading time axis
+        before calling this, so every field is ``(time, *grid.dims)``.
+
+        Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
+        a slab dataset from the same run aligns instead of producing an outer
+        join: ``time`` is the absolute ``datetime64[ns]`` axis built by
+        :func:`jem.utils.time.time_coordinate`, and a separable grid writes 1-D
+        ``lon``/``lat`` in degrees with the same values JCM writes for the same
+        coordinate system. A curvilinear grid cannot: it writes 2-D auxiliary
+        ``lat``/``lon`` coordinates over index-space dimensions, and each data
+        variable gets the CF ``coordinates`` attribute that points at them.
+
+        Parameters
+        ----------
+        diagnostics : Diagnostics
+            The stacked per-step output of :meth:`step`.
+        time : jem.base.component.TimeAxis
+            The records' place in the run, from ``Coupler.time_axis``.
+
+        Returns
+        -------
+        xarray.Dataset
 
         """
+        data_vars = self._create_xarray_data_vars(diagnostics)
+        self._check_time_axis_length(data_vars, time)
 
-    def validate(self):
-        """Validate the model configuration."""
+        time_values, time_attrs = time_coordinate(time)
+        coords: dict[str, Any] = {"time": ("time", time_values, time_attrs)}
 
-    def predictions_to_xarray(self, predictions) -> xr.Dataset:
-        """Convert predictions to xarray Dataset.
-
-        Args:
-            predictions: Predictions dict from step function
-
-        Returns:
-            xarray Dataset with model output
-
-        """
-        T_grid_axis_names = self.grid.dims
-        start_datetime_str = self.start_datetime.to_pydatetime().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-
-        coords = {
-            "time": (
-                ["time"],
-                predictions["state"].sim_time / 3600.0,
-                {"units": f"hours since {start_datetime_str:s}"},
-            ),
-            "latitude2D": (T_grid_axis_names, self.grid.latitude_radian * 180 / jnp.pi),
-            "longitude2D": (T_grid_axis_names, self.grid.longitude_radian * 180 / jnp.pi),
-        }
-
-        data_vars = self._create_xarray_data_vars(predictions)
+        grid_dims = self.grid.dims
+        if self.grid.is_separable:
+            coords["lon"] = (
+                "lon",
+                to_degrees(self.grid.longitude_axis_radian),
+                {**_LONGITUDE_ATTRS, "axis": "X"},
+            )
+            coords["lat"] = (
+                "lat",
+                to_degrees(self.grid.latitude_axis_radian),
+                {**_LATITUDE_ATTRS, "axis": "Y"},
+            )
+        else:
+            # CF forbids ``axis`` on an auxiliary coordinate: it marks a true
+            # coordinate variable, and these are 2-D fields over index-space
+            # dimensions.
+            coords["lon"] = (
+                grid_dims,
+                to_degrees(self.grid.longitude_radian),
+                dict(_LONGITUDE_ATTRS),
+            )
+            coords["lat"] = (
+                grid_dims,
+                to_degrees(self.grid.latitude_radian),
+                dict(_LATITUDE_ATTRS),
+            )
+            data_vars = {
+                name: (dims, values, {**attrs, "coordinates": "lat lon"})
+                for name, (dims, values, attrs) in data_vars.items()
+            }
 
         return xr.Dataset(
             data_vars=data_vars,
@@ -361,28 +389,25 @@ class SlabModelBase(ABC):
             attrs=self._create_xarray_global_attributes(),
         )
 
+    def _check_time_axis_length(self, data_vars: dict[str, Any], time: TimeAxis) -> None:
+        """Raise if the diagnostics and the time axis describe different runs.
+
+        Mismatched lengths otherwise surface as an opaque xarray broadcasting
+        error naming a dimension the caller never wrote.
+        """
+        for name, (_dims, values, *_rest) in data_vars.items():
+            n_records = np.shape(values)[0]
+            if n_records != len(time):
+                raise ValueError(
+                    f"{self.name}: output variable \"{name}\" has {n_records:d} time "
+                    f"records but the time axis has {len(time):d}. The diagnostics "
+                    "handed to to_xarray must be the coupler's stacked trajectory."
+                )
+
     @abstractmethod
-    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
-        """Create model-specific xarray data variables.
+    def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
+        """Return the output variables as ``{name: (dims, values, attrs)}``."""
 
-        Args:
-            predictions: Predictions dict from step function
-
-        Returns:
-            Dict of data variables for xarray Dataset
-
-        """
-    
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
-        """Create model-specific xarray Dataset global attributes.
-
-        Returns:
-            Dict of global attributes for xarray Dataset
-
-        """
+        """Return the Dataset's global attributes (empty unless overridden)."""
         return {}
-
-    def get_info(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-        }
