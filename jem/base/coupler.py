@@ -111,6 +111,12 @@ class Coupler:
         one namespace with the components, so a name may not be used twice.
     coupling_timestep : jdt.Timedelta
         The coupled timestep: how far the whole system advances per step.
+        A ``jdt.Timedelta`` holds whole seconds, so the shortest step
+        expressible today is one second -- fine for every geoscience
+        configuration, but a wall for a non-geoscience component (the spring
+        example in ``examples/03_non_geoscience/`` has to be rescaled because
+        of it). Only ``dt_seconds`` is used downstream, so accepting a float
+        number of seconds would lift the limit: jax-esm#110.
     start_date : jdt.Datetime
         Date of coupled step 0.
     calendar : str

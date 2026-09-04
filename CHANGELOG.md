@@ -363,6 +363,12 @@ otherwise**; the code that has to change is named in each one.
 - The ECHAM surface exchange is not implemented: `exchange_fields.echam()`
   raises `NotImplementedError` naming jax-gcm#754. Coupled runs need SPEEDY
   physics until that lands.
+- `coupling_timestep` cannot be shorter than one second: it is a
+  `jax_datetime.Timedelta`, which holds whole seconds, even though only
+  `Coupler.dt_seconds` is used downstream. Immaterial for a geoscience run; the
+  reason the spring example in `examples/03_non_geoscience/` is rescaled from
+  `dt = 0.01 s` to `dt = 1 s`. Tracked as jax-esm#110 and cross-referenced from
+  `Coupler`'s docstring and the notebook.
 
 ## [0.2.0] - release blockers and repository health
 
