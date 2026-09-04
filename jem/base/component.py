@@ -28,8 +28,10 @@ the things it couples. It is deliberately small:
   exchanger may regrid, compute fluxes, convert units or simply copy a field.
   It is the *only* place where one component's carry is read by another.
 
-The design is recorded in ``docs/source/design/api_hardening_plan.md`` (T1.1
-and T1.3) and ``docs/source/design/architecture.md``.
+The design is recorded in ``docs/source/design/architecture.md`` and, for the
+task numbering (T1.1, T1.3), in the API hardening plan, which lives on the
+review branch rather than in this repository:
+https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
 """
 
 from __future__ import annotations

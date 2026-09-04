@@ -21,7 +21,10 @@ run loop. Nothing here logs per step, holds a trajectory or mutates the
 coupler, because all of that would either break under tracing or make the
 returned function impure.
 
-See ``docs/source/design/api_hardening_plan.md`` (T1.1, T1.3, T1.7).
+See ``docs/source/design/architecture.md`` and, for the task numbering
+(T1.1, T1.3, T1.7), the API hardening plan, which lives on the review
+branch rather than in this repository:
+https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
 """
 
 from __future__ import annotations

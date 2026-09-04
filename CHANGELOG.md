@@ -8,11 +8,13 @@ change is listed here.
 
 ## [Unreleased] — v1.0.0a, "the core API contract"
 
-Phase 1 of the API hardening plan. It replaces the duck-typed component
+Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component
 interface with an explicit protocol, moves the clock out of the components and
 into the coupler, makes component parameters differentiable, and settles the
 output conventions. **Every entry below is a breaking change unless it says
 otherwise**; the code that has to change is named in each one.
+
+[plan]: https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
 
 ### Added
 
