@@ -267,6 +267,36 @@ way: the repository root must contain the matching `LICENSE` file, the
 `license` field and classifier in `pyproject.toml` must agree with it, and
 `MANIFEST.in`/`sdist` must include it. One-commit PR.
 
+## Decision log
+
+Decisions taken after this plan was written, in review of the phase PRs.
+They override the text below where they differ.
+
+- **Phase 0 landed as one PR** (#108, merged 2026-09-04) rather than one PR per
+  task; each later phase is also one PR per phase, at the maintainer's
+  request, so a reviewer sees the whole contract change together.
+- **"mapper" → "exchanger"** (#108 review, meteorologytoday; confirmed by the
+  maintainer). "mapper" reads as regridding, whereas the function may regrid,
+  compute fluxes, convert units or copy a field; the defining property is that
+  it is the one place information crosses a component boundary. The agent
+  noun keeps the registry symmetrical with "component": `exchangers=`,
+  `Coupler.add_exchanger`, the `Exchanger` type
+  `Callable[[dict[str, Carry], CouplingTime], dict[str, Carry]]` (an exchanger
+  receives the clock so lagged or ramped coupling needs no state of its own).
+  Applied in Phase 1 (T1.1/T1.3); no aliases for the old names (pre-1.0), the
+  rename is recorded in `CHANGELOG.md`. Wherever T2.x below says
+  `jem/exchange.py`, `default_exchanges` or `Exchange`, read
+  `jem/exchangers.py`, `default_exchangers`, `Exchanger`.
+- **`jem/base/component.py` is written first** (Phase 1 commit 26b7f63) and the
+  coupler, the JCM wrapper and the slab models are built on it in parallel;
+  `CoupledCarry`, `CouplingTime` (with a `year_fraction` property) and
+  `TimeAxis` live there rather than in `coupler.py`.
+- **`evaluate_periodic` is kept** (maintainer request in #108) with a lazy
+  `coordax` import; T0.6's deletion list no longer includes it.
+- **Veros adapter** is converted to the `Component` protocol in Phase 1
+  (with T1.2), not left on the old monkey-patching path, so the experimental
+  Veros examples keep running in the examples CI job.
+
 ## Phase 1 — core API contract
 
 ### T1.1 `Component` protocol; delete `resolve_interface`
