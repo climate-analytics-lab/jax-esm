@@ -8,7 +8,7 @@ import tree_math
 
 from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
-from jem.components.slab.base import SlabModelBase
+from jem.components.slab.base import SlabModelBase, forcing_variable
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_atmosphere_model.params import SlabAtmosphereParameters
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
@@ -199,11 +199,11 @@ class SlabAtmosphereModel(SlabModelBase):
         dims = ("time",) + self.grid.dims
 
         return {
-            "total_heat_flux": (
+            forcing_variable("total_heat_flux"): (
                 dims,
                 forcing.total_heat_flux,
                 {
-                    "long_name": "Total heat flux forcing",
+                    "long_name": "Total heat flux the air column was forced with",
                     "units": "W m-2",
                     "positive": "upward",
                 },

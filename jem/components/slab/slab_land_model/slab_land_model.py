@@ -28,6 +28,7 @@ from jem.components.slab.base import (
     SlabModelBase,
     end_of_step,
     first_present_variable,
+    forcing_variable,
     load_monthly_climatology,
 )
 from jem.components.slab.grid import SlabGrid
@@ -421,11 +422,11 @@ class SlabLandModel(SlabModelBase):
                     "units": "1",
                 },
             ),
-            "total_heat_flux": (
+            forcing_variable("total_heat_flux"): (
                 dims,
                 forcing.total_heat_flux,
                 {
-                    "long_name": "Total heat flux forcing",
+                    "long_name": "Total heat flux the land surface was forced with",
                     "units": "W m-2",
                     "positive": "upward",
                 },

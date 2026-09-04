@@ -13,6 +13,7 @@ from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     end_of_step,
+    forcing_variable,
     load_monthly_climatology,
 )
 from jem.components.slab.grid import SlabGrid
@@ -409,11 +410,15 @@ class SlabOceanModel(SlabModelBase):
                     "units": "m",
                 },
             ),
+            # Not `forcing_total_heat_flux`: this is the flux the mixed
+            # layer was actually cooled by, which is the received flux with
+            # any Q-flux adjustment already folded in -- a quantity this
+            # model computed.
             "total_heat_flux": (
                 dims,
                 derived.effective_total_heat_flux,
                 {
-                    "long_name": "Total heat flux forcing",
+                    "long_name": "Effective heat flux applied to the mixed layer",
                     "units": "W m-2",
                     "positive": "upward",
                 },
@@ -432,11 +437,14 @@ class SlabOceanModel(SlabModelBase):
         }
 
         if self.params.forcing_method == "qflux":
-            data_vars["q_flux"] = (
+            # The prescribed Q-flux climatology evaluated at this step: a
+            # boundary condition the ocean was given, not one it produced,
+            # even though the snapshot is carried in `derived`.
+            data_vars[forcing_variable("q_flux")] = (
                 dims,
                 derived.q_flux_snapshot,
                 {
-                    "long_name": "Q-flux",
+                    "long_name": "Prescribed Q-flux forcing",
                     "units": "W m-2",
                     "positive": "Heating the ocean",
                 },

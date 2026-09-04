@@ -425,6 +425,42 @@ def test_four_slab_components_run_coupled(slab_coupler):
             assert bool(jnp.all(jnp.isfinite(leaf))), name
 
 
+def test_all_four_slab_datasets_merge(slab_coupler):
+    """Every component of a coupled run merges into one dataset.
+
+    Three of these four components are forced with a heat flux and two of them
+    see the ocean's freeze/melt potential, so without a naming convention the
+    same physical name would arrive from several components carrying different
+    values -- coupling is lagged, so a received copy is a step behind the
+    original -- and ``xr.merge`` would refuse the lot. A field a component was
+    *given* is therefore written with the ``forcing_`` prefix, and only the
+    component that produced a field writes it plain.
+    """
+    initial = slab_coupler.initialize()
+    _, diagnostics = slab_coupler.generate_trajectory_function(3)(initial)
+
+    datasets = slab_coupler.to_xarray(diagnostics)
+    assert set(datasets) == {"atm", "ocn", "lnd", "ice"}
+
+    merged = xr.merge(datasets.values(), join="exact", compat="no_conflicts")
+
+    assert merged.sizes["time"] == 3
+    assert (merged.sizes["lon"], merged.sizes["lat"]) == GRID_SHAPE
+    # One variable per component survives under its own name, and the fields
+    # the components received are there too, prefixed.
+    for name in (
+        "mean_air_temperature",
+        "sea_surface_temperature",
+        "land_surface_temperature",
+        "ice_thickness",
+        "internal_total_heat_flux",
+        "total_heat_flux",
+        "forcing_total_heat_flux",
+        "forcing_ice_frazil_melt_energy",
+    ):
+        assert name in merged, name
+
+
 def test_grad_of_sst_wrt_relaxation_time_through_the_coupler(slab_coupler):
     """A slab parameter stays differentiable through a whole coupled run.
 

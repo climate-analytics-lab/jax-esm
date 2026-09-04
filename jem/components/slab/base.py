@@ -61,6 +61,10 @@ _MONTHS_PER_YEAR = 12
 # on a genuinely different grid is rejected rather than silently regridded.
 _COORDINATE_TOLERANCE_DEGREES = 1e-3
 
+#: Prefix on the output name of a field a component was *given*, as opposed to
+#: one it computed. See :func:`forcing_variable`.
+FORCING_VARIABLE_PREFIX = "forcing_"
+
 #: CF attributes for the horizontal coordinates, copied from
 #: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
 #: describe their shared axes identically.
@@ -74,6 +78,36 @@ _LATITUDE_ATTRS = {
     "units": "degrees_north",
     "long_name": "latitude",
 }
+
+
+def forcing_variable(name: str) -> str:
+    """Return the output-variable name for a field the component was forced with.
+
+    A coupled run writes one dataset per component and they are meant to be
+    read -- and merged -- together. A field a component *received* through the
+    coupler is already written, unprefixed, by the component that produced it,
+    so writing the received copy under the same name puts two different
+    variables with one name into the merged dataset: different because coupling
+    is lagged, so the copy is one step behind the original. ``xr.merge`` then
+    refuses the two datasets outright.
+
+    Prefixing the received copy with ``forcing_`` fixes that and says the more
+    accurate thing anyway: ``forcing_total_heat_flux`` in the land model's
+    output is the flux the land was driven with, not a flux the land computed.
+    A component's own state and its derived diagnostics keep their plain names
+    -- they are that component's output, and match what JCM calls them.
+
+    Parameters
+    ----------
+    name : str
+        The physical field's name, as the component that produces it writes it.
+
+    Returns
+    -------
+    str
+
+    """
+    return f"{FORCING_VARIABLE_PREFIX}{name}"
 
 
 def _resolve_dim_name(
@@ -378,6 +412,12 @@ class SlabModelBase(ABC):
 
         The coupler stacks each step's diagnostics into a leading time axis
         before calling this, so every field is ``(time, *grid.dims)``.
+
+        Variables a component was forced with are named with the
+        ``forcing_`` prefix :func:`forcing_variable` applies; its own state and
+        derived diagnostics keep their plain names. That is what lets every
+        component of a coupled run be merged into one dataset without two of
+        them claiming the same variable.
 
         Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
         a slab dataset from the same run aligns instead of producing an outer

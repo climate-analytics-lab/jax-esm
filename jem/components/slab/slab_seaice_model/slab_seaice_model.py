@@ -8,7 +8,11 @@ import tree_math
 
 from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
-from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE, SlabModelBase
+from jem.components.slab.base import (
+    MASKED_SURFACE_TEMPERATURE,
+    SlabModelBase,
+    forcing_variable,
+)
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_seaice_model.params import SlabSeaiceParameters
 
@@ -215,6 +219,7 @@ class SlabSeaiceModel(SlabModelBase):
     def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
         """Create xarray data variables for sea-ice output."""
         state = diagnostics["state"]
+        forcing = diagnostics["forcing"]
         derived = diagnostics["derived"]
         dims = ("time",) + self.grid.dims
 
@@ -235,13 +240,16 @@ class SlabSeaiceModel(SlabModelBase):
                     "units": "K",
                 },
             ),
-            "ice_frazil_melt_energy": (
+            # Written from the forcing, which is where the ocean's
+            # freeze/melt potential arrives; `derived` carries the same array
+            # for an exchanger to route onward.
+            forcing_variable("ice_frazil_melt_energy"): (
                 dims,
-                derived.ice_frazil_melt_energy,
+                forcing.ice_frazil_melt_energy,
                 {
                     "long_name": (
-                        "Freeze/melt potential (frzmlt): positive forms ice, "
-                        "negative melts ice"
+                        "Freeze/melt potential (frzmlt) this component was "
+                        "forced with: positive forms ice, negative melts ice"
                     ),
                     "units": "J m-2",
                 },
