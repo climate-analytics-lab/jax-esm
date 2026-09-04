@@ -8,7 +8,10 @@ What deliberately does *not* live here any more is the clock. The coupler owns
 the one clock of a coupled run and hands it to every component as a
 :class:`~jem.base.component.CouplingTime`; a slab model holds no start date, no
 timestep and no calendar, so two components cannot disagree about the date and
-the seasonal cycle survives a chunked or restarted run unbroken.
+the seasonal cycle survives a chunked or restarted run unbroken. The one thing
+``initialize()`` still needs the date for -- which month of a climatology the
+run starts in -- reaches the model through
+:meth:`SlabModelBase.bind`, which the coupler calls at registration.
 """
 
 import logging
@@ -16,10 +19,17 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 
-from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
+from jem.base.component import (
+    Carry,
+    CouplingTime,
+    Diagnostics,
+    TimeAxis,
+    start_year_fraction,
+)
 from jem.components.slab.grid import SlabGrid, to_degrees
 from jem.utils.time import time_coordinate
 
@@ -308,6 +318,52 @@ class SlabModelBase(ABC):
         """
         self.name = name
         self.grid = grid
+        # Where the run starts in the annual cycle; see `bind` and
+        # `start_year_fraction`. An unbound model reads its climatologies at
+        # 1 January.
+        self._start_year_fraction = 0.0
+
+    def bind(
+        self,
+        *,
+        coupling_timestep: jdt.Timedelta,
+        start_date: jdt.Datetime,
+        calendar: str,
+    ) -> None:
+        """Adopt the coupler's clock (:class:`~jem.base.component.SupportsBind`).
+
+        A slab model has no internal timestep to reconcile -- it advances by
+        exactly the ``dt`` on the :class:`~jem.base.component.CouplingTime` it
+        is handed, so ``coupling_timestep`` is accepted (the coupler passes the
+        same three facts to every bindable component) and not used. What a slab
+        model does need is the *date*: :meth:`initialize` samples monthly
+        climatologies for the initial condition, and it receives no clock,
+        because the clock lives in the carry and the carry does not exist yet.
+
+        Parameters
+        ----------
+        coupling_timestep : jax_datetime.Timedelta
+            The coupled timestep. Unused; see above.
+        start_date : jax_datetime.Datetime
+            The run's start date. Its position in the annual cycle is what
+            :attr:`start_year_fraction` reports.
+        calendar : str
+            The run's calendar, which fixes the length of the year.
+
+        """
+        del coupling_timestep
+        self._start_year_fraction = start_year_fraction(start_date, calendar)
+
+    @property
+    def start_year_fraction(self) -> float:
+        """Position of the run's start date in the annual cycle, in ``[0, 1)``.
+
+        What :meth:`initialize` samples its climatologies at. It is ``0.0``
+        (1 January) for a model that was never registered with a
+        :class:`~jem.base.coupler.Coupler`, which is what a bare
+        ``model.initialize()`` in a test or a notebook gets.
+        """
+        return self._start_year_fraction
 
     @abstractmethod
     def initialize(self) -> Carry:

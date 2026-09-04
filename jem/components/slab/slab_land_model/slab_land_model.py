@@ -247,7 +247,8 @@ class SlabLandModel(SlabModelBase):
         """Build the initial land carry."""
         params = self.params
         land = _land_cells(self.grid, params)
-        cycle_position = params.initial_year_fraction
+        # The month the run starts in; the coupler sets it through `bind`.
+        cycle_position = self.start_year_fraction
 
         surface_temperature = jnp.where(
             land,

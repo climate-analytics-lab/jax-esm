@@ -2,12 +2,15 @@
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 from jax.test_util import check_grads
 
 import jcm.constants as jcm_constants
 from jem import constants
+from jem.base.component import SupportsBind
+from jem.base.coupler import Coupler
 from jem.components.slab.base import load_monthly_climatology
 from jem.components.slab.slab_ocean_model import SlabOceanModel, SlabOceanParameters
 from tests.unit.slab_test_utils import (
@@ -24,10 +27,30 @@ from tests.unit.slab_test_utils import (
 )
 
 
+MONTHLY_SST = 285.0 + 10.0 * np.cos(2 * np.pi * np.arange(12) / 12.0)
+
+
 @pytest.fixture
 def uniform_grid():
     """Return a tiny all-ocean 4x3 lon-lat grid the tests own."""
     return make_grid()
+
+
+def climatology_at(monthly, year_fraction):
+    """Interpolate a 12-month cycle exactly as the model does, in numpy."""
+    position = (year_fraction % 1.0) * 12.0
+    left = int(np.floor(position)) % 12
+    weight = position - np.floor(position)
+    return (1.0 - weight) * monthly[left] + weight * monthly[(left + 1) % 12]
+
+
+def write_seasonal_sst(path, monthly=MONTHLY_SST):
+    """Write a uniform-in-space, month-varying SST climatology and return its path."""
+    seasonal = np.broadcast_to(
+        np.asarray(monthly)[:, None, None],
+        (12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)),
+    )
+    return write_climatology(path, "sst", np.array(seasonal))
 
 
 def test_load_monthly_climatology_is_shared_and_transposes_by_name(tmp_path, uniform_grid):
@@ -252,18 +275,8 @@ def test_state_has_no_clock(tmp_path, uniform_grid):
     """
     assert "sim_time" not in SlabOceanModel(uniform_grid).initialize()["state"].asdict()
 
-    monthly = 285.0 + 10.0 * np.cos(2 * np.pi * np.arange(12) / 12.0)
-    seasonal = np.broadcast_to(
-        monthly[:, None, None], (12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES))
-    )
-    sst_file = write_climatology(tmp_path / "sst.nc", "sst", np.array(seasonal))
-
-    def climatology_at(year_fraction):
-        """Interpolate the monthly cycle exactly as the model does, in numpy."""
-        position = (year_fraction % 1.0) * 12.0
-        left = int(np.floor(position)) % 12
-        weight = position - np.floor(position)
-        return (1.0 - weight) * monthly[left] + weight * monthly[(left + 1) % 12]
+    monthly = MONTHLY_SST
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc", monthly)
 
     relaxation_time = TIMESTEP  # so the damping factor is exactly 1/2
     model = SlabOceanModel(
@@ -279,9 +292,9 @@ def test_state_has_no_clock(tmp_path, uniform_grid):
     for step in (0, 182):
         stepped, _ = model.step(carry, coupling_time(step))
         year_fraction = step * TIMESTEP / (86400.0 * DAYS_PER_YEAR)
-        expected = 0.5 * (initial - climatology_at(year_fraction)) + climatology_at(
-            year_fraction + 1.0 / DAYS_PER_YEAR
-        )
+        expected = 0.5 * (
+            initial - climatology_at(monthly, year_fraction)
+        ) + climatology_at(monthly, year_fraction + 1.0 / DAYS_PER_YEAR)
         np.testing.assert_allclose(
             np.asarray(stepped["state"].sea_surface_temperature),
             expected,
@@ -346,3 +359,51 @@ def test_freeze_melt_energy_uses_jcm_constants(uniform_grid):
     """Nothing in the ocean model shadows a constant jcm.constants already owns."""
     assert not hasattr(constants, "freezing_point_K")
     assert constants.seawater_freezing_point_K < jcm_constants.tmelt
+
+
+def test_bind_sets_the_initial_climatology_month(tmp_path, uniform_grid):
+    """The start date reaches `initialize()` through the coupler, not a parameter.
+
+    `initialize()` is handed no clock -- the clock lives in the carry, which
+    does not exist yet -- so the coupler tells the model where the run starts
+    when it registers it. A January run and a July run of the same model must
+    therefore start from different months of the same climatology.
+    """
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+
+    def initial_sea_surface_temperature(start_date):
+        model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+        assert isinstance(model, SupportsBind)
+        # Constructing the coupler binds every component that can be bound.
+        Coupler(
+            {"ocn": model},
+            coupling_timestep=jdt.to_timedelta(1, "day"),
+            start_date=jdt.to_datetime(start_date),
+            calendar="365_day",
+        )
+        state = model.initialize()["state"]
+        return float(np.asarray(state.sea_surface_temperature)[0, 0])
+
+    january = initial_sea_surface_temperature("2001-01-01")
+    july = initial_sea_surface_temperature("2001-07-01")
+
+    # 1 July is 181 days into a 365-day year.
+    assert january == pytest.approx(climatology_at(MONTHLY_SST, 0.0), rel=1e-6)
+    assert july == pytest.approx(
+        climatology_at(MONTHLY_SST, 181.0 / DAYS_PER_YEAR), rel=1e-6
+    )
+    # The two months of this climatology are 20 K apart at the extremes; the
+    # point of the test is that they are not the same number.
+    assert abs(july - january) > 1.0
+
+
+def test_unbound_model_starts_in_january(tmp_path, uniform_grid):
+    """A model never registered with a coupler reads its climatology at 1 January."""
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    assert model.start_year_fraction == 0.0
+    state = model.initialize()["state"]
+    assert float(np.asarray(state.sea_surface_temperature)[0, 0]) == pytest.approx(
+        climatology_at(MONTHLY_SST, 0.0), rel=1e-6
+    )

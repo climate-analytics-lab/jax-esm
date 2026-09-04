@@ -2,11 +2,13 @@
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 import xarray as xr
 from jax.test_util import check_grads
 
+from jem.base.coupler import Coupler
 from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE
 from jem.components.slab.slab_land_model import SlabLandModel, SlabLandParameters
 from tests.unit.slab_test_utils import (
@@ -269,3 +271,35 @@ def test_depths_are_differentiable(half_land_grid):
     gradient = jax.grad(mean_temperature)(jnp.float32(1.0))
     assert bool(jnp.isfinite(gradient))
     assert abs(float(gradient)) > 0.0
+
+
+def test_bind_sets_the_initial_climatology_month(half_land_grid):
+    """The start date reaches `initialize()` through the coupler, not a parameter.
+
+    The idealised land climatology peaks in March, so a January start and a
+    July start must produce different initial land temperatures over land.
+    """
+
+    def initial_land_temperature(start_date):
+        model = SlabLandModel(half_land_grid)
+        Coupler(
+            {"lnd": model},
+            coupling_timestep=jdt.to_timedelta(1, "day"),
+            start_date=jdt.to_datetime(start_date),
+            calendar="365_day",
+        )
+        assert model.start_year_fraction == pytest.approx(
+            0.0 if start_date.endswith("01-01") else 181.0 / DAYS_PER_YEAR
+        )
+        land = np.asarray(half_land_grid.fractional_mask) > 0.0
+        temperature = np.asarray(
+            model.initialize()["state"].land_surface_temperature
+        )
+        return temperature[land]
+
+    january = initial_land_temperature("2001-01-01")
+    july = initial_land_temperature("2001-07-01")
+
+    # Poleward cells carry the whole seasonal amplitude; the equator none, so
+    # compare the largest difference rather than every cell.
+    assert np.max(np.abs(july - january)) > 1.0

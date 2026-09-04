@@ -118,7 +118,9 @@ class SlabOceanModel(SlabModelBase):
     Initial condition
     -----------------
     With an SST climatology, the initial SST is that climatology sampled at
-    ``params.initial_year_fraction``. Without one it is an idealized profile,
+    the month the run starts in (:attr:`SlabModelBase.start_year_fraction`,
+    which the coupler sets through ``bind``). Without one it is an idealized
+    profile,
     ``params.initial_sst`` at the poles rising by
     :data:`IDEALIZED_SST_RANGE` towards the equator. ``initial_sst`` is what
     the constructor has always accepted (as
@@ -259,7 +261,7 @@ class SlabOceanModel(SlabModelBase):
 
         if self.sst_climatology is not None:
             sea_surface_temperature = evaluate_cyclic_linear(
-                params.initial_year_fraction, self.sst_climatology
+                self.start_year_fraction, self.sst_climatology
             )
         else:
             sea_surface_temperature = params.initial_sst + IDEALIZED_SST_RANGE * (

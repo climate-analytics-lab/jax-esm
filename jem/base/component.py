@@ -45,6 +45,7 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 from flax import struct
+from jcm.date import days_per_year as jcm_days_per_year
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -60,6 +61,55 @@ SECONDS_PER_DAY = 86400.0
 #: Nanoseconds in a day, as a float64 -- the exact factor JCM multiplies its
 #: float64 day counts by when it builds a ``datetime64[ns]`` time axis.
 NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
+
+
+def seconds_since_new_year(start_date: jdt.Datetime) -> float:
+    """Return the seconds from 1 January of ``start_date``'s year to ``start_date``.
+
+    This offset is what turns simulation time (seconds since the start of the
+    run) into a position in the annual cycle, so a run that starts in July
+    reads the July record of a monthly climatology on its first step. The
+    coupler puts it on every :class:`CouplingTime` as ``year_offset_seconds``.
+
+    The subtraction uses ``jax_datetime``'s proleptic-Gregorian arithmetic
+    while the annual cycle is closed with the *model* calendar's
+    ``days_per_year`` (see :func:`start_year_fraction`). The two disagree by
+    one day for a start date after 29 February of a leap year under a
+    ``365_day`` calendar. That is inherent in describing a real start date on
+    an idealised calendar; it is left visible here rather than hidden by a
+    second, home-made calendar.
+    """
+    year = start_date.to_pydatetime().year
+    new_year = jdt.to_datetime(f"{year:d}-01-01")
+    return float((start_date - new_year) / jdt.to_timedelta(1, "second"))
+
+
+def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
+    """Return the position of ``start_date`` in the annual cycle, in ``[0, 1)``.
+
+    Zero is 00:00 on 1 January. This is the same quantity
+    :attr:`CouplingTime.year_fraction` reports at step 0, computed from the
+    same two facts (the offset into the year and the calendar's year length),
+    so a component that samples a climatology in ``initialize()`` and one that
+    samples it in ``step()`` cannot disagree about where the run starts.
+
+    Parameters
+    ----------
+    start_date : jax_datetime.Datetime
+        The run's start date.
+    calendar : str
+        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
+
+    Returns
+    -------
+    float
+
+    """
+    seconds_per_year = SECONDS_PER_DAY * float(jcm_days_per_year(calendar))
+    # The modulo matters for the leap-day case documented on
+    # `seconds_since_new_year`: 31 December of a Gregorian leap year is a full
+    # 365 days into a "365_day" year, which would otherwise report 1.0.
+    return (seconds_since_new_year(start_date) / seconds_per_year) % 1.0
 
 
 def _timedelta_days(delta: Any) -> float:

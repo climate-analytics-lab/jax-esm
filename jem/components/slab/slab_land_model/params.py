@@ -49,11 +49,6 @@ class SlabLandParameters:
         Surface albedo used when no albedo field is passed to the model. The
         default, 0.2, is below ``land_ice_albedo_threshold`` everywhere, so a
         model built without an albedo field is all soil.
-    initial_year_fraction : jnp.ndarray
-        Position in the annual cycle, in [0, 1), at which the climatologies are
-        sampled for the initial condition. The coupler owns the clock and
-        ``initialize()`` receives no date, so a run that starts on 1 July sets
-        this to 0.5 rather than expecting the component to know.
 
     """
 
@@ -67,7 +62,6 @@ class SlabLandParameters:
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
     land_ice_albedo_threshold: float | jnp.ndarray = 0.4
     surface_albedo: float | jnp.ndarray = 0.2
-    initial_year_fraction: float | jnp.ndarray = 0.0
 
     @classmethod
     def default(cls) -> "SlabLandParameters":

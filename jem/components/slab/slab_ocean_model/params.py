@@ -30,11 +30,6 @@ class SlabOceanParameters:
         Sea-surface temperature (K) the ocean starts from where no SST
         climatology is given -- the base of the idealized profile described in
         :class:`SlabOceanModel`.
-    initial_year_fraction : jnp.ndarray
-        Position in the annual cycle, in [0, 1), at which the SST climatology
-        is sampled for the initial condition. The coupler owns the clock and
-        ``initialize()`` receives no date, so a run that starts on 1 July sets
-        this to 0.5 rather than expecting the component to know.
     forcing_method : str
         One of ``"none"``, ``"qflux"`` or ``"relaxation"``; static.
     ocean_mask_value : float
@@ -48,7 +43,6 @@ class SlabOceanParameters:
     mixed_layer_depth_min: float | jnp.ndarray = 40.0
     mixed_layer_depth_max: float | jnp.ndarray = 60.0
     initial_sst: float | jnp.ndarray = 288.15
-    initial_year_fraction: float | jnp.ndarray = 0.0
     forcing_method: str = struct.field(pytree_node=False, default="none")
     ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
 

@@ -48,6 +48,7 @@ from jem.base.component import (
     SupportsBind,
     SupportsXarray,
     TimeAxis,
+    seconds_since_new_year,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,25 +60,6 @@ logger = logging.getLogger(__name__)
 _REQUIRED_COMPONENT_ATTRIBUTES = ("name", "initialize", "step")
 
 _SECONDS_PER_DAY = 86400.0
-
-
-def _seconds_since_new_year(start_date: jdt.Datetime) -> float:
-    """Return the seconds from 1 January of ``start_date``'s year to ``start_date``.
-
-    This offset is what turns simulation time (seconds since the start of the
-    run) into a position in the annual cycle, so a run that starts in July
-    reads the July record of a monthly climatology on its first step.
-
-    The subtraction uses ``jax_datetime``'s proleptic-Gregorian arithmetic
-    while the annual cycle is closed with the *model* calendar's
-    ``days_per_year``. The two disagree by one day for a start date after
-    29 February of a leap year under a ``365_day`` calendar. That is inherent
-    in describing a real start date on an idealised calendar; it is left
-    visible here rather than hidden by a second, home-made calendar.
-    """
-    year = start_date.to_pydatetime().year
-    new_year = jdt.to_datetime(f"{year:d}-01-01")
-    return float((start_date - new_year) / jdt.to_timedelta(1, "second"))
 
 
 def _missing_component_attributes(component: Any) -> list[str]:
@@ -168,7 +150,7 @@ class Coupler:
         # CouplingTime is built from, and recomputing them per step would put
         # calendar arithmetic inside a traced function.
         self._dt_seconds = float(coupling_timestep / jdt.to_timedelta(1, "second"))
-        self._year_offset_seconds = _seconds_since_new_year(start_date)
+        self._year_offset_seconds = seconds_since_new_year(start_date)
         self._days_per_year = float(jcm_days_per_year(calendar))
 
         for name, exchanger in (exchangers or {}).items():
