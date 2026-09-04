@@ -130,3 +130,21 @@ def test_the_step_file_holds_a_plain_numpy_scalar(tmp_path):
 
     assert isinstance(step, np.ndarray)
     assert int(step) == 11
+
+
+def test_a_failed_overwrite_leaves_no_completion_marker(tmp_path):
+    """Overwriting a checkpoint removes the step file first, so a partial write is refused."""
+    save_coupled_carry(toy_coupled_carry(step=3), tmp_path)
+    assert (tmp_path / COUPLED_STEP_FILENAME).exists()
+
+    def failing_saver(carry, directory):
+        del carry, directory
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        save_coupled_carry(
+            toy_coupled_carry(step=4), tmp_path, component_savers={"lnd": failing_saver}
+        )
+    assert not (tmp_path / COUPLED_STEP_FILENAME).exists()
+    with pytest.raises(ValueError, match=COUPLED_STEP_FILENAME):
+        load_coupled_carry(tmp_path, ["ocn", "lnd"])

@@ -516,3 +516,14 @@ def test_step_function_snapshots_the_model():
 
     _, diagnostics = step(carry)
     assert set(diagnostics) == {"source", "sink"}
+
+
+@pytest.mark.parametrize("seconds", [0, -86400])
+def test_non_positive_coupling_timestep_is_rejected(seconds):
+    """A slab-only coupler has no component that would refuse a zero or negative step."""
+    with pytest.raises(ValueError, match="coupling_timestep must be positive"):
+        Coupler(
+            {"source": SourceComponent()},
+            coupling_timestep=jdt.to_timedelta(seconds, "second"),
+            start_date=START_DATE,
+        )

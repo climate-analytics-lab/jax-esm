@@ -159,6 +159,16 @@ class Coupler:
         # CouplingTime is built from, and recomputing them per step would put
         # calendar arithmetic inside a traced function.
         self._dt_seconds = float(coupling_timestep / jdt.to_timedelta(1, "second"))
+        # Only components with an internal timestep (JCM, Veros) check the
+        # coupling timestep in `bind`; a slab-only coupler would otherwise
+        # accept zero (year_fraction divides by dt; every record gets the
+        # same timestamp) or a negative value (slab physics integrated
+        # backwards) without complaint.
+        if not self._dt_seconds > 0.0:
+            raise ValueError(
+                f"coupling_timestep must be positive; got {coupling_timestep!r} "
+                f"({self._dt_seconds:g} s)."
+            )
         self._year_offset_seconds = seconds_since_new_year(start_date)
         self._days_per_year = float(jcm_days_per_year(calendar))
 
@@ -206,18 +216,20 @@ class Coupler:
                 f"The name {name!r} is already used by an exchanger; components and "
                 "exchangers share one namespace."
             )
-        self.components[name] = component
-
         # Components with an internal timestep (JCM, Veros) need the coupling
         # timestep and must agree with the coupler about the start date and
         # calendar. Binding here rather than only in `__init__` means a
-        # component added later is bound too.
+        # component added later is bound too; binding BEFORE registering
+        # means a component that rejects the clock never enters the coupler,
+        # so a caller that catches the ValueError keeps a usable coupler and
+        # a previously valid component under the same name is not replaced.
         if isinstance(component, SupportsBind):
             component.bind(
                 coupling_timestep=self._coupling_timestep,
                 start_date=self._start_date,
                 calendar=self._calendar,
             )
+        self.components[name] = component
 
     def remove_component(self, name: str) -> None:
         """Remove the component registered under ``name`` if there is one."""

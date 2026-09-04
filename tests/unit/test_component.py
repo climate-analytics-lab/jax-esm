@@ -219,3 +219,29 @@ def test_time_coordinate_delegates_to_the_time_axis():
     assert attrs == axis.attrs
     # A fresh dict each call: xarray keeps what it is handed.
     assert attrs is not axis.attrs
+
+
+class ComponentRejectingClock(MinimalComponent):
+    """A component whose ``bind`` refuses every clock, as JCM does on a mismatch."""
+
+    def bind(self, *, coupling_timestep, start_date, calendar):
+        del coupling_timestep, start_date, calendar
+        raise ValueError("clock rejected")
+
+
+def test_a_component_that_rejects_the_clock_is_not_registered():
+    """A failed bind leaves the coupler as it was, including an earlier component of that name."""
+    from jem.base.coupler import Coupler
+
+    good = ComponentWithBind(name="ocn")
+    coupler = Coupler(
+        {"ocn": good},
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=jdt.to_datetime("2001-01-01"),
+    )
+    with pytest.raises(ValueError, match="clock rejected"):
+        coupler.add_component("ocn", ComponentRejectingClock(name="ocn"))
+    assert coupler.components["ocn"] is good
+    with pytest.raises(ValueError, match="clock rejected"):
+        coupler.add_component("ice", ComponentRejectingClock(name="ice"))
+    assert "ice" not in coupler.components

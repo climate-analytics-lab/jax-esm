@@ -132,12 +132,17 @@ def save_coupled_carry(
 
     """
     checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    step_file = checkpoint_dir / COUPLED_STEP_FILENAME
+    # The step file is the completion marker: `load_coupled_carry` refuses a
+    # directory without it. It is removed first and written last, so that a
+    # failure part-way through overwriting an existing checkpoint leaves a
+    # directory that is refused, rather than one whose stale marker would
+    # silently combine component carries from two different steps.
+    step_file.unlink(missing_ok=True)
     save_component_carries(
         coupled_carry.components, checkpoint_dir, component_savers)
-    # Written last, so a directory that has the step file is known to have the
-    # component carries too: `load_coupled_carry` refuses a checkpoint without
-    # it, which therefore also rejects a half-written one.
-    with open(checkpoint_dir / COUPLED_STEP_FILENAME, "wb") as f:
+    with open(step_file, "wb") as f:
         pickle.dump(np.asarray(coupled_carry.step), f)
 
 
