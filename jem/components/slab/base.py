@@ -11,7 +11,6 @@ timestep and no calendar, so two components cannot disagree about the date and
 the seasonal cycle survives a chunked or restarted run unbroken.
 """
 
-import dataclasses
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
@@ -256,11 +255,10 @@ def end_of_step(time: CouplingTime) -> CouplingTime:
 
     Several slab models need a boundary condition at both ends of a step (the
     climatology an anomaly is measured against at the start, and added back to
-    at the end). Deriving the end from the start with the coupler's own type,
-    rather than by adding ``dt`` to a year fraction by hand, keeps one
-    definition of what "one step later" means.
+    at the end). ``CouplingTime.end_of_step`` is the one definition of what
+    "one step later" means; this alias keeps the slab call sites short.
     """
-    return dataclasses.replace(time, sim_time=time.sim_time + time.dt)
+    return time.end_of_step()
 
 
 class SlabModelBase(ABC):

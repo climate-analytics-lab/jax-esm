@@ -86,6 +86,21 @@ class CouplingTime:
     year_offset_seconds: float = struct.field(pytree_node=False)
     days_per_year: float = struct.field(pytree_node=False)
 
+    def end_of_step(self) -> "CouplingTime":
+        """Return the clock as it reads at the end of this step (one step later).
+
+        Both ``step`` and ``sim_time`` advance together; a component that
+        needs a boundary condition at both ends of a step (the slab models
+        measure an anomaly against the climatology at the start and add it
+        back at the end) must use this rather than adding ``dt`` to
+        ``sim_time`` by hand, because :attr:`year_fraction` is computed from
+        ``step`` whenever the step divides the year.
+        """
+        advanced: CouplingTime = self.replace(  # type: ignore[attr-defined]
+            step=self.step + 1, sim_time=self.sim_time + self.dt
+        )
+        return advanced
+
     @property
     def seconds_per_year(self) -> float:
         """Length of the model year in seconds."""
