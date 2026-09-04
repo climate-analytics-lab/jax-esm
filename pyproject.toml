@@ -41,10 +41,6 @@ dependencies = [
     "flax",
     "hydra-core",
     "omegaconf",
-    # Still required: `jem/base/typing.py` decorates the component protocols
-    # with `typeguard.typechecked`. Phase 1 (T1.1) replaces that protocol and
-    # drops this dependency.
-    "typeguard",
 ]
 
 [project.optional-dependencies]

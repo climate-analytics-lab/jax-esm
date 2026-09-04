@@ -1,522 +1,518 @@
-"""Tests for base/coupler.py
-==========================
-Covers:
-  - adhoc_scan (empty, single, multi-step, dict carry)
-  - generate_scan_function (selector logic)
-  - Coupler construction, add/remove component & mapper
-  - Coupler.initialize delegation
-  - _verify_name_uniqueness (happy + collision)
-  - _verify_workflow (happy + every error branch)
-  - generate_step_function end-to-end (unjitted)
-  - generate_trajectory_function end-to-end (unjitted)
-  - predictions_to_xarray delegation
-  - get_info (including dead-code regression + empty-mapper edge case)
+"""Tests for ``jem.base.coupler``.
 
-Everything runs against the real dependencies; nothing is stubbed.
+Everything here runs on toy components defined in this module: a source whose
+value counts up, a sink that accumulates what it is given, and a clock
+watcher that reports the ``CouplingTime`` it saw. They make the coupler's own
+behaviour - the clock, the workflow order, the immutability of the carry, the
+scan and the output plumbing - visible in exact integers, which a real slab
+or atmosphere component would bury under physics.
+
+The exchanger here rebuilds the dicts it is handed rather than assigning into
+them, which is what every exchanger must do: the coupler hands out the carries
+of a `lax.scan` and cannot tolerate them being written to in place.
 """
 
-from unittest.mock import MagicMock
-import pytest
-
 import jax
+import jax.numpy as jnp
+import jax_datetime as jdt
+import numpy as np
+import pytest
+import xarray as xr
 
-from jem.base.coupler import adhoc_scan, generate_scan_function, Coupler
+from jem.base.component import CoupledCarry, TimeAxis
+from jem.base.coupler import Coupler
 
+DAY = 86400.0
+COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
+START_DATE = jdt.to_datetime("2001-01-01")
 
-# ===========================================================================
-# 2.  TEST HELPERS
-# ===========================================================================
 
-def _make_raw_component(name="comp"):
-    """Return a concrete class instance whose attributes satisfy
-    resolve_interface against JEMComponent.  All Callable fields have the
-    exact parameter counts the type-hints require.
-    """
-    init_carry = {
-        "state" : {"value": 0.0},
-        "forcing" : {"flux": 1.0},
-    }
+# ---------------------------------------------------------------------------
+# Toy components and exchangers
+# ---------------------------------------------------------------------------
 
-    class _Raw:
-        # non-Callable members (Any-typed in JEMComponent, so any value is fine)
 
-        # Callable members — param counts must match the type aliases in typing.py:
-        #   InitializeFunction        = Callable[[], ...]                -> 0 params
-        #   StepFunctionGenerator     = Callable[[JittableFlag], ...]    -> 1 param
-        #   HistoryToXarray           = Callable[[History], ...]         -> 1 param
-        #   GetInfoFunction           = Callable[[], ...]                -> 0 params
+class SourceComponent:
+    """Counts up by one per coupled step; the thing the sink is coupled to."""
 
-        @staticmethod
-        def initialize():                                   # 0 params
-            return init_carry
+    def __init__(self, name="source"):
+        """Name the component."""
+        self.name = name
 
-        @staticmethod
-        def generate_step_function():                       # 0 params
-            def _step(c, t):
-                c["state"]["value"] += 1
-                return c, dict(state=c["state"], forcing=c["forcing"])
-            return _step
+    def initialize(self):
+        return {"value": jnp.float32(0.0)}
 
-        @staticmethod
-        def predictions_to_xarray(history):                 # 1 param
-            return {"ds_" + name: history}
+    def step(self, carry, time):
+        del time
+        new_carry = {"value": carry["value"] + 1.0}
+        return new_carry, {"value": new_carry["value"]}
 
-        @staticmethod
-        def get_info():                                     # 0 params
-            return {"name": name}
 
-    return _Raw()
+class SinkComponent:
+    """Accumulates whatever an exchanger has put in ``received``."""
 
+    def __init__(self, name="sink"):
+        """Name the component."""
+        self.name = name
 
-def _make_raw_mapper():
+    def initialize(self):
+        return {"received": jnp.float32(0.0), "total": jnp.float32(0.0)}
 
-    def mapper(coupled_carry):
-        return coupled_carry
+    def step(self, carry, time):
+        del time
+        new_carry = dict(carry, total=carry["total"] + carry["received"])
+        return new_carry, {"received": carry["received"], "total": new_carry["total"]}
 
-    return mapper
 
-def _build_coupler(comp_names=("comp_a", "comp_b"), mappers=("fm",)):
-    """Build a Coupler with the given components and forcing mappers."""
-    components = {n: _make_raw_component(name=n) for n in comp_names}
-    mapper_dict = {n: _make_raw_mapper() for n in mappers}
-    return Coupler(components=components, mappers=mapper_dict)
+class ClockWatcher:
+    """Reports the clock it was handed, so tests can see what a component sees."""
 
+    def __init__(self, name="clock"):
+        """Name the component."""
+        self.name = name
 
-# ===========================================================================
-# 3.  adhoc_scan
-# ===========================================================================
+    def initialize(self):
+        return {"sim_time": jnp.float32(0.0)}
 
-class TestAdhocScan:
-
-    def test_accumulates_carry_and_collects_outputs(self):
-        def f(carry, x):
-            x_new = carry + x
-            return x_new, x_new ** 2
-
-        final, ys = adhoc_scan(f, 0, [1, 2, 3])
-        assert final == 6          # 0+1+2+3
-        assert list(ys) == [1, 9, 36]     # each x*2
-
-    def test_empty_xs_returns_init_and_empty_stack(self):
-        def f(carry, x):
-            return carry + x, x
-
-        final, ys = adhoc_scan(f, 99, [])
-        assert final == 99
-        assert list(ys) == []
-
-    def test_single_step(self):
-        def f(carry, x):
-            return carry * x, carry
-
-        final, ys = adhoc_scan(f, 5, [3])
-        assert final == 15
-        assert list(ys) == [5]           # single non-dict output stays as list
-
-    def test_dict_carry_mutated_across_steps(self):
-        def f(carry, x):
-            carry["acc"] += x
-            return carry, {"step": x}
-
-        final, ys = adhoc_scan(f, {"acc": 0}, [10, 20, 30])
-        assert final == {"acc": 60}
-        # stack_objects transposes list-of-dicts
-        assert "step" in ys
-        assert list(ys["step"]) == [10, 20, 30]
-
-    def test_dict_outputs_are_transposed(self):
-        def f(carry, x):
-            return carry, {"val": x, "sq": x * x}
-
-        _, ys = adhoc_scan(f, 0, [2, 3, 4])
-        print(ys)
-        assert "val" in ys
-        assert list(ys["val"]) == [2, 3, 4]
-        assert "sq" in ys
-        assert list(ys["sq"]) == [4, 9, 16]
-
-
-# ===========================================================================
-# 4.  generate_scan_function
-# ===========================================================================
-
-class TestGenerateScanFunction:
-
-    def test_jitted_true_returns_lax_scan(self):
-        assert generate_scan_function(jitted=True) is jax.lax.scan
-
-    def test_jitted_false_returns_adhoc_scan(self):
-        assert generate_scan_function(jitted=False) is adhoc_scan
-
-
-# ===========================================================================
-# 5.  Coupler construction & add/remove
-# ===========================================================================
-
-class TestCouplerConstruction:
-
-    def test_empty_coupler(self):
-        c = Coupler()
-        assert c.components == {}
-        assert c.mappers == {}
-
-    def test_none_arguments_default_to_empty(self):
-        c = Coupler(components=None, mappers=None)
-        assert c.components == {}
-        assert c.mappers == {}
-
-    def test_components_registered_on_init(self):
-        raw = _make_raw_component("atm")
-        c = Coupler(components={"atm": raw})
-        assert "atm" in c.components
-        # The stored object is a JEMComponent wrapper, not the raw object
-        assert hasattr(c.components["atm"], "name")
-        assert c.components["atm"].name == "atm"
-
-    def test_mappers_registered_on_init(self):
-        raw_c = _make_raw_component("a")
-        raw_fm = _make_raw_mapper()
-        c = Coupler(
-            components={"a": raw_c},
-            mappers={"fm": raw_fm},
-        )
-        assert "fm" in c.mappers
-
-
-class TestAddRemoveComponent:
-
-    def test_add_component_after_construction(self):
-        c = Coupler()
-        raw = _make_raw_component("ocean")
-        c.add_component("ocean", raw)
-        assert "ocean" in c.components
-
-    def test_remove_existing_component(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=())
-        c.remove_component("a")
-        assert "a" not in c.components
-        assert "b" in c.components
-
-    def test_remove_nonexistent_component_is_noop(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        c.remove_component("ghost")          # should not raise
-        assert "a" in c.components
-
-    def test_add_overwrites_existing_component(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        new_raw = _make_raw_component("a")
-        c.add_component("a", new_raw)
-        assert c.components["a"].raw_component is new_raw
-
-
-class TestAddRemoveForcingMapper:
-
-    def test_add_mapper_after_construction(self):
-        c = _build_coupler(comp_names=("x", "y"), mappers=())
-        raw_fm = _make_raw_mapper()
-        c.add_mapper("coupler_xy", raw_fm)
-        assert "coupler_xy" in c.mappers
-
-    def test_remove_existing_mapper(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=("fm",))
-        c.remove_mapper("fm")
-        assert "fm" not in c.mappers
-
-    def test_remove_nonexistent_mapper_is_noop(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        c.remove_mapper("ghost")     # should not raise
-        assert c.mappers == {}
-
-
-# ===========================================================================
-# 6.  Coupler.initialize
-# ===========================================================================
-
-class TestCouplerInitialize:
-
-    def test_returns_state_forcing_tuple_per_component(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=())
-        result = c.initialize()
-        assert set(result.keys()) == {"a", "b"}
-        for name in ("a", "b"):
-            assert isinstance(result, dict)
-            assert {"state", "forcing"} == set(result[name].keys())
-            assert isinstance(result[name]["state"], dict)
-            assert isinstance(result[name]["forcing"], dict)
-
-    def test_empty_coupler_initialize_returns_empty(self):
-        c = Coupler()
-        assert c.initialize() == {}
-
-
-# ===========================================================================
-# 7.  _verify_name_uniqueness
-# ===========================================================================
-
-class TestVerifyNameUniqueness:
-
-    def test_unique_names_pass(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=(("fm", ("a", "b")),))
-        c._verify_name_uniqueness()   # should not raise
-
-    def test_collision_between_component_and_mapper_raises(self):
-        """A component and a forcing mapper share the same name."""
-        c = _build_coupler(comp_names=("a", "b"), mappers=())
-        # Manually inject a mapper with the same key as component "a"
-        c.mappers["a"] = MagicMock()
-        with pytest.raises(Exception, match="not unique"):
-            c._verify_name_uniqueness()
-
-    def test_empty_coupler_passes(self):
-        Coupler()._verify_name_uniqueness()   # no names at all
-
-
-# ===========================================================================
-# 8.  _verify_workflow
-# ===========================================================================
-
-class TestVerifyWorkflow:
-
-    def test_valid_workflow_passes(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=("fm",))
-        c._verify_workflow(["a", "fm", "b"])   # all names exist
-
-    def test_unknown_action_raises_valueerror(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        with pytest.raises(ValueError, match="does not map"):
-            c._verify_workflow(["a", "unknown"])
-
-    def test_non_string_action_raises_typeerror(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        # jax.tree.flatten is stubbed to just list(), so [123] flattens to [123]
-        with pytest.raises(TypeError, match="have to be strings"):
-            c._verify_workflow([123])
-
-    def test_empty_workflow_passes(self):
-        c = _build_coupler(comp_names=("a",), mappers=())
-        c._verify_workflow([])   # nothing to validate
-
-
-# ===========================================================================
-# 9.  generate_step_function  (unjitted, end-to-end)
-# ===========================================================================
-
-class TestGenerateStepFunction:
-
-    def _make_coupler(self):
-        """Two components, one identity forcing mapper between them."""
-        c = _build_coupler(
-            comp_names=("atm", "ocean"),
-            mappers=("fm",),
-        )
-        return c
-
-    def test_returns_callable(self):
-        c = self._make_coupler()
-        step_fn = c.generate_step_function(
-            workflow=["atm", "fm", "ocean"],
-            jitted=False,
-            verbose=False
-        )
-        assert callable(step_fn)
-
-    def test_step_function_returns_updated_carry_and_predictions(self):
-        c = self._make_coupler()
-        carry = c.initialize()
-        step_fn = c.generate_step_function(
-            workflow=["atm", "fm", "ocean"], jitted=False, verbose=False
-        )
-        final_carry, preds = step_fn(carry, 0)
-
-        # carry structure preserved
-        for comp_name in ["atm", "ocean"]:
-            assert comp_name in final_carry
-            for check_key in ["state", "forcing"]:
-                assert check_key in final_carry[comp_name]
-
-        # predictions keyed by component name
-        assert set(preds.keys()) == {"atm", "ocean"}
-
-    def test_predictions_accumulate_per_component_appearance(self):
-        """If a component appears twice in the workflow its predictions are
-        collected into a list per output key (via stack_objects transpose).
-        E.g. two appearances each yielding {"out": 42.0} become {"out": [42.0, 42.0]}.
-        """
-        c = self._make_coupler()
-        carry = c.initialize()
-        # atm appears twice
-        step_fn = c.generate_step_function(
-            workflow=["atm", "atm", "ocean"], jitted=False, verbose=False
-        )
-        _, preds = step_fn(carry, 0)
-        # stack_objects transposes [{"out":42}, {"out":42}] -> {"out":[42,42]}
-        # so each value list has length 2 (one entry per appearance)
-        assert len(preds["atm"]["state"]["value"]) == 2
-
-    def test_component_only_workflow(self):
-        """Workflow with no forcing mapper — just components in sequence."""
-        c = _build_coupler(comp_names=("a", "b"), mappers=())
-        init_carry  = c.initialize()
-        step_fn = c.generate_step_function(
-            workflow=["a", "b"], jitted=False, verbose=False
-        )
-        new_carry, preds = step_fn(init_carry, 0)
-        assert set(preds.keys()) == {"a", "b"}
-
-# ===========================================================================
-# 10.  generate_trajectory_function  (unjitted, end-to-end)
-# ===========================================================================
-
-class TestGenerateTrajectoryFunction:
-
-    def _setup(self):
-        c = _build_coupler(
-            comp_names=("atm", "ocean"),
-            mappers=("fm",),
-        )
-        workflow = ["atm", "fm", "ocean"]
-        traj_fn  = c.generate_trajectory_function(
-            workflow=workflow,
-            iterations=3,
-            jitted=False,
-            show_progress=False,
-        )
-        init = c.initialize()   # {name: (state, forcing)}
-        return traj_fn, init
-
-    def test_returns_final_state_and_predictions(self):
-        traj_fn, init = self._setup()
-        final_carry, preds = traj_fn(init)
-
-        for comp_name in ["atm", "ocean"]:
-            assert comp_name in final_carry
-            for check_key in ["state", "forcing"]:
-                assert check_key in final_carry[comp_name]
-
-        # preds is keyed by component; each component ran 3 times
-        assert set(preds.keys()) == {"atm", "ocean"}
-
-    def test_predictions_have_one_entry_per_iteration(self):
-        traj_fn, init = self._setup()
-        _, preds = traj_fn(init)
-
-        # Each component appears once per workflow iteration, and there are
-        # 3 iterations, so predictions per component is a list of 3 dicts
-        # (after stack_objects transposes).
-        for comp_name in ("atm", "ocean"):
-            # preds[comp] is the stacked output: list of 3 step-outputs
-            # Each step-output was itself stacked (1 appearance) -> list of 1
-            # So final shape after both stack_objects calls is list of 3 lists
-            print(f"{comp_name}: {preds[comp_name]}")
-            assert len(preds[comp_name]["state"]["value"]) == 3
-
-    def test_zero_iterations_returns_init_unchanged(self):
-        c = _build_coupler(
-            comp_names=("a",),
-            mappers=(),
-        )
-        traj_fn = c.generate_trajectory_function(
-            workflow=["a"],
-            iterations=0,
-            jitted=False,
-            show_progress=False,
-        )
-        init_carry = c.initialize()
-        final_carry, preds = traj_fn(init_carry)
-
-        # No iterations -> states unchanged, predictions empty
-        assert final_carry["a"]["state"] == init_carry["a"]["state"]
-        assert list(preds) == []
-
-
-# ===========================================================================
-# 11.  predictions_to_xarray
-# ===========================================================================
-
-class TestPredictionsToXarray:
-
-    def test_delegates_to_each_component(self):
-        c = _build_coupler(comp_names=("a", "b"), mappers=())
-        fake_preds = {"a": {"history": [1, 2]}, "b": {"history": [3, 4]}}
-        result = c.predictions_to_xarray(fake_preds)
-
-        assert set(result.keys()) == {"a", "b"}
-        # Our stub wraps with {"ds_<name>": ...}
-        assert "ds_a" in result["a"]
-        assert "ds_b" in result["b"]
-
-
-# ===========================================================================
-# 12.  get_info
-# ===========================================================================
-
-class TestGetInfo:
-
-    def test_returns_component_and_mapper_info(self):
-        c = _build_coupler(
-            comp_names=("atm", "ocean"),
-            mappers=("fm",),
-        )
-        info = c.get_info()
-        assert "component_info" in info
-        assert "mappers" in info
-        assert set(info["component_info"].keys()) == {"atm", "ocean"}
-        assert "fm" in info["mappers"]
-
-    def test_empty_mappers_is_empty_dict_not_none_string(self):
-        """get_info checks `if self.mappers is None` to decide whether to
-        emit the string "None".  But __init__ sets mappers to {} (not
-        None) when no mappers are provided.  So an empty coupler's mappers
-        value should be an empty dict, NOT the string "None".
-        """
-        c = _build_coupler(comp_names=("a",), mappers=())
-        info = c.get_info()
-        assert info["mappers"] == {}
-        assert info["mappers"] != "None"
-
-    def test_dead_code_return_info_is_unreachable(self):
-        """coupler.py line 309: `return info` after the first return statement.
-        This is dead code — it can never execute.  We verify get_info still
-        returns successfully (i.e. the dead line does not cause a NameError at
-        import time or anything similar).
-        """
-        c = _build_coupler(comp_names=("x",), mappers=())
-        info = c.get_info()          # must not raise
-        assert isinstance(info, dict)
-
-
-# ===========================================================================
-# 14.  Integration: full simulate cycle
-# ===========================================================================
-
-class TestFullSimulationCycle:
-    """Smoke test: construct -> initialize -> trajectory -> xarray."""
-
-    def test_full_cycle_does_not_raise(self):
-        c = _build_coupler(
-            comp_names=("atm", "ocean"),
-            mappers=("fm",),
+    def step(self, carry, time):
+        del carry
+        return (
+            {"sim_time": time.sim_time},
+            {
+                "sim_time": time.sim_time,
+                "step": time.step,
+                "year_fraction": time.year_fraction,
+            },
         )
 
-        # 1. initialize
-        init = c.initialize()
-        assert len(init) == 2
 
-        # 2. trajectory (3 steps)
-        traj_fn = c.generate_trajectory_function(
-            workflow=["atm", "fm", "ocean"],
-            iterations=3,
-            jitted=False,
-            show_progress=False,
+class DampedComponent:
+    """A smooth nonlinear step, so a gradient through it is worth checking."""
+
+    def __init__(self, name="damped"):
+        """Name the component."""
+        self.name = name
+
+    def initialize(self):
+        return {"value": jnp.array([1.0, 2.0], dtype=jnp.float32)}
+
+    def step(self, carry, time):
+        del time
+        value = 0.9 * carry["value"] + 0.1 * jnp.sin(carry["value"])
+        return {"value": value}, {"value": value}
+
+
+class XarrayComponent(SourceComponent):
+    """A source that can label its own output; records the axis it was given."""
+
+    def __init__(self, name="source"):
+        """Record every time axis handed to `to_xarray`."""
+        super().__init__(name=name)
+        self.time_axes = []
+
+    def to_xarray(self, diagnostics, time):
+        self.time_axes.append(time)
+        return xr.Dataset({"value": ("time", np.asarray(diagnostics["value"]))})
+
+
+def feed(components, time):
+    """Copy the source's value into the sink's ``received`` field."""
+    del time
+    sink = dict(components["sink"], received=components["source"]["value"])
+    return dict(components, sink=sink)
+
+
+def _coupler(workflow=None, **kwargs):
+    """Build the standard source/sink toy coupler."""
+    return Coupler(
+        {"source": SourceComponent(), "sink": SinkComponent()},
+        {"feed": feed},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=workflow,
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Construction, workflow validation and repr
+# ---------------------------------------------------------------------------
+
+
+def test_default_workflow_is_exchangers_then_components():
+    """Exchange first, then every component, each in registration order."""
+    assert _coupler().workflow == ("feed", "source", "sink")
+
+
+def test_explicit_workflow_is_used():
+    coupler = _coupler(workflow=["source", "feed", "sink"])
+    assert coupler.workflow == ("source", "feed", "sink")
+
+
+def test_unknown_workflow_name_raises():
+    with pytest.raises(ValueError, match="ocean"):
+        _coupler(workflow=["feed", "ocean"])
+
+
+def test_duplicate_name_raises():
+    """A name may be a component or an exchanger, not both."""
+    with pytest.raises(ValueError, match="source"):
+        Coupler(
+            {"source": SourceComponent()},
+            {"source": feed},
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=START_DATE,
         )
-        final_carry, preds = traj_fn(init)
-        assert "atm" in final_carry
-        assert "ocean" in final_carry
 
-        # 3. convert predictions to xarray-like dicts
-        xr_out = c.predictions_to_xarray(preds)
-        assert set(xr_out.keys()) == {"atm", "ocean"}
 
-        # 4. get_info
-        info = c.get_info()
-        assert "component_info" in info
+def test_repeated_workflow_entry_raises():
+    """Each element runs exactly once per coupled step."""
+    with pytest.raises(ValueError, match="more than once"):
+        _coupler(workflow=["feed", "source", "source"])
+
+
+def test_workflow_revalidated_when_a_component_is_removed():
+    """A workflow that was valid at construction is checked again at trace time."""
+    coupler = _coupler(workflow=["feed", "source", "sink"])
+    coupler.remove_component("sink")
+    with pytest.raises(ValueError, match="sink"):
+        coupler.step_function()
+
+
+def test_repr_names_the_model():
+    text = repr(_coupler())
+    assert "source" in text
+    assert "feed" in text
+    assert "365_day" in text
+
+
+# ---------------------------------------------------------------------------
+# The clock
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_starts_at_step_zero():
+    carry = _coupler().initialize()
+    assert isinstance(carry, CoupledCarry)
+    assert int(carry.step) == 0
+    assert set(carry.components) == {"source", "sink"}
+
+
+def test_clock_persists_across_trajectory_calls():
+    """Two five-step calls continue the run; the scan index is not the clock."""
+    coupler = Coupler(
+        {"clock": ClockWatcher()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    trajectory = coupler.generate_trajectory_function(5)
+
+    carry = coupler.initialize()
+    carry, first = trajectory(carry)
+    carry, second = trajectory(carry)
+
+    assert int(carry.step) == 10
+    np.testing.assert_allclose(first["clock"]["sim_time"], np.arange(0, 5) * DAY)
+    np.testing.assert_allclose(second["clock"]["sim_time"], np.arange(5, 10) * DAY)
+
+    # The next step - the one the persisted counter is for - sees 10 * dt.
+    _, tenth = coupler.step_function()(carry)
+    assert float(tenth["clock"]["sim_time"]) == pytest.approx(10 * DAY)
+
+
+def test_components_share_clock():
+    """Two components in the same step see the identical time."""
+    coupler = Coupler(
+        {"first": ClockWatcher("first"), "second": ClockWatcher("second")},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    _, diagnostics = coupler.generate_trajectory_function(4)(coupler.initialize())
+
+    np.testing.assert_array_equal(
+        diagnostics["first"]["sim_time"], diagnostics["second"]["sim_time"]
+    )
+    np.testing.assert_array_equal(diagnostics["first"]["step"], np.arange(4))
+
+
+def test_year_fraction_wraps():
+    """The annual cycle wraps at the year end rather than running past 1."""
+    # A start date one day before the year end on a 365-day calendar: the run
+    # starts at 364/365 through the year and step 1 is New Year's Day. 2001 is
+    # not a leap year, so the real-calendar offset jax_datetime computes and
+    # the model's 365-day year agree (see `_seconds_since_new_year`).
+    coupler = Coupler(
+        {"clock": ClockWatcher()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime("2001-12-31"),
+        calendar="365_day",
+    )
+    assert float(coupler.coupling_time(0).year_fraction) == pytest.approx(364 / 365)
+    assert float(coupler.coupling_time(1).year_fraction) == pytest.approx(0.0, abs=1e-6)
+    # Loose tolerance on purpose: `year_fraction` divides a large second count
+    # by the year length in float32, so just after a wrap the surviving
+    # precision is that of the *large* number, ~1e-7 relative to 1.0.
+    assert float(coupler.coupling_time(2).year_fraction) == pytest.approx(
+        1 / 365, rel=1e-4
+    )
+
+
+def test_year_fraction_uses_the_calendar_year_length():
+    """The Gregorian calendar's 365.2425-day year is used when it is selected."""
+    coupler = Coupler(
+        {"clock": ClockWatcher()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        calendar="gregorian",
+    )
+    assert coupler.days_per_year == pytest.approx(365.2425)
+    assert float(coupler.coupling_time(1).year_fraction) == pytest.approx(
+        1 / 365.2425, rel=1e-5
+    )
+
+
+def test_clock_facts_are_exposed():
+    coupler = _coupler()
+    assert coupler.dt_seconds == DAY
+    assert coupler.calendar == "365_day"
+    assert coupler.days_per_year == 365.0
+    assert coupler.year_offset_seconds == 0.0
+    assert coupler.coupling_timestep == COUPLING_TIMESTEP
+
+
+def test_time_axis_starts_at_the_requested_step():
+    axis = _coupler().time_axis(7, 3)
+    assert isinstance(axis, TimeAxis)
+    np.testing.assert_array_equal(axis.steps, [7, 8, 9])
+    assert len(axis) == 3
+    assert axis.calendar == "365_day"
+
+
+# ---------------------------------------------------------------------------
+# The step function
+# ---------------------------------------------------------------------------
+
+
+def test_step_does_not_mutate_input():
+    """A step rebuilds the carry; the one it was given is still the old one."""
+    coupler = _coupler()
+    carry = coupler.initialize()
+    components_before = carry.components
+    structure_before = jax.tree_util.tree_structure(carry)
+    leaves_before = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(carry)]
+
+    new_carry, _ = coupler.step_function()(carry)
+
+    assert carry.components is components_before
+    assert jax.tree_util.tree_structure(carry) == structure_before
+    for before, after in zip(leaves_before, jax.tree_util.tree_leaves(carry), strict=True):
+        np.testing.assert_array_equal(before, np.asarray(after))
+    assert int(carry.step) == 0
+    assert int(new_carry.step) == 1
+
+
+def test_exchanger_runs_before_components_by_default():
+    """With the default workflow the sink sees the value the source had last step."""
+    _, diagnostics = _coupler().generate_trajectory_function(3)(_coupler().initialize())
+
+    np.testing.assert_allclose(diagnostics["source"]["value"], [1.0, 2.0, 3.0])
+    # Lagged by one coupled step: the exchange at step n moves what the source
+    # produced during step n-1, and step 0 exchanges the initialized value.
+    np.testing.assert_allclose(diagnostics["sink"]["received"], [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(diagnostics["sink"]["total"], [0.0, 1.0, 3.0])
+
+
+def test_workflow_order_is_respected():
+    """Running the exchanger between the two components removes the lag ..."""
+    coupler = _coupler(workflow=["source", "feed", "sink"])
+    _, diagnostics = coupler.generate_trajectory_function(3)(coupler.initialize())
+    np.testing.assert_allclose(diagnostics["sink"]["received"], [1.0, 2.0, 3.0])
+
+    # ... and a component placed before the exchanger sees the un-exchanged
+    # value, one further step behind.
+    coupler = _coupler(workflow=["sink", "feed", "source"])
+    _, diagnostics = coupler.generate_trajectory_function(3)(coupler.initialize())
+    np.testing.assert_allclose(diagnostics["sink"]["received"], [0.0, 0.0, 1.0])
+
+
+def test_treedef_change_raises():
+    """An exchanger that changes the carry structure is named, not left to scan."""
+
+    def adds_a_key(components, time):
+        del time
+        sink = dict(components["sink"], extra=jnp.float32(0.0))
+        return dict(components, sink=sink)
+
+    coupler = Coupler(
+        {"source": SourceComponent(), "sink": SinkComponent()},
+        {"adds_a_key": adds_a_key},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    with pytest.raises(RuntimeError, match="adds_a_key"):
+        coupler.step_function()(coupler.initialize())
+
+
+def test_exchanger_must_return_a_mapping():
+    """Returning something other than the carries dict is a clear error."""
+
+    def returns_nothing(components, time):
+        del components, time
+
+    coupler = Coupler(
+        {"source": SourceComponent()},
+        {"returns_nothing": returns_nothing},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    with pytest.raises(TypeError, match="returns_nothing"):
+        coupler.step_function()(coupler.initialize())
+
+
+# ---------------------------------------------------------------------------
+# Trajectories
+# ---------------------------------------------------------------------------
+
+
+def _concatenate(*chunks):
+    """Join per-chunk diagnostics along their leading time axis."""
+    return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *chunks)
+
+
+def _assert_carries_close(left, right):
+    left_leaves = jax.tree_util.tree_leaves(left)
+    right_leaves = jax.tree_util.tree_leaves(right)
+    assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
+    for a, b in zip(left_leaves, right_leaves, strict=True):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=0, atol=1e-12)
+
+
+def test_continuous_equals_chunked():
+    """Ten steps, five twice and two five times give the same run."""
+    coupler = _coupler()
+    initial = coupler.initialize()
+
+    continuous_carry, continuous = coupler.generate_trajectory_function(10)(initial)
+
+    five = coupler.generate_trajectory_function(5)
+    carry, first = five(initial)
+    carry, second = five(carry)
+    _assert_carries_close(carry, continuous_carry)
+    _assert_carries_close(_concatenate(first, second), continuous)
+
+    two = coupler.generate_trajectory_function(2)
+    carry = initial
+    chunks = []
+    for _ in range(5):
+        carry, chunk = two(carry)
+        chunks.append(chunk)
+    _assert_carries_close(carry, continuous_carry)
+    _assert_carries_close(_concatenate(*chunks), continuous)
+
+    assert int(continuous_carry.step) == 10
+
+
+def test_jit_false_matches_jit_true():
+    coupler = _coupler()
+    initial = coupler.initialize()
+    jitted_carry, jitted = coupler.generate_trajectory_function(4, jit=True)(initial)
+    eager_carry, eager = coupler.generate_trajectory_function(4, jit=False)(initial)
+
+    _assert_carries_close(jitted_carry, eager_carry)
+    _assert_carries_close(jitted, eager)
+
+
+def test_remat_matches_plain_trajectory():
+    """`remat` only trades memory for recomputation; the numbers are unchanged."""
+    coupler = _coupler()
+    initial = coupler.initialize()
+    plain_carry, plain = coupler.generate_trajectory_function(4)(initial)
+    remat_carry, remat = coupler.generate_trajectory_function(4, remat=True)(initial)
+
+    _assert_carries_close(plain_carry, remat_carry)
+    _assert_carries_close(plain, remat)
+
+
+def test_diagnostics_have_a_leading_time_axis():
+    coupler = _coupler()
+    _, diagnostics = coupler.generate_trajectory_function(6)(coupler.initialize())
+    assert diagnostics["source"]["value"].shape == (6,)
+
+
+def test_gradient_through_a_trajectory_matches_finite_differences():
+    """The coupled trajectory is differentiable end to end."""
+    coupler = Coupler(
+        {"damped": DampedComponent()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    trajectory = coupler.generate_trajectory_function(3)
+    initial = coupler.initialize()
+
+    def objective(value):
+        carry = CoupledCarry(components={"damped": {"value": value}}, step=initial.step)
+        final, _ = trajectory(carry)
+        return jnp.sum(final.components["damped"]["value"])
+
+    value = initial.components["damped"]["value"]
+    gradient = np.asarray(jax.grad(objective)(value))
+    assert np.all(np.isfinite(gradient))
+
+    epsilon = 1e-2
+    for index in range(value.shape[0]):
+        shift = jnp.zeros_like(value).at[index].set(epsilon)
+        finite_difference = float(
+            (objective(value + shift) - objective(value - shift)) / (2 * epsilon)
+        )
+        assert gradient[index] == pytest.approx(finite_difference, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+
+def test_to_xarray_uses_time_axis():
+    """Each capable component is handed the run's own time axis, and only it."""
+    component = XarrayComponent()
+    coupler = Coupler(
+        {"source": component, "sink": SinkComponent()},
+        {"feed": feed},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    _, diagnostics = coupler.generate_trajectory_function(3)(coupler.initialize())
+
+    datasets = coupler.to_xarray(diagnostics, first_step=5)
+
+    # The sink cannot write output, so it simply has none.
+    assert set(datasets) == {"source"}
+    assert isinstance(datasets["source"], xr.Dataset)
+
+    (axis,) = component.time_axes
+    assert isinstance(axis, TimeAxis)
+    np.testing.assert_array_equal(axis.steps, [5, 6, 7])
+    assert axis.start_date == START_DATE
+    assert axis.dt == COUPLING_TIMESTEP
+
+
+def test_to_xarray_skips_components_without_diagnostics():
+    component = XarrayComponent()
+    coupler = Coupler(
+        {"source": component},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    assert coupler.to_xarray({}) == {}
+
+
+def test_step_function_snapshots_the_model():
+    """A generated step describes the model as it was; later edits do not leak in."""
+    coupler = _coupler()
+    carry = coupler.initialize()
+    step = coupler.step_function()
+
+    coupler.remove_component("sink")
+
+    _, diagnostics = step(carry)
+    assert set(diagnostics) == {"source", "sink"}
