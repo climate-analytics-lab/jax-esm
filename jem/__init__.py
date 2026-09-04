@@ -1,6 +1,6 @@
 """JAX-ESM: A JAX-based Earth System Model coupler."""
 
-__version__ = "0.2.0"
+__version__ = "1.0.0a0"
 
 # The coupling core only. The components live in `jem.components`, which is
 # not imported here: pulling in the JCM wrapper would import the whole

@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) from v1.0.0
 onwards. Before v1.0.0 the public API may change in any release; every such
 change is listed here.
 
-## [Unreleased] — v1.0.0a, "the core API contract"
+## [Unreleased] — 1.0.0a0, "the core API contract"
 
 Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component
 interface with an explicit protocol, moves the clock out of the components and

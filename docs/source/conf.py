@@ -9,10 +9,17 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
 
+# The version shown in the docs is read from the package, which is the single
+# source of truth for it (pyproject.toml's `tool.setuptools.dynamic` reads the
+# same attribute), so the docs cannot advertise a version the code does not
+# have. The import has to follow the sys.path entry above, hence the noqa.
+import jem  # noqa: E402
 
 project = 'JAX-ESM'
 copyright = '2026, Climate Analytics Lab'
 author = 'Tien-Yiao Hsu and Climate Analytics Lab'
+release = jem.__version__
+version = release
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

@@ -241,7 +241,7 @@ Contributions are welcome! Please:
 ## Development Status
 
 - **Version**: single-sourced from `jem.__version__`
-- **Status**: Alpha. The next release is the v1.0.0a "core API contract"
+- **Status**: Alpha. The next release is 1.0.0a0, the "core API contract"
   described at the top of [CHANGELOG.md](CHANGELOG.md).
 - **API Stability**: subject to change without deprecation until 1.0; every
   removal or rename is recorded in [CHANGELOG.md](CHANGELOG.md)
