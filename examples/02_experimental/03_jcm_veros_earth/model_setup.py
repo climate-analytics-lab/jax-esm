@@ -299,7 +299,8 @@ def build_model(
         # min_speed_magnitude**2 so sqrt and its derivative stay bounded;
         # this naturally caps the resulting wind speed from below at
         # min_speed_magnitude. Mirrors the analogous fix in
-        # `jem.components.Veros.make_jem_compatible` for `forc_tke_surface`.
+        # `jem.components.veros_component.VerosComponent` for
+        # `forc_tke_surface`.
         min_speed_magnitude = 1e-3
         wind_speed_squared = wind_x**2 + wind_y**2
         wind_velocity = jnp.sqrt(jnp.maximum(wind_speed_squared, min_speed_magnitude ** 2))

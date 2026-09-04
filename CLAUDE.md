@@ -26,7 +26,7 @@ When asked to fix or implement something, deliver the **complete, faithful**
 solution by default — do not ship a partial fix, a band-aid, or a "good enough
 for now" workaround and present it as done. In a coupler "faithful" specifically
 means the coupled system is right, not just the file you edited: the flux the
-mapper moves has the sign, the units and the grid the receiving component
+exchanger moves has the sign, the units and the grid the receiving component
 expects, the carry structure that comes out of a step matches the one that went
 in, and conservation across the exchange is checked rather than assumed.
 
