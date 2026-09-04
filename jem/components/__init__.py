@@ -1,6 +1,7 @@
 """Earth system components module."""
 
 from jem.components import jcm_component as JCM
+from jem.components.jcm import JCMComponent
 from jem.components.slab.slab_atmosphere_model import SlabAtmosphereModel
 from jem.components.slab.slab_land_model import SlabLandModel
 from jem.components.slab.slab_ocean_model import SlabOceanModel
@@ -8,6 +9,7 @@ from jem.components.slab.slab_seaice_model import SlabSeaiceModel
 
 __all__ = [
     "JCM",
+    "JCMComponent",
     "SlabAtmosphereModel",
     "SlabLandModel",
     "SlabOceanModel",
@@ -22,4 +24,7 @@ def __getattr__(name):
     if name == "Veros":
         from jem.components import veros_component
         return veros_component
+    if name == "VerosComponent":
+        from jem.components.veros_component import VerosComponent
+        return VerosComponent
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
