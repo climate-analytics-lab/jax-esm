@@ -78,15 +78,15 @@ class SlabAtmosphereModel(SlabModelBase):
     to exercise a coupled run without a full atmosphere, not to be a climate
     model: there is no radiation, no moisture and no dynamics.
 
-    Physics:
+    The physics is a single column-mean heat budget::
+
         dT_air/dt = (H_ocean + H_land) / (M_air * cp_air)
 
-    where:
-        T_air: mean air temperature
-        H_ocean, H_land: sensible heat fluxes from the surface below
-        M_air: atmospheric column mass
-        cp_air: specific heat capacity of dry air at constant pressure, from
-            ``jcm.constants.cpd`` -- the same value the real atmosphere uses
+    where ``T_air`` is the mean air temperature, ``H_ocean`` and ``H_land``
+    are the sensible heat fluxes from the surface below, ``M_air`` is the
+    atmospheric column mass, and ``cp_air`` is the specific heat capacity of
+    dry air at constant pressure, taken from ``jcm.constants.cpd`` -- the same
+    value the real atmosphere uses.
     """
 
     def __init__(

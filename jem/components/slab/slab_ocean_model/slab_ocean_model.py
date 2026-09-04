@@ -82,23 +82,20 @@ class SlabOceanModel(SlabModelBase):
     """Slab ocean model with prescribed mixed layer depth and climatology.
 
     This model simulates sea surface temperature evolution using a simple
-    thermodynamic equation with optional relaxation to climatology.
+    thermodynamic equation with optional relaxation to climatology::
 
-    dT/dt = -F_net/(rho * cp * h) + forcing
+        dT/dt = -F_net/(rho * cp * h) + forcing
 
-    where:
-        T: sea surface temperature
-        F_net: total heat flux (positive upward, so it cools the mixed layer)
-        rho: ocean density
-        cp: ocean specific heat capacity
-        h: mixed layer depth
-        forcing: the extra temperature forcing selected by
-            ``params.forcing_method``
+    where ``T`` is the sea surface temperature, ``F_net`` the total heat flux
+    (positive upward, so it cools the mixed layer), ``rho`` the ocean density,
+    ``cp`` the ocean specific heat capacity, ``h`` the mixed layer depth, and
+    ``forcing`` the extra temperature forcing selected by
+    ``params.forcing_method``:
 
     (1) ``forcing_method == "none"``: forcing = 0.
 
     (2) ``forcing_method == "qflux"``: the traditional Q-flux adjustment, a
-        prescribed periodic heat source over the year,
+        prescribed periodic heat source over the year::
 
             forcing = Q / (rho * cp * h)
 
@@ -106,7 +103,7 @@ class SlabOceanModel(SlabModelBase):
         file, Q is zero everywhere -- a valid setup when the Q-flux itself is
         the thing being trained.
 
-    (3) ``forcing_method == "relaxation"``: linear relaxation to climatology,
+    (3) ``forcing_method == "relaxation"``: linear relaxation to climatology::
 
             forcing = - (T - T_clim) / tau
 
@@ -137,7 +134,7 @@ class SlabOceanModel(SlabModelBase):
     seawater freezing point, and the heat that clamp removes (or, symmetrically,
     the heat available above freezing) is reported as a single signed
     diagnostic, ``ice_frazil_melt_energy`` (J/m^2, energy released over this
-    coupling step -- not a flux):
+    coupling step -- not a flux)::
 
         ice_frazil_melt_energy = (T_freezing - T_unclamped)
             * mixed_layer_depth * ocean_density * ocean_specific_heat_capacity
