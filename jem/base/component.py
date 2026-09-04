@@ -86,14 +86,34 @@ class CouplingTime:
     days_per_year: float = struct.field(pytree_node=False)
 
     @property
+    def seconds_per_year(self) -> float:
+        """Length of the model year in seconds."""
+        return SECONDS_PER_DAY * self.days_per_year
+
+    @property
     def year_fraction(self) -> jax.Array:
         """Position in the annual cycle in ``[0, 1)`` at the *start* of this step.
 
         Zero is 00:00 on 1 January. This is what a monthly climatology is
         interpolated with (``jem.utils.cycles.evaluate_cyclic_linear``).
+
+        Precision note: ``sim_time`` is a float32 array unless x64 is enabled,
+        and float32 resolves only ~7 digits, so after a century of simulated
+        time (3e9 s) it is quantised to hundreds of seconds. When the
+        coupling step divides the year exactly (the usual case: daily steps
+        in a 365-day year) the step count is reduced modulo the steps per
+        year in exact integer arithmetic first, so the fraction keeps full
+        float32 precision (a few seconds) for runs of any length. Otherwise
+        the seconds are used directly and precision degrades with run length.
         """
-        seconds_into_year = self.year_offset_seconds + self.sim_time
-        return jnp.mod(seconds_into_year / (SECONDS_PER_DAY * self.days_per_year), 1.0)
+        steps_per_year = self.seconds_per_year / self.dt
+        if float(steps_per_year).is_integer():
+            seconds_into_year = self.year_offset_seconds + (
+                jnp.mod(self.step, int(steps_per_year)) * self.dt
+            )
+        else:
+            seconds_into_year = self.year_offset_seconds + self.sim_time
+        return jnp.mod(seconds_into_year / self.seconds_per_year, 1.0)
 
 
 @struct.dataclass
