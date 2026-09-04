@@ -99,7 +99,13 @@ timestep is not a whole multiple of the model's own, and `JCMComponent`
 additionally refuses a `start_date` or `calendar` that differs from the model's.
 The slab models use it for the start date alone: `initialize()` takes no
 argument, so `bind` is how a run starting on 1 July samples the July record of
-its climatology rather than the January one.
+its climatology rather than the January one. It reaches them as
+`SlabModelBase.start_year_fraction`, computed by the shared
+`jem.base.component.start_year_fraction(start_date, calendar)` — the same
+function behind `CouplingTime.year_fraction`, so a climatology sampled in
+`initialize()` and one sampled in `step()` cannot disagree about where the run
+starts. A model that was never registered with a coupler reads 1 January, which
+is what a bare `model.initialize()` in a test or a notebook gets.
 
 `step` must be a pure function of `(carry, time)` and must return a carry with
 exactly the pytree structure, shapes and dtypes it received, or `lax.scan`
@@ -252,11 +258,20 @@ time coordinate. The conventions, which are JCM's:
 - **The time label is the END of the interval a record covers**, as an absolute
   `datetime64[ns]`: record *k* holds the average over
   `[start_date + k dt, start_date + (k+1) dt)` and is stamped
-  `start_date + (k+1) dt`. This is JCM's convention, reproduced (through
-  float64 days since the epoch, so both models are *identically* inexact) in
-  `jem.utils.time.time_coordinate`, which is the one place it is written down.
-  The dates are proleptic Gregorian whatever the model calendar is; the calendar
-  governs the seasonal cycle and forcing selection, not the labels.
+  `start_date + (k+1) dt`. This is JCM's convention, and `TimeAxis.datetimes()`
+  is the one place it is written down — including the arithmetic, a float64
+  count of days since the epoch multiplied into nanoseconds at the end, which
+  is inexact but *identically* inexact for every component that goes through
+  it. `jem.utils.time.time_coordinate` is the slab-side call site that unpacks
+  it (values plus `TimeAxis.attrs`) for xarray. The dates are proleptic
+  Gregorian whatever the model calendar is; the calendar governs the seasonal
+  cycle and forcing selection, not the labels.
+- **Variable names**: state and derived quantities keep their plain names, and
+  every variable that came from a component's *forcing* is written with a
+  `forcing_` prefix (`forcing_total_heat_flux`,
+  `forcing_ice_frazil_melt_energy`). Two components legitimately hold the same
+  physical field — one produced it, the other received it — and without the
+  prefix the merge collides on the shared name.
 
 Together these are what make `xr.merge([datasets["atm"], datasets["ocn"]])` an
 N-long join rather than a 2N-long outer union.
@@ -301,6 +316,13 @@ API), and `ModelPredictions._predictions` (jax-gcm#756,
 `ModelPredictions.with_context`). The atmosphere's output keeps JCM's own time
 labelling because JEM cannot reproduce its calendar arithmetic while
 `Model._date_from_sim_time` is private (jax-gcm#758).
+
+Each `step` also compares the dycore state's own `sim_time` with the coupler's
+and logs at ERROR if they have parted, which can only happen if the carry came
+from another run. The tolerance is `clock_tolerance_seconds(sim_time)` — one
+second, or eight float32 ulps of the elapsed time, whichever is larger — so the
+check neither fires on the rounding of a long run's float32 clock nor stops
+noticing a real disagreement.
 
 ## Adding a new component
 
