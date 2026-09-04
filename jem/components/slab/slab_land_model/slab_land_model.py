@@ -124,7 +124,10 @@ class SlabLandModel(SlabModelBase):
             Surface albedo on the model grid, used to tell an ice sheet from
             soil (SPEEDY reads it from its topography file). Defaults to a
             uniform ``params.surface_albedo``, which is below the ice
-            threshold, so a model built without one is all soil everywhere.
+            threshold, so a model built without one is all soil everywhere --
+            including over real ice sheets, because nothing yet wires the
+            atmosphere's albedo boundary condition to this argument
+            (jax-esm#109).
 
         Raises
         ------
@@ -151,6 +154,12 @@ class SlabLandModel(SlabModelBase):
             )
 
         if surface_albedo is None:
+            # A uniform albedo below `land_ice_albedo_threshold`, so a model
+            # built without a field is all soil. Nothing in JEM routes the
+            # albedo the atmosphere's boundary data already carries
+            # (`jcm.forcing.ForcingData.alb0`) to this argument, so that is
+            # what every packaged configuration gets, ice sheets included --
+            # see jax-esm#109.
             self.surface_albedo = jnp.full(self.grid.shape, self.params.surface_albedo)
         else:
             surface_albedo = jnp.asarray(surface_albedo)
