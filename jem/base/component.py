@@ -42,6 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import xarray as xr
 from flax import struct
 
@@ -137,26 +138,33 @@ class CoupledCarry:
 
 @dataclasses.dataclass(frozen=True)
 class TimeAxis:
-    """Wall-clock datetimes of a run of output records.
+    """The output records of a run and how they are labelled in time.
 
     Built by ``Coupler.time_axis(first_step, n)``; handed to
     :meth:`SupportsXarray.to_xarray` so every component labels its output
     with the same ``time`` coordinate and ``xr.merge`` of two components'
-    datasets succeeds. The representation the components write must match
-    what JCM's own ``to_xarray`` writes for the same calendar, so merging JCM
-    output with slab output needs no conversion.
+    datasets is an N-long join rather than a 2N-long union.
+
+    The labelling convention is JCM's, which JAX-ESM cannot change from the
+    outside (jax-gcm#758): record ``k`` is the average over
+    ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with the
+    **end** of that interval, ``start_date + (k+1) dt``, as a
+    ``datetime64[ns]`` on the proleptic Gregorian calendar whatever the
+    model calendar is (a ``365_day`` run still writes real dates; the
+    calendar governs only the seasonal cycle and forcing selection).
+    :meth:`datetimes` implements exactly that and is the one place the
+    convention is written down.
 
     Attributes
     ----------
     start_date : jdt.Datetime
         The run's start date.
     steps : numpy.ndarray
-        int array of coupled-step indices, one per record; the record for
-        step ``k`` covers ``[start_date + k dt, start_date + (k+1) dt)``.
+        int array of coupled-step indices, one per record.
     dt : jdt.Timedelta
         Coupling timestep.
     calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"noleap"``, ...).
+        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
 
     """
 
@@ -168,6 +176,18 @@ class TimeAxis:
     def __len__(self) -> int:
         """Return the number of output records."""
         return len(self.steps)
+
+    def datetimes(self) -> np.ndarray:
+        """Return the record labels as ``datetime64[ns]`` (end of each interval)."""
+        seconds_per_step = float(self.dt / jdt.to_timedelta(1, "second"))
+        start = np.datetime64(self.start_date.to_pydatetime(), "ns")
+        offsets = (np.asarray(self.steps) + 1) * seconds_per_step
+        return start + (offsets * 1e9).astype("timedelta64[ns]")
+
+    @property
+    def attrs(self) -> dict[str, str]:
+        """CF attributes JCM writes on its ``time`` coordinate."""
+        return {"standard_name": "time", "axis": "T", "long_name": "time"}
 
 
 @runtime_checkable
