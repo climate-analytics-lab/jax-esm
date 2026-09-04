@@ -279,13 +279,13 @@ class TimeAxis:
         nanosecond count instead would be more accurate and would merge with
         nothing.
 
-        Sub-day start dates are the one deliberate difference from JCM, which
-        takes ``start_date.delta.days`` and drops ``.seconds`` entirely, so a
-        run starting at 06:00 is labelled from midnight. That is a JCM bug
-        JAX-ESM cannot fix from the outside (jax-gcm#758) and reproducing it
-        would mislabel a slab dataset; the seconds are included here. For a
-        start date at midnight -- every configuration JAX-ESM ships -- the two
-        agree bit for bit, because the added term is exactly 0.0.
+        Sub-day start dates are the one deliberate difference from JCM's own
+        output path, which takes ``start_date.delta.days`` and drops
+        ``.seconds`` entirely, so a JCM run starting at 06:00 labels its
+        records from midnight. Reproducing that here would mislabel a slab
+        dataset by up to a day, so the seconds are kept. For a start date at
+        midnight -- every configuration JAX-ESM ships -- the two agree bit for
+        bit, because the added term is exactly 0.0.
         """
         start_days = _timedelta_days(self.start_date.delta)
         step_days = _timedelta_days(self.dt)
