@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 
 from jem.base.component import Carry, CouplingTime, Diagnostics
@@ -170,6 +171,18 @@ class SlabLandModel(SlabModelBase):
                 raise ValueError(
                     f"surface_albedo has shape {tuple(surface_albedo.shape)}, but the "
                     f"grid is {self.grid.shape} (n_lon, n_lat)."
+                )
+            # The field only ever feeds a comparison against the ice
+            # threshold, so a NaN (which compares False, selecting the ice
+            # slab) or an out-of-range value would silently choose the wrong
+            # heat capacity rather than fail.
+            albedo = np.asarray(surface_albedo)
+            if not np.all(np.isfinite(albedo)):
+                raise ValueError("surface_albedo contains non-finite values.")
+            if albedo.min() < 0.0 or albedo.max() > 1.0:
+                raise ValueError(
+                    "surface_albedo must lie in [0, 1]; got values in "
+                    f"[{albedo.min():g}, {albedo.max():g}]."
                 )
             self.surface_albedo = surface_albedo
 

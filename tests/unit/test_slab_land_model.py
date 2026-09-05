@@ -345,3 +345,12 @@ def test_default_albedo_follows_the_carried_params(half_land_grid):
         np.asarray(soil["state"].land_surface_temperature)[land],
         np.asarray(ice["state"].land_surface_temperature)[land],
     )
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, 1.5, np.nan, np.inf], ids=["negative", "above_one", "nan", "inf"])
+def test_explicit_albedo_is_validated(half_land_grid, bad_value):
+    """A supplied albedo field must be finite and in [0, 1]."""
+    albedo = np.full(half_land_grid.shape, 0.2)
+    albedo[0, 0] = bad_value
+    with pytest.raises(ValueError, match="surface_albedo"):
+        SlabLandModel(half_land_grid, surface_albedo=albedo)
