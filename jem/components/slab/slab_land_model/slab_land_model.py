@@ -166,12 +166,19 @@ class SlabLandModel(SlabModelBase):
                     f"params.{name} must be a finite albedo in [0, 1]; "
                     f"got {albedo_value!r}."
                 )
-        for name in ("soil_volumetric_heat_capacity", "land_ice_volumetric_heat_capacity"):
-            capacity = float(getattr(self.params, name))
-            if not np.isfinite(capacity) or capacity <= 0.0:
+        # The slab heat capacity is depth times volumetric capacity; a zero or
+        # negative factor makes the temperature update infinite or unstable.
+        for name in (
+            "depth_soil",
+            "depth_lice",
+            "soil_volumetric_heat_capacity",
+            "land_ice_volumetric_heat_capacity",
+        ):
+            factor = float(getattr(self.params, name))
+            if not np.isfinite(factor) or factor <= 0.0:
                 raise ValueError(
-                    f"params.{name} must be a positive volumetric heat capacity in "
-                    f"J m-3 K-1 (a zero capacity makes the update infinite); got {capacity!r}."
+                    f"params.{name} must be finite and strictly positive (it is a "
+                    f"factor of the slab heat capacity); got {factor!r}."
                 )
 
         # An explicit albedo field is boundary data and lives on the model;
