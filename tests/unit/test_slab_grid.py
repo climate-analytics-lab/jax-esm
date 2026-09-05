@@ -221,3 +221,21 @@ def test_to_xarray_rejects_a_mismatched_time_axis():
 
     with pytest.raises(ValueError, match="time records"):
         model.to_xarray(diagnostics, time_axis(2))
+
+
+@pytest.mark.parametrize(
+    "bad_value", [-1.0, 50.0, np.nan], ids=["fill_value", "percentage", "nan"]
+)
+def test_explicit_scrip_mask_is_validated(bad_value):
+    """A mask given to ``from_scrip`` is checked like every other mask."""
+    good = SlabGrid.from_scrip(str(T31_SCRIP))
+    mask = np.zeros(good.shape)
+    mask[0, 0] = bad_value
+    with pytest.raises(ValueError, match="fractional_mask"):
+        SlabGrid.from_scrip(str(T31_SCRIP), fractional_mask=mask)
+    with pytest.raises(ValueError, match="fractional_mask"):
+        SlabGrid(
+            fractional_mask=jnp.asarray(mask),
+            latitude_radian=good.latitude_radian,
+            longitude_radian=good.longitude_radian,
+        )

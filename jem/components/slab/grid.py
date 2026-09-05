@@ -132,6 +132,18 @@ class SlabGrid:
                 "A SlabGrid is 2-D (n_lon, n_lat); got fractional_mask with shape "
                 f"{tuple(self.fractional_mask.shape)}."
             )
+        # Every construction path ends here, so the value check lives here
+        # too: a fill value (-1), a percentage or a NaN would otherwise pass
+        # straight into `binary_mask` and the land-fraction arithmetic as a
+        # plausible-looking but wrong land/ocean domain.
+        mask = np.asarray(self.fractional_mask)
+        if not np.all(np.isfinite(mask)):
+            raise ValueError("fractional_mask contains non-finite values.")
+        if mask.size and (mask.min() < 0.0 or mask.max() > 1.0):
+            raise ValueError(
+                "fractional_mask must lie in [0, 1] (1 = land); got values in "
+                f"[{mask.min():g}, {mask.max():g}]."
+            )
 
         if self.longitude_axis_radian is None or self.latitude_axis_radian is None:
             axes = _separable_axes(self.longitude_radian, self.latitude_radian)
@@ -224,8 +236,6 @@ class SlabGrid:
                     f"grid is {shape} (n_lon, n_lat). TerrainData.fmask is already on "
                     "this layout; a transposed mask is a sign it came from elsewhere."
                 )
-            if not bool(jnp.all((fractional_mask >= 0.0) & (fractional_mask <= 1.0))):
-                raise ValueError("fractional_mask must lie in [0, 1].")
 
         longitude_2d = jnp.asarray(np.broadcast_to(longitude_axis[:, None], shape))
         latitude_2d = jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape))

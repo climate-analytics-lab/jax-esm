@@ -103,6 +103,12 @@ markers = [
 
 # Lint configuration mirrors jax-gcm's so a developer moving between the two
 # repositories meets one set of rules.
+[tool.ruff]
+# Sibling checkouts that CI (and a developer) may place inside this
+# repository: `ruff check .` must lint this project, not its dependencies,
+# whose moving branches would otherwise turn an unrelated PR red.
+extend-exclude = ["jax-gcm", "veros-jittable"]
+
 [tool.ruff.lint]
 extend-select = ["D"]
 ignore = [
