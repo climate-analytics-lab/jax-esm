@@ -154,6 +154,22 @@ class SlabLandModel(SlabModelBase):
             raise ValueError(
                 "snow_depth_to_cover_scale must be a positive snow depth in mm."
             )
+        # The parameters are validated here, at construction, because inside
+        # `step` they are traced values that cannot be inspected. A caller who
+        # replaces `carry["params"]` afterwards takes on that responsibility.
+        default_albedo = float(self.params.surface_albedo)
+        if not np.isfinite(default_albedo) or not 0.0 <= default_albedo <= 1.0:
+            raise ValueError(
+                "params.surface_albedo must be a finite value in [0, 1]; "
+                f"got {default_albedo!r}."
+            )
+        for name in ("soil_volumetric_heat_capacity", "land_ice_volumetric_heat_capacity"):
+            capacity = float(getattr(self.params, name))
+            if not np.isfinite(capacity) or capacity <= 0.0:
+                raise ValueError(
+                    f"params.{name} must be a positive volumetric heat capacity in "
+                    f"J m-3 K-1 (a zero capacity makes the update infinite); got {capacity!r}."
+                )
 
         # An explicit albedo field is boundary data and lives on the model;
         # without one, `step` builds a uniform field from the *carried*

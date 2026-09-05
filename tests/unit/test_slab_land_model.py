@@ -354,3 +354,20 @@ def test_explicit_albedo_is_validated(half_land_grid, bad_value):
     albedo[0, 0] = bad_value
     with pytest.raises(ValueError, match="surface_albedo"):
         SlabLandModel(half_land_grid, surface_albedo=albedo)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("surface_albedo", np.nan),
+        ("surface_albedo", 1.5),
+        ("soil_volumetric_heat_capacity", 0.0),
+        ("land_ice_volumetric_heat_capacity", -1.0),
+        ("soil_volumetric_heat_capacity", np.inf),
+    ],
+)
+def test_invalid_scalar_parameters_are_rejected(half_land_grid, field, value):
+    """The default albedo and the heat capacities are checked at construction."""
+    params = SlabLandParameters(**{field: value})
+    with pytest.raises(ValueError, match=field):
+        SlabLandModel(half_land_grid, params=params)
