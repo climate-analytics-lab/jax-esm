@@ -364,6 +364,8 @@ def test_explicit_albedo_is_validated(half_land_grid, bad_value):
         ("soil_volumetric_heat_capacity", 0.0),
         ("land_ice_volumetric_heat_capacity", -1.0),
         ("soil_volumetric_heat_capacity", np.inf),
+        ("land_ice_albedo_threshold", np.nan),
+        ("land_ice_albedo_threshold", 2.0),
     ],
 )
 def test_invalid_scalar_parameters_are_rejected(half_land_grid, field, value):

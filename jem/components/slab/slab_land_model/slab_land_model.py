@@ -157,12 +157,15 @@ class SlabLandModel(SlabModelBase):
         # The parameters are validated here, at construction, because inside
         # `step` they are traced values that cannot be inspected. A caller who
         # replaces `carry["params"]` afterwards takes on that responsibility.
-        default_albedo = float(self.params.surface_albedo)
-        if not np.isfinite(default_albedo) or not 0.0 <= default_albedo <= 1.0:
-            raise ValueError(
-                "params.surface_albedo must be a finite value in [0, 1]; "
-                f"got {default_albedo!r}."
-            )
+        # Both albedo values feed the soil/ice comparison; a NaN in either
+        # compares False everywhere and silently selects one material.
+        for name in ("surface_albedo", "land_ice_albedo_threshold"):
+            albedo_value = float(getattr(self.params, name))
+            if not np.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
+                raise ValueError(
+                    f"params.{name} must be a finite albedo in [0, 1]; "
+                    f"got {albedo_value!r}."
+                )
         for name in ("soil_volumetric_heat_capacity", "land_ice_volumetric_heat_capacity"):
             capacity = float(getattr(self.params, name))
             if not np.isfinite(capacity) or capacity <= 0.0:
