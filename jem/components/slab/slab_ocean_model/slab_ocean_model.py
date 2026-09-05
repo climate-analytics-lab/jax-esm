@@ -33,14 +33,20 @@ IDEALIZED_SST_RANGE = 10.0
 
 @tree_math.struct
 class OceanState:
+    """The evolving state: the SST only.
+
+    The mixed-layer depth is not state. It is a prescribed profile of the
+    carried parameters (``mixed_layer_depth_min``/``_max``), recomputed in
+    every ``step`` so that replacing or differentiating those parameters
+    takes effect; it is written to the output as a derived field.
+    """
+
     sea_surface_temperature: jnp.ndarray
-    mixed_layer_depth: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None, mixed_layer_depth=None):
+    def zeros(cls, shape, sea_surface_temperature=None):
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
-            mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
         )
 
 
@@ -59,6 +65,7 @@ class OceanForcing:
 
 @tree_math.struct
 class OceanDerived:
+    mixed_layer_depth: jnp.ndarray
     ice_frazil_melt_energy: jnp.ndarray
     effective_total_heat_flux: jnp.ndarray
     q_flux_snapshot: jnp.ndarray
@@ -67,11 +74,13 @@ class OceanDerived:
     def zeros(
         cls,
         shape,
+        mixed_layer_depth=None,
         ice_frazil_melt_energy=None,
         effective_total_heat_flux=None,
         q_flux_snapshot=None,
     ):
         return cls(
+            mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
             ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
             effective_total_heat_flux if effective_total_heat_flux is not None else jnp.zeros(shape),
             q_flux_snapshot if q_flux_snapshot is not None else jnp.zeros(shape),
@@ -251,12 +260,6 @@ class SlabOceanModel(SlabModelBase):
         params = self.params
         ocean = self._ocean_cells(params)
 
-        mixed_layer_depth = (
-            params.mixed_layer_depth_max
-            + (params.mixed_layer_depth_min - params.mixed_layer_depth_max)
-            * jnp.cos(self.grid.latitude_radian) ** 3
-        )
-
         if self.sst_climatology is not None:
             sea_surface_temperature = evaluate_cyclic_linear(
                 self.start_year_fraction, self.sst_climatology
@@ -273,13 +276,15 @@ class SlabOceanModel(SlabModelBase):
             "params": params,
             "state": OceanState.zeros(
                 self.grid.shape,
-                mixed_layer_depth=mixed_layer_depth,
                 sea_surface_temperature=sea_surface_temperature,
             ),
             "forcing": OceanForcing.zeros(
                 self.grid.shape, q_flux=self.q_flux_climatology
             ),
-            "derived": OceanDerived.zeros(self.grid.shape),
+            "derived": OceanDerived.zeros(
+                self.grid.shape,
+                mixed_layer_depth=self._mixed_layer_depth(params),
+            ),
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -295,10 +300,14 @@ class SlabOceanModel(SlabModelBase):
         forcing = carry["forcing"]
         ocean = self._ocean_cells(params)
 
+        # From the CARRIED parameters, every step: a depth cached at
+        # initialization would make `mixed_layer_depth_min/max` dead
+        # parameters with zero gradient.
+        mixed_layer_depth = self._mixed_layer_depth(params)
         heat_capacity = (
             constants.ocean_density
             * constants.ocean_specific_heat_capacity
-            * state.mixed_layer_depth
+            * mixed_layer_depth
         )
 
         total_heat_flux = forcing.total_heat_flux
@@ -342,7 +351,7 @@ class SlabOceanModel(SlabModelBase):
         ice_frazil_melt_energy = jnp.where(
             ocean,
             (constants.seawater_freezing_point_K - sea_surface_temperature)
-            * state.mixed_layer_depth
+            * mixed_layer_depth
             * constants.ocean_density
             * constants.ocean_specific_heat_capacity,
             0.0,
@@ -361,6 +370,7 @@ class SlabOceanModel(SlabModelBase):
         new_state = state.replace(sea_surface_temperature=sea_surface_temperature)
         new_derived = OceanDerived.zeros(
             self.grid.shape,
+            mixed_layer_depth=mixed_layer_depth,
             ice_frazil_melt_energy=ice_frazil_melt_energy,
             effective_total_heat_flux=total_heat_flux,
             q_flux_snapshot=q_flux_snapshot,
@@ -372,6 +382,14 @@ class SlabOceanModel(SlabModelBase):
             "derived": new_derived,
         }
         return {"params": params, **diagnostics}, diagnostics
+
+    def _mixed_layer_depth(self, params: SlabOceanParameters) -> jnp.ndarray:
+        """Prescribed mixed-layer depth: ``max`` at the poles, ``min`` at the equator."""
+        return (
+            params.mixed_layer_depth_max
+            + (params.mixed_layer_depth_min - params.mixed_layer_depth_max)
+            * jnp.cos(self.grid.latitude_radian) ** 3
+        )
 
     def _climatology_at(self, time: CouplingTime, ocean: jnp.ndarray) -> jnp.ndarray:
         """SST climatology interpolated to ``time``, masked to ocean cells."""
@@ -401,7 +419,7 @@ class SlabOceanModel(SlabModelBase):
             ),
             "mixed_layer_depth": (
                 dims,
-                state.mixed_layer_depth,
+                derived.mixed_layer_depth,
                 {
                     "long_name": "Mixed layer depth",
                     "units": "m",

@@ -231,8 +231,13 @@ carries a clock — the coupler owns the only one:
 @tree_math.struct
 class OceanState:
     sea_surface_temperature: jnp.ndarray
-    mixed_layer_depth: jnp.ndarray
 ```
+
+Only what *evolves* is state. A prescribed profile that depends on the
+parameters (the ocean's mixed-layer depth) is recomputed from `carry["params"]`
+in every step and written to the output as a derived field; caching it in the
+state at initialization would silently make its parameters dead, with zero
+gradient.
 
 **Component parameters are differentiable.** Each slab model has a
 `params.py` holding a `flax.struct.dataclass` whose numeric tunables are pytree

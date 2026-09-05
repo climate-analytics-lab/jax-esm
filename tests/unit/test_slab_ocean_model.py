@@ -170,7 +170,7 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
     )
     new_carry, _ = model.step(carry, coupling_time(0))
 
-    mixed_layer_depth = np.asarray(carry["state"].mixed_layer_depth, dtype=np.float64)
+    mixed_layer_depth = np.asarray(new_carry["derived"].mixed_layer_depth, dtype=np.float64)
     heat_capacity = (
         constants.ocean_density
         * constants.ocean_specific_heat_capacity
@@ -406,4 +406,30 @@ def test_unbound_model_starts_in_january(tmp_path, uniform_grid):
     state = model.initialize()["state"]
     assert float(np.asarray(state.sea_surface_temperature)[0, 0]) == pytest.approx(
         climatology_at(MONTHLY_SST, 0.0), rel=1e-6
+    )
+
+
+def test_mixed_layer_depth_follows_the_carried_params(uniform_grid):
+    """The depth is derived from carry["params"] each step, so its parameters carry gradient."""
+    model = SlabOceanModel(uniform_grid)
+    carry = model.initialize()
+    carry["forcing"] = carry["forcing"].replace(
+        total_heat_flux=jnp.full(uniform_grid.shape, 50.0)
+    )
+    assert "mixed_layer_depth" not in carry["state"].asdict()
+
+    def mean_sst(depth_max):
+        params = carry["params"].replace(mixed_layer_depth_max=depth_max)
+        stepped, _ = model.step(dict(carry, params=params), coupling_time(0))
+        return jnp.mean(stepped["state"].sea_surface_temperature)
+
+    gradient = float(jax.grad(mean_sst)(jnp.float32(60.0)))
+    assert np.isfinite(gradient) and gradient != 0.0
+    # A deeper layer has more heat capacity, so the same cooling flux lowers
+    # the SST less: the gradient of SST with respect to the depth is positive.
+    assert gradient > 0.0
+    _, diagnostics = model.step(carry, coupling_time(0))
+    np.testing.assert_allclose(
+        np.asarray(diagnostics["derived"].mixed_layer_depth),
+        np.asarray(model._mixed_layer_depth(carry["params"])),
     )

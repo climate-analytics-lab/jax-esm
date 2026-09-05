@@ -181,6 +181,11 @@ otherwise**; the code that has to change is named in each one.
   `LandState`, `SeaiceState`, `AtmosphereState`): a component holds no clock.
   Every slab carry gains a `"params"` entry alongside `state`/`forcing`/
   `derived`.
+- **`OceanState` holds only `sea_surface_temperature`.** The mixed-layer
+  depth is a prescribed profile of `mixed_layer_depth_min`/`_max`, recomputed
+  from the carried parameters every step (so they are live, differentiable
+  tunables) and written to the output as `mixed_layer_depth` from
+  `OceanDerived`.
 - **`forcing_method` values are lowercase** `"none" | "qflux" | "relaxation"`
   (`jem.components.slab.slab_ocean_model.params.FORCING_METHODS`). `None` and
   `"None"` are no longer accepted; an unknown value raises `ValueError`.

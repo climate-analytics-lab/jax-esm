@@ -95,7 +95,7 @@ For the slab ocean model, the carry is
     # carry of the slab ocean model
     {
         "params":  SlabOceanParameters(...),   # differentiable tunables
-        "state":   OceanState(sea_surface_temperature, mixed_layer_depth),
+        "state":   OceanState(sea_surface_temperature),
         "forcing": OceanForcing(total_heat_flux, q_flux),
         "derived": OceanDerived(...),
     }
