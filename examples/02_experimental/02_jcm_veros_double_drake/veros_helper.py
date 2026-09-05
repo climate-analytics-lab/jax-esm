@@ -36,8 +36,9 @@ def set_ocean_salinity(ocn_state, salt):
 def get_ocean_surface_temperature(ocn_state):
     """Read the ocean's sea surface temperature [K] from its prognostic state.
 
-    Mirrors the diagnostic computed in `jem.components.Veros.make_jem_compatible`,
-    so callers can read/perturb exactly the field the coupled dynamics use.
+    Mirrors the diagnostic `jem.components.veros_component.VerosComponent`
+    publishes, so callers can read/perturb exactly the field the coupled
+    dynamics use.
     """
     vs = ocn_state.variables
     g = _OCEAN_GHOST_CELL
@@ -46,7 +47,7 @@ def get_ocean_surface_temperature(ocn_state):
 def set_ocean_surface_temperature(ocn_state, sst):
     """Functionally overwrite the ocean's prognostic surface temperature [K].
 
-    Unlike `coupled_carry["ocn"]["derived"]["sea_surface_temperature"]`, which
+    Unlike `carry.components["ocn"]["derived"].sea_surface_temperature`, which
     is recomputed from the prognostic field every sub-step, this writes into
     `state.variables.temp` itself, so a perturbation here actually propagates
     through the ocean dynamics.

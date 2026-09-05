@@ -43,68 +43,93 @@ and ``ocn.nc`` into ``output/``.
     from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
     from jem import Coupler
-    from jem.components import JCM, SlabOceanModel
-    from jem.components.slab.grid import generate_slab_grid
+    from jem.components import JCMComponent, SlabOceanModel
+    from jem.components.slab import SlabGrid
 
-    start_datetime = jdt.to_datetime("2000-01-01")
+    start_date = jdt.to_datetime("2000-01-01")
     coupling_timestep = jdt.to_timedelta(1, "day")
-    one_second = jdt.to_timedelta(1, "second")
 
 
-    # A mapper is any function CoupledCarry -> CoupledCarry: it is the only place
-    # where components exchange information.
-    def atm_ocn_mapper(coupled_carry):
-        atm = coupled_carry["atm"]
-        ocn = coupled_carry["ocn"]
-        ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
-        atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
-        return coupled_carry
-
-
-    # The JCM atmosphere: a plain jcm.model.Model, adapted in place.
-    atm_model = JCM.make_jem_compatible(
-        jcm.model.Model(coords=get_speedy_coords(), start_date=start_datetime),
-        coupling_timestep=coupling_timestep,
-    )
-
-    # Aquaplanet: no mask file, so the fractional mask is all zero (no land).
-    grid = generate_slab_grid("JCM::T31")
-
-    model = Coupler(
-        components=dict(
-            atm=atm_model,
-            ocn=SlabOceanModel(
-                grid=grid,
-                start_datetime=start_datetime,
-                timestep=coupling_timestep / one_second,
+    # An exchanger is the only place where components exchange information. It is
+    # traced with everything else, so it must not write into the carries it is
+    # handed: it builds new ones and returns the mapping to continue with.
+    def atm_ocn_exchange(components, time):
+        del time  # this exchange does not depend on the date
+        atm, ocn = components["atm"], components["ocn"]
+        ocn = dict(
+            ocn,
+            forcing=ocn["forcing"].replace(
+                total_heat_flux=atm["derived"].total_heat_flux,
             ),
-        ),
-        mappers=dict(atm_ocn_mapper=atm_ocn_mapper),
-    )
+        )
+        atm = dict(
+            atm,
+            forcing=atm["forcing"].replace(
+                sea_surface_temperature=ocn["state"].sea_surface_temperature,
+            ),
+        )
+        return dict(components, atm=atm, ocn=ocn)
 
-    # The workflow is the coupling scheme: exchange, then step each component.
-    simulation_interval = jdt.to_timedelta(10, "day")
-    initial_carry, final_carry, predictions = model.run(
-        workflow=["atm_ocn_mapper", "atm", "ocn"],
-        iterations=int(simulation_interval / coupling_timestep),
+
+    # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
+    atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+    atm = JCMComponent(atm_model)
+
+    # Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
+    # and with no fractional mask every cell is ocean.
+    grid = SlabGrid.from_coords(atm_model.coords.horizontal)
+
+    coupler = Coupler(
+        {"atm": atm, "ocn": SlabOceanModel(grid)},
+        {"atm_ocn_exchange": atm_ocn_exchange},
+        coupling_timestep=coupling_timestep,
+        start_date=start_date,
     )
+    print(repr(coupler))
+
+    # The default workflow is every exchanger followed by every component, so the
+    # fields are exchanged first and both components then step on the same state.
+    simulation_interval = jdt.to_timedelta(10, "day")
+    run = coupler.generate_trajectory_function(
+        int(simulation_interval / coupling_timestep)
+    )
+    final_carry, diagnostics = run(coupler.initialize())
 
     output_dir = Path("output")
     output_dir.mkdir(parents=True, exist_ok=True)
-    for component_name, ds in model.predictions_to_xarray(predictions).items():
+    for component_name, ds in coupler.to_xarray(diagnostics).items():
         ds.to_netcdf(output_dir / f"{component_name:s}.nc", engine="netcdf4")
 
 The pieces, in the order they appear:
 
-- **The mapper** is a plain function ``CoupledCarry -> CoupledCarry``. It is the
-  only place where components exchange anything: here, the atmosphere's surface
-  heat flux goes to the ocean, and the ocean's SST comes back as the
-  atmosphere's boundary condition.
-- **The adapter** ``JCM.make_jem_compatible`` attaches JEM's interface to a
-  stock ``jcm.model.Model`` in place. It checks that the coupling timestep is a
-  whole multiple of JCM's own timestep.
-- **The workflow** ``["atm_ocn_mapper", "atm", "ocn"]`` is the coupling scheme:
-  exchange first, then step each component, once per coupling timestep.
+- **The exchanger** is a plain function
+  ``(dict[str, carry], CouplingTime) -> dict[str, carry]``. It is the only place
+  where components exchange anything: here, the atmosphere's surface heat flux
+  goes to the ocean, and the ocean's SST comes back as the atmosphere's boundary
+  condition. It is traced with the rest of the step, so it must build new structs
+  rather than assign into the ones it was handed, and must not change their
+  pytree structure.
+- **The wrapper** ``JCMComponent`` adapts a stock ``jcm.model.Model`` without
+  touching it — no methods are attached to the model. The coupler calls its
+  ``bind()`` when it is registered, which is where the model's start date,
+  calendar and timestep are checked against the coupler's.
+- **The grid** comes from the atmosphere's own ``coords.horizontal``, so the
+  ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
+  ``fractional_mask=`` (e.g. ``jcm.terrain.TerrainData.from_file(...).fmask``)
+  for a land-sea mask; without one every cell is ocean.
+- **The coupler** owns the clock: the coupling timestep, the start date and the
+  calendar live here and nowhere else, and every component's ``step`` is handed
+  the same ``CouplingTime``.
+- **The workflow** — printed by ``repr(coupler)`` — is the coupling scheme.
+  It defaults to every exchanger followed by every component; pass
+  ``workflow=["atm", "atm_ocn_exchange", "ocn"]`` to reorder it.
+- **The trajectory function** is a pure ``carry -> (carry, diagnostics)``
+  function built on ``jax.lax.scan``. Call it again on the carry it returned and
+  the run continues, because the step counter lives in the carry.
+- **The output**: ``to_xarray`` labels every component's dataset on the same
+  time axis and coordinates, so ``xr.merge`` of the two aligns. For a chunked
+  run, pass ``first_step=`` (the ``step`` of the carry the chunk started from) or
+  every chunk is labelled with the first chunk's dates.
 
 For the same run with a sea-ice component and plotting, see
 :doc:`examples/01_basic/01_aquaplanet`.

@@ -1,64 +1,62 @@
 """Tests for `jem.components.slab.slab_ocean_model`."""
 
+import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
-import xarray as xr
+from jax.test_util import check_grads
 
+import jcm.constants as jcm_constants
 from jem import constants
+from jem.base.component import SupportsBind
+from jem.base.coupler import Coupler
 from jem.components.slab.base import load_monthly_climatology
-from jem.components.slab.grid import SlabGrid
-from jem.components.slab.slab_ocean_model import SlabOceanModel
+from jem.components.slab.slab_ocean_model import SlabOceanModel, SlabOceanParameters
+from tests.unit.slab_test_utils import (
+    DAYS_PER_YEAR,
+    LATITUDE_DEGREES,
+    LONGITUDE_DEGREES,
+    TIMESTEP,
+    coupling_time,
+    make_grid,
+    monthly_ramp,
+    run_steps,
+    tree_signature,
+    write_climatology,
+)
 
-LONGITUDE_DEGREES = np.array([0.0, 90.0, 180.0, 270.0])
-LATITUDE_DEGREES = np.array([-60.0, 0.0, 60.0])
-TIMESTEP = 86400.0
+
+MONTHLY_SST = 285.0 + 10.0 * np.cos(2 * np.pi * np.arange(12) / 12.0)
 
 
 @pytest.fixture
-def uniform_grid() -> SlabGrid:
-    """Build a tiny all-ocean 4x3 lon-lat grid by hand so the tests own it."""
-    longitude_2d, latitude_2d = np.meshgrid(
-        np.deg2rad(LONGITUDE_DEGREES), np.deg2rad(LATITUDE_DEGREES), indexing="ij"
+def uniform_grid():
+    """Return a tiny all-ocean 4x3 lon-lat grid the tests own."""
+    return make_grid()
+
+
+def climatology_at(monthly, year_fraction):
+    """Interpolate a 12-month cycle exactly as the model does, in numpy."""
+    position = (year_fraction % 1.0) * 12.0
+    left = int(np.floor(position)) % 12
+    weight = position - np.floor(position)
+    return (1.0 - weight) * monthly[left] + weight * monthly[(left + 1) % 12]
+
+
+def write_seasonal_sst(path, monthly=MONTHLY_SST):
+    """Write a uniform-in-space, month-varying SST climatology and return its path."""
+    seasonal = np.broadcast_to(
+        np.asarray(monthly)[:, None, None],
+        (12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)),
     )
-    return SlabGrid(
-        fractional_mask=jnp.zeros((len(LONGITUDE_DEGREES), len(LATITUDE_DEGREES))),
-        latitude_radian=jnp.asarray(latitude_2d),
-        longitude_radian=jnp.asarray(longitude_2d),
-    )
-
-
-def _write_climatology(
-    path,
-    var: str,
-    values_time_lat_lon: np.ndarray,
-    longitude_degrees: np.ndarray = LONGITUDE_DEGREES,
-    latitude_degrees: np.ndarray = LATITUDE_DEGREES,
-) -> str:
-    """Write a 12-month climatology in (time, lat, lon) order and return its path."""
-    dataset = xr.Dataset(
-        data_vars={var: (("time", "lat", "lon"), values_time_lat_lon)},
-        coords={
-            "time": np.arange(12),
-            "lat": latitude_degrees,
-            "lon": longitude_degrees,
-        },
-    )
-    dataset.to_netcdf(path)
-    return str(path)
-
-
-def _monthly_ramp() -> np.ndarray:
-    """Return a (12, n_lat, n_lon) field whose every element is distinct."""
-    return np.arange(
-        12 * len(LATITUDE_DEGREES) * len(LONGITUDE_DEGREES), dtype=np.float32
-    ).reshape(12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES))
+    return write_climatology(path, "sst", np.array(seasonal))
 
 
 def test_load_monthly_climatology_is_shared_and_transposes_by_name(tmp_path, uniform_grid):
     """The loader is public on the slab base module so every slab component can use it."""
-    values = _monthly_ramp()
-    path = _write_climatology(tmp_path / "field.nc", "field", values)
+    values = monthly_ramp()
+    path = write_climatology(tmp_path / "field.nc", "field", values)
 
     loaded = load_monthly_climatology(path, "field", uniform_grid)
 
@@ -68,14 +66,13 @@ def test_load_monthly_climatology_is_shared_and_transposes_by_name(tmp_path, uni
 
 def test_qflux_file_is_loaded(tmp_path, uniform_grid):
     """A Q-flux file is read into the forcing carry, transposed by name."""
-    values = _monthly_ramp()
-    q_flux_file = _write_climatology(tmp_path / "qflux.nc", "qflux", values)
+    values = monthly_ramp()
+    q_flux_file = write_climatology(tmp_path / "qflux.nc", "qflux", values)
 
     model = SlabOceanModel(
-        grid=uniform_grid,
-        timestep=TIMESTEP,
-        forcing_method="Qflux",
-        Q_flux_file=q_flux_file,
+        uniform_grid,
+        SlabOceanParameters(forcing_method="qflux"),
+        q_flux_file=q_flux_file,
     )
     q_flux = model.initialize()["forcing"].q_flux
 
@@ -86,37 +83,55 @@ def test_qflux_file_is_loaded(tmp_path, uniform_grid):
 
 
 def test_climatology_rejects_wrong_coords(tmp_path, uniform_grid):
-    """A file on a shifted longitude axis is rejected, naming the file."""
-    q_flux_file = _write_climatology(
+    """A file on a shifted longitude axis is rejected, naming the file.
+
+    Boundary data is loaded by the constructor now, so the rejection happens
+    where the caller can see which line configured the component.
+    """
+    q_flux_file = write_climatology(
         tmp_path / "qflux_shifted.nc",
         "qflux",
-        _monthly_ramp(),
+        monthly_ramp(),
         longitude_degrees=LONGITUDE_DEGREES + 1.0,
     )
 
-    model = SlabOceanModel(
-        grid=uniform_grid,
-        timestep=TIMESTEP,
-        forcing_method="Qflux",
-        Q_flux_file=q_flux_file,
-    )
     with pytest.raises(ValueError, match="longitude") as excinfo:
-        model.initialize()
+        SlabOceanModel(
+            uniform_grid,
+            SlabOceanParameters(forcing_method="qflux"),
+            q_flux_file=q_flux_file,
+        )
 
     assert q_flux_file in str(excinfo.value)
 
 
 def test_qflux_zero_without_file(uniform_grid):
     """Q-flux forcing without a file is still a valid (zero-forcing) setup."""
-    model = SlabOceanModel(
-        grid=uniform_grid,
-        timestep=TIMESTEP,
-        forcing_method="Qflux",
-    )
+    model = SlabOceanModel(uniform_grid, SlabOceanParameters(forcing_method="qflux"))
     q_flux = model.initialize()["forcing"].q_flux
 
     assert q_flux.shape == uniform_grid.shape + (12,)
     assert bool(jnp.all(q_flux == 0.0))
+
+
+def test_qflux_file_with_wrong_forcing_method_is_rejected(tmp_path, uniform_grid):
+    """A Q-flux file the run would silently ignore is a configuration error."""
+    q_flux_file = write_climatology(tmp_path / "qflux.nc", "qflux", monthly_ramp())
+
+    with pytest.raises(ValueError, match="forcing_method"):
+        SlabOceanModel(uniform_grid, q_flux_file=q_flux_file)
+
+
+def test_relaxation_without_climatology_is_rejected(uniform_grid):
+    """Relaxation needs something to relax to."""
+    with pytest.raises(ValueError, match="sst_clim_file"):
+        SlabOceanModel(uniform_grid, SlabOceanParameters(forcing_method="relaxation"))
+
+
+def _constant_climatology(tmp_path, value_lat_lon):
+    """Write a 12-month SST climatology that does not vary through the year."""
+    values = np.broadcast_to(value_lat_lon, (12,) + value_lat_lon.shape)
+    return write_climatology(tmp_path / "sst.nc", "sst", np.array(values))
 
 
 def test_relaxation_matches_analytic(tmp_path, uniform_grid):
@@ -130,19 +145,18 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
     climatology_lat_lon = 290.0 + np.arange(
         len(LATITUDE_DEGREES) * len(LONGITUDE_DEGREES), dtype=np.float32
     ).reshape(len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES))
-    values = np.broadcast_to(climatology_lat_lon, (12,) + climatology_lat_lon.shape)
-    sst_file = _write_climatology(tmp_path / "sst.nc", "sst", np.array(values))
+    sst_file = _constant_climatology(tmp_path, climatology_lat_lon)
 
     relaxation_time = 5.0 * TIMESTEP
     initial_anomaly = 5.0
     heat_flux = -2000.0  # W m-2; upward-positive convention, so negative warms
 
     model = SlabOceanModel(
-        grid=uniform_grid,
-        timestep=TIMESTEP,
-        forcing_method="relaxation",
-        relaxation_time=relaxation_time,
-        SST_clim_file=sst_file,
+        uniform_grid,
+        SlabOceanParameters(
+            forcing_method="relaxation", relaxation_time=relaxation_time
+        ),
+        sst_clim_file=sst_file,
     )
     carry = model.initialize()
 
@@ -154,9 +168,9 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
     carry["forcing"] = carry["forcing"].replace(
         total_heat_flux=jnp.full(uniform_grid.shape, heat_flux),
     )
-    new_carry, _ = model.generate_step_function()(carry, 0)
+    new_carry, _ = model.step(carry, coupling_time(0))
 
-    mixed_layer_depth = np.asarray(carry["state"].mixed_layer_depth, dtype=np.float64)
+    mixed_layer_depth = np.asarray(new_carry["derived"].mixed_layer_depth, dtype=np.float64)
     heat_capacity = (
         constants.ocean_density
         * constants.ocean_specific_heat_capacity
@@ -177,46 +191,245 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
 
 def test_freeze_melt_energy_sign(uniform_grid):
     """A large upward heat flux drives the mixed layer to the freezing point."""
-    model = SlabOceanModel(grid=uniform_grid, timestep=TIMESTEP)
+    model = SlabOceanModel(uniform_grid)
     carry = model.initialize()
 
     # Big enough to remove tens of kelvin from the mixed layer in one step.
     carry["forcing"] = carry["forcing"].replace(
         total_heat_flux=jnp.full(uniform_grid.shape, 1.0e5),
     )
-    new_carry, _ = model.generate_step_function()(carry, 0)
+    new_carry, _ = model.step(carry, coupling_time(0))
 
-    sea_surface_temperature = new_carry["state"].sea_surface_temperature
-    ice_frazil_melt_energy = new_carry["derived"].ice_frazil_melt_energy
-
-    assert bool(jnp.all(ice_frazil_melt_energy > 0.0))
+    assert bool(jnp.all(new_carry["derived"].ice_frazil_melt_energy > 0.0))
     np.testing.assert_allclose(
-        np.asarray(sea_surface_temperature),
+        np.asarray(new_carry["state"].sea_surface_temperature),
         constants.seawater_freezing_point_K,
         rtol=1e-6,
     )
 
 
-def test_qflux_positive_warms_ocean(uniform_grid, tmp_path):
+def test_qflux_positive_warms_ocean(tmp_path, uniform_grid):
     """A positive Q-flux is a heat source: with no atmospheric flux the SST must rise.
 
     Guards the sign convention: Q is defined as ``+Q/(rho cp h)`` in the SST
     equation, but the step folds it into the UPWARD-positive total heat flux,
     which is negated -- so Q has to enter with a minus sign there.
     """
-    q_file = tmp_path / "qflux.nc"
-    _write_climatology(
-        q_file, "qflux", np.full((12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)), 50.0)
+    q_file = write_climatology(
+        tmp_path / "qflux.nc",
+        "qflux",
+        np.full((12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)), 50.0),
     )
     model = SlabOceanModel(
-        grid=uniform_grid,
-        forcing_method="Qflux",
-        Q_flux_file=str(q_file),
-        timestep=86400.0,
+        uniform_grid,
+        SlabOceanParameters(forcing_method="qflux"),
+        q_flux_file=q_file,
     )
     carry = model.initialize()
-    step = model.generate_step_function()
-    new_carry, _ = step(carry, 0)
-    sst_before = carry["state"].sea_surface_temperature
-    sst_after = new_carry["state"].sea_surface_temperature
-    assert bool(jnp.all(sst_after > sst_before)), "positive Q-flux must warm the mixed layer"
+    new_carry, _ = model.step(carry, coupling_time(0))
+
+    assert bool(
+        jnp.all(
+            new_carry["state"].sea_surface_temperature
+            > carry["state"].sea_surface_temperature
+        )
+    ), "positive Q-flux must warm the mixed layer"
+
+
+def test_params_default_equivalence(uniform_grid):
+    """Constructing with no params is constructing with the defaults."""
+    implicit = SlabOceanModel(uniform_grid).initialize()
+    explicit = SlabOceanModel(
+        uniform_grid, SlabOceanParameters.default()
+    ).initialize()
+
+    assert jax.tree_util.tree_structure(implicit) == jax.tree_util.tree_structure(
+        explicit
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(implicit), jax.tree_util.tree_leaves(explicit)
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
+def test_params_travel_in_the_carry(uniform_grid):
+    """The tunables are pytree leaves of the carry, not closure constants."""
+    model = SlabOceanModel(uniform_grid)
+    carry = model.initialize()
+
+    assert carry["params"] == model.params
+    assert any(
+        leaf is not None and np.ndim(leaf) == 0
+        for leaf in jax.tree_util.tree_leaves(carry["params"])
+    )
+
+
+def test_state_has_no_clock(tmp_path, uniform_grid):
+    """State carries no time, and the seasonal cycle comes from the coupler's clock.
+
+    The same carry stepped with two different `CouplingTime`s must give two
+    different answers, and specifically the ones the Euler-backward relaxation
+    to a month-varying climatology predicts. That is the whole point of moving
+    the clock out of the component: nothing but `time` distinguishes these two
+    calls.
+    """
+    assert "sim_time" not in SlabOceanModel(uniform_grid).initialize()["state"].asdict()
+
+    monthly = MONTHLY_SST
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc", monthly)
+
+    relaxation_time = TIMESTEP  # so the damping factor is exactly 1/2
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(
+            forcing_method="relaxation", relaxation_time=relaxation_time
+        ),
+        sst_clim_file=sst_file,
+    )
+    carry = model.initialize()
+    initial = float(np.asarray(carry["state"].sea_surface_temperature)[0, 0])
+
+    for step in (0, 182):
+        stepped, _ = model.step(carry, coupling_time(step))
+        year_fraction = step * TIMESTEP / (86400.0 * DAYS_PER_YEAR)
+        expected = 0.5 * (
+            initial - climatology_at(monthly, year_fraction)
+        ) + climatology_at(monthly, year_fraction + 1.0 / DAYS_PER_YEAR)
+        np.testing.assert_allclose(
+            np.asarray(stepped["state"].sea_surface_temperature),
+            expected,
+            rtol=1e-5,
+        )
+
+
+def test_step_shapes_and_dtypes_stable(uniform_grid):
+    """A step returns exactly the carry structure it received (lax.scan's rule)."""
+    model = SlabOceanModel(uniform_grid)
+    carry = model.initialize()
+    new_carry, _ = model.step(carry, coupling_time(0))
+
+    assert tree_signature(new_carry) == tree_signature(carry)
+
+
+def test_grad_wrt_relaxation_time_is_finite(tmp_path, uniform_grid):
+    """The relaxation timescale is differentiable through a multi-step run."""
+    climatology = np.full((12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)), 290.0)
+    sst_file = write_climatology(tmp_path / "sst.nc", "sst", climatology)
+
+    def mean_final_sst(relaxation_time):
+        model = SlabOceanModel(
+            uniform_grid,
+            SlabOceanParameters(forcing_method="relaxation"),
+            sst_clim_file=sst_file,
+        )
+        carry = model.initialize()
+        # A steady heat flux keeps the anomaly non-zero, so the relaxation
+        # timescale actually does something over the five steps.
+        carry["forcing"] = carry["forcing"].replace(
+            total_heat_flux=jnp.full(uniform_grid.shape, -500.0)
+        )
+        carry["params"] = carry["params"].replace(relaxation_time=relaxation_time)
+        carry, _ = run_steps(model, carry, 5)
+        return jnp.mean(carry["state"].sea_surface_temperature)
+
+    gradient = jax.grad(mean_final_sst)(jnp.float32(5.0 * TIMESTEP))
+
+    assert bool(jnp.isfinite(gradient))
+    assert abs(float(gradient)) > 0.0
+
+
+def test_step_is_differentiable(uniform_grid):
+    """Reverse-mode gradients of one step agree with finite differences."""
+    model = SlabOceanModel(uniform_grid)
+    carry = model.initialize()
+
+    def mean_sst(heat_flux_scale):
+        # Scaled to 1e4 W m-2 so a unit change moves SST by a few kelvin: a
+        # float32 finite difference of a ~288 K field cannot resolve less.
+        forced = carry["forcing"].replace(
+            total_heat_flux=jnp.full(uniform_grid.shape, 1.0e4 * heat_flux_scale)
+        )
+        stepped, _ = model.step({**carry, "forcing": forced}, coupling_time(0))
+        return jnp.mean(stepped["state"].sea_surface_temperature)
+
+    check_grads(mean_sst, (0.0,), order=1, modes=["rev"], eps=1e-2, atol=1e-2, rtol=1e-2)
+
+
+def test_freeze_melt_energy_uses_jcm_constants(uniform_grid):
+    """Nothing in the ocean model shadows a constant jcm.constants already owns."""
+    assert not hasattr(constants, "freezing_point_K")
+    assert constants.seawater_freezing_point_K < jcm_constants.tmelt
+
+
+def test_bind_sets_the_initial_climatology_month(tmp_path, uniform_grid):
+    """The start date reaches `initialize()` through the coupler, not a parameter.
+
+    `initialize()` is handed no clock -- the clock lives in the carry, which
+    does not exist yet -- so the coupler tells the model where the run starts
+    when it registers it. A January run and a July run of the same model must
+    therefore start from different months of the same climatology.
+    """
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+
+    def initial_sea_surface_temperature(start_date):
+        model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+        assert isinstance(model, SupportsBind)
+        # Constructing the coupler binds every component that can be bound.
+        Coupler(
+            {"ocn": model},
+            coupling_timestep=jdt.to_timedelta(1, "day"),
+            start_date=jdt.to_datetime(start_date),
+            calendar="365_day",
+        )
+        state = model.initialize()["state"]
+        return float(np.asarray(state.sea_surface_temperature)[0, 0])
+
+    january = initial_sea_surface_temperature("2001-01-01")
+    july = initial_sea_surface_temperature("2001-07-01")
+
+    # 1 July is 181 days into a 365-day year.
+    assert january == pytest.approx(climatology_at(MONTHLY_SST, 0.0), rel=1e-6)
+    assert july == pytest.approx(
+        climatology_at(MONTHLY_SST, 181.0 / DAYS_PER_YEAR), rel=1e-6
+    )
+    # The two months of this climatology are 20 K apart at the extremes; the
+    # point of the test is that they are not the same number.
+    assert abs(july - january) > 1.0
+
+
+def test_unbound_model_starts_in_january(tmp_path, uniform_grid):
+    """A model never registered with a coupler reads its climatology at 1 January."""
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    assert model.start_year_fraction == 0.0
+    state = model.initialize()["state"]
+    assert float(np.asarray(state.sea_surface_temperature)[0, 0]) == pytest.approx(
+        climatology_at(MONTHLY_SST, 0.0), rel=1e-6
+    )
+
+
+def test_mixed_layer_depth_follows_the_carried_params(uniform_grid):
+    """The depth is derived from carry["params"] each step, so its parameters carry gradient."""
+    model = SlabOceanModel(uniform_grid)
+    carry = model.initialize()
+    carry["forcing"] = carry["forcing"].replace(
+        total_heat_flux=jnp.full(uniform_grid.shape, 50.0)
+    )
+    assert "mixed_layer_depth" not in carry["state"].asdict()
+
+    def mean_sst(depth_max):
+        params = carry["params"].replace(mixed_layer_depth_max=depth_max)
+        stepped, _ = model.step(dict(carry, params=params), coupling_time(0))
+        return jnp.mean(stepped["state"].sea_surface_temperature)
+
+    gradient = float(jax.grad(mean_sst)(jnp.float32(60.0)))
+    assert np.isfinite(gradient) and gradient != 0.0
+    # A deeper layer has more heat capacity, so the same cooling flux lowers
+    # the SST less: the gradient of SST with respect to the depth is positive.
+    assert gradient > 0.0
+    _, diagnostics = model.step(carry, coupling_time(0))
+    np.testing.assert_allclose(
+        np.asarray(diagnostics["derived"].mixed_layer_depth),
+        np.asarray(model._mixed_layer_depth(carry["params"])),
+    )

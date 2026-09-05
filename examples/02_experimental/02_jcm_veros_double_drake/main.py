@@ -15,7 +15,6 @@ import jcm
 import jax_datetime as jdt
 
 import jem
-import jem.utils.tree_tools as tree_tools
 from jem.utils.checkpoints import (
     save_coupled_carry, load_coupled_carry,
     save_veros_carry, load_veros_carry,
@@ -73,17 +72,27 @@ model, config = build_model(
     veros_dt_mom=args.veros_timestep_min * 60,
     veros_dt_tracer=args.veros_timestep_min * 60,
 )
-ocn_model = model.components["ocn"].raw_component
+# `coupler.components[name]` is the component object itself -- for the two
+# wrapped models, `.model` is the underlying VerosSetup / jcm.model.Model.
+ocn_component = model.components["ocn"]
+ocn_model = ocn_component.model
 
-print("Model info: ")
-tree_tools.print_tree(model.get_info(), root="Model")
+print("Coupled model: ")
+print(repr(model))
 
-atm_model = model.components["atm"].raw_component
+atm_model = model.components["atm"].model
 transport_scheme = type(atm_model.dycore._primitive).__name__
 print(f"jcm dycore transport scheme: {transport_scheme}")
 
 # Run Coupled Model
-initial_carry = model.initialize()
+#
+# One trajectory function, compiled once and reused for every batch: the
+# coupled step counter lives in the carry, not in the scan index, so calling it
+# again on the carry it returned continues the run rather than restarting it.
+steps_per_batch = int(simulation_interval / coupling_timestep)
+run = model.generate_trajectory_function(steps_per_batch)
+
+carry = model.initialize()
 batches = int(total_simulation_time / simulation_interval)
 checkpoint_dir = output_dir / "checkpoint"
 resume_batch = 0
@@ -92,10 +101,18 @@ if checkpoint_dir.exists():
     if saved:
         resume_batch = int(saved[-1].name.split("_")[1]) + 1
         print(f"Resuming from batch {resume_batch}")
-        initial_carry = load_coupled_carry(
+        # The checkpoint carries the coupled step counter, so the resumed run
+        # picks up the seasonal cycle where it left off. Reconstructing the
+        # step from the batch index would be right only while every batch has
+        # the same length, and wrong the moment --simulation-interval-days
+        # changes between runs.
+        carry = load_coupled_carry(
             saved[-1], ["atm", "ocn", "fakelnd"],
-            component_loaders={"ocn": lambda path: load_veros_carry(path, ocn_model)},
+            component_loaders={
+                "ocn": lambda path: load_veros_carry(path, ocn_model),
+            },
         )
+        print(f"Resuming at coupled step {int(carry.step):d}")
 
 if resume_batch == batches:
     print(f"Target batches: {batches:d} is all done. Exit the program.")
@@ -109,17 +126,17 @@ for b in range(resume_batch, batches):
     # non-deterministic, the re-run might by pass the instability. So, I provide the option
     # --max-rerun-attempts to allow such rerun
     total_attempts = 1 + args.max_rerun_attempts
-    model_failed = False
-    for run_attempt in range(total_attempts): 
-        _, final_carry, predictions = model.run(
-            initial_carry = initial_carry,
-            workflow=config["workflow"],
-            iterations = int(simulation_interval / coupling_timestep),
-            jitted=True,
-            reuse_last_available_trajectory=True,
+    for run_attempt in range(total_attempts):
+        final_carry, diagnostics = run(carry)
+
+        # `first_step` is the coupled step this batch started from; without it
+        # every batch would be labelled with the first batch's dates. It comes
+        # from the carry's own clock rather than from `b * steps_per_batch`,
+        # so a run resumed with a different --simulation-interval-days still
+        # labels its output with the dates it actually simulated.
+        output_dict = model.to_xarray(
+            diagnostics, first_step=int(carry.step)
         )
-        
-        output_dict = model.predictions_to_xarray(predictions)
 
     
         model_is_stable = jnp.all( jnp.isfinite(output_dict["atm"]["specific_humidity"].to_numpy()) )
@@ -154,7 +171,7 @@ for b in range(resume_batch, batches):
         ds.to_netcdf(output_file, unlimited_dims="time", engine="netcdf4")
         ds.close()
   
-    initial_carry = final_carry
+    carry = final_carry
     save_coupled_carry(
         final_carry, checkpoint_dir / f"batch_{b:05d}",
         component_savers={"ocn": save_veros_carry},

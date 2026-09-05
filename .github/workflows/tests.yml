@@ -18,12 +18,24 @@ jobs:
       with:
         python-version: "3.11"
 
-    - name: Install linters
+    - name: Get jax-gcm
+      # mypy needs the real dependencies: with flax and jcm absent every
+      # `struct.dataclass` collapses to Any and the generated constructors
+      # are reported as unexpected keyword arguments. The type check is only
+      # meaningful at dependency parity with the test job.
+      uses: actions/checkout@v4
+      with:
+        repository: climate-analytics-lab/jax-gcm
+        ref: dev
+        path: jax-gcm
+
+    - name: Install the package and linters
       # Ruff is pinned to the same version jax-gcm pins: an unpinned latest
       # drifts new rules onto a clean repository and turns an unrelated PR red.
       run: |
         python -m pip install --upgrade pip
-        pip install ruff==0.15.17 mypy
+        pip install -e ./jax-gcm
+        pip install -e ".[dev]"
 
     - name: Lint with ruff
       # The whole repository, not just jem/: examples and tests are code too,
@@ -31,7 +43,7 @@ jobs:
       run: ruff check --output-format=github .
 
     - name: Type check with mypy
-      run: mypy jem/ --ignore-missing-imports
+      run: JAX_PLATFORMS=cpu mypy jem/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest

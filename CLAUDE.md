@@ -26,7 +26,7 @@ When asked to fix or implement something, deliver the **complete, faithful**
 solution by default — do not ship a partial fix, a band-aid, or a "good enough
 for now" workaround and present it as done. In a coupler "faithful" specifically
 means the coupled system is right, not just the file you edited: the flux the
-mapper moves has the sign, the units and the grid the receiving component
+exchanger moves has the sign, the units and the grid the receiving component
 expects, the carry structure that comes out of a step matches the one that went
 in, and conservation across the exchange is checked rather than assumed.
 
@@ -71,15 +71,16 @@ config-group overrides — never as a standalone driver script:
  - The **target** is `python -m jem.main` with Hydra groups under
    `jem/config/` (atmosphere, ocean, land, seaice, coupling, run,
    experiment), mirroring how `jcm` is driven. That driver and its config
-   tree do not exist yet; they are Phase 2 of
-   `docs/source/design/api_hardening_plan.md`.
+   tree do not exist yet; they are Phase 2 of the API hardening plan (the
+   plan itself is not in the repository — `docs/source/design/architecture.md`
+   describes the API as it stands).
  - **Until it does exist, do not add new standalone command-line driver
    scripts (a hand-rolled CLI plus a `run.sh`).** A new runnable
    configuration is a notebook or a short snippet in
    the docs that calls the Python API (`Coupler`, the component classes,
-   `Coupler.run`); it is not a new bespoke driver. The bespoke drivers still
-   under `examples/02_experimental/` are legacy and are being folded into the
-   Hydra tree, not extended.
+   `Coupler.generate_trajectory_function`); it is not a new bespoke driver.
+   The bespoke drivers still under `examples/02_experimental/` are legacy and
+   are being folded into the Hydra tree, not extended.
  - **Python is the primary interface; config is a thin wrapper.** Every
    physical parameter and its default value lives once, as a Python default on
    the component class. YAML may carry only wiring (`_target_`, required
@@ -123,43 +124,51 @@ ocean GCM — into one JIT-compilable, end-to-end differentiable simulation loop
 
 The design in three sentences:
 
-- A **component** is any object exposing `initialize() -> carry` and
-  `generate_step_function() -> step(carry, step_index) -> (new_carry, predictions)`,
-  plus the optional `predictions_to_xarray()` and `get_info()`. There is no base
-  class to inherit from — the contract is duck-typed, so an external model can
-  be adapted without being rewritten.
-- A **mapper** is a plain function `CoupledCarry -> CoupledCarry`. It is the
-  only place where components exchange information; there is no hidden flux
-  bus.
-- The **`Coupler`** runs an ordered `workflow` — a list naming components and
-  mappers — once per coupling timestep, and drives that step function under
-  `jax.lax.scan` (or a Python loop when `jitted=False`, for debugging).
+- A **component** is any object satisfying the `Component` protocol in
+  `jem/base/component.py`: a `name`, an `initialize() -> carry` and a
+  `step(carry, time) -> (new_carry, diagnostics)`, plus the optional
+  capabilities `SupportsXarray`, `SupportsBind` and `SupportsCheckpoint`.
+  There is still no base class to inherit from — it is a runtime-checkable
+  `typing.Protocol` — so an external model is adapted by a thin wrapper class
+  rather than being rewritten or monkey-patched.
+- An **exchanger** is a plain function
+  `(dict[str, carry], CouplingTime) -> dict[str, carry]`. It is the only place
+  where components exchange information; there is no hidden flux bus.
+- The **`Coupler`** owns the coupled model *and its clock*: it runs an ordered
+  `workflow` naming components and exchangers once per coupling timestep, hands
+  every component the same `CouplingTime`, and turns that step into a pure
+  trajectory function with `generate_trajectory_function(iterations)`, driven
+  by `jax.lax.scan`.
 
-See `docs/source/design/architecture.md` for the carry layout, the interface
-contract and the steps to add a component.
+See `docs/source/design/architecture.md` for the carry layout, the contract
+and the steps to add a component.
 
 ## Repository Structure
 
 ```
 jem/                             # Main package
-├── __init__.py                  # exports Coupler, typing
-├── constants.py                 # physical constants used by the slab models
+├── __init__.py                  # exports the coupling core (Coupler, the protocols)
+├── constants.py                 # SurfaceConstants: what jcm.constants does not define
 ├── base/
-│   ├── coupler.py               # Coupler — the engine (workflow, scan, run)
-│   ├── interface.py             # resolve_interface: duck-type resolver
-│   └── typing.py                # type aliases + the JEMComponent dataclass
+│   ├── component.py             # the contract: Component + optional capabilities,
+│   │                            #   CoupledCarry, CouplingTime, TimeAxis, Exchanger
+│   └── coupler.py               # Coupler — the coupled model, its clock and its step
 ├── components/
-│   ├── jcm_component.py         # adapter for the JCM atmosphere (jax-gcm)
-│   ├── veros_component.py       # adapter for the Veros ocean GCM (optional dep)
+│   ├── jcm/                     # the JCM atmosphere (jax-gcm)
+│   │   ├── component.py         #   JCMComponent: wrapper class, threads the physics carry
+│   │   └── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
+│   ├── jcm_component.py         # deprecated make_jem_compatible shim
+│   ├── veros_component.py       # VerosComponent, the Veros ocean GCM (optional dep)
 │   └── slab/
-│       ├── base.py              # SlabModelBase: grid, clock, xarray output
-│       ├── grid.py              # SlabGrid + generate_slab_grid()
+│       ├── base.py              # SlabModelBase: grid, climatologies, xarray output
+│       ├── grid.py              # SlabGrid.from_coords / .from_scrip
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, frazil diagnostic)
 │       ├── slab_land_model/     # SlabLandModel
 │       ├── slab_seaice_model/   # SlabSeaiceModel (basal-only thickness)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
+│           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
-└── utils/                       # bulk_op, cycles, esmf_regrid, tree_tools, ...
+└── utils/                       # cycles, checkpoints, esmf_regrid, time, ...
 docs/                            # Sphinx documentation (RST + MyST, shibuya theme)
 ├── source/design/               # design documents (this is where they go)
 examples/                        # example notebooks and experimental setups
@@ -215,43 +224,54 @@ named `test_*.py`. Mark tests over ~1 minute with `@pytest.mark.slow`.
 
 ### Data structures
 Component state, forcing and derived quantities use `@tree_math.struct`, which
-gives vector-math semantics and registers the class as a pytree:
+gives vector-math semantics and registers the class as a pytree. None of them
+carries a clock — the coupler owns the only one:
 
 ```python
 @tree_math.struct
 class OceanState:
-    sim_time: jnp.ndarray
     sea_surface_temperature: jnp.ndarray
-    mixed_layer_depth: jnp.ndarray
 ```
 
-**Differentiable component parameters** are the target pattern for the slab
-models: a `flax.struct.dataclass` whose numeric tunables are pytree leaves you
-can take gradients with respect to, while genuinely *static* configuration
-(enums/flags selecting a code path at trace time) is marked `pytree_node=False`
-and stays as Python aux data usable in ordinary `if` branches:
+Only what *evolves* is state. A prescribed profile that depends on the
+parameters (the ocean's mixed-layer depth) is recomputed from `carry["params"]`
+in every step and written to the output as a derived field; caching it in the
+state at initialization would silently make its parameters dead, with zero
+gradient.
+
+**Component parameters are differentiable.** Each slab model has a
+`params.py` holding a `flax.struct.dataclass` whose numeric tunables are pytree
+leaves you can take gradients with respect to, while genuinely *static*
+configuration (flags selecting a code path at trace time) is marked
+`pytree_node=False` and stays as Python aux data usable in ordinary `if`
+branches:
 
 ```python
 @struct.dataclass
 class SlabOceanParameters:
-    relaxation_time: jnp.ndarray = 2592000.0                         # differentiable leaf
-    mixed_layer_depth_max: jnp.ndarray = 60.0                        # differentiable leaf
-    forcing_method: ForcingMethod = struct.field(pytree_node=False,
-                                                 default=ForcingMethod.NONE)  # static aux
+    relaxation_time: float | jnp.ndarray = 60 * 86400.0              # differentiable leaf
+    mixed_layer_depth_max: float | jnp.ndarray = 60.0                # differentiable leaf
+    forcing_method: str = struct.field(pytree_node=False,
+                                       default="none")               # static aux
 ```
 
-Today the slab models still hold these as plain attributes set in `__init__`,
-which keeps them out of the gradient — converting them is a planned task
-(`docs/source/design/api_hardening_plan.md`, T1.4). New numeric tunables must
-not be made static: that hides them from `jax.grad`, which is the whole point of
-the project.
+The `float | jnp.ndarray` annotation is not decoration: mypy is a gate, and a
+field annotated `jnp.ndarray` with a float default fails it, while the union
+says exactly what the field accepts — a Python float from a default or a config,
+or a traced array from an optimizer.
+
+The parameters travel in the carry, as `carry["params"]`, rather than in a
+closure over the model object, which is what makes `jax.grad` of a coupled run
+with respect to a physical parameter work without any special casing in the
+coupler. A new numeric tunable must not be made static: that hides it from
+`jax.grad`, which is the whole point of the project.
 
 ### Logging, not printing
-Use `logging.getLogger(__name__)`; do **not** add `print(...)` anywhere under
-`jem/`. Several modules still print (the coupler's workflow banner, the slab
-models' initialization messages); those are being converted, and no new ones
-should appear. A `print` inside a traced step function is especially misleading:
-it fires once at trace time, not once per step.
+Use `logging.getLogger(__name__)`; there is **no** `print(...)` anywhere under
+`jem/` and no new one should appear. A `print` inside a traced step function is
+especially misleading: it fires once at trace time, not once per step. A library
+must not write to a user's stdout either — the coupler logs its workflow at
+DEBUG, and a driver or notebook is what prints.
 
 ### Physical constants
 Constants shared with the atmosphere must come from **`jcm.constants`**, so that
@@ -260,19 +280,29 @@ friends. Read them by attribute access on the module (`import jcm.constants as
 c; ... c.grav`) rather than `from`-import, so a process-global
 `set_constants(...)` override is honoured.
 
-`jem/constants.py` today **duplicates** several of these values with different
-names and slightly different numbers (`g0 = 9.81` against JCM's `grav`), and the
-slab models read the duplicate. That is a known defect scheduled for removal
-(T1.6); the module keeps only genuinely JEM-specific constants (seawater and
-land-slab properties, ice properties). Do not add a constant to
-`jem/constants.py` that `jcm.constants` already defines.
+`jem/constants.py` holds only what `jcm.constants` genuinely does not define:
+the properties of a seawater / land / ice *surface slab* and the bulk-formula
+coefficients the idealized slab atmosphere uses. It follows the same pattern as
+JCM's module — a frozen `SurfaceConstants` dataclass, a live singleton, a
+`set_constants(...)` override (a whole instance or individual keyword fields)
+and a module `__getattr__` — so `jem.constants.ocean_density` honours an
+override made after import. Call `set_constants` *before* constructing the
+components: a component reads the constants while building its initial carry and
+while tracing its step.
+
+Do not add a constant to `jem/constants.py` that `jcm.constants` already
+defines. The values that used to be duplicated there were removed; the module
+docstring tabulates each one against the `jcm.constants` name that replaced it,
+including the three whose value changed.
 
 ### Naming
 - **snake_case** for functions and variables, **PascalCase** for classes.
 - Descriptive names for physical variables: `sea_surface_temperature`,
   `total_heat_flux`, `ice_frazil_melt_energy` — not `sst`, `hf`, `frzmlt`.
-- Component and mapper names share one namespace in a `Coupler` and must be
-  unique.
+- Component and exchanger names share one namespace in a `Coupler` and must be
+  unique. The functions that move fields between components are **exchangers**,
+  not "mappers": one may regrid, compute a flux, convert units or simply copy a
+  field, and "mapper" read as regridding.
 
 ### Sign and mask conventions
 - Heat flux is **positive upward** (out of the surface); freshwater flux is
@@ -283,6 +313,33 @@ land-slab properties, ice properties). Do not add a constant to
   available to melt existing ice.
 - In a `SlabGrid`, `binary_mask == 1` means land and `0` means ocean.
 
+### Output conventions
+A coupled run writes one dataset per component, and they are only useful
+together if `xr.merge` aligns them rather than producing an outer join. The
+conventions are JCM's, and every component follows them:
+
+- **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
+  `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (plus a CF
+  `coordinates` attribute on each variable) for a curvilinear one — CF and
+  xarray forbid a 2-D variable named after one of its own dimensions.
+- **Coordinate values** are degrees computed as `radians * 180 / pi` in float64
+  (`jem.components.slab.grid.to_degrees`), which is character for character what
+  `jcm.utils.data_to_xarray` does. Any other route risks a last-bit difference,
+  which is enough to turn two 96-point longitude axes into a 119-point union.
+- **The `time` coordinate** is an absolute `datetime64[ns]` axis — never
+  "hours since <start>" — and record *k* is labelled with the **end** of the
+  interval it covers, `start_date + (k+1)*dt`. `TimeAxis.datetimes()` is the
+  single definition; `jem.utils.time.time_coordinate` unpacks it for xarray.
+  The dates are proleptic Gregorian whatever the model calendar is.
+- **Variable names**: state and derived quantities keep their plain names, and
+  every variable that came from a component's *forcing* is written with a
+  `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
+  applied by `forcing_variable(name)`. Two components legitimately hold the
+  same physical field — one produced it, the other received it — and without
+  the prefix the merge of their datasets collides on the shared name. A new
+  output variable that comes from `carry["forcing"]` goes through
+  `forcing_variable()`; one that comes from `state` or `derived` does not.
+
 ### Type hints and docstrings
 - Type hints in public signatures; `mypy jem/ --ignore-missing-imports` is a
   gate.
@@ -291,7 +348,8 @@ land-slab properties, ice properties). Do not add a constant to
 ### Testing
 - Tests under `tests/unit/` (fast, no external data) and `tests/examples/`
   (notebook and example smoke tests).
-- A coupling change is not tested until a two-step coupled `Coupler.run()`
-  exercises it — a unit test of one component's step function does not catch a
-  carry-structure mismatch.
+- A coupling change is not tested until two steps through
+  `Coupler.generate_trajectory_function(2)` exercise it — a unit test of one
+  component's step function does not catch a carry-structure mismatch, which
+  only `lax.scan` sees.
 - Include gradient checks for anything that claims to be differentiable.
