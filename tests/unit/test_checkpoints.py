@@ -22,6 +22,7 @@ from jem.utils.checkpoints import (
     latest_complete_checkpoint,
     load_component_carries,
     load_coupled_carry,
+    remaining_batches,
     save_component_carries,
     save_coupled_carry,
 )
@@ -159,19 +160,19 @@ def test_the_newest_incomplete_checkpoint_is_skipped(tmp_path, caplog):
     some component carries exist, but the completion marker -- written last --
     does not.
     """
-    save_coupled_carry(toy_coupled_carry(step=5), tmp_path / "batch_0000")
-    save_coupled_carry(toy_coupled_carry(step=10), tmp_path / "batch_0001")
-    (tmp_path / "batch_0002").mkdir()
+    save_coupled_carry(toy_coupled_carry(step=5), tmp_path / "step_00000005")
+    save_coupled_carry(toy_coupled_carry(step=10), tmp_path / "step_00000010")
+    (tmp_path / "step_00000015").mkdir()
 
     with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
         latest = latest_complete_checkpoint(tmp_path)
 
-    assert latest == tmp_path / "batch_0001"
-    assert "batch_0002" in caplog.text
-    assert "batch_0001" not in caplog.text
+    assert latest == tmp_path / "step_00000010"
+    assert "step_00000015" in caplog.text
+    assert "step_00000010" not in caplog.text
 
-    # The returned directory is loadable and still names its batch index.
-    assert int(latest.name.split("_")[1]) == 1
+    # The returned directory is loadable, and the step a resume continues from
+    # comes from inside it rather than from its name.
     assert int(load_coupled_carry(latest, ["ocn", "lnd"]).step) == 10
 
 
@@ -179,21 +180,64 @@ def test_no_complete_checkpoint_returns_none(tmp_path, caplog):
     """With nothing loadable there is nothing to resume from -- including no root."""
     assert latest_complete_checkpoint(tmp_path / "absent") is None
 
-    (tmp_path / "batch_0000").mkdir()
+    (tmp_path / "step_00000000").mkdir()
     with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
         assert latest_complete_checkpoint(tmp_path) is None
-    assert "batch_0000" in caplog.text
+    assert "step_00000000" in caplog.text
 
 
 def test_names_that_do_not_match_the_pattern_are_ignored(tmp_path, caplog):
     """Only ``pattern`` names a checkpoint, so nothing else is skipped or warned about."""
-    save_coupled_carry(toy_coupled_carry(step=2), tmp_path / "batch_0000")
+    save_coupled_carry(toy_coupled_carry(step=2), tmp_path / "step_00000002")
     (tmp_path / "output").mkdir()
     (tmp_path / "zzz_scratch").mkdir()
-    (tmp_path / "batch_0001.tmp").write_text("not a directory")
+    (tmp_path / "step_00000004.tmp").write_text("not a directory")
 
     with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
         latest = latest_complete_checkpoint(tmp_path)
 
-    assert latest == tmp_path / "batch_0000"
+    assert latest == tmp_path / "step_00000002"
     assert caplog.text == ""
+
+
+def test_remaining_batches_runs_out_the_full_batches_then_the_remainder():
+    """A run of 20 steps in batches of 6 is three full batches and a short one."""
+    assert remaining_batches(0, 20, 6) == [6, 6, 6, 2]
+    # A total that is a whole number of batches has no short one.
+    assert remaining_batches(0, 18, 6) == [6, 6, 6]
+
+
+def test_remaining_batches_resumes_from_the_step_not_from_a_batch_index():
+    """The batch length may differ from the run that wrote the checkpoint.
+
+    This is the case a batch index cannot express: a run that got to step 10 in
+    batches of 5 is resumed with batches of 2, and still has exactly the 10
+    steps between it and a 20-step total left to do.
+    """
+    assert remaining_batches(10, 20, 2) == [2, 2, 2, 2, 2]
+    # ... and the same restart asked for 10-step batches runs the one batch it
+    # needs rather than exiting as "already done".
+    assert remaining_batches(10, 20, 10) == [10]
+    # A restart part-way through a batch is not special: what is left is what
+    # is left, whether or not it divides evenly.
+    assert remaining_batches(7, 20, 5) == [5, 5, 3]
+
+
+def test_remaining_batches_is_empty_when_the_run_is_done():
+    """Nothing left to run -- including a total that a longer run passed."""
+    assert remaining_batches(20, 20, 5) == []
+    assert remaining_batches(25, 20, 5) == []
+    assert remaining_batches(0, 0, 5) == []
+
+
+@pytest.mark.parametrize(
+    "steps_done, total_steps, steps_per_batch",
+    [(0, 10, 0), (0, 10, -1), (-1, 10, 5), (0, -10, 5)],
+    ids=["zero_batch", "negative_batch", "negative_done", "negative_total"],
+)
+def test_remaining_batches_rejects_nonsense_counts(
+    steps_done, total_steps, steps_per_batch
+):
+    """A zero-length batch would loop forever; a negative count is a caller bug."""
+    with pytest.raises(ValueError):
+        remaining_batches(steps_done, total_steps, steps_per_batch)

@@ -199,7 +199,7 @@ def load_coupled_carry(
 
 
 def latest_complete_checkpoint(
-    checkpoint_root: str | Path, pattern: str = "batch_*"
+    checkpoint_root: str | Path, pattern: str = "step_*"
 ) -> Path | None:
     """Return the newest checkpoint directory that is actually complete.
 
@@ -212,9 +212,12 @@ def latest_complete_checkpoint(
     directory which sorts newest -- so the newest name is not necessarily the
     newest *checkpoint*, and resuming has to skip it.
 
-    Directories are ordered by sorted name, matching how the drivers name them
-    (``batch_0000``, ``batch_0001``, ...), so the caller can still recover a
-    batch index from the returned directory's name.
+    Directories are ordered by sorted name. The drivers name a checkpoint
+    after the coupled step it was written at, zero-padded to a fixed width
+    (``step_00000000``, ``step_00000005``, ...), so sorting the names sorts
+    the checkpoints by simulated time. The step a resumed run continues from
+    is read from inside the checkpoint, not from its name -- the name is only
+    what makes "newest" well defined.
 
     Each skipped directory is logged at WARNING: a marker-less directory means
     an earlier run died mid-save, which is worth knowing about even though the
@@ -260,6 +263,69 @@ def latest_complete_checkpoint(
             COUPLED_STEP_FILENAME,
         )
     return complete[-1] if complete else None
+
+
+def remaining_batches(
+    steps_done: int, total_steps: int, steps_per_batch: int
+) -> list[int]:
+    """Return the lengths of the batches a run still has to integrate.
+
+    A chunked driver runs its coupled steps in batches of ``steps_per_batch``
+    so that it can write output and a checkpoint between them. How many are
+    left is a function of the *step counter the checkpoint restored*, never of
+    the checkpoint's name or of a batch index: the batch length is a run-time
+    choice that may differ between the run that wrote a checkpoint and the run
+    that resumes it, so a batch index means nothing across the two, whereas the
+    coupled step counts the same coupling steps in both.
+
+    The last batch is short when the total is not a whole number of batches.
+    It is returned with its true length rather than rounded up, so a run stops
+    exactly at ``total_steps``; a driver pays for it with one extra trajectory
+    compile, only on that final batch.
+
+    Parameters
+    ----------
+    steps_done : int
+        Coupled steps already integrated -- ``int(carry.step)`` after loading
+        a checkpoint, or 0 for a fresh run.
+    total_steps : int
+        Coupled steps the whole run is asked for.
+    steps_per_batch : int
+        Coupled steps in a full batch.
+
+    Returns
+    -------
+    list of int
+        One entry per batch left to run, in order, each the number of coupled
+        steps to integrate in it. Empty when the run is already done (or past
+        its target, which a shortened ``--total-simulation-days`` produces).
+
+    Raises
+    ------
+    ValueError
+        If ``steps_per_batch`` is not positive, or either step count is
+        negative.
+
+    """
+    if steps_per_batch <= 0:
+        raise ValueError(
+            f"steps_per_batch must be positive; got {steps_per_batch!r}."
+        )
+    if steps_done < 0 or total_steps < 0:
+        raise ValueError(
+            f"step counts must be non-negative; got steps_done={steps_done!r}, "
+            f"total_steps={total_steps!r}."
+        )
+
+    remaining = total_steps - steps_done
+    if remaining <= 0:
+        return []
+
+    full_batches, leftover = divmod(remaining, steps_per_batch)
+    batches = [steps_per_batch] * full_batches
+    if leftover:
+        batches.append(leftover)
+    return batches
 
 
 def _set_veros_runtime_setting(name, value):

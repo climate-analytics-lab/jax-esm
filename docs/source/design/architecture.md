@@ -77,11 +77,19 @@ how the Veros restart writer stores its `derived` and `forcing` structs.
 
 Because the marker is written last, a save interrupted part-way through leaves
 a directory that has no marker — and, in a run that names its checkpoints
-`batch_0000`, `batch_0001`, …, that directory sorts *newest*. A driver
+`step_00000000`, `step_00000005`, …, that directory sorts *newest*. A driver
 resuming from a directory of checkpoints therefore asks
-`latest_complete_checkpoint(root, pattern="batch_*")` for the newest one that
+`latest_complete_checkpoint(root, pattern="step_*")` for the newest one that
 holds a marker rather than the newest name; it warns about each incomplete
 directory it steps over, since one means an earlier run died mid-save.
+
+A checkpoint is named after the coupled step it was written at, and how much of
+a run is left is computed from the step counter *inside* the restored
+checkpoint — `remaining_batches(steps_done, total_steps, steps_per_batch)`
+returns the length of each batch still to run, the last one short when the
+total is not a whole number of batches. A batch index in the name would mean
+nothing across two runs that chose different batch lengths, whereas the coupled
+step counts the same coupling steps in both.
 
 ### The component contract
 

@@ -105,12 +105,24 @@ otherwise**; the code that has to change is named in each one.
 - `docs/source/design/architecture.md` rewritten against the new API, and a
   `tests/examples` note in `docs/source/developers.rst`.
 - `jem.utils.checkpoints.latest_complete_checkpoint(checkpoint_root,
-  pattern="batch_*")` — the newest checkpoint directory that actually holds a
+  pattern="step_*")` — the newest checkpoint directory that actually holds a
   completion marker, or `None`. A run killed part-way through a save leaves a
   marker-less directory that sorts newest and that `load_coupled_carry`
   refuses; a driver that resumed from `sorted(root.glob(...))[-1]` could not
   restart at all. The helper skips such directories, warning once per skipped
   one, and both experimental Veros drivers now resume through it.
+- `jem.utils.checkpoints.remaining_batches(steps_done, total_steps,
+  steps_per_batch)` — the lengths of the batches a chunked run still has to
+  integrate, the last one short when the total is not a whole number of
+  batches. **The experimental Veros drivers now name a checkpoint directory
+  after the coupled step it was written at (`step_00000005`), not after a
+  batch index (`batch_00001`), and derive the remaining work from the restored
+  `carry.step` rather than from that name.** A batch index means nothing
+  across two runs that chose different `--simulation-interval-days`: resuming
+  such a run used to overshoot or exit immediately. An existing `batch_*`
+  checkpoint directory is no longer found by a resume; rename it to
+  `step_<the coupled step it holds>` (zero-padded to eight digits) to keep
+  using it.
 
 ### Changed
 
