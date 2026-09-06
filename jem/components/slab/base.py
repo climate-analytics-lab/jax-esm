@@ -136,6 +136,18 @@ def _check_axis_matches(
             f"{grid_values.size:d}."
         )
 
+    # A non-finite file coordinate has to be rejected *before* the comparison:
+    # ``np.max(np.abs(...))`` of a difference containing NaN is NaN, and
+    # ``NaN > tolerance`` is False, so the axis would be accepted unverified and
+    # the field silently reinterpreted onto the model grid.
+    non_finite = int(np.count_nonzero(~np.isfinite(file_values)))
+    if non_finite:
+        raise ValueError(
+            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has "
+            f"{non_finite:d} non-finite {axis_name:s} coordinate value(s), so its "
+            f"{axis_name:s} axis cannot be checked against the grid's."
+        )
+
     difference = file_values - grid_values
     if periodic:
         # Longitudes may be written on 0-360 or -180-180; compare modulo 360.

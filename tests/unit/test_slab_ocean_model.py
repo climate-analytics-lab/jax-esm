@@ -105,6 +105,30 @@ def test_climatology_rejects_wrong_coords(tmp_path, uniform_grid):
     assert q_flux_file in str(excinfo.value)
 
 
+@pytest.mark.parametrize("axis", ["longitude", "latitude"])
+def test_climatology_rejects_non_finite_coords(tmp_path, uniform_grid, axis):
+    """A NaN in a file's coordinate axis is rejected rather than waved through.
+
+    The axis check compares the file's coordinate to the grid's and rejects a
+    difference above a tolerance. A NaN coordinate makes that difference NaN,
+    and ``NaN > tolerance`` is False -- so without an explicit finiteness check
+    the axis would be *accepted* precisely when it is least verifiable.
+    """
+    axes = {
+        "longitude": dict(longitude_degrees=LONGITUDE_DEGREES.copy()),
+        "latitude": dict(latitude_degrees=LATITUDE_DEGREES.copy()),
+    }[axis]
+    next(iter(axes.values()))[1] = np.nan
+
+    path = write_climatology(tmp_path / "nan_coord.nc", "field", monthly_ramp(), **axes)
+
+    with pytest.raises(ValueError, match=axis) as excinfo:
+        load_monthly_climatology(path, "field", uniform_grid)
+
+    assert "non-finite" in str(excinfo.value)
+    assert path in str(excinfo.value)
+
+
 def test_qflux_zero_without_file(uniform_grid):
     """Q-flux forcing without a file is still a valid (zero-forcing) setup."""
     model = SlabOceanModel(uniform_grid, SlabOceanParameters(forcing_method="qflux"))
