@@ -112,6 +112,33 @@ def test_invalid_parameters_are_rejected(uniform_grid):
         SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(initial_ice_thickness=-1.0))
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("min_ice_thickness", 0.0),
+        ("min_ice_thickness", -1.0),
+        ("min_ice_thickness", np.nan),
+        ("min_ice_thickness", np.inf),
+        ("ice_fraction_thickness_scale", 0.0),
+        ("ice_fraction_thickness_scale", -0.5),
+        ("ice_fraction_thickness_scale", np.nan),
+        ("ice_fraction_thickness_scale", np.inf),
+        ("initial_ice_thickness", -1.0),
+        ("initial_ice_thickness", np.nan),
+        ("initial_ice_thickness", np.inf),
+    ],
+)
+def test_non_finite_thicknesses_are_rejected(uniform_grid, field, value):
+    """Every thickness must be finite as well as correctly signed.
+
+    A NaN compares False against every threshold and an infinite fraction scale
+    makes ``1 - exp(-h / scale)`` zero everywhere, so an unvalidated one gives a
+    run with no ice rather than an error.
+    """
+    with pytest.raises(ValueError, match=field):
+        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(**{field: value}))
+
+
 def test_params_default_equivalence(uniform_grid):
     """Constructing with no params is constructing with the defaults."""
     implicit = SlabSeaiceModel(uniform_grid).initialize()

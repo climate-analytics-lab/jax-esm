@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 
 from jem import constants
@@ -191,7 +192,8 @@ class SlabOceanModel(SlabModelBase):
         ValueError
             If the configuration cannot run: an unknown forcing method,
             relaxation without a climatology or with a non-positive timescale,
-            a Q-flux file a non-Q-flux run would ignore, or a climatology whose
+            a mixed-layer depth that is not finite and strictly positive, a
+            Q-flux file a non-Q-flux run would ignore, or a climatology whose
             ocean points are not finite.
         FileNotFoundError
             If a named file does not exist.
@@ -208,6 +210,20 @@ class SlabOceanModel(SlabModelBase):
                 f"Unknown forcing_method {forcing_method!r}; expected one of "
                 f"{list(FORCING_METHODS)!r}."
             )
+        # The mixed-layer depth is the slab's thickness, and the temperature
+        # update divides by the heat capacity `rho * cp * h`. A zero or
+        # non-finite depth makes every SST NaN and a negative one reverses the
+        # response to a heat flux, both of which are far easier to diagnose
+        # here than in the output. Validated at construction because inside
+        # `step` these are traced values that cannot be inspected; a caller who
+        # replaces `carry["params"]` afterwards takes on that responsibility.
+        for depth_name in ("mixed_layer_depth_min", "mixed_layer_depth_max"):
+            depth = float(getattr(self.params, depth_name))
+            if not np.isfinite(depth) or depth <= 0.0:
+                raise ValueError(
+                    f"params.{depth_name} must be finite and strictly positive (it "
+                    f"is a factor of the mixed layer's heat capacity); got {depth!r}."
+                )
         if q_flux_file is not None and forcing_method != "qflux":
             raise ValueError(
                 f"q_flux_file was given but forcing_method is {forcing_method!r}, "

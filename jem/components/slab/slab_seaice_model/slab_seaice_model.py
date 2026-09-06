@@ -4,6 +4,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import jcm.constants as jcm_constants
+import numpy as np
 import tree_math
 
 from jem import constants
@@ -137,21 +138,32 @@ class SlabSeaiceModel(SlabModelBase):
         Raises
         ------
         ValueError
-            If a thickness scale is not positive, which would make the ice
-            fraction closure or the ice-cover diagnosis undefined.
+            If a thickness scale is not finite and positive, which would make
+            the ice fraction closure or the ice-cover diagnosis undefined, or
+            if the initial thickness is not a finite non-negative depth.
 
         """
         super().__init__(name=name, grid=grid)
         self.params = SlabSeaiceParameters.default() if params is None else params
 
-        if not float(self.params.min_ice_thickness) > 0.0:
-            raise ValueError("min_ice_thickness must be a positive number of metres.")
-        if not float(self.params.ice_fraction_thickness_scale) > 0.0:
+        # Each of these is a metre depth that a comparison or the
+        # `1 - exp(-h / scale)` closure reads. Finiteness is required as well as
+        # sign: an infinite scale silently makes the ice fraction zero
+        # everywhere, and a NaN compares False against every threshold, so
+        # neither fails loudly at run time -- the run just has no ice.
+        for depth_name in ("min_ice_thickness", "ice_fraction_thickness_scale"):
+            depth = float(getattr(self.params, depth_name))
+            if not np.isfinite(depth) or depth <= 0.0:
+                raise ValueError(
+                    f"{depth_name} must be a finite positive number of metres; "
+                    f"got {depth!r}."
+                )
+        initial_ice_thickness = float(self.params.initial_ice_thickness)
+        if not np.isfinite(initial_ice_thickness) or initial_ice_thickness < 0.0:
             raise ValueError(
-                "ice_fraction_thickness_scale must be a positive number of metres."
+                "initial_ice_thickness must be a finite non-negative number of "
+                f"metres; got {initial_ice_thickness!r}."
             )
-        if float(self.params.initial_ice_thickness) < 0.0:
-            raise ValueError("initial_ice_thickness cannot be negative.")
 
     def _ocean_cells(self, params: SlabSeaiceParameters) -> jnp.ndarray:
         """Boolean mask of the cells this model integrates."""

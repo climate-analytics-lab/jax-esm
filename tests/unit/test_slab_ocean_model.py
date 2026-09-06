@@ -457,3 +457,23 @@ def test_mixed_layer_depth_follows_the_carried_params(uniform_grid):
         np.asarray(diagnostics["derived"].mixed_layer_depth),
         np.asarray(model._mixed_layer_depth(carry["params"])),
     )
+
+
+@pytest.mark.parametrize(
+    "field", ["mixed_layer_depth_min", "mixed_layer_depth_max"]
+)
+@pytest.mark.parametrize(
+    "value", [0.0, -10.0, np.nan, np.inf], ids=["zero", "negative", "nan", "inf"]
+)
+def test_invalid_mixed_layer_depths_are_rejected(uniform_grid, field, value):
+    """The mixed-layer depth is a factor of the heat capacity the SST update divides by.
+
+    Zero or non-finite gives NaN SSTs everywhere and negative reverses the
+    response to a heat flux; both are silent in the output, so they are refused
+    at construction where the traceback names the caller's own line.
+    """
+    params = SlabOceanParameters(**{field: value})
+    with pytest.raises(ValueError, match=field) as excinfo:
+        SlabOceanModel(uniform_grid, params)
+
+    assert repr(value) in str(excinfo.value)
