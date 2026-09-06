@@ -14,6 +14,7 @@ January however far into the run it was written.
 """
 
 import logging
+import os
 import pickle
 from pathlib import Path
 from collections.abc import Callable, Iterable
@@ -142,8 +143,22 @@ def save_coupled_carry(
     step_file.unlink(missing_ok=True)
     save_component_carries(
         coupled_carry.components, checkpoint_dir, component_savers)
-    with open(step_file, "wb") as f:
-        pickle.dump(np.asarray(coupled_carry.step), f)
+    # The marker appears at its final name only once it is complete and on
+    # disk: its mere existence is what a resume trusts, so a marker that is
+    # half-written -- a kill, a full disk, or a pickle that raised -- has to be
+    # impossible rather than merely unlikely. Writing to a temporary file in
+    # the same directory (so the rename is within one filesystem and therefore
+    # atomic) and fsyncing before the rename keeps that promise across a crash
+    # as well as across an exception.
+    temporary_file = step_file.with_suffix(".pkl.tmp")
+    try:
+        with open(temporary_file, "wb") as f:
+            pickle.dump(np.asarray(coupled_carry.step), f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_file, step_file)
+    finally:
+        temporary_file.unlink(missing_ok=True)
 
 
 def load_coupled_carry(

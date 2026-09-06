@@ -153,6 +153,37 @@ def test_a_failed_overwrite_leaves_no_completion_marker(tmp_path):
         load_coupled_carry(tmp_path, ["ocn", "lnd"])
 
 
+def test_a_failed_marker_write_leaves_no_marker(tmp_path, monkeypatch):
+    """The marker is published atomically, so it never exists half-written.
+
+    `latest_complete_checkpoint` and `load_coupled_carry` both trust the marker's
+    existence alone, so a marker truncated by a kill or a full disk would be
+    accepted as a complete checkpoint and then fail to unpickle on resume.
+    """
+    real_dump = pickle.dump
+
+    def fail_on_the_step(obj, file):
+        # The step is the only bare array written; the component carries are
+        # dicts, and they have to succeed for the save to reach the marker.
+        if isinstance(obj, np.ndarray):
+            # Write something first: a marker truncated part-way through is
+            # exactly the state this must not leave behind.
+            file.write(b"half a pickle")
+            raise OSError("disk full")
+        return real_dump(obj, file)
+
+    monkeypatch.setattr(pickle, "dump", fail_on_the_step)
+    with pytest.raises(OSError, match="disk full"):
+        save_coupled_carry(toy_coupled_carry(step=6), tmp_path / "checkpoint")
+
+    # The component carries were written, so the failure really was the
+    # marker's own write and not an earlier one.
+    assert (tmp_path / "checkpoint" / "ocn_carry.pkl").exists()
+    assert not (tmp_path / "checkpoint" / COUPLED_STEP_FILENAME).exists()
+    # Nor is the scratch file it wrote through left lying around.
+    assert list((tmp_path / "checkpoint").glob("*.tmp")) == []
+
+
 def test_the_newest_incomplete_checkpoint_is_skipped(tmp_path, caplog):
     """A marker-less directory sorts newest but cannot be loaded, so it is skipped.
 
