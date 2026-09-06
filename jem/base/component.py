@@ -87,11 +87,17 @@ def forcing_variable(name: str) -> str:
     A component's own state and its derived diagnostics keep their plain names
     -- they are that component's output, and match what JCM calls them.
 
-    This lives here, next to the rest of the contract, rather than with any one
-    family of components: it is a convention of the coupled *output*, and every
-    component that implements :class:`SupportsXarray` -- the slab models, the
-    Veros adapter, anything added later -- has to follow the same one for the
-    datasets to merge.
+    This is a convention of the *packaged* output, not part of the component
+    protocol: the coupler never inspects a dataset, and a wrapper around an
+    external model may name its variables however that model does. The slab
+    models and the Veros adapter follow it so that their datasets merge with
+    each other's and with JCM's; a component added later only needs to follow
+    it if its output is meant to merge the same way. It lives here, next to
+    the rest of the contract, so that there is one definition of the prefix.
+
+    A name that already carries the prefix is returned unchanged, so a model
+    whose own field is called ``forcing_shortwave_flux`` does not come out as
+    ``forcing_forcing_shortwave_flux``.
 
     Parameters
     ----------
@@ -103,6 +109,8 @@ def forcing_variable(name: str) -> str:
     str
 
     """
+    if name.startswith(FORCING_VARIABLE_PREFIX):
+        return name
     return f"{FORCING_VARIABLE_PREFIX}{name}"
 
 

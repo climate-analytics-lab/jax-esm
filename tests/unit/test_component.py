@@ -16,11 +16,13 @@ import numpy as np
 import pytest
 
 from jem.base.component import (
+    FORCING_VARIABLE_PREFIX,
     Component,
     SupportsBind,
     SupportsCheckpoint,
     SupportsXarray,
     TimeAxis,
+    forcing_variable,
 )
 from jem.base.coupler import Coupler
 from jem.utils.time import time_coordinate
@@ -262,3 +264,10 @@ def test_seconds_since_new_year_counts_in_the_model_calendar():
         seconds_since_new_year(jdt.to_datetime("2000-02-29"), "365_day")
     with pytest.raises(ValueError, match="calendar"):
         seconds_since_new_year(december_31_leap_year, "360_day")
+
+
+def test_forcing_variable_prefixes_once():
+    """A name that already carries the prefix is not prefixed again."""
+    assert forcing_variable("total_heat_flux") == "forcing_total_heat_flux"
+    assert forcing_variable("forcing_shortwave_flux") == "forcing_shortwave_flux"
+    assert forcing_variable("total_heat_flux").startswith(FORCING_VARIABLE_PREFIX)

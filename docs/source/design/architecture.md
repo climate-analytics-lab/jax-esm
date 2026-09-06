@@ -303,8 +303,11 @@ uses. The conventions, which are JCM's:
   `forcing_variable(name)`, which is what a slab model's
   `_create_xarray_data_vars` and `VerosComponent.to_xarray` call. (It lives
   with the contract rather than in the slab package, and is re-exported from
-  `jem.components.slab.base`, because it is a convention of the coupled output
-  that every component implementing `SupportsXarray` has to follow.) Two
+  `jem.components.slab.base`, so that there is one definition of the prefix.
+  It is a convention of the packaged output, not a protocol requirement: the
+  coupler never inspects a dataset, a wrapper around an external model may
+  keep that model's own names, and the helper leaves a name that already
+  carries the prefix unchanged.) Two
   components legitimately hold the same physical field — one produced it, the
   other received it — and without the prefix the merge collides on the shared
   name. So the slab atmosphere and the slab land model write
