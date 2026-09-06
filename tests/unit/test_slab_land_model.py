@@ -368,10 +368,19 @@ def test_explicit_albedo_is_validated(half_land_grid, bad_value):
         ("land_ice_albedo_threshold", 2.0),
         ("depth_soil", 0.0),
         ("depth_lice", -5.0),
+        # A timescale or a length is read as a ratio, so an infinite one is
+        # silent -- no relaxation, or no snow cover however deep the snow --
+        # where a zero one is not. Both signs of nonsense are refused.
+        ("tdland", 0.0),
+        ("tdland", np.inf),
+        ("tdland", np.nan),
+        ("snow_depth_to_cover_scale", 0.0),
+        ("snow_depth_to_cover_scale", np.inf),
+        ("snow_depth_to_cover_scale", np.nan),
     ],
 )
 def test_invalid_scalar_parameters_are_rejected(half_land_grid, field, value):
-    """The default albedo and the heat capacities are checked at construction."""
+    """The default albedo, the heat capacities and the scales are checked at construction."""
     params = SlabLandParameters(**{field: value})
     with pytest.raises(ValueError, match=field):
         SlabLandModel(half_land_grid, params=params)

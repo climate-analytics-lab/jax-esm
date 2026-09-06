@@ -383,6 +383,15 @@ otherwise**; the code that has to change is named in each one.
   naming the missing file, rather than resuming at step 0 or having its step
   guessed from a batch index — a guess that is only right while every batch has
   the same length.
+- Every scalar parameter a component checks at construction must now be
+  **finite** as well as in range. A bare `> 0` test admits `+inf`, and an
+  infinite parameter is the quiet failure: `snow_depth_to_cover_scale = inf`
+  reports no snow cover however deep the snow, `relaxation_time = inf` relaxes
+  to nothing while the run still calls itself a relaxation run, and
+  `tdland = inf` damps the land temperature by `inf / (1 + inf)` — NaN. The
+  centre coordinates of a SCRIP grid file are now checked the same way and for
+  the same reason: a NaN compares False against both ends of a range test, so
+  it used to pass straight into the run's output coordinates.
 
 ### Known gaps
 

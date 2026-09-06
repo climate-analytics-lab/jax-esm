@@ -152,6 +152,24 @@ def test_relaxation_without_climatology_is_rejected(uniform_grid):
         SlabOceanModel(uniform_grid, SlabOceanParameters(forcing_method="relaxation"))
 
 
+@pytest.mark.parametrize(
+    "value", [0.0, -60.0, np.nan, np.inf], ids=["zero", "negative", "nan", "inf"]
+)
+def test_invalid_relaxation_times_are_rejected(tmp_path, uniform_grid, value):
+    """The relaxation timescale is a denominator, so it must be finite and positive.
+
+    An infinite one is the quiet case: the damping factor is exactly 1, so the
+    run relaxes to nothing at all while still calling itself a relaxation run.
+    """
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+
+    params = SlabOceanParameters(forcing_method="relaxation", relaxation_time=value)
+    with pytest.raises(ValueError, match="relaxation_time") as excinfo:
+        SlabOceanModel(uniform_grid, params, sst_clim_file=sst_file)
+
+    assert repr(value) in str(excinfo.value)
+
+
 def _constant_climatology(tmp_path, value_lat_lon):
     """Write a 12-month SST climatology that does not vary through the year."""
     values = np.broadcast_to(value_lat_lon, (12,) + value_lat_lon.shape)

@@ -282,6 +282,13 @@ class SlabGrid:
         -------
         SlabGrid
 
+        Raises
+        ------
+        ValueError
+            If the file is not a 2-D SCRIP grid, its variables disagree about
+            its size, its coordinate units are not recognised, or its centre
+            coordinates are not finite values inside the globe.
+
         """
         ds = xr.open_dataset(scrip_file)
 
@@ -311,6 +318,17 @@ class SlabGrid:
         longitude_2d = _scrip_latlon_to_radians(ds["grid_center_lon"], ni, nj, scrip_file)
         latitude_2d = _scrip_latlon_to_radians(ds["grid_center_lat"], ni, nj, scrip_file)
 
+        # Non-finite first, for the same reason as `fractional_mask` above: a
+        # NaN compares False against both bounds, so it would pass the range
+        # checks below and end up in the output's coordinate axes, where it
+        # breaks the merge of two components' datasets rather than this load.
+        for axis_name, values in (
+            ("latitude", latitude_2d), ("longitude", longitude_2d)
+        ):
+            if not bool(jnp.all(jnp.isfinite(values))):
+                raise ValueError(
+                    f"'{scrip_file}' has non-finite {axis_name} values."
+                )
         if jnp.any((latitude_2d < -jnp.pi / 2) | (latitude_2d > jnp.pi / 2)):
             raise ValueError(f"'{scrip_file}' has latitude values outside [-90, 90] degrees.")
         if jnp.any((longitude_2d < -2 * jnp.pi) | (longitude_2d > 2 * jnp.pi)):

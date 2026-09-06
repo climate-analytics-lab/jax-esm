@@ -223,6 +223,25 @@ def test_to_xarray_rejects_a_mismatched_time_axis():
         model.to_xarray(diagnostics, time_axis(2))
 
 
+@pytest.mark.parametrize("variable", ["grid_center_lat", "grid_center_lon"])
+def test_scrip_non_finite_centre_coordinates_are_rejected(tmp_path, variable):
+    """A NaN centre coordinate passes the range checks, so it is caught first.
+
+    ``NaN < -90`` and ``NaN > 90`` are both False, so without this the cell
+    would be accepted and the NaN would surface much later, in the coordinate
+    axis of the run's output.
+    """
+    ds = xr.open_dataset(T31_SCRIP)
+    values = np.asarray(ds[variable].values, dtype=np.float64)
+    values[0] = np.nan
+    ds[variable] = (ds[variable].dims, values, ds[variable].attrs)
+    broken = tmp_path / "broken.SCRIP.nc"
+    ds.to_netcdf(broken)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        SlabGrid.from_scrip(str(broken))
+
+
 @pytest.mark.parametrize(
     "bad_value", [-1.0, 50.0, np.nan], ids=["fill_value", "percentage", "nan"]
 )

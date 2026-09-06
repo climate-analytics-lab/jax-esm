@@ -191,10 +191,10 @@ class SlabOceanModel(SlabModelBase):
         ------
         ValueError
             If the configuration cannot run: an unknown forcing method,
-            relaxation without a climatology or with a non-positive timescale,
-            a mixed-layer depth that is not finite and strictly positive, a
-            Q-flux file a non-Q-flux run would ignore, or a climatology whose
-            ocean points are not finite.
+            relaxation without a climatology or with a relaxation time that
+            is not finite and strictly positive, a mixed-layer depth that is
+            not finite and strictly positive, a Q-flux file a non-Q-flux run
+            would ignore, or a climatology whose ocean points are not finite.
         FileNotFoundError
             If a named file does not exist.
 
@@ -237,10 +237,14 @@ class SlabOceanModel(SlabModelBase):
                     "climatology to relax towards without it."
                 )
             relaxation_time = float(self.params.relaxation_time)
-            if not relaxation_time > 0.0:
+            # Finiteness as well as sign: the SST is damped by
+            # `1 / (1 + dt / relaxation_time)`, so an infinite timescale is
+            # silently no relaxation at all -- a run that reports itself as
+            # forcing_method="relaxation" while doing nothing of the kind.
+            if not np.isfinite(relaxation_time) or relaxation_time <= 0.0:
                 raise ValueError(
-                    "relaxation_time must be a positive number of seconds; got "
-                    f"{relaxation_time!r}."
+                    "relaxation_time must be a finite positive number of "
+                    f"seconds; got {relaxation_time!r}."
                 )
 
         # Boundary data is *configuration*, so it is read here rather than in

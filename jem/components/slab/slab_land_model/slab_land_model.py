@@ -144,15 +144,31 @@ class SlabLandModel(SlabModelBase):
         self.params = SlabLandParameters.default() if params is None else params
         self.land_clim_file = land_clim_file
 
-        if not float(self.params.tdland) > 0.0:
-            raise ValueError("tdland must be a positive number of seconds.")
+        # Both timescales are read as a ratio against a length -- the relaxation
+        # as `tdland / dt`, the snow cover as `snow_depth / scale` -- and an
+        # infinite one is silent where a zero one is not: it damps the land
+        # temperature by `inf / (1 + inf)`, which is NaN, and it puts the snow
+        # cover at zero everywhere however deep the snow. Finiteness is
+        # therefore required as well as sign (the fractions below get it from
+        # being bounded on both sides).
+        tdland = float(self.params.tdland)
+        if not np.isfinite(tdland) or tdland <= 0.0:
+            raise ValueError(
+                "params.tdland must be a finite positive number of seconds; "
+                f"got {tdland!r}."
+            )
         if not 0.0 <= float(self.params.land_threshold) <= 1.0:
             raise ValueError("land_threshold must be a land fraction in [0, 1].")
         if not 0.0 <= float(self.params.flandmin) <= 1.0:
             raise ValueError("flandmin must be a land fraction in [0, 1].")
-        if float(self.params.snow_depth_to_cover_scale) <= 0.0:
+        snow_depth_to_cover_scale = float(self.params.snow_depth_to_cover_scale)
+        if (
+            not np.isfinite(snow_depth_to_cover_scale)
+            or snow_depth_to_cover_scale <= 0.0
+        ):
             raise ValueError(
-                "snow_depth_to_cover_scale must be a positive snow depth in mm."
+                "params.snow_depth_to_cover_scale must be a finite positive snow "
+                f"depth in mm; got {snow_depth_to_cover_scale!r}."
             )
         # The parameters are validated here, at construction, because inside
         # `step` they are traced values that cannot be inspected. A caller who
