@@ -1,11 +1,11 @@
 """Slab ocean model component."""
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
-import numpy as np
 import tree_math
 
 from jem import constants
@@ -219,7 +219,7 @@ class SlabOceanModel(SlabModelBase):
         # replaces `carry["params"]` afterwards takes on that responsibility.
         for depth_name in ("mixed_layer_depth_min", "mixed_layer_depth_max"):
             depth = float(getattr(self.params, depth_name))
-            if not np.isfinite(depth) or depth <= 0.0:
+            if not math.isfinite(depth) or depth <= 0.0:
                 raise ValueError(
                     f"params.{depth_name} must be finite and strictly positive (it "
                     f"is a factor of the mixed layer's heat capacity); got {depth!r}."
@@ -241,7 +241,7 @@ class SlabOceanModel(SlabModelBase):
             # `1 / (1 + dt / relaxation_time)`, so an infinite timescale is
             # silently no relaxation at all -- a run that reports itself as
             # forcing_method="relaxation" while doing nothing of the kind.
-            if not np.isfinite(relaxation_time) or relaxation_time <= 0.0:
+            if not math.isfinite(relaxation_time) or relaxation_time <= 0.0:
                 raise ValueError(
                     "relaxation_time must be a finite positive number of "
                     f"seconds; got {relaxation_time!r}."

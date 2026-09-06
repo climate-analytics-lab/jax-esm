@@ -16,11 +16,11 @@ Programmer: Aya Lalou
 Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
 """
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
-import numpy as np
 import tree_math
 
 from jem.base.component import Carry, CouplingTime, Diagnostics
@@ -152,7 +152,7 @@ class SlabLandModel(SlabModelBase):
         # therefore required as well as sign (the fractions below get it from
         # being bounded on both sides).
         tdland = float(self.params.tdland)
-        if not np.isfinite(tdland) or tdland <= 0.0:
+        if not math.isfinite(tdland) or tdland <= 0.0:
             raise ValueError(
                 "params.tdland must be a finite positive number of seconds; "
                 f"got {tdland!r}."
@@ -163,7 +163,7 @@ class SlabLandModel(SlabModelBase):
             raise ValueError("flandmin must be a land fraction in [0, 1].")
         snow_depth_to_cover_scale = float(self.params.snow_depth_to_cover_scale)
         if (
-            not np.isfinite(snow_depth_to_cover_scale)
+            not math.isfinite(snow_depth_to_cover_scale)
             or snow_depth_to_cover_scale <= 0.0
         ):
             raise ValueError(
@@ -177,7 +177,7 @@ class SlabLandModel(SlabModelBase):
         # compares False everywhere and silently selects one material.
         for name in ("surface_albedo", "land_ice_albedo_threshold"):
             albedo_value = float(getattr(self.params, name))
-            if not np.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
+            if not math.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
                 raise ValueError(
                     f"params.{name} must be a finite albedo in [0, 1]; "
                     f"got {albedo_value!r}."
@@ -191,7 +191,7 @@ class SlabLandModel(SlabModelBase):
             "land_ice_volumetric_heat_capacity",
         ):
             factor = float(getattr(self.params, name))
-            if not np.isfinite(factor) or factor <= 0.0:
+            if not math.isfinite(factor) or factor <= 0.0:
                 raise ValueError(
                     f"params.{name} must be finite and strictly positive (it is a "
                     f"factor of the slab heat capacity); got {factor!r}."
@@ -218,13 +218,14 @@ class SlabLandModel(SlabModelBase):
             # threshold, so a NaN (which compares False, selecting the ice
             # slab) or an out-of-range value would silently choose the wrong
             # heat capacity rather than fail.
-            albedo = np.asarray(surface_albedo)
-            if not np.all(np.isfinite(albedo)):
+            if not bool(jnp.all(jnp.isfinite(surface_albedo))):
                 raise ValueError("surface_albedo contains non-finite values.")
-            if albedo.min() < 0.0 or albedo.max() > 1.0:
+            albedo_min = float(surface_albedo.min())
+            albedo_max = float(surface_albedo.max())
+            if albedo_min < 0.0 or albedo_max > 1.0:
                 raise ValueError(
                     "surface_albedo must lie in [0, 1]; got values in "
-                    f"[{albedo.min():g}, {albedo.max():g}]."
+                    f"[{albedo_min:g}, {albedo_max:g}]."
                 )
             self.surface_albedo = surface_albedo
 

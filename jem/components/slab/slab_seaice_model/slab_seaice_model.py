@@ -1,10 +1,10 @@
 """Slab sea-ice model component."""
 
+import math
 from typing import Any
 
 import jax.numpy as jnp
 import jcm.constants as jcm_constants
-import numpy as np
 import tree_math
 
 from jem import constants
@@ -153,13 +153,13 @@ class SlabSeaiceModel(SlabModelBase):
         # neither fails loudly at run time -- the run just has no ice.
         for depth_name in ("min_ice_thickness", "ice_fraction_thickness_scale"):
             depth = float(getattr(self.params, depth_name))
-            if not np.isfinite(depth) or depth <= 0.0:
+            if not math.isfinite(depth) or depth <= 0.0:
                 raise ValueError(
                     f"{depth_name} must be a finite positive number of metres; "
                     f"got {depth!r}."
                 )
         initial_ice_thickness = float(self.params.initial_ice_thickness)
-        if not np.isfinite(initial_ice_thickness) or initial_ice_thickness < 0.0:
+        if not math.isfinite(initial_ice_thickness) or initial_ice_thickness < 0.0:
             raise ValueError(
                 "initial_ice_thickness must be a finite non-negative number of "
                 f"metres; got {initial_ice_thickness!r}."
