@@ -198,6 +198,70 @@ def load_coupled_carry(
     return CoupledCarry(components=components, step=step)
 
 
+def latest_complete_checkpoint(
+    checkpoint_root: str | Path, pattern: str = "batch_*"
+) -> Path | None:
+    """Return the newest checkpoint directory that is actually complete.
+
+    A driver that resumes by taking the last of ``sorted(root.glob(pattern))``
+    can pick a directory that no run can load. :func:`save_coupled_carry`
+    writes :data:`COUPLED_STEP_FILENAME` *last*, precisely so that a save
+    interrupted part-way through leaves a directory without it rather than one
+    that silently mixes component carries from two different steps. The cost of
+    that ordering is that an interrupted save leaves behind a marker-less
+    directory which sorts newest -- so the newest name is not necessarily the
+    newest *checkpoint*, and resuming has to skip it.
+
+    Directories are ordered by sorted name, matching how the drivers name them
+    (``batch_0000``, ``batch_0001``, ...), so the caller can still recover a
+    batch index from the returned directory's name.
+
+    Each skipped directory is logged at WARNING: a marker-less directory means
+    an earlier run died mid-save, which is worth knowing about even though the
+    resume itself recovers.
+
+    Parameters
+    ----------
+    checkpoint_root : path-like
+        Directory holding the individual checkpoint directories. A root that
+        does not exist is not an error -- it just holds no checkpoints.
+    pattern : str
+        Glob matched against the names in ``checkpoint_root``. Names that do
+        not match are ignored entirely (they are not checkpoints, so they are
+        not incomplete ones either).
+
+    Returns
+    -------
+    pathlib.Path or None
+        The newest matching directory holding a completion marker, or None if
+        there is no such directory.
+
+    """
+    checkpoint_root = Path(checkpoint_root)
+    if not checkpoint_root.is_dir():
+        return None
+
+    candidates = sorted(
+        path for path in checkpoint_root.glob(pattern) if path.is_dir()
+    )
+    complete = [
+        path for path in candidates if (path / COUPLED_STEP_FILENAME).exists()
+    ]
+    if not complete:
+        incomplete_directories = candidates
+    else:
+        incomplete_directories = candidates[candidates.index(complete[-1]) + 1:]
+
+    for incomplete in incomplete_directories:
+        logger.warning(
+            "Skipping incomplete checkpoint %s: it has no %s, so the save that "
+            "wrote it was interrupted.",
+            incomplete,
+            COUPLED_STEP_FILENAME,
+        )
+    return complete[-1] if complete else None
+
+
 def _set_veros_runtime_setting(name, value):
     from veros import runtime_settings as rs
     object.__setattr__(rs, "__locked__", False)

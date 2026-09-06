@@ -9,6 +9,7 @@ the clock*. ``CoupledCarry.step`` is the coupled model's only clock, so a
 checkpoint that dropped it would resume every run in January.
 """
 
+import logging
 import pickle
 
 import jax.numpy as jnp
@@ -18,6 +19,7 @@ import pytest
 from jem.base.component import CoupledCarry
 from jem.utils.checkpoints import (
     COUPLED_STEP_FILENAME,
+    latest_complete_checkpoint,
     load_component_carries,
     load_coupled_carry,
     save_component_carries,
@@ -148,3 +150,50 @@ def test_a_failed_overwrite_leaves_no_completion_marker(tmp_path):
     assert not (tmp_path / COUPLED_STEP_FILENAME).exists()
     with pytest.raises(ValueError, match=COUPLED_STEP_FILENAME):
         load_coupled_carry(tmp_path, ["ocn", "lnd"])
+
+
+def test_the_newest_incomplete_checkpoint_is_skipped(tmp_path, caplog):
+    """A marker-less directory sorts newest but cannot be loaded, so it is skipped.
+
+    This is the state a run killed mid-save leaves behind: the directory and
+    some component carries exist, but the completion marker -- written last --
+    does not.
+    """
+    save_coupled_carry(toy_coupled_carry(step=5), tmp_path / "batch_0000")
+    save_coupled_carry(toy_coupled_carry(step=10), tmp_path / "batch_0001")
+    (tmp_path / "batch_0002").mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
+        latest = latest_complete_checkpoint(tmp_path)
+
+    assert latest == tmp_path / "batch_0001"
+    assert "batch_0002" in caplog.text
+    assert "batch_0001" not in caplog.text
+
+    # The returned directory is loadable and still names its batch index.
+    assert int(latest.name.split("_")[1]) == 1
+    assert int(load_coupled_carry(latest, ["ocn", "lnd"]).step) == 10
+
+
+def test_no_complete_checkpoint_returns_none(tmp_path, caplog):
+    """With nothing loadable there is nothing to resume from -- including no root."""
+    assert latest_complete_checkpoint(tmp_path / "absent") is None
+
+    (tmp_path / "batch_0000").mkdir()
+    with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
+        assert latest_complete_checkpoint(tmp_path) is None
+    assert "batch_0000" in caplog.text
+
+
+def test_names_that_do_not_match_the_pattern_are_ignored(tmp_path, caplog):
+    """Only ``pattern`` names a checkpoint, so nothing else is skipped or warned about."""
+    save_coupled_carry(toy_coupled_carry(step=2), tmp_path / "batch_0000")
+    (tmp_path / "output").mkdir()
+    (tmp_path / "zzz_scratch").mkdir()
+    (tmp_path / "batch_0001.tmp").write_text("not a directory")
+
+    with caplog.at_level(logging.WARNING, logger="jem.utils.checkpoints"):
+        latest = latest_complete_checkpoint(tmp_path)
+
+    assert latest == tmp_path / "batch_0000"
+    assert caplog.text == ""

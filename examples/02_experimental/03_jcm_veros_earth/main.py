@@ -16,7 +16,7 @@ import jax_datetime as jdt
 
 import jem
 from jem.utils.checkpoints import (
-    save_coupled_carry, load_coupled_carry,
+    save_coupled_carry, load_coupled_carry, latest_complete_checkpoint,
     save_veros_carry, load_veros_carry,
 )
 
@@ -96,23 +96,27 @@ carry = model.initialize()
 batches = int(total_simulation_time / simulation_interval)
 checkpoint_dir = output_dir / "checkpoint"
 resume_batch = 0
-if checkpoint_dir.exists():
-    saved = sorted(checkpoint_dir.glob("batch_*"))
-    if saved:
-        resume_batch = int(saved[-1].name.split("_")[1]) + 1
-        print(f"Resuming from batch {resume_batch}")
-        # The checkpoint carries the coupled step counter, so the resumed run
-        # picks up the seasonal cycle where it left off. Reconstructing the
-        # step from the batch index would be right only while every batch has
-        # the same length, and wrong the moment --simulation-interval-days
-        # changes between runs.
-        carry = load_coupled_carry(
-            saved[-1], ["atm", "ocn", "fakelnd"],
-            component_loaders={
-                "ocn": lambda path: load_veros_carry(path, ocn_model),
-            },
-        )
-        print(f"Resuming at coupled step {int(carry.step):d}")
+# The newest `batch_*` directory is not necessarily a loadable checkpoint: a
+# save interrupted after the directory was created but before its completion
+# marker was written leaves one behind, and `load_coupled_carry` refuses it.
+# `latest_complete_checkpoint` skips those (logging each) and returns the newest
+# checkpoint the run can actually resume from.
+saved = latest_complete_checkpoint(checkpoint_dir)
+if saved is not None:
+    resume_batch = int(saved.name.split("_")[1]) + 1
+    print(f"Resuming from batch {resume_batch}")
+    # The checkpoint carries the coupled step counter, so the resumed run
+    # picks up the seasonal cycle where it left off. Reconstructing the
+    # step from the batch index would be right only while every batch has
+    # the same length, and wrong the moment --simulation-interval-days
+    # changes between runs.
+    carry = load_coupled_carry(
+        saved, ["atm", "ocn", "fakelnd"],
+        component_loaders={
+            "ocn": lambda path: load_veros_carry(path, ocn_model),
+        },
+    )
+    print(f"Resuming at coupled step {int(carry.step):d}")
 
 if resume_batch == batches:
     print(f"Target batches: {batches:d} is all done. Exit the program.")

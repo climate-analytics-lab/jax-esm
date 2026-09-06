@@ -75,6 +75,14 @@ calendar. `save_component_carries` / `load_component_carries` are the
 mapping-only halves, for a sub-carry that has no clock of its own — which is
 how the Veros restart writer stores its `derived` and `forcing` structs.
 
+Because the marker is written last, a save interrupted part-way through leaves
+a directory that has no marker — and, in a run that names its checkpoints
+`batch_0000`, `batch_0001`, …, that directory sorts *newest*. A driver
+resuming from a directory of checkpoints therefore asks
+`latest_complete_checkpoint(root, pattern="batch_*")` for the newest one that
+holds a marker rather than the newest name; it warns about each incomplete
+directory it steps over, since one means an earlier run died mid-save.
+
 ### The component contract
 
 `jem.base.component.Component` is a runtime-checkable `typing.Protocol`, so

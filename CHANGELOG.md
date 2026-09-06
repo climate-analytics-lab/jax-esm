@@ -104,6 +104,13 @@ otherwise**; the code that has to change is named in each one.
   pulls in the whole atmosphere, which should not be the cost of `import jem`.
 - `docs/source/design/architecture.md` rewritten against the new API, and a
   `tests/examples` note in `docs/source/developers.rst`.
+- `jem.utils.checkpoints.latest_complete_checkpoint(checkpoint_root,
+  pattern="batch_*")` — the newest checkpoint directory that actually holds a
+  completion marker, or `None`. A run killed part-way through a save leaves a
+  marker-less directory that sorts newest and that `load_coupled_carry`
+  refuses; a driver that resumed from `sorted(root.glob(...))[-1]` could not
+  restart at all. The helper skips such directories, warning once per skipped
+  one, and both experimental Veros drivers now resume through it.
 
 ### Changed
 
