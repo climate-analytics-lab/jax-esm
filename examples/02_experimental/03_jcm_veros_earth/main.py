@@ -16,8 +16,7 @@ import jax_datetime as jdt
 
 import jem
 from jem.utils.checkpoints import (
-    save_coupled_carry, load_coupled_carry, latest_complete_checkpoint,
-    remaining_batches, save_veros_carry, load_veros_carry,
+    latest_complete_checkpoint, remaining_batches,
 )
 
 from model_setup import build_model
@@ -72,10 +71,6 @@ model, config = build_model(
     veros_dt_tracer=args.veros_timestep_min * 60,
     grid_folder = args.grid_folder,
 )
-# `coupler.components[name]` is the component object itself -- for the two
-# wrapped models, `.model` is the underlying VerosSetup / jcm.model.Model.
-ocn_component = model.components["ocn"]
-ocn_model = ocn_component.model
 
 print("Coupled model: ")
 print(repr(model))
@@ -113,18 +108,16 @@ carry = model.initialize()
 checkpoint_dir = output_dir / "checkpoint"
 # The newest `step_*` directory is not necessarily a loadable checkpoint: a
 # save interrupted after the directory was created but before its completion
-# marker was written leaves one behind, and `load_coupled_carry` refuses it.
+# marker was written leaves one behind, and `model.load_state` refuses it.
 # `latest_complete_checkpoint` skips those (logging each) and returns the newest
 # checkpoint the run can actually resume from.
 saved = latest_complete_checkpoint(checkpoint_dir)
 if saved is not None:
     print(f"Resuming from checkpoint {saved.name}")
-    carry = load_coupled_carry(
-        saved, ["atm", "ocn", "fakelnd"],
-        component_loaders={
-            "ocn": lambda path: load_veros_carry(path, ocn_model),
-        },
-    )
+    # The coupler knows which of its components read themselves back by hand
+    # -- the Veros ocean, through its HDF5 restart file -- so the driver does
+    # not have to name them.
+    carry = model.load_state(saved)
     print(f"Resuming at coupled step {int(carry.step):d}")
 
 # What is left to run comes from the restored carry's own clock -- the only
@@ -213,10 +206,7 @@ for batch_length in batch_lengths:
         ds.close()
   
     carry = final_carry
-    save_coupled_carry(
-        final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}",
-        component_savers={"ocn": save_veros_carry},
-    )
+    model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
 
 print("Program ends.")
 

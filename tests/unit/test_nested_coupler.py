@@ -14,6 +14,7 @@ in the output.
 """
 
 import dataclasses
+import json
 
 import jax
 import jax.numpy as jnp
@@ -30,7 +31,11 @@ from jem.base.component import (
     SupportsXarray,
 )
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
-from jem.utils.checkpoints import load_coupled_carry, save_coupled_carry
+from jem.utils.checkpoints import (
+    COUPLED_STEP_FILENAME,
+    load_coupled_carry,
+    save_coupled_carry,
+)
 
 DAY = 86400.0
 HOUR = 3600.0
@@ -65,6 +70,37 @@ class Counter:
             },
             coords={"time": time.datetimes()},
         )
+
+
+class CheckpointingCounter(Counter):
+    """A ``Counter`` that writes its own carry, as ``VerosComponent`` does.
+
+    The point of the toy is the *path*: it records every directory it is
+    handed, so a test can show that the coupler passed it the directory named
+    after it, inside the one named after the coupler it lives in. Its format
+    is deliberately not a pickle, so a checkpoint that fell back to the
+    default pytree path would be visible as a missing file rather than as a
+    file that happens to work.
+    """
+
+    FILENAME = "custom_format.json"
+
+    def __init__(self, name):
+        """Name the component and start with no recorded directories."""
+        super().__init__(name)
+        self.saved_directories = []
+        self.loaded_directories = []
+
+    def save_state(self, carry, directory):
+        self.saved_directories.append(directory)
+        (directory / self.FILENAME).write_text(
+            json.dumps({key: float(value) for key, value in carry.items()})
+        )
+
+    def load_state(self, directory):
+        self.loaded_directories.append(directory)
+        stored = json.loads((directory / self.FILENAME).read_text())
+        return {key: jnp.float32(value) for key, value in stored.items()}
 
 
 def atm_lnd_exchange(components, time):
@@ -127,6 +163,29 @@ def nested_model():
     )
 
 
+def checkpointing_nested_model():
+    """Build the nested model with an inner component that checkpoints itself.
+
+    Returns the outer coupler and the inner one, so a test can reach the
+    component that recorded the directories it was given.
+    """
+    inner = Coupler(
+        {"atm": Counter("atm"), "lnd": CheckpointingCounter("lnd")},
+        {"atm_lnd_exchange": atm_lnd_exchange},
+        coupling_timestep=FAST_TIMESTEP,
+        start_date=START_DATE,
+        name="atm_lnd",
+    )
+    outer = Coupler(
+        {"atm_lnd": inner, "ocn": Counter("ocn")},
+        {"srf_ocn_exchange": srf_ocn_exchange_nested},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
+    )
+    return outer, inner
+
+
 def flat_model():
     """Build the same model as one coupler with a repeated workflow."""
     return Coupler(
@@ -167,9 +226,9 @@ def test_a_coupler_is_a_component():
     assert isinstance(coupler, Component)
     assert isinstance(coupler, SupportsBind)
     assert isinstance(coupler, SupportsXarray)
-    # Its carry is a plain pytree, so it needs no checkpoint capability of
-    # its own; `save_coupled_carry` pickles it like any other carry.
-    assert not isinstance(coupler, SupportsCheckpoint)
+    # It checkpoints itself too, which is what lets an outer coupler hand it
+    # its own subdirectory instead of pickling its whole inner carry.
+    assert isinstance(coupler, SupportsCheckpoint)
     assert coupler.name == "atm_lnd"
     assert Coupler(
         {}, coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE
@@ -421,6 +480,106 @@ def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
     np.testing.assert_allclose(
         np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
         np.arange(48, 96) * HOUR,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checkpointing the coupled model through the components' own capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_save_state_hands_each_component_its_own_directory(tmp_path):
+    """A component that writes itself is delegated to, however deeply nested.
+
+    The savers are derived from the components, so the driver names none of
+    them: the outer coupler delegates the inner coupled carry to the inner
+    coupler, which in turn delegates its land to the component that knows how
+    to write it.
+    """
+    outer, inner = checkpointing_nested_model()
+    land = inner.components["lnd"]
+    carry, _ = outer.generate_trajectory_function(2)(outer.initialize())
+
+    root = tmp_path / "checkpoint"
+    outer.save_state(carry, root)
+
+    assert land.saved_directories == [root / "atm_lnd" / "lnd"]
+    assert (root / "atm_lnd" / "lnd" / CheckpointingCounter.FILENAME).exists()
+    # Its sibling has an ordinary pytree carry and is still pickled, next to
+    # it, under the name the default path uses.
+    assert (root / "atm_lnd" / "atm_carry.pkl").exists()
+    assert (root / "ocn_carry.pkl").exists()
+    # The delegating saver replaces the pickle rather than accompanying it,
+    # for the component and for the nested coupler alike.
+    assert not (root / "atm_lnd" / "lnd_carry.pkl").exists()
+    assert not (root / "atm_lnd_carry.pkl").exists()
+    # Both coupled models are complete checkpoints in their own right: the
+    # inner one wrote its own clock and its own completion marker.
+    assert (root / COUPLED_STEP_FILENAME).exists()
+    assert (root / "atm_lnd" / COUPLED_STEP_FILENAME).exists()
+
+
+def test_load_state_round_trips_a_nested_checkpoint(tmp_path):
+    """The loaders are derived the same way, so the carry comes back whole."""
+    outer, inner = checkpointing_nested_model()
+    land = inner.components["lnd"]
+    carry, _ = outer.generate_trajectory_function(2)(outer.initialize())
+
+    root = tmp_path / "checkpoint"
+    outer.save_state(carry, root)
+    loaded = outer.load_state(root)
+
+    assert land.loaded_directories == [root / "atm_lnd" / "lnd"]
+    assert isinstance(loaded, CoupledCarry)
+    assert isinstance(loaded.components["atm_lnd"], CoupledCarry)
+    assert_trees_equal(loaded, carry)
+    # Both clocks, spelled out: the outer counts coupled days, the inner its
+    # own hours, and neither is reconstructed from the other.
+    assert int(loaded.step) == 2
+    assert int(loaded.components["atm_lnd"].step) == 48
+    assert loaded.step.dtype == jnp.int32
+    assert loaded.components["atm_lnd"].step.dtype == jnp.int32
+
+
+def test_a_nested_run_resumed_from_load_state_continues_identically(tmp_path):
+    """Four steps, or two then a checkpoint then two, are the same run."""
+    outer, _ = checkpointing_nested_model()
+    initial = outer.initialize()
+    continuous_carry, _ = outer.generate_trajectory_function(4)(initial)
+
+    two = outer.generate_trajectory_function(2)
+    carry, _ = two(initial)
+    outer.save_state(carry, tmp_path / "checkpoint")
+
+    resumed, diagnostics = two(outer.load_state(tmp_path / "checkpoint"))
+
+    assert_trees_equal(resumed, continuous_carry)
+    # The inner clock continues from hour 48, not from zero.
+    np.testing.assert_allclose(
+        np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
+        np.arange(48, 96) * HOUR,
+    )
+
+
+def test_save_state_matches_the_explicit_helpers_for_an_all_pytree_model(tmp_path):
+    """With nothing to delegate to, the capability writes the same checkpoint.
+
+    The flat model has no component with a checkpoint capability of its own,
+    so ``Coupler.save_state`` derives an empty savers mapping and is exactly
+    the call a driver used to write by hand.
+    """
+    model = flat_model()
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+
+    model.save_state(carry, tmp_path / "capability")
+    save_coupled_carry(carry, tmp_path / "explicit")
+
+    assert sorted(path.name for path in (tmp_path / "capability").iterdir()) == sorted(
+        path.name for path in (tmp_path / "explicit").iterdir()
+    )
+    assert_trees_equal(
+        model.load_state(tmp_path / "capability"),
+        load_coupled_carry(tmp_path / "explicit", model.components),
     )
 
 

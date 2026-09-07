@@ -62,18 +62,47 @@ index restarts at zero on every call: putting the clock in the carry is what
 makes a chunked run (or a restart from a checkpoint) continue the same
 simulation instead of replaying the first year.
 
-For the same reason `step` is part of a **checkpoint**.
-`jem.utils.checkpoints.save_coupled_carry(coupled_carry, directory)` writes one
-`{name}_carry.pkl` per component — or a subdirectory, for a component that
-implements `SupportsCheckpoint` and is passed in `component_savers` — plus
-`coupled_step.pkl` holding the counter, and `load_coupled_carry` returns the
-`CoupledCarry` a trajectory function can be handed straight back. A checkpoint
+For the same reason `step` is part of a **checkpoint**. A checkpoint directory
+holds one `{name}_carry.pkl` per component — or a subdirectory, for a component
+that writes itself — plus `coupled_step.pkl` holding the counter. A checkpoint
 directory with no `coupled_step.pkl` is refused with a `ValueError`: its
 position in the seasonal cycle is not recoverable, and resuming at step 0 (or
 at a step reconstructed from a batch index) would silently move the run's
 calendar. `save_component_carries` / `load_component_carries` are the
 mapping-only halves, for a sub-carry that has no clock of its own — which is
 how the Veros restart writer stores its `derived` and `forcing` structs.
+
+**The coupler is what a driver checkpoints through**, in one call each way:
+
+```python
+model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+carry = model.load_state(saved)
+```
+
+Which components need writing by hand rather than pickling is a property of the
+*components* — `VerosComponent` has to go through Veros' HDF5 restart writer
+because a `VerosState` is not a pytree — and the coupler is the one object that
+knows them all. `Coupler.save_state` therefore derives the savers itself, as
+`{name: component.save_state for … if isinstance(component, SupportsCheckpoint)}`,
+and `load_state` derives the loaders from the same capability. A driver never
+enumerates them, so it cannot get the set wrong or forget one when a component
+is swapped.
+
+A `Coupler` implements `SupportsCheckpoint` itself, so this **recurses**: an
+outer coupler sees a nested coupler as a component that writes itself, hands it
+`directory / <the name it is registered under>`, and the inner coupler writes
+its own components and its own `coupled_step.pkl` there — an inner checkpoint
+that is complete in its own right, holding the inner clock. Without that, the
+outer save would treat the inner `CoupledCarry` as a plain pytree and pickle it,
+which works only while nothing inside it needs a format of its own; a nested
+model containing Veros would silently bypass the restart path.
+
+`save_coupled_carry(coupled_carry, directory, component_savers=…)` and
+`load_coupled_carry(directory, names, component_loaders=…)` are still the
+underlying functions and still take the mappings explicitly, for a caller that
+wants to override a saver or supply one for something that is not a component
+capability. `Coupler.save_state` / `load_state` are the answer for every
+ordinary case.
 
 Because the marker is written last, a save interrupted part-way through leaves
 a directory that has no marker — and, in a run that names its checkpoints
@@ -115,7 +144,7 @@ at a random call site:
 |---|---|---|
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
-| `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent` |
+| `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent`, `Coupler` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -379,9 +408,11 @@ model = Coupler(
   diagnostics gain no extra axis, mirroring multiplicity 1.
 - **The carry** of the inner coupler is a `CoupledCarry` living inside the
   outer one's `components`, so there are two step counters: the outer counts
-  outer steps, the inner counts its own. Both are plain pytrees, so
-  `save_coupled_carry`/`load_coupled_carry` round-trip a nested run and a
-  resume continues both clocks.
+  outer steps, the inner counts its own. `outer.save_state(carry, directory)`
+  writes the inner model into `directory / <its registered name>` through the
+  inner coupler's own `save_state`, and `outer.load_state(directory)` reads it
+  back the same way, so a resume continues both clocks — and a component inside
+  the inner model that needs its own format (Veros) still gets it.
 - **Exchangers in the outer coupler** see the inner `CoupledCarry` under its
   registered name and reach inner components through `.components`.
   `jem.nested_carry(carries, outer_name, inner_name)` and

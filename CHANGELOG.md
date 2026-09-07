@@ -180,9 +180,27 @@ otherwise**; the code that has to change is named in each one.
     `jem.with_nested_carry(carries, outer_name, inner_name, new_inner_carry)`
     — how an exchanger in the outer coupler reads and immutably replaces a
     component inside a nested one.
-  - The inner `CoupledCarry` is a plain pytree inside the outer carry, so
-    `save_coupled_carry` / `load_coupled_carry` round-trip a nested run and a
-    resume continues both clocks.
+  - `Coupler.save_state(carry, directory)` / `Coupler.load_state(directory)`
+    checkpoint the coupled model, so a `Coupler` implements
+    `SupportsCheckpoint` as well. The savers and loaders are derived from the
+    components — `{name: component.save_state for … if isinstance(component,
+    SupportsCheckpoint)}` — so a driver no longer builds them by hand:
+
+    ```python
+    model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+    carry = model.load_state(saved)
+    ```
+
+    Because a `Coupler` is itself such a component this recurses: a nested
+    coupled model is written into `directory / <its registered name>`, with its
+    own components and its own `coupled_step.pkl`, and read back the same way,
+    so a resume continues both clocks. Previously the outer save pickled the
+    inner `CoupledCarry` as a plain pytree, which bypassed the HDF5 restart
+    path a component like `VerosComponent` requires, and no explicit
+    `component_savers` mapping could reach into it without a bespoke recursive
+    saver. `save_coupled_carry` / `load_coupled_carry` still take
+    `component_savers` / `component_loaders` explicitly, for a caller
+    overriding one or supplying a saver that is not a component capability.
 
   Writing the same model as one coupler with a repeated workflow (above) gives
   bit-identical carries and datasets; the design doc says which to prefer when.

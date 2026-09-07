@@ -18,12 +18,13 @@ A ``Coupler`` is the whole definition of a coupled model:
 
 A ``Coupler`` is itself a :class:`~jem.base.component.Component`: it has a
 ``name``, an ``initialize()`` and a ``step(carry, time)``, and it binds to a
-slower clock like any other component with an internal timestep. A coupled
-model can therefore be a component of a slower coupled model -- the GFDL
-pattern of a fast atmosphere/land loop inside a daily ocean coupling -- with
-no wrapper class. The alternative for the same model is one coupler with a
-repeated workflow (see :class:`Coupler`); the two are equivalent, and which
-reads better depends on whether the fast loop is a thing in its own right.
+slower clock, writes its output and checkpoints itself like any other
+component that provides those capabilities. A coupled model can therefore be
+a component of a slower coupled model -- the GFDL pattern of a fast
+atmosphere/land loop inside a daily ocean coupling -- with no wrapper class.
+The alternative for the same model is one coupler with a repeated workflow
+(see :class:`Coupler`); the two are equivalent, and which reads better
+depends on whether the fast loop is a thing in its own right.
 
 The coupler produces *functions*, not runs: :meth:`Coupler.step_function` and
 :meth:`Coupler.generate_trajectory_function` return pure functions of the
@@ -45,6 +46,7 @@ import dataclasses
 import logging
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import jax
@@ -62,6 +64,7 @@ from jem.base.component import (
     Diagnostics,
     Exchanger,
     SupportsBind,
+    SupportsCheckpoint,
     SupportsXarray,
     TimeAxis,
     seconds_since_new_year,
@@ -378,9 +381,10 @@ class Coupler:
 
     **A coupler is a component.** It has a ``name``, an ``initialize()``
     returning its :class:`CoupledCarry` and a ``step(carry, time)``, and it
-    implements :class:`~jem.base.component.SupportsBind` and
-    :class:`~jem.base.component.SupportsXarray`, so it can be registered in a
-    slower coupler with no wrapper class::
+    implements :class:`~jem.base.component.SupportsBind`,
+    :class:`~jem.base.component.SupportsXarray` and
+    :class:`~jem.base.component.SupportsCheckpoint`, so it can be registered
+    in a slower coupler with no wrapper class::
 
         fast = Coupler({"atm": atm, "lnd": lnd}, {"atm_lnd_exchange": ...},
                        coupling_timestep=jdt.to_timedelta(1, "hour"),
@@ -403,6 +407,11 @@ class Coupler:
     An exchanger in the outer coupler sees the inner coupled carry under that
     registered name and reaches inside it with :func:`nested_carry` and
     :func:`with_nested_carry`.
+
+    :meth:`save_state` / :meth:`load_state` checkpoint the whole coupled
+    model in one call, deriving each component's writer from the component
+    itself; because a coupler implements the capability too, a nested model
+    checkpoints by recursion into a subdirectory of its own.
 
     The same model can be written either as a nested pair of couplers or as
     one coupler with a repeated workflow, and the two produce identical
@@ -1207,6 +1216,114 @@ class Coupler:
                     )
                 datasets[dataset_name] = dataset
         return datasets
+
+    # -- checkpointing -----------------------------------------------------
+
+    def _component_savers(self) -> dict[str, Callable[[Carry, Path], None]]:
+        """Return the ``save_state`` of every component that has one.
+
+        Which components need writing by hand rather than pickling is a
+        property of the components, and the coupler is the one object that
+        knows them all -- so it is the one object that can assemble this
+        mapping. A caller enumerating it instead would have to know that the
+        ocean is Veros and that Veros needs its HDF5 restart path, and would
+        have to know it again for every model it builds.
+        """
+        return {
+            name: component.save_state
+            for name, component in self.components.items()
+            if isinstance(component, SupportsCheckpoint)
+        }
+
+    def _component_loaders(self) -> dict[str, Callable[[Path], Carry]]:
+        """Return the ``load_state`` of every component that has one.
+
+        The inverse of :meth:`_component_savers`, derived from the same
+        capability, so a carry written by a component's ``save_state`` is
+        always read back by that component's ``load_state``.
+        """
+        return {
+            name: component.load_state
+            for name, component in self.components.items()
+            if isinstance(component, SupportsCheckpoint)
+        }
+
+    def save_state(self, carry: CoupledCarry, directory: Path) -> None:
+        """Write the coupled carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
+
+        This is what a driver calls: one line that checkpoints the whole
+        coupled model, however it is put together. Every component that
+        implements :class:`~jem.base.component.SupportsCheckpoint` writes its
+        own carry into ``directory / <its registered name>``; every other
+        component's carry is pickled as ``<name>_carry.pkl``; and the coupled
+        step counter is written last, as the completion marker (see
+        :func:`jem.utils.checkpoints.save_coupled_carry`).
+
+        A :class:`Coupler` implements the capability itself, so a **nested**
+        coupled model is checkpointed by recursion: the outer coupler hands
+        the inner one the subdirectory named after it, and the inner one
+        writes its own components and its own marker there. Without that,
+        the outer save would treat the inner :class:`CoupledCarry` as a plain
+        pytree and pickle it -- which silently bypasses the HDF5 restart path
+        a component like Veros requires.
+
+        :func:`jem.utils.checkpoints.save_coupled_carry` still takes an
+        explicit ``component_savers`` mapping, for a caller that wants to
+        override or supply a saver for something that is not a component
+        capability. This method is the answer for the ordinary case.
+
+        Parameters
+        ----------
+        carry : CoupledCarry
+            The carry a trajectory function (or a nested step) returned.
+        directory : pathlib.Path
+            Directory to write into; created if absent.
+
+        """
+        # Imported here rather than at module scope: `jem.utils.checkpoints`
+        # imports the component contract from `jem.base`, so the dependency
+        # runs the other way round and a module-level import would make the
+        # two modules' import order load-bearing.
+        from jem.utils.checkpoints import save_coupled_carry
+
+        save_coupled_carry(carry, directory, component_savers=self._component_savers())
+
+    def load_state(self, directory: Path) -> CoupledCarry:
+        """Read back a coupled carry written by :meth:`save_state`.
+
+        The exact inverse: the loaders are derived from the same components,
+        so a nested coupler reads its own subdirectory back and a component
+        with a custom format is read by the code that wrote it. The result is
+        a :class:`CoupledCarry` that can be handed straight to a trajectory
+        function, which continues the run from the step the checkpoint holds.
+
+        The components read are the ones registered *now*: a checkpoint is
+        loaded into the model that is meant to continue it, and a component
+        added or removed since it was written is a mismatch the load reports
+        (a missing file) rather than papering over.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            A directory written by :meth:`save_state`.
+
+        Returns
+        -------
+        CoupledCarry
+
+        Raises
+        ------
+        ValueError
+            If ``directory`` holds no completion marker, i.e. it is not a
+            complete checkpoint.
+
+        """
+        # See `save_state` for why this import is not at module scope.
+        from jem.utils.checkpoints import load_coupled_carry
+
+        return load_coupled_carry(
+            directory, self.components, component_loaders=self._component_loaders()
+        )
 
     def __repr__(self) -> str:
         """Return a summary naming the components, exchangers, order and clock.

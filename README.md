@@ -191,6 +191,12 @@ it was handed, and never change their pytree structure.
   and the inner datasets come out of `to_xarray` under their own names, on the
   inner clock. The two forms produce identical runs — see
   `docs/source/design/architecture.md`.
+- `model.save_state(carry, directory)` / `model.load_state(directory)`
+  checkpoint the whole coupled model. The coupler derives each component's
+  writer from the component itself, so a driver never lists them; a component
+  whose carry is not a plain pytree (`VerosComponent`, through Veros' HDF5
+  restart file) writes its own subdirectory, and because a `Coupler` is one of
+  those components, a nested model checkpoints by recursion.
 
 See `docs/source/design/architecture.md` for the carry layout and the full
 contract.
