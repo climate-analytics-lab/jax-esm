@@ -235,6 +235,69 @@ def test_a_coupler_is_a_component():
     ).name == "coupled"
 
 
+class ParameterizedCounter(Counter):
+    """A ``Counter`` that can start from parameters it is handed.
+
+    It stands for a slab model with an initial-condition parameter: the value
+    the run starts from is read once, by ``initialize``.
+    """
+
+    def __init__(self, name, start=0.0):
+        """Name the component and set the value it defaults to starting from."""
+        super().__init__(name)
+        self.params = jnp.float32(start)
+
+    def initialize(self, params=None):
+        params = self.params if params is None else params
+        return {"value": jnp.asarray(params), "received": jnp.float32(0.0)}
+
+
+def test_initialize_routes_params_through_a_nested_coupler():
+    """The value for a nested coupler is a mapping over *its* components."""
+    inner = Coupler(
+        {"atm": ParameterizedCounter("atm"), "lnd": Counter("lnd")},
+        {"atm_lnd_exchange": atm_lnd_exchange},
+        coupling_timestep=FAST_TIMESTEP,
+        start_date=START_DATE,
+        name="atm_lnd",
+    )
+    outer = Coupler(
+        {"atm_lnd": inner, "ocn": ParameterizedCounter("ocn")},
+        {"srf_ocn_exchange": srf_ocn_exchange_nested},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
+    )
+
+    carry = outer.initialize({"atm_lnd": {"atm": jnp.float32(7.0)}, "ocn": jnp.float32(3.0)})
+
+    inner_carry = carry.components["atm_lnd"]
+    assert float(inner_carry.components["atm"]["value"]) == 7.0
+    # The inner component the inner mapping does not name is untouched, as is
+    # the inner coupler's own step counter.
+    assert float(inner_carry.components["lnd"]["value"]) == 0.0
+    assert int(inner_carry.step) == 0
+    assert float(carry.components["ocn"]["value"]) == 3.0
+
+
+def test_initialize_of_a_nested_coupler_rejects_an_unknown_inner_name():
+    """The inner coupler validates its own mapping, and says which name it is."""
+    inner = Coupler(
+        {"atm": ParameterizedCounter("atm")},
+        coupling_timestep=FAST_TIMESTEP,
+        start_date=START_DATE,
+        name="atm_lnd",
+    )
+    outer = Coupler(
+        {"atm_lnd": inner},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+    with pytest.raises(ValueError, match=r"\['ocn'\].*'atm_lnd'"):
+        outer.initialize({"atm_lnd": {"ocn": jnp.float32(1.0)}})
+
+
 def test_registering_a_coupler_binds_it():
     coupler = fast_coupler()
     assert coupler.outer_ratio is None

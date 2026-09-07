@@ -12,10 +12,18 @@ class SlabSeaiceParameters:
     respect to any of them works: the parameters travel in the component's
     carry (``carry["params"]``), not in a closure over the model object.
 
+    ``initial_ice_thickness`` is an **initial-condition** parameter: it is read
+    once, by :meth:`SlabSeaiceModel.initialize`, and never by ``step``. Vary it
+    by passing parameters to ``initialize`` (or to ``Coupler.initialize({"ice":
+    params})``); replacing that leaf in a carry that already exists changes
+    nothing, because its value has already been copied into the state. The
+    others are process parameters, read from the carry every step.
+
     Attributes
     ----------
     initial_ice_thickness : jnp.ndarray
         Uniform ice thickness (m) over ocean points at the start of a run.
+        Initial condition; read only by ``initialize``.
     min_ice_thickness : jnp.ndarray
         Thickness (m) above which a cell is *diagnosed* as ice-covered. It has
         no effect on the thickness tendency; it only selects which surface

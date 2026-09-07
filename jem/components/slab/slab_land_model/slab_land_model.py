@@ -114,7 +114,11 @@ class SlabLandModel(SlabModelBase):
             The model's grid.
         params : SlabLandParameters, optional
             Tunable parameters; defaults to
-            :meth:`SlabLandParameters.default`.
+            :meth:`SlabLandParameters.default`. They are what
+            :meth:`initialize` uses unless it is handed parameters of its own,
+            and what the checks below are made against: validation applies to
+            these concrete, construction-time values, which is why it can read
+            them as Python floats.
         name : str
             Component name in the coupler's workflow and carry.
         land_clim_file : str, optional
@@ -311,9 +315,23 @@ class SlabLandModel(SlabModelBase):
         )
         return load_monthly_climatology(self.land_clim_file, name, self.grid)
 
-    def initialize(self) -> Carry:
-        """Build the initial land carry."""
-        params = self.params
+    def initialize(self, params: SlabLandParameters | None = None) -> Carry:
+        """Build the initial land carry.
+
+        Parameters
+        ----------
+        params : SlabLandParameters, optional
+            Parameters to start from; defaults to the ones the model was
+            constructed with. The land model has no initial-condition
+            parameters -- it starts from its climatology, and every field of
+            :class:`SlabLandParameters` is a process parameter ``step`` reads
+            out of the carry -- but the parameters given here still shape the
+            initial state (through the land mask and the snow-cover closure)
+            and are what the carry carries, so the state and the process
+            parameters cannot come from two different objects.
+
+        """
+        params = self._initial_params(params)
         land = _land_cells(self.grid, params)
         # The month the run starts in; the coupler sets it through `bind`.
         cycle_position = self.start_year_fraction

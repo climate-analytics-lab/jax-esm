@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import inspect
 import logging
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -88,6 +89,40 @@ def _missing_component_attributes(component: Any) -> list[str]:
         for attribute in _REQUIRED_COMPONENT_ATTRIBUTES
         if not hasattr(component, attribute)
     ]
+
+
+def _initialize_with_params(name: str, component: Component, params: Any) -> Carry:
+    """Return ``component.initialize(params=params)``, or say why it cannot.
+
+    A component whose ``initialize`` takes no parameters is not a bug in
+    itself -- a wrapper around an external model initializes from that
+    model's own state -- but asking one for an initial condition built from
+    given parameters is, and dropping the request silently would leave the
+    caller differentiating a constant. The signature is inspected rather than
+    the call being wrapped in ``try``, so a ``TypeError`` raised *inside* a
+    component's own ``initialize`` is not misreported as this.
+    """
+    try:
+        signature: inspect.Signature | None = inspect.signature(component.initialize)
+    except (TypeError, ValueError):
+        # Not introspectable (a builtin, or a callable with no signature);
+        # let the call itself decide.
+        signature = None
+    if signature is not None:
+        try:
+            signature.bind(params=params)
+        except TypeError as exc:
+            raise TypeError(
+                f"Component {name!r} ({type(component).__name__}) was given"
+                " initial-condition parameters, but its initialize() does not"
+                f" accept a `params` argument: {exc}. Only a component that"
+                " builds its initial state from parameters can be named in"
+                " Coupler.initialize({...})."
+            ) from exc
+    # The Component protocol's `initialize` takes no arguments -- taking
+    # parameters is an extra a component may offer, and only the signature
+    # check above can establish it, so the call is made through `Any`.
+    return cast(Any, component.initialize)(params=params)
 
 
 def _flatten_workflow(workflow: Any) -> Iterator[str]:
@@ -787,11 +822,72 @@ class Coupler:
 
     # -- the coupled model as a function -----------------------------------
 
-    def initialize(self) -> CoupledCarry:
-        """Build the initial coupled carry: every component's carry, and step 0."""
+    def initialize(self, params: Mapping[str, Any] | None = None) -> CoupledCarry:
+        """Build the initial coupled carry: every component's carry, and step 0.
+
+        Parameters
+        ----------
+        params : mapping, optional
+            ``{component name: that component's parameters}``, for the
+            components whose initial state is to be built from parameters of
+            the caller's choosing rather than the ones they were constructed
+            with. A component the mapping does not name is initialized exactly
+            as it is without this argument.
+
+            This is how an **initial-condition** parameter is varied: a
+            parameter a component reads only in ``initialize`` (the slab
+            ocean's ``initial_sst``, the sea ice's ``initial_ice_thickness``)
+            has already been copied into the state by the time a carry exists,
+            so replacing that leaf in ``carry["params"]`` afterwards does
+            nothing. Passing it here builds the initial state from it, and
+            since the values reach ``initialize`` untouched, ``jax.grad`` of a
+            trajectory with respect to one of them flows all the way back::
+
+                jax.grad(lambda p: loss(trajectory(model.initialize({"ice": p}))))
+
+            For a nested :class:`Coupler`, the value is itself a mapping over
+            *its* components, because that is what its own ``initialize``
+            takes.
+
+        Returns
+        -------
+        CoupledCarry
+
+        Raises
+        ------
+        ValueError
+            If the mapping names something this coupler does not have a
+            component for.
+        TypeError
+            If a named component's ``initialize`` does not accept parameters.
+            Not every component can take them -- a wrapper around an external
+            model initializes from that model's own state -- and silently
+            ignoring the request would leave the caller differentiating a
+            constant.
+
+        """
+        if params is None:
+            return CoupledCarry(
+                components={
+                    name: component.initialize()
+                    for name, component in self.components.items()
+                },
+                step=jnp.int32(0),
+            )
+        unknown = sorted(set(params) - set(self.components))
+        if unknown:
+            raise ValueError(
+                f"initialize() was given parameters for {unknown!r}, which"
+                f" {self.name!r} has no component for; its components are"
+                f" {sorted(self.components)!r}."
+            )
         return CoupledCarry(
             components={
-                name: component.initialize()
+                name: (
+                    _initialize_with_params(name, component, params[name])
+                    if name in params
+                    else component.initialize()
+                )
                 for name, component in self.components.items()
             },
             step=jnp.int32(0),

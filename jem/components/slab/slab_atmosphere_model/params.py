@@ -12,10 +12,16 @@ class SlabAtmosphereParameters:
     to any of them works: the parameters travel in the component's carry
     (``carry["params"]``), not in a closure over the model object.
 
-    They are all initial-condition tunables. The bulk-formula coefficients this
-    model uses are physical constants of the surface layer, not per-run knobs,
-    and live in :mod:`jem.constants`; the drag coefficient additionally travels
-    in the model's *forcing* so an exchanger can vary it per cell.
+    They are all **initial-condition** parameters: each is read once, by
+    :meth:`SlabAtmosphereModel.initialize`, and never by ``step``. Vary one by
+    passing parameters to ``initialize`` (or to ``Coupler.initialize({"atm":
+    params})``); replacing a leaf in a carry that already exists changes
+    nothing, because its value has already been copied into the state.
+
+    The bulk-formula coefficients this model uses are physical constants of the
+    surface layer, not per-run knobs, and live in :mod:`jem.constants`; the drag
+    coefficient additionally travels in the model's *forcing* so an exchanger
+    can vary it per cell.
 
     Attributes
     ----------

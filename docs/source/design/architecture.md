@@ -35,7 +35,8 @@ keep but expensive to rediagnose:
 - The four slab models put their `flax.struct` parameters in `carry["params"]`
   rather than closing over them, so `jax.grad` of a coupled run with respect to,
   say, `SlabOceanParameters.relaxation_time` works with no special casing in the
-  coupler.
+  coupler. Which of them can be varied *through the carry* is the subject of
+  the next section.
 - `JCMComponent`'s carry has a fourth key, `"physics"`: JCM's cross-step physics
   carry (sub-cycled radiation, prior-step TKE, the tendencies one term hands to
   the next). It is threaded straight back into
@@ -120,6 +121,60 @@ total is not a whole number of batches. A batch index in the name would mean
 nothing across two runs that chose different batch lengths, whereas the coupled
 step counts the same coupling steps in both.
 
+### Parameters: process and initial-condition
+
+A component's parameters divide into two kinds, and the difference decides how
+a parameter study varies one. It is not a distinction the framework enforces —
+it follows from *when* the parameter is read:
+
+| | Read by | Varied by | Example |
+|---|---|---|---|
+| **Process parameter** | `step`, out of `carry["params"]`, every step | replacing that leaf in the carry | `SlabOceanParameters.relaxation_time`, `SlabLandParameters.tdland` |
+| **Initial-condition parameter** | `initialize`, once | passing parameters to `initialize` | `SlabOceanParameters.initial_sst`, `SlabSeaiceParameters.initial_ice_thickness`, every field of `SlabAtmosphereParameters` |
+
+A process parameter is varied in the carry, because that is where `step` reads
+it from:
+
+```python
+carry = model.initialize()
+carry["params"] = carry["params"].replace(relaxation_time=tau)   # differentiable
+```
+
+An initial-condition parameter **cannot** be: by the time a carry exists its
+value has already been copied into the state, and `step` never looks at it
+again, so replacing the leaf changes nothing and a gradient with respect to it
+is zero. It is varied by handing the parameters to `initialize`, which builds
+the initial state from them *and* puts them in `carry["params"]`, so the state
+and the process parameters come from one object:
+
+```python
+# `coupled` is the Coupler; `ocn` the SlabOceanModel registered in it.
+def loss(initial_sst):
+    params = ocn.params.replace(initial_sst=initial_sst)
+    _, diagnostics = trajectory(coupled.initialize({"ocn": params}))
+    return jnp.mean(diagnostics["ocn"]["state"].sea_surface_temperature)
+
+jax.grad(loss)(jnp.float32(288.15))     # non-zero
+```
+
+`Coupler.initialize(params)` takes `{component name: that component's
+parameters}` and routes each one to that component's `initialize(params=…)`; a
+component the mapping does not name is initialized exactly as it is without the
+argument, `Coupler.initialize()` with no argument is unchanged, and a name the
+coupler has no component for is a `ValueError`. Not every component can take
+parameters — a wrapper around an external model initializes from that model's
+own state — so naming one that cannot is a `TypeError` rather than a silently
+ignored request. For a **nested** coupler the value is itself a mapping over
+its components (`{"atm_lnd": {"atm": params}}`), because that is what its own
+`initialize` takes.
+
+Building the model inside `jax.grad` is not an alternative route to the same
+gradient: a constructor validates its parameters, which means reading them as
+concrete Python floats, and that cannot be done to a traced value. Validation
+therefore stays at construction, where the values are concrete, and
+`initialize(params)` is the differentiable entry point, which uses what it is
+given untouched.
+
 ### The component contract
 
 `jem.base.component.Component` is a runtime-checkable `typing.Protocol`, so
@@ -135,6 +190,13 @@ inherit from and nothing is monkey-patched onto the wrapped model:
 `Coupler.add_component(name, component)` checks `isinstance(component,
 Component)` and raises `TypeError` naming the missing members. The object itself
 is stored, so `coupler.components[name] is component`.
+
+`initialize()` must be callable with no arguments — that is all the protocol
+asks. A component may additionally accept `initialize(params=…)`, which is what
+`Coupler.initialize({name: params})` calls and how an initial-condition
+parameter is varied (see *Parameters*); the slab models and `Coupler` itself do,
+`JCMComponent` and `VerosComponent` do not, because they initialize from the
+wrapped model's own state.
 
 Three capabilities are **optional**, and are tested for with `isinstance`
 against their protocols at the one place that uses them — never with `hasattr`
@@ -616,7 +678,11 @@ the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
    dataclass carried as `carry["params"]` so they stay differentiable.
 2. Keep `initialize()` pure with respect to `self`: load boundary data in
    `__init__` (it is configuration, not state), so calling `initialize()` twice
-   gives the same answer.
+   gives the same answer. If any parameter is an *initial condition* — read by
+   `initialize` and never by `step` — give it the `initialize(params=None)`
+   signature the slab models have, so that parameter can be varied and
+   differentiated (see *Parameters*); a parameter that can only be set at
+   construction is a dead leaf in the carry.
 3. Add `bind(...)` if the model has an internal timestep, and raise `ValueError`
    when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
    time)` if it produces output, and `save_state`/`load_state` if its carry

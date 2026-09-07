@@ -104,7 +104,10 @@ class SlabAtmosphereModel(SlabModelBase):
             The model's grid.
         params : SlabAtmosphereParameters, optional
             Tunable parameters; defaults to
-            :meth:`SlabAtmosphereParameters.default`.
+            :meth:`SlabAtmosphereParameters.default`. They are all initial
+            conditions, and they are what :meth:`initialize` builds the
+            initial state from unless it is handed parameters of its own;
+            ``initialize(params)`` is the differentiable entry point for them.
         name : str
             Component name in the coupler's workflow and carry.
 
@@ -114,9 +117,23 @@ class SlabAtmosphereModel(SlabModelBase):
             SlabAtmosphereParameters.default() if params is None else params
         )
 
-    def initialize(self) -> Carry:
-        """Build the initial atmosphere carry."""
-        params = self.params
+    def initialize(self, params: SlabAtmosphereParameters | None = None) -> Carry:
+        """Build the initial atmosphere carry.
+
+        Parameters
+        ----------
+        params : SlabAtmosphereParameters, optional
+            Parameters to start from; defaults to the ones the model was
+            constructed with. Every field of
+            :class:`SlabAtmosphereParameters` is an initial condition, read
+            here and nowhere else, so this is the entry point that makes them
+            differentiable: they are used as given, never converted to Python
+            ``float``, and ``jax.grad`` of a trajectory with respect to one
+            reaches the state the run starts from. The same object goes into
+            ``carry["params"]``.
+
+        """
+        params = self._initial_params(params)
         latitude = self.grid.latitude_radian
 
         mean_air_temperature = (

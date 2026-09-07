@@ -384,3 +384,33 @@ def test_invalid_scalar_parameters_are_rejected(half_land_grid, field, value):
     params = SlabLandParameters(**{field: value})
     with pytest.raises(ValueError, match=field):
         SlabLandModel(half_land_grid, params=params)
+
+
+def test_initialize_takes_parameters_and_defaults_to_the_models_own(half_land_grid):
+    """``initialize(params)`` uses them; no argument starts as before.
+
+    The land model has no initial-condition parameter -- it starts from its
+    climatology -- but the parameters it is handed still shape the initial
+    state through the land mask, and they are what the carry carries.
+    """
+    model = SlabLandModel(half_land_grid)
+
+    default = model.initialize()
+    explicit = model.initialize(model.params)
+    no_land = model.initialize(SlabLandParameters(land_threshold=2.0))
+
+    assert jax.tree_util.tree_structure(default) == jax.tree_util.tree_structure(
+        explicit
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(default), jax.tree_util.tree_leaves(explicit)
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    # A threshold no cell reaches leaves the whole grid masked, and the
+    # parameters that did it travel in the carry.
+    np.testing.assert_allclose(
+        np.asarray(no_land["state"].land_surface_temperature),
+        MASKED_SURFACE_TEMPERATURE,
+    )
+    assert float(no_land["params"].land_threshold) == 2.0

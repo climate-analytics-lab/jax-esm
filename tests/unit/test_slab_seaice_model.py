@@ -225,3 +225,78 @@ def test_thickness_scale_is_differentiable(uniform_grid):
     gradient = jax.grad(mean_ice_fraction)(jnp.float32(0.5))
     assert bool(jnp.isfinite(gradient))
     assert abs(float(gradient)) > 0.0
+
+
+def test_initialize_takes_parameters_and_defaults_to_the_models_own(uniform_grid):
+    """``initialize(params)`` starts from them; no argument starts as before."""
+    model = SlabSeaiceModel(uniform_grid)
+
+    default = model.initialize()
+    explicit = model.initialize(model.params)
+    thicker = model.initialize(
+        SlabSeaiceParameters(initial_ice_thickness=2.0)
+    )
+
+    # No argument is the construction-time initial state, unchanged.
+    assert jax.tree_util.tree_structure(default) == jax.tree_util.tree_structure(
+        explicit
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(default), jax.tree_util.tree_leaves(explicit)
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+    np.testing.assert_allclose(np.asarray(default["state"].ice_thickness), 0.0)
+
+    # Parameters given here build the state *and* travel in the carry, so the
+    # two cannot come from different objects.
+    np.testing.assert_allclose(np.asarray(thicker["state"].ice_thickness), 2.0)
+    assert float(thicker["params"].initial_ice_thickness) == 2.0
+    np.testing.assert_allclose(
+        np.asarray(thicker["derived"].ice_fraction),
+        1.0 - np.exp(-2.0 / 0.5),
+        rtol=1e-5,
+    )
+
+
+def test_replacing_the_carried_leaf_cannot_move_the_initial_state(uniform_grid):
+    """Why ``initialize`` takes parameters: the initial condition is spent.
+
+    ``initial_ice_thickness`` has already been copied into the state by the
+    time a carry exists, and ``step`` never reads it, so replacing that leaf
+    in the carry does nothing -- which is exactly why an initial condition is
+    varied through ``initialize`` instead.
+    """
+    model = SlabSeaiceModel(uniform_grid)
+    carry = model.initialize()
+
+    carry["params"] = carry["params"].replace(initial_ice_thickness=3.0)
+    stepped, _ = model.step(carry, coupling_time(0))
+
+    np.testing.assert_allclose(np.asarray(carry["state"].ice_thickness), 0.0)
+    np.testing.assert_allclose(np.asarray(stepped["state"].ice_thickness), 0.0)
+
+
+def test_grad_wrt_initial_thickness_reaches_the_trajectory(uniform_grid):
+    """The initial thickness is differentiable through ``initialize``."""
+    model = SlabSeaiceModel(uniform_grid)
+
+    def mean_thickness(initial_ice_thickness):
+        params = model.params.replace(initial_ice_thickness=initial_ice_thickness)
+        carry = model.initialize(params)
+        carry["forcing"] = carry["forcing"].replace(
+            # Growth well clear of the clip at zero, so the derivative is not
+            # measuring the clip.
+            ice_frazil_melt_energy=jnp.full(
+                uniform_grid.shape, 0.25 * ENERGY_PER_METRE
+            )
+        )
+        for step in range(3):
+            carry, _ = model.step(carry, coupling_time(step))
+        return jnp.mean(carry["state"].ice_thickness)
+
+    gradient = jax.grad(mean_thickness)(jnp.float32(1.0))
+
+    assert bool(jnp.isfinite(gradient))
+    assert abs(float(gradient)) > 0.0
+    # Basal growth is additive, so a metre of initial ice is a metre at the end.
+    np.testing.assert_allclose(float(gradient), 1.0, rtol=1e-5)

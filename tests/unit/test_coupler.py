@@ -102,6 +102,30 @@ class DampedComponent:
         return {"value": value}, {"value": value}
 
 
+class ParameterizedComponent:
+    """A component whose initial state is built from parameters it is handed.
+
+    The slab models are the real thing this stands for: a parameter read only
+    by ``initialize`` (an initial condition) can only be varied by passing it
+    to ``initialize``, so the coupler has to be able to route one per
+    component.
+    """
+
+    def __init__(self, name="parameterized", start=1.0):
+        """Name the component and set the parameters it defaults to."""
+        self.name = name
+        self.params = jnp.float32(start)
+
+    def initialize(self, params=None):
+        params = self.params if params is None else params
+        return {"params": params, "value": jnp.asarray(params) * 2.0}
+
+    def step(self, carry, time):
+        del time
+        new_carry = dict(carry, value=carry["value"] + carry["params"])
+        return new_carry, {"value": new_carry["value"]}
+
+
 class XarrayComponent(SourceComponent):
     """A source that can label its own output; records the axis it was given."""
 
@@ -243,6 +267,73 @@ def test_initialize_starts_at_step_zero():
     assert isinstance(carry, CoupledCarry)
     assert int(carry.step) == 0
     assert set(carry.components) == {"source", "sink"}
+
+
+def _parameterized_coupler():
+    """Build a coupler with one parameterizable component and one without."""
+    return Coupler(
+        {"ice": ParameterizedComponent("ice"), "source": SourceComponent()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+
+def test_initialize_with_params_builds_that_components_initial_state():
+    """The parameters reach the component they are keyed by, and the carry."""
+    coupler = _parameterized_coupler()
+
+    carry = coupler.initialize({"ice": jnp.float32(5.0)})
+
+    assert float(carry.components["ice"]["value"]) == 10.0
+    assert float(carry.components["ice"]["params"]) == 5.0
+    # A component the mapping does not name is initialized exactly as before.
+    assert float(carry.components["source"]["value"]) == 0.0
+    assert int(carry.step) == 0
+
+
+def test_initialize_without_params_is_unchanged():
+    """The no-argument call is the construction-time initial state."""
+    coupler = _parameterized_coupler()
+
+    default = coupler.initialize()
+    explicit = coupler.initialize({"ice": coupler.components["ice"].params})
+
+    assert jax.tree.structure(default) == jax.tree.structure(explicit)
+    for left, right in zip(jax.tree.leaves(default), jax.tree.leaves(explicit)):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+    assert float(default.components["ice"]["value"]) == 2.0
+
+
+def test_initialize_gradient_reaches_a_trajectory_through_the_coupler():
+    """An initial condition passed here is differentiable through the run."""
+    coupler = _parameterized_coupler()
+    trajectory = coupler.generate_trajectory_function(3)
+
+    def final_value(initial):
+        carry, _ = trajectory(coupler.initialize({"ice": initial}))
+        return carry.components["ice"]["value"]
+
+    gradient = jax.grad(final_value)(jnp.float32(5.0))
+
+    # value = 2p + 3p, so d/dp = 5.
+    assert bool(jnp.isfinite(gradient))
+    np.testing.assert_allclose(float(gradient), 5.0, rtol=1e-6)
+
+
+def test_initialize_names_a_component_that_cannot_take_params():
+    """A component whose initialize takes none says so, rather than ignoring it."""
+    coupler = _parameterized_coupler()
+
+    with pytest.raises(TypeError, match="'source'.*does not accept"):
+        coupler.initialize({"source": jnp.float32(1.0)})
+
+
+def test_initialize_rejects_parameters_for_an_unregistered_name():
+    """A typo in a component name is not silently a no-op."""
+    coupler = _parameterized_coupler()
+
+    with pytest.raises(ValueError, match=r"\['ic'\]"):
+        coupler.initialize({"ic": jnp.float32(1.0)})
 
 
 def test_clock_persists_across_trajectory_calls():

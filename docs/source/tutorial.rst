@@ -103,6 +103,17 @@ For the slab ocean model, the carry is
 Neither carries a simulation time: the coupler owns the one clock and hands it
 to :code:`step`.
 
+The carried parameters are differentiable, but only the ones :code:`step`
+actually reads from the carry can be varied *there*: replacing
+:code:`relaxation_time` in :code:`carry["params"]` changes the run, while
+replacing :code:`initial_sst` changes nothing, because it was read once by
+:code:`initialize` and has already been copied into the state. An
+initial-condition parameter is varied by passing parameters to
+:code:`initialize` -- :code:`ocn.initialize(params)`, or
+:code:`coupler.initialize({"ocn": params})` for the coupled model -- which
+builds the initial state from them and carries them. See the *Parameters*
+section of :doc:`design/architecture` for the pattern in full.
+
 
 Step 2: Write the Wrapper
 -------------------------

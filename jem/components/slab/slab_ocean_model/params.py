@@ -17,6 +17,14 @@ class SlabOceanParameters:
     ``forcing_method`` is the one exception -- it selects which terms are traced
     at all, so it is static aux data and is read with an ordinary ``if``.
 
+    ``initial_sst`` is an **initial-condition** parameter: it is read once, by
+    :meth:`SlabOceanModel.initialize` (and only when no SST climatology was
+    given), and never by ``step``. Vary it by passing parameters to
+    ``initialize`` (or to ``Coupler.initialize({"ocn": params})``); replacing
+    that leaf in a carry that already exists changes nothing, because its value
+    has already been copied into the state. The others are process parameters,
+    read from the carry every step.
+
     Attributes
     ----------
     relaxation_time : jnp.ndarray
@@ -29,7 +37,8 @@ class SlabOceanParameters:
     initial_sst : jnp.ndarray
         Sea-surface temperature (K) the ocean starts from where no SST
         climatology is given -- the base of the idealized profile described in
-        :class:`SlabOceanModel`.
+        :class:`SlabOceanModel`. Initial condition; read only by
+        ``initialize``.
     forcing_method : str
         One of ``"none"``, ``"qflux"`` or ``"relaxation"``; static.
     ocean_mask_value : float

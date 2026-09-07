@@ -305,11 +305,28 @@ class SlabModelBase(ABC):
 
     Subclasses must implement:
 
-    - ``initialize()`` -- build the initial carry. Pure with respect to
-      ``self``: boundary data is loaded in ``__init__``, so calling it twice
-      gives the same answer and calling it never mutates the component.
+    - ``initialize(params=None)`` -- build the initial carry. Pure with
+      respect to ``self``: boundary data is loaded in ``__init__``, so calling
+      it twice gives the same answer and calling it never mutates the
+      component.
     - ``step(carry, time)`` -- advance one coupling step.
     - ``_create_xarray_data_vars(diagnostics)`` -- name the output variables.
+
+    A slab model's parameters divide into two kinds, and they are varied
+    differently:
+
+    - **Process parameters** are read by :meth:`step` out of
+      ``carry["params"]`` every step (the ocean's ``relaxation_time``, the
+      land's ``tdland``). Vary one by replacing that leaf in the carry.
+    - **Initial-condition parameters** are read once, by :meth:`initialize`,
+      and never again (``initial_sst``, ``initial_ice_thickness``, the slab
+      atmosphere's ``initial_*``). Replacing such a leaf in a carry that
+      already exists does nothing at all -- its value has already been copied
+      into the state. Vary one by passing the parameters to ``initialize``:
+      ``model.initialize(params)`` builds the initial state from them *and*
+      puts them in ``carry["params"]``, so the state and the process
+      parameters come from one object and a gradient with respect to an
+      initial condition flows through the trajectory.
 
     Attributes
     ----------
@@ -317,11 +334,15 @@ class SlabModelBase(ABC):
         The component's name in the coupler's workflow and carry.
     grid : SlabGrid
         The model's grid.
+    params : Any
+        The model's construction-time parameters, set by each subclass'
+        ``__init__``; what ``initialize()`` uses when it is passed none.
 
     """
 
     name: str
     grid: SlabGrid
+    params: Any
 
     def __init__(self, name: str, grid: SlabGrid):
         """Initialize the shared slab-model state.
@@ -409,9 +430,29 @@ class SlabModelBase(ABC):
         """
         return self._start_year_fraction
 
+    def _initial_params(self, params: Any) -> Any:
+        """Return the parameters :meth:`initialize` must build the state from.
+
+        ``None`` means the ones the model was constructed with. Anything else
+        is used as given -- including a traced value from inside
+        ``jax.grad``, which is what makes an initial-condition parameter
+        differentiable.
+        """
+        return self.params if params is None else params
+
     @abstractmethod
-    def initialize(self) -> Carry:
-        """Build the initial carry. Must not integrate the model."""
+    def initialize(self, params: Any = None) -> Carry:
+        """Build the initial carry from ``params``. Must not integrate the model.
+
+        Parameters
+        ----------
+        params : optional
+            The model's parameters. Defaults to the ones it was constructed
+            with. When given, they are what the initial state is built from
+            *and* what the carry carries, so a run started from them is
+            described by one parameter object throughout.
+
+        """
 
     @abstractmethod
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:

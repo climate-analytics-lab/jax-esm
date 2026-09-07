@@ -14,6 +14,11 @@ class SlabLandParameters:
     respect to any of them works: the parameters travel in the component's
     carry (``carry["params"]``), not in a closure over the model object.
 
+    They are all **process** parameters, read from the carry every step, so a
+    parameter study varies one by replacing that leaf in ``carry["params"]``.
+    The land model has no initial-condition parameters: it starts from its
+    climatology.
+
     Defaults are SPEEDY's (``land_model.f90``).
 
     Attributes

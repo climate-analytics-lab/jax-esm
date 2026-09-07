@@ -207,3 +207,58 @@ def test_drag_coefficient_is_differentiable(half_land_grid):
     gradient = jax.grad(mean_air_temperature)(jnp.float32(1e-3))
     assert bool(jnp.isfinite(gradient))
     assert abs(float(gradient)) > 0.0
+
+
+def test_initialize_takes_parameters_and_defaults_to_the_models_own(half_land_grid):
+    """``initialize(params)`` starts from them; no argument starts as before."""
+    model = SlabAtmosphereModel(half_land_grid)
+
+    default = model.initialize()
+    explicit = model.initialize(model.params)
+    warmer = model.initialize(
+        SlabAtmosphereParameters(
+            initial_temperature_base=250.0,
+            initial_temperature_amplitude=0.0,
+            initial_zonal_wind=3.0,
+        )
+    )
+
+    # No argument is the construction-time initial state, unchanged.
+    assert jax.tree_util.tree_structure(default) == jax.tree_util.tree_structure(
+        explicit
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(default), jax.tree_util.tree_leaves(explicit)
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    # Parameters given here build the state *and* travel in the carry.
+    np.testing.assert_allclose(
+        np.asarray(warmer["state"].mean_air_temperature), 250.0, rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(warmer["state"].mean_zonal_wind_velocity), 3.0
+    )
+    assert float(warmer["params"].initial_temperature_base) == 250.0
+
+
+def test_grad_wrt_initial_temperature_reaches_the_trajectory(half_land_grid):
+    """The initial column temperature is differentiable through ``initialize``."""
+    model = SlabAtmosphereModel(half_land_grid)
+
+    def mean_air_temperature(base):
+        params = model.params.replace(initial_temperature_base=base)
+        carry = model.initialize(params)
+        # A surface to exchange heat with, so the run is not a constant.
+        carry["forcing"] = carry["forcing"].replace(
+            land_surface_temperature=jnp.full(half_land_grid.shape, 300.0),
+            sea_surface_temperature=jnp.full(half_land_grid.shape, 300.0),
+        )
+        for step in range(3):
+            carry, _ = model.step(carry, coupling_time(step))
+        return jnp.mean(carry["state"].mean_air_temperature)
+
+    gradient = jax.grad(mean_air_temperature)(jnp.float32(273.15))
+
+    assert bool(jnp.isfinite(gradient))
+    assert abs(float(gradient)) > 0.0

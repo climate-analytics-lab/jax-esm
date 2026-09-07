@@ -495,3 +495,53 @@ def test_invalid_mixed_layer_depths_are_rejected(uniform_grid, field, value):
         SlabOceanModel(uniform_grid, params)
 
     assert repr(value) in str(excinfo.value)
+
+
+def test_initialize_takes_parameters_and_defaults_to_the_models_own(uniform_grid):
+    """``initialize(params)`` starts from them; no argument starts as before."""
+    model = SlabOceanModel(uniform_grid)
+
+    default = model.initialize()
+    explicit = model.initialize(model.params)
+    warmer = model.initialize(SlabOceanParameters(initial_sst=300.0))
+
+    # No argument is the construction-time initial state, unchanged.
+    assert jax.tree_util.tree_structure(default) == jax.tree_util.tree_structure(
+        explicit
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(default), jax.tree_util.tree_leaves(explicit)
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+    # Parameters given here build the state *and* travel in the carry.
+    np.testing.assert_allclose(
+        np.asarray(warmer["state"].sea_surface_temperature)
+        - np.asarray(default["state"].sea_surface_temperature),
+        300.0 - float(model.params.initial_sst),
+        rtol=1e-5,
+    )
+    assert float(warmer["params"].initial_sst) == 300.0
+
+
+def test_grad_wrt_initial_sst_reaches_the_trajectory(uniform_grid):
+    """The initial SST is differentiable through ``initialize``.
+
+    No climatology file, so the idealized profile applies and ``initial_sst``
+    is its base -- the one place the parameter is read.
+    """
+    model = SlabOceanModel(uniform_grid)
+
+    def mean_final_sst(initial_sst):
+        params = model.params.replace(initial_sst=initial_sst)
+        carry = model.initialize(params)
+        carry, _ = run_steps(model, carry, 3)
+        return jnp.mean(carry["state"].sea_surface_temperature)
+
+    gradient = jax.grad(mean_final_sst)(jnp.float32(288.15))
+
+    assert bool(jnp.isfinite(gradient))
+    assert abs(float(gradient)) > 0.0
+    # With no forcing method and no heat flux the mixed layer holds its
+    # temperature, so a degree at the start is a degree at the end.
+    np.testing.assert_allclose(float(gradient), 1.0, rtol=1e-5)

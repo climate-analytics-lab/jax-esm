@@ -15,7 +15,9 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 - **Efficient Time Integration**: `Coupler.generate_trajectory_function()` returns a
   pure `carry -> (carry, diagnostics)` function built on `jax.lax.scan`
 - **Differentiable parameters**: component parameters are `flax.struct` dataclasses that
-  travel in the carry, so `jax.grad` through a coupled run reaches them
+  travel in the carry, so `jax.grad` through a coupled run reaches them — the ones
+  `step` reads by replacing the leaf in `carry["params"]`, and the ones that are
+  initial conditions by passing them to `initialize`
 - **xarray Integration**: `Coupler.to_xarray()` labels every component's output on the
   same time axis and grid coordinates, so the datasets merge
 
@@ -250,6 +252,29 @@ Each slab model takes its tunables as a `flax.struct` parameter dataclass
 (`SlabOceanParameters`, ...) whose numeric fields are pytree leaves, and carries
 them in `carry["params"]`, so a gradient of a coupled run with respect to a
 physical parameter needs no special casing.
+
+How a parameter is varied depends on when the model reads it:
+
+```python
+# A PROCESS parameter is read by step() out of the carry, every step, so it is
+# varied by replacing that leaf:
+carry = ocn.initialize()
+carry["params"] = carry["params"].replace(relaxation_time=tau)
+
+# An INITIAL-CONDITION parameter (initial_sst, initial_ice_thickness, every
+# SlabAtmosphereParameters field) is read once, by initialize(), and never
+# again -- replacing it in an existing carry does nothing, so it is given to
+# initialize instead:
+carry = ocn.initialize(ocn.params.replace(initial_sst=sst0))
+
+# In a coupled model, through the coupler, which routes by component name:
+coupled_carry = coupled.initialize({"ocn": ocn.params.replace(initial_sst=sst0)})
+```
+
+Both are differentiable: `jax.grad` of a trajectory reaches a process parameter
+through the carry and an initial condition through `initialize`. Each
+`*Parameters` docstring says which of its fields are initial conditions;
+`docs/source/design/architecture.md` has the full pattern.
 
 ## Contributing
 

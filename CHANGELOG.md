@@ -78,6 +78,34 @@ otherwise**; the code that has to change is named in each one.
     `initial_meridional_wind=0.0`.
   Each has a `.default()` classmethod, and each model's `params=` argument
   defaults to it.
+- **Parameterized initialization**: `SlabModelBase.initialize(params=None)` and
+  `Coupler.initialize(params=None)`. A parameter a component reads only in
+  `initialize` — the slab ocean's `initial_sst`, the sea ice's
+  `initial_ice_thickness`, every field of `SlabAtmosphereParameters` — has
+  already been copied into the state by the time a carry exists, so replacing
+  that leaf in `carry["params"]` did nothing and `jax.grad` with respect to it
+  was zero: the field was advertised as a differentiable leaf but could not be
+  varied at all (constructing the model inside `jax.grad` does not help, since
+  the constructor validates these values as Python floats). Passing parameters
+  to `initialize` builds the initial state from them *and* carries them, and
+  they reach the state untouched, so a gradient with respect to an initial
+  condition flows through the trajectory:
+
+  ```python
+  jax.grad(lambda p: loss(trajectory(model.initialize({"ice": p}))))
+  ```
+
+  `Coupler.initialize(params)` takes `{component name: that component's
+  parameters}`, routes each to that component's `initialize(params=…)` and
+  initializes the rest as before; a name it has no component for is a
+  `ValueError`, and a component whose `initialize` takes no parameters is a
+  `TypeError` rather than a silently ignored request. For a nested `Coupler`
+  the value is itself a mapping over its components.
+  **`initialize()` with no argument is exactly as it was**, in every component
+  and in the coupler. Constructor validation of these parameters also stays as
+  it was — it runs on the concrete construction-time values, which is why it
+  can read them as floats; `initialize(params)` is the differentiable entry
+  point and takes traced values.
 - `SlabGrid.from_coords(horizontal, fractional_mask=None, threshold=0.5)`,
   which builds a slab grid from the dinosaur horizontal grid the atmosphere is
   discretized on, and `SlabGrid.from_scrip(...)`.

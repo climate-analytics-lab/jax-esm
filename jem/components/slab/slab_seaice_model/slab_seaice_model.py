@@ -131,7 +131,14 @@ class SlabSeaiceModel(SlabModelBase):
             The model's grid.
         params : SlabSeaiceParameters, optional
             Tunable parameters; defaults to
-            :meth:`SlabSeaiceParameters.default`.
+            :meth:`SlabSeaiceParameters.default`. They are what
+            :meth:`initialize` builds the initial state from unless it is
+            handed parameters of its own, and what the checks below are made
+            against: validation applies to these concrete, construction-time
+            values, which is why it can read them as Python floats.
+            ``initialize(params)`` is the differentiable entry point for the
+            initial condition and takes traced values, so it is deliberately
+            not re-validated there.
         name : str
             Component name in the coupler's workflow and carry.
 
@@ -169,9 +176,23 @@ class SlabSeaiceModel(SlabModelBase):
         """Boolean mask of the cells this model integrates."""
         return self.grid.binary_mask == params.ocean_mask_value
 
-    def initialize(self) -> Carry:
-        """Build the initial sea-ice carry."""
-        params = self.params
+    def initialize(self, params: SlabSeaiceParameters | None = None) -> Carry:
+        """Build the initial sea-ice carry.
+
+        Parameters
+        ----------
+        params : SlabSeaiceParameters, optional
+            Parameters to start from; defaults to the ones the model was
+            constructed with. ``initial_ice_thickness`` is read here and
+            nowhere else, so this is the entry point that makes it
+            differentiable: it is used as given, never converted to a Python
+            ``float``, and ``jax.grad`` of a trajectory with respect to it
+            reaches the ice thickness the run starts from. The same object
+            goes into ``carry["params"]``, so the process parameters ``step``
+            reads are the ones the initial state was built from.
+
+        """
+        params = self._initial_params(params)
         ocean = self._ocean_cells(params)
 
         ice_thickness = jnp.where(ocean, params.initial_ice_thickness, 0.0)
