@@ -29,6 +29,9 @@ CORE_NAMES = (
     "SupportsCheckpoint",
     "SupportsXarray",
     "TimeAxis",
+    # The helpers an exchanger reaches into a nested coupler's carry with.
+    "nested_carry",
+    "with_nested_carry",
 )
 
 # What a coupled run is built out of: the atmosphere wrapper, the slab models

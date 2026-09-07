@@ -150,6 +150,51 @@ otherwise**; the code that has to change is named in each one.
 - `Coupler.multiplicities()` — how many times each element runs per coupled
   step — and `Coupler.time_axis(first_step, n, *, multiplicity=1)`, whose new
   keyword builds the sub-rate output axis.
+- **A `Coupler` is a `Component`**, so a coupled model can be a component of a
+  slower coupled model with no wrapper class — a fast atmosphere/land loop
+  inside a daily ocean coupling:
+
+  ```python
+  fast = Coupler({"atm": atm, "lnd": lnd}, {"atm_lnd_exchange": ...},
+                 coupling_timestep=jdt.to_timedelta(1, "hour"),
+                 start_date=start_date, name="atm_lnd")
+  model = Coupler({"atm_lnd": fast, "ocn": ocn}, {"srf_ocn_exchange": ...},
+                  coupling_timestep=jdt.to_timedelta(1, "day"),
+                  start_date=start_date,
+                  workflow=["srf_ocn_exchange", "atm_lnd", "ocn"])
+  ```
+
+  - `Coupler.__init__` takes a keyword-only `name="coupled"` (the `Component`
+    protocol requires the attribute; the key it is registered under is still
+    what a workflow names).
+  - `Coupler.bind(*, coupling_timestep, start_date, calendar)` requires the
+    outer timestep to be a whole multiple of this coupler's own and the start
+    date and calendar to be equal, and records the ratio *r*
+    (`Coupler.outer_ratio`). Rebinding to the same clock is a no-op, to a
+    different one a `ValueError`.
+  - `Coupler.step(carry, time)` runs *r* of this coupler's own coupled steps,
+    driven by the inner carry's own step counter, and returns its usual
+    per-component diagnostics stacked on a leading axis of length *r* (no extra
+    axis for `r == 1`). Calling it before `bind` is a `RuntimeError`.
+  - `jem.nested_carry(carries, outer_name, inner_name)` and
+    `jem.with_nested_carry(carries, outer_name, inner_name, new_inner_carry)`
+    — how an exchanger in the outer coupler reads and immutably replaces a
+    component inside a nested one.
+  - The inner `CoupledCarry` is a plain pytree inside the outer carry, so
+    `save_coupled_carry` / `load_coupled_carry` round-trip a nested run and a
+    resume continues both clocks.
+
+  Writing the same model as one coupler with a repeated workflow (above) gives
+  bit-identical carries and datasets; the design doc says which to prefer when.
+- **`SupportsXarray.to_xarray` may return a mapping of datasets**, not only one
+  dataset: a component that is itself a coupled model has one per *its*
+  components. `Coupler.to_xarray` flattens such a mapping into its result under
+  those names — the nested coupler's own registered name does not appear in the
+  output — and raises `ValueError` on a name collision. It also accepts the
+  component-protocol call `to_xarray(diagnostics, time)` alongside the existing
+  `to_xarray(diagnostics, *, first_step=0)`; in the first form the inner
+  datasets are labelled on the inner, faster axis, starting at
+  `time.steps[0] * r`.
 
 ### Changed
 

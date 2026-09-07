@@ -16,6 +16,15 @@ A ``Coupler`` is the whole definition of a coupled model:
   checkpoint restarts (a ``lax.scan`` index restarts at zero on every call; the
   carry does not).
 
+A ``Coupler`` is itself a :class:`~jem.base.component.Component`: it has a
+``name``, an ``initialize()`` and a ``step(carry, time)``, and it binds to a
+slower clock like any other component with an internal timestep. A coupled
+model can therefore be a component of a slower coupled model -- the GFDL
+pattern of a fast atmosphere/land loop inside a daily ocean coupling -- with
+no wrapper class. The alternative for the same model is one coupler with a
+repeated workflow (see :class:`Coupler`); the two are equivalent, and which
+reads better depends on whether the fast loop is a thing in its own right.
+
 The coupler produces *functions*, not runs: :meth:`Coupler.step_function` and
 :meth:`Coupler.generate_trajectory_function` return pure functions of the
 carry, which the caller composes with ``jax.jit``, ``jax.grad`` or a chunked
@@ -34,8 +43,9 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
-from collections.abc import Callable, Iterator, Sequence
-from typing import Any
+import math
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -184,14 +194,116 @@ def _merge_leading_axes(diagnostics: Diagnostics, name: str, expected: int) -> D
         array = jnp.asarray(leaf)
         if array.ndim < 2 or array.shape[1] != expected:
             raise ValueError(
-                f"Component {name!r} runs {expected} times per coupled step, so its "
-                f"stacked diagnostics must have shape (steps, {expected}, ...); got "
+                f"{name!r} runs {expected} times per step, so its stacked "
+                f"diagnostics must have shape (steps, {expected}, ...); got "
                 f"{array.shape}. (These diagnostics did not come from a trajectory "
                 "of this coupler.)"
             )
         return array.reshape((array.shape[0] * expected, *array.shape[2:]))
 
     return jax.tree_util.tree_map(merge, diagnostics)
+
+
+def nested_carry(
+    carries: dict[str, Carry], outer_name: str, inner_name: str
+) -> Carry:
+    """Return the carry of ``inner_name`` inside the nested coupler ``outer_name``.
+
+    An exchanger in an outer coupler sees a nested :class:`Coupler` as one
+    entry in the carries mapping, holding a whole :class:`CoupledCarry` rather
+    than a component carry. Reaching an inner component means going through
+    ``.components``, and this is that step written once, with an error that
+    says what was actually there when it is not a nested coupler.
+
+    Parameters
+    ----------
+    carries : dict[str, Carry]
+        The mapping an exchanger was handed.
+    outer_name : str
+        Name the nested coupler is registered under in the outer coupler.
+    inner_name : str
+        Name of the component inside it.
+
+    Returns
+    -------
+    Carry
+
+    """
+    return _inner_carries(carries, outer_name)[inner_name]
+
+
+def with_nested_carry(
+    carries: dict[str, Carry],
+    outer_name: str,
+    inner_name: str,
+    new_inner_carry: Carry,
+) -> dict[str, Carry]:
+    """Return ``carries`` with one component of a nested coupler replaced.
+
+    The counterpart of :func:`nested_carry`, and the only safe way for an
+    exchanger to write into a nested model: nothing is mutated in place -- a
+    new inner carries dict, a new :class:`CoupledCarry` (via
+    ``dataclasses.replace``, so a field added to it later is carried through)
+    and a new outer mapping -- because the carries an exchanger is handed are
+    the ones a ``lax.scan`` is carrying.
+
+    Parameters
+    ----------
+    carries : dict[str, Carry]
+        The mapping an exchanger was handed.
+    outer_name : str
+        Name the nested coupler is registered under in the outer coupler.
+    inner_name : str
+        Name of the component inside it to replace.
+    new_inner_carry : Carry
+        The carry to put there. It must have the pytree structure of the one
+        it replaces, like any other carry an exchanger returns.
+
+    Returns
+    -------
+    dict[str, Carry]
+
+    """
+    coupled = carries[outer_name]
+    inner = dict(_inner_carries(carries, outer_name), **{inner_name: new_inner_carry})
+    return dict(carries, **{outer_name: dataclasses.replace(coupled, components=inner)})
+
+
+def _inner_carries(carries: dict[str, Carry], outer_name: str) -> dict[str, Carry]:
+    """Return the component carries of the nested coupler registered as ``outer_name``."""
+    coupled = carries[outer_name]
+    if not isinstance(coupled, CoupledCarry):
+        raise TypeError(
+            f"{outer_name!r} does not hold a nested coupled model: its carry is a "
+            f"{type(coupled).__name__}, not a CoupledCarry. Only a component that "
+            "is itself a Coupler has components inside it."
+        )
+    return coupled.components
+
+
+def _named_datasets(
+    name: str, written: xr.Dataset | Mapping[str, xr.Dataset]
+) -> dict[str, xr.Dataset]:
+    """Return what a component's ``to_xarray`` produced, keyed by output name.
+
+    A component normally returns one dataset, which is keyed by the name it
+    is registered under. A component that is itself a coupled model returns a
+    mapping of its own components' names to their datasets -- they have
+    different variables and, if the inner workflow repeats one of them,
+    different sampling rates, so there is nothing to concatenate them into --
+    and those names are used as they are.
+    """
+    if isinstance(written, xr.Dataset):
+        return {name: written}
+    if isinstance(written, Mapping):
+        # An `xarray.Dataset` is itself a Mapping (of variable name to
+        # DataArray), so the isinstance above cannot narrow the union for
+        # static analysis; the Dataset case has already returned.
+        return dict(cast(Mapping[str, xr.Dataset], written))
+    raise TypeError(
+        f"Component {name!r} returned {type(written).__name__} from to_xarray; "
+        "it must return an xarray.Dataset, or a mapping of name to Dataset."
+    )
 
 
 class Coupler:
@@ -221,6 +333,12 @@ class Coupler:
     calendar : str
         Calendar name as JCM spells it; determines the length of the year
         used for the annual cycle (``jcm.date.days_per_year``).
+    name : str
+        The coupler's own name, as the :class:`Component` protocol requires
+        it of anything a coupler steps -- a ``Coupler`` is a component (see
+        the Notes), so it has one. It is *not* what an outer coupler keys it
+        by: that is the dict key it is registered under, as for every other
+        component.
     workflow : Sequence, optional
         The order in which exchangers and components run within one coupled
         step. Defaults to every exchanger (in insertion order) followed by
@@ -258,6 +376,41 @@ class Coupler:
     its time axis -- is exactly as it is for a coupler with no multiplicity
     at all.
 
+    **A coupler is a component.** It has a ``name``, an ``initialize()``
+    returning its :class:`CoupledCarry` and a ``step(carry, time)``, and it
+    implements :class:`~jem.base.component.SupportsBind` and
+    :class:`~jem.base.component.SupportsXarray`, so it can be registered in a
+    slower coupler with no wrapper class::
+
+        fast = Coupler({"atm": atm, "lnd": lnd}, {"atm_lnd_exchange": ...},
+                       coupling_timestep=jdt.to_timedelta(1, "hour"),
+                       start_date=start_date)
+        model = Coupler({"atm_lnd": fast, "ocn": ocn}, {"srf_ocn_exchange": ...},
+                        coupling_timestep=jdt.to_timedelta(1, "day"),
+                        start_date=start_date,
+                        workflow=["srf_ocn_exchange", "atm_lnd", "ocn"])
+
+    The outer timestep must be a whole multiple of the inner one, and the two
+    must share a start date and calendar; :meth:`bind` refuses anything else.
+    One outer step runs ``r = outer / inner`` inner coupled steps, driven by
+    the inner carry's own step counter, so the inner clock is continuous
+    across outer steps. Its diagnostics come back stacked on a leading axis
+    of length ``r`` (none for ``r == 1``), and its :meth:`to_xarray` returns
+    one dataset **per inner component**, which the outer coupler flattens
+    into its own result under those names -- the nested coupler's own
+    registered name does not appear in the output.
+
+    An exchanger in the outer coupler sees the inner coupled carry under that
+    registered name and reaches inside it with :func:`nested_carry` and
+    :func:`with_nested_carry`.
+
+    The same model can be written either as a nested pair of couplers or as
+    one coupler with a repeated workflow, and the two produce identical
+    numbers. Prefer the nested form when the fast loop is a thing in its own
+    right -- built, tested, checkpointed or run on its own -- and the flat
+    form when it is only a rate: one coupler, one carry and one workflow to
+    read.
+
     """
 
     def __init__(
@@ -268,9 +421,15 @@ class Coupler:
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
         calendar: str = "365_day",
+        name: str = "coupled",
         workflow: Sequence[Any] | None = None,
     ):
         """Build a coupled model; see the class docstring for the parameters."""
+        self.name = name
+        # Set only by `bind`, when this coupler is registered as a component
+        # of a slower one: the number of coupled steps of this model that
+        # make one step of that one. None means "not nested".
+        self._outer_ratio: int | None = None
         self.components: dict[str, Component] = {}
         self.exchangers: dict[str, Exchanger] = {}
 
@@ -785,11 +944,170 @@ class Coupler:
 
         return jax.jit(trajectory) if jit else trajectory
 
+    # -- the coupled model as a component of a slower one -------------------
+
+    @property
+    def outer_ratio(self) -> int | None:
+        """Coupled steps of this model per step of the coupler it is nested in.
+
+        ``None`` until :meth:`bind` is called, i.e. for a coupler that is not
+        a component of another one.
+        """
+        return self._outer_ratio
+
+    def bind(
+        self,
+        *,
+        coupling_timestep: jdt.Timedelta,
+        start_date: jdt.Datetime,
+        calendar: str,
+    ) -> None:
+        """Adopt an outer coupler's clock (:class:`~jem.base.component.SupportsBind`).
+
+        A nested coupled model keeps its own timestep and runs several of its
+        own coupled steps per outer step, so what it needs from the outer
+        coupler is the *ratio*. The two clocks must agree exactly otherwise:
+        a nested model that started on a different date, or counted a
+        different year, would date its own forcing and output differently
+        from every other component of the outer model, which is the one thing
+        the coupler's single clock exists to prevent.
+
+        Parameters
+        ----------
+        coupling_timestep : jax_datetime.Timedelta
+            The outer coupled timestep. It must be a whole multiple of this
+            coupler's own, because this coupler advances by whole steps of
+            its own and a fractional outer step could only be rounded.
+        start_date : jax_datetime.Datetime
+            The outer run's start date; must equal :attr:`start_date`.
+        calendar : str
+            The outer run's calendar; must equal :attr:`calendar`.
+
+        Raises
+        ------
+        ValueError
+            If the timestep does not divide, if either clock setting differs,
+            or if this coupler is already bound to a different outer
+            timestep. Binding it again to the same clock is a no-op.
+
+        """
+        if str(calendar) != str(self._calendar):
+            raise ValueError(
+                f"Calendar mismatch: the outer coupler runs {calendar!r} but the "
+                f"nested coupler {self.name!r} runs {self._calendar!r}."
+            )
+        if start_date != self._start_date:
+            raise ValueError(
+                f"Start-date mismatch: the outer coupler starts at {start_date!r} "
+                f"but the nested coupler {self.name!r} starts at "
+                f"{self._start_date!r}."
+            )
+        outer_seconds = _timedelta_seconds(coupling_timestep)
+        ratio, remainder = divmod(outer_seconds, self._dt_total_seconds)
+        if remainder or ratio < 1:
+            raise ValueError(
+                f"The outer coupling timestep ({outer_seconds} s) is not a whole "
+                f"multiple of the nested coupler {self.name!r}'s own "
+                f"({self._dt_total_seconds} s), so one outer step is not a whole "
+                "number of its coupled steps."
+            )
+        if self._outer_ratio is not None and ratio != self._outer_ratio:
+            # One instance belongs to one coupled model: `step` runs
+            # `_outer_ratio` inner steps, so a second outer coupler with
+            # another timestep would silently run the wrong number for the
+            # first one.
+            raise ValueError(
+                f"The nested coupler {self.name!r} is already bound to an outer "
+                f"step of {self._outer_ratio} of its own steps and cannot also be "
+                f"bound to one of {ratio}. Build a separate instance per coupled "
+                "model."
+            )
+        self._outer_ratio = ratio
+
+    def _require_outer_ratio(self, what: str) -> int:
+        """Return the bound outer ratio, or explain that there is not one."""
+        if self._outer_ratio is None:
+            raise RuntimeError(
+                f"{type(self).__name__} {self.name!r} cannot be {what} as a "
+                "component because it has not been bound to an outer coupler. "
+                "Register it in one (which binds it), or drive it directly with "
+                "`step_function()` / `generate_trajectory_function()`."
+            )
+        return self._outer_ratio
+
+    def _check_outer_clock(self, time: CouplingTime, ratio: int) -> None:
+        """Check the outer clock is the one this coupler was bound to.
+
+        Only the static fields of a :class:`CouplingTime` can be checked: the
+        step counter is a traced array, and the inner steps are driven by the
+        inner carry's own counter anyway. The static fields are enough to
+        catch the mistake that matters -- a clock from a different coupler,
+        or a hand-built one at the wrong rate -- at trace time.
+        """
+        expected_dt = self._dt_seconds * ratio
+        if not math.isclose(time.dt, expected_dt, rel_tol=1e-12):
+            raise ValueError(
+                f"The nested coupler {self.name!r} was bound to an outer step of "
+                f"{expected_dt:g} s but was handed a clock with dt={time.dt:g} s."
+            )
+        if time.days_per_year != self._days_per_year or (
+            time.year_offset_seconds != self._year_offset_seconds
+        ):
+            raise ValueError(
+                f"The nested coupler {self.name!r} was handed a clock from a "
+                "different calendar or start date than the one it was bound to."
+            )
+
+    def step(
+        self, carry: CoupledCarry, time: CouplingTime
+    ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
+        """Advance this coupled model by one step of the coupler it is nested in.
+
+        Runs ``r`` of this coupler's own coupled steps, where ``r`` is the
+        ratio :meth:`bind` recorded. The inner clock comes from the inner
+        carry's own step counter, exactly as it does in a standalone run, so
+        it is continuous across outer steps and survives a checkpoint; the
+        outer ``time`` is only checked against it (see
+        :meth:`_check_outer_clock`).
+
+        Parameters
+        ----------
+        carry : CoupledCarry
+            This coupler's own carry, which is what :meth:`initialize`
+            returns and what the outer coupler stores under this coupler's
+            registered name.
+        time : CouplingTime
+            The outer coupler's clock for this outer step.
+
+        Returns
+        -------
+        carry : CoupledCarry
+            The inner carry after ``r`` inner steps.
+        diagnostics : dict[str, Diagnostics]
+            One entry per inner component that ran, stacked on a leading axis
+            of length ``r``. For ``r == 1`` there is no extra axis and the
+            inner step is run directly rather than through a length-1 scan,
+            mirroring what multiplicity does for a component that runs once.
+
+        """
+        ratio = self._require_outer_ratio("stepped")
+        self._check_outer_clock(time, ratio)
+        if ratio == 1:
+            return self.step_function()(carry)
+        # An unjitted trajectory: `lax.scan` keeps one copy of the inner step
+        # in the outer jaxpr instead of `r` unrolled ones, and stacks the
+        # per-step diagnostics on the leading axis this method promises. It
+        # is left unjitted so that it composes into whatever the outer
+        # coupler's trajectory is wrapped in.
+        trajectory = self.generate_trajectory_function(ratio, jit=False)
+        return trajectory(carry)
+
     # -- output ------------------------------------------------------------
 
     def to_xarray(
         self,
         diagnostics: dict[str, Diagnostics],
+        time: TimeAxis | None = None,
         *,
         first_step: int = 0,
     ) -> dict[str, xr.Dataset]:
@@ -809,15 +1127,58 @@ class Coupler:
         ``first_step * n``, so its records are stamped at the end of each
         sub-step rather than all at the end of the coupled step.
 
+        A component that is itself a :class:`Coupler` returns one dataset per
+        *its* components, and they are flattened into this coupler's result
+        under those names; a name that collides with one already there is a
+        ``ValueError``, because silently overwriting one component's output
+        with another's is not a merge.
+
+        There are two ways to call this, one method so that the labelling
+        rules cannot drift apart:
+
+        - ``to_xarray(diagnostics, first_step=0)`` -- how a *run* is written
+          out. ``first_step`` is the coupled step the first record covers:
+          the ``step`` of the carry the trajectory started from. **Pass it
+          for a chunked run**, or every chunk is labelled with the first
+          chunk's dates.
+        - ``to_xarray(diagnostics, time)`` -- the
+          :class:`~jem.base.component.SupportsXarray` signature, used when
+          this coupler is nested in a slower one. ``time`` is the outer
+          coupler's axis: its first step, times the ratio :meth:`bind`
+          recorded, is where this model's own records start, and the outer
+          coupler's extra leading axis of length ``r`` (one entry per inner
+          coupled step) is folded into the records first. The datasets come
+          back on the inner, faster axis.
+
         Parameters
         ----------
         diagnostics : dict[str, Diagnostics]
-            The diagnostics returned by a trajectory function.
+            The diagnostics returned by a trajectory function, or -- in the
+            nested form -- the ones an outer coupler stacked for this one.
+        time : TimeAxis, optional
+            The outer coupler's time axis; only for a nested coupler, and
+            mutually exclusive with ``first_step``.
         first_step : int
-            The coupled step the first record covers; the step counter of the
-            carry the trajectory started from.
+            The coupled step the first record covers.
 
         """
+        if time is not None:
+            if first_step:
+                raise ValueError(
+                    "Pass either `time` (the outer coupler's axis, when this "
+                    "coupler is nested) or `first_step` (the coupled step a run "
+                    "starts at), not both."
+                )
+            ratio = self._require_outer_ratio("written out")
+            # The outer axis counts ITS steps; this model's records start at
+            # the inner step that outer step corresponds to.
+            first_step = int(np.asarray(time.steps)[0]) * ratio
+            if ratio > 1:
+                diagnostics = {
+                    name: _merge_leading_axes(component_diagnostics, name, ratio)
+                    for name, component_diagnostics in diagnostics.items()
+                }
+
         datasets: dict[str, xr.Dataset] = {}
         for name, component in self.components.items():
             if name not in diagnostics:
@@ -832,10 +1193,19 @@ class Coupler:
                 component_diagnostics = _merge_leading_axes(
                     component_diagnostics, name, runs
                 )
-            datasets[name] = component.to_xarray(
+            written = component.to_xarray(
                 component_diagnostics,
                 self.time_axis(first_step * runs, n_records, multiplicity=runs),
             )
+            for dataset_name, dataset in _named_datasets(name, written).items():
+                if dataset_name in datasets:
+                    raise ValueError(
+                        f"Component {name!r} wrote a dataset named "
+                        f"{dataset_name!r}, which another component of this "
+                        "coupler has already written. Rename the component "
+                        "inside it, or register it under another name."
+                    )
+                datasets[dataset_name] = dataset
         return datasets
 
     def __repr__(self) -> str:
@@ -847,6 +1217,7 @@ class Coupler:
         """
         return (
             f"{type(self).__name__}("
+            f"name={self.name!r}, "
             f"components={list(self.components)}, "
             f"exchangers={list(self.exchangers)}, "
             f"workflow=[{_compressed_workflow(self.workflow)}], "

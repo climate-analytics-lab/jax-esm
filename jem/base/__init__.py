@@ -12,7 +12,7 @@ from jem.base.component import (
     SupportsXarray,
     TimeAxis,
 )
-from jem.base.coupler import Coupler
+from jem.base.coupler import Coupler, nested_carry, with_nested_carry
 
 __all__ = [
     "Carry",
@@ -26,4 +26,6 @@ __all__ = [
     "SupportsCheckpoint",
     "SupportsXarray",
     "TimeAxis",
+    "nested_carry",
+    "with_nested_carry",
 ]

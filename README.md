@@ -176,6 +176,21 @@ it was handed, and never change their pytree structure.
   ```python
   workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange", "ocn"]
   ```
+- A `Coupler` is itself a component, so a coupled model can be a component of a
+  slower one — the same fast loop written as a model in its own right:
+
+  ```python
+  fast = Coupler({"atm": atm, "lnd": lnd}, {"atm_lnd_exchange": ...},
+                 coupling_timestep=jdt.to_timedelta(1, "hour"), start_date=start_date)
+  model = Coupler({"atm_lnd": fast, "ocn": ocn}, {"atm_ocn_exchange": ...},
+                  coupling_timestep=jdt.to_timedelta(1, "day"), start_date=start_date)
+  ```
+
+  The outer step must be a whole multiple of the inner one; `jem.nested_carry` /
+  `jem.with_nested_carry` are how an outer exchanger reaches an inner component,
+  and the inner datasets come out of `to_xarray` under their own names, on the
+  inner clock. The two forms produce identical runs — see
+  `docs/source/design/architecture.md`.
 
 See `docs/source/design/architecture.md` for the carry layout and the full
 contract.

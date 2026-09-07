@@ -113,7 +113,7 @@ at a random call site:
 
 | Protocol | Member | Who implements it |
 |---|---|---|
-| `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset` | slab models, `JCMComponent`, `VerosComponent` |
+| `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent` |
 
@@ -139,6 +139,14 @@ is what a bare `model.initialize()` in a test or a notebook gets.
 `step` must be a pure function of `(carry, time)` and must return a carry with
 exactly the pytree structure, shapes and dtypes it received, or `lax.scan`
 rejects it.
+
+`to_xarray` normally returns one dataset, keyed in the coupler's output by the
+name the component is registered under. A component that is itself a coupled
+model — a `Coupler` nested in a slower one — has no single dataset to return, so
+it may return a **mapping** of name to dataset, which the outer coupler flattens
+into its result under those names (a collision with a name already there is a
+`ValueError`). `Coupler` is the implementation of that case; see *Nesting
+couplers*.
 
 ### The clock
 
@@ -327,12 +335,117 @@ for chunk in range(12):
     datasets = coupler.to_xarray(diagnostics, first_step=chunk * 30)
 ```
 
+## Nesting couplers
+
+A `Coupler` satisfies `Component`: it has a `name` (the keyword-only
+`name="coupled"` argument; the *registered* key in an outer coupler is what the
+outer workflow uses), an `initialize()` returning its `CoupledCarry`, and a
+`step(carry, time)`. It also implements `SupportsBind` and `SupportsXarray`. So
+a coupled model can be a component of a slower coupled model with no wrapper
+class — the GFDL pattern of a fast atmosphere/land loop inside a daily ocean
+coupling:
+
+```python
+fast = Coupler(
+    {"atm": atm, "lnd": lnd},
+    {"atm_lnd_exchange": atm_lnd_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "hour"),
+    start_date=start_date,
+    name="atm_lnd",
+)
+model = Coupler(
+    {"atm_lnd": fast, "ocn": ocn},
+    {"srf_ocn_exchange": srf_ocn_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "day"),
+    start_date=start_date,
+    workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
+)
+```
+
+- **`bind`** requires the outer timestep to be a whole multiple of the inner
+  one, and the start date and calendar to be equal; anything else is a
+  `ValueError`, as it is for any other component with an internal timestep. It
+  records the ratio *r* (24 here). Binding again to the same clock is a no-op,
+  to a different one a `ValueError`: one instance belongs to one coupled model.
+- **`step`** runs *r* of the inner coupler's own coupled steps, through an
+  unjitted trajectory (`lax.scan`, so the inner step appears once in the outer
+  jaxpr rather than *r* times unrolled). The inner clock comes from the inner
+  carry's own `step` counter exactly as in a standalone run, so it is
+  continuous across outer steps and survives a checkpoint; the outer `time` is
+  only checked against it — the static fields of a `CouplingTime` (`dt`,
+  `days_per_year`, `year_offset_seconds`) are comparable at trace time, the
+  step counter is a traced array. Calling `step` before `bind` is a
+  `RuntimeError`. For `r == 1` the inner step is run directly and the
+  diagnostics gain no extra axis, mirroring multiplicity 1.
+- **The carry** of the inner coupler is a `CoupledCarry` living inside the
+  outer one's `components`, so there are two step counters: the outer counts
+  outer steps, the inner counts its own. Both are plain pytrees, so
+  `save_coupled_carry`/`load_coupled_carry` round-trip a nested run and a
+  resume continues both clocks.
+- **Exchangers in the outer coupler** see the inner `CoupledCarry` under its
+  registered name and reach inner components through `.components`.
+  `jem.nested_carry(carries, outer_name, inner_name)` and
+  `jem.with_nested_carry(carries, outer_name, inner_name, new_inner_carry)` are
+  that read and that immutable write (`dataclasses.replace` on the inner
+  `CoupledCarry`), written once:
+
+  ```python
+  def srf_ocn_exchange(components, time):
+      del time
+      land = nested_carry(components, "atm_lnd", "lnd")
+      ocn = dict(components["ocn"], forcing=land["derived"].total_heat_flux)
+      return dict(components, ocn=ocn)
+  ```
+
+- **Output.** The inner coupler's `to_xarray` returns one dataset per *its*
+  components, and the outer coupler flattens them into its result under those
+  names — the nested coupler's own registered name does not appear. The inner
+  datasets carry the inner, faster time axis: `Coupler.to_xarray` supports both
+  the run form `to_xarray(diagnostics, first_step=0)` and the component form
+  `to_xarray(diagnostics, time)`, and in the second it takes `time.steps[0] * r`
+  as its own first step and folds the outer coupler's leading axis of length *r*
+  into the records first.
+
+### The same model, written flat
+
+Multiplicity expresses the same model in one coupler:
+
+```python
+model = Coupler(
+    {"atm": atm, "lnd": lnd, "ocn": ocn},
+    {"atm_lnd_exchange": atm_lnd_exchange, "srf_ocn_exchange": srf_ocn_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "day"),
+    start_date=start_date,
+    workflow=["srf_ocn_exchange",
+              ["atm_lnd_exchange", "atm", "lnd"] * 24,
+              "ocn"],
+)
+```
+
+The two are **equivalent** — the same elements in the same order, on the same
+clocks, producing bit-identical carries and datasets (`tests/unit/
+test_nested_coupler.py::test_nested_and_flat_forms_are_the_same_run` is that
+check). They differ only in bookkeeping:
+
+| | Nested | Flat |
+|---|---|---|
+| Carry | two levels, two step counters | one level, one counter |
+| Exchangers | outer ones go through `nested_carry` | all at one level |
+| Fast loop | exists on its own: buildable, testable and runnable alone | is a rate, not an object |
+
+Prefer the **nested** form when the fast loop is a thing in its own right — an
+already-assembled surface model, something you also run standalone, or a piece
+another model will reuse — and the **flat** form when it is only a rate: one
+coupler, one carry and one workflow to read.
+
 ## Output conventions
 
 `Coupler.to_xarray(diagnostics, *, first_step=0)` returns one
 `xarray.Dataset` per component that implements `SupportsXarray`; components that
 do not are skipped, so an output-less component does not stop a run producing
-output. `first_step` is the coupled step the first record covers — the `step` of
+output. A component that returns a *mapping* of datasets (a nested `Coupler`)
+contributes its entries under their own names, and a name that collides with one
+already written is a `ValueError`. `first_step` is the coupled step the first record covers — the `step` of
 the carry the trajectory started from — and defaults to 0. **Pass it when
 writing a chunked run**, or the second chunk is labelled with the first chunk's
 dates.

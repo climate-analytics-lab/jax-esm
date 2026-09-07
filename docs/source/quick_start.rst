@@ -128,6 +128,10 @@ The pieces, in the order they appear:
   ``workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange",
   "ocn"]`` couples the atmosphere and the land hourly inside a daily ocean
   coupling, and the hourly components write 24 output records per coupled step.
+  The same model can be written as an hourly ``Coupler`` registered as a
+  component of the daily one — a ``Coupler`` satisfies the component contract —
+  which is worth it when the fast loop is a model in its own right. See
+  :doc:`design/architecture` for both forms.
 - **The trajectory function** is a pure ``carry -> (carry, diagnostics)``
   function built on ``jax.lax.scan``. Call it again on the carry it returned and
   the run continues, because the step counter lives in the carry.

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -409,9 +409,22 @@ class Component(Protocol):
 
 @runtime_checkable
 class SupportsXarray(Protocol):
-    """Optional: convert stacked diagnostics to an ``xarray.Dataset``."""
+    """Optional: convert stacked diagnostics to ``xarray``.
 
-    def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset: ...
+    The return value is normally one :class:`xarray.Dataset`, keyed in the
+    coupler's output under the component's registered name. A component that
+    is itself a coupled model -- a :class:`~jem.base.coupler.Coupler` nested
+    inside a slower one -- has no single dataset to return: it holds several
+    components of its own, each with its own variables and its own sampling
+    rate. It may therefore return a **mapping** of name to dataset instead,
+    which the outer coupler flattens into its own result under those names
+    (and refuses if one of them collides with a name already there). A
+    wrapper around any other multi-model system can do the same.
+    """
+
+    def to_xarray(
+        self, diagnostics: Diagnostics, time: TimeAxis
+    ) -> xr.Dataset | Mapping[str, xr.Dataset]: ...
 
 
 @runtime_checkable
