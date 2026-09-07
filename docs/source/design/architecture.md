@@ -218,8 +218,9 @@ convert units or simply copy a field.
 A **workflow** is an ordered tuple of names driving one coupling timestep. Each
 entry is either a component name — run that component's `step` on its carry and
 record its diagnostics — or an exchanger name — call it on the whole mapping.
-Components and exchangers share one namespace: a name may not be used twice, and
-each may appear at most once in a workflow.
+Components and exchangers share one namespace, so one name may not be both; a
+name may, however, appear in the workflow more than once (see *Multiplicity*
+below).
 
 The default is every exchanger (in insertion order) followed by every component
 (in insertion order):
@@ -234,6 +235,70 @@ moves the fields the components produced during step *n-1*, and the first step
 of a run exchanges the values that came out of `initialize()`. Moving a
 component ahead of the exchanger in an explicit `workflow=` is what changes
 that.
+
+#### Nesting
+
+An explicit `workflow=` may be an arbitrarily **nested** sequence of names. The
+nesting is notation only — it is flattened at construction and
+`Coupler.workflow` is always the flat tuple actually executed — but it lets a
+coupling scheme be written the way it is described:
+
+```python
+Coupler(components, exchangers,
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=start_date,
+        workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24,
+                  "atm_ocn_exchange", "ocn"])
+```
+
+Strings are the leaves; any other leaf is a `TypeError`, because the
+alternative — iterating it — would silently turn a stray object into a sequence
+of characters. An unknown name is still a `ValueError` at construction.
+
+#### Multiplicity: running a component on a faster clock
+
+An element listed *n* times runs *n* times per coupled step, on a clock *n*
+times faster. In the example above the atmosphere, the land and the exchanger
+between them run hourly inside a daily ocean coupling — the GFDL-style
+"fast loop" — with no second `Coupler` and no component-side sub-stepping code.
+
+- **The sub-timestep is `coupling_timestep / n`, and must be a whole number of
+  seconds.** `jdt.Timedelta` is integer-backed, so anything else would have to
+  be rounded, and a rounded sub-step desynchronises the sub-stepped component
+  from the coupled clock a little more every step. It is refused at
+  construction, with a `ValueError` naming the element and the count.
+- **A bindable component is bound with its own sub-timestep**, once — the step
+  it actually advances by, not the coupled one, so a component that sub-cycles
+  an internal timestep (JCM, Veros) sub-cycles the right number of times. A
+  component an explicit workflow never names has multiplicity 0: it is neither
+  bound nor run. A component registered *after* construction with
+  `add_component` is bound with the multiplicity the current workflow gives it,
+  or the full coupling timestep when nothing names it — which is the case for
+  the default workflow, since that is derived from the components and the new
+  one is not registered yet. Binding still happens before registering, so a
+  component that rejects the clock never enters the coupler.
+- **Each call gets its own clock.** The loop over the workflow is ordinary
+  Python, run once at trace time, so which call this is — *k* of *n* — is a
+  static number: call *k* of coupled step *s* is handed
+  `Coupler.coupling_time_at_substep(s, k, n)`, whose `step` is the sub-step
+  `s * n + k` (exact integer arithmetic on the int32 counter), whose `dt` is the
+  sub-timestep and whose `sim_time` is `(s * n + k) * dt`. `year_fraction`
+  keeps its exact integer reduction at the sub-rate too — an hourly sub-step
+  still divides a 365-day year — so the seasonal cycle does not quantise away
+  in a long run. Exchangers may be repeated as well and see the same clock.
+- **`CoupledCarry.step` still counts coupled steps.** The sub-step count is
+  derived from it, never stored, so checkpoints, resume and chunked runs are
+  untouched: a checkpoint of a run with multiplicity restores the coupled
+  counter and both clocks continue.
+- **Diagnostics of a repeated component are stacked** along a new leading axis
+  of length *n*, in the order the calls were made, so a trajectory returns
+  `(steps, n, ...)` for it; `to_xarray` folds those two axes into one and
+  labels the records at the sub-rate (below).
+
+Everything about `n == 1` — the clock a component sees, the shape of its
+diagnostics, its time axis, the traced operations — is exactly what it is in a
+coupler with no multiplicity at all, so adding a fast loop to one part of a
+model cannot perturb the rest of it.
 
 ### The scan loop
 
@@ -272,11 +337,25 @@ the carry the trajectory started from — and defaults to 0. **Pass it when
 writing a chunked run**, or the second chunk is labelled with the first chunk's
 dates.
 
-Each component is handed a `TimeAxis` (start date, the record's coupled-step
-indices, the timestep and the calendar) so every dataset from one run shares one
+Each component is handed a `TimeAxis` (start date, the record's step indices,
+the record interval and the calendar) so every dataset from one run shares one
 time coordinate; `jem.utils.time.time_coordinate` unpacks it into the
 `(values, attrs)` pair xarray wants and is the one call site every component
-uses. The conventions, which are JCM's:
+uses.
+
+A component the workflow runs *n > 1* times per coupled step wrote *n* records
+per step, and its stacked diagnostics arrive as `(steps, n, ...)`. The two
+leading axes are folded into one — they are already in time order, record
+`s * n + k` being call *k* of step *s* — and the component is handed a
+`TimeAxis` spaced at `coupling_timestep / n` and starting at sub-step
+`first_step * n`. So `first_step` is always given in *coupled* steps, whatever
+rate a component runs at, and an hourly component in a daily coupler writes 24
+records per coupled step stamped at the end of each hour. Components with
+`n == 1` are unchanged, and the datasets of a fast and a slow component are
+deliberately *not* on one time axis: they are different sampling rates of one
+run, and `xr.merge` of the two is an outer join by design.
+
+The conventions, which are JCM's:
 
 - **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
   `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (and a CF

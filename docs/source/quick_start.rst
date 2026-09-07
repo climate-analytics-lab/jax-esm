@@ -122,7 +122,12 @@ The pieces, in the order they appear:
   the same ``CouplingTime``.
 - **The workflow** — printed by ``repr(coupler)`` — is the coupling scheme.
   It defaults to every exchanger followed by every component; pass
-  ``workflow=["atm", "atm_ocn_exchange", "ocn"]`` to reorder it.
+  ``workflow=["atm", "atm_ocn_exchange", "ocn"]`` to reorder it. It may be
+  nested, and a name may appear more than once: an element listed *n* times
+  runs *n* times per coupled step, on a clock *n* times faster. So
+  ``workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange",
+  "ocn"]`` couples the atmosphere and the land hourly inside a daily ocean
+  coupling, and the hourly components write 24 output records per coupled step.
 - **The trajectory function** is a pure ``carry -> (carry, diagnostics)``
   function built on ``jax.lax.scan``. Call it again on the carry it returned and
   the run continues, because the step counter lives in the carry.

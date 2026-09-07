@@ -115,6 +115,59 @@ class XarrayComponent(SourceComponent):
         return xr.Dataset({"value": ("time", np.asarray(diagnostics["value"]))})
 
 
+class ClockRecorder:
+    """Records the clock of every call it receives and writes it out.
+
+    Unlike `ClockWatcher` it also reports `dt`, which is what makes a
+    sub-stepped call distinguishable from a coupled one, and it can label its
+    own output, so the time axis a repeated component is given is visible.
+    """
+
+    def __init__(self, name="recorder"):
+        """Name the component and start with no recorded time axes."""
+        self.name = name
+        self.time_axes = []
+
+    def initialize(self):
+        return {"calls": jnp.int32(0)}
+
+    def step(self, carry, time):
+        return (
+            {"calls": carry["calls"] + 1},
+            {
+                "step": time.step,
+                "sim_time": time.sim_time,
+                "dt": jnp.float32(time.dt),
+                "year_fraction": time.year_fraction,
+            },
+        )
+
+    def to_xarray(self, diagnostics, time):
+        self.time_axes.append(time)
+        return xr.Dataset(
+            {"sim_time": ("time", np.asarray(diagnostics["sim_time"]))},
+            coords={"time": time.datetimes()},
+        )
+
+
+class BindRecorder(SourceComponent):
+    """A `SupportsBind` component that records every clock it is bound to."""
+
+    def __init__(self, name="bound"):
+        """Name the component and start unbound."""
+        super().__init__(name=name)
+        self.binds = []
+
+    def bind(self, *, coupling_timestep, start_date, calendar):
+        self.binds.append(
+            {
+                "coupling_timestep": coupling_timestep,
+                "start_date": start_date,
+                "calendar": calendar,
+            }
+        )
+
+
 def feed(components, time):
     """Copy the source's value into the sink's ``received`` field."""
     del time
@@ -163,12 +216,6 @@ def test_duplicate_name_raises():
             coupling_timestep=COUPLING_TIMESTEP,
             start_date=START_DATE,
         )
-
-
-def test_repeated_workflow_entry_raises():
-    """Each element runs exactly once per coupled step."""
-    with pytest.raises(ValueError, match="more than once"):
-        _coupler(workflow=["feed", "source", "source"])
 
 
 def test_workflow_revalidated_when_a_component_is_removed():
@@ -524,3 +571,285 @@ def test_non_positive_coupling_timestep_is_rejected(seconds):
             coupling_timestep=jdt.to_timedelta(seconds, "second"),
             start_date=START_DATE,
         )
+
+
+# ---------------------------------------------------------------------------
+# Nested workflows and multiplicity
+# ---------------------------------------------------------------------------
+
+HOUR = 3600.0
+
+
+def _hourly_coupler():
+    """Build a daily coupler in which ``fast`` runs hourly and ``slow`` daily."""
+    return Coupler(
+        {"fast": ClockRecorder("fast"), "slow": ClockRecorder("slow")},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[["fast"] * 24, "slow"],
+    )
+
+
+def _assert_trees_equal(left, right):
+    """Compare two pytrees leaf by leaf, exactly."""
+    assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
+    for a, b in zip(
+        jax.tree_util.tree_leaves(left),
+        jax.tree_util.tree_leaves(right),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_nested_workflow_is_flattened():
+    """A workflow may be written nested; what runs is the flat sequence."""
+    coupler = _coupler(workflow=[["feed", "source"], ["sink"]])
+    assert coupler.workflow == ("feed", "source", "sink")
+
+
+def test_nested_workflow_with_repeats_flattens_to_the_running_order():
+    coupler = _coupler(workflow=[["feed", "source"] * 2, "sink"])
+    assert coupler.workflow == ("feed", "source", "feed", "source", "sink")
+    assert coupler.multiplicities() == {"feed": 2, "source": 2, "sink": 1}
+
+
+@pytest.mark.parametrize("workflow", [["feed", 3], [["feed", None]], ["feed", {"sink"}]])
+def test_non_string_workflow_leaf_raises(workflow):
+    """Only strings are leaves; anything else would be iterated by accident."""
+    with pytest.raises(TypeError, match="strings"):
+        _coupler(workflow=workflow)
+
+
+def test_unknown_name_in_a_nested_workflow_raises():
+    with pytest.raises(ValueError, match="ocean"):
+        _coupler(workflow=[["feed", "source"], ["ocean"]])
+
+
+def test_a_repeated_component_runs_on_a_faster_clock():
+    """24 calls per coupled step, each on its own hour of the day."""
+    coupler = _hourly_coupler()
+    _, diagnostics = coupler.generate_trajectory_function(2)(coupler.initialize())
+
+    fast = diagnostics["fast"]
+    # The extra leading axis is the multiplicity, inside the scanned steps.
+    assert fast["sim_time"].shape == (2, 24)
+    np.testing.assert_allclose(np.asarray(fast["dt"]), np.full((2, 24), HOUR))
+    # Hourly and continuous across the coupled step boundary.
+    np.testing.assert_allclose(
+        np.asarray(fast["sim_time"]).ravel(), np.arange(48) * HOUR
+    )
+    np.testing.assert_array_equal(np.asarray(fast["step"]).ravel(), np.arange(48))
+    # The seasonal cycle is still reduced in exact integer arithmetic at the
+    # sub-rate: an hour divides a 365-day year 8760 times.
+    np.testing.assert_allclose(
+        np.asarray(fast["year_fraction"]).ravel(), np.arange(48) / 8760, rtol=1e-6
+    )
+
+    # A component listed once still gets the coupled daily clock.
+    slow = diagnostics["slow"]
+    assert slow["sim_time"].shape == (2,)
+    np.testing.assert_allclose(np.asarray(slow["dt"]), [DAY, DAY])
+    np.testing.assert_allclose(np.asarray(slow["sim_time"]), [0.0, DAY])
+
+
+def test_a_repeated_component_is_bound_with_its_own_timestep():
+    """A bindable component is bound once, with the step it actually advances by."""
+    fast = BindRecorder("fast")
+    slow = BindRecorder("slow")
+    Coupler(
+        {"fast": fast, "slow": slow},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[["fast"] * 24, "slow"],
+    )
+
+    assert len(fast.binds) == 1
+    assert fast.binds[0]["coupling_timestep"] == jdt.to_timedelta(1, "hour")
+    assert fast.binds[0]["start_date"] == START_DATE
+    assert fast.binds[0]["calendar"] == "365_day"
+
+    assert len(slow.binds) == 1
+    assert slow.binds[0]["coupling_timestep"] == COUPLING_TIMESTEP
+
+
+def test_a_component_the_workflow_omits_is_never_bound_or_run():
+    """A count of zero means no clock and no step, not a silent daily one."""
+    unused = BindRecorder("unused")
+    coupler = Coupler(
+        {"unused": unused, "source": SourceComponent()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=["source"],
+    )
+    assert unused.binds == []
+
+    _, diagnostics = coupler.step_function()(coupler.initialize())
+    assert set(diagnostics) == {"source"}
+
+
+def test_a_component_added_after_construction_is_bound_with_the_full_timestep():
+    """It is not in the explicit workflow, so it has no faster clock to adopt."""
+    component = BindRecorder()
+    coupler = _coupler(workflow=["feed", "source", "sink"])
+    coupler.add_component("bound", component)
+    assert len(component.binds) == 1
+    assert component.binds[0]["coupling_timestep"] == COUPLING_TIMESTEP
+
+
+def test_indivisible_multiplicity_is_rejected():
+    """A day does not divide into 7 whole seconds' worth of sub-steps."""
+    with pytest.raises(ValueError, match="'source' appears 7 times"):
+        _coupler(workflow=["feed", ["source"] * 7, "sink"])
+
+
+def test_repr_collapses_a_repeated_block():
+    text = repr(_coupler(workflow=[["feed", "source"] * 3, "sink"]))
+    assert "['feed', 'source'] * 3" in text
+    assert "'sink'" in text
+
+
+# ---------------------------------------------------------------------------
+# Multiplicity: output
+# ---------------------------------------------------------------------------
+
+
+def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
+    """24 hourly records per coupled step, stamped at the end of each hour."""
+    coupler = _hourly_coupler()
+    _, diagnostics = coupler.generate_trajectory_function(2)(coupler.initialize())
+
+    datasets = coupler.to_xarray(diagnostics)
+
+    hourly = np.datetime64("2001-01-01", "ns") + (
+        np.arange(1, 49) * np.timedelta64(1, "h")
+    )
+    assert datasets["fast"].sizes["time"] == 48
+    np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
+    # The records are in run order: the flattened sub-step clock.
+    np.testing.assert_allclose(
+        datasets["fast"].sim_time.values, np.arange(48) * HOUR
+    )
+
+    assert datasets["slow"].sizes["time"] == 2
+    np.testing.assert_array_equal(
+        datasets["slow"].time.values,
+        np.array(["2001-01-02", "2001-01-03"], dtype="datetime64[ns]"),
+    )
+
+    axis = coupler.components["fast"].time_axes[-1]
+    assert axis.dt == jdt.to_timedelta(1, "hour")
+    np.testing.assert_array_equal(axis.steps, np.arange(48))
+
+
+def test_to_xarray_first_step_is_in_coupled_steps_for_every_component():
+    """A chunked run labels the fast component from its own sub-step count."""
+    coupler = _hourly_coupler()
+    _, diagnostics = coupler.generate_trajectory_function(2)(coupler.initialize())
+
+    datasets = coupler.to_xarray(diagnostics, first_step=2)
+
+    hourly = np.datetime64("2001-01-01", "ns") + (
+        np.arange(49, 97) * np.timedelta64(1, "h")
+    )
+    np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
+    np.testing.assert_array_equal(
+        datasets["slow"].time.values,
+        np.array(["2001-01-04", "2001-01-05"], dtype="datetime64[ns]"),
+    )
+
+
+def test_to_xarray_rejects_diagnostics_that_are_not_the_run_s():
+    """Diagnostics without the multiplicity axis cannot be labelled."""
+    coupler = _hourly_coupler()
+    single = coupler.step_function()(coupler.initialize())[1]
+    # One step's diagnostics are (24, ...), not (steps, 24, ...).
+    with pytest.raises(ValueError, match="runs 24 times"):
+        coupler.to_xarray(single)
+
+
+# ---------------------------------------------------------------------------
+# Multiplicity: nothing changes when every name appears once
+# ---------------------------------------------------------------------------
+
+
+def test_a_workflow_without_multiplicity_is_the_run_it_always_was():
+    """Flat, nested-but-single and default workflows are the same model."""
+    default = _coupler()
+    flat = _coupler(workflow=["feed", "source", "sink"])
+    nested = _coupler(workflow=[["feed"], ["source", "sink"]])
+    assert nested.workflow == flat.workflow == default.workflow
+
+    runs = [
+        coupler.generate_trajectory_function(3)(coupler.initialize())
+        for coupler in (default, flat, nested)
+    ]
+    for carry, diagnostics in runs[1:]:
+        _assert_trees_equal(carry, runs[0][0])
+        _assert_trees_equal(diagnostics, runs[0][1])
+    # No extra axis, and the diagnostics are the component's own pytree.
+    assert runs[0][1]["source"]["value"].shape == (3,)
+
+
+def test_the_substep_clock_of_a_single_element_is_the_coupled_clock():
+    """`multiplicity == 1` is not a special case of the sub-step arithmetic."""
+    coupler = _coupler()
+    coupled = coupler.coupling_time(3)
+    substep = coupler.coupling_time_at_substep(3, 0, 1)
+    assert int(substep.step) == int(coupled.step)
+    assert float(substep.sim_time) == float(coupled.sim_time)
+    assert substep.dt == coupled.dt
+    assert substep.year_offset_seconds == coupled.year_offset_seconds
+    assert substep.days_per_year == coupled.days_per_year
+
+
+def test_a_repeated_exchanger_sees_the_sub_stepped_clock():
+    """An exchanger may be repeated too, and is told which sub-step it is on."""
+    seen = []
+
+    def record(components, time):
+        seen.append((float(time.sim_time), time.dt, int(time.step)))
+        return components
+
+    coupler = Coupler(
+        {"fast": ClockRecorder("fast")},
+        {"record": record},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[["record", "fast"] * 4],
+    )
+    step = coupler.step_function()
+
+    carry, _ = step(coupler.initialize())
+    assert [entry[1] for entry in seen] == [DAY / 4] * 4
+    assert [entry[0] for entry in seen] == [0.0, 21600.0, 43200.0, 64800.0]
+    assert [entry[2] for entry in seen] == [0, 1, 2, 3]
+
+    # The next coupled step continues the sub-step count, because it is
+    # derived from the coupled counter in the carry.
+    seen.clear()
+    step(carry)
+    assert [entry[2] for entry in seen] == [4, 5, 6, 7]
+
+
+def test_checkpoint_round_trip_of_a_run_with_multiplicity(tmp_path):
+    """The carry counts COUPLED steps, so a resumed run continues both clocks."""
+    from jem.utils.checkpoints import load_coupled_carry, save_coupled_carry
+
+    coupler = _hourly_coupler()
+    initial = coupler.initialize()
+    continuous_carry, continuous = coupler.generate_trajectory_function(4)(initial)
+
+    two = coupler.generate_trajectory_function(2)
+    carry, first = two(initial)
+    save_coupled_carry(carry, tmp_path / "checkpoint")
+    loaded = load_coupled_carry(tmp_path / "checkpoint", coupler.components)
+
+    # Two coupled steps, not 48 sub-steps: the counter is the coupled clock.
+    assert int(loaded.step) == 2
+
+    resumed, second = two(loaded)
+    _assert_carries_close(resumed, continuous_carry)
+    _assert_carries_close(_concatenate(first, second), continuous)
+    np.testing.assert_allclose(
+        np.asarray(second["fast"]["sim_time"]).ravel(), np.arange(48, 96) * HOUR
+    )

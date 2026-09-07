@@ -207,6 +207,10 @@ Step 4: Couple JCM to the Slab Ocean Model
 The workflow defaults to every exchanger followed by every component, which for
 this model is :code:`("interaction_between_atm_and_ocn", "atm", "ocn")` — pass
 :code:`workflow=[...]` to the constructor to choose a different coupling scheme.
+The sequence may be nested, and a name may appear more than once: an element
+listed *n* times runs *n* times per coupled step, on a clock *n* times faster.
+:code:`workflow=[["interaction_between_atm_and_ocn", "atm"] * 24, "ocn"]` runs
+the atmosphere hourly inside a daily ocean coupling.
 
 Full Code
 ---------

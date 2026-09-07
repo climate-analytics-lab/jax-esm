@@ -123,6 +123,33 @@ otherwise**; the code that has to change is named in each one.
   checkpoint directory is no longer found by a resume; rename it to
   `step_<the coupled step it holds>` (zero-padded to eight digits) to keep
   using it.
+- **Nested workflows and workflow multiplicity.** `Coupler(workflow=...)` now
+  accepts an arbitrarily nested sequence of names — it is flattened at
+  construction, and `Coupler.workflow` is still the flat tuple — and a name may
+  appear more than once. An element listed *n* times runs *n* times per coupled
+  step on a clock `coupling_timestep / n` (which must be a whole number of
+  seconds, or construction raises `ValueError` naming the element and the
+  count):
+
+  ```python
+  workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange", "ocn"]
+  ```
+
+  A bindable component is bound with its own sub-timestep, once; a component an
+  explicit workflow never names is neither bound nor run. Call *k* of coupled
+  step *s* is handed `Coupler.coupling_time_at_substep(s, k, n)`, whose `step`
+  is the sub-step `s * n + k` and whose `dt` is the sub-timestep, so
+  `year_fraction` stays exact at the faster rate; exchangers may be repeated
+  too. The repeated component's diagnostics come back stacked on a new leading
+  axis of length *n* — `(steps, n, ...)` from a trajectory — and
+  `Coupler.to_xarray` folds those into `steps * n` records labelled at the
+  sub-rate, `first_step` still being counted in coupled steps.
+  `CoupledCarry.step` still counts coupled steps, so checkpoints and resume are
+  unchanged. **Everything about `n == 1` is exactly as it was**, including the
+  traced operations, the diagnostics shapes and the time axis.
+- `Coupler.multiplicities()` — how many times each element runs per coupled
+  step — and `Coupler.time_axis(first_step, n, *, multiplicity=1)`, whose new
+  keyword builds the sub-rate output axis.
 
 ### Changed
 
@@ -143,7 +170,9 @@ otherwise**; the code that has to change is named in each one.
   calendar="365_day", workflow=None)`. `coupling_timestep` and `start_date`
   are required. `workflow` moved here from `run()`/`generate_*` and defaults
   to every exchanger (in insertion order) followed by every component, so the
-  usual coupling scheme need not be spelled out.
+  usual coupling scheme need not be spelled out. **The "each name at most once"
+  restriction is gone**: a repeated name is now a multiplicity (see *Added*),
+  not a `ValueError`.
 - **`Coupler.initialize()` returns a `CoupledCarry`**, not a plain
   `dict[str, carry]`. The per-component carries are under
   `.components`; rebuild one with `carry.replace(components=...)`.

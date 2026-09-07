@@ -168,7 +168,14 @@ it was handed, and never change their pytree structure.
 - The clock lives in the carry (`CoupledCarry.step`), not in the scan index, so
   calling a trajectory function twice continues the run instead of restarting it.
 - Within a coupling timestep the `workflow` runs sequentially in the order given;
-  by default that is every exchanger followed by every component.
+  by default that is every exchanger followed by every component. It may be
+  written nested, and a name may appear more than once — an element listed *n*
+  times runs *n* times per coupled step on a clock *n* times faster, which is
+  how one part of a model runs a fast loop inside a slower coupling:
+
+  ```python
+  workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange", "ocn"]
+  ```
 
 See `docs/source/design/architecture.md` for the carry layout and the full
 contract.
