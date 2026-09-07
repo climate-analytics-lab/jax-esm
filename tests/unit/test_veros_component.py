@@ -6,7 +6,9 @@ the smallest one it ships; it is built once per module because ``setup()``
 plus the first compiled step dominates the runtime.
 """
 
+import logging
 import os
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -173,6 +175,51 @@ def test_bind_sets_the_internal_step_count(component, veros_model):
     assert component._steps_per_coupling_step == 86400 // tracer_seconds
 
 
+def test_bind_records_the_veros_clock_zero_point(component, veros_model):
+    """The Veros time at registration is what the coupler's start date means."""
+    assert component._veros_time_zero == float(veros_model.state.variables.time)
+
+
+def _carry_at_veros_time(component, coupler_seconds):
+    """Return a carry whose Veros clock reads ``coupler_seconds`` into the run.
+
+    ``_report_clock_drift`` reads exactly one field, so the whole Veros state
+    can be stood in for here: building a real drifted ``VerosState`` would
+    mean integrating the ocean to get one, which is what the check exists to
+    make unnecessary.
+    """
+    veros_time = component._veros_time_zero + coupler_seconds
+    return {"state": SimpleNamespace(
+        variables=SimpleNamespace(time=jnp.float32(veros_time)))}
+
+
+def test_clock_drift_is_silent_when_the_clocks_agree(component, caplog):
+    """An ocean one day into the run, on the coupler's second step, is fine."""
+    carry = _carry_at_veros_time(component, 86400.0)
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(carry, _coupling_time(1))
+        jax.effects_barrier()
+
+    assert caplog.text == ""
+
+
+def test_clock_drift_of_a_day_is_reported(component, caplog):
+    """An ocean a day ahead of the coupler names itself and both clocks."""
+    carry = _carry_at_veros_time(component, 2 * 86400.0)
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(carry, _coupling_time(1))
+        jax.effects_barrier()
+
+    assert "ocn" in caplog.text
+    # The drift, and both clocks in the coupler's frame: 172800 s of ocean
+    # against 86400 s of coupler.
+    assert "86400" in caplog.text
+    assert "172800" in caplog.text
+    assert caplog.records and caplog.records[0].levelno == logging.ERROR
+
+
 def test_make_jem_compatible_is_deprecated(veros_model):
     """The old entry point still works and warns."""
     from jem.components import veros_component
@@ -240,6 +287,25 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component):
         component.to_xarray(
             stacked,
             TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP, CALENDAR))
+
+
+@pytest.mark.slow
+def test_a_drifted_clock_is_reported_and_the_step_still_runs(component, caplog):
+    """A mismatch is loud but never aborts: the run may still be salvageable."""
+    carry = component.initialize()
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        # The carry is the ocean at the start of the run; the clock says five
+        # days have passed, as a restart paired with the wrong step counter
+        # would.
+        new_carry, diagnostics = component.step(carry, _coupling_time(5))
+        jax.effects_barrier()
+
+    assert "model clock is" in caplog.text
+    assert set(new_carry) == set(carry)
+    assert bool(jnp.all(jnp.isfinite(
+        new_carry["derived"].sea_surface_temperature)))
+    assert "temp" in diagnostics
 
 
 def test_rebinding_to_a_different_timestep_is_rejected(component):

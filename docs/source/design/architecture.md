@@ -593,6 +593,20 @@ second, or eight float32 ulps of the elapsed time, whichever is larger — so th
 check neither fires on the rounding of a long run's float32 clock nor stops
 noticing a real disagreement.
 
+`VerosComponent.step` makes the same comparison against Veros'
+`variables.time`, from the same tolerance
+(`jem.components.clock.clock_tolerance_seconds`, which is where it lives so the
+two wrappers cannot answer the question differently). Veros has no calendar, so
+its counter is not seconds since the coupler's `start_date` but seconds since
+its setup's own start: `bind` records the reading the setup holds when the
+coupler adopts it, and the check compares `variables.time` minus that zero
+point. A setup that was already integrated before it was wrapped therefore
+starts the coupled run where it stands — JEM cannot know which absolute date
+that state belongs to — while a *later* disagreement, such as a Veros restart
+paired with a `CoupledCarry.step` from elsewhere in the run, is caught. Both
+checks report through `jax.debug.callback` rather than raising: they run inside
+the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
+
 ## Adding a new component
 
 1. Write the class (or a wrapper class for an external model) under

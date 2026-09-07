@@ -18,6 +18,7 @@ Components
    :toctree: generated
    :recursive:
 
+   jem.components.clock
    jem.components.jcm.component
    jem.components.jcm.exchange_fields
    jem.components.veros_component

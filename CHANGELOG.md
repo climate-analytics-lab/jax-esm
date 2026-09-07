@@ -53,6 +53,11 @@ otherwise**; the code that has to change is named in each one.
     `NotImplementedError` naming jax-gcm#754, and `detect()`.
 - `jem.components.veros_component.VerosComponent(model)`, name `"ocn"`, the
   same treatment for the Veros ocean.
+- `jem.components.clock` — `clock_tolerance_seconds(sim_time)` and the two
+  constants behind it, the one definition of how far a wrapped model's own
+  clock may drift from the coupler's before the wrapper reports it. Both the
+  JCM and the Veros wrapper make that comparison, and they must not answer it
+  differently.
 - A `flax.struct` parameters dataclass per slab model, whose numeric fields are
   pytree leaves and which travels in `carry["params"]`, so `jax.grad` of a
   coupled run with respect to a physical parameter needs no special casing:
@@ -366,7 +371,9 @@ otherwise**; the code that has to change is named in each one.
 - `JCMComponent`'s clock-drift check scales with float32 resolution:
   `clock_tolerance_seconds(sim_time)` is one second or eight float32 ulps of
   the elapsed time, whichever is larger, so it neither fires on the rounding of
-  a long run's clock nor stops noticing a real disagreement.
+  a long run's clock nor stops noticing a real disagreement. That tolerance now
+  lives in `jem.components.clock`, shared with the Veros wrapper, rather than
+  in the JCM one; its behaviour is unchanged.
 - `Coupler` logs at DEBUG instead of printing; nothing under `jem/` prints any
   more (the Veros checkpoint writer and the forcing/topography generator were
   the last two).
@@ -458,6 +465,18 @@ otherwise**; the code that has to change is named in each one.
   differs from the coupler's. `JCMComponent.step` additionally reports at
   ERROR if the dycore state's own `sim_time` has drifted from the coupler's,
   which can only happen if the carry came from a different run.
+- `VerosComponent.step` makes that same check, which it previously did not: it
+  advanced from Veros' own `variables.time` and ignored the coupler's clock
+  entirely, so a setup that had already been integrated, or a Veros restart
+  state paired with a `CoupledCarry.step` from elsewhere in the run, put the
+  ocean at a different simulated date from every other component — silently,
+  because the output axis is labelled from the coupler's clock. Veros has no
+  calendar of its own, so `bind` records the `variables.time` the setup holds
+  when the coupler adopts it as the reading that corresponds to the coupler's
+  `start_date`, and `step` compares the difference with `time.sim_time`
+  against `jem.components.clock.clock_tolerance_seconds`. As in the JCM
+  wrapper it is reported at ERROR through `jax.debug.callback`, never raised:
+  the check runs inside the coupled `lax.scan`.
 - `Coupler.step_function()` snapshots the components and exchangers when it is
   called, so registering a component afterwards cannot silently change an
   already-compiled step.

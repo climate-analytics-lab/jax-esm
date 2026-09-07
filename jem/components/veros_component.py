@@ -31,6 +31,7 @@ from jem.base.component import (
     TimeAxis,
     forcing_variable,
 )
+from jem.components.clock import clock_tolerance_seconds
 from jem.utils.checkpoints import load_veros_carry, save_veros_carry
 from jem.utils.time import time_coordinate
 
@@ -208,6 +209,10 @@ class VerosComponent:
 
         # Number of Veros tracer timesteps per coupling step; set by bind().
         self._steps_per_coupling_step: int | None = None
+        # Veros' own `variables.time` at the moment the coupler adopted this
+        # ocean, i.e. the reading that corresponds to the coupler's
+        # `start_date`; set by bind(). See `_report_clock_drift`.
+        self._veros_time_zero: float | None = None
 
         # Static-configuration checks. Reported here rather than inside
         # ``step`` because they read Python-level settings that cannot change
@@ -250,17 +255,33 @@ class VerosComponent:
     ) -> None:
         """Adopt the coupler's clock and work out the internal step count.
 
+        Veros has no calendar: ``variables.time`` counts seconds from
+        whatever the setup treats as its own start, so there is no start date
+        to check against the coupler's the way the JCM wrapper does. What
+        makes the two clocks comparable at all is this: the Veros time the
+        setup holds **when the coupler adopts it** is the reading that
+        corresponds to the coupler's ``start_date``, and it is recorded here
+        as the zero point of :meth:`_report_clock_drift`. A setup that was
+        already integrated before it was wrapped therefore starts the coupled
+        run at its own current time rather than being declared wrong -- JEM
+        cannot know which absolute date that state belongs to -- while any
+        *later* disagreement between the two clocks is caught.
+
+        The zero point is recorded once, on the first bind, so re-binding an
+        ocean that has since been stepped cannot silently move it.
+
         Parameters
         ----------
         coupling_timestep : jax_datetime.Timedelta
             The coupled model's timestep. It must be an exact multiple of
             Veros' tracer timestep ``dt_tracer``.
         start_date : jax_datetime.Datetime
-            The run's start date. Recorded for the output metadata; Veros
-            keeps its own seconds-since-start counter (``variables.time``)
-            and has no calendar of its own to reconcile with.
+            The run's start date. Recorded for the output metadata, and (see
+            above) taken to be the date Veros' current ``variables.time``
+            stands for.
         calendar : str
-            The run's calendar. Recorded for the same reason.
+            The run's calendar. Recorded for the output metadata; Veros has
+            no calendar of its own to reconcile with.
 
         Raises
         ------
@@ -298,6 +319,8 @@ class VerosComponent:
                 "Build a separate instance per coupled model."
             )
         self._steps_per_coupling_step = steps_per_coupling_step
+        if self._veros_time_zero is None:
+            self._veros_time_zero = float(self.model.state.variables.time)
 
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
@@ -327,9 +350,12 @@ class VerosComponent:
         carry : dict
             The carry :meth:`initialize` produced, as last returned.
         time : jem.base.component.CouplingTime
-            The coupler's clock for this step. Unused: Veros advances its
-            own ``variables.time`` counter and reads no date-dependent
-            forcing of its own once ``set_forcing`` has been disabled.
+            The coupler's clock for this step. Veros integrates on its own
+            ``variables.time`` counter and reads no date-dependent forcing of
+            its own once ``set_forcing`` has been disabled, so the coupler's
+            clock does not enter the integration -- but the two are compared
+            before it, and a disagreement is reported
+            (:meth:`_report_clock_drift`).
 
         Returns
         -------
@@ -349,6 +375,8 @@ class VerosComponent:
                 " timestep: register it with a Coupler (which calls bind())"
                 " before stepping it."
             )
+        self._report_clock_drift(carry, time)
+
         # Imported here rather than at module scope: `veros.core.operators`
         # binds its array backend (numpy or jax) at import time from
         # `runtime_settings.backend`, so importing it before
@@ -460,6 +488,59 @@ class VerosComponent:
             },
             diagnostics,
         )
+
+    def _report_clock_drift(self, carry: Carry, time: CouplingTime) -> None:
+        """Log at ERROR if the ocean's own clock has left the coupler's.
+
+        Veros advances ``variables.time`` by ``dt_tracer`` per internal step,
+        independently of the coupler's step counter, so the two can only
+        disagree if the carry did not come from this run: a Veros restart
+        state paired with a ``CoupledCarry.step`` from a different point in
+        the run, a setup integrated behind the coupler's back, or a carry
+        threaded into the wrong component. The coupler and every other
+        component would go on dating this ocean's fields by ``time.sim_time``,
+        silently assigning them to the wrong simulated date.
+
+        Veros' counter is not seconds since the coupler's ``start_date`` but
+        seconds since the setup's own start, so it is compared in the
+        coupler's frame: ``variables.time`` minus the reading :meth:`bind`
+        recorded when the coupler adopted this ocean. It is a no-op before
+        that has happened, which only a component ``step`` has already
+        refused can be.
+
+        The tolerance grows with simulation time
+        (:func:`jem.components.clock.clock_tolerance_seconds`, shared with the
+        other wrappers that make this check), because both counters are
+        float32 by default and would otherwise disagree by float32 rounding
+        alone after a few decades.
+
+        Reported rather than raised, and through ``jax.debug.callback``
+        rather than ``checkify``: the check runs inside the coupled
+        ``lax.scan``, where a Python exception cannot fire on a traced value
+        and where aborting the scan would throw away a run that may still be
+        salvageable. The message is loud enough to find in a log.
+        """
+        zero = self._veros_time_zero
+        if zero is None:
+            return
+        model_seconds = carry["state"].variables.time - zero
+        name = self.name
+
+        def _report(model_seconds, coupler_seconds) -> None:
+            drift = float(model_seconds) - float(coupler_seconds)
+            # The tolerance is set by the COUPLER's time: it is the one that
+            # is right by construction, so a model clock that is wildly wrong
+            # cannot widen the window that would catch it.
+            if abs(drift) > clock_tolerance_seconds(coupler_seconds):
+                logger.error(
+                    "%s: model clock is %.6g s from the coupler's"
+                    " (model %.6g s, coupler %.6g s, both counted from the"
+                    " coupler's start date). The ocean's state will be dated"
+                    " differently from the rest of the coupled model.",
+                    name, drift, float(model_seconds), float(coupler_seconds),
+                )
+
+        jax.debug.callback(_report, model_seconds, time.sim_time)
 
     def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
         """Label the stacked per-step diagnostics as an ``xarray.Dataset``.
