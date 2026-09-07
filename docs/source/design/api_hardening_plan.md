@@ -296,6 +296,31 @@ They override the text below where they differ.
 - **Veros adapter** is converted to the `Component` protocol in Phase 1
   (with T1.2), not left on the old monkey-patching path, so the experimental
   Veros examples keep running in the examples CI job.
+- **Weaved workflows are restored in Phase 1** (#111 review, meteorologytoday).
+  T1.3's "each name once" rule lost a capability `main` had: an atmosphere-land
+  loop nested inside a slower atmosphere-ocean loop, written as
+  `[["atm_lnd_exch", "atm", "land"] * 24, "atm_ocn_exch", "ocn"]`. Two additions
+  to `Coupler` bring it back on top of the coupler-owned clock: (1) *workflow
+  multiplicity* -- a nested sequence is flattened, a name occurring `n` times
+  per coupled step is bound with `dt / n`, its k-th call receives a
+  sub-stepped `CouplingTime`, its diagnostics are stacked along a sub-step
+  axis and written with a `dt / n` time axis; (2) *`Coupler` satisfies
+  `Component`* (a `name`, a `bind` checking the outer step is a whole multiple
+  of its own and the clocks agree, a `step` that runs the ratio of inner
+  steps, nested output flattened by the outer `to_xarray`), so an already
+  built coupler drops into a slower one unchanged. The two forms are
+  equivalent and tested bit-for-bit against each other. The `forcing_`
+  output prefix is documented as a convention of the packaged components,
+  not a protocol requirement (same review).
+- **In-scan diagnostic reduction is a Phase 2 driver feature** (#111 review).
+  Monthly means over a long run must not compile 28-, 30- and 31-day loops:
+  with `calendar="365_day"` the month is a static function of
+  `step % steps_per_year`, so T2.3's loop body should offer an
+  `accumulate=(init, update)` hook on `generate_trajectory_function` whose
+  `update(acc, diagnostics, time)` runs inside the `lax.scan` body, with a
+  packaged `monthly_mean` accumulator (a `(12, ...)` sum and `(12,)` count
+  indexed through a day-of-year table). Until then, fixed-length chunks
+  binned on the host by their `datetime64` labels are the supported route.
 
 ## Phase 1 — core API contract
 
