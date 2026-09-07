@@ -312,6 +312,15 @@ They override the text below where they differ.
   equivalent and tested bit-for-bit against each other. The `forcing_`
   output prefix is documented as a convention of the packaged components,
   not a protocol requirement (same review).
+- **A `jem_role` variable attribute joins the `forcing_` prefix in Phase 2**
+  (#111 review, meteorologytoday; accepted by the maintainer). The prefix
+  exists to avoid an `xr.merge` name collision between a field a component
+  computed and the copy another component received, so it stays; but tooling
+  should not have to parse names to find received fields. T2.3's output
+  module writes `jem_role = "forcing"` on every variable a packaged component
+  received through an exchanger (and `jem_role = "state"` / `"derived"` on
+  the others), via one helper next to `forcing_variable`, so the role is
+  machine-readable whatever the variable is called.
 - **In-scan diagnostic reduction is a Phase 2 driver feature** (#111 review).
   Monthly means over a long run must not compile 28-, 30- and 31-day loops:
   with `calendar="365_day"` the month is a static function of
