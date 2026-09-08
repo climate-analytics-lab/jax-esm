@@ -911,6 +911,16 @@ class Coupler:
         updated in place, so the caller's carry remains valid, which is what
         makes re-running a step or differentiating through it safe.
 
+        This is a *generator* where a component's ``step`` is a plain method
+        because generating makes something new here: the workflow is
+        resolved, the components and exchangers are snapshotted (so a later
+        ``add_component`` cannot change a function that may already be
+        compiled), and the result takes the carry *alone*, deriving the clock
+        from the carry's step counter, which is the signature ``lax.scan``
+        needs. A component has nothing of that to do -- its bound ``step`` is
+        already the closure over ``self``, and its one-off setup happens in
+        ``__init__`` and ``bind`` -- so the protocol asks it for a method.
+
         Notes
         -----
         The loop over the workflow is ordinary Python, run once at trace
