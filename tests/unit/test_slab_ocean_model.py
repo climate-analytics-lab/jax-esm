@@ -664,3 +664,21 @@ def test_grad_wrt_initial_sst_reaches_the_trajectory(uniform_grid):
     # With no forcing method and no heat flux the mixed layer holds its
     # temperature, so a degree at the start is a degree at the end.
     np.testing.assert_allclose(float(gradient), 1.0, rtol=1e-5)
+
+
+def test_initialize_rejects_relaxation_without_a_climatology(uniform_grid):
+    """A carried ``forcing_method`` the model cannot run fails at initialize.
+
+    ``forcing_method`` is static, so ``initialize(params)`` may select a
+    method the model was not constructed for; relaxation needs the SST
+    climatology the constructor did not load, and the failure has to be here,
+    not one step into the run.
+    """
+    model = SlabOceanModel(uniform_grid)  # forcing_method="none", no file
+    with pytest.raises(ValueError, match="sst_clim_file"):
+        model.initialize(SlabOceanParameters(forcing_method="relaxation"))
+    with pytest.raises(ValueError, match="Unknown forcing_method"):
+        model.initialize(SlabOceanParameters(forcing_method="tidal"))
+    # The default, and a method the model can run, still initialize.
+    model.initialize()
+    model.initialize(SlabOceanParameters(forcing_method="qflux"))

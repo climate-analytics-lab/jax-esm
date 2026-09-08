@@ -293,6 +293,30 @@ class SlabOceanModel(SlabModelBase):
                     "points of this grid: the file's land mask and the grid's disagree."
                 )
 
+    def _check_forcing_configuration(self, params: SlabOceanParameters) -> None:
+        """Reject parameters whose static configuration this model cannot run.
+
+        ``forcing_method`` is a static field, so a run may start (through
+        ``initialize(params)``) from a method other than the one the model
+        was constructed with; the constructor's checks covered only the
+        construction-time method. Relaxation needs the SST climatology, and
+        that is boundary data the constructor either loaded or did not, so a
+        carried ``"relaxation"`` on a model built without ``sst_clim_file``
+        would run until ``_climatology_at`` and fail there, one step in.
+        """
+        forcing_method = params.forcing_method
+        if forcing_method not in FORCING_METHODS:
+            raise ValueError(
+                f"Unknown forcing_method {forcing_method!r}; expected one of "
+                f"{list(FORCING_METHODS)!r}."
+            )
+        if forcing_method == "relaxation" and self.sst_climatology is None:
+            raise ValueError(
+                "forcing_method='relaxation' needs an SST climatology, but this "
+                "model was constructed without sst_clim_file; construct it with "
+                "the file to run a relaxation from these parameters."
+            )
+
     def _load(self, path: str | None, var: str) -> jnp.ndarray | None:
         """Load a monthly climatology, or return None when no file was given."""
         if path is None:
@@ -322,8 +346,18 @@ class SlabOceanModel(SlabModelBase):
             process parameters ``step`` reads are the ones the initial state
             was built from.
 
+        Raises
+        ------
+        ValueError
+            If the parameters select a configuration this model cannot run:
+            an unknown ``forcing_method``, or ``"relaxation"`` when the model
+            was constructed without ``sst_clim_file``. ``forcing_method`` is
+            static, so this is checked here, on the parameters the run will
+            actually carry, rather than discovered by the first step.
+
         """
         params = self._initial_params(params)
+        self._check_forcing_configuration(params)
         ocean = self._ocean_cells(params)
 
         if self.sst_climatology is not None:
