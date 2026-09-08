@@ -534,6 +534,15 @@ otherwise**; the code that has to change is named in each one.
   centre coordinates of a SCRIP grid file are now checked the same way and for
   the same reason: a NaN compares False against both ends of a range test, so
   it used to pass straight into the run's output coordinates.
+- `SlabAtmosphereModel` now validates its four initial-condition parameters at
+  construction: `initial_temperature_base` must be a finite positive
+  temperature in kelvin, and `initial_temperature_amplitude`,
+  `initial_zonal_wind` and `initial_meridional_wind` must be finite (they are
+  signed, so nothing more is required of them). They are copied straight into
+  the initial state, so a non-finite one used to be accepted and make the whole
+  trajectory non-finite — quietly, in the case of an infinite wind, whose
+  infinite bulk conductance leaves the column heat budget evaluating
+  `inf + -inf`.
 
 ### Known gaps
 

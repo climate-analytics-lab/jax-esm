@@ -112,6 +112,63 @@ def test_initial_state_follows_the_parameters(half_land_grid):
     )
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "initial_temperature_base",
+        "initial_temperature_amplitude",
+        "initial_zonal_wind",
+        "initial_meridional_wind",
+    ],
+)
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf], ids=["nan", "inf", "-inf"])
+def test_non_finite_initial_parameters_are_rejected(half_land_grid, field, value):
+    """Every parameter here is copied straight into the initial state.
+
+    Nothing downstream rejects a non-finite one: it just makes the whole
+    trajectory non-finite, and the winds do it quietly -- an infinite wind
+    gives an infinite bulk conductance, so the column heat budget evaluates
+    ``inf + -inf`` and the air temperature is NaN from the first step.
+    """
+    params = SlabAtmosphereParameters(**{field: value})
+
+    with pytest.raises(ValueError, match=field) as excinfo:
+        SlabAtmosphereModel(half_land_grid, params)
+
+    assert repr(float(value)) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value", [0.0, -273.15], ids=["zero", "negative"])
+def test_non_positive_initial_temperature_base_is_rejected(half_land_grid, value):
+    """The base of the initial profile is an absolute temperature in kelvin."""
+    params = SlabAtmosphereParameters(initial_temperature_base=value)
+
+    with pytest.raises(ValueError, match="initial_temperature_base") as excinfo:
+        SlabAtmosphereModel(half_land_grid, params)
+
+    assert repr(value) in str(excinfo.value)
+
+
+def test_signed_initial_amplitude_and_winds_are_accepted(half_land_grid):
+    """Only finiteness is required of the signed parameters.
+
+    A negative amplitude is a pole-warm profile and a negative wind blows the
+    other way; both are legitimate initial conditions, so the finiteness check
+    must not have quietly become a positivity one.
+    """
+    params = SlabAtmosphereParameters(
+        initial_temperature_amplitude=-17.0,
+        initial_zonal_wind=-10.0,
+        initial_meridional_wind=-4.0,
+    )
+    carry = SlabAtmosphereModel(half_land_grid, params).initialize()
+
+    assert bool(jnp.all(jnp.isfinite(carry["state"].mean_air_temperature)))
+    np.testing.assert_allclose(
+        np.asarray(carry["state"].mean_zonal_wind_velocity), -10.0
+    )
+
+
 def test_params_default_equivalence(half_land_grid):
     """Constructing with no params is constructing with the defaults."""
     implicit = SlabAtmosphereModel(half_land_grid).initialize()

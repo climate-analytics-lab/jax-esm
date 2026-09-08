@@ -1,5 +1,6 @@
 """Slab atmosphere model component."""
 
+import math
 from typing import Any
 
 import jax.numpy as jnp
@@ -111,11 +112,48 @@ class SlabAtmosphereModel(SlabModelBase):
         name : str
             Component name in the coupler's workflow and carry.
 
+        Raises
+        ------
+        ValueError
+            If an initial-condition parameter is not finite, or if
+            ``initial_temperature_base`` is not a strictly positive
+            temperature in kelvin.
+
         """
         super().__init__(name=name, grid=grid)
         self.params = (
             SlabAtmosphereParameters.default() if params is None else params
         )
+
+        # Every parameter of this model is an initial condition copied straight
+        # into the initial state, so nothing downstream ever rejects a bad one:
+        # a non-finite value simply makes the whole trajectory non-finite. The
+        # winds are the quiet case -- an infinite wind gives an infinite bulk
+        # conductance, and the heat budget then evaluates `inf + -inf`, so the
+        # air temperature is NaN from the first step with no error anywhere.
+        # Validated here, at construction, because inside `initialize(params)`
+        # these are traced values that cannot be inspected; a caller who hands
+        # `initialize` parameters of its own takes on that responsibility.
+        base_temperature = float(self.params.initial_temperature_base)
+        if not math.isfinite(base_temperature) or base_temperature <= 0.0:
+            raise ValueError(
+                "params.initial_temperature_base must be a finite positive "
+                f"temperature in kelvin; got {base_temperature!r}."
+            )
+        # The amplitude and the two winds are signed quantities -- a negative
+        # amplitude is simply a pole-warm profile, a negative wind blows the
+        # other way -- so finiteness is all that is required of them.
+        for field_name in (
+            "initial_temperature_amplitude",
+            "initial_zonal_wind",
+            "initial_meridional_wind",
+        ):
+            value = float(getattr(self.params, field_name))
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"params.{field_name} must be finite (it is copied straight "
+                    f"into the initial state); got {value!r}."
+                )
 
     def initialize(self, params: SlabAtmosphereParameters | None = None) -> Carry:
         """Build the initial atmosphere carry.
