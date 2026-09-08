@@ -543,6 +543,11 @@ otherwise**; the code that has to change is named in each one.
   trajectory non-finite — quietly, in the case of an infinite wind, whose
   infinite bulk conductance leaves the column heat budget evaluating
   `inf + -inf`.
+- `SlabOceanModel` now validates `initial_sst` at construction as a finite,
+  strictly positive temperature in kelvin, beside the mixed-layer-depth checks.
+  With no SST climatology it is the base of the idealized initial profile, so
+  it fills every ocean cell of the initial state and every later SST inherits
+  it; nothing downstream rejected a non-finite or non-physical value.
 
 ### Known gaps
 

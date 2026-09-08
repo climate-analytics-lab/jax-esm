@@ -497,6 +497,27 @@ def test_invalid_mixed_layer_depths_are_rejected(uniform_grid, field, value):
     assert repr(value) in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [0.0, -1.0, np.nan, np.inf, -np.inf],
+    ids=["zero", "negative", "nan", "inf", "-inf"],
+)
+def test_invalid_initial_sst_is_rejected(uniform_grid, value):
+    """The initial SST is an absolute temperature every ocean cell starts from.
+
+    With no SST climatology it is the base of the idealized profile, so it
+    fills the whole initial state and every later SST inherits it -- nothing
+    downstream ever rejects it, which is why it is refused at construction
+    where the traceback names the caller's own line.
+    """
+    params = SlabOceanParameters(initial_sst=value)
+
+    with pytest.raises(ValueError, match="initial_sst") as excinfo:
+        SlabOceanModel(uniform_grid, params)
+
+    assert repr(float(value)) in str(excinfo.value)
+
+
 def test_initialize_takes_parameters_and_defaults_to_the_models_own(uniform_grid):
     """``initialize(params)`` starts from them; no argument starts as before."""
     model = SlabOceanModel(uniform_grid)

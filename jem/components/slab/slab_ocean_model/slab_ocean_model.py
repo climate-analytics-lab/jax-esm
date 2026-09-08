@@ -199,9 +199,10 @@ class SlabOceanModel(SlabModelBase):
         ValueError
             If the configuration cannot run: an unknown forcing method,
             relaxation without a climatology or with a relaxation time that
-            is not finite and strictly positive, a mixed-layer depth that is
-            not finite and strictly positive, a Q-flux file a non-Q-flux run
-            would ignore, or a climatology whose ocean points are not finite.
+            is not finite and strictly positive, a mixed-layer depth or an
+            initial SST that is not finite and strictly positive, a Q-flux
+            file a non-Q-flux run would ignore, or a climatology whose ocean
+            points are not finite.
         FileNotFoundError
             If a named file does not exist.
 
@@ -231,6 +232,17 @@ class SlabOceanModel(SlabModelBase):
                     f"params.{depth_name} must be finite and strictly positive (it "
                     f"is a factor of the mixed layer's heat capacity); got {depth!r}."
                 )
+        # The base of the idealized initial profile, and the only thing that
+        # sets the starting SST of a run given no climatology file -- every
+        # ocean cell is filled from it. It is an absolute temperature in
+        # kelvin, and a non-finite one is refused nowhere downstream: it is
+        # copied into the initial state and every later SST inherits it.
+        initial_sst = float(self.params.initial_sst)
+        if not math.isfinite(initial_sst) or initial_sst <= 0.0:
+            raise ValueError(
+                "params.initial_sst must be a finite positive temperature in "
+                f"kelvin; got {initial_sst!r}."
+            )
         if q_flux_file is not None and forcing_method != "qflux":
             raise ValueError(
                 f"q_flux_file was given but forcing_method is {forcing_method!r}, "
