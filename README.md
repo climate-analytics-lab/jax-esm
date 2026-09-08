@@ -164,7 +164,7 @@ it was handed, and never change their pytree structure.
 
 ### Time integration
 
-- `Coupler.step_function()` returns one coupled step;
+- `Coupler.generate_step_function()` returns one coupled step;
   `Coupler.generate_trajectory_function(iterations, remat=..., jit=...)` drives it
   with `jax.lax.scan`.
 - The clock lives in the carry (`CoupledCarry.step`), not in the scan index, so

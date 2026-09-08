@@ -248,7 +248,7 @@ def test_workflow_revalidated_when_a_component_is_removed():
     coupler = _coupler(workflow=["feed", "source", "sink"])
     coupler.remove_component("sink")
     with pytest.raises(ValueError, match="sink"):
-        coupler.step_function()
+        coupler.generate_step_function()
 
 
 def test_repr_names_the_model():
@@ -355,7 +355,7 @@ def test_clock_persists_across_trajectory_calls():
     np.testing.assert_allclose(second["clock"]["sim_time"], np.arange(5, 10) * DAY)
 
     # The next step - the one the persisted counter is for - sees 10 * dt.
-    _, tenth = coupler.step_function()(carry)
+    _, tenth = coupler.generate_step_function()(carry)
     assert float(tenth["clock"]["sim_time"]) == pytest.approx(10 * DAY)
 
 
@@ -437,7 +437,7 @@ def test_step_does_not_mutate_input():
     structure_before = jax.tree_util.tree_structure(carry)
     leaves_before = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(carry)]
 
-    new_carry, _ = coupler.step_function()(carry)
+    new_carry, _ = coupler.generate_step_function()(carry)
 
     assert carry.components is components_before
     assert jax.tree_util.tree_structure(carry) == structure_before
@@ -509,7 +509,7 @@ def test_in_place_exchange_corrupts_the_initial_carry_eagerly(exchanger, eager_c
     assert float(carry.components["struct"]["forcing"].value) == 0.0
 
     carry = coupler.initialize()
-    coupler.step_function()(carry)
+    coupler.generate_step_function()(carry)
     corrupted = float(carry.components["struct"]["forcing"].value) != 0.0
     assert corrupted == eager_corrupts
 
@@ -553,7 +553,7 @@ def test_treedef_change_raises():
         start_date=START_DATE,
     )
     with pytest.raises(RuntimeError, match="adds_a_key"):
-        coupler.step_function()(coupler.initialize())
+        coupler.generate_step_function()(coupler.initialize())
 
 
 def test_exchanger_must_return_a_mapping():
@@ -569,7 +569,7 @@ def test_exchanger_must_return_a_mapping():
         start_date=START_DATE,
     )
     with pytest.raises(TypeError, match="returns_nothing"):
-        coupler.step_function()(coupler.initialize())
+        coupler.generate_step_function()(coupler.initialize())
 
 
 # ---------------------------------------------------------------------------
@@ -709,11 +709,11 @@ def test_to_xarray_skips_components_without_diagnostics():
     assert coupler.to_xarray({}) == {}
 
 
-def test_step_function_snapshots_the_model():
+def test_generate_step_function_snapshots_the_model():
     """A generated step describes the model as it was; later edits do not leak in."""
     coupler = _coupler()
     carry = coupler.initialize()
-    step = coupler.step_function()
+    step = coupler.generate_step_function()
 
     coupler.remove_component("sink")
 
@@ -842,7 +842,7 @@ def test_a_component_the_workflow_omits_is_never_bound_or_run():
     )
     assert unused.binds == []
 
-    _, diagnostics = coupler.step_function()(coupler.initialize())
+    _, diagnostics = coupler.generate_step_function()(coupler.initialize())
     assert set(diagnostics) == {"source"}
 
 
@@ -920,7 +920,7 @@ def test_to_xarray_first_step_is_in_coupled_steps_for_every_component():
 def test_to_xarray_rejects_diagnostics_that_are_not_the_run_s():
     """Diagnostics without the multiplicity axis cannot be labelled."""
     coupler = _hourly_coupler()
-    single = coupler.step_function()(coupler.initialize())[1]
+    single = coupler.generate_step_function()(coupler.initialize())[1]
     # One step's diagnostics are (24, ...), not (steps, 24, ...).
     with pytest.raises(ValueError, match="runs 24 times"):
         coupler.to_xarray(single)
@@ -976,7 +976,7 @@ def test_a_repeated_exchanger_sees_the_sub_stepped_clock():
         start_date=START_DATE,
         workflow=[["record", "fast"] * 4],
     )
-    step = coupler.step_function()
+    step = coupler.generate_step_function()
 
     carry, _ = step(coupler.initialize())
     assert [entry[1] for entry in seen] == [DAY / 4] * 4

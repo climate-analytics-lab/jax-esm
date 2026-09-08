@@ -26,7 +26,7 @@ The alternative for the same model is one coupler with a repeated workflow
 (see :class:`Coupler`); the two are equivalent, and which reads better
 depends on whether the fast loop is a thing in its own right.
 
-The coupler produces *functions*, not runs: :meth:`Coupler.step_function` and
+The coupler produces *functions*, not runs: :meth:`Coupler.generate_step_function` and
 :meth:`Coupler.generate_trajectory_function` return pure functions of the
 carry, which the caller composes with ``jax.jit``, ``jax.grad`` or a chunked
 run loop. Nothing here logs per step, holds a trajectory or mutates the
@@ -508,7 +508,7 @@ class Coupler:
 
         # A workflow given explicitly is validated now, so a typo is a
         # construction error rather than a trace-time one; it is validated
-        # again by `step_function`, because components may be added or
+        # again by `generate_step_function`, because components may be added or
         # removed after construction.
         self._explicit_workflow: tuple[str, ...] | None = None
         if workflow is not None:
@@ -893,17 +893,23 @@ class Coupler:
             step=jnp.int32(0),
         )
 
-    def step_function(
+    def generate_step_function(
         self,
     ) -> Callable[[CoupledCarry], tuple[CoupledCarry, dict[str, Diagnostics]]]:
-        """Return the pure function that advances the coupled model one step.
+        """Return ``step(carry) -> (new_carry, diagnostics)``, one coupled step.
 
-        The returned function takes a :class:`CoupledCarry` and returns the
-        new carry (with ``step`` incremented) and one diagnostics pytree per
-        component that ran. It never mutates its argument: the carries dict
-        is rebuilt, not updated in place, so the caller's carry remains
-        valid, which is what makes re-running a step or differentiating
-        through it safe.
+        This is the coupled model as a function: ``step`` runs the workflow
+        once -- every exchanger and every component, in order, on the clock
+        the carry's step counter implies -- and returns the new
+        :class:`CoupledCarry` (``step`` incremented) with one diagnostics
+        pytree per component that ran. :meth:`generate_trajectory_function`
+        is nothing more than this function scanned ``iterations`` times; call
+        this one directly to advance a single step eagerly (debugging, a
+        gradient check, comparing two workflows from one carry).
+
+        ``step`` never mutates its argument: the carries dict is rebuilt, not
+        updated in place, so the caller's carry remains valid, which is what
+        makes re-running a step or differentiating through it safe.
 
         Notes
         -----
@@ -1031,7 +1037,7 @@ class Coupler:
             the function twice continues the run rather than restarting it.
 
         """
-        step = self.step_function()
+        step = self.generate_step_function()
 
         def scan_body(
             carry: CoupledCarry, _: None
@@ -1136,7 +1142,7 @@ class Coupler:
                 f"{type(self).__name__} {self.name!r} cannot be {what} as a "
                 "component because it has not been bound to an outer coupler. "
                 "Register it in one (which binds it), or drive it directly with "
-                "`step_function()` / `generate_trajectory_function()`."
+                "`generate_step_function()` / `generate_trajectory_function()`."
             )
         return self._outer_ratio
 
@@ -1198,7 +1204,7 @@ class Coupler:
         ratio = self._require_outer_ratio("stepped")
         self._check_outer_clock(time, ratio)
         if ratio == 1:
-            return self.step_function()(carry)
+            return self.generate_step_function()(carry)
         # An unjitted trajectory: `lax.scan` keeps one copy of the inner step
         # in the outer jaxpr instead of `r` unrolled ones, and stacks the
         # per-step diagnostics on the leading axis this method promises. It

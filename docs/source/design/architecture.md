@@ -315,7 +315,7 @@ Two rules, both enforced by what `lax.scan` will accept:
 
    Inside `generate_trajectory_function` the carries are tracers, so the
    assignment cannot reach the caller's arrays and `carry0` is untouched.
-   But run one step eagerly (`model.step_function()(carry0)`, the natural thing
+   But run one step eagerly (`model.generate_step_function()(carry0)`, the natural thing
    to do when debugging, checking a gradient or comparing two workflows from
    one initial condition) and the struct being assigned into *is*
    `carry0.components["seaice"]["forcing"]`: the initial carry is silently
@@ -432,7 +432,7 @@ model cannot perturb the rest of it.
 
 ### The scan loop
 
-`Coupler.step_function()` returns the pure function `CoupledCarry ->
+`Coupler.generate_step_function()` returns the pure function `CoupledCarry ->
 (CoupledCarry, dict[str, Diagnostics])` that runs one workflow pass and returns
 the carry with `step` incremented. It snapshots the components and exchangers as
 they stand when it is called, so registering a component afterwards cannot

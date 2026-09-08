@@ -38,8 +38,10 @@ otherwise**; the code that has to change is named in each one.
     labels its dataset from.
   - `Exchanger`, the type of the functions that move information between
     components.
-- `Coupler.step_function()` — the pure one-step function, previously only
-  available inside `Coupler.run`.
+- `Coupler.generate_step_function()` — the pure one-step function
+  `step(carry) -> (carry, diagnostics)`, previously only available inside
+  `Coupler.run`. (The name is kept from the old API; the signature is new, see
+  *Removed*.)
 - `Coupler.coupling_time(step)`, `Coupler.time_axis(first_step, n)` and the
   `coupling_timestep` / `start_date` / `calendar` / `dt_seconds` /
   `year_offset_seconds` / `days_per_year` properties: the clock, readable.
@@ -439,8 +441,9 @@ otherwise**; the code that has to change is named in each one.
   `(initial_carry, final_carry, predictions)`; the initial carry is now
   whatever you passed in.
 - `Coupler.generate_step_function()` in its old form (it took a workflow and
-  returned a function of `(carry, step)`); `Coupler.step_function()` replaces
-  it.
+  `jitted`/`show_progress` flags and returned a function of `(carry, step)`);
+  the method now takes no arguments and returns `step(carry)`, the workflow
+  and clock being the coupler's own.
 - `Coupler.predictions_to_xarray(...)` → `Coupler.to_xarray(...)`.
 - `Coupler.get_info()` → `repr(coupler)`.
 - `Coupler.add_mapper` / `remove_mapper` / `.mappers` → `add_exchanger` /
@@ -505,7 +508,7 @@ otherwise**; the code that has to change is named in each one.
   against `jem.components.clock.clock_tolerance_seconds`. As in the JCM
   wrapper it is reported at ERROR through `jax.debug.callback`, never raised:
   the check runs inside the coupled `lax.scan`.
-- `Coupler.step_function()` snapshots the components and exchangers when it is
+- `Coupler.generate_step_function()` snapshots the components and exchangers when it is
   called, so registering a component afterwards cannot silently change an
   already-compiled step.
 - The coupled step never mutates its input carry; it rebuilds the carries dict
