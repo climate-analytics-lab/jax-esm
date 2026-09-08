@@ -1179,6 +1179,45 @@ class Coupler:
                 "different calendar or start date than the one it was bound to."
             )
 
+    def _report_inner_clock_drift(
+        self, carry: CoupledCarry, time: CouplingTime, ratio: int
+    ) -> None:
+        """Log at ERROR if the inner carry's clock has left the outer coupler's.
+
+        :meth:`_check_outer_clock` covers the static half of the clock at
+        trace time. The dynamic half is the step counter: this coupler
+        advances from ``carry.step`` (its own counter, so that the inner clock
+        is continuous across outer steps and survives a checkpoint), and in a
+        consistent run that counter is exactly ``ratio`` times the outer
+        step. The two disagree only if the carry did not come from this run
+        -- an inner checkpoint restored next to an outer ``CoupledCarry.step``
+        from a different point in the run, or an inner carry threaded into
+        the wrong slot -- and then the inner components would sample their
+        climatologies and date their diagnostics for one simulated time
+        while the outer exchangers and output axis use another.
+
+        Both counters are exact int32, so the comparison is exact (no
+        tolerance is needed, unlike the wrappers' float clocks). Reported
+        through ``jax.debug.callback`` rather than raised, for the reason the
+        JCM and Veros wrappers give: the check runs inside the outer
+        ``lax.scan``, where a Python exception cannot fire on a traced value
+        and aborting would throw away a run that may still be salvageable.
+        """
+        name = self.name
+
+        def _report(inner_step, outer_step) -> None:
+            expected = int(outer_step) * ratio
+            if int(inner_step) != expected:
+                logger.error(
+                    "%s: nested clock is at inner step %d but the outer coupler"
+                    " is at outer step %d, i.e. inner step %d. The nested"
+                    " model will date its forcing and output differently"
+                    " from the rest of the coupled model.",
+                    name, int(inner_step), int(outer_step), expected,
+                )
+
+        jax.debug.callback(_report, carry.step, time.step)
+
     def step(
         self, carry: CoupledCarry, time: CouplingTime
     ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
@@ -1188,8 +1227,9 @@ class Coupler:
         ratio :meth:`bind` recorded. The inner clock comes from the inner
         carry's own step counter, exactly as it does in a standalone run, so
         it is continuous across outer steps and survives a checkpoint; the
-        outer ``time`` is only checked against it (see
-        :meth:`_check_outer_clock`).
+        outer ``time`` is only checked against it, statically at trace time
+        (:meth:`_check_outer_clock`) and dynamically, step counter against
+        step counter, at run time (:meth:`_report_inner_clock_drift`).
 
         Parameters
         ----------
@@ -1213,6 +1253,7 @@ class Coupler:
         """
         ratio = self._require_outer_ratio("stepped")
         self._check_outer_clock(time, ratio)
+        self._report_inner_clock_drift(carry, time, ratio)
         if ratio == 1:
             return self.generate_step_function()(carry)
         # An unjitted trajectory: `lax.scan` keeps one copy of the inner step

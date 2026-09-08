@@ -700,3 +700,34 @@ def test_with_nested_carry_survives_a_new_coupled_carry_field():
     assert dataclasses.fields(updated["atm_lnd"]) == dataclasses.fields(
         carries["atm_lnd"]
     )
+
+
+def test_an_inner_carry_from_another_point_in_the_run_is_reported(caplog):
+    """The inner step counter is checked against the outer one every step.
+
+    A nested checkpoint paired with an outer step from elsewhere in the run
+    would date the inner components differently from the rest of the model;
+    the mismatch is logged at ERROR (not raised: the check runs inside the
+    outer scan), and a consistent run logs nothing.
+    """
+    import logging
+
+    model = nested_model()
+    run = model.generate_trajectory_function(2)
+
+    with caplog.at_level(logging.ERROR, logger="jem.base.coupler"):
+        run(model.initialize())
+    assert not [r for r in caplog.records if "nested clock" in r.getMessage()]
+
+    carry = model.initialize()
+    inner = carry.components["atm_lnd"]
+    skewed = dataclasses.replace(
+        carry,
+        components={**carry.components,
+                    "atm_lnd": dataclasses.replace(inner, step=inner.step + 24)},
+    )
+    with caplog.at_level(logging.ERROR, logger="jem.base.coupler"):
+        run(skewed)
+    messages = [r.getMessage() for r in caplog.records if "nested clock" in r.getMessage()]
+    # 24 inner steps ahead of outer step 0, whose consistent inner step is 0.
+    assert any("inner step 24" in m and "inner step 0" in m for m in messages)
