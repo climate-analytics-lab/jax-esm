@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+import tree_math
 import xarray as xr
 
 from jem.base.component import CoupledCarry, TimeAxis
@@ -444,6 +445,73 @@ def test_step_does_not_mutate_input():
         np.testing.assert_array_equal(before, np.asarray(after))
     assert int(carry.step) == 0
     assert int(new_carry.step) == 1
+
+
+@tree_math.struct
+class _Forcing:
+    """A mutable struct, like the slab models' forcing structs."""
+
+    value: jnp.ndarray
+
+
+class _StructComponent:
+    """Carries a mutable struct so an exchanger can (wrongly) assign into it."""
+
+    def __init__(self, name="struct"):
+        """Name the component."""
+        self.name = name
+
+    def initialize(self):
+        return {"forcing": _Forcing(value=jnp.float32(0.0))}
+
+    def step(self, carry, time):
+        del time
+        return carry, {"value": carry["forcing"].value}
+
+
+def _assign_in_place(components, time):
+    """Write into the struct it was handed, which the contract forbids."""
+    del time
+    components["struct"]["forcing"].value = components["struct"]["forcing"].value + 1.0
+    return components
+
+
+def _rebuild(components, time):
+    """Return a new struct in a new dict, as the contract asks."""
+    del time
+    struct = components["struct"]
+    struct = dict(struct, forcing=struct["forcing"].replace(value=struct["forcing"].value + 1.0))
+    return dict(components, struct=struct)
+
+
+@pytest.mark.parametrize(
+    ("exchanger", "eager_corrupts"),
+    [(_assign_in_place, True), (_rebuild, False)],
+    ids=["assign_in_place", "rebuild"],
+)
+def test_in_place_exchange_corrupts_the_initial_carry_eagerly(exchanger, eager_corrupts):
+    """Assigning into a carried struct is invisible under jit and wrong eagerly.
+
+    Under the jitted scan the exchanger receives tracers, so neither form can
+    reach the caller's arrays. In an eager step the structs inside the fresh
+    dict are the caller's own objects, so the in-place form overwrites the
+    initial carry -- the case the design doc's exchanger rule is about.
+    """
+    coupler = Coupler(
+        {"struct": _StructComponent()},
+        {"exchange": exchanger},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+    carry = coupler.initialize()
+    coupler.generate_trajectory_function(2)(carry)
+    assert float(carry.components["struct"]["forcing"].value) == 0.0
+
+    carry = coupler.initialize()
+    coupler.step_function()(carry)
+    corrupted = float(carry.components["struct"]["forcing"].value) != 0.0
+    assert corrupted == eager_corrupts
 
 
 def test_exchanger_runs_before_components_by_default():

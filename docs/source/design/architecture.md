@@ -302,6 +302,37 @@ Two rules, both enforced by what `lax.scan` will accept:
    `flax.struct` struct, `dataclasses.replace`, a new `dict`) and return them.
    The coupler passes a *fresh* dict, so adding or replacing entries cannot
    reach the caller's carry, but the structs inside it are shared.
+
+   The risk is easy to miss because it only shows outside `jit`. This
+   exchanger runs and gives the right trajectory under the jitted scan:
+
+   ```python
+   def exchange_in_place(components, time):
+       ocn, seaice = components["ocn"], components["seaice"]
+       seaice["forcing"].ice_frazil_melt_energy = ocn["derived"].ice_frazil_melt_energy
+       return components
+   ```
+
+   Inside `generate_trajectory_function` the carries are tracers, so the
+   assignment cannot reach the caller's arrays and `carry0` is untouched.
+   But run one step eagerly (`model.step_function()(carry0)`, the natural thing
+   to do when debugging, checking a gradient or comparing two workflows from
+   one initial condition) and the struct being assigned into *is*
+   `carry0.components["seaice"]["forcing"]`: the initial carry is silently
+   overwritten, and the next run from `carry0` starts somewhere else. The
+   same exchanger written as the contract asks,
+
+   ```python
+   def exchange(components, time):
+       ocn, seaice = components["ocn"], components["seaice"]
+       seaice = dict(seaice, forcing=seaice["forcing"].replace(
+           ice_frazil_melt_energy=ocn["derived"].ice_frazil_melt_energy))
+       return dict(components, seaice=seaice)
+   ```
+
+   behaves the same both ways. `tests/unit/test_coupler.py` pins this
+   asymmetry (`test_in_place_exchange_corrupts_the_initial_carry_eagerly`),
+   so the rule is not just advice.
 2. **Do not change the pytree structure.** After every workflow element the
    coupler compares the structure of the carries dict with the structure it had
    on entry and raises `RuntimeError` naming the element responsible. The check
