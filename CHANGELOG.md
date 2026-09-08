@@ -548,6 +548,17 @@ otherwise**; the code that has to change is named in each one.
   With no SST climatology it is the base of the idealized initial profile, so
   it fills every ocean cell of the initial state and every later SST inherits
   it; nothing downstream rejected a non-finite or non-physical value.
+- `SlabOceanModel` writes `forcing_q_flux` when the **run** applied a Q-flux,
+  not when the model object was constructed with one. `step` follows the
+  `forcing_method` in `carry["params"]`, so a run started with
+  `initialize(params)` (or `Coupler.initialize({"ocn": params})`) carrying a
+  different method used to have an applied Q-flux dropped from its output, or
+  a constant zero published as though a Q-flux were active. The step now
+  publishes the snapshot it applied as its own diagnostics key and the output
+  follows that key. Consequently `OceanDerived` no longer has a
+  `q_flux_snapshot` field: the snapshot is per-step output that nothing reads
+  back, and a `tree_math.struct` field would exist in every configuration,
+  which is what forced the unconditional write in the first place.
 
 ### Known gaps
 

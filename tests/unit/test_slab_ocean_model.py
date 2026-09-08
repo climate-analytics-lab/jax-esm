@@ -22,6 +22,7 @@ from tests.unit.slab_test_utils import (
     make_grid,
     monthly_ramp,
     run_steps,
+    time_axis,
     tree_signature,
     write_climatology,
 )
@@ -516,6 +517,103 @@ def test_invalid_initial_sst_is_rejected(uniform_grid, value):
         SlabOceanModel(uniform_grid, params)
 
     assert repr(float(value)) in str(excinfo.value)
+
+
+def _run_to_dataset(model, carry, n_steps=2):
+    """Step the model and write the trajectory out, as the coupler would."""
+    _, stacked = run_steps(model, carry, n_steps)
+    return model.to_xarray(stacked, time_axis(n_steps))
+
+
+def test_qflux_output_follows_the_run_not_the_construction(tmp_path, uniform_grid):
+    """A run switched INTO Q-flux mode publishes the Q-flux it applied.
+
+    ``step`` follows ``carry["params"].forcing_method``, so a model built for
+    relaxation and started with ``initialize(params.replace(...))`` really does
+    apply a Q-flux. Keying the output off ``self.params`` instead used to drop
+    that applied forcing from the dataset entirely.
+    """
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method="relaxation"),
+        sst_clim_file=sst_file,
+    )
+
+    carry = model.initialize(model.params.replace(forcing_method="qflux"))
+    # A Q-flux with a real signal in it, so the published field cannot be
+    # mistaken for the zero placeholder the model would carry either way.
+    q_flux = jnp.asarray(np.transpose(monthly_ramp(), (2, 1, 0)))
+    carry["forcing"] = carry["forcing"].replace(q_flux=q_flux)
+
+    dataset = _run_to_dataset(model, carry)
+
+    assert "forcing_q_flux" in dataset
+    assert float(np.abs(dataset["forcing_q_flux"].values).max()) > 0.0
+    # What was published is what was applied: the effective heat flux is the
+    # received (zero) flux minus the Q-flux folded into it.
+    np.testing.assert_allclose(
+        dataset["total_heat_flux"].values,
+        -dataset["forcing_q_flux"].values,
+        rtol=1e-6,
+    )
+
+
+def test_qflux_output_is_absent_when_the_run_applies_none(tmp_path, uniform_grid):
+    """A model built for Q-flux but RUN as relaxation publishes no Q-flux.
+
+    The reverse of the test above: the trajectory applied no Q-flux, so a
+    ``forcing_q_flux`` of zeros would claim a forcing the run never had.
+    """
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    q_flux_file = write_climatology(tmp_path / "qflux.nc", "qflux", monthly_ramp())
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method="qflux"),
+        sst_clim_file=sst_file,
+        q_flux_file=q_flux_file,
+    )
+
+    carry = model.initialize(model.params.replace(forcing_method="relaxation"))
+    dataset = _run_to_dataset(model, carry)
+
+    assert "forcing_q_flux" not in dataset
+    # The rest of the ocean's output is unaffected by the missing variable.
+    assert "sea_surface_temperature" in dataset
+    assert "mixed_layer_depth" in dataset
+
+
+@pytest.mark.parametrize("forcing_method", ["none", "qflux", "relaxation"])
+def test_qflux_output_matches_the_method_the_run_used(
+    tmp_path, uniform_grid, forcing_method
+):
+    """Constructed and run with the same method: the variable follows it."""
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method=forcing_method),
+        sst_clim_file=sst_file,
+    )
+
+    dataset = _run_to_dataset(model, model.initialize())
+
+    assert ("forcing_q_flux" in dataset) == (forcing_method == "qflux")
+
+
+def test_qflux_snapshot_is_not_carried_between_steps(uniform_grid):
+    """The snapshot is output, not state: the carry keeps its shared layout.
+
+    Keeping it in ``derived`` would make it a field of every configuration,
+    which is exactly what forced the output to be written unconditionally.
+    """
+    model = SlabOceanModel(uniform_grid, SlabOceanParameters(forcing_method="qflux"))
+    carry = model.initialize()
+
+    new_carry, diagnostics = model.step(carry, coupling_time(0))
+
+    assert set(new_carry) == {"params", "state", "forcing", "derived"}
+    assert "q_flux_snapshot" not in new_carry["derived"].asdict()
+    assert "q_flux_snapshot" in diagnostics
 
 
 def test_initialize_takes_parameters_and_defaults_to_the_models_own(uniform_grid):

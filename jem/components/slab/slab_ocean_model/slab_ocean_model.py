@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 #: SST climatology is given.
 IDEALIZED_SST_RANGE = 10.0
 
+#: Diagnostics key the applied Q-flux snapshot rides on. A step includes it
+#: only when the parameters it was handed select ``forcing_method="qflux"``,
+#: and its presence is what makes the output carry ``forcing_q_flux``.
+_Q_FLUX_SNAPSHOT = "q_flux_snapshot"
+
 
 @tree_math.struct
 class OceanState:
@@ -66,10 +71,19 @@ class OceanForcing:
 
 @tree_math.struct
 class OceanDerived:
+    """What the ocean diagnoses every step and other components may read.
+
+    The applied Q-flux is deliberately not a field here. A
+    ``tree_math.struct`` has a fixed field list, so a Q-flux field would exist
+    in every configuration and could only be published unconditionally -- a
+    constant zero presented as an active forcing in a run that applies none.
+    It travels instead as the :data:`_Q_FLUX_SNAPSHOT` key of the step's
+    diagnostics, which is present only when a Q-flux was actually applied.
+    """
+
     mixed_layer_depth: jnp.ndarray
     ice_frazil_melt_energy: jnp.ndarray
     effective_total_heat_flux: jnp.ndarray
-    q_flux_snapshot: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -78,13 +92,11 @@ class OceanDerived:
         mixed_layer_depth=None,
         ice_frazil_melt_energy=None,
         effective_total_heat_flux=None,
-        q_flux_snapshot=None,
     ):
         return cls(
             mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
             ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
             effective_total_heat_flux if effective_total_heat_flux is not None else jnp.zeros(shape),
-            q_flux_snapshot if q_flux_snapshot is not None else jnp.zeros(shape),
         )
 
 
@@ -348,6 +360,11 @@ class SlabOceanModel(SlabModelBase):
         is why the timescale appears as ``1 / (1 + dt/tau)`` rather than as an
         explicit tendency: the relaxation is the stiff term here, and an
         explicit step of it is unstable once ``dt`` approaches ``tau``.
+
+        The forcing term follows the ``forcing_method`` of the CARRIED
+        parameters, not the model's construction-time ones, and so do the
+        diagnostics: a step that applies a Q-flux publishes the snapshot it
+        applied, and one that does not publishes nothing in its place.
         """
         params = carry["params"]
         state = carry["state"]
@@ -365,10 +382,12 @@ class SlabOceanModel(SlabModelBase):
         )
 
         total_heat_flux = forcing.total_heat_flux
-        q_flux_snapshot = jnp.zeros(self.grid.shape)
         anomaly = state.sea_surface_temperature
         climatology_end = None
         time_factor = 1.0
+        # Stays None unless the Q-flux branch below runs, which is what tells
+        # the diagnostics at the end of this step whether a Q-flux was applied.
+        q_flux_snapshot = None
 
         # ``forcing_method`` is static configuration, so this branches at trace
         # time and only the selected term is ever compiled.
@@ -427,15 +446,32 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth=mixed_layer_depth,
             ice_frazil_melt_energy=ice_frazil_melt_energy,
             effective_total_heat_flux=total_heat_flux,
-            q_flux_snapshot=q_flux_snapshot,
         )
 
+        new_carry = {
+            "params": params,
+            "state": new_state,
+            "forcing": forcing,
+            "derived": new_derived,
+        }
         diagnostics = {
             "state": new_state,
             "forcing": forcing,
             "derived": new_derived,
         }
-        return {"params": params, **diagnostics}, diagnostics
+        # An applied Q-flux is published; an absent one leaves no variable
+        # behind. The decision has to be made here rather than in
+        # `_create_xarray_data_vars`, because only the step sees the
+        # parameters the trajectory actually ran with: `forcing_method` is
+        # static, but it is the CARRIED one, and `initialize(params)` may start
+        # a run from a method the model was not constructed with. Being static
+        # is also what makes this safe -- the key is present for every step of
+        # a run or for none, so the diagnostics `lax.scan` stacks keep one
+        # structure. It stays out of the carry: nothing reads it back, and the
+        # `state`/`forcing`/`derived` layout is the one every component shares.
+        if q_flux_snapshot is not None:
+            diagnostics[_Q_FLUX_SNAPSHOT] = q_flux_snapshot
+        return new_carry, diagnostics
 
     def _mixed_layer_depth(self, params: SlabOceanParameters) -> jnp.ndarray:
         """Prescribed mixed-layer depth: ``max`` at the poles, ``min`` at the equator."""
@@ -457,7 +493,18 @@ class SlabOceanModel(SlabModelBase):
         )
 
     def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
-        """Create xarray data variables for ocean output."""
+        """Create xarray data variables for ocean output.
+
+        ``forcing_q_flux`` is written exactly when the trajectory applied a
+        Q-flux, which is a property of the run and not of this object:
+        :meth:`step` follows the ``forcing_method`` in ``carry["params"]``, and
+        ``initialize(params)`` may start a run from a different method than the
+        model was constructed with. So the decision is read off the diagnostics
+        the run produced -- they carry the snapshot only when one was applied
+        -- rather than off ``self.params``, which would otherwise drop an
+        applied Q-flux from the output or publish a constant zero as an active
+        one.
+        """
         state = diagnostics["state"]
         derived = diagnostics["derived"]
         dims = ("time",) + self.grid.dims
@@ -505,13 +552,12 @@ class SlabOceanModel(SlabModelBase):
             ),
         }
 
-        if self.params.forcing_method == "qflux":
-            # The prescribed Q-flux climatology evaluated at this step: a
-            # boundary condition the ocean was given, not one it produced,
-            # even though the snapshot is carried in `derived`.
+        if _Q_FLUX_SNAPSHOT in diagnostics:
+            # The prescribed Q-flux climatology evaluated at each step: a
+            # boundary condition the ocean was given, not one it produced.
             data_vars[forcing_variable("q_flux")] = (
                 dims,
-                derived.q_flux_snapshot,
+                diagnostics[_Q_FLUX_SNAPSHOT],
                 {
                     "long_name": "Prescribed Q-flux forcing",
                     "units": "W m-2",

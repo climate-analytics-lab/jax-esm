@@ -461,6 +461,36 @@ def test_all_four_slab_datasets_merge(slab_coupler):
         assert name in merged, name
 
 
+def test_ocean_output_follows_the_method_the_coupled_run_was_started_with(
+    slab_coupler,
+):
+    """A coupled run switched into Q-flux mode publishes the Q-flux it applied.
+
+    The ocean of ``slab_coupler`` is *built* for relaxation, but the run is
+    started from Q-flux parameters, so its steps apply a Q-flux and its output
+    has to say so. Going through ``generate_trajectory_function`` is the point:
+    the Q-flux snapshot rides as a conditional key of the ocean's diagnostics,
+    and only ``lax.scan`` checks that the structure it stacks is the same on
+    every step.
+    """
+    ocean_params = slab_coupler.components["ocn"].params
+    initial = slab_coupler.initialize(
+        {"ocn": ocean_params.replace(forcing_method="qflux")}
+    )
+
+    _, diagnostics = slab_coupler.generate_trajectory_function(2)(initial)
+    ocean = slab_coupler.to_xarray(diagnostics)["ocn"]
+
+    assert "forcing_q_flux" in ocean
+    assert ocean["forcing_q_flux"].sizes["time"] == 2
+    # The ocean built for relaxation still publishes no Q-flux when the run
+    # keeps that method.
+    _, relaxation_diagnostics = slab_coupler.generate_trajectory_function(2)(
+        slab_coupler.initialize()
+    )
+    assert "forcing_q_flux" not in slab_coupler.to_xarray(relaxation_diagnostics)["ocn"]
+
+
 def test_grad_of_sst_wrt_relaxation_time_through_the_coupler(slab_coupler):
     """A slab parameter stays differentiable through a whole coupled run.
 

@@ -634,6 +634,18 @@ The conventions, which are JCM's:
   `forcing_surface_tauy` and `forcing_surface_air_temperature` for the five
   fields an exchanger hands it, keeping plain names for the `temp`, `salt`,
   `u`, `v` and sea-surface fields it computes.
+- **A configuration-dependent variable is decided by the run, not by the
+  component object.** `SlabOceanModel` writes `forcing_q_flux` only when the
+  trajectory actually applied a Q-flux, and `step` follows the
+  `forcing_method` in `carry["params"]` — which `initialize(params)` may set
+  to something other than the method the model was constructed with. So the
+  step publishes the Q-flux snapshot it applied as a key of its own
+  diagnostics, and `_create_xarray_data_vars` writes the variable when that
+  key is there. Keying it off `self.params` instead would drop an applied
+  Q-flux from the output, or publish a constant zero as though a Q-flux were
+  active. This is safe under `lax.scan` precisely because `forcing_method` is
+  static (`pytree_node=False`): it cannot change during a run, so the
+  diagnostics structure is constant even though it varies between runs.
 
 Together these are what make `xr.merge([datasets["atm"], datasets["ocn"]])` an
 N-long join rather than a 2N-long outer union.
