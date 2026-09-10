@@ -576,9 +576,9 @@ dates.
 
 Each component is handed a `TimeAxis` (start date, the record's step indices,
 the record interval and the calendar) so every dataset from one run shares one
-time coordinate; `jem.utils.time.time_coordinate` unpacks it into the
-`(values, attrs)` pair xarray wants and is the one call site every component
-uses.
+time coordinate; `TimeAxis.datetimes()` and `TimeAxis.attrs` are the
+`(values, attrs)` pair xarray wants, and every component's `to_xarray` calls
+them directly.
 
 A component the workflow runs *n > 1* times per coupled step wrote *n* records
 per step, and its stacked diagnostics arrive as `(steps, n, ...)`. The two
@@ -609,10 +609,10 @@ The conventions, which are JCM's:
   is the one place it is written down — including the arithmetic, a float64
   count of days since the epoch multiplied into nanoseconds at the end, which
   is inexact but *identically* inexact for every component that goes through
-  it. `jem.utils.time.time_coordinate` is the slab-side call site that unpacks
-  it (values plus `TimeAxis.attrs`) for xarray. The dates are proleptic
-  Gregorian whatever the model calendar is; the calendar governs the seasonal
-  cycle and forcing selection, not the labels.
+  it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
+  xarray. The dates are proleptic Gregorian whatever the model calendar is;
+  the calendar governs the seasonal cycle and forcing selection, not the
+  labels.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by

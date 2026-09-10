@@ -33,7 +33,6 @@ from jem.base.component import (
 )
 from jem.components.clock import clock_tolerance_seconds
 from jem.utils.checkpoints import load_veros_carry, save_veros_carry
-from jem.utils.time import time_coordinate
 
 logger = logging.getLogger(__name__)
 
@@ -563,8 +562,8 @@ class VerosComponent:
             slab models' output does, so merging this dataset with the
             atmosphere's does not collide on a name two components both hold.
             The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
-            :func:`jem.utils.time.time_coordinate` builds from ``time``, the
-            same one every other component labels its output with, so
+            :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
+            the same one every other component labels its output with, so
             ``xr.merge`` joins the records instead of unioning two axes -- or,
             as before this coordinate was written at all, leaving the ocean's
             ``time`` as a bare 0..n-1 index that means nothing.
@@ -577,8 +576,6 @@ class VerosComponent:
                 f" coupler's time axis has {len(time)}; the diagnostics"
                 " passed here are not the ones this run produced."
             )
-
-        time_values, time_attrs = time_coordinate(time)
 
         dataset = xr.Dataset(
             data_vars={
@@ -605,7 +602,9 @@ class VerosComponent:
                 "dzt": (["depth"], self.dzt),
             },
             coords={
-                "time": (["time"], time_values, time_attrs),
+                # ``attrs`` is a fresh dict per access, so xarray -- which
+                # keeps the dict it is handed -- gets one of its own.
+                "time": (["time"], time.datetimes(), time.attrs),
                 "lon": (["lon"], self.longitude),
                 "lat": (["lat"], self.latitude),
             },

@@ -40,7 +40,6 @@ from jem.base.component import (
     forcing_variable as forcing_variable,
 )
 from jem.components.slab.grid import SlabGrid, to_degrees
-from jem.utils.time import time_coordinate
 
 logger = logging.getLogger(__name__)
 
@@ -473,11 +472,12 @@ class SlabModelBase(ABC):
         Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
         a slab dataset from the same run aligns instead of producing an outer
         join: ``time`` is the absolute ``datetime64[ns]`` axis built by
-        :func:`jem.utils.time.time_coordinate`, and a separable grid writes 1-D
-        ``lon``/``lat`` in degrees with the same values JCM writes for the same
-        coordinate system. A curvilinear grid cannot: it writes 2-D auxiliary
-        ``lat``/``lon`` coordinates over index-space dimensions, and each data
-        variable gets the CF ``coordinates`` attribute that points at them.
+        :meth:`jem.base.component.TimeAxis.datetimes`, and a separable grid
+        writes 1-D ``lon``/``lat`` in degrees with the same values JCM writes
+        for the same coordinate system. A curvilinear grid cannot: it writes
+        2-D auxiliary ``lat``/``lon`` coordinates over index-space dimensions,
+        and each data variable gets the CF ``coordinates`` attribute that
+        points at them.
 
         Parameters
         ----------
@@ -494,8 +494,9 @@ class SlabModelBase(ABC):
         data_vars = self._create_xarray_data_vars(diagnostics)
         self._check_time_axis_length(data_vars, time)
 
-        time_values, time_attrs = time_coordinate(time)
-        coords: dict[str, Any] = {"time": ("time", time_values, time_attrs)}
+        # ``attrs`` is a fresh dict per access, so xarray -- which keeps the
+        # dict it is handed -- gets one of its own.
+        coords: dict[str, Any] = {"time": ("time", time.datetimes(), time.attrs)}
 
         grid_dims = self.grid.dims
         if self.grid.is_separable:

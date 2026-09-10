@@ -25,7 +25,6 @@ from jem.base.component import (
     forcing_variable,
 )
 from jem.base.coupler import Coupler
-from jem.utils.time import time_coordinate
 
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 START_DATE = jdt.to_datetime("2001-01-01")
@@ -211,16 +210,16 @@ def test_datetimes_reproduce_jcm_arithmetic_bit_for_bit():
     np.testing.assert_array_equal(axis.datetimes(), expected)
 
 
-def test_time_coordinate_delegates_to_the_time_axis():
-    """The slab helper is a call site, not a second implementation."""
+def test_time_axis_attrs_is_a_fresh_dict_per_access():
+    """Hand every caller its own dict, because xarray keeps what it is given.
+
+    ``to_xarray`` passes ``attrs`` straight to :class:`xarray.Dataset`, so a
+    shared dict would let one dataset's edit reach every other component's.
+    """
     axis = TimeAxis(START_DATE, np.arange(4), COUPLING_TIMESTEP, "365_day")
 
-    values, attrs = time_coordinate(axis)
-
-    np.testing.assert_array_equal(values, axis.datetimes())
-    assert attrs == axis.attrs
-    # A fresh dict each call: xarray keeps what it is handed.
-    assert attrs is not axis.attrs
+    assert axis.attrs == axis.attrs
+    assert axis.attrs is not axis.attrs
 
 
 class ComponentRejectingClock(MinimalComponent):

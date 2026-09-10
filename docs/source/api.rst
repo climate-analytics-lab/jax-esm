@@ -43,6 +43,5 @@ Constants and utilities
    :recursive:
 
    jem.constants
-   jem.utils.time
    jem.utils.esmf_regrid.ESMFRegridder
    jem.utils.esmf_regrid.ESMFWeights

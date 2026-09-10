@@ -116,9 +116,9 @@ otherwise**; the code that has to change is named in each one.
   `__getattr__`, so `jem.constants.ocean_density` honours an override made
   after import.
 - `TimeAxis.datetimes()` and `TimeAxis.attrs`, the single definition of the
-  output time labels (JCM's arithmetic, not just JCM's answer);
-  `jem.utils.time.time_coordinate(time_axis)` is now the slab-side call site
-  that unpacks them for xarray.
+  output time labels (JCM's arithmetic, not just JCM's answer); every
+  component's `to_xarray` calls them directly for the `(values, attrs)` pair
+  xarray wants.
 - `jem.base.component.seconds_since_new_year(start_date)` and
   `start_year_fraction(start_date, calendar)`, the shared arithmetic behind
   both `CouplingTime.year_fraction` and the date a slab model samples its
@@ -479,6 +479,10 @@ otherwise**; the code that has to change is named in each one.
   `unwrap_leading_dims`. They existed because the old coupler stacked each
   step's predictions by hand; `lax.scan` does it, so nothing called them.
 - `jem.utils.time.TIME_ATTRS` → `TimeAxis.attrs`.
+- `jem.utils.time` (whole module): its one function, `time_coordinate`, only
+  returned `(time.datetimes(), dict(time.attrs))`, and `TimeAxis.attrs`
+  already builds a fresh dict per access. The two `to_xarray` implementations
+  call the `TimeAxis` directly.
 - The dependency `typeguard`; nothing imports it now that `jem.base.typing`
   is gone.
 
@@ -517,8 +521,8 @@ otherwise**; the code that has to change is named in each one.
   a `TimeAxis`, checked the record count against it and then dropped it, so an
   ocean dataset came out with a bare 0..n-1 integer `time` index: it could not
   be merged with any other component's output, and the dates of a chunked run
-  were absent from the files entirely. It now uses
-  `jem.utils.time.time_coordinate`, the same call site the slab models use.
+  were absent from the files entirely. It now labels its records with
+  `TimeAxis.datetimes()` and `TimeAxis.attrs`, exactly as the slab models do.
 - A run resumed from a checkpoint no longer restarts its seasonal cycle:
   `save_coupled_carry` writes the coupled step counter and `load_coupled_carry`
   restores it. A checkpoint written without one is refused with a `ValueError`
