@@ -874,6 +874,11 @@ class Coupler:
                 },
                 step=jnp.int32(0),
             )
+        # A set difference, not an arithmetic one: this rejects only names
+        # the coupler has no component for. `params` may therefore cover any
+        # subset of the components -- the ones it does not name initialize
+        # with their own defaults, below -- while a name that would otherwise
+        # be ignored silently is an error.
         unknown = sorted(set(params) - set(self.components))
         if unknown:
             raise ValueError(
