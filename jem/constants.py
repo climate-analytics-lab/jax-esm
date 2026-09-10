@@ -96,15 +96,15 @@ class SurfaceConstants:
 
     """
 
-    ocean_density: float = 1025.0
-    ocean_specific_heat_capacity: float = 3985.0
-    land_density: float = 3000.0
-    land_specific_heat_capacity: float = 830.0
-    surface_air_density: float = 1.22
-    bulk_drag_coefficient: float = 1e-3
-    atmosphere_column_mass: float = 1e4
-    ice_thermal_conductivity: float = 2.03
-    seawater_freezing_point_K: float = 271.35
+    ocean_density: float = 1025.0  # kg/m3
+    ocean_specific_heat_capacity: float = 3985.0  # J/kg/K
+    land_density: float = 3000.0  # kg/m3
+    land_specific_heat_capacity: float = 830.0  # J/kg/K
+    surface_air_density: float = 1.22  # kg/m3
+    bulk_drag_coefficient: float = 1e-3  # dimensionless
+    atmosphere_column_mass: float = 1e4  # kg/m2
+    ice_thermal_conductivity: float = 2.03  # W/m/K
+    seawater_freezing_point_K: float = 271.35  # K (-1.8 degC)
 
 
 #: The live singleton every ``jem.constants.<name>`` access resolves against.
