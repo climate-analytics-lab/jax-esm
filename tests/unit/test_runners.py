@@ -319,12 +319,22 @@ def test_the_shipped_ocean_options_ask_for_what_they_take():
 
     Composed from the shipped group files, so this fails if a config ever
     names a target whose signature disagrees with how the runner builds it.
-    Veros is an optional dependency and is not imported here: the check is
-    on the composed node.
+
+    Resolving `jem.components.VerosComponent.from_setup` DOES import Veros --
+    `jem.components.__getattr__` imports the wrapper module, which imports
+    veros at module scope -- so without Veros installed `_accepts_grid` would
+    answer False because the lookup failed, not because the signature says so,
+    and the test would pass without checking anything. The signature is
+    therefore read directly, and the assertion skipped where it cannot be.
     """
     for option in ("slab", "slab_relax", "slab_qflux"):
         assert runners._accepts_grid(composed([f"ocean={option}"]).ocean), option
-    assert not runners._accepts_grid(composed(["ocean=veros"]).ocean)
+
+    veros_node = composed(["ocean=veros"]).ocean
+    pytest.importorskip("veros", reason="`ocean=veros`'s target cannot be resolved")
+    resolved = runners.hydra.utils.get_object(str(veros_node._target_))
+    assert runners.GRID_KEYWORD not in inspect.signature(resolved).parameters
+    assert not runners._accepts_grid(veros_node)
 
 
 # ---------------------------------------------------------------------------

@@ -919,8 +919,11 @@ however the run was chunked, and zero-padding it keeps a directory listing in
 run order. A chunk *index* would not do: the chunk length belongs to the run
 and not to the checkpoint, so a run resumed with a different `chunk` gives the
 same simulated time a different index and would write over a file the earlier
-run already wrote. `write_chunk` warns when it does overwrite an existing file,
-which (a resume never colliding) means a rerun into the same directory. The
+run already wrote. `write_chunk` warns when it does overwrite an existing file. That
+normally means a rerun into the same directory; the one other way to reach it
+is a run killed after a chunk's output was written and before its checkpoint
+was, which resumes at the step it already wrote — so the warning reports the
+fact without asserting which happened. The
 chunk index survives as what it is: a counter for the health check and the log
 line. Each chunk is labelled with its own dates, because `first_step` is passed
 through to `Coupler.to_xarray`.

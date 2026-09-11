@@ -228,8 +228,11 @@ def write_chunk(
     An existing file is overwritten, with a warning. Writing a second run into
     a directory that already holds one is a deliberate act (a rerun, or a
     configuration changed and repeated), and refusing it would be worse than
-    saying so; a *resumed* run never collides, because it starts where the
-    previous one stopped.
+    saying so. A resumed run normally does not collide, because it starts from
+    the step its checkpoint holds; the one case where it does is a run killed
+    between writing a chunk's output and writing that chunk's checkpoint,
+    which resumes at the step it already wrote -- so the warning reports a
+    fact and does not assert which of the two happened.
 
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
@@ -279,8 +282,10 @@ def write_chunk(
         if path.exists():
             logger.warning(
                 "%s already exists and is being overwritten: this directory "
-                "already holds output for coupled step %d. A resumed run never "
-                "collides, so this is a rerun into the same output directory.",
+                "already holds output for coupled step %d. Either this is a "
+                "rerun into the same output directory, or an earlier run was "
+                "killed after writing this chunk and before checkpointing it, "
+                "so the resume is repeating the chunk.",
                 path, first_step,
             )
         datasets[name].to_netcdf(path, engine="netcdf4")
