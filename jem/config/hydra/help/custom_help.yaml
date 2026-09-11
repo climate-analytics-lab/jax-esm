@@ -1,5 +1,14 @@
 app_name: JEM
 
+# Hydra renders this template TWICE: OmegaConf resolves it as a config value,
+# and `string.Template.substitute` then fills in Hydra's own $APP_CONFIG_GROUPS
+# and friends. So a literal `${...}` example -- which this help has to show,
+# because the packaged-data resolvers are the whole point of it -- has to
+# survive both. `$\${` is that: OmegaConf's `\${` yields `${`, leaving `$${`,
+# which `string.Template` renders as `${`. Written any other way, `--help`
+# either prints this machine's absolute paths in place of the example or
+# aborts with "Invalid placeholder in string".
+
 
 template: |
 
@@ -53,6 +62,7 @@ template: |
     and `run` keys are not the atmosphere's and nothing would read them.
 
   Files shipped with the packages can be named without a machine-specific
-  path: ``${jcm_data:bc/t30/clim/forcing.nc}``, ``${jem_data:JCM_T31.SCRIP.nc}``.
+  path: ``$\${jcm_data:bc/t30/clim/forcing.nc}``,
+  ``$\${jem_data:JCM_T31.SCRIP.nc}``.
 
   See the project README for runnable examples and the most common overrides.

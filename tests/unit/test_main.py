@@ -106,6 +106,35 @@ def test_a_stopped_run_exits_one_as_a_process(tmp_path):
     assert finished.returncode == 1, finished.stdout[-2000:] + finished.stderr[-2000:]
 
 
+def test_help_prints_the_resolver_syntax_rather_than_this_machine_s_paths(tmp_path):
+    """`--help` must show `${jcm_data:...}`, not what it resolves to here.
+
+    The custom help template is rendered twice on its way to the terminal --
+    OmegaConf resolves it as a config value, and `string.Template` then fills
+    in Hydra's own `$APP_CONFIG_GROUPS` -- so the packaged-data examples it
+    exists to teach are exactly the thing both stages want to eat. Written
+    plainly they come out as this machine's absolute paths (and abort `--help`
+    if the file named is ever removed from the package); escaped for only one
+    of the two stages, `--help` dies with "Invalid placeholder in string".
+    A subprocess, because neither failure is visible any other way.
+    """
+    repository = pathlib.Path(__file__).resolve().parents[2]
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(repository), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    finished = subprocess.run(
+        [sys.executable, "-m", "jem.main", "--help"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=600,
+    )
+    assert finished.returncode == 0, finished.stderr[-2000:]
+    assert "${jcm_data:bc/t30/clim/forcing.nc}" in finished.stdout
+    assert "${jem_data:JCM_T31.SCRIP.nc}" in finished.stdout
+    # Nothing of this machine's filesystem leaked in through a resolver.
+    assert str(repository) not in finished.stdout
+
+
 def test_main_sets_the_package_log_level_from_the_config(cfg, monkeypatch):
     """`coupled_run.log_level` configures the `jem` logger, not the root one.
 
