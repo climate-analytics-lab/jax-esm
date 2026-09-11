@@ -258,6 +258,26 @@ def test_accepts_grid_reads_the_target_signature(target, accepts):
     assert runners._accepts_grid(node) is accepts
 
 
+def test_a_broken_target_lookup_is_not_read_as_taking_no_grid(monkeypatch):
+    """A lookup that is itself broken must raise, not answer "no grid".
+
+    `_accepts_grid` swallows the errors a *lookup* raises, because an
+    unresolvable target is `instantiate`'s to report. It must not swallow
+    anything else: `hydra.utils.get_object` needs hydra-core >= 1.3, and on an
+    older Hydra the resulting `AttributeError` would otherwise be read as
+    "this component takes no grid" -- for EVERY component, slabs included,
+    leaving the run to die inside `instantiate` with a message naming neither
+    Hydra nor the grid.
+    """
+    def broken(path):
+        raise AttributeError("module 'hydra.utils' has no attribute 'get_object'")
+
+    monkeypatch.setattr(runners.hydra.utils, "get_object", broken)
+    node = OmegaConf.create({"_target_": "tests.unit.test_runners.TakesAGrid"})
+    with pytest.raises(AttributeError, match="get_object"):
+        runners._accepts_grid(node)
+
+
 def test_a_component_that_brings_its_own_grid_gets_none_built():
     """No grid is even built for a component that does not take one.
 

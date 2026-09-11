@@ -466,7 +466,14 @@ def _accepts_grid(node: Any) -> bool:
     A target that cannot be resolved (a typo, or an optional dependency that
     is not installed) answers ``False``: no grid is built, and
     ``hydra.utils.instantiate`` then raises the real import error, which says
-    far more than anything this could invent.
+    far more than anything this could invent. Only the errors a *lookup*
+    raises are swallowed for that -- ``ImportError`` and the ``ValueError``
+    Hydra gives an invalid dotstring. Anything else means the lookup itself is
+    broken rather than the target missing, and it must not be mistaken for
+    "this component takes no grid": that answer is indistinguishable from the
+    truthful one, and it would silently deny every slab component the grid it
+    requires, leaving a run to die inside ``instantiate`` with a message
+    naming nothing.
 
     Parameters
     ----------
@@ -487,7 +494,7 @@ def _accepts_grid(node: Any) -> bool:
         # is a class, `jem.components.VerosComponent.from_setup` a classmethod
         # -- and the typed lookups reject (and log an error about) the other.
         resolved = hydra.utils.get_object(str(target))
-    except Exception:
+    except (ImportError, ValueError):
         logger.debug("Could not resolve _target_ %r; no grid injected.", target)
         return False
     try:
