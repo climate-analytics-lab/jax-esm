@@ -48,6 +48,40 @@ def example_exchanger(components: dict[str, Carry], time: CouplingTime):
     return components
 
 
+class TakesAGrid:
+    """A component built *on* a grid, like every slab model. See below."""
+
+    def __init__(self, grid, name="stub"):
+        """Record the grid the runner injected."""
+        self.grid = grid
+        self.name = name
+
+
+class BringsItsOwnGrid:
+    """A component with a grid of its own, like the Veros ocean wrapper.
+
+    ``from_setup`` mirrors :meth:`jem.components.VerosComponent.from_setup`
+    in the one respect that matters here: it forwards every keyword it does
+    not recognise to a setup factory, so a ``grid=`` the runner injected
+    would not be quietly ignored -- it would reach the factory and be
+    rejected there, which is the bug this stub pins.
+    """
+
+    def __init__(self, setup, **setup_kwargs):
+        """Keep whatever the config node carried."""
+        self.setup = setup
+        self.setup_kwargs = setup_kwargs
+
+    @classmethod
+    def from_setup(cls, setup, **setup_kwargs):
+        """Build from an importable setup path, as the Veros wrapper does."""
+        if "grid" in setup_kwargs:
+            raise TypeError(
+                "generateVerosSetup() got an unexpected keyword argument 'grid'"
+            )
+        return cls(setup, **setup_kwargs)
+
+
 @pytest.fixture
 def restore_constants():
     """Undo a process-global ``jcm.constants`` override made by a test."""
@@ -193,6 +227,67 @@ def test_constants_override_reaches_the_build(restore_constants):
     assert jcm.constants.grav != 9.7
     runners.build_atmosphere(composed(["+atmosphere.constants.grav=9.7"]))
     assert jcm.constants.grav == pytest.approx(9.7)
+
+
+# ---------------------------------------------------------------------------
+# A grid is injected only into a component that takes one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("target", "accepts"),
+    [
+        ("tests.unit.test_runners.TakesAGrid", True),
+        ("tests.unit.test_runners.BringsItsOwnGrid", False),
+        ("tests.unit.test_runners.BringsItsOwnGrid.from_setup", False),
+        # Not resolvable at all: no grid, and `instantiate` reports the real
+        # import error rather than this deciding what went wrong.
+        ("tests.unit.test_runners.NoSuchComponent", False),
+    ],
+)
+def test_accepts_grid_reads_the_target_signature(target, accepts):
+    """Whether a grid is injected is a question about the target, not a name list.
+
+    Both spellings of a `_target_` have to be resolved -- a class
+    (`jem.components.SlabOceanModel`) and a classmethod
+    (`jem.components.VerosComponent.from_setup`) -- and a `**kwargs`
+    catch-all must not count as taking a grid: that is exactly the signature
+    that swallows the keyword and fails somewhere else.
+    """
+    node = OmegaConf.create({"_target_": target})
+    assert runners._accepts_grid(node) is accepts
+
+
+def test_a_component_that_brings_its_own_grid_gets_none_built():
+    """No grid is even built for a component that does not take one.
+
+    `atm=None` is the point: `build_grid` would immediately fail on it, so
+    this passing proves the grid is not merely built and dropped. A Veros
+    ocean has its own bathymetry and land-sea mask, and a `SlabGrid` made
+    from the atmosphere's geometry would describe a grid nothing runs on.
+    """
+    veros_like = OmegaConf.create(
+        {"_target_": "tests.unit.test_runners.BringsItsOwnGrid.from_setup",
+         "setup": "some_case.generateVerosSetup"}
+    )
+    assert runners._injected_grid(veros_like, atm=None) == {}
+
+    built = runners.build_component(veros_like)
+    assert built.setup == "some_case.generateVerosSetup"
+    assert built.setup_kwargs == {}
+
+
+def test_the_shipped_ocean_options_ask_for_what_they_take():
+    """`ocean=veros` composes a node that takes no grid; the slabs take one.
+
+    Composed from the shipped group files, so this fails if a config ever
+    names a target whose signature disagrees with how the runner builds it.
+    Veros is an optional dependency and is not imported here: the check is
+    on the composed node.
+    """
+    for option in ("slab", "slab_relax", "slab_qflux"):
+        assert runners._accepts_grid(composed([f"ocean={option}"]).ocean), option
+    assert not runners._accepts_grid(composed(["ocean=veros"]).ocean)
 
 
 # ---------------------------------------------------------------------------

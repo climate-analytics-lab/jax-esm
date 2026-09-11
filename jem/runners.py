@@ -25,6 +25,7 @@ component name in the coupler, and so which rows of
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -65,6 +66,11 @@ GROUP_TO_NAME = {"ocean": "ocn", "land": "lnd", "seaice": "seaice"}
 #: an object the runner makes and injects. They are read by :func:`build_grid`
 #: and removed before the node is instantiated.
 RUNNER_ONLY_KEYS = ("grid_file", "land_fraction_file")
+
+#: The keyword :func:`build_coupler` injects a built grid under, and the
+#: parameter a component must declare to be given one. See
+#: :func:`_accepts_grid`.
+GRID_KEYWORD = "grid"
 
 #: How the named regridders of the ``regrid`` group map onto the keys
 #: :func:`jem.exchangers.default_exchanges` asks for. A flux or an areal
@@ -356,7 +362,7 @@ def build_coupler(cfg: DictConfig) -> Coupler:
         if node is None:
             logger.debug("No %s component (%s=none).", name, group)
             continue
-        components[name] = build_component(node, grid=build_grid(node, atm))
+        components[name] = build_component(node, **_injected_grid(node, atm))
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)
@@ -409,6 +415,89 @@ def run(cfg: DictConfig) -> driver.RunResult:
 
 
 # -- the objects a config cannot name ---------------------------------------
+
+
+def _injected_grid(node: Any, atm: JCMComponent) -> dict[str, SlabGrid]:
+    """Return the ``grid=`` keyword for ``node``, or nothing at all.
+
+    A component that brings its own grid -- an ocean GCM with its own
+    bathymetry -- neither takes one nor needs one built, so no grid is made
+    for it either: :func:`build_grid` would read the atmosphere's horizontal
+    grid and its land fraction to produce something nothing would use.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig
+        One component's config node.
+    atm : jem.components.jcm.component.JCMComponent
+        The already-built atmosphere, for :func:`build_grid`.
+
+    Returns
+    -------
+    dict
+        ``{"grid": SlabGrid}``, or ``{}``.
+
+    """
+    if not _accepts_grid(node):
+        logger.debug(
+            "%s takes no grid, so none is built for it.", node.get("_target_")
+        )
+        return {}
+    return {GRID_KEYWORD: build_grid(node, atm)}
+
+
+def _accepts_grid(node: Any) -> bool:
+    """Return whether the thing ``node`` builds takes a ``grid=`` argument.
+
+    The slab components are built **on** a grid, which is a live object no
+    configuration file can name, so the runner makes one and injects it. A
+    component that brings its own grid -- an ocean GCM with its own
+    bathymetry and its own land-sea mask -- does not take one, and handing it
+    a grid anyway is not a harmless extra: ``VerosComponent.from_setup``
+    passes every keyword it does not recognise on to the Veros setup factory,
+    which rejects an unknown ``grid``.
+
+    So the question is asked of the target itself rather than answered by a
+    list of component names here: the ``_target_`` is resolved to the class
+    or function it names and its signature inspected for an explicit ``grid``
+    parameter. A ``**kwargs`` catch-all does not count -- that is exactly the
+    case that swallows the keyword and fails somewhere else.
+
+    A target that cannot be resolved (a typo, or an optional dependency that
+    is not installed) answers ``False``: no grid is built, and
+    ``hydra.utils.instantiate`` then raises the real import error, which says
+    far more than anything this could invent.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig or None
+        One component's config node.
+
+    Returns
+    -------
+    bool
+
+    """
+    target = None if node is None else node.get("_target_")
+    if target is None:
+        return False
+    try:
+        # `get_object` rather than `get_class`/`get_method`, because a
+        # `_target_` is legitimately either -- `jem.components.SlabOceanModel`
+        # is a class, `jem.components.VerosComponent.from_setup` a classmethod
+        # -- and the typed lookups reject (and log an error about) the other.
+        resolved = hydra.utils.get_object(str(target))
+    except Exception:
+        logger.debug("Could not resolve _target_ %r; no grid injected.", target)
+        return False
+    try:
+        signature = inspect.signature(resolved)
+    except (TypeError, ValueError):
+        return False
+    parameter = signature.parameters.get(GRID_KEYWORD)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+    )
 
 
 def _runner_only_value(node: Any, key: str) -> Any:

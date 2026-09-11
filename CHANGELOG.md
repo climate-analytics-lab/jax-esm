@@ -69,7 +69,11 @@ Breaking changes are marked; everything else is additive.
   a group file and never by adding a branch to the runner. What it injects is
   what a config file cannot name: a surface component's `SlabGrid` (from the
   built atmosphere's `coords.horizontal` and `terrain.fmask`, or from a SCRIP
-  `grid_file`), the regridders, and the coupling timestep. `+atmosphere.constants.*`
+  `grid_file`), the regridders, and the coupling timestep. A grid is injected
+  only into a component whose `_target_` actually declares a `grid` parameter
+  (the signature is inspected; a `**kwargs` catch-all does not count), and for
+  one that does not — a Veros ocean, which brings its own bathymetry and mask —
+  no grid is built at all. `+atmosphere.constants.*`
   reaches `jcm.runners.apply_constants_overrides` *before* the model is built,
   and because the surface components read the same process-global singleton,
   one such override moves the whole Earth system.

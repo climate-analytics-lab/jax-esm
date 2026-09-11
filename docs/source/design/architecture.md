@@ -993,6 +993,17 @@ atmosphere's `coords.horizontal` and `terrain.fmask`, or from a SCRIP
 `grid_file`), the regridders, and the coupling timestep — injected into
 `hydra.utils.instantiate` after the keys that describe them are removed.
 
+**A grid goes only to a component that asks for one.** `_accepts_grid` resolves
+the node's `_target_` (a class or a classmethod — both spellings occur) and
+looks for an explicit `grid` parameter in its signature; a `**kwargs` catch-all
+does not count, because that is the signature that swallows the keyword and
+fails elsewhere. `VerosComponent.from_setup` forwards every keyword it does not
+recognise to the Veros setup factory, so an injected `grid=` would have been
+rejected *there*, with a message about the factory. A component that takes no
+grid does not get one **built** either: it brings its own bathymetry and
+land-sea mask, and a `SlabGrid` made from the atmosphere's geometry would
+describe a grid nothing runs on.
+
 **Packaged data resolvers.** `${jcm_data:bc/t30/clim/forcing.nc}` and
 `${jem_data:DisplacedPoleGrid.SCRIP.nc}` resolve to files inside the installed
 `jcm.data` and `jem.data` packages; importing `jem.config` registers them. They
