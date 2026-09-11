@@ -148,6 +148,11 @@ Two things worth knowing:
   `atmosphere.run` is the atmosphere's run config, and a `run` group here would
   shadow jax-gcm's. `coupled_run/default.yaml` is the complete schema, so every
   key is overridable without a `+`.
+- **The exit status means what a scheduler thinks it means.** `0` when the run
+  reached the time it was asked for, `1` when the health gate stopped it early
+  (the output and checkpoint written so far are kept, and the reason is
+  logged). So `python -m jem.main ... && <post-processing>` runs the
+  post-processing only on a run that finished.
 
 The YAML is wiring only — `_target_`, required input files, and the non-default
 choices that define a named configuration. Every physics default lives on the

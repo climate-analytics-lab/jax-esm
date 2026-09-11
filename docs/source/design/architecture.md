@@ -948,6 +948,12 @@ for a coupled run:
 python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
 ```
 
+**Exit status.** `0` if the run reached `total_time`, `1` if the health gate
+stopped it early — `jem.main` raises `SystemExit(1)` after logging the last
+report. A run stopped by the gate keeps everything it wrote, but it did not do
+what it was asked to, and the exit status is the only thing a queue system, a
+CI job or a shell `&&` can see.
+
 **jax-gcm's own groups, re-rooted under `atmosphere`.** `jem/config/config.yaml`
 puts `pkg://jcm.config` on Hydra's search path and composes jcm's groups at
 `atmosphere.*`, so `cfg.atmosphere` is exactly the config

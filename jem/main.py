@@ -24,6 +24,14 @@ JAX-ESM's own::
 ``python -m jem.main --help`` lists the groups and the override spellings;
 ``--cfg job`` prints the fully composed config without running anything.
 
+Exit status
+-----------
+``0`` when the run reached the time it was asked for, ``1`` when the health
+gate stopped it early, and whatever Hydra reports for a configuration or
+build error. A run that stops early is a *failure* as far as a scheduler,
+a shell ``&&`` or a CI job is concerned -- the output it wrote is kept and
+the reason is logged, but the command must not look like it succeeded.
+
 """
 
 import logging
@@ -44,7 +52,22 @@ logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Run one coupled simulation, configured entirely by ``cfg``."""
+    """Run one coupled simulation, configured entirely by ``cfg``.
+
+    Returns normally when the run completed, and raises ``SystemExit(1)``
+    when the health gate stopped it early; see the module docstring.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The composed config, as Hydra hands it over.
+
+    Raises
+    ------
+    SystemExit
+        With code 1 if :attr:`jem.driver.RunResult.completed` is False.
+
+    """
     # The whole package's logger, not the root one: Hydra already configures
     # the root logger for the job, and `coupled_run.log_level` is about how
     # much JAX-ESM itself says.
@@ -61,6 +84,11 @@ def main(cfg: DictConfig) -> None:
             result.steps_completed,
             result.reports[-1] if result.reports else "(none)",
         )
+        # The only thing a scheduler, a `&&` or a CI job can see is the exit
+        # status, so a run the gate stopped must not exit 0. The output and
+        # the checkpoint written so far are kept; this only reports that the
+        # run did not get to the end.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

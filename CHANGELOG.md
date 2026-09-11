@@ -83,7 +83,11 @@ Breaking changes are marked; everything else is additive.
   ```
 
   It sets the `jem` logger from `coupled_run.log_level`, logs the composed
-  config and calls `jem.runners.run`. Nothing prints.
+  config and calls `jem.runners.run`. Nothing prints. It exits `0` when the run
+  reached the time it was asked for and `1` when the health gate stopped it
+  early, so a scheduler, a CI job or a shell `&&` sees a stopped run as the
+  failure it is; the output and the checkpoint written up to that point are
+  kept, and the last health report is logged at ERROR.
 - **`jem/config/`** — JAX-ESM's Hydra configuration. `config.yaml` puts
   **jax-gcm's own config groups under `atmosphere`** through
   `hydra.searchpath: pkg://jcm.config`, so `cfg.atmosphere` is exactly the
