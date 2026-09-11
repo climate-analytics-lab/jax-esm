@@ -1,0 +1,14 @@
+# Regridding between two different horizontal grids, using ESMF weight files
+# generated offline by `ESMF_RegridWeightGen` (JAX-ESM applies them; it does
+# not compute them).
+#
+# The four names are the exchange directions and algorithms an exchanger asks
+# for: `a2o` is atmosphere-to-ocean, `o2a` the reverse; conservative weights
+# are for fluxes and areal fractions (they preserve the budget), bilinear ones
+# for states such as SST (they do not introduce the staircase a conservative
+# map leaves in a smooth field).
+_target_: jem.regrid.ESMFRegridders
+a2o_conserve: ???
+a2o_bilinear: ???
+o2a_conserve: ???
+o2a_bilinear: ???

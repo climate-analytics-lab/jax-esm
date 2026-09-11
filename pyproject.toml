@@ -79,7 +79,13 @@ dev = [
 include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.setuptools.package-data]
-jem = ["data/*.nc"]
+# The YAML config groups are part of the package, not just of the source tree:
+# `python -m jem.main` composes them through `pkg://jem.config`, so an
+# installed wheel that lacks them cannot run anything.
+jem = [
+    "config/**/*.yaml",
+    "data/*.nc",
+]
 
 # Single source of truth for the version: `jem.__version__`. Reading it from
 # the package rather than repeating it here means `jem.__version__` and the

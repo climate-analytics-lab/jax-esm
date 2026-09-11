@@ -1,0 +1,73 @@
+# JAX-ESM's primary config: one coupled model, assembled from group files.
+#
+# The atmosphere is configured by jax-gcm's OWN config groups, re-rooted here
+# under `atmosphere` so that `cfg.atmosphere` is exactly the config
+# `jcm.runners.build_model()` expects. Group and option names are jcm's, so
+# anything that works in `python -m jcm.main` works here with the group's
+# package spelled out:
+#
+#   python -m jem.main physics@atmosphere.physics=held_suarez \
+#       grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15
+#
+# and a whole jax-gcm configuration bundle composes under the atmosphere with
+#
+#   python -m jem.main +configuration@atmosphere=speedy-t31
+#
+# JAX-ESM's own groups (ocean, land, seaice, coupling, regrid, coupled_run)
+# sit at the top level, and `+configuration=<name>` composes a named coupled
+# configuration out of all of them.
+hydra:
+  searchpath:
+    # jcm ships its YAML as package data, so its groups can be composed from
+    # here without vendoring a copy that would drift from the model's.
+    - pkg://jcm.config
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: multirun/${hydra.job.num}
+
+defaults:
+  - _self_
+
+  # --- atmosphere: jcm's config groups, re-rooted under `atmosphere` --------
+  # This list mirrors jcm/config/config.yaml's own defaults one for one; a
+  # group jcm adds has to be added here too, or `cfg.atmosphere` stops being
+  # a config jcm can build from.
+  - physics@atmosphere.physics: speedy
+  - grid@atmosphere.grid: speedy_t31_l8
+  - dycore@atmosphere.dycore: dinosaur
+  - run@atmosphere.run: default
+  - init@atmosphere.init: isothermal
+  - terrain@atmosphere.terrain: aquaplanet
+  - forcing@atmosphere.forcing: default
+  - nudging@atmosphere.nudging: none
+  - diffusion@atmosphere.diffusion: default
+
+  # --- JAX-ESM's own groups -------------------------------------------------
+  - ocean: slab
+  - land: none
+  - seaice: slab
+  - coupling: daily
+  - regrid: same_grid
+  # The coupled run's own settings land at `cfg.run`, but the GROUP is called
+  # `coupled_run` and not `run`: Hydra resolves a group option from the first
+  # search-path entry that has it, and the primary config package (this one)
+  # comes before `pkg://jcm.config`. A `run` group here would therefore shadow
+  # jcm's `run/default.yaml` and `run/longrun.yaml` -- the atmosphere would
+  # silently be handed the coupler's run keys instead of its own, and every
+  # jax-gcm configuration bundle that says `override /run: longrun` (16 of the
+  # 19 shipped ones) would compose the wrong file. Overriding it on the command
+  # line keeps the package: `coupled_run@run=smoke`.
+  - coupled_run@run: default
+
+  - override hydra/help: custom_help
+
+atmosphere:
+  # Optional physical-constant overrides, applied process-globally by
+  # `jcm.runners.apply_constants_overrides` before the atmosphere is built --
+  # e.g. `+atmosphere.constants.grav=9.80665`. Only *base* fields of
+  # `jcm.constants.PhysicalConstants` may be set; derived constants follow.
+  # The coupled components read the same singleton, so one setting here moves
+  # the whole Earth system, not just the atmosphere.
+  constants: {}

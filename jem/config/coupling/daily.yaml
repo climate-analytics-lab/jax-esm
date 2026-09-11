@@ -1,0 +1,28 @@
+# How the components are coupled: how often they exchange, and what the
+# exchange consists of. A daily coupling step is what the shipped examples and
+# every slab configuration use.
+#
+# `null` everywhere else means "use the Python default", which is defined once,
+# in Python, for the set of components that were actually built.
+
+# Interval between exchanges, as a `jcm.date.parse_duration_days` string
+# ("1 day", "12 hours", "1 month"). It is also the step the atmosphere is
+# integrated over between exchanges, so it must be a whole number of the
+# atmosphere's own timesteps.
+timestep: "1 day"
+
+# Order in which exchangers and components are stepped, as `Coupler` takes it.
+# null -> the Coupler's default workflow (every exchanger, then every
+# component).
+workflow: null
+
+# The declarative exchange list.
+# null -> `jem.exchangers.default_exchangers(components)`, which picks the
+# exchanges that the components present can actually support.
+exchangers: null
+
+# An importable dotted path to a single `jem.Exchanger` callable, used INSTEAD
+# of `exchangers` when a configuration needs an exchange that the declarative
+# list cannot express (the Veros configurations do). Setting both is an error
+# the runner reports.
+exchanger: null

@@ -1,0 +1,4 @@
+# @package _global_
+# No sea-ice component. See `ocean/none.yaml` for why the `_global_` header is
+# needed to make the key null rather than empty.
+seaice: null

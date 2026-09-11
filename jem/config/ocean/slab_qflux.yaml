@@ -1,0 +1,12 @@
+# A slab ocean driven by a prescribed Q-flux -- the traditional way to hold a
+# slab near a realistic mean state while letting it respond to a perturbation.
+_target_: jem.components.SlabOceanModel
+# 12-month `qflux` climatology on the ocean grid. Left required because a
+# Q-flux run with no file applies a zero Q-flux, which is a silent no-op
+# rather than the experiment asked for. (Passing `null` explicitly is the
+# supported way to ask for that -- it is what a run that *trains* the Q-flux
+# starts from.)
+q_flux_file: ???
+params:
+  _target_: jem.components.slab.SlabOceanParameters
+  forcing_method: qflux
