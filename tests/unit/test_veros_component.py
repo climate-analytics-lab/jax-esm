@@ -363,3 +363,43 @@ def test_save_state_and_load_state_round_trip(component, grid_shape, tmp_path):
         np.asarray(loaded["forcing"].heat_flux),
         np.asarray(carry["forcing"].heat_flux),
     )
+
+
+def test_a_runtime_setting_is_restored_even_when_the_block_raises():
+    """The process-global Veros setting goes back however the block ends.
+
+    `load_state` has to turn `force_overwrite` off to read a restart, and the
+    rest of a coupled run needs it on. The settings are process-global, so a
+    failed read -- a missing or mismatched HDF5 file -- must not leave the
+    flag flipped: the next thing to write an output would then fail for a
+    reason with no connection to what actually went wrong.
+    """
+    from veros import runtime_settings
+
+    from jem.components.veros_component import _veros_runtime_setting
+
+    before = runtime_settings.force_overwrite
+    locked_before = getattr(runtime_settings, "__locked__", False)
+
+    with pytest.raises(RuntimeError, match="restart is missing"):
+        with _veros_runtime_setting("force_overwrite", not before):
+            assert runtime_settings.force_overwrite is (not before)
+            raise RuntimeError("the restart is missing")
+
+    assert runtime_settings.force_overwrite is before
+    # And the lock the settings were under is put back as it was, rather than
+    # assumed: this module runs before and after `veros.core` is imported.
+    assert getattr(runtime_settings, "__locked__", False) is locked_before
+
+
+@pytest.mark.slow
+def test_load_state_restores_force_overwrite_when_the_restart_is_missing(
+    component, tmp_path
+):
+    """A failed restart read leaves the runtime settings as it found them."""
+    from veros import runtime_settings
+
+    before = runtime_settings.force_overwrite
+    with pytest.raises(Exception):
+        component.load_state(tmp_path / "not-a-checkpoint")
+    assert runtime_settings.force_overwrite is before

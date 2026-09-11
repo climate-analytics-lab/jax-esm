@@ -15,6 +15,8 @@ handed it. That is done once, in the constructor, and said out loud there.
 import importlib
 import logging
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -109,18 +111,39 @@ def configure_veros_runtime() -> None:
             ) from exc
 
 
-def _set_veros_runtime_setting(name: str, value: object) -> None:
-    """Set one locked Veros runtime setting, unlocking it around the write.
+@contextmanager
+def _veros_runtime_setting(name: str, value: object) -> Iterator[None]:
+    """Set one locked Veros runtime setting for the duration of a block.
 
     ``runtime_settings`` locks itself once ``veros.core`` is imported, and
     reading a restart needs ``force_overwrite`` off while the rest of a
     coupled run needs it on. Veros itself offers no supported way to flip a
-    locked setting, so the lock flag is cleared and restored around the
+    locked setting, so the lock flag is cleared and restored around each
     assignment.
+
+    It is a context manager, and the restore is in a ``finally``, because the
+    settings are **process-global**: a failed ``read_restart`` -- a missing or
+    mismatched HDF5 file -- would otherwise leave the whole process with
+    ``force_overwrite`` off, and the next thing that tried to write an output
+    or a restart would fail for a reason with no connection to the one that
+    actually went wrong. The previous value is put back rather than a
+    hard-coded one, so this makes no assumption about who set it.
     """
-    object.__setattr__(runtime_settings, "__locked__", False)
-    setattr(runtime_settings, name, value)
-    object.__setattr__(runtime_settings, "__locked__", True)
+    previous = getattr(runtime_settings, name)
+    was_locked = getattr(runtime_settings, "__locked__", False)
+
+    def assign(to: object) -> None:
+        object.__setattr__(runtime_settings, "__locked__", False)
+        try:
+            setattr(runtime_settings, name, to)
+        finally:
+            object.__setattr__(runtime_settings, "__locked__", was_locked)
+
+    assign(value)
+    try:
+        yield
+    finally:
+        assign(previous)
 
 
 # Deliberate import-time side effect: see configure_veros_runtime(). This is the
@@ -829,16 +852,15 @@ class VerosComponent:
         from veros.restart import read_restart
 
         state = self.model.state
-        # Veros refuses to read a restart while `force_overwrite` is on, which
-        # this module turns on so that a coupled run may rewrite its own
-        # outputs; it is restored immediately afterwards.
-        _set_veros_runtime_setting("force_overwrite", False)
         with state.settings.unlock():
             state.settings.restart_input_filename = str(
                 directory / VEROS_RESTART_FILENAME
             )
-        read_restart(state)
-        _set_veros_runtime_setting("force_overwrite", True)
+        # Veros refuses to read a restart while `force_overwrite` is on, which
+        # this module turns on so that a coupled run may rewrite its own
+        # outputs; the context manager puts it back however the read ends.
+        with _veros_runtime_setting("force_overwrite", False):
+            read_restart(state)
 
         template = {
             "derived": VerosDerived.zeros(self.horizontal_shape),
