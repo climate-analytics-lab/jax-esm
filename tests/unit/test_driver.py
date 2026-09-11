@@ -201,18 +201,58 @@ def test_unhealthy_chunk_stops_the_run(coupler, tmp_path):
 
 
 def test_unhealthy_chunk_can_be_logged_and_ignored(coupler, tmp_path):
-    """`bail_on_unhealthy=False` integrates an unhealthy state and says so."""
+    """`bail_on_unhealthy=False` integrates an unhealthy state and says so.
+
+    It also keeps checkpointing: the run is carrying on, so it has to stay
+    resumable from where it has got to -- which is the opposite of what
+    bailing does.
+    """
+    checkpoint = tmp_path / "checkpoint"
     result = run_chunked(
         coupler,
         total_time="4 days",
         chunk="2 days",
-        output_dir=tmp_path,
+        output_dir=tmp_path / "output",
+        checkpoint_path=checkpoint,
         health_check=lambda datasets, index, days: (False, {"chunk": index}),
         bail_on_unhealthy=False,
     )
     assert result.completed
     assert result.steps_completed == 4
     assert len(result.reports) == 2
+    assert int(two_slabs().load_state(checkpoint).step) == 4
+
+
+def test_a_rejected_chunk_does_not_overwrite_the_last_good_checkpoint(
+    coupler, tmp_path
+):
+    """Bailing leaves the restart point at the last chunk that passed.
+
+    There is one checkpoint directory and it is overwritten in place, so
+    checkpointing a chunk the gate has just rejected would destroy the last
+    healthy state: the resume would start from the broken one, fail again and
+    have nothing left to go back to. The gate therefore runs before the save.
+    """
+    def fails_on_the_second_chunk(datasets, chunk_index, elapsed_days):
+        return chunk_index < 1, {"chunk": chunk_index}
+
+    checkpoint = tmp_path / "checkpoint"
+    result = run_chunked(
+        coupler,
+        total_time="6 days",
+        chunk="2 days",
+        output_dir=tmp_path / "output",
+        checkpoint_path=checkpoint,
+        health_check=fails_on_the_second_chunk,
+    )
+
+    assert not result.completed
+    # Two chunks were integrated, and the second one's output was kept ...
+    assert result.steps_completed == 4
+    assert len(result.paths) == 4
+    # ... but only the first was checkpointed, so a resume repeats the chunk
+    # that failed instead of starting from its state.
+    assert int(two_slabs().load_state(checkpoint).step) == 2
 
 
 def test_no_health_check_collects_no_reports(coupler, tmp_path):

@@ -8,7 +8,7 @@ decide it again, slightly differently. :func:`run_chunked` is that loop,
 written once:
 
     integrate a chunk -> label it -> write its (reduced) output ->
-    checkpoint -> check the state is still healthy -> repeat
+    check the state is still healthy -> checkpoint -> repeat
 
 **Every default a run has lives here**, on :func:`run_chunked`'s signature.
 ``jem/config/coupled_run/*.yaml`` names the same keys and :mod:`jem.runners`
@@ -43,6 +43,13 @@ same command as starting it: point at the path and the run either starts from
 scratch (nothing there) or continues from where it stopped. The cost is that
 only the newest state survives; a run that wants a history of restart points
 keeps its own directory of them and passes each one in turn.
+
+Because there is only ever one checkpoint, the health gate runs *before* it
+is written and a chunk the gate rejects is not checkpointed at all: saving it
+would overwrite the last healthy restart point with a broken state, and a
+resume would then start from the broken one with nothing left to go back to.
+A rejected run therefore resumes by repeating the chunk that failed, from the
+last chunk that passed.
 
 The overwrite is safe because :mod:`jem.checkpoint` publishes the carry file
 -- which holds the coupled step counter -- last, after removing the previous
@@ -159,6 +166,14 @@ def default_health_check(
     all, so the same atmosphere blowing up in the last hours of a chunk would
     read as healthy in the reduced output that was written.
 
+    The finest thing it can see is therefore one **coupling step**, not one
+    model timestep: :class:`~jem.components.jcm.component.JCMComponent`
+    integrates each coupling step with JCM's own ``output_averages``, so the
+    records being stacked are already step means. A NaN still propagates
+    through that mean, so a blow-up is caught; a finite excursion that is over
+    within a coupling step is averaged with the rest of the step and can be
+    missed. Coupling more often is what makes the gate look more closely.
+
     A coupled model with no atmosphere -- a slab-only test, a spring, an
     ocean-only configuration -- has nothing this can look at, so it is
     reported as skipped and the run continues. That is a deliberate "no
@@ -238,7 +253,8 @@ def run_chunked(
         the files only.
     health_check : callable, optional
         ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run after
-        each chunk has been written and checkpointed. ``datasets`` is the
+        each chunk has been written and **before** it is checkpointed.
+        ``datasets`` is the
         chunk **as it was integrated** -- every record, unreduced -- and not
         the thinned or averaged form written to disk, so that a gate judging
         a chunk by its last record or its extremes sees them however the run
@@ -246,13 +262,15 @@ def run_chunked(
         and no reports are collected.
     bail_on_unhealthy : bool
         Stop at the first chunk the health check rejects, returning a result
-        with ``completed=False``. False logs the failure and carries on --
-        which is what a run studying the instability itself wants.
+        with ``completed=False``. That chunk's output is kept but it is not
+        checkpointed, so the restart point stays at the last chunk that
+        passed. False logs the failure, checkpoints and carries on -- which
+        is what a run studying the instability itself wants.
     checkpoint_path : path-like, optional
         Directory holding the run's restart state. The coupled carry is
-        written there after every chunk, and a run started with a complete
-        checkpoint already there resumes from it. ``None`` disables
-        checkpointing.
+        written there after every chunk the health gate accepts, and a run
+        started with a complete checkpoint already there resumes from it.
+        ``None`` disables checkpointing.
 
     Returns
     -------
@@ -338,8 +356,6 @@ def run_chunked(
             datasets, output_averages=output_averages, subsample=subsample
         )
         paths.extend(write_chunk(reduced, output_dir, first_step))
-        if checkpoint_path is not None:
-            coupler.save_state(carry, Path(checkpoint_path))
 
         elapsed_days = float(coupler.coupling_time(carry.step).sim_time) / SECONDS_PER_DAY
         logger.info(
@@ -348,25 +364,48 @@ def run_chunked(
             chunk_index, steps, int(carry.step), elapsed_days,
             elapsed_days / coupler.days_per_year, len(reduced),
         )
-        if health_check is None:
-            continue
 
-        ok, report = health_check(datasets, chunk_index, elapsed_days)
-        reports.append(report)
-        if ok:
-            logger.debug("Chunk %d passed the health check: %s", chunk_index, report)
-            continue
-        logger.error(
-            "Chunk %d failed the health check at %.4g simulated days: %s",
-            chunk_index, elapsed_days, report,
-        )
-        if bail_on_unhealthy:
+        ok = True
+        if health_check is not None:
+            ok, report = health_check(datasets, chunk_index, elapsed_days)
+            reports.append(report)
+            if ok:
+                logger.debug(
+                    "Chunk %d passed the health check: %s", chunk_index, report
+                )
+            else:
+                logger.error(
+                    "Chunk %d failed the health check at %.4g simulated days: %s",
+                    chunk_index, elapsed_days, report,
+                )
+        stopping = not ok and bail_on_unhealthy
+
+        # The gate runs before the checkpoint, and a chunk it rejects is not
+        # checkpointed: `jem.checkpoint` keeps a SINGLE restart directory and
+        # overwrites it, so saving a state the gate has just rejected would
+        # replace the last good one with it and leave the run nothing to go
+        # back to -- a resume would start from the broken state, fail again,
+        # and have lost the chunk that was still healthy. Stopping instead
+        # leaves the restart point at the last chunk that passed, so the run
+        # resumes by repeating the chunk that failed. A run integrating an
+        # unhealthy state deliberately (`bail_on_unhealthy=False`) does
+        # checkpoint it: it is carrying on, and has to stay resumable.
+        if checkpoint_path is not None and not stopping:
+            coupler.save_state(carry, Path(checkpoint_path))
+        if stopping:
             logger.error(
                 "Stopping after %d coupled steps; the output written so far is "
-                "kept. Pass bail_on_unhealthy=False to integrate an unhealthy "
-                "state anyway.", int(carry.step),
+                "kept, and the checkpoint still holds the last chunk that "
+                "passed. Pass bail_on_unhealthy=False to integrate an "
+                "unhealthy state anyway.", int(carry.step),
             )
             return RunResult(carry, int(carry.step), False, reports, paths)
+
+        # Both copies of the chunk are dropped before the next one is built.
+        # Each is a chunk of host-side arrays -- a month of an atmosphere is
+        # gigabytes -- and holding one while `chunk_datasets` labels the next
+        # would double the run's peak memory for nothing.
+        del datasets, reduced
 
     return RunResult(carry, int(carry.step), True, reports, paths)
 

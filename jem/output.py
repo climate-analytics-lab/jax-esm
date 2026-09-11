@@ -242,10 +242,11 @@ def write_chunk(
     a directory that already holds one is a deliberate act (a rerun, or a
     configuration changed and repeated), and refusing it would be worse than
     saying so. A resumed run normally does not collide, because it starts from
-    the step its checkpoint holds; the one case where it does is a run killed
-    between writing a chunk's output and writing that chunk's checkpoint,
-    which resumes at the step it already wrote -- so the warning reports a
-    fact and does not assert which of the two happened.
+    the step its checkpoint holds; it does when the chunk it already wrote was
+    never checkpointed -- either because the run was killed in between, or
+    because the health gate rejected that chunk, which is deliberately not
+    checkpointed -- so the warning reports a fact and does not assert which of
+    them happened.
 
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
@@ -296,9 +297,10 @@ def write_chunk(
             logger.warning(
                 "%s already exists and is being overwritten: this directory "
                 "already holds output for coupled step %d. Either this is a "
-                "rerun into the same output directory, or an earlier run was "
-                "killed after writing this chunk and before checkpointing it, "
-                "so the resume is repeating the chunk.",
+                "rerun into the same output directory, or an earlier run "
+                "wrote this chunk without checkpointing it -- killed in "
+                "between, or stopped by the health gate -- so the resume is "
+                "repeating the chunk.",
                 path, first_step,
             )
         datasets[name].to_netcdf(path, engine="netcdf4")
@@ -356,6 +358,12 @@ def postprocess_datasets(
     The reductions are the same ones, applied with the same options to each
     component: a chunk is one interval of the run's clock, so a run whose
     output is chunk means wants them from every component that wrote any.
+
+    Nothing here copies. With neither reduction asked for this is the
+    identity and the returned datasets **are** the given ones, so a caller
+    holding both -- :func:`jem.driver.run_chunked` holds the chunk for its
+    health gate and the reduction for the file -- must treat them as one
+    object and not modify either in place.
 
     Parameters
     ----------

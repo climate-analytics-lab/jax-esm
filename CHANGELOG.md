@@ -361,6 +361,12 @@ code this release adds:
   `subsample>1` could drop the chunk's last record — which is the record
   `jcm.diagnostics.check_health` judges, so a model that went bad near the end
   of a chunk was reported healthy and checkpointed.
+- A chunk the health gate rejects is no longer checkpointed. The gate now runs
+  before the save, so a run stopped by it leaves its single restart directory
+  holding the last chunk that *passed*, instead of overwriting it with the
+  state that failed — which a resume would have started from, failed on again,
+  with the last healthy state already gone. `bail_on_unhealthy=False` still
+  checkpoints, because that run is carrying on and has to stay resumable.
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.

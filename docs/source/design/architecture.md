@@ -863,8 +863,9 @@ for each chunk:
     datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
     reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…)
     paths += write_chunk(reduced, output_dir, first_step)
-    coupler.save_state(carry, checkpoint_path)
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
+    if ok or not bail_on_unhealthy:
+        coupler.save_state(carry, checkpoint_path)
 ```
 
 It returns a `RunResult`: the `final_carry`, `steps_completed`
@@ -903,10 +904,25 @@ at all. An atmosphere that blew up in the last hours of a month would then be
 reported healthy and checkpointed. So the loop labels the chunk once with
 `chunk_datasets`, hands *that* to the gate, and applies `postprocess_datasets`
 only to the copy it writes; `datasets_for_chunk` remains the two composed, for
-a caller that wants the reduced form alone.
+a caller that wants the reduced form alone. What the gate can resolve is one
+**coupling step**: `JCMComponent` integrates each coupling step with JCM's own
+`output_averages`, so the records being judged are already step means — a NaN
+propagates through that mean, a finite excursion shorter than a coupling step
+need not.
+
+The gate also runs **before** the checkpoint, and a chunk it rejects is not
+checkpointed (unless `bail_on_unhealthy=False`, where the run carries on and so
+must stay resumable). There is only one checkpoint directory and it is
+overwritten in place, so saving a rejected state would replace the last healthy
+restart point with a broken one and a resume would start from that, fail again,
+and have nothing left to go back to. Bailing instead leaves the restart point
+at the last chunk that passed, so the run resumes by repeating the chunk that
+failed — which is why that chunk's output files are overwritten on the resume,
+with the warning `write_chunk` logs.
 
 **Checkpoints and resume.** `checkpoint_path` is a **single directory**,
-rewritten after every chunk, not a directory of dated restart points. That is
+rewritten after every chunk the health gate accepts, not a directory of dated
+restart points. That is
 what makes resuming a run the same command as starting it: point at the path,
 and the run either starts from scratch or continues from where it stopped. The
 cost is that only the newest state survives; a run that wants a history of

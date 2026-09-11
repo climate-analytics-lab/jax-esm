@@ -182,6 +182,11 @@ command-line form. The checkpoint is one directory, rewritten atomically each
 chunk; a save interrupted half way through is detected and skipped rather than
 resumed from.
 
+The gate runs before the checkpoint, and a chunk it rejects is not
+checkpointed: there is one restart directory and it is overwritten in place, so
+a stopped run leaves it holding the last chunk that passed rather than the
+state that failed.
+
 `output_averages` and `subsample` reduce the *files* only. The health check is
 given each chunk exactly as it was integrated — every record — because it
 judges a chunk by its last record and its extremes, and a chunk mean (which
