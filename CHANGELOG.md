@@ -335,6 +335,25 @@ Breaking changes are marked; everything else is additive.
   belong — the HDF5 restart is Veros' business, not the coupler's. Call
   `Coupler.save_state` / `load_state` rather than any of them.
 
+### Fixed
+
+Defects found by the local review of this change before it was pushed, all in
+code this release adds:
+
+- `run_chunked` validates `subsample` before compiling a trajectory, instead of
+  after the first chunk has been integrated.
+- `jem.runners` no longer reads a broken `_target_` lookup as "this component
+  takes no grid"; `hydra-core>=1.3` is now a stated requirement.
+- `python -m jem.main --help` prints the `${jcm_data:}` / `${jem_data:}`
+  resolver syntax instead of resolving it to the local machine's paths.
+- A `grid_file` / `land_fraction_file` given to a component that takes no grid
+  is refused rather than silently dropped.
+- `VerosComponent.load_state` restores Veros' process-global `force_overwrite`
+  even when the restart read fails.
+- The two shipped Veros configurations state that, with `land=none` and the
+  default atmospheric forcing, the atmosphere runs over land at a constant
+  288.15 K with zero snow and soil water, and name the overrides that change it.
+
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
 Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component
