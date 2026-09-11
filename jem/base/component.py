@@ -40,7 +40,7 @@ import dataclasses
 import datetime
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 import jax
 import jax.numpy as jnp
@@ -112,6 +112,74 @@ def forcing_variable(name: str) -> str:
     if name.startswith(FORCING_VARIABLE_PREFIX):
         return name
     return f"{FORCING_VARIABLE_PREFIX}{name}"
+
+
+#: Name of the variable attribute that records which part of a component's
+#: carry an output variable came from. See :func:`role_attrs`.
+ROLE_ATTRIBUTE = "jem_role"
+
+#: What a variable's role may be: the three sections of the carry layout the
+#: packaged components share (``jem.exchangers`` addresses fields by them).
+Role = Literal["state", "derived", "forcing"]
+
+#: The roles, as a tuple, for validation and for iterating in a test.
+ROLES: tuple[str, ...] = get_args(Role)
+
+
+def role_attrs(role: Role) -> dict[str, str]:
+    """Return the variable attributes marking an output variable's role.
+
+    A packaged component's output says which part of its carry a variable
+    came from in **two** ways, and they are not redundant:
+
+    - The ``forcing_`` name prefix (:func:`forcing_variable`) exists to stop
+      an ``xr.merge`` collision. A field one component computed and the copy
+      another was given through the coupler are *different* variables --
+      coupling is lagged, so the copy is a step behind -- and under one name
+      ``xr.merge`` refuses the two datasets outright. Renaming is the only
+      thing that fixes that, so the prefix stays.
+    - This attribute exists so that nothing has to *parse* names to find out
+      what a variable is. ``ds.filter_by_attrs(jem_role="forcing")`` is the
+      whole query; the alternative, matching a prefix, cannot tell a received
+      ``forcing_q_flux`` from a model whose own field happens to be called
+      ``forcing_shortwave_flux``, and says nothing at all about the rest --
+      whether ``total_heat_flux`` in the ocean's output is state the ocean
+      integrated or a diagnostic it computed.
+
+    So the prefix is a naming rule and this is metadata; every packaged
+    component sets both. The roles are the sections of the carry layout the
+    packaged components share and that :mod:`jem.exchangers` addresses:
+    ``state`` is what the component integrates, ``derived`` what it diagnosed
+    for others to read, ``forcing`` what it was given. A variable that is
+    none of those -- a grid mask, a layer thickness, anything time-invariant
+    that came from the component's configuration rather than its carry -- is
+    left untagged, which is a meaningful answer and not an omission.
+
+    A fresh dict is returned on every call, because xarray keeps the dict it
+    is handed: two variables sharing one attrs dict would share any later
+    edit to it.
+
+    Parameters
+    ----------
+    role : {"state", "derived", "forcing"}
+        Which section of the carry the variable was read from.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{"jem_role": role}``, ready to merge into a variable's attributes.
+
+    Raises
+    ------
+    ValueError
+        If ``role`` is not one of the three.
+
+    """
+    if role not in ROLES:
+        raise ValueError(
+            f"Unknown variable role {role!r}; it must be one of {list(ROLES)!r}."
+        )
+    return {ROLE_ATTRIBUTE: role}
 
 
 def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:

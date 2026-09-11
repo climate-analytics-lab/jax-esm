@@ -9,7 +9,7 @@ import tree_math
 
 from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
-from jem.components.slab.base import SlabModelBase, forcing_variable
+from jem.components.slab.base import SlabModelBase, forcing_variable, role_attrs
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_atmosphere_model.params import SlabAtmosphereParameters
 from jem.utils.idealized_distribution import positive_cosine_cubic_latitude_squared
@@ -261,6 +261,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "long_name": "Total heat flux the air column was forced with",
                     "units": "W m-2",
                     "positive": "upward",
+                    **role_attrs("forcing"),
                 },
             ),
             "internal_total_heat_flux": (
@@ -270,6 +271,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "long_name": "Internally-computed total heat flux (ocean + land sensible)",
                     "units": "W m-2",
                     "positive": "upward",
+                    **role_attrs("derived"),
                 },
             ),
             "mean_air_temperature": (
@@ -278,6 +280,7 @@ class SlabAtmosphereModel(SlabModelBase):
                 {
                     "long_name": "Mean air column temperature",
                     "units": "K",
+                    **role_attrs("state"),
                 },
             ),
             "mean_zonal_wind_velocity": (
@@ -287,6 +290,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "long_name": "Mean velocity of the air column in zonal direction",
                     "units": "m s-1",
                     "positive": "east",
+                    **role_attrs("state"),
                 },
             ),
             "mean_meridional_wind_velocity": (
@@ -296,6 +300,7 @@ class SlabAtmosphereModel(SlabModelBase):
                     "long_name": "Mean velocity of the air column in meridional direction",
                     "units": "m s-1",
                     "positive": "north",
+                    **role_attrs("state"),
                 },
             ),
         }
