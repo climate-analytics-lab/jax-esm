@@ -30,6 +30,11 @@ from jem.exchangers import (
 )
 from jem.output import datasets_for_chunk, postprocess, write_chunk
 
+# The run loop sits on those in turn. `jem.runners` (config -> objects) is
+# deliberately NOT here: it imports Hydra and the component packages, which is
+# most of what `import jem` avoids.
+from jem.driver import RunResult, default_health_check, run_chunked
+
 __all__ = [
     "Carry",
     "Component",
@@ -40,6 +45,7 @@ __all__ = [
     "Exchange",
     "ExchangeSpec",
     "Exchanger",
+    "RunResult",
     "SupportsBind",
     "SupportsCheckpoint",
     "SupportsXarray",
@@ -47,9 +53,11 @@ __all__ = [
     "datasets_for_chunk",
     "default_exchangers",
     "default_exchanges",
+    "default_health_check",
     "default_workflow",
     "nested_carry",
     "postprocess",
+    "run_chunked",
     "with_nested_carry",
     "write_chunk",
 ]
