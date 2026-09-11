@@ -258,6 +258,23 @@ def test_accepts_grid_reads_the_target_signature(target, accepts):
     assert runners._accepts_grid(node) is accepts
 
 
+@pytest.mark.parametrize("key", ["grid_file", "land_fraction_file"])
+def test_a_grid_key_on_a_component_that_takes_no_grid_is_refused(key):
+    """A grid described for a component that cannot use one is an error.
+
+    `build_component` strips the runner-only keys before instantiating, so
+    `ocean.grid_file=...` on a Veros node would otherwise be read by nothing
+    at all: the run would go ahead on the ocean's own bathymetry while the
+    user believes they replaced it.
+    """
+    node = OmegaConf.create(
+        {"_target_": "tests.unit.test_runners.BringsItsOwnGrid.from_setup",
+         "setup": "some_case.generateVerosSetup", key: "somewhere.nc"}
+    )
+    with pytest.raises(ValueError, match=key):
+        runners._injected_grid(node, atm=None)
+
+
 def test_a_broken_target_lookup_is_not_read_as_taking_no_grid(monkeypatch):
     """A lookup that is itself broken must raise, not answer "no grid".
 

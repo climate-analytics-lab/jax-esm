@@ -425,6 +425,12 @@ def _injected_grid(node: Any, atm: JCMComponent) -> dict[str, SlabGrid]:
     for it either: :func:`build_grid` would read the atmosphere's horizontal
     grid and its land fraction to produce something nothing would use.
 
+    Such a node carrying a :data:`RUNNER_ONLY_KEYS` key is refused rather than
+    ignored. Those keys describe the grid this function would have built, and
+    :func:`build_component` drops them before instantiating, so a
+    ``ocean.grid_file=...`` on a Veros node would otherwise reach nothing at
+    all and the run would proceed on a grid the user believes they replaced.
+
     Parameters
     ----------
     node : omegaconf.DictConfig
@@ -437,8 +443,26 @@ def _injected_grid(node: Any, atm: JCMComponent) -> dict[str, SlabGrid]:
     dict
         ``{"grid": SlabGrid}``, or ``{}``.
 
+    Raises
+    ------
+    ValueError
+        If the node describes a grid for a component that takes none.
+
     """
     if not _accepts_grid(node):
+        unusable = [
+            key for key in RUNNER_ONLY_KEYS
+            if _runner_only_value(node, key) is not None
+        ]
+        if unusable:
+            raise ValueError(
+                f"{node.get('_target_')!r} does not take a grid, so "
+                f"{unusable!r} would be read by nothing: these keys describe "
+                "the grid the runner builds for a component that is built ON "
+                "one (the slab models). A component that brings its own grid "
+                "takes its geometry through its own constructor arguments -- "
+                "for a Veros ocean, the keys its setup factory declares."
+            )
         logger.debug(
             "%s takes no grid, so none is built for it.", node.get("_target_")
         )
