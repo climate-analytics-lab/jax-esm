@@ -4,13 +4,24 @@ A run produces stacked diagnostics; :meth:`jem.base.coupler.Coupler.to_xarray`
 turns those into one labelled :class:`xarray.Dataset` per component. What is
 left -- and what every driver has had to re-invent -- is the last step:
 thinning or averaging the records, and writing them out under names that say
-which component and which chunk they came from. That is this module:
+which component they came from and where on the run's clock they start. That
+is this module:
 
 - :func:`postprocess` reduces one dataset (subsample, chunk mean),
 - :func:`write_chunk` writes a mapping of datasets to
-  ``<output_dir>/<component>-<chunk>.nc``,
+  ``<output_dir>/<component>-<first step>.nc``,
 - :func:`datasets_for_chunk` is the two of them either side of
   ``Coupler.to_xarray``, so a run loop needs one call per chunk.
+
+The **coupled step a chunk starts at** is what labels a file, rather than a
+chunk index. A chunk index counts chunks of one particular length, so the same
+simulated time has a different index under a different chunk length -- and a
+run resumed with a different chunk (a perfectly legitimate choice: the chunk
+belongs to the run, not to the checkpoint) would then write over a file the
+earlier run already wrote, with different contents. The coupled step is the
+run's clock: it is unique whatever the chunking, it is the same number the
+checkpoint holds and the one the records are labelled from, and zero-padding
+it keeps a directory listing in run order.
 
 Nothing here holds state, opens a run or decides when a chunk ends; the run
 loop does that and calls these.
@@ -173,14 +184,22 @@ def postprocess(
 
 
 def write_chunk(
-    datasets: Mapping[str, xr.Dataset], output_dir: Path | str, chunk_index: int
+    datasets: Mapping[str, xr.Dataset], output_dir: Path | str, first_step: int
 ) -> list[Path]:
     """Write one chunk's datasets as netCDF and return the paths, in a stable order.
 
-    One file per dataset, named ``<component>-<chunk_index:05d>.nc``: the
-    component first so a directory listing groups a component's chunks
-    together, the index zero-padded so it sorts lexically, and both in the
-    name so a run that is resumed cannot overwrite what it already wrote.
+    One file per dataset, named ``<component>-<first_step:08d>.nc``: the
+    component first so a directory listing groups a component's files
+    together, and the coupled step the chunk starts at -- zero-padded so the
+    listing sorts in run order -- second. That step is the run's own clock, so
+    the name is unique however the run was chunked; see the module docstring
+    for why a chunk index is not.
+
+    An existing file is overwritten, with a warning. Writing a second run into
+    a directory that already holds one is a deliberate act (a rerun, or a
+    configuration changed and repeated), and refusing it would be worse than
+    saying so; a *resumed* run never collides, because it starts where the
+    previous one stopped.
 
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
@@ -194,8 +213,10 @@ def write_chunk(
     output_dir : pathlib.Path or str
         Directory to write into. Created, with its parents, if it does not
         exist.
-    chunk_index : int
-        Which chunk this is, counting from zero.
+    first_step : int
+        The coupled step this chunk starts at -- the ``step`` of the carry it
+        was integrated from, and the same number
+        :func:`datasets_for_chunk` labels its records from.
 
     Returns
     -------
@@ -206,29 +227,36 @@ def write_chunk(
     Raises
     ------
     ValueError
-        If ``chunk_index`` is negative, or two dataset names reduce to the
+        If ``first_step`` is negative, or two dataset names reduce to the
         same file name.
 
     """
-    if chunk_index < 0:
-        raise ValueError(f"chunk_index must not be negative; got {chunk_index!r}.")
+    if first_step < 0:
+        raise ValueError(f"first_step must not be negative; got {first_step!r}.")
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
     paths: dict[Path, str] = {}
     written: list[Path] = []
     for name in sorted(datasets):
-        path = directory / f"{_safe_name(name)}-{chunk_index:05d}.nc"
+        path = directory / f"{_safe_name(name)}-{first_step:08d}.nc"
         if path in paths:
             raise ValueError(
                 f"Datasets {paths[path]!r} and {name!r} would both be written to "
                 f"{path.name!r}; rename one of the components."
             )
         paths[path] = name
+        if path.exists():
+            logger.warning(
+                "%s already exists and is being overwritten: this directory "
+                "already holds output for coupled step %d. A resumed run never "
+                "collides, so this is a rerun into the same output directory.",
+                path, first_step,
+            )
         datasets[name].to_netcdf(path, engine="netcdf4")
         written.append(path)
     logger.debug(
-        "Chunk %d: wrote %d file(s) to %s.", chunk_index, len(written), directory
+        "Coupled step %d: wrote %d file(s) to %s.", first_step, len(written), directory
     )
     return written
 

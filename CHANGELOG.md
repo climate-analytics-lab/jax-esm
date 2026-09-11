@@ -202,7 +202,7 @@ Breaking changes are marked; everything else is additive.
   role it plays, so a coupling table may name either vocabulary.
 - **`jem.output`** — the last step of a chunk, which every driver re-invented:
   `postprocess(dataset, *, output_averages, subsample)`,
-  `write_chunk(datasets, output_dir, chunk_index)` and `datasets_for_chunk`,
+  `write_chunk(datasets, output_dir, first_step)` and `datasets_for_chunk`,
   which is the two of them either side of `Coupler.to_xarray` so a run loop
   needs one call per chunk. `output_averages` is defined against jcm's meaning
   of the same word: jcm replaces each saved record with the mean over its save
@@ -210,9 +210,15 @@ Breaking changes are marked; everything else is additive.
   already one per coupling step — so the coupler's output interval is the
   **chunk**, and the flag replaces a chunk's records with their mean, labelled
   with the chunk's last time and carrying `cell_methods = "time: mean"`. Files
-  are `<component>-<chunk:05d>.nc`: the component first so a listing groups a
-  component's chunks, the index padded so it sorts, and both in the name so a
-  resumed run cannot overwrite what it already wrote. `jem` exports all three.
+  are `<component>-<first step:08d>.nc`: the component first so a listing groups
+  a component's files, and the **coupled step the chunk starts at** second,
+  zero-padded so the listing sorts in run order. The step rather than a chunk
+  index, because the chunk length belongs to the run and not to the checkpoint:
+  a run resumed with a different `chunk` gives the same simulated time a
+  different index, and would write over a file the earlier run had already
+  written. An existing file is overwritten with a WARNING — a resumed run never
+  collides, so it means a rerun into the same directory. `jem` exports all
+  three.
 - **`jem_role`**, a variable attribute on every packaged component's output
   saying which section of the carry a variable came from — `state`, `derived`
   or `forcing` — built by `jem.base.component.role_attrs(role)`. The

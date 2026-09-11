@@ -6,6 +6,8 @@ coupler at the end is there for :func:`~jem.output.datasets_for_chunk`, whose
 whole job is to sit on top of a real ``Coupler.to_xarray``.
 """
 
+import logging
+
 import jax_datetime as jdt
 import numpy as np
 import pytest
@@ -133,13 +135,28 @@ def test_postprocess_needs_a_time_dimension_to_reduce():
 # ---------------------------------------------------------------------------
 
 
-def test_write_chunk_names_files_by_component_and_chunk(tmp_path):
+def test_write_chunk_names_files_by_component_and_first_step(tmp_path):
+    """The name is the component and the coupled step the chunk starts at."""
     datasets = {"ocn": simple_dataset(3), "atm": simple_dataset(3)}
     paths = write_chunk(datasets, tmp_path / "output", 7)
 
-    assert [path.name for path in paths] == ["atm-00007.nc", "ocn-00007.nc"]
+    assert [path.name for path in paths] == ["atm-00000007.nc", "ocn-00000007.nc"]
     assert all(path.parent == tmp_path / "output" for path in paths)
     assert all(path.exists() for path in paths)
+
+
+def test_write_chunk_names_sort_in_run_order(tmp_path):
+    """Zero padding is what makes a directory listing read in run order.
+
+    Unpadded, step 10 would sort before step 9, and a user reading the files
+    in listing order would read the run out of sequence.
+    """
+    for first_step in (0, 9, 10, 1000):
+        write_chunk({"ocn": simple_dataset(2)}, tmp_path, first_step)
+    names = sorted(path.name for path in tmp_path.iterdir())
+    assert names == [
+        "ocn-00000000.nc", "ocn-00000009.nc", "ocn-00000010.nc", "ocn-00001000.nc",
+    ]
 
 
 def test_write_chunk_round_trips_through_open_dataset(tmp_path):
@@ -161,17 +178,41 @@ def test_write_chunk_round_trips_through_open_dataset(tmp_path):
 def test_write_chunk_creates_the_directory_and_keeps_chunks_apart(tmp_path):
     directory = tmp_path / "deeply" / "nested"
     first = write_chunk({"ocn": simple_dataset(2)}, directory, 0)
-    second = write_chunk({"ocn": simple_dataset(2)}, directory, 1)
+    second = write_chunk({"ocn": simple_dataset(2)}, directory, 2)
 
     assert first != second
     assert sorted(p.name for p in directory.iterdir()) == [
-        "ocn-00000.nc", "ocn-00001.nc",
+        "ocn-00000000.nc", "ocn-00000002.nc",
     ]
+
+
+def test_write_chunk_warns_when_it_overwrites(tmp_path, caplog):
+    """Writing over an existing file is allowed, and said out loud.
+
+    A resumed run never lands on a step it has already written, so a
+    collision means a rerun into the same output directory -- deliberate,
+    but worth knowing about when the two runs were not configured the same.
+    """
+    write_chunk({"ocn": simple_dataset(2)}, tmp_path, 4)
+    with caplog.at_level(logging.WARNING, logger="jem.output"):
+        write_chunk({"ocn": simple_dataset(3)}, tmp_path, 4)
+    assert "already exists and is being overwritten" in caplog.text
+
+    # The second write won, so the file holds the second dataset.
+    with xr.open_dataset(tmp_path / "ocn-00000004.nc") as written:
+        assert written.sizes["time"] == 3
+
+
+def test_write_chunk_does_not_warn_on_a_first_write(tmp_path, caplog):
+    """A run writing into an empty directory says nothing about overwriting."""
+    with caplog.at_level(logging.WARNING, logger="jem.output"):
+        write_chunk({"ocn": simple_dataset(2)}, tmp_path, 0)
+    assert caplog.text == ""
 
 
 def test_write_chunk_makes_a_name_safe_for_the_filesystem(tmp_path):
     (path,) = write_chunk({"fast/atm": simple_dataset(2)}, tmp_path, 3)
-    assert path.name == "fast_atm-00003.nc"
+    assert path.name == "fast_atm-00000003.nc"
     assert path.parent == tmp_path
 
 
@@ -182,7 +223,7 @@ def test_write_chunk_refuses_names_that_would_collide(tmp_path):
         )
 
 
-def test_write_chunk_rejects_a_negative_chunk_index(tmp_path):
+def test_write_chunk_rejects_a_negative_first_step(tmp_path):
     with pytest.raises(ValueError, match="must not be negative"):
         write_chunk({"ocn": simple_dataset(2)}, tmp_path, -1)
 
@@ -265,16 +306,17 @@ def test_a_chunked_run_writes_one_file_per_component_per_chunk(
     run = two_slab_coupler.generate_trajectory_function(2)
     carry = two_slab_coupler.initialize()
     written = []
-    for chunk_index in range(2):
+    for _ in range(2):
         first_step = int(carry.step)
         carry, diagnostics = run(carry)
         datasets = datasets_for_chunk(
             two_slab_coupler, diagnostics, first_step=first_step
         )
-        written += write_chunk(datasets, tmp_path, chunk_index)
+        written += write_chunk(datasets, tmp_path, first_step)
 
     assert sorted(path.name for path in written) == [
-        "ocn-00000.nc", "ocn-00001.nc", "seaice-00000.nc", "seaice-00001.nc",
+        "ocn-00000000.nc", "ocn-00000002.nc",
+        "seaice-00000000.nc", "seaice-00000002.nc",
     ]
     with xr.open_mfdataset(
         [path for path in written if path.name.startswith("ocn")],

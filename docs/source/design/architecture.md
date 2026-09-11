@@ -861,7 +861,7 @@ for each chunk:
     first_step = int(carry.step)
     carry, diagnostics = trajectory(carry)
     datasets = datasets_for_chunk(coupler, diagnostics, first_step=first_step, …)
-    paths += write_chunk(datasets, output_dir, first_step // steps_per_chunk)
+    paths += write_chunk(datasets, output_dir, first_step)
     coupler.save_state(carry, checkpoint_path)
     ok, report = health_check(datasets, chunk_index, elapsed_days)
 ```
@@ -908,14 +908,22 @@ for how far the run has got; nothing is derived from a chunk index or a file
 name. What is left is `remaining_batches(int(carry.step), total_steps,
 steps_per_chunk)`, so a run resumed with a *different* chunk length — a
 perfectly legitimate choice, since the chunk is a property of the run and not of
-the checkpoint — finishes the part-chunk first in one short batch (one extra
-compile, on that batch only) and still stops exactly at `total_time`.
+the checkpoint — runs whole chunks and then one short final batch (one extra
+compile, on that batch only), and still stops exactly at `total_time`.
 
 **Output files.** One file per component per chunk,
-`<output_dir>/<component>-<chunk index>.nc`, with the chunk index derived from
-the coupled step counter — so a resumed run continues the numbering instead of
-overwriting what it already wrote. Each chunk is labelled with its own dates,
-because `first_step` is passed through to `Coupler.to_xarray`.
+`<output_dir>/<component>-<first step:08d>.nc`, named after the coupled step
+the chunk starts at. That step is the run's clock — the same number the
+checkpoint holds and the records are labelled from — so the name is unique
+however the run was chunked, and zero-padding it keeps a directory listing in
+run order. A chunk *index* would not do: the chunk length belongs to the run
+and not to the checkpoint, so a run resumed with a different `chunk` gives the
+same simulated time a different index and would write over a file the earlier
+run already wrote. `write_chunk` warns when it does overwrite an existing file,
+which (a resume never colliding) means a rerun into the same directory. The
+chunk index survives as what it is: a counter for the health check and the log
+line. Each chunk is labelled with its own dates, because `first_step` is passed
+through to `Coupler.to_xarray`.
 
 `subsample=n` keeps every *n*-th coupling step. `output_averages=True` is
 defined against jcm's meaning of the same word rather than beside it: jcm

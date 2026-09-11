@@ -38,8 +38,10 @@ Run the First Coupled Run
 
 A complete, runnable aquaplanet simulation coupling the JCM atmosphere to JEM's
 slab ocean. It takes a couple of minutes on a laptop CPU, and writes
-``atm-00000.nc``, ``atm-00001.nc``, ``ocn-00000.nc`` and ``ocn-00001.nc`` into
-``output/`` -- one file per component per chunk.
+``atm-00000000.nc``, ``atm-00000005.nc``, ``ocn-00000000.nc`` and
+``ocn-00000005.nc`` into ``output/`` -- one file per component per chunk, named
+after the coupled step its chunk starts at (here 0 and 5, the two five-day
+chunks of a ten-day run).
 
 .. code-block:: python
 

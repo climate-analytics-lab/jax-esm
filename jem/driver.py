@@ -28,10 +28,11 @@ both quantities.
 
 The trajectory is compiled **once**, for ``chunk`` worth of coupled steps, and
 called once per chunk. A resumed run is the one case that can need a second
-compile: a checkpoint written by a run with a different chunk length leaves
-the step counter part-way through a chunk, and the remaining steps are then
-integrated in a short batch first (:func:`jem.checkpoint.remaining_batches`)
-so the run still stops exactly at ``total_time``.
+compile: a checkpoint written by a run with a different chunk length leaves the
+step counter part-way through a chunk, so what remains does not divide into
+whole chunks and :func:`jem.checkpoint.remaining_batches` makes the **last**
+batch a short one -- one extra compile, on that batch only, in exchange for the
+run stopping exactly at ``total_time``.
 
 Resuming
 --------
@@ -50,7 +51,12 @@ file, which this loop refuses to resume from (it logs and starts from
 
 ``CoupledCarry.step`` restored from the checkpoint is the only source of truth
 for how far the run has got. Nothing is derived from the chunk index or from a
-file name.
+file name -- and, for the same reason, each chunk's output files are named
+after the coupled **step** they start at rather than after a chunk index: the
+chunk length belongs to the run, not to the checkpoint, so two runs of the same
+simulation with different chunks number their chunks differently while agreeing
+exactly on the step. The chunk index survives as what it is, a counter for the
+health check and the log line.
 """
 
 from __future__ import annotations
@@ -239,10 +245,10 @@ def run_chunked(
 
     Notes
     -----
-    Output files are named per chunk (``<component>-<chunk index>.nc``) and
-    the chunk index is derived from the coupled step counter, so a resumed run
-    continues the numbering rather than overwriting the files it already
-    wrote.
+    Each chunk's output files are named after the coupled step the chunk
+    starts at (``<component>-<first step>.nc``), which is unique however the
+    run is chunked -- so a run resumed with a different ``chunk`` writes new
+    files rather than over the ones it already wrote. See :mod:`jem.output`.
 
     """
     coupling_days = coupler.dt_seconds / SECONDS_PER_DAY
@@ -280,9 +286,10 @@ def run_chunked(
         )
     for steps in batches:
         first_step = int(carry.step)
-        # Numbered by where the chunk starts on the clock, not by how many
-        # chunks this call has run, so a resumed run's files carry on from
-        # the ones already on disk instead of overwriting them.
+        # A counter for the health check and the log line only: it says which
+        # chunk of *this* call is running. The output files are named after
+        # `first_step` instead, because a chunk index means different
+        # simulated time under a different chunk length.
         chunk_index = first_step // steps_per_chunk
         if steps not in trajectories:
             trajectories[steps] = coupler.generate_trajectory_function(steps)
@@ -295,7 +302,7 @@ def run_chunked(
             output_averages=output_averages,
             subsample=subsample,
         )
-        paths.extend(write_chunk(datasets, output_dir, chunk_index))
+        paths.extend(write_chunk(datasets, output_dir, first_step))
         if checkpoint_path is not None:
             coupler.save_state(carry, Path(checkpoint_path))
 

@@ -77,9 +77,12 @@ def test_run_chunked_python_api(coupler, tmp_path):
     assert result.steps_completed == 4
     assert int(result.final_carry.step) == 4
 
+    # One file per component per chunk, named after the coupled step each
+    # chunk starts at: steps 0 and 2 of a four-step run in two-day chunks.
     names = sorted(path.name for path in result.paths)
     assert names == [
-        "ocn-00000.nc", "ocn-00001.nc", "seaice-00000.nc", "seaice-00001.nc"
+        "ocn-00000000.nc", "ocn-00000002.nc",
+        "seaice-00000000.nc", "seaice-00000002.nc",
     ]
     assert all(path.exists() for path in result.paths)
 
@@ -89,8 +92,8 @@ def test_run_chunked_python_api(coupler, tmp_path):
     assert [report["chunk"] for report in result.reports] == [0, 1]
 
     # Each chunk is labelled with its own dates rather than the first chunk's.
-    first = xr.open_dataset(tmp_path / "ocn-00000.nc")
-    second = xr.open_dataset(tmp_path / "ocn-00001.nc")
+    first = xr.open_dataset(tmp_path / "ocn-00000000.nc")
+    second = xr.open_dataset(tmp_path / "ocn-00000002.nc")
     assert second["time"].values[0] > first["time"].values[-1]
 
 
@@ -165,7 +168,8 @@ def test_unhealthy_chunk_stops_the_run(coupler, tmp_path):
     assert result.steps_completed == 4
     assert len(result.reports) == 2
     assert sorted(path.name for path in result.paths) == [
-        "ocn-00000.nc", "ocn-00001.nc", "seaice-00000.nc", "seaice-00001.nc"
+        "ocn-00000000.nc", "ocn-00000002.nc",
+        "seaice-00000000.nc", "seaice-00000002.nc",
     ]
 
 
@@ -245,9 +249,9 @@ def test_continuous_chunked_resumed_agree(tmp_path):
 
     # The resumed run wrote the second chunk's file, not the first one again.
     assert sorted(path.name for path in resumed.paths) == [
-        "ocn-00001.nc", "seaice-00001.nc"
+        "ocn-00000005.nc", "seaice-00000005.nc"
     ]
-    assert (tmp_path / "restarted" / "ocn-00000.nc").exists()
+    assert (tmp_path / "restarted" / "ocn-00000000.nc").exists()
 
 
 def test_checkpoint_is_one_directory_rewritten_each_chunk(coupler, tmp_path):
@@ -310,11 +314,47 @@ def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     assert resumed.completed
     assert resumed.steps_completed == 8
 
-    continuous = run_chunked(
-        two_slabs(), total_time="8 days", chunk="8 days",
-        output_dir=tmp_path / "continuous",
+
+def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
+    """A different chunk length on resume must not write over earlier output.
+
+    Three days in one chunk, then a resume with four-day chunks into the SAME
+    output directory. Every file is named after the coupled step its chunk
+    starts at -- 0 for the first run, then 3 and 7 (a full four-day chunk and
+    then the short one that stops the run exactly at eight days) -- so all
+    three survive. Under a chunk *index* the resumed run's first chunk would
+    have been index `3 // 4 == 0` again, and the first run's three days of
+    output would have been silently replaced.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    output = tmp_path / "output"
+    first = run_chunked(
+        two_slabs(), total_time="3 days", chunk="3 days",
+        output_dir=output, checkpoint_path=checkpoint,
     )
-    assert_carries_agree(resumed.final_carry, continuous.final_carry, atol=1e-12)
+    resumed = run_chunked(
+        two_slabs(), total_time="8 days", chunk="4 days",
+        output_dir=output, checkpoint_path=checkpoint,
+    )
+    assert resumed.steps_completed == 8
+
+    assert [path.name for path in first.paths] == [
+        "ocn-00000000.nc", "seaice-00000000.nc"
+    ]
+    assert sorted(path.name for path in resumed.paths) == [
+        "ocn-00000003.nc", "ocn-00000007.nc",
+        "seaice-00000003.nc", "seaice-00000007.nc",
+    ]
+    # The first run's files are still there, and still hold its three days.
+    assert all(path.exists() for path in first.paths)
+    with xr.open_dataset(output / "ocn-00000000.nc") as written:
+        assert written.sizes["time"] == 3
+
+    # The whole run reads back as one continuous eight-day series.
+    with xr.open_mfdataset(
+        sorted(output.glob("ocn-*.nc")), combine="by_coords"
+    ) as combined:
+        assert combined.sizes["time"] == 8
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +471,9 @@ def test_run_smoke_cli(tmp_path):
     run_directories = sorted((tmp_path / "outputs").glob("*/*"))
     assert len(run_directories) == 1, run_directories
     written = sorted(path.name for path in run_directories[0].glob("*.nc"))
-    assert written == ["atm-00000.nc", "ocn-00000.nc", "seaice-00000.nc"]
+    assert written == [
+        "atm-00000000.nc", "ocn-00000000.nc", "seaice-00000000.nc",
+    ]
 
     # The run said what it did, at INFO, through the logger rather than print.
     log = (run_directories[0] / "main.log").read_text()

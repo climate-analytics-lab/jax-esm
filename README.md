@@ -97,7 +97,9 @@ print(repr(coupler))
 
 # One run loop for every coupled run: integrate a chunk, write one file per
 # component, check the atmosphere is still healthy, repeat. Every run default
-# lives on `run_chunked` itself.
+# lives on `run_chunked` itself. Each file is named after the coupled step its
+# chunk starts at, so this writes `atm-00000000.nc` and `atm-00000005.nc`
+# (and the ocean's two) into `output/`.
 result = run_chunked(
     coupler, total_time="10 days", chunk="5 days", output_dir="output"
 )

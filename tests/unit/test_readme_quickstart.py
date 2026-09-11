@@ -31,7 +31,9 @@ def test_readme_quickstart_runs(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     exec(compile(shortened, str(README), "exec"), {"__name__": "__main__"})
 
-    # The block writes what it says it writes, into the directory it names.
+    # The block writes what it says it writes, into the directory it names:
+    # one file per component, named after the coupled step its chunk starts
+    # at -- which for a shortened one-chunk run is step 0.
     assert sorted(p.name for p in (tmp_path / "output").glob("*.nc")) == [
-        "atm-00000.nc", "ocn-00000.nc",
+        "atm-00000000.nc", "ocn-00000000.nc",
     ]
