@@ -29,10 +29,9 @@ from jcm.terrain import TerrainData
 import jax_datetime as jdt
 import xarray as xr
 
-from jem.components import JCM, Veros, SlabOceanModel
-from jem.components.slab.grid import generate_slab_grid, load_jcm_fractional_mask
+from jem.components import JCMComponent, SlabOceanModel, VerosComponent
+from jem.components.slab import SlabGrid, SlabOceanParameters
 from jem.base.coupler import Coupler
-import jem.utils.tree_tools as tree_tools
 
 use_ipython = 'get_ipython' in globals()
 
@@ -70,7 +69,6 @@ coupling_timestep = jdt.to_timedelta(24, "hour")
 output_dir = (Path(f"output_T{truncation_number}") /"02-02_experimental_JCM_Veros").resolve()
 
 output_dir.mkdir(exist_ok=True, parents=True)
-one_second = jdt.to_timedelta(1, "second")
 
 # %% [markdown]
 # ## Create Components
@@ -84,11 +82,6 @@ atm_model = jcm.model.Model(
     time_step = 10,
 )
 
-JCM.make_jem_compatible(
-    atm_model,
-    coupling_timestep=coupling_timestep,
-)
-    
 atm_D2_nodal_shape = atm_model.coords.nodal_shape[1:]
 # %% [markdown]
 # ### Create Veros
@@ -112,28 +105,27 @@ ocn_model = generateVerosSetup(
     dt_tracer = 3600.0,
 )()
 ocn_model.setup()
-Veros.make_jem_compatible(
-    ocn_model,
-    coupling_timestep=coupling_timestep,
-)
 # %% [markdown]
 # ### Create Slab Ocean model
 # %%
-fakelnd_grid = generate_slab_grid(
-    f"JCM::T{truncation_number:d}",
-    fractional_mask=load_jcm_fractional_mask(modified_jcm_terrain_file),
+# The slab grid comes from the atmosphere's own horizontal grid, with the land
+# fraction the atmosphere was built with -- one source of truth for both.
+fakelnd_grid = SlabGrid.from_coords(
+    coords.horizontal,
+    fractional_mask=terrain.fmask,
 )
-fakelnd_model=SlabOceanModel(
-    grid=fakelnd_grid,
-    start_datetime=start_datetime,
-    timestep=coupling_timestep/one_second,
-    forcing_method=None,
-    mask_value=1.0,
+# `ocean_mask_value=1.0` makes this slab ocean integrate the cells the grid
+# marks as land: it is standing in for a land model, capping the poles Veros
+# cannot simulate.
+fakelnd_model = SlabOceanModel(
+    fakelnd_grid,
+    SlabOceanParameters(forcing_method="none", ocean_mask_value=1.0),
+    name="fakelnd",
 )
 # %% [markdown]
 # ## Creating Flux and Scalar Exchange between Components
 #
-# Here we demonstrote the flexibility of JEM: You do not have to use the `BasicMapper` that JEM provides. You can define your own mapping function. In this example, we simply define a function `interaction` as below.
+# An *exchanger* is the one place a component's carry is read by another. It receives the mapping of every component's carry together with the coupler's clock and returns the mapping to continue with; it is traced with the rest of the coupled step, so it builds new carries with `.replace(...)` rather than writing into the ones it is handed.
 # %%
 # Creating regridders and mapping
 def veros_to_jcm_regridder(arr):
@@ -141,11 +133,12 @@ def veros_to_jcm_regridder(arr):
 def jcm_to_veros_regridder(arr):
     return arr#[:, 4:-4]
 
-# Note: Remember to return the `coupled_carry` at the end.
-def interaction(coupled_carry):
-    atm = coupled_carry["atm"]
-    ocn = coupled_carry["ocn"]
-    fakelnd = coupled_carry["fakelnd"]
+def interaction(components, time):
+    del time  # this exchange does not depend on the date
+
+    atm = components["atm"]
+    ocn = components["ocn"]
+    fakelnd = components["fakelnd"]
 
     # ===== compute wind stress begin =====
     # Tien-Yiao's ad-hoc way to compute wind stress
@@ -165,58 +158,76 @@ def interaction(coupled_carry):
     total_heat_flux = atm["derived"].total_heat_flux
 
     # Mapping
-    ocn["forcing"].surface_taux = surface_taux
-    ocn["forcing"].surface_tauy = surface_tauy     
-    ocn["forcing"].heat_flux = jcm_to_veros_regridder(total_heat_flux)
-    ocn["forcing"].freshwater_flux = jcm_to_veros_regridder(atm["derived"].total_freshwater_flux)
-    ocn["forcing"].wind_x = wind_x
-    ocn["forcing"].wind_y = wind_y
-    fakelnd["forcing"].total_heat_flux = jcm_to_veros_regridder(total_heat_flux)
-    fakelnd["state"].sea_surface_temperature = jnp.clip(
-        fakelnd["state"].sea_surface_temperature,
-        200.0,
-        273.15 + 30.0,
+    ocn = dict(ocn, forcing=ocn["forcing"].replace(
+        surface_taux=surface_taux,
+        surface_tauy=surface_tauy,
+        heat_flux=jcm_to_veros_regridder(total_heat_flux),
+        freshwater_flux=jcm_to_veros_regridder(atm["derived"].total_freshwater_flux),
+    ))
+    fakelnd = dict(
+        fakelnd,
+        forcing=fakelnd["forcing"].replace(
+            total_heat_flux=jcm_to_veros_regridder(total_heat_flux),
+        ),
+        state=fakelnd["state"].replace(
+            sea_surface_temperature=jnp.clip(
+                fakelnd["state"].sea_surface_temperature,
+                200.0,
+                273.15 + 30.0,
+            ),
+        ),
     )
-    atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"].sea_surface_temperature)
-    atm["forcing"].stl_am = fakelnd["state"].sea_surface_temperature
-    
-    return coupled_carry
+    atm = dict(atm, forcing=atm["forcing"].replace(
+        sea_surface_temperature=veros_to_jcm_regridder(
+            ocn["derived"].sea_surface_temperature
+        ),
+        stl_am=fakelnd["state"].sea_surface_temperature,
+    ))
+
+    return dict(components, atm=atm, ocn=ocn, fakelnd=fakelnd)
 
 # %% [markdown]
 # ## Create Coupled Model
 # %%
+# The coupler owns the clock and binds it to every component: it checks that
+# the coupling timestep is a whole multiple of both JCM's and Veros' own
+# timesteps, and that JCM was built on this start date and calendar.
 model = Coupler(
-    components=dict(
-        atm=atm_model,
-        ocn=ocn_model,
+    dict(
+        atm=JCMComponent(atm_model),
+        ocn=VerosComponent(ocn_model),
         fakelnd=fakelnd_model,
     ),
-    mappers=dict(mapper=interaction),
+    dict(exchange=interaction),
+    coupling_timestep=coupling_timestep,
+    start_date=start_datetime,
+    workflow=["exchange", "ocn", "atm", "fakelnd"],
 )
 
-print("Model info: ") 
-tree_tools.print_tree(model.get_info(), root="Model")
+print(repr(model))
 # %% [markdown]
 # ## Run Coupled Model
 
 # %%
-initial_carry = model.initialize()
+carry = model.initialize()
 
+steps_per_batch = int(simulation_interval / coupling_timestep)
 batches = int(total_simulation_time / simulation_interval)
+
+# One trajectory function, compiled once and reused for every batch: the
+# coupled step counter lives in the carry, not in the scan index, so calling it
+# again on the carry it returned continues the run rather than restarting it.
+run = model.generate_trajectory_function(steps_per_batch)
 
 for b in range(batches):
     
     print(f"[batch={b:d}/{batches:d}] Simulation...")
     
-    _, final_carry, predictions = model.run(
-        initial_carry = initial_carry,
-        workflow=["mapper", "ocn", "atm", "fakelnd"],
-        iterations = int(simulation_interval / coupling_timestep),
-        jitted=True,
-        reuse_last_available_trajectory=True,
-    )
-    
-    output_dict = model.predictions_to_xarray(predictions)
+    carry, diagnostics = run(carry)
+
+    # `first_step` is the coupled step this batch started from; without it
+    # every batch would be labelled with the first batch's dates.
+    output_dict = model.to_xarray(diagnostics, first_step=b * steps_per_batch)
 
     ds_atm = output_dict["atm"]
     output_dict["atm_mean"] = ds_atm.reduce(np.mean, dim="time", keepdims=True)
@@ -239,7 +250,7 @@ for b in range(batches):
         ds_ocn["sea_surface_salinity"],
         ds_ocn["sea_surface_u"],
         ds_ocn["sea_surface_v"],
-        ds_ocn["heat_flux"],
+        ds_ocn["forcing_heat_flux"],
     ])
     output_dict["ocn_mean"] = ds_ocn.reduce(np.mean, dim="time", keepdims=True)
     del output_dict["ocn"]
@@ -257,7 +268,5 @@ for b in range(batches):
     if jnp.any( jnp.isnan(output_dict["atm_mean"]["specific_humidity"].to_numpy()) ):
         print("Error: Model exploded. End program")
         break
-
-    initial_carry = final_carry
 
 

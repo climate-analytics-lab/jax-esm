@@ -9,22 +9,18 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
 import xarray as xr
 
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.terrain import TerrainData
 
-from jem.components import JCM, Veros, SlabOceanModel
-from jem.components.slab.grid import generate_slab_grid
+from jem.components import JCMComponent, SlabOceanModel, VerosComponent
+from jem.components.slab import SlabGrid, SlabOceanParameters
 from jem.base.coupler import Coupler
 from jem.utils.esmf_regrid import ESMFRegridder
 
 from veros_case_setup import generateVerosSetup
-
-
-one_second = jdt.to_timedelta(1, "second")
 
 def is_pytree_all_finite(tree):
     return jax.tree_util.tree_reduce(
@@ -210,7 +206,6 @@ def build_model(
         time_step=jcm_dt/60.0,
         calendar=calendar,
     )
-    JCM.make_jem_compatible(atm_model, coupling_timestep=coupling_timestep)
     if freeze_season_at_day is not None:
         _freeze_season(atm_model, freeze_season_at_day)
 
@@ -234,38 +229,36 @@ def build_model(
         ddz=[50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0][:number_of_ocean_layers],
     )()
     ocn_model.setup()
-    Veros.make_jem_compatible(ocn_model, coupling_timestep=coupling_timestep)
 
     # Create Slab Ocean model
     #
-    # `jem.components.slab.grid.load_jcm_fractional_mask` does a bare
-    # `jnp.asarray(ds["lsm"])`, but this file's "lsm" carries an extra
-    # singleton `valid_time` axis and (lat, lon) order rather than JEM's
-    # (lon, lat) -- squeeze and transpose before handing it to SlabGrid.
+    # `SlabGrid.from_coords` takes the land fraction as an (n_lon, n_lat)
+    # array on the atmosphere's own grid; this file's "lsm" carries an extra
+    # singleton `valid_time` axis and (lat, lon) order, so squeeze and
+    # transpose it first.
     atm_mask_ds = xr.open_dataset(data_files["landsea_mask"]["atm"])
     atm_lsm = atm_mask_ds["lsm"].to_numpy()
     if atm_lsm.ndim == 3:
         atm_lsm = atm_lsm[0]
     atm_fractional_mask = jnp.asarray(atm_lsm.T)  # (lat, lon) -> (lon, lat)
 
-    fakelnd_grid = generate_slab_grid(
-        f"JCM::T{truncation_number:d}",
+    fakelnd_grid = SlabGrid.from_coords(
+        coords.horizontal,
         fractional_mask=atm_fractional_mask,
     )
     fakelnd_model = SlabOceanModel(
-        grid=fakelnd_grid,
-        start_datetime=start_datetime,
-        timestep=coupling_timestep / one_second,
-        forcing_method=None,
-        calendar=calendar,
+        fakelnd_grid,
+        SlabOceanParameters(forcing_method="none"),
+        name="fakelnd",
     )
 
     # Creating Flux and Scalar Exchange between Components
     #
-    # Here we demonstrate the flexibility of JEM: you do not have to use
-    # the `BasicMapper` that JEM provides. You can define your own mapping
-    # function. In this example, we simply define a function `interaction`
-    # as below.
+    # An exchanger is the one place a component's carry is read by another.
+    # It receives the mapping of every component's carry together with the
+    # coupler's clock and returns the mapping to continue with; it is traced
+    # with the rest of the coupled step, so it builds new carries with
+    # `.replace(...)` rather than writing into the ones it is handed.
 
     a2o_regridder = data_files["regrid"]["a2o"]["conserve"]
     o2a_regridder = data_files["regrid"]["o2a"]["bilinear"]
@@ -277,11 +270,12 @@ def build_model(
         return a2o_regridder(arr)
 
 
-    # Note: Remember to return the `coupled_carry` at the end.
-    def interaction(coupled_carry):
-        atm = coupled_carry["atm"]
-        ocn = coupled_carry["ocn"]
-        fakelnd = coupled_carry["fakelnd"]
+    def interaction(components, time):
+        del time  # this exchange does not depend on the date
+
+        atm = components["atm"]
+        ocn = components["ocn"]
+        fakelnd = components["fakelnd"]
 
         # ===== compute wind stress begin =====
         # Tien-Yiao's ad-hoc way to compute wind stress.
@@ -305,7 +299,8 @@ def build_model(
         # min_speed_magnitude**2 so sqrt and its derivative stay bounded;
         # this naturally caps the resulting wind speed from below at
         # min_speed_magnitude. Mirrors the analogous fix in
-        # `jem.components.Veros.make_jem_compatible` for `forc_tke_surface`.
+        # `jem.components.veros_component.VerosComponent` for
+        # `forc_tke_surface`.
         min_speed_magnitude = 1e-3
         wind_speed_squared = wind_x**2 + wind_y**2
         wind_velocity = jnp.sqrt(jnp.maximum(wind_speed_squared, min_speed_magnitude ** 2))
@@ -336,20 +331,31 @@ def build_model(
         # ===== simple "swamp" sea ice mask end =====
 
         # Mapping
-        ocn["forcing"].surface_taux = surface_taux
-        ocn["forcing"].surface_tauy = surface_tauy
-        ocn["forcing"].heat_flux = heat_flux
-        ocn["forcing"].freshwater_flux = freshwater_flux
-        ocn["forcing"].wind_x = wind_x
-        ocn["forcing"].wind_y = wind_y
-        fakelnd["forcing"].total_heat_flux = total_heat_flux
-        fakelnd["state"].sea_surface_temperature = jnp.clip(
-            fakelnd["state"].sea_surface_temperature,
-            200.0, #273.15 - 50.0,
-            273.15 + 30.0,
+        ocn = dict(ocn, forcing=ocn["forcing"].replace(
+            surface_taux=surface_taux,
+            surface_tauy=surface_tauy,
+            heat_flux=heat_flux,
+            freshwater_flux=freshwater_flux,
+        ))
+        fakelnd = dict(
+            fakelnd,
+            forcing=fakelnd["forcing"].replace(
+                total_heat_flux=total_heat_flux,
+            ),
+            state=fakelnd["state"].replace(
+                sea_surface_temperature=jnp.clip(
+                    fakelnd["state"].sea_surface_temperature,
+                    200.0, #273.15 - 50.0,
+                    273.15 + 30.0,
+                ),
+            ),
         )
-        atm["forcing"].sea_surface_temperature = veros_to_jcm_regridder(ocn["derived"].sea_surface_temperature)
-        atm["forcing"].stl_am = fakelnd["state"].sea_surface_temperature
+        atm = dict(atm, forcing=atm["forcing"].replace(
+            sea_surface_temperature=veros_to_jcm_regridder(
+                ocn["derived"].sea_surface_temperature
+            ),
+            stl_am=fakelnd["state"].sea_surface_temperature,
+        ))
 
 
         if debug_mode:
@@ -377,8 +383,8 @@ def build_model(
                     jax.debug.print("Model exploded. Activate breakpoint to see what happened.")
                     report_first_nonfinite("wind_x", wind_x, lon_deg, lat_deg)
                     report_first_nonfinite("wind_y", wind_y, lon_deg, lat_deg)
-                    report_first_nonfinite("ocn.forcing.heat_flux", ocn["forcing"].heat_flux, lon_deg, lat_deg)
-                    report_first_nonfinite("atm.forcing.stl_am", atm["forcing"].stl_am, lon_deg, lat_deg)
+                    report_first_nonfinite("ocn.forcing.heat_flux", heat_flux, lon_deg, lat_deg)
+                    report_first_nonfinite("fakelnd.state.sst", fakelnd["state"].sea_surface_temperature, lon_deg, lat_deg)
                     # The crash was first seen in the ocean state (u, v, Nsqr
                     # all NaN while the atmosphere was still finite), so check
                     # the ocean's prognostic fields too (3D: x, y, depth).
@@ -390,25 +396,29 @@ def build_model(
                     # jax.debug.breakpoint()  # disabled: no TTY in SLURM batch jobs -> JaxRuntimeError
                 jax.lax.cond(all_finite, true_fn, false_fn, x)
 
-            breakpoint_if_nonfinite(coupled_carry) 
+            breakpoint_if_nonfinite(components)
 
 
-        return coupled_carry
+        return dict(components, atm=atm, ocn=ocn, fakelnd=fakelnd)
 
+    # The coupler owns the clock and binds it to every component: it checks
+    # that the coupling timestep is a whole multiple of both JCM's and Veros'
+    # own timesteps, and that JCM was built on this start date and calendar.
     model = Coupler(
-        components=dict(
-            atm=atm_model,
-            ocn=ocn_model,
+        dict(
+            atm=JCMComponent(atm_model),
+            ocn=VerosComponent(ocn_model),
             fakelnd=fakelnd_model,
         ),
-        mappers=dict(mapper=interaction),
+        dict(exchange=interaction),
+        coupling_timestep=coupling_timestep,
+        start_date=start_datetime,
+        calendar=calendar,
+        workflow=["exchange", "atm", "ocn", "fakelnd"],
     )
 
     config = dict(
-        #terrain=terrain,
-        #modified_jcm_terrain_file=modified_jcm_terrain_file,
         coords=coords,
-        workflow=["mapper", "atm", "ocn", "fakelnd"],
     )
 
     return model, config

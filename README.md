@@ -1,15 +1,25 @@
 # JAX-ESM: A JAX-based Earth System Model Coupler
 
-JAX-ESM is a JAX-based coupling framework for Earth system components, specifically designed for coupling JCM (JAX Climate Model) with ocean and flux models. It provides efficient time integration using `jax.lax.scan` and supports component-specific sub-stepping for numerical stability.
+JAX-ESM is a JAX-based coupling framework for Earth system components, specifically designed for coupling JCM (JAX Climate Model) with ocean, land and sea-ice models. It provides efficient time integration using `jax.lax.scan` and supports component-specific sub-stepping for numerical stability.
 
 ## Features
 
 - **JAX-Native**: Fully JIT-compilable, GPU-ready, and differentiable
-- **Duck-typed Components**: Any object with `initialize()` and `generate_step_function()` can be coupled; no base class to inherit from
-- **Efficient Time Integration**: Uses `jax.lax.scan` for vectorized time stepping with optional debug mode
-- **Component Sub-stepping**: Each component can use internal sub-steps for numerical stability
-- **Direct Component Coupling**: Components can directly access each other's state for tight integration
-- **xarray Integration**: Built-in conversion to xarray Datasets for analysis
+- **A small component contract**: any object with a `name`, an `initialize()` and a
+  `step(carry, time)` is a component (`jem.base.component.Component`, a
+  `typing.Protocol`); there is no base class to inherit from, so an external model
+  is adapted by a thin wrapper class
+- **One clock**: the `Coupler` owns the coupling timestep, start date and calendar and
+  hands every component the same `CouplingTime`, so components cannot disagree about
+  the date and the seasonal cycle survives chunked runs and restarts
+- **Efficient Time Integration**: `Coupler.generate_trajectory_function()` returns a
+  pure `carry -> (carry, diagnostics)` function built on `jax.lax.scan`
+- **Differentiable parameters**: component parameters are `flax.struct` dataclasses that
+  travel in the carry, so `jax.grad` through a coupled run reaches them — the ones
+  `step` reads by replacing the leaf in `carry["params"]`, and the ones that are
+  initial conditions by passing them to `initialize`
+- **xarray Integration**: `Coupler.to_xarray()` labels every component's output on the
+  same time axis and grid coordinates, so the datasets merge
 
 ## Installation 
 
@@ -46,55 +56,61 @@ import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
 from jem import Coupler
-from jem.components import JCM, SlabOceanModel
-from jem.components.slab.grid import generate_slab_grid
+from jem.components import JCMComponent, SlabOceanModel
+from jem.components.slab import SlabGrid
 
-start_datetime = jdt.to_datetime("2000-01-01")
+start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-one_second = jdt.to_timedelta(1, "second")
 
 
-# A mapper is any function CoupledCarry -> CoupledCarry: it is the only place
-# where components exchange information.
-def atm_ocn_mapper(coupled_carry):
-    atm = coupled_carry["atm"]
-    ocn = coupled_carry["ocn"]
-    ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
-    atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
-    return coupled_carry
-
-
-# The JCM atmosphere: a plain jcm.model.Model, adapted in place.
-atm_model = JCM.make_jem_compatible(
-    jcm.model.Model(coords=get_speedy_coords(), start_date=start_datetime),
-    coupling_timestep=coupling_timestep,
-)
-
-# Aquaplanet: no mask file, so the fractional mask is all zero (no land).
-grid = generate_slab_grid("JCM::T31")
-
-model = Coupler(
-    components=dict(
-        atm=atm_model,
-        ocn=SlabOceanModel(
-            grid=grid,
-            start_datetime=start_datetime,
-            timestep=coupling_timestep / one_second,
+# An exchanger is the only place where components exchange information. It is
+# traced with everything else, so it must not write into the carries it is
+# handed: it builds new ones and returns the mapping to continue with.
+def atm_ocn_exchange(components, time):
+    del time  # this exchange does not depend on the date
+    atm, ocn = components["atm"], components["ocn"]
+    ocn = dict(
+        ocn,
+        forcing=ocn["forcing"].replace(
+            total_heat_flux=atm["derived"].total_heat_flux,
         ),
-    ),
-    mappers=dict(atm_ocn_mapper=atm_ocn_mapper),
-)
+    )
+    atm = dict(
+        atm,
+        forcing=atm["forcing"].replace(
+            sea_surface_temperature=ocn["state"].sea_surface_temperature,
+        ),
+    )
+    return dict(components, atm=atm, ocn=ocn)
 
-# The workflow is the coupling scheme: exchange, then step each component.
-simulation_interval = jdt.to_timedelta(10, "day")
-initial_carry, final_carry, predictions = model.run(
-    workflow=["atm_ocn_mapper", "atm", "ocn"],
-    iterations=int(simulation_interval / coupling_timestep),
+
+# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+atm = JCMComponent(atm_model)
+
+# Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
+# and with no fractional mask every cell is ocean.
+grid = SlabGrid.from_coords(atm_model.coords.horizontal)
+
+coupler = Coupler(
+    {"atm": atm, "ocn": SlabOceanModel(grid)},
+    {"atm_ocn_exchange": atm_ocn_exchange},
+    coupling_timestep=coupling_timestep,
+    start_date=start_date,
 )
+print(repr(coupler))
+
+# The default workflow is every exchanger followed by every component, so the
+# fields are exchanged first and both components then step on the same state.
+simulation_interval = jdt.to_timedelta(10, "day")
+run = coupler.generate_trajectory_function(
+    int(simulation_interval / coupling_timestep)
+)
+final_carry, diagnostics = run(coupler.initialize())
 
 output_dir = Path("output")
 output_dir.mkdir(parents=True, exist_ok=True)
-for component_name, ds in model.predictions_to_xarray(predictions).items():
+for component_name, ds in coupler.to_xarray(diagnostics).items():
     ds.to_netcdf(output_dir / f"{component_name:s}.nc", engine="netcdf4")
 ```
 
@@ -118,30 +134,74 @@ Then open `docs/build/html/index.html` in your browser.
 
 ## Architecture
 
-### Component Interface
+### The component contract
 
-Each component needs to provide two methods:
+A component is any object satisfying `jem.base.component.Component`:
 
-- **`initialize()`**: Return initial component carry value, a pytree.
-- **`generate_step_function()`**: Return the step function (the coupler JIT-compiles it)
-  - Signature: `step_function(component_carry, step) -> (new_component_carry, predictions)`
+- **`name: str`** — its name in the coupler's workflow, carry and output.
+- **`initialize() -> carry`** — build the initial carry, a pytree. It must not
+  integrate the model.
+- **`step(carry, time) -> (new_carry, diagnostics)`** — advance one coupling
+  timestep. `time` is a `CouplingTime` (the coupler's clock); the returned carry
+  must have exactly the structure, shapes and dtypes of the one it received, or
+  `lax.scan` rejects it. `diagnostics` is the per-step output pytree, which the
+  coupler stacks along a leading time axis.
 
-### Component Coupling
+Three capabilities are optional and detected with `isinstance`:
+`SupportsXarray` (`to_xarray(diagnostics, time)`), `SupportsCheckpoint`
+(`save_state`/`load_state`) and `SupportsBind` (`bind(coupling_timestep=...,
+start_date=..., calendar=...)`, called once by the coupler at registration for
+components with an internal timestep, such as JCM and Veros).
 
-The current implementation uses direct coupling:
-- Coupler creates a dictionary of component carry values.
-- Coupler passes the carry value of each component to the corresponding component's `step_function`.
-- To exchange variables like fluxes, pass mapper functions to Coupler. A mapper function receives
-  the dictionary of component carry values and returns a new one. 
+### Component coupling
 
-### Time Integration
+Components never call each other. An **exchanger** —
+`Callable[[dict[str, Carry], CouplingTime], dict[str, Carry]]` — receives the
+mapping of every component's carry and returns the mapping to continue with. It
+is traced along with everything else, so it must be pure: build new structs
+(`.replace(...)` / `dataclasses.replace`) rather than assigning into the carries
+it was handed, and never change their pytree structure.
 
-- Uses `jax.lax.scan` for efficient time stepping
-- Within a coupling timestep the workflow runs sequentially, in the order given
-- Debug mode available with `jitted=False` (uses a Python loop)
+### Time integration
+
+- `Coupler.generate_step_function()` returns one coupled step;
+  `Coupler.generate_trajectory_function(iterations, remat=..., jit=...)` drives it
+  with `jax.lax.scan`.
+- The clock lives in the carry (`CoupledCarry.step`), not in the scan index, so
+  calling a trajectory function twice continues the run instead of restarting it.
+- Within a coupling timestep the `workflow` runs sequentially in the order given;
+  by default that is every exchanger followed by every component. It may be
+  written nested, and a name may appear more than once — an element listed *n*
+  times runs *n* times per coupled step on a clock *n* times faster, which is
+  how one part of a model runs a fast loop inside a slower coupling:
+
+  ```python
+  workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange", "ocn"]
+  ```
+- A `Coupler` is itself a component, so a coupled model can be a component of a
+  slower one — the same fast loop written as a model in its own right:
+
+  ```python
+  fast = Coupler({"atm": atm, "lnd": lnd}, {"atm_lnd_exchange": ...},
+                 coupling_timestep=jdt.to_timedelta(1, "hour"), start_date=start_date)
+  model = Coupler({"atm_lnd": fast, "ocn": ocn}, {"atm_ocn_exchange": ...},
+                  coupling_timestep=jdt.to_timedelta(1, "day"), start_date=start_date)
+  ```
+
+  The outer step must be a whole multiple of the inner one; `jem.nested_carry` /
+  `jem.with_nested_carry` are how an outer exchanger reaches an inner component,
+  and the inner datasets come out of `to_xarray` under their own names, on the
+  inner clock. The two forms produce identical runs — see
+  `docs/source/design/architecture.md`.
+- `model.save_state(carry, directory)` / `model.load_state(directory)`
+  checkpoint the whole coupled model. The coupler derives each component's
+  writer from the component itself, so a driver never lists them; a component
+  whose carry is not a plain pytree (`VerosComponent`, through Veros' HDF5
+  restart file) writes its own subdirectory, and because a `Coupler` is one of
+  those components, a nested model checkpoints by recursion.
 
 See `docs/source/design/architecture.md` for the carry layout and the full
-interface contract.
+contract.
 
 ## Examples
 - `examples/01_basic`: aquaplanet setups coupling JCM to the slab models.
@@ -156,20 +216,22 @@ JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean
 ### Included Components
 
 1. **JCM (Atmosphere)**
-   - Location: `jem/components/jcm_component.py`
-   - Wraps JCM atmosphere model from jax-gcm
-   - Handles conversion between Dinosaur dynamics states and physics states
-   - Supports internal sub-stepping
+   - Location: `jem/components/jcm/`
+   - `JCMComponent` wraps a `jcm.model.Model` from jax-gcm; the model itself is
+     left untouched
+   - Threads JCM's cross-step physics carry through the coupled run, and sub-steps
+     internally at JCM's own timestep
+   - Publishes the surface exchange (`jem/components/jcm/exchange_fields.py`) in
+     JEM's conventions: heat flux positive upward, water fluxes in kg m-2 s-1
 
 2. **Veros (Ocean, full 3D)**
    - Location: `jem/components/veros_component.py`
-   - Wraps the [jittable Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM
+   - `VerosComponent` wraps the [jittable Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM
    - Optional dependency; lazily imported so `jem.components` works without `veros` installed
 
 3. **SlabOceanModel**
    - Location: `jem/components/slab/slab_ocean_model/`
-   - Mixed-layer ocean with climatological relaxation
-   - Anomaly-based SST evolution using Euler backward scheme
+   - Mixed-layer ocean with optional Q-flux or relaxation to climatology
    - Reports `ice_frazil_melt_energy`, a freeze/melt heat diagnostic for coupling to `SlabSeaiceModel`
 
 4. **SlabLandModel**
@@ -185,6 +247,34 @@ JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean
    - Location: `jem/components/slab/slab_seaice_model/`
    - Basal-only sea-ice thickness model driven by `SlabOceanModel`'s freeze/melt potential
    - Exposes a smooth thickness-to-fraction closure for an atmosphere model's ice-fraction boundary condition
+
+Each slab model takes its tunables as a `flax.struct` parameter dataclass
+(`SlabOceanParameters`, ...) whose numeric fields are pytree leaves, and carries
+them in `carry["params"]`, so a gradient of a coupled run with respect to a
+physical parameter needs no special casing.
+
+How a parameter is varied depends on when the model reads it:
+
+```python
+# A PROCESS parameter is read by step() out of the carry, every step, so it is
+# varied by replacing that leaf:
+carry = ocn.initialize()
+carry["params"] = carry["params"].replace(relaxation_time=tau)
+
+# An INITIAL-CONDITION parameter (initial_sst, initial_ice_thickness, every
+# SlabAtmosphereParameters field) is read once, by initialize(), and never
+# again -- replacing it in an existing carry does nothing, so it is given to
+# initialize instead:
+carry = ocn.initialize(ocn.params.replace(initial_sst=sst0))
+
+# In a coupled model, through the coupler, which routes by component name:
+coupled_carry = coupled.initialize({"ocn": ocn.params.replace(initial_sst=sst0)})
+```
+
+Both are differentiable: `jax.grad` of a trajectory reaches a process parameter
+through the carry and an initial condition through `initialize`. Each
+`*Parameters` docstring says which of its fields are initial conditions;
+`docs/source/design/architecture.md` has the full pattern.
 
 ## Contributing
 
@@ -203,9 +293,11 @@ Contributions are welcome! Please:
 
 ## Development Status
 
-- **Version**: 0.1.0 (Alpha)
-- **Status**: Prototype coupling framework
-- **API Stability**: Subject to change without deprecation until 1.0
+- **Version**: single-sourced from `jem.__version__`
+- **Status**: Alpha. The next release is 1.0.0a0, the "core API contract"
+  described at the top of [CHANGELOG.md](CHANGELOG.md).
+- **API Stability**: subject to change without deprecation until 1.0; every
+  removal or rename is recorded in [CHANGELOG.md](CHANGELOG.md)
 
 ## Miscellaneous
 

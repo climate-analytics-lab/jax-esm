@@ -4,143 +4,735 @@ How JEM couples black-box components. This is the reference for developers
 adding a component or debugging an exchange; the user-facing walkthrough is
 {doc}`../tutorial`.
 
+Every statement here is checkable against `jem/base/component.py` and
+`jem/base/coupler.py`, which together are the whole of the coupling core.
+
 ## Core concepts
 
 ### Carry
 
 Every component owns a **carry**: a pytree (by convention a plain `dict`) that
-holds everything passed from one coupling step to the next. The convention every
-built-in component follows is:
+holds everything passed from one coupling step to the next. The coupler never
+looks inside it, but every built-in component follows the same convention:
 
 ```python
 {
+    "params":  <the component's tunable parameters>,   # slab models
     "state":   <the component's prognostic state>,
     "forcing": <what other components send in>,
     "derived": <diagnostics other components read out>,
 }
 ```
 
-The split is not enforced by the coupler — a carry can be any pytree — but it is
-what makes a mapper readable, because a mapper only ever moves a `derived` (or
+The split is not enforced — a carry can be any pytree — but it is what makes an
+exchanger readable, because an exchanger only ever moves a `derived` (or
 `state`) field of one component into a `forcing` field of another.
 
 The carry holds more than the mathematical state. It also holds (1) anything
-that must participate in differentiability, such as forcing fields and tunable
-parameters, and (2) quantities that are cheap to keep but expensive to
-rediagnose, such as the surface turbulent fluxes.
+that must participate in differentiability and (2) quantities that are cheap to
+keep but expensive to rediagnose:
 
-`Coupler` holds a **`CoupledCarry`**, which is just `dict[component_name, carry]`.
+- The four slab models put their `flax.struct` parameters in `carry["params"]`
+  rather than closing over them, so `jax.grad` of a coupled run with respect to,
+  say, `SlabOceanParameters.relaxation_time` works with no special casing in the
+  coupler. Which of them can be varied *through the carry* is the subject of
+  the next section.
+- `JCMComponent`'s carry has a fourth key, `"physics"`: JCM's cross-step physics
+  carry (sub-cycled radiation, prior-step TKE, the tendencies one term hands to
+  the next). It is threaded straight back into
+  `Model.run_from_state_with_carry`, because dropping it between coupling steps
+  would reset that memory once per coupling interval — a silent, systematic
+  error. It contains integer and boolean leaves, so it must never be cast
+  wholesale to a float dtype.
+- `JCMComponent`'s `carry["derived"]` is a `JCMDerived` struct holding the
+  surface exchange (`total_heat_flux`, `total_freshwater_flux`, `evaporation`,
+  `precipitation`, `u0`, `v0`) plus `physics`, JCM's own per-step diagnostics
+  dict, carried opaquely so an exchanger can reach any field JCM computes.
 
-### Workflow
-
-A **workflow** is an ordered list (or any nested pytree) of strings driving one
-coupling timestep. Each entry is either a component name — run that component's
-step function on its slice of the coupled carry — or a mapper name — call that
-mapper on the whole coupled carry. For example:
-
-```python
-workflow = ["mapper", "atm", "ocn", "seaice"]
-```
-
-Order is the coupling scheme: everything here is explicit and sequential within
-a step, so where a mapper sits decides whether a component sees this step's
-fluxes or the previous step's.
-
-### Mappers
-
-A **mapper** is any callable `CoupledCarry -> CoupledCarry`. It is the only
-mechanism for exchanging information between components:
+The coupler's own state is a **`CoupledCarry`** (`flax.struct.dataclass`):
 
 ```python
-def mapper(coupled_carry):
-    atm, ocn = coupled_carry["atm"], coupled_carry["ocn"]
-    ocn["forcing"].total_heat_flux = atm["derived"].total_heat_flux
-    atm["forcing"].sea_surface_temperature = ocn["state"].sea_surface_temperature
-    return coupled_carry
+@struct.dataclass
+class CoupledCarry:
+    components: dict[str, Carry]   # one carry per component, keyed by name
+    step: jax.Array                # int32; coupled steps completed
 ```
 
-A mapper is traced along with everything else, so it must be pure with respect
-to array values and must not change the pytree *structure* of the carry — the
-coupler warns when the structure changes after a workflow element runs, and
-`lax.scan` will reject it outright.
+`step` lives in the carry rather than in the `lax.scan` index because the scan
+index restarts at zero on every call: putting the clock in the carry is what
+makes a chunked run (or a restart from a checkpoint) continue the same
+simulation instead of replaying the first year.
+
+For the same reason `step` is part of a **checkpoint**. A checkpoint directory
+holds one `{name}_carry.pkl` per component — or a subdirectory, for a component
+that writes itself — plus `coupled_step.pkl` holding the counter. A checkpoint
+directory with no `coupled_step.pkl` is refused with a `ValueError`: its
+position in the seasonal cycle is not recoverable, and resuming at step 0 (or
+at a step reconstructed from a batch index) would silently move the run's
+calendar. `save_component_carries` / `load_component_carries` are the
+mapping-only halves, for a sub-carry that has no clock of its own — which is
+how the Veros restart writer stores its `derived` and `forcing` structs.
+
+**The coupler is what a driver checkpoints through**, in one call each way:
+
+```python
+model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+carry = model.load_state(saved)
+```
+
+Which components need writing by hand rather than pickling is a property of the
+*components* — `VerosComponent` has to go through Veros' HDF5 restart writer
+because a `VerosState` is not a pytree — and the coupler is the one object that
+knows them all. `Coupler.save_state` therefore derives the savers itself, as
+`{name: component.save_state for … if isinstance(component, SupportsCheckpoint)}`,
+and `load_state` derives the loaders from the same capability. A driver never
+enumerates them, so it cannot get the set wrong or forget one when a component
+is swapped.
+
+A `Coupler` implements `SupportsCheckpoint` itself, so this **recurses**: an
+outer coupler sees a nested coupler as a component that writes itself, hands it
+`directory / <the name it is registered under>`, and the inner coupler writes
+its own components and its own `coupled_step.pkl` there — an inner checkpoint
+that is complete in its own right, holding the inner clock. Without that, the
+outer save would treat the inner `CoupledCarry` as a plain pytree and pickle it,
+which works only while nothing inside it needs a format of its own; a nested
+model containing Veros would silently bypass the restart path.
+
+`save_coupled_carry(coupled_carry, directory, component_savers=…)` and
+`load_coupled_carry(directory, names, component_loaders=…)` are still the
+underlying functions and still take the mappings explicitly, for a caller that
+wants to override a saver or supply one for something that is not a component
+capability. `Coupler.save_state` / `load_state` are the answer for every
+ordinary case.
+
+Because the marker is written last, a save interrupted part-way through leaves
+a directory that has no marker — and, in a run that names its checkpoints
+`step_00000000`, `step_00000005`, …, that directory sorts *newest*. A driver
+resuming from a directory of checkpoints therefore asks
+`latest_complete_checkpoint(root, pattern="step_*")` for the newest one that
+holds a marker rather than the newest name; it warns about each incomplete
+directory it steps over, since one means an earlier run died mid-save.
+
+A checkpoint is named after the coupled step it was written at, and how much of
+a run is left is computed from the step counter *inside* the restored
+checkpoint — `remaining_batches(steps_done, total_steps, steps_per_batch)`
+returns the length of each batch still to run, the last one short when the
+total is not a whole number of batches. A batch index in the name would mean
+nothing across two runs that chose different batch lengths, whereas the coupled
+step counts the same coupling steps in both.
+
+### Parameters: process and initial-condition
+
+A component's parameters divide into two kinds, and the difference decides how
+a parameter study varies one. It is not a distinction the framework enforces —
+it follows from *when* the parameter is read:
+
+| | Read by | Varied by | Example |
+|---|---|---|---|
+| **Process parameter** | `step`, out of `carry["params"]`, every step | replacing that leaf in the carry | `SlabOceanParameters.relaxation_time`, `SlabLandParameters.tdland` |
+| **Initial-condition parameter** | `initialize`, once | passing parameters to `initialize` | `SlabOceanParameters.initial_sst`, `SlabSeaiceParameters.initial_ice_thickness`, every field of `SlabAtmosphereParameters` |
+
+A process parameter is varied in the carry, because that is where `step` reads
+it from:
+
+```python
+carry = model.initialize()
+carry["params"] = carry["params"].replace(relaxation_time=tau)   # differentiable
+```
+
+An initial-condition parameter **cannot** be: by the time a carry exists its
+value has already been copied into the state, and `step` never looks at it
+again, so replacing the leaf changes nothing and a gradient with respect to it
+is zero. It is varied by handing the parameters to `initialize`, which builds
+the initial state from them *and* puts them in `carry["params"]`, so the state
+and the process parameters come from one object:
+
+```python
+# `coupled` is the Coupler; `ocn` the SlabOceanModel registered in it.
+def loss(initial_sst):
+    params = ocn.params.replace(initial_sst=initial_sst)
+    _, diagnostics = trajectory(coupled.initialize({"ocn": params}))
+    return jnp.mean(diagnostics["ocn"]["state"].sea_surface_temperature)
+
+jax.grad(loss)(jnp.float32(288.15))     # non-zero
+```
+
+`Coupler.initialize(params)` takes `{component name: that component's
+parameters}` and routes each one to that component's `initialize(params=…)`; a
+component the mapping does not name is initialized exactly as it is without the
+argument, `Coupler.initialize()` with no argument is unchanged, and a name the
+coupler has no component for is a `ValueError`. Not every component can take
+parameters — a wrapper around an external model initializes from that model's
+own state — so naming one that cannot is a `TypeError` rather than a silently
+ignored request. For a **nested** coupler the value is itself a mapping over
+its components (`{"atm_lnd": {"atm": params}}`), because that is what its own
+`initialize` takes.
+
+Building the model inside `jax.grad` is not an alternative route to the same
+gradient: a constructor validates its parameters, which means reading them as
+concrete Python floats, and that cannot be done to a traced value. Validation
+therefore stays at construction, where the values are concrete, and
+`initialize(params)` is the differentiable entry point, which uses what it is
+given untouched.
+
+### The component contract
+
+`jem.base.component.Component` is a runtime-checkable `typing.Protocol`, so
+"implementing" it means having the right attributes — there is no base class to
+inherit from and nothing is monkey-patched onto the wrapped model:
+
+| Member | Signature | Purpose |
+|---|---|---|
+| `name` | `str` | The component's name in the workflow, carry and output |
+| `initialize()` | `() -> Carry` | Build the initial carry. Must not integrate |
+| `step(carry, time)` | `(Carry, CouplingTime) -> (Carry, Diagnostics)` | Advance one coupling step |
+
+`Coupler.add_component(name, component)` checks `isinstance(component,
+Component)` and raises `TypeError` naming the missing members. The object itself
+is stored, so `coupler.components[name] is component`.
+
+`initialize()` must be callable with no arguments — that is all the protocol
+asks. A component may additionally accept `initialize(params=…)`, which is what
+`Coupler.initialize({name: params})` calls and how an initial-condition
+parameter is varied (see *Parameters*); the slab models and `Coupler` itself do,
+`JCMComponent` and `VerosComponent` do not, because they initialize from the
+wrapped model's own state.
+
+Three capabilities are **optional**, and are tested for with `isinstance`
+against their protocols at the one place that uses them — never with `hasattr`
+at a random call site:
+
+| Protocol | Member | Who implements it |
+|---|---|---|
+| `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
+| `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
+| `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent`, `Coupler` |
+
+`bind` is called by the coupler once per component, from `add_component` (hence
+from the constructor for everything passed to it), and it is the only way a
+component learns anything about the clock outside a step. A component with an
+internal timestep uses it for the coupling interval — `JCMComponent` converts it
+to the number of days it passes to JCM as `save_interval`/`total_time`,
+`VerosComponent` to a count of tracer timesteps — and it is where a disagreement
+about the clock is refused: both wrappers raise `ValueError` if the coupling
+timestep is not a whole multiple of the model's own, and `JCMComponent`
+additionally refuses a `start_date` or `calendar` that differs from the model's.
+The slab models use it for the start date alone: `initialize()` takes no
+argument, so `bind` is how a run starting on 1 July samples the July record of
+its climatology rather than the January one. It reaches them as
+`SlabModelBase.start_year_fraction`, computed by the shared
+`jem.base.component.start_year_fraction(start_date, calendar)` — the same
+function behind `CouplingTime.year_fraction`, so a climatology sampled in
+`initialize()` and one sampled in `step()` cannot disagree about where the run
+starts. A model that was never registered with a coupler reads 1 January, which
+is what a bare `model.initialize()` in a test or a notebook gets.
+
+`step` must be a pure function of `(carry, time)` and must return a carry with
+exactly the pytree structure, shapes and dtypes it received, or `lax.scan`
+rejects it.
+
+`to_xarray` normally returns one dataset, keyed in the coupler's output by the
+name the component is registered under. A component that is itself a coupled
+model — a `Coupler` nested in a slower one — has no single dataset to return, so
+it may return a **mapping** of name to dataset, which the outer coupler flattens
+into its result under those names (a collision with a name already there is a
+`ValueError`). `Coupler` is the implementation of that case; see *Nesting
+couplers*.
+
+### The clock
+
+The coupler owns the only clock. Components hold no start date, no timestep and
+no calendar of their own, so two of them cannot disagree about the date. Each
+`step` is handed a `CouplingTime` built from `CoupledCarry.step`:
+
+```python
+@struct.dataclass
+class CouplingTime:
+    step: jax.Array          # int32, coupled steps completed before this one
+    sim_time: jax.Array      # seconds since start_date; equals step * dt
+    dt: float                       # static: coupling timestep in seconds
+    year_offset_seconds: float      # static: 1 Jan of the start year -> start_date
+    days_per_year: float            # static: jcm.date.days_per_year(calendar)
+```
+
+- `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
+  *start* of the step; it is what a monthly climatology is interpolated with
+  (`jem.utils.cycles.evaluate_cyclic_linear`). When the coupling step divides
+  the year exactly — the usual case, daily steps in a 365-day year — the step
+  count is reduced modulo the steps per year in exact integer arithmetic before
+  the division, so a float32 `sim_time` cannot quantise the seasonal cycle away
+  in a century-long run.
+- `time.end_of_step()` returns the clock one step later, advancing `step` and
+  `sim_time` together. A model that needs a boundary condition at both ends of a
+  step (the slab models measure an anomaly against the climatology at the start
+  and add it back at the end) must use it rather than adding `dt` to `sim_time`
+  by hand, because `year_fraction` is derived from `step`.
+
+The static fields are resolved once, in the coupler's constructor, so no
+calendar arithmetic happens inside a traced function.
+
+### Exchangers
+
+An **exchanger** is the only mechanism for exchanging information between
+components:
+
+```python
+Exchanger = Callable[[dict[str, Carry], CouplingTime], dict[str, Carry]]
+```
+
+It receives the mapping of every component's carry and the clock, and returns
+the mapping to continue with. The clock is passed so a time-dependent coupling
+(lagged exchange, ramped forcing) needs no state of its own.
+
+```python
+def atm_ocn_exchange(components, time):
+    del time
+    atm, ocn = components["atm"], components["ocn"]
+    ocn = dict(ocn, forcing=ocn["forcing"].replace(
+        total_heat_flux=atm["derived"].total_heat_flux))
+    atm = dict(atm, forcing=atm["forcing"].replace(
+        sea_surface_temperature=ocn["state"].sea_surface_temperature))
+    return dict(components, atm=atm, ocn=ocn)
+```
+
+Two rules, both enforced by what `lax.scan` will accept:
+
+1. **Do not mutate in place.** The carries handed to an exchanger are the ones
+   the scan is carrying. Build new structs (`.replace(...)` on a `tree_math` or
+   `flax.struct` struct, `dataclasses.replace`, a new `dict`) and return them.
+   The coupler passes a *fresh* dict, so adding or replacing entries cannot
+   reach the caller's carry, but the structs inside it are shared.
+
+   The risk is easy to miss because it only shows outside `jit`. This
+   exchanger runs and gives the right trajectory under the jitted scan:
+
+   ```python
+   def exchange_in_place(components, time):
+       ocn, seaice = components["ocn"], components["seaice"]
+       seaice["forcing"].ice_frazil_melt_energy = ocn["derived"].ice_frazil_melt_energy
+       return components
+   ```
+
+   Inside `generate_trajectory_function` the carries are tracers, so the
+   assignment cannot reach the caller's arrays and `carry0` is untouched.
+   But run one step eagerly (`model.generate_step_function()(carry0)`, the natural thing
+   to do when debugging, checking a gradient or comparing two workflows from
+   one initial condition) and the struct being assigned into *is*
+   `carry0.components["seaice"]["forcing"]`: the initial carry is silently
+   overwritten, and the next run from `carry0` starts somewhere else. The
+   same exchanger written as the contract asks,
+
+   ```python
+   def exchange(components, time):
+       ocn, seaice = components["ocn"], components["seaice"]
+       seaice = dict(seaice, forcing=seaice["forcing"].replace(
+           ice_frazil_melt_energy=ocn["derived"].ice_frazil_melt_energy))
+       return dict(components, seaice=seaice)
+   ```
+
+   behaves the same both ways. `tests/unit/test_coupler.py` pins this
+   asymmetry (`test_in_place_exchange_corrupts_the_initial_carry_eagerly`),
+   so the rule is not just advice.
+2. **Do not change the pytree structure.** After every workflow element the
+   coupler compares the structure of the carries dict with the structure it had
+   on entry and raises `RuntimeError` naming the element responsible. The check
+   is at trace time, so it costs nothing per step and turns an opaque `lax.scan`
+   error into a located one.
+
+These were called "mappers" before v1.0. The name changed because "mapper" reads
+as a regridding operation, whereas an exchanger may regrid, compute a flux,
+convert units or simply copy a field.
+
+### Workflow and the coupled step
+
+A **workflow** is an ordered tuple of names driving one coupling timestep. Each
+entry is either a component name — run that component's `step` on its carry and
+record its diagnostics — or an exchanger name — call it on the whole mapping.
+Components and exchangers share one namespace, so one name may not be both; a
+name may, however, appear in the workflow more than once (see *Multiplicity*
+below).
+
+The default is every exchanger (in insertion order) followed by every component
+(in insertion order):
+
+```python
+coupler.workflow  # ("atm_ocn_exchange", "atm", "ocn")
+```
+
+so information is exchanged first and every component then sees the same
+exchanged state. Coupling is therefore **lagged**: the exchanger at step *n*
+moves the fields the components produced during step *n-1*, and the first step
+of a run exchanges the values that came out of `initialize()`. Moving a
+component ahead of the exchanger in an explicit `workflow=` is what changes
+that.
+
+#### Nesting
+
+An explicit `workflow=` may be an arbitrarily **nested** sequence of names. The
+nesting is notation only — it is flattened at construction and
+`Coupler.workflow` is always the flat tuple actually executed — but it lets a
+coupling scheme be written the way it is described:
+
+```python
+Coupler(components, exchangers,
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=start_date,
+        workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24,
+                  "atm_ocn_exchange", "ocn"])
+```
+
+Strings are the leaves; any other leaf is a `TypeError`, because the
+alternative — iterating it — would silently turn a stray object into a sequence
+of characters. An unknown name is still a `ValueError` at construction.
+
+#### Multiplicity: running a component on a faster clock
+
+An element listed *n* times runs *n* times per coupled step, on a clock *n*
+times faster. In the example above the atmosphere, the land and the exchanger
+between them run hourly inside a daily ocean coupling — the GFDL-style
+"fast loop" — with no second `Coupler` and no component-side sub-stepping code.
+
+- **The sub-timestep is `coupling_timestep / n`, and must be a whole number of
+  seconds.** `jdt.Timedelta` is integer-backed, so anything else would have to
+  be rounded, and a rounded sub-step desynchronises the sub-stepped component
+  from the coupled clock a little more every step. It is refused at
+  construction, with a `ValueError` naming the element and the count.
+- **A bindable component is bound with its own sub-timestep**, once — the step
+  it actually advances by, not the coupled one, so a component that sub-cycles
+  an internal timestep (JCM, Veros) sub-cycles the right number of times. A
+  component an explicit workflow never names has multiplicity 0: it is neither
+  bound nor run. A component registered *after* construction with
+  `add_component` is bound with the multiplicity the current workflow gives it,
+  or the full coupling timestep when nothing names it — which is the case for
+  the default workflow, since that is derived from the components and the new
+  one is not registered yet. Binding still happens before registering, so a
+  component that rejects the clock never enters the coupler.
+- **Each call gets its own clock.** The loop over the workflow is ordinary
+  Python, run once at trace time, so which call this is — *k* of *n* — is a
+  static number: call *k* of coupled step *s* is handed
+  `Coupler.coupling_time_at_substep(s, k, n)`, whose `step` is the sub-step
+  `s * n + k` (exact integer arithmetic on the int32 counter), whose `dt` is the
+  sub-timestep and whose `sim_time` is `(s * n + k) * dt`. `year_fraction`
+  keeps its exact integer reduction at the sub-rate too — an hourly sub-step
+  still divides a 365-day year — so the seasonal cycle does not quantise away
+  in a long run. Exchangers may be repeated as well and see the same clock.
+- **`CoupledCarry.step` still counts coupled steps.** The sub-step count is
+  derived from it, never stored, so checkpoints, resume and chunked runs are
+  untouched: a checkpoint of a run with multiplicity restores the coupled
+  counter and both clocks continue.
+- **Diagnostics of a repeated component are stacked** along a new leading axis
+  of length *n*, in the order the calls were made, so a trajectory returns
+  `(steps, n, ...)` for it; `to_xarray` folds those two axes into one and
+  labels the records at the sub-rate (below).
+
+Everything about `n == 1` — the clock a component sees, the shape of its
+diagnostics, its time axis, the traced operations — is exactly what it is in a
+coupler with no multiplicity at all, so adding a fast loop to one part of a
+model cannot perturb the rest of it.
 
 ### The scan loop
 
-`Coupler.run()` builds one step function from the workflow and drives it with
-`jax.lax.scan` over `jnp.arange(iterations)`, returning
-`(initial_carry, final_carry, predictions)`. Passing `jitted=False` swaps in
-`adhoc_scan` — a Python `for` loop in `coupler.py` — which is for debugging only
-and is not equivalent in performance or tracing behaviour.
+`Coupler.generate_step_function()` returns the pure function `CoupledCarry ->
+(CoupledCarry, dict[str, Diagnostics])` that runs one workflow pass and returns
+the carry with `step` incremented. It snapshots the components and exchangers as
+they stand when it is called, so registering a component afterwards cannot
+silently change an already-compiled step.
 
-## The interface contract
+`Coupler.generate_trajectory_function(iterations, *, remat=False, jit=True)`
+drives that step with `jax.lax.scan` over `iterations` steps and no `xs` (the
+steps are identical; the only per-step input, the clock, comes from the carry).
+It returns `carry -> (final_carry, diagnostics)`, where every diagnostics leaf
+has gained a leading axis of length `iterations`. `remat=True` wraps the step in
+`jax.checkpoint`, trading recomputation for memory when differentiating through
+a long trajectory; `jit=False` leaves the scan unjitted.
 
-`Coupler.add_component()` calls `resolve_interface()` (`jem/base/interface.py`)
-to bind a raw object's methods into a `JEMComponent` wrapper. No inheritance is
-required.
+Because the clock is the carry's own `step`, calling the trajectory function
+again on the returned carry continues the run:
 
-Required on a component:
+```python
+run = coupler.generate_trajectory_function(30)
+carry = coupler.initialize()
+for chunk in range(12):
+    carry, diagnostics = run(carry)
+    datasets = coupler.to_xarray(diagnostics, first_step=chunk * 30)
+```
 
-| Method | Signature | Purpose |
+## Nesting couplers
+
+A `Coupler` satisfies `Component`: it has a `name` (the keyword-only
+`name="coupled"` argument; the *registered* key in an outer coupler is what the
+outer workflow uses), an `initialize()` returning its `CoupledCarry`, and a
+`step(carry, time)`. It also implements `SupportsBind` and `SupportsXarray`. So
+a coupled model can be a component of a slower coupled model with no wrapper
+class — the GFDL pattern of a fast atmosphere/land loop inside a daily ocean
+coupling:
+
+```python
+fast = Coupler(
+    {"atm": atm, "lnd": lnd},
+    {"atm_lnd_exchange": atm_lnd_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "hour"),
+    start_date=start_date,
+    name="atm_lnd",
+)
+model = Coupler(
+    {"atm_lnd": fast, "ocn": ocn},
+    {"srf_ocn_exchange": srf_ocn_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "day"),
+    start_date=start_date,
+    workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
+)
+```
+
+- **`bind`** requires the outer timestep to be a whole multiple of the inner
+  one, and the start date and calendar to be equal; anything else is a
+  `ValueError`, as it is for any other component with an internal timestep. It
+  records the ratio *r* (24 here). Binding again to the same clock is a no-op,
+  to a different one a `ValueError`: one instance belongs to one coupled model.
+- **`step`** runs *r* of the inner coupler's own coupled steps, through an
+  unjitted trajectory (`lax.scan`, so the inner step appears once in the outer
+  jaxpr rather than *r* times unrolled). The inner clock comes from the inner
+  carry's own `step` counter exactly as in a standalone run, so it is
+  continuous across outer steps and survives a checkpoint; the outer `time` is
+  only checked against it — the static fields of a `CouplingTime` (`dt`,
+  `days_per_year`, `year_offset_seconds`) are comparable at trace time, the
+  step counter is a traced array. Calling `step` before `bind` is a
+  `RuntimeError`. For `r == 1` the inner step is run directly and the
+  diagnostics gain no extra axis, mirroring multiplicity 1.
+- **The carry** of the inner coupler is a `CoupledCarry` living inside the
+  outer one's `components`, so there are two step counters: the outer counts
+  outer steps, the inner counts its own. `outer.save_state(carry, directory)`
+  writes the inner model into `directory / <its registered name>` through the
+  inner coupler's own `save_state`, and `outer.load_state(directory)` reads it
+  back the same way, so a resume continues both clocks — and a component inside
+  the inner model that needs its own format (Veros) still gets it.
+- **Exchangers in the outer coupler** see the inner `CoupledCarry` under its
+  registered name and reach inner components through `.components`.
+  `jem.nested_carry(carries, outer_name, inner_name)` and
+  `jem.with_nested_carry(carries, outer_name, inner_name, new_inner_carry)` are
+  that read and that immutable write (`dataclasses.replace` on the inner
+  `CoupledCarry`), written once:
+
+  ```python
+  def srf_ocn_exchange(components, time):
+      del time
+      land = nested_carry(components, "atm_lnd", "lnd")
+      ocn = dict(components["ocn"], forcing=land["derived"].total_heat_flux)
+      return dict(components, ocn=ocn)
+  ```
+
+- **Output.** The inner coupler's `to_xarray` returns one dataset per *its*
+  components, and the outer coupler flattens them into its result under those
+  names — the nested coupler's own registered name does not appear. The inner
+  datasets carry the inner, faster time axis: `Coupler.to_xarray` supports both
+  the run form `to_xarray(diagnostics, first_step=0)` and the component form
+  `to_xarray(diagnostics, time)`, and in the second it takes `time.steps[0] * r`
+  as its own first step and folds the outer coupler's leading axis of length *r*
+  into the records first.
+
+### The same model, written flat
+
+Multiplicity expresses the same model in one coupler:
+
+```python
+model = Coupler(
+    {"atm": atm, "lnd": lnd, "ocn": ocn},
+    {"atm_lnd_exchange": atm_lnd_exchange, "srf_ocn_exchange": srf_ocn_exchange},
+    coupling_timestep=jdt.to_timedelta(1, "day"),
+    start_date=start_date,
+    workflow=["srf_ocn_exchange",
+              ["atm_lnd_exchange", "atm", "lnd"] * 24,
+              "ocn"],
+)
+```
+
+The two are **equivalent** — the same elements in the same order, on the same
+clocks, producing bit-identical carries and datasets (`tests/unit/
+test_nested_coupler.py::test_nested_and_flat_forms_are_the_same_run` is that
+check). They differ only in bookkeeping:
+
+| | Nested | Flat |
 |---|---|---|
-| `initialize()` | `() -> ComponentCarry` | Return the initial carry |
-| `generate_step_function()` | `() -> StepFunction` | Return the step function |
+| Carry | two levels, two step counters | one level, one counter |
+| Exchangers | outer ones go through `nested_carry` | all at one level |
+| Fast loop | exists on its own: buildable, testable and runnable alone | is a rate, not an object |
 
-`StepFunction` has signature
-`(ComponentCarry, SimulationTime) -> (ComponentCarry, Predictions)`. The carry it
-returns must match the structure `initialize()` produced. The leading axis of
-every `Predictions` leaf is time; the coupler stacks predictions across steps
-along it.
+Prefer the **nested** form when the fast loop is a thing in its own right — an
+already-assembled surface model, something you also run standalone, or a piece
+another model will reuse — and the **flat** form when it is only a rate: one
+coupler, one carry and one workflow to read.
 
-Optional (bound to `None` if absent): `predictions_to_xarray(predictions) ->
-xr.Dataset` and `get_info() -> dict`.
+## Output conventions
 
-A class whose methods have different names can supply a
-`__JEM_CUSTOMIZED_MAPPING__` dict remapping them onto the expected names, so a
-third-party object can be adapted without subclassing.
+`Coupler.to_xarray(diagnostics, *, first_step=0)` returns one
+`xarray.Dataset` per component that implements `SupportsXarray`; components that
+do not are skipped, so an output-less component does not stop a run producing
+output. A component that returns a *mapping* of datasets (a nested `Coupler`)
+contributes its entries under their own names, and a name that collides with one
+already written is a `ValueError`. `first_step` is the coupled step the first record covers — the `step` of
+the carry the trajectory started from — and defaults to 0. **Pass it when
+writing a chunked run**, or the second chunk is labelled with the first chunk's
+dates.
 
-### Name uniqueness
+Each component is handed a `TimeAxis` (start date, the record's step indices,
+the record interval and the calendar) so every dataset from one run shares one
+time coordinate; `TimeAxis.datetimes()` and `TimeAxis.attrs` are the
+`(values, attrs)` pair xarray wants, and every component's `to_xarray` calls
+them directly.
 
-Component names and mapper names share one namespace.
-`Coupler._verify_name_uniqueness()` runs before every step-function build, so a
-clash is caught at build time rather than producing a silently ignored mapper.
+A component the workflow runs *n > 1* times per coupled step wrote *n* records
+per step, and its stacked diagnostics arrive as `(steps, n, ...)`. The two
+leading axes are folded into one — they are already in time order, record
+`s * n + k` being call *k* of step *s* — and the component is handed a
+`TimeAxis` spaced at `coupling_timestep / n` and starting at sub-step
+`first_step * n`. So `first_step` is always given in *coupled* steps, whatever
+rate a component runs at, and an hourly component in a daily coupler writes 24
+records per coupled step stamped at the end of each hour. Components with
+`n == 1` are unchanged, and the datasets of a fast and a slow component are
+deliberately *not* on one time axis: they are different sampling rates of one
+run, and `xr.merge` of the two is an outer join by design.
+
+The conventions, which are JCM's:
+
+- **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
+  `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (and a CF
+  `coordinates` attribute on each variable) for a curvilinear one — CF and
+  xarray forbid a 2-D variable named after one of its own dimensions.
+- **Coordinate values** are degrees computed as `radians * 180 / pi`, in
+  float64, which is character for character what `jcm.utils.data_to_xarray`
+  does. A last-bit difference would be enough for `xr.merge` to treat two
+  96-point longitude axes as different axes and produce a 119-point union.
+- **The time label is the END of the interval a record covers**, as an absolute
+  `datetime64[ns]`: record *k* holds the average over
+  `[start_date + k dt, start_date + (k+1) dt)` and is stamped
+  `start_date + (k+1) dt`. This is JCM's convention, and `TimeAxis.datetimes()`
+  is the one place it is written down — including the arithmetic, a float64
+  count of days since the epoch multiplied into nanoseconds at the end, which
+  is inexact but *identically* inexact for every component that goes through
+  it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
+  xarray. The dates are proleptic Gregorian whatever the model calendar is;
+  the calendar governs the seasonal cycle and forcing selection, not the
+  labels.
+- **Variable names**: state and derived quantities keep their plain names, and
+  every variable that came from a component's *forcing* is written with a
+  `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
+  `forcing_variable(name)`, which is what a slab model's
+  `_create_xarray_data_vars` and `VerosComponent.to_xarray` call. (It lives
+  with the contract rather than in the slab package, and is re-exported from
+  `jem.components.slab.base`, so that there is one definition of the prefix.
+  It is a convention of the packaged output, not a protocol requirement: the
+  coupler never inspects a dataset, a wrapper around an external model may
+  keep that model's own names, and the helper leaves a name that already
+  carries the prefix unchanged.) Two
+  components legitimately hold the same physical field — one produced it, the
+  other received it — and without the prefix the merge collides on the shared
+  name. So the slab atmosphere and the slab land model write
+  `forcing_total_heat_flux` while the ocean writes its own derived
+  `total_heat_flux`; the sea ice writes `forcing_ice_frazil_melt_energy` for
+  the field the ocean published as `ice_frazil_melt_energy`; and Veros writes
+  `forcing_heat_flux`, `forcing_freshwater_flux`, `forcing_surface_taux`,
+  `forcing_surface_tauy` and `forcing_surface_air_temperature` for the five
+  fields an exchanger hands it, keeping plain names for the `temp`, `salt`,
+  `u`, `v` and sea-surface fields it computes.
+- **A configuration-dependent variable is decided by the run, not by the
+  component object.** `SlabOceanModel` writes `forcing_q_flux` only when the
+  trajectory actually applied a Q-flux, and `step` follows the
+  `forcing_method` in `carry["params"]` — which `initialize(params)` may set
+  to something other than the method the model was constructed with. So the
+  step publishes the Q-flux snapshot it applied as a key of its own
+  diagnostics, and `_create_xarray_data_vars` writes the variable when that
+  key is there. Keying it off `self.params` instead would drop an applied
+  Q-flux from the output, or publish a constant zero as though a Q-flux were
+  active. This is safe under `lax.scan` precisely because `forcing_method` is
+  static (`pytree_node=False`): it cannot change during a run, so the
+  diagnostics structure is constant even though it varies between runs.
+
+Together these are what make `xr.merge([datasets["atm"], datasets["ocn"]])` an
+N-long join rather than a 2N-long outer union.
 
 ## The JCM adapter
 
-`jem/components/jcm_component.py` adapts a `jcm.model.Model` (the spectral
-atmosphere from jax-gcm). It does not subclass: `make_jem_compatible(model,
-coupling_timestep)` attaches the four JEM methods to the model instance, after
-checking that the coupling timestep is an integer multiple of JCM's own
-timestep. Its carry is:
+`jem/components/jcm/component.py` wraps a `jcm.model.Model` (the spectral
+atmosphere from jax-gcm) as `JCMComponent`. It is a wrapper object, not an
+in-place adaptation: the atmosphere JEM drives is the same object the user
+configured, and nothing in JCM has to know JEM exists. Its carry is:
 
 ```python
 {
-    "state":   <jcm modal (spectral) state>,
-    "forcing": <jcm ForcingData>,
-    "derived": JCMDerived(
-        physics,                # jcm's own physics carry, opaque passthrough
-        ...,                    # surface heat fluxes, W/m^2, positive upward
-        total_freshwater_flux,  # kg/m^2/s, positive upward (evap - precip)
-    ),
+    "state":   <jcm modal (spectral) dycore state>,
+    "physics": <jcm's cross-step physics carry, threaded, opaque>,
+    "forcing": <jcm ForcingData; holds sea_surface_temperature, sice_am, ...>,
+    "derived": JCMDerived(physics, total_heat_flux, total_freshwater_flux,
+                          evaporation, precipitation, u0, v0),
 }
 ```
 
-Each coupling step calls `model.run_from_state_with_carry()` with the coupling
-interval as both `save_interval` and `total_time`, then reads the surface fluxes
-out of the returned physics diagnostics and flips their sign (JCM publishes
-downward positive; JEM is upward positive). The exact set of flux fields on
-`JCMDerived` tracks what jax-gcm publishes and is changing — see
-`api_hardening_plan.md` T0.2 and T1.2.
+`initialize()` builds those pytrees from `Model.bootstrap_state()` and a
+structural template of the diagnostics dict; it does **not** integrate. Each
+`step` calls `model.run_from_state_with_carry()` with the coupling interval as
+both `save_interval` and `total_time`, so JCM sub-steps internally at its own
+timestep and returns exactly one saved record per coupling step, then reads the
+surface exchange out of the returned physics diagnostics.
+
+That read is isolated in `jem/components/jcm/exchange_fields.py`, which is the
+single place JCM's package-specific diagnostics layout is translated into JEM's
+conventions — heat flux **positive upward** (JCM publishes `hfluxn` downward
+positive, so it is negated exactly here), water fluxes in `kg m-2 s-1` (JCM's
+SPEEDY reports `g m-2 s-1`), wind in `m s-1`. `detect()` picks the reader from
+the diagnostics keys; the ECHAM reader raises `NotImplementedError` naming
+jax-gcm#754, the issue that will have every JCM physics package publish the same
+surface-exchange struct.
+
+Three JCM private attributes are still read, each in one helper tagged with the
+jax-gcm issue that will remove it: `_final_dycore_state` and
+`_final_physics_state` (jax-gcm#755, a public initial-state / physics-carry
+API), and `ModelPredictions._predictions` (jax-gcm#756,
+`ModelPredictions.with_context`). The atmosphere's output keeps JCM's own time
+labelling because JEM cannot reproduce its calendar arithmetic while
+`Model._date_from_sim_time` is private (jax-gcm#758).
+
+Each `step` also compares the dycore state's own `sim_time` with the coupler's
+and logs at ERROR if they have parted, which can only happen if the carry came
+from another run. The tolerance is `clock_tolerance_seconds(sim_time)` — one
+second, or eight float32 ulps of the elapsed time, whichever is larger — so the
+check neither fires on the rounding of a long run's float32 clock nor stops
+noticing a real disagreement.
+
+`VerosComponent.step` makes the same comparison against Veros'
+`variables.time`, from the same tolerance
+(`jem.components.clock.clock_tolerance_seconds`, which is where it lives so the
+two wrappers cannot answer the question differently). Veros has no calendar, so
+its counter is not seconds since the coupler's `start_date` but seconds since
+its setup's own start: `bind` records the reading the setup holds when the
+coupler adopts it, and the check compares `variables.time` minus that zero
+point. A setup that was already integrated before it was wrapped therefore
+starts the coupled run where it stands — JEM cannot know which absolute date
+that state belongs to — while a *later* disagreement, such as a Veros restart
+paired with a `CoupledCarry.step` from elsewhere in the run, is caught. Both
+checks report through `jax.debug.callback` rather than raising: they run inside
+the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
 
 ## Adding a new component
 
-1. Write the class (or an adapter for an external model) under
-   `jem/components/`.
-2. Implement `initialize()` and `generate_step_function()`; follow the
-   `state`/`forcing`/`derived` carry convention so mappers stay readable.
-3. Optionally add `predictions_to_xarray()` and `get_info()`.
+1. Write the class (or a wrapper class for an external model) under
+   `jem/components/`. Give it a `name`, an `initialize()` and a
+   `step(carry, time)`; follow the `state`/`forcing`/`derived` carry convention
+   so exchangers stay readable, and put tunables in a `flax.struct` parameters
+   dataclass carried as `carry["params"]` so they stay differentiable.
+2. Keep `initialize()` pure with respect to `self`: load boundary data in
+   `__init__` (it is configuration, not state), so calling `initialize()` twice
+   gives the same answer. If any parameter is an *initial condition* — read by
+   `initialize` and never by `step` — give it the `initialize(params=None)`
+   signature the slab models have, so that parameter can be varied and
+   differentiated (see *Parameters*); a parameter that can only be set at
+   construction is a dead leaf in the carry.
+3. Add `bind(...)` if the model has an internal timestep, and raise `ValueError`
+   when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
+   time)` if it produces output, and `save_state`/`load_state` if its carry
+   cannot be checkpointed as a plain pytree.
 4. Export it from `jem/components/__init__.py` (lazily, via the module's
    `__getattr__`, if it pulls in an optional dependency — as Veros does).
-5. Register it: `Coupler(components={"mycomp": MyComponent(...)})`.
-6. Add tests under `tests/unit/`, including a two-step `Coupler.run()` that
-   exercises the component inside a workflow — a component-only test cannot
-   catch a carry-structure mismatch.
+5. Register it: `Coupler({"mycomp": MyComponent(...)}, ...)`.
+6. Add tests under `tests/unit/`, including a two-step run through
+   `Coupler.generate_trajectory_function(2)` — a component-only test cannot
+   catch a carry-structure mismatch, which only `lax.scan` sees.
