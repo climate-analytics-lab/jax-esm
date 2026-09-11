@@ -18,16 +18,19 @@ template: |
   Named coupled configurations (the quickest way in):
   ---------------------------------------------------
     python -m jem.main +configuration=aquaplanet-slab
-    python -m jem.main +configuration=earth-slab coupled_run@run=smoke
+    python -m jem.main +configuration=earth-slab coupled_run=smoke
 
   JAX-ESM's own config groups (under jem/config/):
   -----------------------------------------------
     ocean, land, seaice, coupling, regrid, coupled_run, configuration
 
-    The coupled run's settings compose at ``cfg.run`` from the
-    ``coupled_run`` group, so overriding the whole group keeps the package:
-    ``coupled_run@run=longrun``. Individual keys need no prefix:
-    ``run.total_time="90 days" run.chunk="30 days"``.
+    The coupled run's settings are the ``coupled_run`` group, at
+    ``cfg.coupled_run``: ``coupled_run=longrun`` picks an option and
+    ``coupled_run.total_time="90 days" coupled_run.chunk="30 days"`` sets
+    individual keys (no ``+`` needed -- ``coupled_run/default.yaml`` is the
+    complete schema). It is not called ``run`` because ``atmosphere.run`` is
+    the atmosphere's own run config and a ``run`` group here would shadow
+    JAX-GCM's.
 
   The atmosphere: JAX-GCM's own config groups, re-rooted under `atmosphere`:
   -------------------------------------------------------------------------

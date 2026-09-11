@@ -40,12 +40,6 @@ JCM_CONFIG_DIR = Path(str(importlib.resources.files("jcm.config")))
 #: Directories under `jem/config/` that are not option groups.
 NOT_A_GROUP = {"hydra", "__pycache__"}
 
-#: Groups whose composed package is not the group's own name. The coupled run
-#: composes at `cfg.run` from the `coupled_run` group -- see `config.yaml` for
-#: why the group cannot simply be called `run` -- so selecting one of its
-#: options on the command line has to carry that package.
-GROUP_PACKAGE = {"coupled_run": "run"}
-
 #: Keys a component node may carry that are NOT constructor arguments of its
 #: `_target_`: `jem.runners` reads and removes them before instantiating. They
 #: are exempt from the no-Python-defaults check for the same reason a `**kwargs`
@@ -67,10 +61,11 @@ def _options(group: str) -> list[str]:
 
 
 def _group_override(group: str, option: str) -> str:
-    """Return the command-line override selecting ``option`` of ``group``."""
-    package = GROUP_PACKAGE.get(group)
-    if package is not None:
-        return f"{group}@{package}={option}"
+    """Return the command-line override selecting ``option`` of ``group``.
+
+    Every JAX-ESM group composes at its own name, so one spelling serves all
+    of them -- there is no package to carry.
+    """
     return f"{group}={option}"
 
 
@@ -124,8 +119,7 @@ def _target_nodes(node, path: str = "") -> Iterator[tuple[str, DictConfig]]:
 def test_every_group_option_composes(group, option):
     """Every option of every JAX-ESM group composes onto the default config."""
     cfg = composed([_group_override(group, option)])
-    package = GROUP_PACKAGE.get(group, group)
-    assert package in cfg
+    assert group in cfg
 
 
 @pytest.mark.parametrize("group", ["ocean", "land", "seaice", "regrid"])
@@ -170,7 +164,7 @@ def test_jcm_configuration_composes_under_the_atmosphere():
     assert cfg.atmosphere.terrain.kind == "from_file"
     assert cfg.atmosphere.run.time_step == 15
     # ... and the top-level (coupled) config is untouched by it.
-    assert cfg.run.total_time == "30 days"
+    assert cfg.coupled_run.total_time == "30 days"
 
     overridden = composed(
         ["+configuration@atmosphere=speedy-t31", "atmosphere.run.time_step=7"]
@@ -186,15 +180,19 @@ def test_jcm_run_group_is_not_shadowed():
     ``run`` here would therefore be composed into ``atmosphere.run`` in place
     of JCM's -- and, worse, silently: 16 of the 19 JAX-GCM configuration
     bundles say ``override /run: longrun``, so they would compose the coupler's
-    run keys into the atmosphere. Hence the group is called ``coupled_run``.
+    run keys into the atmosphere. Hence the group is called ``coupled_run``,
+    which is also how it reads: ``atmosphere.run`` is the atmosphere's run
+    config, ``coupled_run`` the coupled model's, and neither claims a bare
+    top-level ``run`` key.
     """
     assert not (CONFIG_DIR / "run").exists()
+    assert "run" not in composed([])
 
     cfg = composed(["+configuration@atmosphere=t63-echam-1m"])
     # JCM's own run/longrun.yaml, not anything of ours.
     assert cfg.atmosphere.run.total_time == 365
     assert "time_step" in cfg.atmosphere.run
-    assert cfg.run.total_time == "30 days"
+    assert cfg.coupled_run.total_time == "30 days"
 
 
 def test_help_is_jem_s_own():
@@ -212,12 +210,12 @@ def test_help_is_jem_s_own():
 def test_run_options_share_one_schema():
     """Every ``coupled_run`` option exposes the same keys.
 
-    ``default`` is the complete schema and the others inherit it, so any run
-    key can be set on the command line without a ``+`` whichever option is
-    composed.
+    ``default`` is the complete schema and the others inherit it, so any
+    ``coupled_run.<key>`` can be set on the command line without a ``+``
+    whichever option is composed.
     """
     key_sets = {
-        option: set(composed([_group_override("coupled_run", option)]).run)
+        option: set(composed([_group_override("coupled_run", option)]).coupled_run)
         for option in _options("coupled_run")
     }
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
@@ -401,10 +399,10 @@ def test_installed_wheel_has_config(tmp_path):
     anything -- and the source tree gives no warning of it.
     """
     repository_root = Path(jem.__file__).resolve().parent.parent
-    # Built from a copy: `pip wheel --no-build-isolation` builds in place, and
-    # a test must not leave a `build/` directory in the working tree. Only what
-    # the build reads is copied (the version is an attribute of `jem/__init__`,
-    # so the package itself has to come along).
+    # Built from a copy, because a build writes a `build/` directory beside the
+    # sources and a test must not leave one in the working tree. Only what the
+    # build reads is copied (the version is an attribute of `jem/__init__`, so
+    # the package itself has to come along).
     source = tmp_path / "src"
     source.mkdir()
     for name in ("pyproject.toml", "README.md", "LICENSE"):
@@ -415,18 +413,27 @@ def test_installed_wheel_has_config(tmp_path):
         ignore=shutil.ignore_patterns("__pycache__"),
     )
 
+    # The PEP 517 hook directly rather than `pip wheel`: it is the same build
+    # setuptools would run, without pip's resolver, its index lookups or its
+    # lock -- none of which this test is about, and any of which can hang a CI
+    # job that has no network.
+    output = tmp_path / "wheel"
     result = subprocess.run(
         [
-            sys.executable, "-m", "pip", "wheel", str(source),
-            "--no-deps", "--no-build-isolation", "--wheel-dir", str(tmp_path),
+            sys.executable, "-c",
+            "import sys; from setuptools import build_meta; "
+            "print(build_meta.build_wheel(sys.argv[1]))",
+            str(output),
         ],
+        cwd=source,
         capture_output=True,
         text=True,
         check=False,
+        timeout=600,
     )
     assert result.returncode == 0, result.stderr[-4000:]
 
-    wheels = list(tmp_path.glob("*.whl"))
+    wheels = list(output.glob("*.whl"))
     assert len(wheels) == 1, wheels
     names = set(zipfile.ZipFile(wheels[0]).namelist())
     assert "jem/config/config.yaml" in names

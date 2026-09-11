@@ -8,9 +8,10 @@
 #
 # The keys are the keyword arguments of `jem.driver.run_chunked()`, which is
 # where their defaults live; the values here repeat only what this named
-# option is about. The group is called `coupled_run` but is composed at
-# `cfg.run` -- see the comment in `config.yaml` for why the group cannot be
-# called `run`. Override it as `coupled_run@run=smoke`.
+# option is about. The group composes at `cfg.coupled_run`, not `cfg.run` --
+# `atmosphere.run` is the atmosphere's own run config, and a group called
+# `run` here would shadow jcm's (see the comment in `config.yaml`). Select an
+# option with `coupled_run=smoke`, set one key with `coupled_run.chunk=...`.
 
 # Total simulated time, as a `jcm.date.parse_duration_days` string.
 total_time: "30 days"

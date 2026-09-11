@@ -50,16 +50,18 @@ defaults:
   - seaice: slab
   - coupling: daily
   - regrid: same_grid
-  # The coupled run's own settings land at `cfg.run`, but the GROUP is called
-  # `coupled_run` and not `run`: Hydra resolves a group option from the first
-  # search-path entry that has it, and the primary config package (this one)
-  # comes before `pkg://jcm.config`. A `run` group here would therefore shadow
-  # jcm's `run/default.yaml` and `run/longrun.yaml` -- the atmosphere would
-  # silently be handed the coupler's run keys instead of its own, and every
-  # jax-gcm configuration bundle that says `override /run: longrun` (16 of the
-  # 19 shipped ones) would compose the wrong file. Overriding it on the command
-  # line keeps the package: `coupled_run@run=smoke`.
-  - coupled_run@run: default
+  # The coupled run's settings, at `cfg.coupled_run`. The group is NOT called
+  # `run`, for two reasons. Mechanically: Hydra resolves a group option from
+  # the first search-path entry that has it, and the primary config package
+  # (this one) comes before `pkg://jcm.config`, so a `run` group here would
+  # shadow jcm's `run/default.yaml` and `run/longrun.yaml` -- the atmosphere
+  # would silently be handed the coupler's run keys instead of its own, and
+  # every jax-gcm configuration bundle that says `override /run: longrun` (16
+  # of the 19 shipped ones) would compose the wrong file. And for reading:
+  # `atmosphere.run` already exists and means something else, so the coupled
+  # run keeps its own name at both ends -- `coupled_run=smoke` selects the
+  # option, `coupled_run.total_time="90 days"` sets one key.
+  - coupled_run: default
 
   - override hydra/help: custom_help
 
