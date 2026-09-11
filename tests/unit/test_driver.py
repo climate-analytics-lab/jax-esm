@@ -327,7 +327,13 @@ def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     The chunk length is a choice of the run, not a property of the checkpoint,
     so a run resumed with a longer chunk starts mid-chunk. What is left is
     computed from the restored step counter, so the run still stops exactly at
-    `total_time`.
+    `total_time` -- and, because `remaining_batches` puts the short batch
+    LAST, the eight days are integrated as 3 + 4 + 1. The control run is what
+    makes that a statement about the trajectory rather than about the counter:
+    the separately-compiled short final batch has to produce the same numbers
+    as one continuous eight-day integration, which is the property a bug in
+    `remaining_batches` or in the driver's per-length trajectory cache would
+    break while still stopping at step 8.
     """
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
@@ -340,6 +346,12 @@ def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     )
     assert resumed.completed
     assert resumed.steps_completed == 8
+
+    continuous = run_chunked(
+        two_slabs(), total_time="8 days", chunk="8 days",
+        output_dir=tmp_path / "continuous",
+    )
+    assert_carries_agree(resumed.final_carry, continuous.final_carry, atol=1e-12)
 
 
 def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
