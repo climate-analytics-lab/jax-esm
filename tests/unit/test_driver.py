@@ -235,6 +235,83 @@ def test_default_health_check_skips_without_an_atmosphere():
     assert report == {"chunk": 3, "elapsed_days": 12.0, "skipped": "no atmosphere"}
 
 
+class BlowsUpInTheLastRecord(Coupler):
+    """A two-slab coupler whose ocean's chunk ends with one NaN point.
+
+    A slab ocean integrated for a few days does not blow up, and tuning one
+    until it did would stop it being a slab ocean. What a health gate has to
+    cope with is the *shape* of a blow-up rather than its cause -- a bad
+    value in the chunk's final record -- so that is injected here, at the one
+    place the driver takes a chunk's datasets from.
+    """
+
+    def to_xarray(self, diagnostics, time=None, *, first_step=0):
+        datasets = super().to_xarray(diagnostics, time, first_step=first_step)
+        ocean = datasets["ocn"]["sea_surface_temperature"]
+        values = np.asarray(ocean.values).copy()
+        values[-1, 0, 0] = np.nan
+        datasets["ocn"]["sea_surface_temperature"] = ocean.copy(data=values)
+        return datasets
+
+
+def two_slabs_blowing_up() -> Coupler:
+    """Return :func:`two_slabs`' model, with a NaN at the end of every chunk."""
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    return BlowsUpInTheLastRecord(
+        components,
+        default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+
+def rejects_a_nan_in_the_last_record(datasets, chunk_index, elapsed_days):
+    """Ask of the ocean what `jcm.diagnostics.check_health` asks of the atmosphere.
+
+    The real gate reads `isel(time=-1)` and fails on a NaN there; this is the
+    same question, put to the one component a two-slab coupler has.
+    """
+    last = datasets["ocn"]["sea_surface_temperature"].isel(time=-1)
+    unhealthy = bool(np.isnan(np.asarray(last)).any())
+    return not unhealthy, {"chunk": chunk_index, "nan_in_last_record": unhealthy}
+
+
+@pytest.mark.parametrize(
+    ("options", "records"),
+    [({}, 4), ({"output_averages": True}, 1), ({"subsample": 2}, 2)],
+)
+def test_health_gate_sees_the_chunk_unreduced(tmp_path, options, records):
+    """A state that goes bad at the end of a chunk is caught however output is reduced.
+
+    Both reductions destroy the evidence a gate reads: `output_averages`
+    averages the chunk, and xarray's mean skips NaNs and dilutes a finite
+    extreme, while `subsample=2` drops the last of four records outright. So
+    the gate is given the chunk as integrated, and only the copy written to
+    disk is reduced -- which the file's own record count and the NaN's
+    absence from it check, so the fix cannot be "stop reducing the output".
+    """
+    result = run_chunked(
+        two_slabs_blowing_up(),
+        total_time="4 days",
+        chunk="4 days",
+        output_dir=tmp_path,
+        health_check=rejects_a_nan_in_the_last_record,
+        **options,
+    )
+
+    assert not result.completed
+    assert result.reports == [{"chunk": 0, "nan_in_last_record": True}]
+
+    with xr.open_dataset(tmp_path / "ocn-00000000.nc") as written:
+        assert written.sizes["time"] == records
+        # The file is the reduced form, and in both reduced forms the bad
+        # point is no longer in it -- which is exactly what the gate used to
+        # be shown.
+        nan_in_file = bool(np.isnan(written["sea_surface_temperature"].values).any())
+        assert nan_in_file == (not options)
+
+
 # ---------------------------------------------------------------------------
 # Chunking and resuming give the same run
 # ---------------------------------------------------------------------------

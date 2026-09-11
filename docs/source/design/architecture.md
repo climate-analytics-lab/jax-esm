@@ -860,10 +860,11 @@ trajectory = coupler.generate_trajectory_function(steps_per_chunk)   # compiled 
 for each chunk:
     first_step = int(carry.step)
     carry, diagnostics = trajectory(carry)
-    datasets = datasets_for_chunk(coupler, diagnostics, first_step=first_step, …)
-    paths += write_chunk(datasets, output_dir, first_step)
+    datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+    reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…)
+    paths += write_chunk(reduced, output_dir, first_step)
     coupler.save_state(carry, checkpoint_path)
-    ok, report = health_check(datasets, chunk_index, elapsed_days)
+    ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
 ```
 
 It returns a `RunResult`: the `final_carry`, `steps_completed`
@@ -891,6 +892,18 @@ abstention, not a pass: a gate for the surface components would have to know
 each one's physical ranges, which is the components' business.
 `health_check=None` removes the gate entirely, and `bail_on_unhealthy=False`
 logs and carries on, which is what a run studying the instability itself wants.
+
+The gate is given the chunk **as it was integrated** — every record — and not
+the thinned or averaged datasets that were written. That distinction is the
+difference between a working gate and one that cannot see: `check_health`
+judges a chunk by its last record and by extremes, while `output_averages=True`
+replaces the chunk with a mean that (xarray skips NaNs) drops a NaN entirely
+and dilutes a finite extreme, and `subsample=n` need not keep the last record
+at all. An atmosphere that blew up in the last hours of a month would then be
+reported healthy and checkpointed. So the loop labels the chunk once with
+`chunk_datasets`, hands *that* to the gate, and applies `postprocess_datasets`
+only to the copy it writes; `datasets_for_chunk` remains the two composed, for
+a caller that wants the reduced form alone.
 
 **Checkpoints and resume.** `checkpoint_path` is a **single directory**,
 rewritten after every chunk, not a directory of dated restart points. That is

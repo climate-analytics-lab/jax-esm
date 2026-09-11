@@ -38,9 +38,12 @@ CORE_NAMES = (
     "default_exchangers",
     "default_exchanges",
     "default_workflow",
-    # Writing a chunk of a run out.
+    # Writing a chunk of a run out: the labelling and the reduction, each on
+    # its own (the health gate needs the unreduced chunk) and composed.
+    "chunk_datasets",
     "datasets_for_chunk",
     "postprocess",
+    "postprocess_datasets",
     "write_chunk",
     # The run loop, and the gate it gives a chunk.
     "RunResult",

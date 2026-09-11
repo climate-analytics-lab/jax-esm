@@ -201,10 +201,14 @@ Breaking changes are marked; everything else is additive.
   says it needs none. `jem.runners` also exposes each map under the exchange
   role it plays, so a coupling table may name either vocabulary.
 - **`jem.output`** — the last step of a chunk, which every driver re-invented:
-  `postprocess(dataset, *, output_averages, subsample)`,
-  `write_chunk(datasets, output_dir, first_step)` and `datasets_for_chunk`,
-  which is the two of them either side of `Coupler.to_xarray` so a run loop
-  needs one call per chunk. `output_averages` is defined against jcm's meaning
+  `chunk_datasets(coupler, diagnostics, *, first_step)` (label a chunk's
+  records, reduce nothing), `postprocess(dataset, *, output_averages,
+  subsample)` and `postprocess_datasets` (the same reduction over a whole
+  chunk), `write_chunk(datasets, output_dir, first_step)`, and
+  `datasets_for_chunk`, which is the labelling and the reduction in one call.
+  The labelling and the reduction are separate because a chunk has two
+  consumers: what is *written* is reduced, while what the health gate
+  *inspects* must not be. `output_averages` is defined against jcm's meaning
   of the same word: jcm replaces each saved record with the mean over its save
   interval, labelled at the interval's end, and the coupler's records are
   already one per coupling step — so the coupler's output interval is the
@@ -350,6 +354,13 @@ code this release adds:
   is refused rather than silently dropped.
 - `VerosComponent.load_state` restores Veros' process-global `force_overwrite`
   even when the restart read fails.
+- The health check is given each chunk **unreduced**, and only the copy that is
+  written is thinned or averaged. `output_averages=True` (the shipped
+  `coupled_run=longrun`) replaced a chunk with its time mean before the gate
+  saw it: xarray's mean skips NaNs and dilutes a finite extreme, and
+  `subsample>1` could drop the chunk's last record — which is the record
+  `jcm.diagnostics.check_health` judges, so a model that went bad near the end
+  of a chunk was reported healthy and checkpointed.
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.

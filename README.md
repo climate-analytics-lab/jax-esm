@@ -182,6 +182,12 @@ command-line form. The checkpoint is one directory, rewritten atomically each
 chunk; a save interrupted half way through is detected and skipped rather than
 resumed from.
 
+`output_averages` and `subsample` reduce the *files* only. The health check is
+given each chunk exactly as it was integrated — every record — because it
+judges a chunk by its last record and its extremes, and a chunk mean (which
+skips NaNs) or a stride that drops the last record would report an atmosphere
+that blew up at the end of the month as healthy.
+
 For a reduction that must not cost memory proportional to the run, accumulate
 it *inside* the scan instead of writing every step out:
 

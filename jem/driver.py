@@ -7,8 +7,8 @@ every example, notebook and experiment driver in this repository used to
 decide it again, slightly differently. :func:`run_chunked` is that loop,
 written once:
 
-    integrate a chunk -> label and write its output -> checkpoint ->
-    check the state is still healthy -> repeat
+    integrate a chunk -> label it -> write its (reduced) output ->
+    checkpoint -> check the state is still healthy -> repeat
 
 **Every default a run has lives here**, on :func:`run_chunked`'s signature.
 ``jem/config/coupled_run/*.yaml`` names the same keys and :mod:`jem.runners`
@@ -72,7 +72,12 @@ import xarray as xr
 
 from jem.base.component import CoupledCarry
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
-from jem.output import check_subsample, datasets_for_chunk, write_chunk
+from jem.output import (
+    check_subsample,
+    chunk_datasets,
+    postprocess_datasets,
+    write_chunk,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - only the type checker needs the class
     from jem.base.coupler import Coupler
@@ -95,9 +100,11 @@ STEP_TOLERANCE = 1e-9
 ATMOSPHERE_NAME = "atm"
 
 #: What a health check returns and is given: ``(datasets, chunk_index,
-#: elapsed_days) -> (ok, report)``. ``ok`` False stops the run when
-#: ``bail_on_unhealthy``; ``report`` is kept in :attr:`RunResult.reports`
-#: whatever it says.
+#: elapsed_days) -> (ok, report)``, where ``datasets`` is the chunk's
+#: **unreduced** output -- every record it integrated, whatever
+#: ``output_averages`` and ``subsample`` do to the files. ``ok`` False stops
+#: the run when ``bail_on_unhealthy``; ``report`` is kept in
+#: :attr:`RunResult.reports` whatever it says.
 HealthCheck = Callable[[dict[str, xr.Dataset], int, float], tuple[bool, dict]]
 
 
@@ -145,6 +152,13 @@ def default_health_check(
     gate, applied to the atmosphere's own output, so a coupled run stops on
     the same evidence an uncoupled one does.
 
+    Because it judges the chunk by its **last record and its extremes**, it
+    must be given the chunk unreduced -- which is what
+    :func:`run_chunked` passes it. A chunk mean skips NaNs and averages an
+    extreme away, and a ``subsample`` stride need not keep the last record at
+    all, so the same atmosphere blowing up in the last hours of a chunk would
+    read as healthy in the reduced output that was written.
+
     A coupled model with no atmosphere -- a slab-only test, a spring, an
     ocean-only configuration -- has nothing this can look at, so it is
     reported as skipped and the run continues. That is a deliberate "no
@@ -155,7 +169,7 @@ def default_health_check(
     Parameters
     ----------
     datasets : Mapping[str, xarray.Dataset]
-        The chunk's postprocessed output, keyed by component name.
+        The chunk's full, unreduced output, keyed by component name.
     chunk_index : int
         Which chunk this is, from zero; passed through to the report.
     elapsed_days : float
@@ -217,13 +231,19 @@ def run_chunked(
         Directory the chunk files are written into, created if absent.
     output_averages : bool
         Write each chunk's time mean instead of its individual records; see
-        :mod:`jem.output` for what the averaging interval is.
+        :mod:`jem.output` for what the averaging interval is. This reduces
+        the *files* only; ``health_check`` still sees the whole chunk.
     subsample : int
-        Keep every ``subsample``-th coupled step in the output.
+        Keep every ``subsample``-th coupled step in the output -- again, in
+        the files only.
     health_check : callable, optional
-        ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run on
-        each chunk's output after it is written. ``None`` disables the gate
-        entirely, and no reports are collected.
+        ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run after
+        each chunk has been written and checkpointed. ``datasets`` is the
+        chunk **as it was integrated** -- every record, unreduced -- and not
+        the thinned or averaged form written to disk, so that a gate judging
+        a chunk by its last record or its extremes sees them however the run
+        is configured to write output. ``None`` disables the gate entirely,
+        and no reports are collected.
     bail_on_unhealthy : bool
         Stop at the first chunk the health check rejects, returning a result
         with ``completed=False``. False logs the failure and carries on --
@@ -306,14 +326,18 @@ def run_chunked(
             trajectories[steps] = coupler.generate_trajectory_function(steps)
         carry, diagnostics = trajectories[steps](carry)
 
-        datasets = datasets_for_chunk(
-            coupler,
-            diagnostics,
-            first_step=first_step,
-            output_averages=output_averages,
-            subsample=subsample,
+        # The chunk is labelled once, unreduced, and then reduced only for
+        # the copy that is written: `output_averages` and `subsample` are
+        # both lossy in the direction the health gate cares about (a time
+        # mean skips NaNs and dilutes a finite extreme; a stride can drop the
+        # last record entirely), so a gate handed the reduced output would
+        # pass a state that went bad at the end of the chunk. See
+        # :mod:`jem.output`.
+        datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+        reduced = postprocess_datasets(
+            datasets, output_averages=output_averages, subsample=subsample
         )
-        paths.extend(write_chunk(datasets, output_dir, first_step))
+        paths.extend(write_chunk(reduced, output_dir, first_step))
         if checkpoint_path is not None:
             coupler.save_state(carry, Path(checkpoint_path))
 
@@ -322,7 +346,7 @@ def run_chunked(
             "Chunk %d: %d coupled steps run, at step %d, %.4g simulated days "
             "(%.4g years); %d file(s) written.",
             chunk_index, steps, int(carry.step), elapsed_days,
-            elapsed_days / coupler.days_per_year, len(datasets),
+            elapsed_days / coupler.days_per_year, len(reduced),
         )
         if health_check is None:
             continue

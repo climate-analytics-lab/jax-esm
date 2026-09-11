@@ -7,11 +7,24 @@ thinning or averaging the records, and writing them out under names that say
 which component they came from and where on the run's clock they start. That
 is this module:
 
-- :func:`postprocess` reduces one dataset (subsample, chunk mean),
+- :func:`chunk_datasets` labels a chunk's diagnostics -- ``Coupler.to_xarray``
+  with the chunk's first step -- and reduces nothing,
+- :func:`postprocess` reduces one dataset (subsample, chunk mean) and
+  :func:`postprocess_datasets` does that to a whole mapping of them,
 - :func:`write_chunk` writes a mapping of datasets to
   ``<output_dir>/<component>-<first step>.nc``,
-- :func:`datasets_for_chunk` is the two of them either side of
-  ``Coupler.to_xarray``, so a run loop needs one call per chunk.
+- :func:`datasets_for_chunk` is the labelling and the reduction in one call,
+  for a caller that wants only the reduced form.
+
+The labelling and the reduction are separate calls because a chunk has two
+consumers that need different things from it. What is *written* is the reduced
+form -- that is the point of ``output_averages`` and ``subsample``. What a
+health gate inspects must be the **unreduced** chunk: both reductions are
+lossy in exactly the direction a gate cares about, since a time mean skips
+NaNs and dilutes a finite extreme, and a stride can drop the very last record
+-- so a state that went bad at the end of a chunk would be reported healthy.
+:func:`jem.driver.run_chunked` therefore calls :func:`chunk_datasets` once and
+feeds the gate that, reducing only the copy it writes.
 
 The **coupled step a chunk starts at** is what labels a file, rather than a
 chunk index. A chunk index counts chunks of one particular length, so the same
@@ -296,6 +309,78 @@ def write_chunk(
     return written
 
 
+def chunk_datasets(
+    coupler: "Coupler",
+    diagnostics: Mapping[str, Any],
+    *,
+    first_step: int = 0,
+) -> dict[str, xr.Dataset]:
+    """Label a chunk's diagnostics, keeping every record.
+
+    ``coupler.to_xarray(diagnostics, first_step=first_step)``, and nothing
+    else. ``first_step`` is the coupled step the chunk's first record covers
+    -- the ``step`` of the carry the chunk started from -- and passing it is
+    what stops every chunk from being labelled with the first chunk's dates.
+
+    This is the form anything that *inspects* a chunk must be given: it still
+    holds the chunk's last record, and every value in it, which neither
+    reduction in :func:`postprocess` promises to preserve. Reduce with
+    :func:`postprocess_datasets` only what is written out.
+
+    Parameters
+    ----------
+    coupler : jem.base.coupler.Coupler
+        The coupled model the diagnostics came from.
+    diagnostics : Mapping[str, Any]
+        What the chunk's trajectory function returned.
+    first_step : int
+        The coupled step the first record of this chunk covers.
+
+    Returns
+    -------
+    dict[str, xarray.Dataset]
+        One unreduced dataset per component that writes output.
+
+    """
+    return coupler.to_xarray(dict(diagnostics), first_step=first_step)
+
+
+def postprocess_datasets(
+    datasets: Mapping[str, xr.Dataset],
+    *,
+    output_averages: bool = False,
+    subsample: int = 1,
+) -> dict[str, xr.Dataset]:
+    """Apply :func:`postprocess` to every dataset of a chunk.
+
+    The reductions are the same ones, applied with the same options to each
+    component: a chunk is one interval of the run's clock, so a run whose
+    output is chunk means wants them from every component that wrote any.
+
+    Parameters
+    ----------
+    datasets : Mapping[str, xarray.Dataset]
+        A chunk's datasets, keyed by component name -- from
+        :func:`chunk_datasets`.
+    output_averages : bool
+        Passed to :func:`postprocess`.
+    subsample : int
+        Passed to :func:`postprocess`.
+
+    Returns
+    -------
+    dict[str, xarray.Dataset]
+        One postprocessed dataset per entry, under the same names.
+
+    """
+    return {
+        name: postprocess(
+            dataset, output_averages=output_averages, subsample=subsample
+        )
+        for name, dataset in datasets.items()
+    }
+
+
 def datasets_for_chunk(
     coupler: "Coupler",
     diagnostics: Mapping[str, Any],
@@ -304,13 +389,15 @@ def datasets_for_chunk(
     output_averages: bool = False,
     subsample: int = 1,
 ) -> dict[str, xr.Dataset]:
-    """Label a chunk's diagnostics and postprocess them, one call per chunk.
+    """Label a chunk's diagnostics and postprocess them, in one call.
 
-    ``coupler.to_xarray(diagnostics, first_step=first_step)`` followed by
-    :func:`postprocess` on each dataset. ``first_step`` is the coupled step
-    the chunk's first record covers -- the ``step`` of the carry the chunk
-    started from -- and passing it is what stops every chunk from being
-    labelled with the first chunk's dates.
+    :func:`chunk_datasets` followed by :func:`postprocess_datasets`, for a
+    caller that wants only the reduced output.
+
+    A caller that also inspects the chunk -- a health gate, a diagnostic --
+    should call the two separately and inspect the unreduced datasets, as
+    :func:`jem.driver.run_chunked` does; see the module docstring for why
+    reduced output is the wrong thing to judge a chunk by.
 
     Parameters
     ----------
@@ -331,10 +418,8 @@ def datasets_for_chunk(
         One postprocessed dataset per component that writes output.
 
     """
-    datasets = coupler.to_xarray(dict(diagnostics), first_step=first_step)
-    return {
-        name: postprocess(
-            dataset, output_averages=output_averages, subsample=subsample
-        )
-        for name, dataset in datasets.items()
-    }
+    return postprocess_datasets(
+        chunk_datasets(coupler, diagnostics, first_step=first_step),
+        output_averages=output_averages,
+        subsample=subsample,
+    )

@@ -16,7 +16,13 @@ import xarray as xr
 from jem.base.coupler import Coupler
 from jem.components.slab import SlabOceanModel, SlabSeaiceModel
 from jem.exchangers import default_exchangers
-from jem.output import datasets_for_chunk, postprocess, write_chunk
+from jem.output import (
+    chunk_datasets,
+    datasets_for_chunk,
+    postprocess,
+    postprocess_datasets,
+    write_chunk,
+)
 from tests.unit.slab_test_utils import make_grid
 
 START_DATE = jdt.to_datetime("2001-01-01")
@@ -247,6 +253,39 @@ def two_slab_coupler():
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
     )
+
+
+def test_chunk_datasets_and_postprocess_datasets_are_the_two_halves(
+    two_slab_coupler,
+):
+    """The labelling keeps every record; the reduction is a separate choice.
+
+    `run_chunked` relies on being able to take the two separately -- it shows
+    the health gate the unreduced chunk and writes the reduced one -- so the
+    split is part of the contract, not an implementation detail of
+    `datasets_for_chunk`.
+    """
+    run = two_slab_coupler.generate_trajectory_function(4)
+    _, diagnostics = run(two_slab_coupler.initialize())
+
+    labelled = chunk_datasets(two_slab_coupler, diagnostics, first_step=0)
+    assert set(labelled) == {"ocn", "seaice"}
+    assert all(dataset.sizes["time"] == 4 for dataset in labelled.values())
+
+    reduced = postprocess_datasets(labelled, output_averages=True, subsample=2)
+    assert all(dataset.sizes["time"] == 1 for dataset in reduced.values())
+    # The reduction is not in place: the chunk it was given still has all
+    # four records for whoever else is looking at them.
+    assert all(dataset.sizes["time"] == 4 for dataset in labelled.values())
+
+    composed = datasets_for_chunk(
+        two_slab_coupler, diagnostics, first_step=0, output_averages=True,
+        subsample=2,
+    )
+    for name, dataset in composed.items():
+        np.testing.assert_array_equal(
+            dataset["time"].values, reduced[name]["time"].values
+        )
 
 
 def test_datasets_for_chunk_labels_and_postprocesses(two_slab_coupler, tmp_path):
