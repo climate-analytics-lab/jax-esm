@@ -122,7 +122,7 @@ class SlabSeaiceModel(SlabModelBase):
         grid: SlabGrid,
         params: SlabSeaiceParameters | None = None,
         *,
-        name: str = "ice",
+        name: str = "seaice",
     ):
         """Initialize the slab sea-ice model.
 
@@ -141,7 +141,11 @@ class SlabSeaiceModel(SlabModelBase):
             initial condition and takes traced values, so it is deliberately
             not re-validated there.
         name : str
-            Component name in the coupler's workflow and carry.
+            Component name in the coupler's workflow and carry. The default is
+            the name the standard coupling wires the sea ice under
+            (:func:`jem.exchangers.default_exchanges`), so a model registered
+            as ``{"seaice": SlabSeaiceModel(grid)}`` is connected without
+            being renamed.
 
         Raises
         ------
