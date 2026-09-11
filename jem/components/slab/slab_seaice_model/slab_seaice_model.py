@@ -13,6 +13,7 @@ from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     forcing_variable,
+    role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_seaice_model.params import SlabSeaiceParameters
@@ -263,6 +264,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice thickness",
                     "units": "m",
+                    **role_attrs("state"),
                 },
             ),
             "ice_surface_temperature": (
@@ -271,6 +273,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice surface temperature",
                     "units": "K",
+                    **role_attrs("state"),
                 },
             ),
             # Written from the forcing, which is where the ocean's
@@ -285,6 +288,7 @@ class SlabSeaiceModel(SlabModelBase):
                         "forced with: positive forms ice, negative melts ice"
                     ),
                     "units": "J m-2",
+                    **role_attrs("forcing"),
                 },
             ),
             "ice_fraction": (
@@ -293,6 +297,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice areal fraction (smooth closure from thickness)",
                     "units": "1",
+                    **role_attrs("derived"),
                 },
             ),
         }

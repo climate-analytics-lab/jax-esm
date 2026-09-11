@@ -31,6 +31,7 @@ from jem.components.slab.base import (
     first_present_variable,
     forcing_variable,
     load_monthly_climatology,
+    role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_land_model.params import SlabLandParameters
@@ -485,6 +486,7 @@ class SlabLandModel(SlabModelBase):
                 {
                     "long_name": "Land surface temperature",
                     "units": "K",
+                    **role_attrs("state"),
                 },
             ),
             "snowc": (
@@ -493,6 +495,7 @@ class SlabLandModel(SlabModelBase):
                 {
                     "long_name": "Snow cover fraction",
                     "units": "1",
+                    **role_attrs("state"),
                 },
             ),
             "soilw": (
@@ -501,6 +504,7 @@ class SlabLandModel(SlabModelBase):
                 {
                     "long_name": "Soil water availability",
                     "units": "1",
+                    **role_attrs("state"),
                 },
             ),
             forcing_variable("total_heat_flux"): (
@@ -510,6 +514,7 @@ class SlabLandModel(SlabModelBase):
                     "long_name": "Total heat flux the land surface was forced with",
                     "units": "W m-2",
                     "positive": "upward",
+                    **role_attrs("forcing"),
                 },
             ),
         }

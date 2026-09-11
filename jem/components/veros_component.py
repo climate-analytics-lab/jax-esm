@@ -30,6 +30,7 @@ from jem.base.component import (
     Diagnostics,
     TimeAxis,
     forcing_variable,
+    role_attrs,
 )
 from jem.components.clock import clock_tolerance_seconds
 from jem.utils.checkpoints import load_veros_carry, save_veros_carry
@@ -561,6 +562,11 @@ class VerosComponent:
             :func:`~jem.base.component.forcing_variable` applies, exactly as the
             slab models' output does, so merging this dataset with the
             atmosphere's does not collide on a name two components both hold.
+            Each variable that came out of the carry also carries the
+            ``jem_role`` attribute (:func:`~jem.base.component.role_attrs`),
+            which says the same thing without a name to parse; the grid
+            fields (``mask_T``, ``mask_surface_T``, ``dzt``) carry none,
+            because they are configuration rather than carry.
             The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
@@ -613,31 +619,48 @@ class VerosComponent:
         dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
         dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
+        # `jem_role` records which section of the carry each variable came
+        # from, so a reader does not have to parse the `forcing_` prefix.
+        # The last three are the grid itself -- time-invariant configuration,
+        # not state, diagnostics or forcing -- so they carry no role.
         var_attrs = {
-            "temp": {"long_name": "ocean potential temperature", "units": "deg C"},
-            "salt": {"long_name": "ocean salinity", "units": "g/kg"},
-            "u": {"long_name": "zonal ocean velocity", "units": "m/s"},
-            "v": {"long_name": "meridional ocean velocity", "units": "m/s"},
+            "temp": {"long_name": "ocean potential temperature", "units": "deg C",
+                     **role_attrs("state")},
+            "salt": {"long_name": "ocean salinity", "units": "g/kg",
+                     **role_attrs("state")},
+            "u": {"long_name": "zonal ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
+            "v": {"long_name": "meridional ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
             "sea_surface_temperature": {
                 "long_name": "sea surface temperature", "units": "K",
                 "comment": "unlike `temp`, this field is shifted by +273.15 to Kelvin",
+                **role_attrs("derived"),
             },
-            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s"},
-            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s"},
-            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg"},
+            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
+                                     **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
                 "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
+                **role_attrs("forcing"),
             },
             forcing_variable("surface_taux"): {
-                "long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "zonal surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("surface_tauy"): {
-                "long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "meridional surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("heat_flux"): {
-                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
+                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2",
+                **role_attrs("forcing")},
             forcing_variable("freshwater_flux"): {
                 "long_name": "net surface freshwater flux forcing (upward positive)",
-                "units": "kg/m^2/s"},
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
