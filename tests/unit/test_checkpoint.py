@@ -8,11 +8,14 @@ dropped it would resume every run in January; and the JCM physics carry holds
 int and bool leaves whose meaning a silent cast to float would destroy, so
 every leaf has to come back with the dtype it went in with.
 
-*A mismatch is refused where it happens.* The format stores leaves, not
-structure, so a checkpoint from another grid or another component composition
-would otherwise deserialise cleanly and explode much later inside a traced
-step. Leaf count, shape and dtype are all checked, and the message names the
-leaf.
+*A mismatch is refused where it happens.* The format stores the leaves and a
+manifest of the tree they came from, and pours them back into a template, so a
+checkpoint from another grid or another component composition would otherwise
+deserialise cleanly and explode much later inside a traced step. Leaf count,
+leaf path, shape and dtype are all checked, and the message names the leaf;
+the tree structure is checked too, because a component whose carry holds no
+arrays -- an empty carry, or one belonging to a component that checkpoints
+itself -- has no leaf to name and would otherwise be renamed unnoticed.
 
 *An interrupted save is never loadable.* The carry file is written last, so a
 run killed mid-save leaves a directory that :func:`latest_complete_checkpoint`
@@ -159,6 +162,73 @@ def test_a_renamed_leaf_is_refused_even_when_the_shapes_line_up(tmp_path):
         load({"ice": jnp.zeros(3), "ocn": jnp.zeros(3)}, tmp_path / "carry.msgpack")
 
 
+def test_a_subtree_with_no_leaves_cannot_be_renamed_unnoticed(tmp_path):
+    """An empty carry leaves no leaf to compare, so only the structure catches it.
+
+    A component with an empty carry contributes no leaf, no leaf path and no
+    shape, so every leaf-level check passes and the saved leaves would be
+    unflattened into whatever tree the template describes -- resuming a
+    different model at the saved step. The stored ``PyTreeDef`` is what makes
+    that a refusal.
+    """
+    save({"components": {"old": {}}, "step": jnp.int32(7)},
+         tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError, match="pytree structure") as excinfo:
+        load({"components": {"new": {}}, "step": jnp.int32(0)},
+             tmp_path / "carry.msgpack")
+
+    # Both trees are named, so the reader can see which key moved.
+    assert "'old'" in str(excinfo.value)
+    assert "'new'" in str(excinfo.value)
+
+
+def test_a_container_that_changed_type_is_refused(tmp_path):
+    """A list is not a tuple, even holding the same leaf at the same path."""
+    save({"a": [jnp.zeros(2)]}, tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError, match="pytree structure"):
+        load({"a": (jnp.zeros(2),)}, tmp_path / "carry.msgpack")
+
+
+def test_a_big_structure_mismatch_is_reported_as_a_window(tmp_path):
+    """Two thousand-character reprs are excerpted around the first difference.
+
+    A whole-model carry's structure repr is far too long to read; the message
+    has to point at the difference rather than print both trees in full.
+    """
+    saved_tree = {f"component_{index:03d}": {} for index in range(60)}
+    template_tree = dict(saved_tree)
+    template_tree["component_042"] = {"renamed": {}}
+    save(saved_tree, tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError, match="first differ at character") as excinfo:
+        load(template_tree, tmp_path / "carry.msgpack")
+
+    message = str(excinfo.value)
+    assert "'renamed'" in message
+    assert "..." in message
+    # The window, not the whole tree: the first and last components are far
+    # from the difference and so are not in the message.
+    assert "component_000" not in message
+
+
+def test_a_checkpoint_without_the_structure_manifest_is_refused(tmp_path):
+    """A payload written before the structure was recorded is not loadable.
+
+    Refusing it is the point: such a file cannot be checked for the very
+    mismatch the manifest exists to catch, so accepting it would reintroduce
+    the silent-resume it was added to prevent.
+    """
+    (tmp_path / "old_format.msgpack").write_bytes(
+        flax.serialization.msgpack_serialize(
+            {"leaves": [np.zeros(2)], "leaf_paths": ["['a']"]}
+        )
+    )
+    with pytest.raises(ValueError, match="old_format.msgpack"):
+        load({"a": jnp.zeros(2)}, tmp_path / "old_format.msgpack")
+
+
 def test_a_file_that_is_not_a_checkpoint_is_refused_by_name(tmp_path):
     """An unreadable or foreign file names itself in the error."""
     (tmp_path / "rubbish.msgpack").write_bytes(b"not msgpack at all")
@@ -236,6 +306,86 @@ def test_a_component_saver_is_delegated_to(tmp_path):
     )
     assert loaded.components["ocn"] == {"loaded_from": str(checkpoint_dir / "ocn")}
     assert int(loaded.step) == 3
+
+
+def test_a_renamed_component_with_an_empty_carry_is_refused(tmp_path):
+    """A component that carries nothing is still part of the composition.
+
+    This is the coupled-level form of the structure check: nothing in the
+    leaves distinguishes a run with a component called ``old`` from one with a
+    component called ``new`` when neither carries an array, so before the
+    structure was recorded this resumed the wrong model at the saved step.
+    """
+    save_coupled(
+        CoupledCarry(components={"old": {}}, step=jnp.int32(7)),
+        tmp_path / "checkpoint",
+    )
+
+    with pytest.raises(ValueError, match="pytree structure"):
+        load_coupled(tmp_path / "checkpoint", {"new": {}})
+
+
+def test_a_renamed_component_with_leaves_is_refused_by_leaf_path(tmp_path):
+    """A component that carries arrays is caught by the leaf paths, as before.
+
+    The structure check is a catch-all behind the leaf-level checks, not a
+    replacement for them: where a leaf *can* name the mismatch it still does,
+    because that message is the more useful of the two.
+    """
+    save_coupled(toy_coupled_carry(step=1), tmp_path / "checkpoint")
+
+    templates = toy_component_templates()
+    templates["ice"] = templates.pop("ocn")
+    with pytest.raises(ValueError, match=r"\['components'\]\['ice'\]"):
+        load_coupled(tmp_path / "checkpoint", templates)
+
+
+def test_a_renamed_delegated_component_is_refused_by_name(tmp_path):
+    """Renaming a component that checkpoints itself is a composition change.
+
+    Its carry never reaches the shared file, so only its name is there to
+    check. Without that name the rename would surface -- at best -- as its
+    loader failing on a directory that does not exist, and a loader that does
+    not look at its directory would not notice at all.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    save_coupled(
+        toy_coupled_carry(step=3),
+        checkpoint_dir,
+        component_savers={"ocn": lambda carry, directory: None},
+    )
+
+    with pytest.raises(ValueError, match="pytree structure") as excinfo:
+        load_coupled(
+            checkpoint_dir,
+            {"lnd": toy_component_templates()["lnd"]},
+            component_loaders={"ocean": lambda directory: {}},
+        )
+    assert "'ocn'" in str(excinfo.value)
+
+
+def test_an_unchanged_delegated_composition_still_round_trips(tmp_path):
+    """The name recorded for a delegated component costs the round trip nothing.
+
+    The component's data stays in its own directory -- the shared file gains
+    only the name -- so the loader still supplies the carry in full.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    save_coupled(
+        toy_coupled_carry(step=9),
+        checkpoint_dir,
+        component_savers={"ocn": lambda carry, directory: None},
+    )
+
+    loaded = load_coupled(
+        checkpoint_dir,
+        {"lnd": toy_component_templates()["lnd"]},
+        component_loaders={"ocn": lambda directory: {"restored": True}},
+    )
+
+    assert loaded.components["ocn"] == {"restored": True}
+    assert_trees_equal(loaded.components["lnd"], toy_coupled_carry().components["lnd"])
+    assert int(loaded.step) == 9
 
 
 def test_a_component_cannot_be_both_delegated_and_templated(tmp_path):

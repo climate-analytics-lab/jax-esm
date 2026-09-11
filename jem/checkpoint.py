@@ -4,12 +4,16 @@ Two layers live here, and a driver normally touches only the second:
 
 - :func:`save` / :func:`load` persist **any** pytree carry to a single
   ``msgpack`` file. The leaves are flattened to a plain list of arrays and
-  serialised with ``flax.serialization``; the *structure* is not stored at
-  all but taken from a ``template`` at load time, which is what makes the
-  format both small and self-checking -- a checkpoint written by a different
-  model configuration fails on the leaf count, the leaf's name, its shape or
-  its dtype rather than deserialising into something that only explodes later
-  inside a ``lax.scan``.
+  serialised with ``flax.serialization``; the tree they came from is *rebuilt*
+  from a ``template`` at load time, which is what keeps the format small, and
+  is recorded beside them only as a manifest to check that template against --
+  each leaf's path, shape and dtype, and the repr of the whole ``PyTreeDef``.
+  A checkpoint written by a different model configuration therefore fails on
+  the leaf count, the leaf's name, its shape, its dtype or the tree's shape
+  rather than deserialising into something that only explodes later inside a
+  ``lax.scan``. The ``PyTreeDef`` manifest is what catches the mismatches the
+  leaves cannot see: a component whose carry holds no arrays at all (``{}`` or
+  ``None``) contributes no leaf, so renaming one would otherwise be invisible.
 - :func:`save_coupled` / :func:`load_coupled` lay a whole
   :class:`~jem.base.component.CoupledCarry` out in a directory, delegating
   the components that write themselves. They are what
@@ -23,7 +27,8 @@ The directory layout is::
     <directory>/
         <name>/               one per SupportsCheckpoint component (Veros, a
                               nested Coupler), written by the component itself
-        carry.msgpack         every other component's carry, plus the clock
+        carry.msgpack         every other component's carry, plus the clock,
+                              plus the *name* of every delegated component
 
 **The coupled step counter is part of the checkpoint because it is part of
 the state.** ``CoupledCarry.step`` is the model's only clock: every
@@ -80,6 +85,28 @@ _LEAVES_KEY = "leaves"
 #: renamed, a dict reordered -- and only the paths tell them apart.
 _PATHS_KEY = "leaf_paths"
 
+#: Key the repr of the carry's ``PyTreeDef`` is stored under. The leaf paths
+#: cover everything that *is* a leaf; this covers the rest of the tree --
+#: container types, and the keys of subtrees that hold no leaves at all. A
+#: component whose carry is ``{}`` or ``None`` (one that is delegated to a
+#: :class:`~jem.base.component.SupportsCheckpoint` component, or simply has no
+#: arrays yet) contributes no leaf, so without this a checkpoint of
+#: ``{"old": {}}`` would load happily into a model expecting ``{"new": {}}``
+#: and resume a different model at the saved step.
+#:
+#: The repr is compared for equality only, never parsed. It is JAX's, so a
+#: future JAX whose ``PyTreeDef.__repr__`` changes would reject checkpoints
+#: written by an older one; that is the price of a manifest that needs no
+#: format of its own, and it fails loudly rather than silently.
+_STRUCTURE_KEY = "tree_structure"
+
+#: Below this many characters both structure reprs are shown in full in a
+#: mismatch message; above it, only a window around the first difference is.
+_STRUCTURE_REPR_LIMIT = 240
+
+#: Characters of context shown either side of that first difference.
+_STRUCTURE_CONTEXT = 60
+
 
 def _canonical_leaf(leaf: Any) -> np.ndarray:
     """Return ``leaf`` as the numpy array JAX would carry it as.
@@ -96,11 +123,43 @@ def _canonical_leaf(leaf: Any) -> np.ndarray:
     return np.asarray(jnp.asarray(leaf))
 
 
+def _structure_difference(saved: str, expected: str) -> str:
+    """Return a readable rendering of two differing ``PyTreeDef`` reprs.
+
+    A whole-model carry's repr runs to thousands of characters, in which the
+    one renamed key is unfindable by eye. Both reprs come out of the same
+    depth-first walk, so they agree character for character up to the first
+    structural difference: a window around that offset *is* the diff, and
+    costs one scan of the shorter string. Short reprs are shown whole, because
+    for those the window would hide context that already fits.
+    """
+    if len(saved) <= _STRUCTURE_REPR_LIMIT and len(expected) <= _STRUCTURE_REPR_LIMIT:
+        return f"  checkpoint: {saved}\n  model:      {expected}"
+
+    limit = min(len(saved), len(expected))
+    common = next((i for i in range(limit) if saved[i] != expected[i]), limit)
+    start = max(0, common - _STRUCTURE_CONTEXT)
+    stop = common + _STRUCTURE_CONTEXT
+
+    def excerpt(text: str) -> str:
+        head = "..." if start > 0 else ""
+        tail = "..." if stop < len(text) else ""
+        return f"{head}{text[start:stop]}{tail}"
+
+    return (
+        f"  they first differ at character {common}:\n"
+        f"  checkpoint: {excerpt(saved)}\n"
+        f"  model:      {excerpt(expected)}"
+    )
+
+
 def save(carry: Carry, path: str | Path) -> Path:
     """Write any pytree ``carry`` to ``path`` as one msgpack file.
 
-    Only the leaves are written, as arrays; the pytree structure is
-    reconstructed at load time from a template (see :func:`load`). Scalar
+    Only the leaves are written, as arrays, beside a manifest of the tree they
+    came from -- each leaf's path and the repr of the whole ``PyTreeDef``. The
+    tree itself is rebuilt at load time from a template, and the manifest is
+    what that template is checked against (see :func:`load`). Scalar
     leaves keep their dtype -- the JCM physics carry holds int and bool flags
     whose meaning a silent cast to float would destroy -- because every leaf
     is stored as a typed array rather than as a bare msgpack number.
@@ -131,6 +190,7 @@ def save(carry: Carry, path: str | Path) -> Path:
         _PATHS_KEY: [
             jax.tree_util.keystr(key_path) for key_path, _ in keyed_leaves
         ],
+        _STRUCTURE_KEY: str(jax.tree_util.tree_structure(carry)),
     }
     temporary_path = path.with_name(path.name + ".tmp")
     try:
@@ -149,15 +209,23 @@ def save(carry: Carry, path: str | Path) -> Path:
 def load(template: Carry, path: str | Path) -> Carry:
     """Read back a pytree written by :func:`save`, shaped like ``template``.
 
-    ``template`` supplies everything the file does not: the pytree structure
-    and, per leaf, the shape and dtype the model expects. All three are
-    checked -- the file records each leaf's *path* in the tree it came from as
-    well as its array, so two carries with the same leaf count, shapes and
-    dtypes but different names are not silently interchanged -- and a
+    ``template`` supplies the pytree the leaves are poured back into, and with
+    it, per leaf, the shape and dtype the model expects. Everything the file
+    records about the carry it came from -- each leaf's *path*, and the repr of
+    the whole ``PyTreeDef`` -- is checked against that template, so a
     checkpoint from a different grid, a different vertical resolution or a
-    different component composition is refused *here*, with the offending leaf
-    named, rather than deserialising cleanly and failing much later inside a
-    traced step.
+    different component composition is refused *here* rather than
+    deserialising cleanly and failing much later inside a traced step.
+
+    The checks run leaf-first: leaf count, then each leaf's path, shape and
+    dtype, and only then the tree structure as a whole. That order is chosen
+    for the error message, not for speed -- a leaf-level check can name the
+    offending leaf and say what is wrong with it, which is more use than two
+    ``PyTreeDef`` reprs, so the structure comparison is left as the catch-all
+    for the differences no leaf can show: a subtree that holds no leaves at
+    all (``{}`` or ``None``, which is how a delegated component appears in a
+    coupled checkpoint), or a container whose type changed without its
+    contents moving.
 
     The values in ``template`` are never used; only its structure is. A
     caller with no carry to hand can therefore build one from
@@ -180,9 +248,9 @@ def load(template: Carry, path: str | Path) -> Carry:
     ------
     ValueError
         If the file is unreadable, holds a different number of leaves, holds
-        them under different names, or holds a leaf whose shape or dtype
-        differs from the template's. The message names the file and, for a
-        leaf, its path in the pytree.
+        them under different names, holds a leaf whose shape or dtype differs
+        from the template's, or was written from a differently shaped pytree.
+        The message names the file and, for a leaf, its path in the pytree.
 
     """
     path = Path(path)
@@ -192,17 +260,17 @@ def load(template: Carry, path: str | Path) -> Carry:
         raise ValueError(
             f"{path} is not a readable JEM checkpoint file: {exc}"
         ) from exc
-    if (
-        not isinstance(payload, Mapping)
-        or _LEAVES_KEY not in payload
-        or _PATHS_KEY not in payload
+    required = (_LEAVES_KEY, _PATHS_KEY, _STRUCTURE_KEY)
+    if not isinstance(payload, Mapping) or any(
+        key not in payload for key in required
     ):
         raise ValueError(
             f"{path} does not hold a JEM checkpoint payload (it has no "
-            f"{_LEAVES_KEY!r} and {_PATHS_KEY!r} entries)."
+            f"{', '.join(repr(key) for key in required)} entries)."
         )
     saved_leaves = list(payload[_LEAVES_KEY])
     saved_paths = list(payload[_PATHS_KEY])
+    saved_structure = str(payload[_STRUCTURE_KEY])
 
     keyed_leaves, treedef = jax.tree_util.tree_flatten_with_path(template)
     if len(saved_leaves) != len(keyed_leaves):
@@ -236,6 +304,22 @@ def load(template: Carry, path: str | Path) -> Carry:
                 "component parameters)."
             )
         restored.append(jnp.asarray(saved))
+
+    # Last, because every check above names a leaf and says what is wrong with
+    # it; this one can only show two trees. It is still needed, because a
+    # subtree with no leaves in it -- `{}` or `None` -- is invisible to all of
+    # them: without it, a checkpoint of `{"old": {}}` would be unflattened
+    # into a template of `{"new": {}}` and resume a different model.
+    expected_structure = str(treedef)
+    if saved_structure != expected_structure:
+        raise ValueError(
+            f"{path}: the saved carry's pytree structure is not the model's, "
+            "even though its leaves line up -- something holding no arrays (a "
+            "component with an empty carry, or one that checkpoints itself) "
+            "was renamed, added or removed, or a container changed type, "
+            "since this checkpoint was written.\n"
+            + _structure_difference(saved_structure, expected_structure)
+        )
     return jax.tree_util.tree_unflatten(treedef, restored)
 
 
@@ -251,6 +335,14 @@ def save_coupled(
     ``coupled_carry.step``, goes into the single
     :data:`CARRY_FILENAME` file, which is written **last** and is therefore
     the checkpoint's completion marker (see the module docstring).
+
+    A delegated component still leaves its *name* in the carry file, as an
+    empty (``None``) entry beside the plain components. It costs nothing --
+    ``None`` is an empty pytree node, so no leaf is written for it -- and it
+    is what makes the set of delegated components part of what
+    :func:`load_coupled` checks: without it, renaming one would be met by its
+    own loader failing on a missing directory, or, for a loader that does not
+    look at its directory, not met at all.
 
     Parameters
     ----------
@@ -276,17 +368,20 @@ def save_coupled(
     # good checkpoint.
     carry_file.unlink(missing_ok=True)
 
-    plain: dict[str, Carry] = {}
+    stored_components: dict[str, Carry] = {}
     for name, carry in coupled_carry.components.items():
         saver = component_savers.get(name)
         if saver is None:
-            plain[name] = carry
+            stored_components[name] = carry
         else:
             component_directory = directory / name
             component_directory.mkdir(parents=True, exist_ok=True)
             saver(carry, component_directory)
+            # The component's data is in its own directory; what goes in the
+            # shared file is only its name, carried by an empty pytree node.
+            stored_components[name] = None
 
-    save({"step": coupled_carry.step, "components": plain}, carry_file)
+    save({"step": coupled_carry.step, "components": stored_components}, carry_file)
 
 
 def load_coupled(
@@ -323,7 +418,10 @@ def load_coupled(
         If the directory holds no :data:`CARRY_FILENAME` -- it is not a
         complete checkpoint, so the coupled step counter, and with it the
         run's position in the seasonal cycle, cannot be recovered -- or if
-        the stored carry does not match the templates.
+        the stored carry does not match the templates. The component *names*
+        are part of that match, the components that load themselves included,
+        so a renamed component is refused here rather than by its own loader
+        finding no directory.
 
     """
     directory = Path(directory)
@@ -346,7 +444,17 @@ def load_coupled(
             "one or the other."
         )
 
-    template = {"step": jnp.int32(0), "components": dict(component_templates)}
+    # The delegated components go into the template as the same empty entries
+    # `save_coupled` stored for them, so that the checkpoint's set of
+    # component names -- delegated ones included -- is checked as part of the
+    # tree structure before any loader is called.
+    template = {
+        "step": jnp.int32(0),
+        "components": {
+            **dict(component_templates),
+            **dict.fromkeys(component_loaders),
+        },
+    }
     stored = load(template, carry_file)
 
     components = dict(stored["components"])

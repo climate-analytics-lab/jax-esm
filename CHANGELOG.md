@@ -237,11 +237,20 @@ Breaking changes are marked; everything else is additive.
 - **`jem.checkpoint`** — `save(carry, path)` / `load(template, path)` for any
   pytree, and `save_coupled` / `load_coupled` for a whole `CoupledCarry`, in
   the format jax-gcm already uses: the leaves flattened to typed arrays and
-  serialised with flax's msgpack codec, the *structure* taken from a template
-  at load time. Every leaf is checked against the template's path, shape and
-  dtype, so a checkpoint from another grid or another component composition is
-  a `ValueError` naming the leaf instead of a wrong resume, and the int and
-  bool flags in a physics carry keep their dtypes. `latest_complete_checkpoint(root,
+  serialised with flax's msgpack codec, the tree they came from *rebuilt* from
+  a template at load time and recorded beside them only as a manifest to check
+  that template against. Every leaf is checked against the template's path,
+  shape and dtype, so a checkpoint from another grid or another component
+  composition is a `ValueError` naming the leaf instead of a wrong resume, and
+  the int and bool flags in a physics carry keep their dtypes. The manifest
+  also holds the repr of the whole `PyTreeDef`, checked after the leaves,
+  which is what catches the mismatches no leaf can show: a component whose
+  carry holds no arrays (`{}` or `None`) contributes no leaf, so renaming one
+  — or renaming a component that checkpoints itself, whose carry never reaches
+  the shared file at all — would otherwise load cleanly and resume a different
+  model at the saved step. A delegated component's *name* is stored in the
+  shared carry file as an empty entry for exactly that reason.
+  `latest_complete_checkpoint(root,
   pattern="step_*")` and `remaining_batches(steps_done, total_steps,
   steps_per_batch)` moved here from `jem.utils.checkpoints` unchanged.
 - `jem.accumulate.monthly_mean(coupler)` and
@@ -299,8 +308,8 @@ Breaking changes are marked; everything else is additive.
   pickled step counter; a pickle ties a checkpoint to the classes that wrote it
   and validates nothing. A checkpoint directory now holds one
   `carry.msgpack` — every component that does not write itself, plus
-  `CoupledCarry.step` — beside one subdirectory per `SupportsCheckpoint`
-  component. **`carry.msgpack` is written last**, through a flushed and fsynced
+  `CoupledCarry.step`, plus the *name* of every component that does — beside
+  one subdirectory per `SupportsCheckpoint` component. **`carry.msgpack` is written last**, through a flushed and fsynced
   temporary renamed into place, and *is* the completion marker: a resume cannot
   do without the clock, which lives in that file, so its presence is exactly the
   condition "this checkpoint is loadable". The separate `coupled_step.pkl`
