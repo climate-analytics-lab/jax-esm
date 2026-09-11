@@ -1,0 +1,30 @@
+The thermodynamic core of this package (winton_seaice_model.py: the implicit surface-temperature solve, the
+layer enthalpies, the thickness update with surface and basal melt, snowfall, flooding and layer
+re-equalisation) is a port to JAX of the MITgcm package pkg/thsice, routines THSICE_SOLVE4TEMP
+(thsice_solve4temp.F) and THSICE_CALC_THICKN (thsice_calc_thickn.F), and reproduces them to machine precision
+(tests/reference/thsice). MITgcm is distributed under the MIT License:
+
+    Copyright (c) 2018 MITgcm Developers and Contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+    documentation files (the "Software"), to deal in the Software without restriction, including without
+    limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+    Software, and to permit persons to whom the Software is furnished to do so, subject to the following
+    conditions:
+
+    The above copyright notice and this permission notice shall be included in all copies or substantial
+    portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+    LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+    EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+    AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+    OR OTHER DEALINGS IN THE SOFTWARE.
+
+The scheme is Winton (2000), J. Atmos. Oceanic Technol. 17, 525-531. The sub-grid lead closure follows
+Hibler (1979), J. Phys. Oceanogr. 9, 815-846, and is not part of thsice. The bulk surface fluxes over ice use
+the coefficients of SPEEDY / JCM (jax-gcm). The optional transport (ice_transport.py) is original code
+following published practice: thickness diffusion as in Ferreira, Marshall and Rose (2011), J. Climate 24,
+992-1012; advection by the surface ocean current as in the GENIE (Edwards and Marsh 2005, Clim. Dyn. 24,
+415-433) and Bern3D models; and a no-convergence-into-compact-ice rule that simplifies the cavitating-fluid
+rheology of Flato and Hibler (1992), J. Phys. Oceanogr. 22, 626-651.
