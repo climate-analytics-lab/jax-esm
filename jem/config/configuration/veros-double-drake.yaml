@@ -26,10 +26,19 @@
 #    coupled run is long and T31 tolerates it.
 #  - seaice=none, land=none: neither is part of this experiment -- the
 #    idealized continents carry no land model, and no sea ice is formed.
-#  - the exchange between a Veros ocean and the atmosphere is case-specific
-#    (wind stress on a rotated grid, freshwater flux, a fake-land slab); point
-#    `coupling.exchanger` at the example's own exchanger if the default
-#    exchangers do not cover the case.
+#  - the coupling is left at the default table, which recognises a Veros ocean
+#    and wires it in Veros' own field names (`jem.exchangers`,
+#    VEROS_OCEAN_EXCHANGES): the surface heat and freshwater fluxes go to the
+#    ocean and its sea surface temperature comes back to the atmosphere.
+#    The WIND STRESS is not in that table and cannot be: Veros integrates a
+#    stress and the atmosphere publishes a near-surface wind, and going from
+#    one to the other is a bulk drag law, not a copy. So this configuration
+#    runs the ocean thermodynamically forced but mechanically at rest. Set
+#    `coupling.exchanger=<module>.<function>` to a hand-written exchanger --
+#    an importable module-level function taking (components, time) -- to drive
+#    it; the exchange in this example's `model_setup.py` is a closure built
+#    inside `build_model` and also wires a `fakelnd` component this
+#    configuration does not have, so it cannot be named here as it stands.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8

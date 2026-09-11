@@ -742,6 +742,30 @@ that just misses one of those (`ice`, `ocean`, `land`) is left unconnected with
 a warning, because the failure it would otherwise cause is silent: the sea ice
 simply never receives anything.
 
+**One table per carry layout.** Component wrappers do not all name the same
+physical field the same way, nor keep it in the same section: the Veros ocean
+takes its surface heat flux as `forcing.heat_flux` and publishes its sea
+surface temperature from `derived` (its `state` is Veros' own `VerosState`
+object, not a struct of exchangeable fields), where a slab has
+`forcing.total_heat_flux` and `state.sea_surface_temperature`. So the table
+above is `STANDARD_EXCHANGES`, and a `VerosComponent` registered as `"ocn"`
+selects `VEROS_OCEAN_EXCHANGES` instead — the same wiring in Veros' names, plus
+the freshwater flux Veros also takes, and with no `ocn` → `seaice` row because
+Veros publishes no freeze/melt potential (that combination is warned about).
+The choice is made by *type*, which needs real components: called with a list
+of names, `default_exchanges` cannot tell one ocean from another and gives the
+slab table. The check looks the wrapper's module up in `sys.modules` rather
+than importing it, so a JAX-ESM without the optional Veros dependency never
+imports Veros to find out that it has no Veros ocean.
+
+What the Veros table deliberately does **not** carry is the **wind stress**:
+Veros integrates `forcing.surface_taux`/`tauy` and the atmosphere publishes a
+near-surface *wind*, so getting from one to the other is a bulk drag law (and,
+on a rotated grid, a rotation into its local frame) — a computation, not a
+copy, and therefore a hand-written exchanger. The shipped `veros-*`
+configurations run thermodynamically forced and mechanically at rest until one
+is given.
+
 Three properties are worth stating, because a hand-written exchanger has them
 only by accident:
 
@@ -761,7 +785,10 @@ only by accident:
 **Regridding.** A row that crosses the atmosphere/ocean grid boundary may name
 a regridder, and `default_exchanges` names one from a mapping keyed by
 *direction and kind*: `a2o`/`o2a` for the direction, `flux`/`state` for the
-kind, the kind following the source section. That split is the one the
+kind. The kind is written on each row of the table rather than inferred from
+the carry section the field is read from, because the two do not agree — the
+same intensive sea surface temperature comes from `state` on a slab and from
+`derived` on a Veros ocean. That split is the one the
 mixed-grid example makes by hand — extensive quantities (heat fluxes, the
 freeze/melt energy, an areal ice fraction) are mapped conservatively so their
 budgets survive the interface, while an intensive state variable such as SST is

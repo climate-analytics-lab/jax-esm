@@ -167,10 +167,25 @@ Breaking changes are marked; everything else is additive.
   A row survives only if both its components are present, so an aquaplanet with
   no land model gets the four rows that do not mention `lnd`. `regrid` is keyed
   by direction and kind (`a2o_flux`, `o2a_state`, or a bare `a2o`/`o2a`), the
-  kind following the source section — which is exactly the split the mixed-grid
+  kind written on each row — which is exactly the split the mixed-grid
   example makes by hand: conservative maps for fluxes and the areal ice
-  fraction, bilinear for the sea surface temperature. `default_workflow` is the
-  order a `Coupler` runs by default. The module docstring is where the
+  fraction, bilinear for the sea surface temperature.
+  There is **one table per carry layout**: the rows above (`STANDARD_EXCHANGES`)
+  for JAX-ESM's own slab components, and `VEROS_OCEAN_EXCHANGES` when the
+  component registered as `"ocn"` is a `VerosComponent` — the same wiring in
+  Veros' own field names (`ocn.forcing.heat_flux`,
+  `ocn.forcing.freshwater_flux`, `ocn.derived.sea_surface_temperature`), so the
+  shipped `veros-double-drake` and `veros-earth` configurations get a coupling
+  that validates instead of one written for a slab carry. The wind stress is
+  not in it and cannot be — Veros integrates a stress, the atmosphere publishes
+  a wind, and a drag law is not a copy — so those configurations run
+  thermodynamically forced and mechanically at rest until `coupling.exchanger`
+  names a hand-written one. A Veros ocean coupled to a sea-ice component is
+  warned about, because Veros publishes no freeze/melt potential to drive it.
+  The Veros wrapper's module is looked up in `sys.modules` rather than
+  imported, so nothing here depends on the optional Veros install.
+  `default_workflow` is the order a `Coupler` runs by default. The module
+  docstring is where the
   **one-step coupling lag** the default workflow implies is finally written
   down: with `["exchange", "atm", "ocn"]` the ocean at step *n* is driven by the
   atmosphere's fluxes from step *n−1*, and the first step of a run exchanges

@@ -16,6 +16,9 @@ that named a field JCM does not have would still fail here.
 """
 
 import dataclasses
+import logging
+import sys
+import types
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +27,7 @@ import numpy as np
 import pytest
 import tree_math
 
+from jem import exchangers
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabGrid,
@@ -32,6 +36,7 @@ from jem.components.slab import (
     SlabSeaiceModel,
 )
 from jem.exchangers import (
+    VEROS_OCEAN_EXCHANGES,
     Exchange,
     ExchangeSpec,
     default_exchangers,
@@ -72,6 +77,10 @@ class _AtmosphereState:
 @tree_math.struct
 class _AtmosphereDerived:
     total_heat_flux: jnp.ndarray
+    # Published by `JCMDerived` too, and taken by a Veros ocean (a slab does
+    # not read it), so the stub has to carry it or the Veros table could not
+    # be checked against a JCM-shaped atmosphere at all.
+    total_freshwater_flux: jnp.ndarray
 
 
 @tree_math.struct
@@ -99,7 +108,7 @@ class StubAtmosphere:
         zeros = jnp.zeros(self.shape)
         return {
             "state": _AtmosphereState(zeros + 280.0),
-            "derived": _AtmosphereDerived(zeros),
+            "derived": _AtmosphereDerived(zeros, zeros),
             "forcing": _AtmosphereForcing(zeros, zeros, zeros, zeros, zeros),
         }
 
@@ -117,10 +126,115 @@ class StubAtmosphere:
         new_state = _AtmosphereState(state.air_temperature + 1e-3 * flux)
         new_carry = {
             "state": new_state,
-            "derived": _AtmosphereDerived(flux),
+            "derived": _AtmosphereDerived(flux, 1e-5 * flux),
             "forcing": forcing,
         }
         return new_carry, {"air_temperature": new_state.air_temperature}
+
+
+# ---------------------------------------------------------------------------
+# The stub Veros ocean
+# ---------------------------------------------------------------------------
+
+#: The Veros rows of the standard wiring, written out independently of the
+#: module under test, exactly as EXPECTED_SPECS is for the slab table.
+EXPECTED_VEROS_SPECS = (
+    ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"),
+    ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux"),
+    ("ocn.derived.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
+)
+
+
+@tree_math.struct
+class _VerosLikeState:
+    """Stands in for Veros' own ``VerosState``: nothing here is exchangeable.
+
+    The real object is Veros' state container, not a struct of surface fields,
+    which is exactly why the Veros table reads the sea surface temperature
+    from ``derived`` where the slab table reads it from ``state``.
+    """
+
+    temperature: jnp.ndarray
+
+
+@tree_math.struct
+class _VerosLikeDerived:
+    sea_surface_temperature: jnp.ndarray
+    sea_surface_u: jnp.ndarray
+    sea_surface_v: jnp.ndarray
+
+
+@tree_math.struct
+class _VerosLikeForcing:
+    heat_flux: jnp.ndarray
+    freshwater_flux: jnp.ndarray
+    surface_taux: jnp.ndarray
+    surface_tauy: jnp.ndarray
+    surface_air_temperature: jnp.ndarray
+
+
+class StubVerosOcean:
+    """An ocean with ``VerosComponent``'s carry layout and no ocean physics.
+
+    Field for field and section for section as
+    :class:`jem.components.veros_component.VerosComponent`
+    (``VerosForcing``, ``VerosDerived``, and a ``state`` that holds no
+    exchangeable surface field), so a row of
+    :data:`~jem.exchangers.VEROS_OCEAN_EXCHANGES` that named something Veros
+    does not have would fail here. Veros itself is an optional dependency and
+    is never imported by these tests.
+    """
+
+    name = "ocn"
+
+    def __init__(self, shape):
+        """Remember the horizontal shape the carry is built on."""
+        self.shape = shape
+
+    def initialize(self):
+        zeros = jnp.zeros(self.shape)
+        return {
+            "state": _VerosLikeState(zeros + 285.0),
+            "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros),
+            "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros),
+        }
+
+    def step(self, carry, time):
+        del time
+        forcing = carry["forcing"]
+        # Upward-positive heat flux cools the ocean, as it does in Veros'
+        # `forc_temp_surface`; the freshwater flux enters weakly so that a
+        # row that failed to deliver it would change the trajectory.
+        temperature = (
+            carry["state"].temperature
+            - 1e-3 * forcing.heat_flux
+            - 1.0 * forcing.freshwater_flux
+        )
+        new_carry = {
+            "state": _VerosLikeState(temperature),
+            "derived": _VerosLikeDerived(
+                temperature, carry["derived"].sea_surface_u,
+                carry["derived"].sea_surface_v,
+            ),
+            "forcing": forcing,
+        }
+        return new_carry, {"sea_surface_temperature": temperature}
+
+
+@pytest.fixture
+def veros_module(monkeypatch):
+    """Register :class:`StubVerosOcean` as the Veros wrapper for one test.
+
+    ``jem.exchangers`` recognises a Veros ocean by looking its module up in
+    ``sys.modules`` and testing ``isinstance`` against the class there --
+    deliberately, so that a JAX-ESM without the optional Veros dependency
+    never imports it. Veros is not installed in the unit-test job, so the
+    module is stood in for here; the code path taken is the real one.
+    """
+    module = types.ModuleType(exchangers.VEROS_COMPONENT_MODULE)
+    module.VerosComponent = StubVerosOcean
+    monkeypatch.setitem(sys.modules, exchangers.VEROS_COMPONENT_MODULE, module)
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +274,14 @@ def build_coupler(components, exchangers) -> Coupler:
 @pytest.fixture
 def components():
     return build_components()
+
+
+@pytest.fixture
+def veros_components(veros_module):
+    """Return a JCM-shaped atmosphere over a Veros-shaped ocean."""
+    del veros_module
+    shape = half_land_grid().fractional_mask.shape
+    return {"atm": StubAtmosphere(shape), "ocn": StubVerosOcean(shape)}
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +557,136 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
         ("lnd.state.snowc", "atm.forcing.snowc_am"): None,
         ("lnd.state.soilw", "atm.forcing.soilw_am"): None,
     }
+
+
+# ---------------------------------------------------------------------------
+# A Veros ocean gets the Veros table
+# ---------------------------------------------------------------------------
+
+
+def test_default_exchanges_uses_the_veros_table_for_a_veros_ocean(veros_components):
+    """A Veros ocean is coupled through its own rows, not the slab table's.
+
+    A Veros carry has none of the slab ocean's exchange fields -- no
+    ``forcing.total_heat_flux``, no ``state.sea_surface_temperature`` -- so
+    the slab table applied to it is not a degraded coupling but a broken one,
+    which is what this replaces.
+    """
+    specs = default_exchanges(veros_components)
+    assert tuple((spec.src, spec.dst) for spec in specs) == EXPECTED_VEROS_SPECS
+
+
+def test_the_veros_table_validates_against_a_veros_carry(veros_components):
+    """Every Veros row names a field the components really have.
+
+    `Exchange.validate` is the pre-flight a runner pays for before anything is
+    compiled; on the slab table applied to a Veros ocean it is exactly what
+    used to fail.
+    """
+    exchange = default_exchangers(veros_components)["exchange"]
+    carries = {
+        name: component.initialize()
+        for name, component in veros_components.items()
+    }
+    exchange.validate(carries)
+
+
+def test_the_veros_wiring_runs_a_coupled_trajectory(veros_components):
+    """Two coupled steps: the flux reaches the ocean and the SST comes back.
+
+    One step would not catch a carry whose structure the exchange changed.
+    Two also show the documented one-step lag: the exchange runs first, so
+    the sea surface temperature the atmosphere holds after step 2 is the one
+    the ocean reached at the end of step 1.
+    """
+    coupler = build_coupler(
+        veros_components, default_exchangers(veros_components)
+    )
+    after_one, _ = coupler.generate_trajectory_function(1)(coupler.initialize())
+    after_two, _ = coupler.generate_trajectory_function(2)(coupler.initialize())
+
+    ocean = after_two.components["ocn"]
+    # The ocean received the atmosphere's fluxes ...
+    assert not np.allclose(np.asarray(ocean["forcing"].heat_flux), 0.0)
+    assert not np.allclose(np.asarray(ocean["forcing"].freshwater_flux), 0.0)
+    # ... and it is being cooled by them (the flux is upward positive).
+    assert float(jnp.min(ocean["derived"].sea_surface_temperature)) < 285.0
+    # The atmosphere is driven by the ocean's own temperature, one step back.
+    np.testing.assert_allclose(
+        np.asarray(after_two.components["atm"]["forcing"].sea_surface_temperature),
+        np.asarray(after_one.components["ocn"]["derived"].sea_surface_temperature),
+    )
+    # Nothing wrote the fields no row covers: Veros' wind stress needs a drag
+    # law, which no copy can express, so it is still what `initialize` set.
+    np.testing.assert_array_equal(
+        np.asarray(ocean["forcing"].surface_taux), 0.0
+    )
+
+
+def test_the_veros_sst_is_regridded_as_a_state_though_it_comes_from_derived(
+    veros_components,
+):
+    """The row says flux or state; the carry section it is read from does not.
+
+    Veros publishes its sea surface temperature from ``derived`` and a slab
+    from ``state``, and it is the same intensive field either way -- so a
+    rule that read the kind off the section would map it conservatively here
+    and leave a conservative map's staircase in a smooth field.
+    """
+    specs = default_exchanges(
+        veros_components,
+        regrid={"a2o_flux": "a2o_conserve", "o2a_state": "o2a_bilinear"},
+    )
+    assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
+        ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"): "a2o_conserve",
+        ("atm.derived.total_freshwater_flux",
+         "ocn.forcing.freshwater_flux"): "a2o_conserve",
+        ("ocn.derived.sea_surface_temperature",
+         "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
+    }
+
+
+def test_a_slab_ocean_still_gets_the_slab_table(components, veros_module):
+    """Registering the Veros wrapper changes nothing for a slab ocean."""
+    del veros_module
+    specs = default_exchanges(components)
+    assert tuple((spec.src, spec.dst) for spec in specs) == EXPECTED_SPECS
+
+
+def test_names_alone_cannot_select_the_veros_table(veros_module):
+    """Called with names rather than components, the slab table is the answer.
+
+    A name says nothing about a carry, and silently guessing "ocn" means Veros
+    would break every test and script that wires a slab model by name.
+    """
+    del veros_module
+    specs = default_exchanges(("atm", "ocn"))
+    assert [spec.dst for spec in specs] == [
+        "ocn.forcing.total_heat_flux", "atm.forcing.sea_surface_temperature",
+    ]
+
+
+def test_sea_ice_with_a_veros_ocean_is_warned_about(veros_components, caplog):
+    """Veros publishes no freeze/melt potential, so the ice is undriven.
+
+    The table has no row that could drive it, and a silently unforced sea-ice
+    model is exactly the failure this warning exists to prevent.
+    """
+    grid = half_land_grid()
+    components = dict(
+        veros_components, seaice=SlabSeaiceModel(grid, name="seaice")
+    )
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        default_exchanges(components)
+    assert "no freeze/melt potential" in caplog.text
+
+
+def test_the_veros_table_is_the_documented_one():
+    """The constant and the rows this module expects agree, deliberately."""
+    assert tuple(
+        (src, dst) for src, dst, _ in VEROS_OCEAN_EXCHANGES
+        if src.startswith(("atm.", "ocn.")) and dst.startswith(("atm.", "ocn."))
+    ) == EXPECTED_VEROS_SPECS
 
 
 def test_a_bare_direction_key_covers_both_kinds():

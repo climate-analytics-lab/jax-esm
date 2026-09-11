@@ -23,6 +23,7 @@ exchangers: null
 
 # An importable dotted path to a single `jem.Exchanger` callable, used INSTEAD
 # of `exchangers` when a configuration needs an exchange that the declarative
-# list cannot express (the Veros configurations do). Setting both is an error
-# the runner reports.
+# list cannot express -- one that computes a flux (a wind stress from a wind),
+# converts units or blends two fields. Setting both is an error the runner
+# reports.
 exchanger: null
