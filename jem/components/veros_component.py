@@ -12,6 +12,7 @@ with a no-op or Veros overwrites the surface forcing the coupler just
 handed it. That is done once, in the constructor, and said out loud there.
 """
 
+import importlib
 import logging
 import warnings
 from pathlib import Path
@@ -244,6 +245,75 @@ class VerosComponent:
             self.name,
         )
         model.set_forcing = lambda state: None
+
+    @classmethod
+    def from_setup(cls, setup: str, **setup_kwargs: Any) -> "VerosComponent":
+        """Build the component from an importable Veros setup.
+
+        The constructor takes an already-built Veros model, which is a live
+        Python object no configuration file can name. This is the door a
+        config comes through (``jem/config/ocean/veros.yaml``): it imports
+        ``setup``, builds it with ``setup_kwargs``, runs the setup's own
+        ``setup()`` -- which is what allocates the grid and the initial
+        conditions this wrapper reads its geometry from -- and wraps it.
+
+        Parameters
+        ----------
+        setup : str
+            Importable dotted path of either a ``VerosSetup`` subclass or a
+            factory returning one. It is never a file path: the module has to
+            be importable like any other, so a setup that lives in an example
+            directory needs that directory on ``sys.path``. Both spellings
+            are accepted because the setups shipped with the examples are
+            factories -- that is how a case is parameterised by its grid file
+            and timesteps -- and which one a path names is only discoverable
+            by calling it.
+        **setup_kwargs
+            Passed to the class or factory.
+
+        Returns
+        -------
+        VerosComponent
+            Wrapping a setup whose ``setup()`` has been called.
+
+        Raises
+        ------
+        ImportError
+            If ``setup`` is not a dotted path, its module cannot be imported,
+            or the module has no such attribute.
+
+        """
+        module_path, _, attribute = setup.rpartition(".")
+        if not module_path:
+            raise ImportError(
+                f"{setup!r} is not an importable dotted path to a Veros setup"
+                " (expected something like"
+                " 'my_package.my_case.MySetup')."
+            )
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ImportError(
+                f"Cannot import {module_path!r} for the Veros setup {setup!r}."
+                " A setup that lives outside an installed package (the ones"
+                " under examples/ do) needs its directory on PYTHONPATH."
+            ) from exc
+        try:
+            factory = getattr(module, attribute)
+        except AttributeError as exc:
+            raise ImportError(
+                f"{module_path!r} has no attribute {attribute!r}"
+                f" (from the Veros setup {setup!r})."
+            ) from exc
+
+        model = factory(**setup_kwargs)
+        if isinstance(model, type):
+            # ``factory`` was a factory returning the setup *class*, not the
+            # class itself; the shipped example cases are written that way so
+            # that the class can close over the case's grid and settings.
+            model = model()
+        model.setup()
+        return cls(model)
 
     def bind(
         self,
