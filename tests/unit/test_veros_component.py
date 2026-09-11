@@ -319,3 +319,47 @@ def test_rebinding_to_a_different_timestep_is_rejected(component):
             start_date=START_DATE,
             calendar=CALENDAR,
         )
+
+
+@pytest.mark.slow
+def test_save_state_and_load_state_round_trip(component, grid_shape, tmp_path):
+    """The carry survives the split between the HDF5 restart and the carry file.
+
+    The ``VerosState`` goes through Veros' own restart writer and the rest of
+    the carry through :mod:`jem.checkpoint`, and only a round trip shows that
+    the two halves come back as one carry -- with the restart file where the
+    loader looks for it, and the pytree half restored leaf for leaf.
+    """
+    from jem.checkpoint import CARRY_FILENAME
+    from jem.components.veros_component import VEROS_RESTART_FILENAME
+
+    carry = component.initialize()
+    carry = dict(
+        carry,
+        derived=carry["derived"].replace(
+            sea_surface_temperature=jnp.full(grid_shape, 290.5)
+        ),
+        forcing=carry["forcing"].replace(heat_flux=jnp.full(grid_shape, -12.5)),
+    )
+
+    directory = tmp_path / "ocn"
+    component.save_state(carry, directory)
+    assert (directory / VEROS_RESTART_FILENAME).exists()
+    # The carry file is written last: it is the completion marker of this
+    # component's directory as much as of a coupled checkpoint.
+    assert (directory / CARRY_FILENAME).exists()
+
+    loaded = component.load_state(directory)
+
+    assert set(loaded) == {"state", "derived", "forcing"}
+    # Veros' reader mutates the model's state in place, so the restored carry
+    # shares that object rather than holding a copy of it.
+    assert loaded["state"] is component.model.state
+    np.testing.assert_array_equal(
+        np.asarray(loaded["derived"].sea_surface_temperature),
+        np.asarray(carry["derived"].sea_surface_temperature),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(loaded["forcing"].heat_flux),
+        np.asarray(carry["forcing"].heat_flux),
+    )

@@ -497,7 +497,7 @@ class SupportsXarray(Protocol):
 
 @runtime_checkable
 class SupportsCheckpoint(Protocol):
-    """Optional: components whose carry cannot be pickled as a plain pytree (Veros)."""
+    """Optional: components whose carry is not a plain pytree of arrays (Veros)."""
 
     def save_state(self, carry: Carry, directory: Path) -> None: ...
 
