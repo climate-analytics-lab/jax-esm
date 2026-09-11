@@ -67,6 +67,11 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
     "pytest-xdist",
+    # tests/unit/test_config.py builds a wheel through setuptools' PEP 517
+    # hook to check the config tree ships as package data. Python 3.12 venvs
+    # no longer carry setuptools by default (only 3.11 and earlier do), so it
+    # is a test dependency in its own right.
+    "setuptools>=61.0",
     "mypy",
     "ruff==0.15.17",
     "nbformat",
