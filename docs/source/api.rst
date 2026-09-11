@@ -10,6 +10,29 @@ The coupling core
 
    jem.base.component
    jem.base.coupler.Coupler
+   jem.exchangers
+
+Running a model
+---------------
+
+``jem.driver`` is the run loop a Python user calls; ``jem.runners`` and
+``jem.main`` are the same loop reached from a composed Hydra config.
+``jem.checkpoint`` and ``jem.accumulate`` are module-level APIs -- they are not
+re-exported from ``jem``, because a run reaches them through
+``Coupler.save_state`` and ``generate_trajectory_function(accumulate=...)``.
+
+.. autosummary::
+   :toctree: generated
+   :recursive:
+
+   jem.driver
+   jem.output
+   jem.checkpoint
+   jem.accumulate
+   jem.regrid
+   jem.config
+   jem.runners
+   jem.main
 
 Components
 ----------
@@ -20,6 +43,7 @@ Components
 
    jem.components.clock
    jem.components.jcm.component
+   jem.components.jcm.contract
    jem.components.jcm.exchange_fields
    jem.components.veros_component
 

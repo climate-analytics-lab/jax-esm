@@ -37,9 +37,14 @@ subsample: 1
 # on (e.g. when the instability is the thing being studied).
 bail_on_unhealthy: true
 
-# Path of the restart file. null disables checkpointing; when set, the coupled
-# carry is written after each chunk and a run started with an existing file
-# resumes from it.
+# Directory holding the run's restart state. null disables checkpointing; when
+# set, the coupled carry is written there after every chunk and a run started
+# with a complete checkpoint already there resumes from it -- so resuming is
+# the same command as starting. It is ONE directory, rewritten each chunk, not
+# a directory of dated restart points, and a relative path is resolved against
+# the directory the command was run from (Hydra does not change it), not
+# against the per-run output directory -- which changes every run and so could
+# never be resumed from.
 checkpoint_path: null
 
 # Logging level of the `jem` logger. Consumed by `jem.main` only -- it is not

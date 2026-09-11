@@ -73,6 +73,12 @@ dev = [
     "nbconvert",
 ]
 
+[project.scripts]
+# The coupled run's command line. `jem <overrides>` and `python -m jem.main
+# <overrides>` are the same entry point; the console script is what makes an
+# installed wheel runnable without knowing the module path.
+jem = "jem.main:main"
+
 [project.urls]
 "Homepage" = "https://github.com/climate-analytics-lab/jax-esm"
 "Bug Reports" = "https://github.com/climate-analytics-lab/jax-esm/issues"

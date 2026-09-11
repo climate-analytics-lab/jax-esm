@@ -19,10 +19,19 @@ def test_readme_quickstart_runs(tmp_path, monkeypatch):
     match = re.search(r"```python\n(.*?)```", README.read_text(), re.S)
     assert match, "README.md has no ```python fence"
     code = match.group(1)
-    # One coupling step is enough to prove the block runs end to end; the
-    # README itself keeps the length a reader would actually want.
-    code = re.sub(r"jdt\.to_timedelta\(\d+, \"day\"\)\s*#\s*simulation", 'jdt.to_timedelta(1, "day")  # simulation', code)
-    code = code.replace('simulation_interval = jdt.to_timedelta(10, "day")', 'simulation_interval = jdt.to_timedelta(1, "day")')
-    assert 'jdt.to_timedelta(1, "day")' in code, "could not shorten the README run to one step"
+    # One coupling step in one chunk is enough to prove the block runs end to
+    # end; the README itself keeps the length a reader would actually want.
+    shortened = code.replace(
+        'total_time="10 days", chunk="5 days"', 'total_time="1 day", chunk="1 day"'
+    )
+    assert shortened != code, (
+        "could not shorten the README run: the quick start no longer calls "
+        "run_chunked with the expected durations"
+    )
     monkeypatch.chdir(tmp_path)
-    exec(compile(code, str(README), "exec"), {"__name__": "__main__"})
+    exec(compile(shortened, str(README), "exec"), {"__name__": "__main__"})
+
+    # The block writes what it says it writes, into the directory it names.
+    assert sorted(p.name for p in (tmp_path / "output").glob("*.nc")) == [
+        "atm-00000.nc", "ocn-00000.nc",
+    ]

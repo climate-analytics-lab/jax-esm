@@ -68,19 +68,24 @@ and its evidence where the decision was made instead.
 Every runnable configuration must be expressible as a single command with
 config-group overrides — never as a standalone driver script:
 
- - The **target** is `python -m jem.main` with Hydra groups under
-   `jem/config/` (atmosphere, ocean, land, seaice, coupling, run,
-   experiment), mirroring how `jcm` is driven. That driver and its config
-   tree do not exist yet; they are Phase 2 of the API hardening plan (the
-   plan itself is not in the repository — `docs/source/design/architecture.md`
-   describes the API as it stands).
- - **Until it does exist, do not add new standalone command-line driver
-   scripts (a hand-rolled CLI plus a `run.sh`).** A new runnable
-   configuration is a notebook or a short snippet in
-   the docs that calls the Python API (`Coupler`, the component classes,
-   `Coupler.generate_trajectory_function`); it is not a new bespoke driver.
-   The bespoke drivers still under `examples/02_experimental/` are legacy and
-   are being folded into the Hydra tree, not extended.
+ - The command is `python -m jem.main` (or the `jem` console script) with the
+   Hydra groups under `jem/config/`: `ocean`, `land`, `seaice`, `coupling`,
+   `regrid`, `coupled_run` and `configuration`, plus **jax-gcm's own groups
+   re-rooted under `atmosphere`** (`physics@atmosphere.physics=...`). A new
+   backend, component or run pattern gets a config-group entry and, if it is a
+   new *kind* of component, one line in `jem.runners.GROUP_TO_NAME` — never a
+   branch in the runner, which `test_runners_has_no_component_kwargs` enforces.
+ - **The one run loop is `jem.driver.run_chunked`.** It owns chunking, output,
+   checkpoint/resume and the health gate, and every run default lives on its
+   signature. Do not write a second loop; `jem/config/coupled_run/default.yaml`
+   is its schema and repeats none of its values.
+ - **Do not add standalone command-line driver scripts (a hand-rolled CLI plus
+   a `run.sh`).** A new runnable configuration is a named
+   `jem/config/configuration/*.yaml` with a comment saying WHY each setting is
+   what it is, or a notebook calling the Python API (`Coupler`, the component
+   classes, `run_chunked`). The bespoke drivers still under
+   `examples/02_experimental/` are legacy and are being folded into the Hydra
+   tree, not extended.
  - **Python is the primary interface; config is a thin wrapper.** Every
    physical parameter and its default value lives once, as a Python default on
    the component class. YAML may carry only wiring (`_target_`, required
@@ -147,10 +152,21 @@ and the steps to add a component.
 
 ```
 jem/                             # Main package
-├── __init__.py                  # exports the coupling core (Coupler, the protocols)
+├── __init__.py                  # exports the coupling core (Coupler, the protocols,
+│                                #   the exchangers, the output helpers, run_chunked)
 ├── accumulate.py                # in-scan diagnostic reductions (monthly_mean)
 ├── checkpoint.py                # saving/loading a carry; the coupled directory layout
 ├── constants.py                 # SurfaceConstants: what jcm.constants does not define
+├── driver.py                    # run_chunked: THE chunked run loop, and its defaults
+├── exchangers.py                # ExchangeSpec/Exchange + the standard coupling table
+├── main.py                      # `python -m jem.main`: the Hydra entry point
+├── output.py                    # postprocess / write_chunk: a chunk's files
+├── regrid.py                    # ESMFRegridders: the named maps a mixed-grid run uses
+├── runners.py                   # composed config -> built objects -> run_chunked
+├── config/                      # the Hydra config groups (wiring only, no defaults)
+│   ├── config.yaml              #   jcm's groups under `atmosphere`, plus jem's own
+│   └── <group>/*.yaml           #   ocean, land, seaice, coupling, regrid,
+│                                #   coupled_run, configuration
 ├── base/
 │   ├── component.py             # the contract: Component + optional capabilities,
 │   │                            #   CoupledCarry, CouplingTime, TimeAxis, Exchanger
@@ -158,6 +174,7 @@ jem/                             # Main package
 ├── components/
 │   ├── jcm/                     # the JCM atmosphere (jax-gcm)
 │   │   ├── component.py         #   JCMComponent: wrapper class, threads the physics carry
+│   │   ├── contract.py          #   the pinned jax-gcm revision and every name JEM calls
 │   │   └── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
 │   ├── jcm_component.py         # deprecated make_jem_compatible shim
 │   ├── veros_component.py       # VerosComponent, the Veros ocean GCM (optional dep)
@@ -343,6 +360,12 @@ conventions are JCM's, and every component follows them:
   the prefix the merge of their datasets collides on the shared name. A new
   output variable that comes from `carry["forcing"]` goes through
   `forcing_variable()`; one that comes from `state` or `derived` does not.
+- **Every variable is also tagged with its role**, `jem_role` — `state`,
+  `derived` or `forcing` — by `jem.base.component.role_attrs(role)`, so that
+  `ds.filter_by_attrs(jem_role="forcing")` answers the question without parsing
+  names. The prefix and the attribute are not redundant: the prefix stops an
+  `xr.merge` collision, the attribute is metadata. A variable that is none of
+  the three (a grid mask, a layer thickness) is left untagged deliberately.
 
 ### Type hints and docstrings
 - Type hints in public signatures; `mypy jem/ --ignore-missing-imports` is a

@@ -72,10 +72,8 @@ SECTIONS = ("state", "derived", "forcing")
 #: The component names :func:`default_exchanges` knows the standard wiring
 #: for. A coupler may register its components under any names it likes; the
 #: default wiring is only defined for these, and is filtered to the ones
-#: actually present. Note that ``SlabSeaiceModel`` is constructed with
-#: ``name="ice"`` by default, so a coupled run that wants the default wiring
-#: must register it as ``SlabSeaiceModel(grid, name="seaice")`` -- which is
-#: what the examples do.
+#: actually present. Every packaged component is constructed with the name it
+#: is wired under here, so the standard wiring needs no renaming.
 STANDARD_COMPONENT_NAMES = ("atm", "ocn", "lnd", "seaice")
 
 # Names a coupled model plausibly uses for a component the standard wiring
@@ -83,8 +81,6 @@ STANDARD_COMPONENT_NAMES = ("atm", "ocn", "lnd", "seaice")
 # wired -- the wiring is by name and guessing would be worse -- but it is worth
 # a warning, because the failure it would otherwise cause is silent: a sea-ice
 # model registered as "ice" would simply never receive or publish anything.
-# ``SlabSeaiceModel`` is constructed with ``name="ice"`` by default, which is
-# how a user meets this.
 _NEAR_MISS_NAMES = {
     "ice": "seaice",
     "sea_ice": "seaice",

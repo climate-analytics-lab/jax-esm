@@ -42,6 +42,10 @@ CORE_NAMES = (
     "datasets_for_chunk",
     "postprocess",
     "write_chunk",
+    # The run loop, and the gate it gives a chunk.
+    "RunResult",
+    "default_health_check",
+    "run_chunked",
 )
 
 # What a coupled run is built out of: the atmosphere wrapper, the slab models

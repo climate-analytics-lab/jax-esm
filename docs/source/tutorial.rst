@@ -190,6 +190,23 @@ into the carries it was handed, and must not change their pytree structure:
 The clock is passed in so a time-dependent coupling (a ramped forcing, a lagged
 exchange) needs no state of its own.
 
+This exchange only *moves* fields, which is what most of a coupled model does,
+so it can be written as a table instead --
+:func:`~jem.exchangers.default_exchangers` builds exactly these two rows (and
+the land and sea-ice ones, when those components are present) for you:
+
+.. code-block:: python
+
+    from jem import default_exchangers
+
+    exchangers = default_exchangers({"atm": atm, "ocn": ocn})
+
+Write the function when the exchange is something a table cannot express: a
+flux computed from two components' states, a unit conversion, a coupling that
+depends on the date. See :doc:`design/architecture` for the table's rows, the
+regridding keys a mixed-grid run uses, and the one-step lag the default
+workflow implies.
+
 Step 4: Couple JCM to the Slab Ocean Model
 ------------------------------------------
 
@@ -207,14 +224,6 @@ Step 4: Couple JCM to the Slab Ocean Model
         start_date=start_date,
     )
 
-    simulation_interval = jdt.to_timedelta(10, "day")
-    run = coupler.generate_trajectory_function(
-        int(simulation_interval / coupling_timestep)
-    )
-    final_carry, diagnostics = run(coupler.initialize())
-
-    output_dict = coupler.to_xarray(diagnostics)
-
 The workflow defaults to every exchanger followed by every component, which for
 this model is :code:`("interaction_between_atm_and_ocn", "atm", "ocn")` — pass
 :code:`workflow=[...]` to the constructor to choose a different coupling scheme.
@@ -223,8 +232,47 @@ listed *n* times runs *n* times per coupled step, on a clock *n* times faster.
 :code:`workflow=[["interaction_between_atm_and_ocn", "atm"] * 24, "ocn"]` runs
 the atmosphere hourly inside a daily ocean coupling.
 
+Step 5: Run It
+--------------
+
+:class:`~jem.base.coupler.Coupler` produces *functions*, not runs.
+:func:`~jem.driver.run_chunked` is the loop that turns one into a run --
+integrate a chunk, write one file per component, checkpoint, check the state is
+still healthy, repeat -- and every run default lives on its signature:
+
+.. code-block:: python
+
+    from jem import run_chunked
+
+    result = run_chunked(
+        coupler,
+        total_time="10 days",
+        chunk="5 days",              # a file and a health check every 5 days
+        output_dir="output",
+        checkpoint_path="checkpoint",   # optional; resuming is the same call
+    )
+    print(result.steps_completed, "coupled steps;", len(result.paths), "files")
+
+``total_time`` and ``chunk`` may be ``"10 days"``-style strings or numbers of
+days; both must be whole multiples of the coupling timestep, and ``total_time``
+a whole multiple of ``chunk``. The checkpoint is a single directory rewritten
+after every chunk, so running the same call again continues from the coupled
+step it holds.
+
+Once a model can be built from a config -- a ``_target_`` line in
+``jem/config/<group>/``, naming the class and its required inputs and nothing
+else -- the whole thing is one command:
+
+.. code-block:: bash
+
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+
+See :doc:`quick_start` for the override spellings and
+:doc:`design/architecture` for what the configuration layer may and may not
+carry.
+
 Full Code
 ---------
 
-:doc:`quick_start` puts exactly these four steps together into one
-self-contained script you can copy and run.
+:doc:`quick_start` puts exactly these steps together into one self-contained
+script you can copy and run.
