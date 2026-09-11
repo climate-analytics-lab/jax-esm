@@ -26,6 +26,16 @@
 #  - atmosphere.run.time_step = 30 min: the validated step for this coupled
 #    case (the example's `run.sh`).
 #  - seaice=none, land=none: this configuration couples the ocean only.
+#  - land=none with the atmosphere's `forcing` group left at `default`: the
+#    default coupling has no source for the atmosphere's land boundary
+#    conditions, so they stay at what `jcm.forcing.ForcingData.zeros` put
+#    there and hold it for the whole integration -- land surface temperature
+#    288.15 K everywhere, zero snow cover, zero soil water, zero bare-land
+#    albedo. That is a deliberate simplification of THIS experiment, not a
+#    land model: over the continents the surface neither warms, cools nor
+#    carries a seasonal cycle. Add `land=slab_speedy` (with its climatology
+#    file) for a responding land surface, or
+#    `forcing@atmosphere.forcing=from_file` for a prescribed one.
 #  - the coupling is left at the default table, which recognises a Veros ocean
 #    and wires it in Veros' own field names (`jem.exchangers`,
 #    VEROS_OCEAN_EXCHANGES), regridded through the weights above:
