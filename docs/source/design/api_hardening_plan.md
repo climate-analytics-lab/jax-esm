@@ -330,6 +330,52 @@ They override the text below where they differ.
   packaged `monthly_mean` accumulator (a `(12, ...)` sum and `(12,)` count
   indexed through a day-of-year table). Until then, fixed-length chunks
   binned on the host by their `datetime64` labels are the supported route.
+- **Phase 2 adaptations taken at the start of Phase 2** (2026-09-11, after
+  #111 merged; the four tasks ran as parallel branches merged into one PR):
+  - *T2.0 pin*: no tagged jax-gcm release contains #750 (the `run` schema and
+    named bundles) or #763 (the input-resolution engine), so
+    `JCM_SUPPORTED_REV` is jax-gcm `dev` @ `637bfee5` (2026-09-10; version
+    string 2.1.0b0, dinosaur 1.5.0). Every required CI job checks out that sha;
+    a non-blocking `canary-jcm-dev` job tracks `dev`.
+  - *Group names follow what jax-gcm shipped*: jax-gcm #750 named its bundles
+    `configuration/`, not `experiment/`, so JAX-ESM's coupled bundles are
+    `jem/config/configuration/*.yaml` (`+configuration=earth-slab`) and a
+    jax-gcm bundle is adopted with `+configuration@atmosphere=speedy-t31`.
+  - *The coupled run group is `coupled_run`, at its own key*: Hydra resolves a
+    group from the first search-path entry that has it and the primary package
+    precedes `pkg://jcm.config`, so a jem `run/` group would shadow jcm's
+    `run/default.yaml` and `run/longrun.yaml` inside `atmosphere` (16 of the 19
+    jax-gcm bundles say `override /run: longrun`). It composes at
+    `cfg.coupled_run` (`coupled_run=smoke`, `coupled_run.total_time=...`)
+    rather than remapped onto `run`, so the CLI spelling is one spelling.
+  - *Packaged data is named through OmegaConf resolvers*, not a `jcm-data://`
+    scheme (jcm has none; its own bundles use an `hf://` mirror that needs the
+    network): `${jcm_data:bc/t30/clim/forcing.nc}` and
+    `${jem_data:DisplacedPoleGrid.SCRIP.nc}`, registered by importing
+    `jem.config`, so the shipped configurations run offline in CI.
+  - *`coupling.exchanger`* (a dotted path to one `Exchanger` callable) is the
+    key the plan called `mapper`; `coupling.exchangers` is the declarative list.
+  - *`Coupler.to_xarray` already does what the plan's `diagnostics_to_datasets`
+    described*, so `jem.output` is `postprocess`, `write_chunk` and
+    `datasets_for_chunk` only. `output_averages` for the coupler is the chunk
+    mean, labelled at the chunk end with `cell_methods = "time: mean"`.
+  - *Regridding in the declarative default*: keys `a2o_flux`/`a2o_state`/
+    `o2a_flux`/`o2a_state` (or bare `a2o`/`o2a`); the kind follows the source
+    section (`state` → bilinear, anything else → conservative), which is the
+    split the mixed-grid example makes by hand.
+  - *Checkpoints*: `jem/checkpoint.py` (flax msgpack of the flattened leaves,
+    treedef from a template, per-leaf path/shape/dtype check, atomic rename)
+    replaces the Phase 1 pickle format; `carry.msgpack` is written last and is
+    itself the completion marker; earlier checkpoints are not readable (alpha).
+  - *`accumulate` replaces the stacked diagnostics*: with `accumulate=(init,
+    update)` the trajectory function returns `(carry, accumulator)`; a step is
+    binned by the month of its output label (end of interval) so
+    `monthly_mean(...).finalize` equals `to_xarray(...).groupby("time.month")`.
+    `gregorian` raises (leap years); a timestep that does not divide the year
+    raises.
+  - *`SlabSeaiceModel`'s default name becomes `"seaice"`* (was `"ice"`): the
+    standard wiring and every example use `seaice`, and the near miss silently
+    left the sea ice uncoupled.
 
 ## Phase 1 — core API contract
 
