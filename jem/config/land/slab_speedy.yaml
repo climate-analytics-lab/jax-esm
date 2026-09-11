@@ -1,0 +1,9 @@
+# SPEEDY's land surface: a soil/land-ice slab whose temperature anomaly is
+# relaxed towards a prescribed climatology.
+_target_: jem.components.SlabLandModel
+# 12-month `stl` / `snowc` / `soilw` climatologies on the land grid. Required:
+# without them the model runs on idealized fields, which is a different
+# experiment and has its own configuration.
+land_clim_file: ???
+params:
+  _target_: jem.components.slab.SlabLandParameters

@@ -1,0 +1,53 @@
+# @package _global_
+#
+# The double-drake experiment: SPEEDY T31L8 over the Veros ocean GCM on an
+# idealized two-continent planet.
+#
+#   PYTHONPATH=examples/02_experimental/02_jcm_veros_double_drake \
+#     python -m jem.main +configuration=veros-double-drake \
+#       ocean.nx=96 ocean.ny=48 ocean.land_sea_mask_file=<terrain>.nc \
+#       atmosphere.terrain.file=<terrain>.nc
+#
+# The setup this names lives in `examples/02_experimental/02_jcm_veros_double_drake/`,
+# which is a directory of scripts and NOT an installed package: the example
+# directory has to be on PYTHONPATH for `veros_case_setup` to import. The
+# required inputs are left `???` because they are generated locally --
+# `modify_jcm_terrain.py` in that directory writes the double-drake terrain
+# file that both the atmosphere and the ocean mask are read from, and its
+# resolution has to match the atmosphere's grid.
+#
+# WHY each setting:
+#  - ocean=veros: the point of the experiment is a dynamical ocean; a slab
+#    cannot transport heat between the two basins.
+#  - terrain=from_file: the double-drake continents are what makes it the
+#    double-drake experiment, and they come from the generated file.
+#  - atmosphere.run.time_step = 30 min: the validated step for this coupled
+#    case (the example's `run.sh`), slower than the 12 min default because the
+#    coupled run is long and T31 tolerates it.
+#  - seaice=none, land=none: neither is part of this experiment -- the
+#    idealized continents carry no land model, and no sea ice is formed.
+#  - the exchange between a Veros ocean and the atmosphere is case-specific
+#    (wind stress on a rotated grid, freshwater flux, a fake-land slab); point
+#    `coupling.exchanger` at the example's own exchanger if the default
+#    exchangers do not cover the case.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: from_file
+  - override /ocean: veros
+  - override /seaice: none
+  - override /land: none
+
+atmosphere:
+  terrain:
+    file: ???
+  run:
+    time_step: 30
+
+ocean:
+  # A factory returning a `VerosSetup` subclass; `from_setup` calls it with
+  # every other key in this node.
+  setup: veros_case_setup.generateVerosSetup
+  nx: ???
+  ny: ???
+  land_sea_mask_file: ???

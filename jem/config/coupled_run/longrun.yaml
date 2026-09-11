@@ -1,0 +1,15 @@
+# A ~10-year integration, chunked by month.
+defaults:
+  - default
+  - _self_
+
+total_time: "3600 days"
+# Monthly chunks: short enough that an unhealthy state is caught (and the run
+# restarts) without losing much, long enough that the per-chunk output and
+# recompilation cost stays negligible.
+chunk: "30 days"
+# Monthly means rather than every coupling step: at this length the
+# instantaneous stream is both huge and not what a climate is read from.
+output_averages: true
+# A run this long outlives a queue slot, so it always checkpoints.
+checkpoint_path: checkpoint

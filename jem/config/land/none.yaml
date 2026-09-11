@@ -1,0 +1,4 @@
+# @package _global_
+# No land component -- the default. See `ocean/none.yaml` for why the
+# `_global_` header is needed to make the key null rather than empty.
+land: null
