@@ -19,6 +19,16 @@ from jem.base.component import (
 )
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
 
+# The declarative exchangers sit on the coupling core and import nothing
+# from `jem.components`, so they cost nothing to export.
+from jem.exchangers import (
+    Exchange,
+    ExchangeSpec,
+    default_exchangers,
+    default_exchanges,
+    default_workflow,
+)
+
 __all__ = [
     "Carry",
     "Component",
@@ -26,11 +36,16 @@ __all__ = [
     "Coupler",
     "CouplingTime",
     "Diagnostics",
+    "Exchange",
+    "ExchangeSpec",
     "Exchanger",
     "SupportsBind",
     "SupportsCheckpoint",
     "SupportsXarray",
     "TimeAxis",
+    "default_exchangers",
+    "default_exchanges",
+    "default_workflow",
     "nested_carry",
     "with_nested_carry",
 ]

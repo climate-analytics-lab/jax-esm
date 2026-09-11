@@ -32,6 +32,12 @@ CORE_NAMES = (
     # The helpers an exchanger reaches into a nested coupler's carry with.
     "nested_carry",
     "with_nested_carry",
+    # The declarative form of an exchanger, and the standard wiring.
+    "Exchange",
+    "ExchangeSpec",
+    "default_exchangers",
+    "default_exchanges",
+    "default_workflow",
 )
 
 # What a coupled run is built out of: the atmosphere wrapper, the slab models
