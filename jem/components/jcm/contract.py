@@ -127,6 +127,15 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " Signature: build_forcing(cfg: DictConfig, coords, dycore=None).",
     ),
     IntegrationPoint(
+        "jcm.runners", "apply_constants_overrides", "public",
+        "Apply `+atmosphere.constants.<name>=<value>` to the process-global"
+        " jcm.constants singleton before the atmosphere is built, exactly as"
+        " jax-gcm's own CLI does -- the dynamical core reads the live"
+        " singleton at construction, and JAX-ESM's surface components read the"
+        " same one. Signature: apply_constants_overrides(cfg: DictConfig)"
+        " -> None.",
+    ),
+    IntegrationPoint(
         "jcm.runners", "warn_on_config_traps", "public",
         "Warn about known jax-gcm configuration traps before a coupled run"
         " starts, so a JAX-ESM user gets the same diagnostics a jax-gcm user"
@@ -192,6 +201,12 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "The nodal shape every exchanged field is on, the grid the default"
         " forcing is built on, and part of the context re-attached to a"
         " ModelPredictions after a pytree round trip.",
+    ),
+    IntegrationPoint(
+        "jcm.model.Model", "terrain", "public",
+        "The atmosphere's land-sea mask (`terrain.fmask`), which jem.runners"
+        " builds a surface component's SlabGrid from when that component"
+        " shares the atmosphere's grid.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "physics", "public",
