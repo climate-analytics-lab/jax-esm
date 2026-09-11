@@ -81,6 +81,16 @@ _REQUIRED_COMPONENT_ATTRIBUTES = ("name", "initialize", "step")
 
 _SECONDS_PER_DAY = 86400.0
 
+#: What ``Coupler.generate_trajectory_function(accumulate=...)`` takes: the
+#: pair ``(init, update)`` of an in-scan reduction of the per-step
+#: diagnostics. ``init()`` builds the accumulator, ``update(accumulator,
+#: diagnostics, time)`` folds one coupled step into it, inside the scan.
+#: :class:`jem.accumulate.MonthlyMean` is such a pair.
+Accumulator = tuple[
+    Callable[[], Any],
+    Callable[[Any, dict[str, Diagnostics], CouplingTime], Any],
+]
+
 
 def _missing_component_attributes(component: Any) -> list[str]:
     """Return the names of the :class:`Component` members ``component`` lacks."""
@@ -1028,7 +1038,8 @@ class Coupler:
         *,
         remat: bool = False,
         jit: bool = True,
-    ) -> Callable[[CoupledCarry], tuple[CoupledCarry, dict[str, Diagnostics]]]:
+        accumulate: Accumulator | None = None,
+    ) -> Callable[..., tuple[CoupledCarry, Any]]:
         """Return the function that runs ``iterations`` coupled steps.
 
         Parameters
@@ -1040,35 +1051,100 @@ class Coupler:
             for memory when differentiating through a long trajectory.
         jit : bool
             Wrap the trajectory in ``jax.jit``.
+        accumulate : pair of callables, optional
+            ``(init, update)``: an **in-scan reduction** of the per-step
+            diagnostics. ``init()`` returns the initial accumulator pytree,
+            whose shapes must be static; ``update(accumulator, diagnostics,
+            time)`` runs inside the ``lax.scan`` body on that step's
+            diagnostics, with the same :class:`CouplingTime` the step's
+            components were handed, and returns the next accumulator.
+            :func:`jem.accumulate.monthly_mean` builds such a pair (and
+            unpacks as one) for a monthly mean.
 
         Returns
         -------
         Callable
-            ``carry -> (final_carry, diagnostics)``, where every diagnostics
-            leaf has a leading axis of length ``iterations`` (``lax.scan``
-            stacks them); a component the workflow runs ``n > 1`` times per
-            coupled step has a second axis of length ``n`` after it. The
-            clock is the carry's own ``step``, not the scan index, so calling
-            the function twice continues the run rather than restarting it.
+            Without ``accumulate``: ``carry -> (final_carry, diagnostics)``,
+            where every diagnostics leaf has a leading axis of length
+            ``iterations`` (``lax.scan`` stacks them); a component the
+            workflow runs ``n > 1`` times per coupled step has a second axis
+            of length ``n`` after it.
+
+            With ``accumulate``: ``(carry, accumulator=None) -> (final_carry,
+            accumulator)``. The per-step diagnostics are **not** stacked --
+            the scan returns nothing per step -- so the memory a call needs no
+            longer grows with ``iterations``. Passing the accumulator a
+            previous call returned continues the reduction across a chunked
+            run; omitting it (or passing ``None``) starts from ``init()``.
+
+            Either way the clock is the carry's own ``step``, not the scan
+            index, so calling the function twice continues the run rather
+            than restarting it.
+
+        Notes
+        -----
+        Without ``accumulate`` this is byte for byte the function it was
+        before the hook existed: the same scan, over the same body, returning
+        the same stacked diagnostics.
+
+        The hook exists for long runs whose reductions must not dictate the
+        loop structure. A twelve-month run reduced on the host has to hold
+        every step's diagnostics until the chunk ends, and a run chunked *by
+        month* has to compile a 28-, a 30- and a 31-day trajectory. Reducing
+        inside the scan does neither: one compiled trajectory of whatever
+        length suits the machine, and an accumulator of fixed size that
+        crosses chunk boundaries untouched.
 
         """
         step = self.generate_step_function()
 
-        def scan_body(
-            carry: CoupledCarry, _: None
-        ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            return step(carry)
+        if accumulate is None:
+            def scan_body(
+                carry: CoupledCarry, _: None
+            ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
+                return step(carry)
 
-        body = jax.checkpoint(scan_body) if remat else scan_body
+            body = jax.checkpoint(scan_body) if remat else scan_body
 
-        def trajectory(
-            carry: CoupledCarry,
-        ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            # No `xs`: the steps are identical and the only per-step input,
-            # the clock, is derived from the carry.
-            return jax.lax.scan(body, carry, xs=None, length=iterations)
+            def trajectory(
+                carry: CoupledCarry,
+            ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
+                # No `xs`: the steps are identical and the only per-step
+                # input, the clock, is derived from the carry.
+                return jax.lax.scan(body, carry, xs=None, length=iterations)
 
-        return jax.jit(trajectory) if jit else trajectory
+            return jax.jit(trajectory) if jit else trajectory
+
+        initialize_accumulator, update_accumulator = accumulate
+
+        def accumulating_body(
+            state: tuple[CoupledCarry, Any], _: None
+        ) -> tuple[tuple[CoupledCarry, Any], None]:
+            carry, accumulator = state
+            # The clock of the step about to run, rebuilt from the same step
+            # counter `step` itself reads, so `update` sees exactly the
+            # `CouplingTime` the components of that step were handed.
+            time = self.coupling_time(carry.step)
+            new_carry, diagnostics = step(carry)
+            return (new_carry, update_accumulator(accumulator, diagnostics, time)), None
+
+        accumulating = (
+            jax.checkpoint(accumulating_body) if remat else accumulating_body
+        )
+
+        def accumulating_trajectory(
+            carry: CoupledCarry, accumulator: Any = None
+        ) -> tuple[CoupledCarry, Any]:
+            if accumulator is None:
+                accumulator = initialize_accumulator()
+            # `ys` is dropped: not stacking the per-step diagnostics is the
+            # whole point of the hook.
+            (final_carry, final_accumulator), _ = jax.lax.scan(
+                accumulating, (carry, accumulator), xs=None, length=iterations
+            )
+            return final_carry, final_accumulator
+
+        return jax.jit(accumulating_trajectory) if jit else accumulating_trajectory
 
     # -- the coupled model as a component of a slower one -------------------
 

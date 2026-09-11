@@ -148,6 +148,7 @@ and the steps to add a component.
 ```
 jem/                             # Main package
 ├── __init__.py                  # exports the coupling core (Coupler, the protocols)
+├── accumulate.py                # in-scan diagnostic reductions (monthly_mean)
 ├── checkpoint.py                # saving/loading a carry; the coupled directory layout
 ├── constants.py                 # SurfaceConstants: what jcm.constants does not define
 ├── base/
