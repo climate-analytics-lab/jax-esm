@@ -106,6 +106,37 @@ def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
     return updated
 
 
+def check_subsample(subsample: Any) -> int:
+    """Return ``subsample`` if it is a valid record stride, else raise.
+
+    The rule lives here, beside the reduction that applies it, and is called
+    both by :func:`postprocess` and -- before anything is compiled -- by
+    :func:`jem.driver.run_chunked`, so a run configured with a nonsensical
+    stride is refused up front rather than after a chunk has been integrated.
+
+    Parameters
+    ----------
+    subsample : Any
+        The value to check.
+
+    Returns
+    -------
+    int
+        ``subsample`` itself.
+
+    Raises
+    ------
+    ValueError
+        If it is not a positive integer. ``bool`` is rejected too: ``True``
+        would pass ``isinstance(_, int)`` and silently mean "keep every
+        record", which is not what anyone writing it meant.
+
+    """
+    if not isinstance(subsample, int) or isinstance(subsample, bool) or subsample < 1:
+        raise ValueError(f"subsample must be a positive integer; got {subsample!r}.")
+    return subsample
+
+
 def postprocess(
     dataset: xr.Dataset, *, output_averages: bool = False, subsample: int = 1
 ) -> xr.Dataset:
@@ -145,8 +176,7 @@ def postprocess(
         for and the dataset has no time dimension to reduce.
 
     """
-    if not isinstance(subsample, int) or isinstance(subsample, bool) or subsample < 1:
-        raise ValueError(f"subsample must be a positive integer; got {subsample!r}.")
+    check_subsample(subsample)
     if subsample == 1 and not output_averages:
         return dataset
     if TIME_DIMENSION not in dataset.dims:

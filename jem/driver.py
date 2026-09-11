@@ -24,7 +24,8 @@ multiple of ``chunk``: a final short chunk would need a second compiled
 trajectory for one call, and a run whose length does not divide into chunks is
 much more often a mistake in the configuration than a deliberate request. All
 three are checked before anything is built or compiled, and the message names
-both quantities.
+both quantities -- as is ``subsample``, which is otherwise not read until the
+first chunk has already been integrated.
 
 The trajectory is compiled **once**, for ``chunk`` worth of coupled steps, and
 called once per chunk. A resumed run is the one case that can need a second
@@ -71,7 +72,7 @@ import xarray as xr
 
 from jem.base.component import CoupledCarry
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
-from jem.output import datasets_for_chunk, write_chunk
+from jem.output import check_subsample, datasets_for_chunk, write_chunk
 
 if TYPE_CHECKING:  # pragma: no cover - only the type checker needs the class
     from jem.base.coupler import Coupler
@@ -241,7 +242,9 @@ def run_chunked(
     ------
     ValueError
         If ``chunk`` or ``total_time`` is not a whole number of coupling
-        steps, or ``total_time`` is not a whole number of chunks.
+        steps, ``total_time`` is not a whole number of chunks, or
+        ``subsample`` is not a positive integer. All of them are checked
+        before anything is compiled or integrated.
 
     Notes
     -----
@@ -251,6 +254,11 @@ def run_chunked(
     files rather than over the ones it already wrote. See :mod:`jem.output`.
 
     """
+    # Every argument that can be wrong on its own is checked here, before a
+    # trajectory is compiled or a step integrated: `subsample` is not read
+    # until the first chunk has already been written, and finding out then
+    # that it was 0 would have cost a chunk of an atmosphere.
+    check_subsample(subsample)
     coupling_days = coupler.dt_seconds / SECONDS_PER_DAY
     steps_per_chunk = _whole_steps(chunk, coupling_days, coupler, "chunk")
     total_steps = _whole_steps(total_time, coupling_days, coupler, "total_time")

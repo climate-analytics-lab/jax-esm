@@ -127,6 +127,33 @@ def test_run_chunked_rejects_a_duration_that_is_not_whole_steps(
         run_chunked(coupler, output_dir=tmp_path, **kwargs)
 
 
+@pytest.mark.parametrize("subsample", [0, -1, 1.0, True])
+def test_run_chunked_rejects_a_bad_subsample_before_it_integrates(
+    coupler, tmp_path, subsample
+):
+    """`subsample` is checked up front, not after a chunk has been integrated.
+
+    It is only read once a chunk's output exists, so a run configured with a
+    nonsensical stride would otherwise compile a trajectory and integrate a
+    whole chunk -- for an atmosphere, hours -- before raising. The trajectory
+    factory is replaced with one that explodes, so the test fails if the
+    check ever moves back behind it.
+    """
+    def must_not_be_called(iterations):
+        raise AssertionError(
+            f"a {iterations}-step trajectory was built despite subsample="
+            f"{subsample!r}"
+        )
+
+    coupler.generate_trajectory_function = must_not_be_called
+    with pytest.raises(ValueError, match="subsample must be a positive integer"):
+        run_chunked(
+            coupler, total_time="2 days", chunk="2 days",
+            output_dir=tmp_path, subsample=subsample,
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_run_chunked_writes_nothing_when_the_run_is_already_done(coupler, tmp_path):
     """A carry already at `total_time` completes with no chunks and no files."""
     carry = coupler.initialize()
