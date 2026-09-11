@@ -3,9 +3,9 @@
 An *exchanger* is the one place a component's carry is read by another
 (:data:`jem.base.component.Exchanger`). Written by hand it is a small
 function that pulls fields out of one carry and puts them into another with
-``.replace()``; written here it is a **table**, because almost every exchange in a
-coupled Earth-system model is exactly that: field X of component A becomes
-field Y of component B, optionally regridded on the way.
+``.replace()``; written here it is a **table**, because almost every exchange
+in a coupled Earth-system model is exactly that: field X of component A
+becomes field Y of component B, optionally regridded on the way.
 
 :class:`ExchangeSpec` is one row of that table, :class:`Exchange` executes
 it, and :func:`default_exchanges` is the standard atmosphere/ocean/land/

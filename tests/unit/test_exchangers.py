@@ -255,7 +255,10 @@ def test_exchange_roundtrip(components):
         is incoming["ocn"]["state"].sea_surface_temperature
     )
     assert atmosphere_forcing.sice_am is incoming["seaice"]["derived"].ice_fraction
-    assert atmosphere_forcing.stl_am is incoming["lnd"]["state"].land_surface_temperature
+    assert (
+        atmosphere_forcing.stl_am
+        is incoming["lnd"]["state"].land_surface_temperature
+    )
     assert atmosphere_forcing.snowc_am is incoming["lnd"]["state"].snowc
     assert atmosphere_forcing.soilw_am is incoming["lnd"]["state"].soilw
 

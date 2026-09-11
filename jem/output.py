@@ -227,7 +227,9 @@ def write_chunk(
         paths[path] = name
         datasets[name].to_netcdf(path, engine="netcdf4")
         written.append(path)
-    logger.debug("Chunk %d: wrote %d file(s) to %s.", chunk_index, len(written), directory)
+    logger.debug(
+        "Chunk %d: wrote %d file(s) to %s.", chunk_index, len(written), directory
+    )
     return written
 
 
