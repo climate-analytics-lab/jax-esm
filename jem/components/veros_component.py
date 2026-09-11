@@ -31,8 +31,10 @@ from jem.base.component import (
     TimeAxis,
     forcing_variable,
 )
+from jem.checkpoint import CARRY_FILENAME
+from jem.checkpoint import load as load_carry
+from jem.checkpoint import save as save_carry
 from jem.components.clock import clock_tolerance_seconds
-from jem.utils.checkpoints import load_veros_carry, save_veros_carry
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,11 @@ REFERENCE_SALINITY = 35.0  # PSU
 # at this value squared, which bounds sqrt and its derivative and caps the
 # resulting magnitude from below.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
+
+#: Name of the HDF5 restart file :meth:`VerosComponent.save_state` writes
+#: inside its checkpoint directory. Veros owns the format; JEM only chooses
+#: where it goes, and fixes the name so that the loader finds it.
+VEROS_RESTART_FILENAME = "veros.restart.h5"
 
 
 def configure_veros_runtime() -> None:
@@ -98,6 +105,21 @@ def configure_veros_runtime() -> None:
                 " configure_veros_runtime()) before importing any Veros setup"
                 " module or veros.core."
             ) from exc
+
+
+def _set_veros_runtime_setting(name: str, value: object) -> None:
+    """Set one locked Veros runtime setting, unlocking it around the write.
+
+    ``runtime_settings`` locks itself once ``veros.core`` is imported, and
+    reading a restart needs ``force_overwrite`` off while the rest of a
+    coupled run needs it on. Veros itself offers no supported way to flip a
+    locked setting, so the lock flag is cleared and restored around the
+    assignment.
+    """
+    object.__setattr__(runtime_settings, "__locked__", False)
+    setattr(runtime_settings, name, value)
+    object.__setattr__(runtime_settings, "__locked__", True)
+
 
 # Deliberate import-time side effect: see configure_veros_runtime(). This is the
 # only way to guarantee the setting precedes the operator import that binds it.
@@ -648,21 +670,89 @@ class VerosComponent:
         return dataset
 
     def save_state(self, carry: Carry, directory: Path) -> None:
-        """Write the carry to ``directory``.
+        """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         The ``VerosState`` goes through Veros' own HDF5 restart writer
-        because it is not a plain pytree; the derived and forcing structs
-        are pickled alongside it.
+        because it is not a plain pytree -- it is a mutable object holding
+        settings, dimensions and its own array backend. What is left of the
+        carry, the ``derived`` and ``forcing`` structs, is an ordinary pytree
+        and is written beside it by :func:`jem.checkpoint.save`, under the
+        same file name a coupled checkpoint uses, so one directory has one
+        carry file however deep in the model it sits.
+
+        Parameters
+        ----------
+        carry : Carry
+            ``{"state": VerosState, "derived": ..., "forcing": ...}``.
+        directory : pathlib.Path
+            Directory to write into; created if absent.
+
         """
-        save_veros_carry(carry, directory)
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        from veros.restart import write_restart
+
+        state = carry["state"]
+        with state.settings.unlock():
+            state.settings.restart_output_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+            logger.info(
+                "Saving ocean restart file to %s",
+                state.settings.restart_output_filename,
+            )
+        write_restart(state, force=True)
+
+        # The restart file first, the pytree carry file last: the coupled
+        # checkpoint treats the carry file as the completion marker, and this
+        # component keeps the same promise for its own directory.
+        save_carry(
+            {"derived": carry["derived"], "forcing": carry["forcing"]},
+            directory / CARRY_FILENAME,
+        )
 
     def load_state(self, directory: Path) -> Carry:
         """Read back a carry written by :meth:`save_state`.
 
         Veros' restart reader mutates ``model.state`` in place, so the
-        returned carry shares that object -- as :meth:`initialize` does.
+        returned carry shares that object -- as :meth:`initialize` does. The
+        ``derived`` and ``forcing`` structs are poured back into the templates
+        :meth:`initialize` builds, so a restart written on another grid is
+        refused by shape rather than silently adopted.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            A directory written by :meth:`save_state`.
+
+        Returns
+        -------
+        Carry
+
         """
-        return load_veros_carry(directory, self.model)
+        directory = Path(directory)
+
+        from veros.restart import read_restart
+
+        state = self.model.state
+        # Veros refuses to read a restart while `force_overwrite` is on, which
+        # this module turns on so that a coupled run may rewrite its own
+        # outputs; it is restored immediately afterwards.
+        _set_veros_runtime_setting("force_overwrite", False)
+        with state.settings.unlock():
+            state.settings.restart_input_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+        read_restart(state)
+        _set_veros_runtime_setting("force_overwrite", True)
+
+        template = {
+            "derived": VerosDerived.zeros(self.horizontal_shape),
+            "forcing": VerosForcing.zeros(self.horizontal_shape),
+        }
+        stored = load_carry(template, directory / CARRY_FILENAME)
+        return {"state": state, **stored}
 
 
 def make_jem_compatible(

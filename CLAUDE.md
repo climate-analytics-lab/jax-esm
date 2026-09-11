@@ -148,6 +148,7 @@ and the steps to add a component.
 ```
 jem/                             # Main package
 ├── __init__.py                  # exports the coupling core (Coupler, the protocols)
+├── checkpoint.py                # saving/loading a carry; the coupled directory layout
 ├── constants.py                 # SurfaceConstants: what jcm.constants does not define
 ├── base/
 │   ├── component.py             # the contract: Component + optional capabilities,
@@ -168,7 +169,7 @@ jem/                             # Main package
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
-└── utils/                       # cycles, checkpoints, esmf_regrid, time, ...
+└── utils/                       # cycles, esmf_regrid, idealized_distribution, ...
 docs/                            # Sphinx documentation (RST + MyST, shibuya theme)
 ├── source/design/               # design documents (this is where they go)
 examples/                        # example notebooks and experimental setups

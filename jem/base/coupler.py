@@ -1406,6 +1406,27 @@ class Coupler:
             if isinstance(component, SupportsCheckpoint)
         }
 
+    def _plain_component_templates(self) -> dict[str, Carry]:
+        """Return a template carry for every component that does not load itself.
+
+        :func:`jem.checkpoint.load` stores only leaves, so reading a carry
+        back needs a pytree of the right structure, shapes and dtypes to pour
+        them into. For the components stored in the shared carry file that
+        template is ``component.initialize()`` -- the same call a fresh run
+        makes, and the one object guaranteed to have the structure the
+        component's ``step`` threads. The values are discarded; only the
+        shape of the tree is used.
+
+        Components that are :class:`~jem.base.component.SupportsCheckpoint`
+        are absent, because they read themselves back and need no template
+        from here.
+        """
+        return {
+            name: component.initialize()
+            for name, component in self.components.items()
+            if not isinstance(component, SupportsCheckpoint)
+        }
+
     def save_state(self, carry: CoupledCarry, directory: Path) -> None:
         """Write the coupled carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
@@ -1413,22 +1434,22 @@ class Coupler:
         coupled model, however it is put together. Every component that
         implements :class:`~jem.base.component.SupportsCheckpoint` writes its
         own carry into ``directory / <its registered name>``; every other
-        component's carry is pickled as ``<name>_carry.pkl``; and the coupled
-        step counter is written last, as the completion marker (see
-        :func:`jem.utils.checkpoints.save_coupled_carry`).
+        component's carry, together with the coupled step counter, goes into
+        the single ``directory / carry.msgpack``, which is written last and is
+        the checkpoint's completion marker (see :mod:`jem.checkpoint`).
 
         A :class:`Coupler` implements the capability itself, so a **nested**
         coupled model is checkpointed by recursion: the outer coupler hands
         the inner one the subdirectory named after it, and the inner one
-        writes its own components and its own marker there. Without that,
+        writes its own components and its own carry file there. Without that,
         the outer save would treat the inner :class:`CoupledCarry` as a plain
-        pytree and pickle it -- which silently bypasses the HDF5 restart path
-        a component like Veros requires.
+        pytree and serialise it -- which silently bypasses the HDF5 restart
+        path a component like Veros requires.
 
-        :func:`jem.utils.checkpoints.save_coupled_carry` still takes an
-        explicit ``component_savers`` mapping, for a caller that wants to
-        override or supply a saver for something that is not a component
-        capability. This method is the answer for the ordinary case.
+        :func:`jem.checkpoint.save_coupled` still takes an explicit
+        ``component_savers`` mapping, for a caller that wants to override or
+        supply a saver for something that is not a component capability. This
+        method is the answer for the ordinary case.
 
         Parameters
         ----------
@@ -1438,13 +1459,13 @@ class Coupler:
             Directory to write into; created if absent.
 
         """
-        # Imported here rather than at module scope: `jem.utils.checkpoints`
-        # imports the component contract from `jem.base`, so the dependency
-        # runs the other way round and a module-level import would make the
-        # two modules' import order load-bearing.
-        from jem.utils.checkpoints import save_coupled_carry
+        # Imported here rather than at module scope: `jem.checkpoint` imports
+        # the component contract from `jem.base`, so the dependency runs the
+        # other way round and a module-level import would make the two
+        # modules' import order load-bearing.
+        from jem.checkpoint import save_coupled
 
-        save_coupled_carry(carry, directory, component_savers=self._component_savers())
+        save_coupled(carry, directory, component_savers=self._component_savers())
 
     def load_state(self, directory: Path) -> CoupledCarry:
         """Read back a coupled carry written by :meth:`save_state`.
@@ -1455,10 +1476,12 @@ class Coupler:
         a :class:`CoupledCarry` that can be handed straight to a trajectory
         function, which continues the run from the step the checkpoint holds.
 
-        The components read are the ones registered *now*: a checkpoint is
-        loaded into the model that is meant to continue it, and a component
-        added or removed since it was written is a mismatch the load reports
-        (a missing file) rather than papering over.
+        The components read are the ones registered *now*, and their present
+        ``initialize()`` supplies the template the saved leaves are poured
+        into (:meth:`_plain_component_templates`): a checkpoint is loaded into
+        the model that is meant to continue it, and a component added,
+        removed, or rebuilt on another grid since it was written is a mismatch
+        the load reports -- naming the leaf -- rather than papering over.
 
         Parameters
         ----------
@@ -1472,15 +1495,17 @@ class Coupler:
         Raises
         ------
         ValueError
-            If ``directory`` holds no completion marker, i.e. it is not a
-            complete checkpoint.
+            If ``directory`` holds no carry file, i.e. it is not a complete
+            checkpoint, or if what it holds does not match this model.
 
         """
         # See `save_state` for why this import is not at module scope.
-        from jem.utils.checkpoints import load_coupled_carry
+        from jem.checkpoint import load_coupled
 
-        return load_coupled_carry(
-            directory, self.components, component_loaders=self._component_loaders()
+        return load_coupled(
+            directory,
+            self._plain_component_templates(),
+            component_loaders=self._component_loaders(),
         )
 
     def __repr__(self) -> str:

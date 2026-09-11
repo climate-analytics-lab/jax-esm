@@ -15,7 +15,7 @@ import jcm
 import jax_datetime as jdt
 
 import jem
-from jem.utils.checkpoints import (
+from jem.checkpoint import (
     latest_complete_checkpoint, remaining_batches,
 )
 
