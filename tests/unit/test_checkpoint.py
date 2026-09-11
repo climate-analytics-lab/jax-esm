@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from flax import struct
 
 from jem.base.component import CoupledCarry
 from jem.checkpoint import (
@@ -73,6 +74,20 @@ def toy_coupled_carry(step=0):
 def toy_component_templates():
     """Return the per-component templates ``load_coupled`` needs for the toy."""
     return dict(toy_coupled_carry().components)
+
+
+@struct.dataclass
+class _StaticallyConfigured:
+    """A parameter struct in the shape the components use: one of each kind.
+
+    ``depth`` is a differentiable leaf, ``method`` is static aux data JAX
+    keeps in the ``PyTreeDef``. Defined here rather than imported from a
+    component so that the tests below pin the *format*'s treatment of the two
+    kinds, and do not break when a component's parameters change.
+    """
+
+    depth: jnp.ndarray = 60.0
+    method: str = struct.field(pytree_node=False, default="none")
 
 
 def assert_trees_equal(left, right):
@@ -213,20 +228,64 @@ def test_a_big_structure_mismatch_is_reported_as_a_window(tmp_path):
     assert "component_000" not in message
 
 
-def test_a_checkpoint_without_the_structure_manifest_is_refused(tmp_path):
+def test_a_changed_static_parameter_is_refused_and_named(tmp_path):
+    """A ``pytree_node=False`` parameter lives in the structure, so it is checked.
+
+    JAX keeps static parameters in the ``PyTreeDef`` rather than in the
+    leaves, so recording the structure makes editing one between writing a
+    checkpoint and resuming from it a refusal. That is the intended reading --
+    a static parameter selects a code path, so the resumed run would be a
+    different model -- and the message has to say so, because "a component was
+    renamed" alone would send the reader looking for something that did not
+    happen.
+    """
+    save({"params": _StaticallyConfigured(), "x": jnp.zeros(2)},
+         tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError, match="static") as excinfo:
+        load({"params": _StaticallyConfigured(method="qflux"), "x": jnp.zeros(2)},
+             tmp_path / "carry.msgpack")
+
+    # The difference itself is in the message, so the reader sees which
+    # setting moved rather than being told only that something did.
+    assert "'none'" in str(excinfo.value)
+    assert "'qflux'" in str(excinfo.value)
+
+
+def test_a_differentiable_parameter_is_restored_not_checked(tmp_path):
+    """The other half of that contract: a leaf parameter comes back as saved.
+
+    A tunable is a leaf, so a checkpoint holds its value and a resume
+    continues from it -- editing one between runs is not a mismatch, it is
+    simply overridden by the saved run.
+    """
+    save({"params": _StaticallyConfigured(depth=50.0)}, tmp_path / "carry.msgpack")
+
+    loaded = load({"params": _StaticallyConfigured(depth=10.0)},
+                  tmp_path / "carry.msgpack")
+
+    assert float(loaded["params"].depth) == 50.0
+
+
+def test_a_checkpoint_without_the_structure_manifest_names_what_is_missing(tmp_path):
     """A payload written before the structure was recorded is not loadable.
 
     Refusing it is the point: such a file cannot be checked for the very
     mismatch the manifest exists to catch, so accepting it would reintroduce
-    the silent-resume it was added to prevent.
+    the silent resume it was added to prevent. The message names the entry
+    that is absent, which is what separates "an older checkpoint, re-run from
+    the start" from "not a checkpoint at all, check the path".
     """
     (tmp_path / "old_format.msgpack").write_bytes(
         flax.serialization.msgpack_serialize(
             {"leaves": [np.zeros(2)], "leaf_paths": ["['a']"]}
         )
     )
-    with pytest.raises(ValueError, match="old_format.msgpack"):
+    with pytest.raises(ValueError, match="old_format.msgpack") as excinfo:
         load({"a": jnp.zeros(2)}, tmp_path / "old_format.msgpack")
+
+    assert "'tree_structure'" in str(excinfo.value)
+    assert "'leaves'" not in str(excinfo.value)
 
 
 def test_a_file_that_is_not_a_checkpoint_is_refused_by_name(tmp_path):
@@ -362,6 +421,27 @@ def test_a_renamed_delegated_component_is_refused_by_name(tmp_path):
             component_loaders={"ocean": lambda directory: {}},
         )
     assert "'ocn'" in str(excinfo.value)
+
+
+def test_a_component_that_gained_a_save_state_is_refused(tmp_path):
+    """"Delegated" is part of the composition, not just the component's name.
+
+    A component that carries nothing at all and one that keeps its state in
+    its own subdirectory both contribute no leaf, so the marker
+    ``save_coupled`` stores for a delegated component has to be distinguishable
+    from an empty carry. Otherwise a stateless component later given a
+    ``save_state`` would load from a checkpoint that never wrote its
+    directory, and fail inside its own loader instead of here.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    save_coupled(
+        CoupledCarry(components={"ocn": None}, step=jnp.int32(2)), checkpoint_dir
+    )
+
+    with pytest.raises(ValueError, match="pytree structure"):
+        load_coupled(
+            checkpoint_dir, {}, component_loaders={"ocn": lambda directory: {}}
+        )
 
 
 def test_an_unchanged_delegated_composition_still_round_trips(tmp_path):

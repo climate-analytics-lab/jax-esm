@@ -249,7 +249,13 @@ Breaking changes are marked; everything else is additive.
   — or renaming a component that checkpoints itself, whose carry never reaches
   the shared file at all — would otherwise load cleanly and resume a different
   model at the saved step. A delegated component's *name* is stored in the
-  shared carry file as an empty entry for exactly that reason.
+  shared carry file as an empty marker entry for exactly that reason. Static
+  (`pytree_node=False`) parameters live in the `PyTreeDef` too, so resuming
+  with one of them edited — `forcing_method` from `none` to `qflux` — is
+  refused, deliberately: it selects a code path at trace time, so the resumed
+  run would be a different model, and the message says so and shows the
+  difference. A *differentiable* parameter is a leaf and is restored from the
+  checkpoint as before.
   `latest_complete_checkpoint(root,
   pattern="step_*")` and `remaining_batches(steps_done, total_steps,
   steps_per_batch)` moved here from `jem.utils.checkpoints` unchanged.

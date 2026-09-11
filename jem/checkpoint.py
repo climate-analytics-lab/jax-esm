@@ -98,7 +98,27 @@ _PATHS_KEY = "leaf_paths"
 #: future JAX whose ``PyTreeDef.__repr__`` changes would reject checkpoints
 #: written by an older one; that is the price of a manifest that needs no
 #: format of its own, and it fails loudly rather than silently.
+#:
+#: It also fingerprints each component's **static** (``pytree_node=False``)
+#: parameters, because JAX keeps those in the ``PyTreeDef`` rather than in the
+#: leaves -- ``CustomNode(SlabOceanParameters[('qflux', 0.0)], [*, *, *, *])``.
+#: Resuming with one of them changed is therefore refused. That is deliberate:
+#: a static parameter selects a code path at trace time, so a run resumed with
+#: a different one is a different model, and this module's contract is to say
+#: so rather than to continue quietly. The mismatch message names static
+#: parameters as one of the causes, and shows the difference, because the
+#: alternative -- stripping the static data out of the comparison -- would
+#: also strip out real structure and cannot be done without parsing JAX's
+#: repr.
 _STRUCTURE_KEY = "tree_structure"
+
+#: Reserved key marking, inside the shared carry file, a component that wrote
+#: its own subdirectory. ``{_DELEGATED_MARKER_KEY: {}}`` holds no leaf, so it
+#: costs the file nothing and only puts the component's *name* into the
+#: recorded structure -- but unlike a bare ``{}`` or ``None`` it cannot be
+#: confused with a plain component that genuinely carries nothing, so a
+#: component that gains (or loses) a ``save_state`` is a mismatch too.
+_DELEGATED_MARKER_KEY = "checkpointed_by_the_component"
 
 #: Below this many characters both structure reprs are shown in full in a
 #: mismatch message; above it, only a window around the first difference is.
@@ -151,6 +171,16 @@ def _structure_difference(saved: str, expected: str) -> str:
         f"  checkpoint: {excerpt(saved)}\n"
         f"  model:      {excerpt(expected)}"
     )
+
+
+def _delegated_marker() -> Carry:
+    """Return what stands in the shared carry file for a delegated component.
+
+    A fresh dict each call, because it goes into a carry the caller may go on
+    to mutate; it holds no leaf, so it adds nothing to the file but the
+    component's name.
+    """
+    return {_DELEGATED_MARKER_KEY: {}}
 
 
 def save(carry: Carry, path: str | Path) -> Path:
@@ -223,9 +253,13 @@ def load(template: Carry, path: str | Path) -> Carry:
     offending leaf and say what is wrong with it, which is more use than two
     ``PyTreeDef`` reprs, so the structure comparison is left as the catch-all
     for the differences no leaf can show: a subtree that holds no leaves at
-    all (``{}`` or ``None``, which is how a delegated component appears in a
-    coupled checkpoint), or a container whose type changed without its
-    contents moving.
+    all (``{}`` or ``None``, which is how a component that checkpoints itself
+    appears in a coupled checkpoint), a container whose type changed without
+    its contents moving, or a **static** (``pytree_node=False``) parameter
+    that changed value -- JAX keeps those in the ``PyTreeDef``, so a run
+    resumed with one of them edited is refused rather than continued as a
+    different model. A differentiable parameter, being a leaf, is instead
+    restored from the checkpoint.
 
     The values in ``template`` are never used; only its structure is. A
     caller with no carry to hand can therefore build one from
@@ -261,12 +295,21 @@ def load(template: Carry, path: str | Path) -> Carry:
             f"{path} is not a readable JEM checkpoint file: {exc}"
         ) from exc
     required = (_LEAVES_KEY, _PATHS_KEY, _STRUCTURE_KEY)
-    if not isinstance(payload, Mapping) or any(
-        key not in payload for key in required
-    ):
+    missing = (
+        required
+        if not isinstance(payload, Mapping)
+        else tuple(key for key in required if key not in payload)
+    )
+    if missing:
+        # The missing keys are named rather than all three, because a payload
+        # holding some of them is a checkpoint written by an older format
+        # (something to re-run from the start), whereas one holding none is a
+        # foreign or corrupt file (a wrong path) -- and the operator has to be
+        # able to tell those apart from the message.
         raise ValueError(
             f"{path} does not hold a JEM checkpoint payload (it has no "
-            f"{', '.join(repr(key) for key in required)} entries)."
+            f"{', '.join(repr(key) for key in missing)} entr"
+            f"{'y' if len(missing) == 1 else 'ies'})."
         )
     saved_leaves = list(payload[_LEAVES_KEY])
     saved_paths = list(payload[_PATHS_KEY])
@@ -314,10 +357,12 @@ def load(template: Carry, path: str | Path) -> Carry:
     if saved_structure != expected_structure:
         raise ValueError(
             f"{path}: the saved carry's pytree structure is not the model's, "
-            "even though its leaves line up -- something holding no arrays (a "
-            "component with an empty carry, or one that checkpoints itself) "
-            "was renamed, added or removed, or a container changed type, "
-            "since this checkpoint was written.\n"
+            "even though its leaves line up. Either something holding no "
+            "arrays (a component with an empty carry, or one that checkpoints "
+            "itself) was renamed, added or removed, a container changed type, "
+            "or a static (non-differentiable) parameter was changed -- JAX "
+            "keeps those in the structure, not in the leaves. The difference "
+            "is:\n"
             + _structure_difference(saved_structure, expected_structure)
         )
     return jax.tree_util.tree_unflatten(treedef, restored)
@@ -336,9 +381,9 @@ def save_coupled(
     :data:`CARRY_FILENAME` file, which is written **last** and is therefore
     the checkpoint's completion marker (see the module docstring).
 
-    A delegated component still leaves its *name* in the carry file, as an
-    empty (``None``) entry beside the plain components. It costs nothing --
-    ``None`` is an empty pytree node, so no leaf is written for it -- and it
+    A delegated component still leaves its *name* in the carry file, as a
+    marker entry beside the plain components. It costs nothing -- the marker
+    holds no leaf, so nothing is written for it -- and it
     is what makes the set of delegated components part of what
     :func:`load_coupled` checks: without it, renaming one would be met by its
     own loader failing on a missing directory, or, for a loader that does not
@@ -378,8 +423,9 @@ def save_coupled(
             component_directory.mkdir(parents=True, exist_ok=True)
             saver(carry, component_directory)
             # The component's data is in its own directory; what goes in the
-            # shared file is only its name, carried by an empty pytree node.
-            stored_components[name] = None
+            # shared file is only its name, carried by a marker that holds no
+            # leaf.
+            stored_components[name] = _delegated_marker()
 
     save({"step": coupled_carry.step, "components": stored_components}, carry_file)
 
@@ -452,7 +498,7 @@ def load_coupled(
         "step": jnp.int32(0),
         "components": {
             **dict(component_templates),
-            **dict.fromkeys(component_loaders),
+            **{name: _delegated_marker() for name in component_loaders},
         },
     }
     stored = load(template, carry_file)

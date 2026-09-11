@@ -69,22 +69,42 @@ simulation instead of replaying the first year.
 
 For the same reason `step` is part of a **checkpoint**. A checkpoint directory
 holds one `carry.msgpack` — every component that does not write itself, plus the
-coupled step counter — beside one subdirectory per component that writes itself
-(`VerosComponent`, a nested `Coupler`). A directory with no `carry.msgpack` is
+coupled step counter, plus the *name* of every component that does — beside one
+subdirectory per component that writes itself (`VerosComponent`, a nested
+`Coupler`). A directory with no `carry.msgpack` is
 refused with a `ValueError`: its position in the seasonal cycle is not
 recoverable, and resuming at step 0 (or at a step reconstructed from a batch
 index) would silently move the run's calendar.
 
 The format is jax-gcm's: `jem.checkpoint.save(carry, path)` flattens any pytree
 to a list of typed arrays serialised with flax's msgpack codec, and
-`load(template, path)` rebuilds the tree from a *template*'s treedef. The
-structure is not stored at all, which is what makes the format both small and
-self-checking — every leaf is compared with the template's path, shape and
+`load(template, path)` rebuilds the tree from a *template*'s treedef. The tree
+itself is never stored — rebuilding it from the template is what keeps the
+format small — but a manifest of it is, and that is what makes the format
+self-checking. Every leaf is compared with the template's path, shape and
 dtype, so a checkpoint written by another grid or another component composition
 fails naming the leaf instead of deserialising into something that only explodes
 later inside a `lax.scan`. The leaf paths are stored because leaf count, shape
 and dtype together cannot tell two same-shaped carries apart, and silently
 swapping two components' carries on resume is the failure that would follow.
+
+The manifest also holds the repr of the whole `PyTreeDef`, compared after the
+leaves — leaf-level checks name the offending leaf, which is more use than two
+tree reprs, so the structure comparison is left as the catch-all for the
+differences no leaf can show. There are three. A component whose carry holds no
+arrays (`{}` or `None`) contributes no leaf at all, so renaming one would
+otherwise load cleanly and resume a *different* composition at the saved step;
+so does a component that checkpoints itself, whose carry never reaches the
+shared file, which is why `save_coupled` stores its name there as an empty
+marker entry. A container that changed type without its contents moving (a list
+for a tuple) is the second. The third is a **static** (`pytree_node=False`)
+parameter that changed value: JAX keeps those inside the `PyTreeDef`, so
+resuming with `forcing_method` edited from `"none"` to `"qflux"` is refused
+rather than continued. That is deliberate — a static parameter selects a code
+path at trace time, so the resumed run would be a different model — and the
+mismatch message names it as one of the causes and shows the difference. A
+*differentiable* parameter is a leaf, so it is restored from the checkpoint
+instead: editing one between runs is overridden, not refused.
 Both the stored leaf and the template go through `jnp.asarray` first: a
 component's parameter default is a Python float in `initialize()` and a float32
 array in the carry `lax.scan` returns, and the two have to compare as one leaf.
