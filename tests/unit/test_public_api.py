@@ -38,6 +38,10 @@ CORE_NAMES = (
     "default_exchangers",
     "default_exchanges",
     "default_workflow",
+    # Writing a chunk of a run out.
+    "datasets_for_chunk",
+    "postprocess",
+    "write_chunk",
 )
 
 # What a coupled run is built out of: the atmosphere wrapper, the slab models

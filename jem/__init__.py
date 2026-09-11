@@ -19,8 +19,8 @@ from jem.base.component import (
 )
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
 
-# The declarative exchangers sit on the coupling core and import nothing
-# from `jem.components`, so they cost nothing to export.
+# The declarative exchangers and the output helpers sit on the coupling core
+# and import nothing from `jem.components`, so they cost nothing to export.
 from jem.exchangers import (
     Exchange,
     ExchangeSpec,
@@ -28,6 +28,7 @@ from jem.exchangers import (
     default_exchanges,
     default_workflow,
 )
+from jem.output import datasets_for_chunk, postprocess, write_chunk
 
 __all__ = [
     "Carry",
@@ -43,9 +44,12 @@ __all__ = [
     "SupportsCheckpoint",
     "SupportsXarray",
     "TimeAxis",
+    "datasets_for_chunk",
     "default_exchangers",
     "default_exchanges",
     "default_workflow",
     "nested_carry",
+    "postprocess",
     "with_nested_carry",
+    "write_chunk",
 ]
