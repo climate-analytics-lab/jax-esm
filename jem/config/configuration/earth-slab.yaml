@@ -1,0 +1,51 @@
+# @package _global_
+#
+# Earth-like: realistic orography and a climatological surface, SPEEDY T31L8
+# over a relaxed slab ocean and SPEEDY's slab land.
+#
+#   python -m jem.main +configuration=earth-slab
+#
+# This is `examples/02_experimental/01_earth.ipynb` as a config.
+#
+# WHY each setting:
+#  - terrain/forcing come from jax-gcm's packaged T30 climatology rather than
+#    the `hf://` mirror jax-gcm's own configurations use, so this runs with no
+#    network. The T30 climatology is on the T31 grid's own 96x48 Gaussian
+#    grid; `interpolate` stays at the group's default.
+#  - ocean=slab_relax reading the same forcing file's `sst`: a free slab drifts
+#    away from the observed state within months, so an Earth-like run relaxes.
+#  - ocean relaxation_time = 30 days rather than the model's 60: this is the
+#    validated setting of the notebook this configuration comes from -- at T31
+#    the slower relaxation lets the tropical SST drift before the seasonal
+#    cycle turns it around.
+#  - land=slab_speedy on the same file's `stl`/`snowc`/`soilw`, with
+#    tdland = 1 day rather than SPEEDY's 40: the land temperature anomaly runs
+#    unrealistically hot and cold at this resolution (jax-esm#1), and the
+#    strong relaxation is the stopgap the notebook validated.
+#  - seaice=slab: the relaxed ocean still reports freeze/melt energy, and the
+#    climatological sea-ice cover the atmosphere sees comes from this
+#    component, not from the forcing file.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: from_file
+  - override /forcing@atmosphere.forcing: from_file
+  - override /ocean: slab_relax
+  - override /land: slab_speedy
+  - override /seaice: slab
+
+atmosphere:
+  terrain:
+    file: ${jcm_data:bc/t30/clim/terrain.nc}
+  forcing:
+    file: ${jcm_data:bc/t30/clim/forcing.nc}
+
+ocean:
+  sst_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
+  params:
+    relaxation_time: 2592000    # 30 days, in seconds
+
+land:
+  land_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
+  params:
+    tdland: 86400.0             # 1 day, in seconds

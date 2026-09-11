@@ -1,0 +1,54 @@
+# Default coupled run: a month of simulated time in one chunk, written once.
+#
+# This file is also the COMPLETE schema of the coupled run: every key the
+# driver reads lives here, with a default and a comment, and the other options
+# in this group (`smoke`, `longrun`) inherit it via `defaults: [default,
+# _self_]` and override only what they change. So every option exposes the
+# same keys, and any of them can be set on the command line without a `+`.
+#
+# The keys are the keyword arguments of `jem.driver.run_chunked()`, which is
+# where their defaults live; the values here repeat only what this named
+# option is about. The group composes at `cfg.coupled_run`, not `cfg.run` --
+# `atmosphere.run` is the atmosphere's own run config, and a group called
+# `run` here would shadow jcm's (see the comment in `config.yaml`). Select an
+# option with `coupled_run=smoke`, set one key with `coupled_run.chunk=...`.
+
+# Total simulated time, as a `jcm.date.parse_duration_days` string.
+total_time: "30 days"
+
+# Simulated time integrated between health checks and output files. One chunk
+# per run by default; a long run splits so a NaN is caught (and a checkpoint
+# written) before weeks of compute are lost.
+chunk: "30 days"
+
+# Where the output netCDFs go. null -> the Hydra run directory, so a run is
+# self-contained and two runs cannot overwrite each other.
+output_dir: null
+
+# Write interval means instead of instantaneous snapshots.
+output_averages: false
+
+# Keep every n-th coupling step in the output. 1 keeps them all; a long run
+# raises it rather than writing a file it cannot store.
+subsample: 1
+
+# Stop at the first chunk whose state fails `jcm.diagnostics.check_health`
+# instead of integrating an already-broken state. Set false to log and carry
+# on (e.g. when the instability is the thing being studied).
+bail_on_unhealthy: true
+
+# Directory holding the run's restart state. null disables checkpointing; when
+# set, the coupled carry is written there after every chunk and a run started
+# with a complete checkpoint already there resumes from it -- so resuming is
+# the same command as starting. It is ONE directory, rewritten each chunk, not
+# a directory of dated restart points, and a relative path is resolved against
+# the directory the command was run from (Hydra does not change it), not
+# against the per-run output directory -- which changes every run and so could
+# never be resumed from.
+checkpoint_path: null
+
+# Logging level of the `jem` logger. Consumed by `jem.main` only -- it is not
+# an argument of `run_chunked()`, but it belongs with the run's other
+# command-line settings. INFO because a coupled run reports each chunk as it
+# completes, and a silent run is not the same as a clean one.
+log_level: INFO

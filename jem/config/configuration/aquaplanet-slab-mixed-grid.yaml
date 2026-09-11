@@ -1,0 +1,50 @@
+# @package _global_
+#
+# Aquaplanet with the slab components on their own, non-atmospheric grid: a
+# displaced-pole ocean grid, with ESMF weights mapping fields between it and
+# the atmosphere's T31 Gaussian grid.
+#
+#   python -m jem.main +configuration=aquaplanet-slab-mixed-grid
+#
+# This is `examples/01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb` as a
+# config, and the configuration that proves the coupler does not require one
+# shared grid.
+#
+# WHY each setting:
+#  - the ocean and sea ice run on the packaged `DisplacedPoleGrid` SCRIP grid:
+#    its pole sits over land, which is how an ocean model avoids the polar
+#    singularity -- and being curvilinear it is exactly what a shared-grid
+#    assumption would break on.
+#  - regrid=esmf with the four packaged weight files. Fluxes and areal
+#    fractions use the conservative maps (budgets have to be preserved across
+#    the interface); the SST the atmosphere reads uses the bilinear one.
+#  - terrain=aquaplanet and ocean=slab as in `aquaplanet-slab`: the grids are
+#    the experiment here, not the physics.
+#  - land=none: an aquaplanet has no land, and the displaced pole's land
+#    fraction only marks which ocean cells are inactive.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: aquaplanet
+  - override /ocean: slab
+  - override /seaice: slab
+  - override /land: none
+  - override /regrid: esmf
+
+# `grid_file` and `land_fraction_file` are NOT constructor arguments of the
+# slab models: they are read (and removed) by `jem.runners` when it builds the
+# `SlabGrid` the component is then handed, exactly as the notebook does with
+# `SlabGrid.from_scrip(...)`. Without them a slab model is built on the
+# atmosphere's grid.
+ocean:
+  grid_file: ${jem_data:DisplacedPoleGrid.SCRIP.nc}
+  land_fraction_file: ${jem_data:landsea_mask_fraction_DisplacedPoleGrid.nc}
+seaice:
+  grid_file: ${jem_data:DisplacedPoleGrid.SCRIP.nc}
+  land_fraction_file: ${jem_data:landsea_mask_fraction_DisplacedPoleGrid.nc}
+
+regrid:
+  a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}
+  a2o_bilinear: ${jem_data:weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc}
+  o2a_conserve: ${jem_data:weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc}
+  o2a_bilinear: ${jem_data:weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc}

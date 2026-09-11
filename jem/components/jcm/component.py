@@ -42,13 +42,36 @@ from jcm.forcing import ForcingData, default_forcing
 from jcm.model import Model
 from jcm.predictions import ModelPredictions
 
-from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
+from jem.base.component import (
+    Carry,
+    CouplingTime,
+    Diagnostics,
+    TimeAxis,
+    role_attrs,
+)
 from jem.components.clock import clock_tolerance_seconds
 from jem.components.jcm import exchange_fields
 
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 86400.0
+
+#: Fields of :class:`jcm.forcing.ForcingData` that a coupled run's exchangers
+#: write -- the surface boundary conditions an uncoupled JCM run prescribes
+#: and a coupled one receives from the surface components (see
+#: :func:`jem.exchangers.default_exchanges`). Where one of these appears in
+#: JCM's own output dataset it is tagged ``jem_role = "forcing"``, so the
+#: atmosphere's output can be queried for its forcing the same way every
+#: other component's can. The rest of JCM's variables are left untagged:
+#: those names are JCM's, and the roles of its diagnostics are not JEM's to
+#: assert.
+FORCING_VARIABLE_NAMES = (
+    "sea_surface_temperature",
+    "sice_am",
+    "stl_am",
+    "snowc_am",
+    "soilw_am",
+)
 
 
 @tree_math.struct
@@ -396,6 +419,15 @@ class JCMComponent:
 
         Notes
         -----
+        Every variable in the dataset is JCM's, named as JCM names it, so the
+        ``forcing_`` prefix the other components use is deliberately not
+        applied here -- renaming JCM's output would make a coupled run's
+        atmosphere files disagree with an uncoupled run's. The variables that
+        *are* recognisably the surface forcing an exchanger writes
+        (:data:`FORCING_VARIABLE_NAMES`) are marked with the ``jem_role``
+        attribute where they appear; everything else is left untagged rather
+        than guessed at, because JCM owns those names and their meaning.
+
         The ``time`` coordinate is JCM's, not the coupler's: JCM labels each
         averaged record with the **end** of the interval it covers
         (``datetime64[ns]``, absolute, from the model's own ``start_date``),
@@ -417,6 +449,13 @@ class JCMComponent:
                 " passed here are not the ones this run produced."
             )
         dataset: xr.Dataset = predictions.to_xarray()
+        for name in FORCING_VARIABLE_NAMES:
+            if name in dataset.variables:
+                # A fresh dict: xarray keeps the one it is handed, and the
+                # attrs on JCM's variable are JCM's to own.
+                dataset[name].attrs = {
+                    **dataset[name].attrs, **role_attrs("forcing")
+                }
         return dataset
 
     def _report_clock_drift(self, state: Any, time: CouplingTime) -> None:

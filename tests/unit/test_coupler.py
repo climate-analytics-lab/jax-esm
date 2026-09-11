@@ -992,16 +992,14 @@ def test_a_repeated_exchanger_sees_the_sub_stepped_clock():
 
 def test_checkpoint_round_trip_of_a_run_with_multiplicity(tmp_path):
     """The carry counts COUPLED steps, so a resumed run continues both clocks."""
-    from jem.utils.checkpoints import load_coupled_carry, save_coupled_carry
-
     coupler = _hourly_coupler()
     initial = coupler.initialize()
     continuous_carry, continuous = coupler.generate_trajectory_function(4)(initial)
 
     two = coupler.generate_trajectory_function(2)
     carry, first = two(initial)
-    save_coupled_carry(carry, tmp_path / "checkpoint")
-    loaded = load_coupled_carry(tmp_path / "checkpoint", coupler.components)
+    coupler.save_state(carry, tmp_path / "checkpoint")
+    loaded = coupler.load_state(tmp_path / "checkpoint")
 
     # Two coupled steps, not 48 sub-steps: the counter is the coupled clock.
     assert int(loaded.step) == 2

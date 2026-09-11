@@ -1,0 +1,68 @@
+app_name: JEM
+
+# Hydra renders this template TWICE: OmegaConf resolves it as a config value,
+# and `string.Template.substitute` then fills in Hydra's own $APP_CONFIG_GROUPS
+# and friends. So a literal `${...}` example -- which this help has to show,
+# because the packaged-data resolvers are the whole point of it -- has to
+# survive both. `$\${` is that: OmegaConf's `\${` yields `${`, leaving `$${`,
+# which `string.Template` renders as `${`. Written any other way, `--help`
+# either prints this machine's absolute paths in place of the example or
+# aborts with "Invalid placeholder in string".
+
+
+template: |
+
+  ${hydra.help.app_name}: JAX Earth-System Model coupler
+  ----
+  Runs coupled simulations: a JAX-GCM atmosphere plus ocean, land and sea-ice
+  components, exchanging on a fixed coupling step.
+
+  Usage:
+  ------
+    python -m jem.main [OVERRIDES...]
+
+  Use ``python -m jem.main --cfg job`` to print the fully-composed config for
+  the current overrides; ``--help`` lists every config-group choice below.
+
+  Named coupled configurations (the quickest way in):
+  ---------------------------------------------------
+    python -m jem.main +configuration=aquaplanet-slab
+    python -m jem.main +configuration=earth-slab coupled_run=smoke
+
+  JAX-ESM's own config groups (under jem/config/):
+  -----------------------------------------------
+    ocean, land, seaice, coupling, regrid, coupled_run, configuration
+
+    The coupled run's settings are the ``coupled_run`` group, at
+    ``cfg.coupled_run``: ``coupled_run=longrun`` picks an option and
+    ``coupled_run.total_time="90 days" coupled_run.chunk="30 days"`` sets
+    individual keys (no ``+`` needed -- ``coupled_run/default.yaml`` is the
+    complete schema). It is not called ``run`` because ``atmosphere.run`` is
+    the atmosphere's own run config and a ``run`` group here would shadow
+    JAX-GCM's.
+
+  The atmosphere: JAX-GCM's own config groups, re-rooted under `atmosphere`:
+  -------------------------------------------------------------------------
+    physics, grid, dycore, run, init, terrain, forcing, nudging, diffusion
+
+    Group and option names are JAX-GCM's; the package is spelled out in the
+    override, and single keys are addressed under ``atmosphere.``:
+
+      python -m jem.main physics@atmosphere.physics=held_suarez \
+          grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15
+
+    A whole JAX-GCM configuration bundle composes under the atmosphere with
+    the group's package, and command-line overrides still apply on top:
+
+      python -m jem.main +configuration@atmosphere=speedy-t31 \
+          atmosphere.run.time_step=7
+
+    Spell the ``@atmosphere`` part: ``+configuration=speedy-t31`` without it
+    would compose that bundle at the *root*, where its `physics`, `terrain`
+    and `run` keys are not the atmosphere's and nothing would read them.
+
+  Files shipped with the packages can be named without a machine-specific
+  path: ``$\${jcm_data:bc/t30/clim/forcing.nc}``,
+  ``$\${jem_data:JCM_T31.SCRIP.nc}``.
+
+  See the project README for runnable examples and the most common overrides.

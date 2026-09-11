@@ -32,6 +32,23 @@ CORE_NAMES = (
     # The helpers an exchanger reaches into a nested coupler's carry with.
     "nested_carry",
     "with_nested_carry",
+    # The declarative form of an exchanger, and the standard wiring.
+    "Exchange",
+    "ExchangeSpec",
+    "default_exchangers",
+    "default_exchanges",
+    "default_workflow",
+    # Writing a chunk of a run out: the labelling and the reduction, each on
+    # its own (the health gate needs the unreduced chunk) and composed.
+    "chunk_datasets",
+    "datasets_for_chunk",
+    "postprocess",
+    "postprocess_datasets",
+    "write_chunk",
+    # The run loop, and the gate it gives a chunk.
+    "RunResult",
+    "default_health_check",
+    "run_chunked",
 )
 
 # What a coupled run is built out of: the atmosphere wrapper, the slab models

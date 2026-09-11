@@ -20,14 +20,27 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
   initial conditions by passing them to `initialize`
 - **xarray Integration**: `Coupler.to_xarray()` labels every component's output on the
   same time axis and grid coordinates, so the datasets merge
+- **One run loop**: `jem.run_chunked()` integrates in chunks, writes a file per
+  component per chunk, checkpoints, and stops on an unhealthy state — and every
+  run default lives on it
+- **One command line**: `python -m jem.main` composes a coupled model from Hydra
+  config groups, JAX-GCM's own groups included, re-rooted under `atmosphere`
 
 ## Installation 
+
+JAX-ESM is developed and tested against **one** jax-gcm revision, recorded as
+`JCM_SUPPORTED_REV` in [`jem/components/jcm/contract.py`](jem/components/jcm/contract.py)
+together with every jax-gcm name JAX-ESM calls. The `jcm>=2.1.0b0` floor in
+`pyproject.toml` is the loosest statement of the same thing — jax-gcm bumps its
+version only at release, so the pin cannot be expressed as a version. Check out
+that revision if a coupled run fails with an `AttributeError` inside `jcm`:
+`pytest tests/unit/test_jcm_contract.py` reports exactly which name moved.
 
 ```
 # JAX-GCM (jcm) >= 2.1 is not on PyPI yet: install its dev branch from source FIRST
 git clone https://github.com/climate-analytics-lab/jax-gcm
 cd jax-gcm
-git switch dev
+git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
 pip install -e "."
 cd ..
 
@@ -49,40 +62,16 @@ Here is a complete, runnable aquaplanet simulation coupling the JCM atmosphere
 to JEM's slab ocean. It takes a couple of minutes on a laptop CPU.
 
 ```python
-from pathlib import Path
-
 import jax_datetime as jdt
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-from jem import Coupler
+from jem import Coupler, default_exchangers, run_chunked
 from jem.components import JCMComponent, SlabOceanModel
 from jem.components.slab import SlabGrid
 
 start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-
-
-# An exchanger is the only place where components exchange information. It is
-# traced with everything else, so it must not write into the carries it is
-# handed: it builds new ones and returns the mapping to continue with.
-def atm_ocn_exchange(components, time):
-    del time  # this exchange does not depend on the date
-    atm, ocn = components["atm"], components["ocn"]
-    ocn = dict(
-        ocn,
-        forcing=ocn["forcing"].replace(
-            total_heat_flux=atm["derived"].total_heat_flux,
-        ),
-    )
-    atm = dict(
-        atm,
-        forcing=atm["forcing"].replace(
-            sea_surface_temperature=ocn["state"].sea_surface_temperature,
-        ),
-    )
-    return dict(components, atm=atm, ocn=ocn)
-
 
 # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
 atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
@@ -92,33 +81,129 @@ atm = JCMComponent(atm_model)
 # and with no fractional mask every cell is ocean.
 grid = SlabGrid.from_coords(atm_model.coords.horizontal)
 
+# An exchanger is the only place where components exchange information.
+# `default_exchangers` is the standard wiring written down once — here, the
+# atmosphere's surface heat flux drives the ocean and the ocean's SST comes
+# back as the atmosphere's boundary condition — filtered to whichever of the
+# standard components (`atm`, `ocn`, `lnd`, `seaice`) are present.
+components = {"atm": atm, "ocn": SlabOceanModel(grid)}
 coupler = Coupler(
-    {"atm": atm, "ocn": SlabOceanModel(grid)},
-    {"atm_ocn_exchange": atm_ocn_exchange},
+    components,
+    default_exchangers(components),
     coupling_timestep=coupling_timestep,
     start_date=start_date,
 )
 print(repr(coupler))
 
-# The default workflow is every exchanger followed by every component, so the
-# fields are exchanged first and both components then step on the same state.
-simulation_interval = jdt.to_timedelta(10, "day")
-run = coupler.generate_trajectory_function(
-    int(simulation_interval / coupling_timestep)
+# One run loop for every coupled run: integrate a chunk, write one file per
+# component, check the atmosphere is still healthy, repeat. Every run default
+# lives on `run_chunked` itself. Each file is named after the coupled step its
+# chunk starts at, so this writes `atm-00000000.nc` and `atm-00000005.nc`
+# (and the ocean's two) into `output/`.
+result = run_chunked(
+    coupler, total_time="10 days", chunk="5 days", output_dir="output"
 )
-final_carry, diagnostics = run(coupler.initialize())
-
-output_dir = Path("output")
-output_dir.mkdir(parents=True, exist_ok=True)
-for component_name, ds in coupler.to_xarray(diagnostics).items():
-    ds.to_netcdf(output_dir / f"{component_name:s}.nc", engine="netcdf4")
+print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 ```
 
-Longer versions of this run, including the sea-ice component and the plotting
-code that produced the animation below, are in
-`examples/01_basic/01_aquaplanet.ipynb`.
+An exchange the standard table cannot express — one that regrids, computes a
+flux, converts units or blends two fields — is written as a plain function
+instead; `docs/source/tutorial.rst` works one through. Longer versions of this
+run, including the sea-ice component and the plotting code that produced the
+animation below, are in `examples/01_basic/01_aquaplanet.ipynb`.
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
+
+## Running from the command line
+
+The same run as one command. `python -m jem.main` (or the `jem` console script)
+composes the model from Hydra config groups: JAX-ESM's own groups at the top
+level, and **jax-gcm's own groups re-rooted under `atmosphere`**, so anything
+that works in `python -m jcm.main` works here with the group's package spelled
+out.
+
+```bash
+python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+python -m jem.main --help       # every group, option and override spelling
+python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't run
+```
+
+| To do this | Write this |
+| --- | --- |
+| Run a named coupled configuration | `+configuration=earth-slab` |
+| Compose a whole jax-gcm bundle as the atmosphere | `+configuration@atmosphere=speedy-t31` |
+| Change one atmosphere group | `physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8` |
+| Set one atmosphere key | `atmosphere.run.time_step=7` |
+| Choose a surface component | `ocean=slab_relax ocean.sst_clim_file=${jcm_data:bc/t30/clim/forcing.nc}` |
+| Drop one | `land=none` |
+| Set a component parameter | `+ocean.params.relaxation_time=1e6` |
+| Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
+| Choose the run settings | `coupled_run=smoke`, or `coupled_run.total_time="90 days"` |
+
+Two things worth knowing:
+
+- **Spell the `@atmosphere`.** `+configuration=speedy-t31` without it composes
+  that jax-gcm bundle at the *root*, where its `physics`, `terrain` and `run`
+  keys are nobody's and nothing reads them. The atmosphere's groups always
+  carry their package: `<group>@atmosphere.<group>=<option>`.
+- **The coupled run's own settings are `coupled_run`, not `run`.**
+  `atmosphere.run` is the atmosphere's run config, and a `run` group here would
+  shadow jax-gcm's. `coupled_run/default.yaml` is the complete schema, so every
+  key is overridable without a `+`.
+- **The exit status means what a scheduler thinks it means.** `0` when the run
+  reached the time it was asked for, `1` when the health gate stopped it early
+  (the output and checkpoint written so far are kept, and the reason is
+  logged). So `python -m jem.main ... && <post-processing>` runs the
+  post-processing only on a run that finished.
+
+The YAML is wiring only — `_target_`, required input files, and the non-default
+choices that define a named configuration. Every physics default lives on the
+Python class that owns it, and every *run* default on `jem.driver.run_chunked`.
+
+## Long runs: checkpoints and monthly means
+
+`run_chunked` writes a restart after every chunk when it is given a path, and
+resuming is the same call:
+
+```python
+result = run_chunked(
+    coupler,
+    total_time="10 years",
+    chunk="30 days",             # a health check, a file and a restart per month
+    output_dir="output",
+    output_averages=True,        # one record per chunk: the monthly mean
+    checkpoint_path="checkpoint",
+)
+```
+
+Run it again with the same `checkpoint_path` and it continues from the coupled
+step the checkpoint holds — `python -m jem.main ... coupled_run=longrun` is the
+command-line form. The checkpoint is one directory, rewritten atomically each
+chunk; a save interrupted half way through is detected and skipped rather than
+resumed from.
+
+The gate runs before the checkpoint, and a chunk it rejects is not
+checkpointed: there is one restart directory and it is overwritten in place, so
+a stopped run leaves it holding the last chunk that passed rather than the
+state that failed.
+
+`output_averages` and `subsample` reduce the *files* only. The health check is
+given each chunk exactly as it was integrated — every record — because it
+judges a chunk by its last record and its extremes, and a chunk mean (which
+skips NaNs) or a stride that drops the last record would report an atmosphere
+that blew up at the end of the month as healthy.
+
+For a reduction that must not cost memory proportional to the run, accumulate
+it *inside* the scan instead of writing every step out:
+
+```python
+from jem.accumulate import monthly_mean
+
+monthly = monthly_mean(coupler)
+trajectory = coupler.generate_trajectory_function(365, accumulate=monthly)
+carry, accumulator = trajectory(coupler.initialize())
+means = monthly.finalize(accumulator)      # one (12, ...) record per variable
+```
 
 ## Documentation
 
@@ -294,8 +379,8 @@ Contributions are welcome! Please:
 ## Development Status
 
 - **Version**: single-sourced from `jem.__version__`
-- **Status**: Alpha. The next release is 1.0.0a0, the "core API contract"
-  described at the top of [CHANGELOG.md](CHANGELOG.md).
+- **Status**: Alpha. The next release is 1.0.0b0, "the driver and configuration
+  layer", described at the top of [CHANGELOG.md](CHANGELOG.md).
 - **API Stability**: subject to change without deprecation until 1.0; every
   removal or rename is recorded in [CHANGELOG.md](CHANGELOG.md)
 

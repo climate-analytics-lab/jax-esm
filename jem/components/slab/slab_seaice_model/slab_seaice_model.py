@@ -13,6 +13,7 @@ from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     forcing_variable,
+    role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_seaice_model.params import SlabSeaiceParameters
@@ -121,7 +122,7 @@ class SlabSeaiceModel(SlabModelBase):
         grid: SlabGrid,
         params: SlabSeaiceParameters | None = None,
         *,
-        name: str = "ice",
+        name: str = "seaice",
     ):
         """Initialize the slab sea-ice model.
 
@@ -140,7 +141,11 @@ class SlabSeaiceModel(SlabModelBase):
             initial condition and takes traced values, so it is deliberately
             not re-validated there.
         name : str
-            Component name in the coupler's workflow and carry.
+            Component name in the coupler's workflow and carry. The default is
+            the name the standard coupling wires the sea ice under
+            (:func:`jem.exchangers.default_exchanges`), so a model registered
+            as ``{"seaice": SlabSeaiceModel(grid)}`` is connected without
+            being renamed.
 
         Raises
         ------
@@ -263,6 +268,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice thickness",
                     "units": "m",
+                    **role_attrs("state"),
                 },
             ),
             "ice_surface_temperature": (
@@ -271,6 +277,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice surface temperature",
                     "units": "K",
+                    **role_attrs("state"),
                 },
             ),
             # Written from the forcing, which is where the ocean's
@@ -285,6 +292,7 @@ class SlabSeaiceModel(SlabModelBase):
                         "forced with: positive forms ice, negative melts ice"
                     ),
                     "units": "J m-2",
+                    **role_attrs("forcing"),
                 },
             ),
             "ice_fraction": (
@@ -293,6 +301,7 @@ class SlabSeaiceModel(SlabModelBase):
                 {
                     "long_name": "Sea ice areal fraction (smooth closure from thickness)",
                     "units": "1",
+                    **role_attrs("derived"),
                 },
             ),
         }

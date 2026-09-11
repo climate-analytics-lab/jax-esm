@@ -1,0 +1,82 @@
+# @package _global_
+#
+# Earth with a dynamical ocean: SPEEDY T31L8 over the Veros ocean GCM on a
+# rotated Gaussian lon/lat grid, exchanging through ESMF weights.
+#
+#   PYTHONPATH=examples/02_experimental/03_jcm_veros_earth \
+#     python -m jem.main +configuration=veros-earth \
+#       atmosphere.terrain.file=<terrain>.nc
+#
+# The setup this names lives in `examples/02_experimental/03_jcm_veros_earth/`,
+# which is a directory of scripts and NOT an installed package: the example
+# directory has to be on PYTHONPATH for `veros_case_setup` to import.
+#
+# WHY each setting:
+#  - ocean=veros on the packaged `RotatedGaussianLatLon` SCRIP grid: rotating
+#    the grid moves its pole onto land, and the ocean's land-sea mask comes
+#    from the matching packaged land-fraction file.
+#  - regrid=esmf with the four packaged weight files for that grid pair --
+#    conservative for fluxes, bilinear for states.
+#  - terrain=from_file is left `???`: the atmosphere's orography has to be made
+#    consistent with the ocean mask, which `modify_jcm_terrain.py` in the
+#    example directory does, writing a file from the packaged
+#    `terrain_JCM_T31.nc` and `landsea_mask_fraction_JCM_T31.nc`. JCM computes
+#    its Coriolis parameter from its OWN latitudes, so the atmosphere's
+#    terrain must stay on the unrotated grid.
+#  - atmosphere.run.time_step = 30 min: the validated step for this coupled
+#    case (the example's `run.sh`).
+#  - seaice=none, land=none: this configuration couples the ocean only.
+#  - land=none with the atmosphere's `forcing` group left at `default`: the
+#    default coupling has no source for the atmosphere's land boundary
+#    conditions, so they stay at what `jcm.forcing.ForcingData.zeros` put
+#    there and hold it for the whole integration -- land surface temperature
+#    288.15 K everywhere, zero snow cover, zero soil water, zero bare-land
+#    albedo. That is a deliberate simplification of THIS experiment, not a
+#    land model: over the continents the surface neither warms, cools nor
+#    carries a seasonal cycle. Add `land=slab_speedy` (with its climatology
+#    file) for a responding land surface, or
+#    `forcing@atmosphere.forcing=from_file` for a prescribed one.
+#  - the coupling is left at the default table, which recognises a Veros ocean
+#    and wires it in Veros' own field names (`jem.exchangers`,
+#    VEROS_OCEAN_EXCHANGES), regridded through the weights above:
+#    conservatively for the surface heat and freshwater fluxes going onto the
+#    ocean grid, bilinearly for the sea surface temperature coming back.
+#    The WIND STRESS is not in that table and cannot be: it is a bulk drag law
+#    over the atmosphere's near-surface wind, followed here by a rotation into
+#    this grid's local frame (the SCRIP file's `grid_cos_angle`/
+#    `grid_sin_angle`), and neither is a copy of a field. So this
+#    configuration runs the ocean thermodynamically forced but mechanically at
+#    rest. Set `coupling.exchanger=<module>.<function>` to a hand-written
+#    exchanger -- an importable module-level function taking
+#    (components, time) -- to drive it; the exchange in this example's
+#    `model_setup.py` is a closure built inside `build_model` (it closes over
+#    the rotation angles and the regridders) and also wires a `fakelnd`
+#    component this configuration does not have, so it cannot be named here as
+#    it stands.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: from_file
+  - override /ocean: veros
+  - override /seaice: none
+  - override /land: none
+  - override /regrid: esmf
+
+atmosphere:
+  terrain:
+    file: ???
+  run:
+    time_step: 30
+
+ocean:
+  # A factory returning a `VerosSetup` subclass; `from_setup` calls it with
+  # every other key in this node.
+  setup: veros_case_setup.generateVerosSetup
+  scrip_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
+  landsea_mask_file: ${jem_data:landsea_mask_fraction_RotatedGaussianLatLon.nc}
+
+regrid:
+  a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_RotatedGaussianLatLon.nc}
+  a2o_bilinear: ${jem_data:weight_algo-bilinear_JCM_T31_to_RotatedGaussianLatLon.nc}
+  o2a_conserve: ${jem_data:weight_algo-conserve_RotatedGaussianLatLon_to_JCM_T31.nc}
+  o2a_bilinear: ${jem_data:weight_algo-bilinear_RotatedGaussianLatLon_to_JCM_T31.nc}

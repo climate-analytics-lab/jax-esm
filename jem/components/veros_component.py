@@ -12,8 +12,11 @@ with a no-op or Veros overwrites the surface forcing the coupler just
 handed it. That is done once, in the constructor, and said out loud there.
 """
 
+import importlib
 import logging
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +33,12 @@ from jem.base.component import (
     Diagnostics,
     TimeAxis,
     forcing_variable,
+    role_attrs,
 )
+from jem.checkpoint import CARRY_FILENAME
+from jem.checkpoint import load as load_carry
+from jem.checkpoint import save as save_carry
 from jem.components.clock import clock_tolerance_seconds
-from jem.utils.checkpoints import load_veros_carry, save_veros_carry
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,11 @@ REFERENCE_SALINITY = 35.0  # PSU
 # at this value squared, which bounds sqrt and its derivative and caps the
 # resulting magnitude from below.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
+
+#: Name of the HDF5 restart file :meth:`VerosComponent.save_state` writes
+#: inside its checkpoint directory. Veros owns the format; JEM only chooses
+#: where it goes, and fixes the name so that the loader finds it.
+VEROS_RESTART_FILENAME = "veros.restart.h5"
 
 
 def configure_veros_runtime() -> None:
@@ -98,6 +109,42 @@ def configure_veros_runtime() -> None:
                 " configure_veros_runtime()) before importing any Veros setup"
                 " module or veros.core."
             ) from exc
+
+
+@contextmanager
+def _veros_runtime_setting(name: str, value: object) -> Iterator[None]:
+    """Set one locked Veros runtime setting for the duration of a block.
+
+    ``runtime_settings`` locks itself once ``veros.core`` is imported, and
+    reading a restart needs ``force_overwrite`` off while the rest of a
+    coupled run needs it on. Veros itself offers no supported way to flip a
+    locked setting, so the lock flag is cleared and restored around each
+    assignment.
+
+    It is a context manager, and the restore is in a ``finally``, because the
+    settings are **process-global**: a failed ``read_restart`` -- a missing or
+    mismatched HDF5 file -- would otherwise leave the whole process with
+    ``force_overwrite`` off, and the next thing that tried to write an output
+    or a restart would fail for a reason with no connection to the one that
+    actually went wrong. The previous value is put back rather than a
+    hard-coded one, so this makes no assumption about who set it.
+    """
+    previous = getattr(runtime_settings, name)
+    was_locked = getattr(runtime_settings, "__locked__", False)
+
+    def assign(to: object) -> None:
+        object.__setattr__(runtime_settings, "__locked__", False)
+        try:
+            setattr(runtime_settings, name, to)
+        finally:
+            object.__setattr__(runtime_settings, "__locked__", was_locked)
+
+    assign(value)
+    try:
+        yield
+    finally:
+        assign(previous)
+
 
 # Deliberate import-time side effect: see configure_veros_runtime(). This is the
 # only way to guarantee the setting precedes the operator import that binds it.
@@ -244,6 +291,75 @@ class VerosComponent:
             self.name,
         )
         model.set_forcing = lambda state: None
+
+    @classmethod
+    def from_setup(cls, setup: str, **setup_kwargs: Any) -> "VerosComponent":
+        """Build the component from an importable Veros setup.
+
+        The constructor takes an already-built Veros model, which is a live
+        Python object no configuration file can name. This is the door a
+        config comes through (``jem/config/ocean/veros.yaml``): it imports
+        ``setup``, builds it with ``setup_kwargs``, runs the setup's own
+        ``setup()`` -- which is what allocates the grid and the initial
+        conditions this wrapper reads its geometry from -- and wraps it.
+
+        Parameters
+        ----------
+        setup : str
+            Importable dotted path of either a ``VerosSetup`` subclass or a
+            factory returning one. It is never a file path: the module has to
+            be importable like any other, so a setup that lives in an example
+            directory needs that directory on ``sys.path``. Both spellings
+            are accepted because the setups shipped with the examples are
+            factories -- that is how a case is parameterised by its grid file
+            and timesteps -- and which one a path names is only discoverable
+            by calling it.
+        **setup_kwargs
+            Passed to the class or factory.
+
+        Returns
+        -------
+        VerosComponent
+            Wrapping a setup whose ``setup()`` has been called.
+
+        Raises
+        ------
+        ImportError
+            If ``setup`` is not a dotted path, its module cannot be imported,
+            or the module has no such attribute.
+
+        """
+        module_path, _, attribute = setup.rpartition(".")
+        if not module_path:
+            raise ImportError(
+                f"{setup!r} is not an importable dotted path to a Veros setup"
+                " (expected something like"
+                " 'my_package.my_case.MySetup')."
+            )
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ImportError(
+                f"Cannot import {module_path!r} for the Veros setup {setup!r}."
+                " A setup that lives outside an installed package (the ones"
+                " under examples/ do) needs its directory on PYTHONPATH."
+            ) from exc
+        try:
+            factory = getattr(module, attribute)
+        except AttributeError as exc:
+            raise ImportError(
+                f"{module_path!r} has no attribute {attribute!r}"
+                f" (from the Veros setup {setup!r})."
+            ) from exc
+
+        model = factory(**setup_kwargs)
+        if isinstance(model, type):
+            # ``factory`` was a factory returning the setup *class*, not the
+            # class itself; the shipped example cases are written that way so
+            # that the class can close over the case's grid and settings.
+            model = model()
+        model.setup()
+        return cls(model)
 
     def bind(
         self,
@@ -561,6 +677,11 @@ class VerosComponent:
             :func:`~jem.base.component.forcing_variable` applies, exactly as the
             slab models' output does, so merging this dataset with the
             atmosphere's does not collide on a name two components both hold.
+            Each variable that came out of the carry also carries the
+            ``jem_role`` attribute (:func:`~jem.base.component.role_attrs`),
+            which says the same thing without a name to parse; the grid
+            fields (``mask_T``, ``mask_surface_T``, ``dzt``) carry none,
+            because they are configuration rather than carry.
             The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
@@ -613,31 +734,48 @@ class VerosComponent:
         dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
         dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
+        # `jem_role` records which section of the carry each variable came
+        # from, so a reader does not have to parse the `forcing_` prefix.
+        # The last three are the grid itself -- time-invariant configuration,
+        # not state, diagnostics or forcing -- so they carry no role.
         var_attrs = {
-            "temp": {"long_name": "ocean potential temperature", "units": "deg C"},
-            "salt": {"long_name": "ocean salinity", "units": "g/kg"},
-            "u": {"long_name": "zonal ocean velocity", "units": "m/s"},
-            "v": {"long_name": "meridional ocean velocity", "units": "m/s"},
+            "temp": {"long_name": "ocean potential temperature", "units": "deg C",
+                     **role_attrs("state")},
+            "salt": {"long_name": "ocean salinity", "units": "g/kg",
+                     **role_attrs("state")},
+            "u": {"long_name": "zonal ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
+            "v": {"long_name": "meridional ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
             "sea_surface_temperature": {
                 "long_name": "sea surface temperature", "units": "K",
                 "comment": "unlike `temp`, this field is shifted by +273.15 to Kelvin",
+                **role_attrs("derived"),
             },
-            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s"},
-            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s"},
-            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg"},
+            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
+                                     **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
                 "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
+                **role_attrs("forcing"),
             },
             forcing_variable("surface_taux"): {
-                "long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "zonal surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("surface_tauy"): {
-                "long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "meridional surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("heat_flux"): {
-                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
+                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2",
+                **role_attrs("forcing")},
             forcing_variable("freshwater_flux"): {
                 "long_name": "net surface freshwater flux forcing (upward positive)",
-                "units": "kg/m^2/s"},
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
@@ -648,21 +786,88 @@ class VerosComponent:
         return dataset
 
     def save_state(self, carry: Carry, directory: Path) -> None:
-        """Write the carry to ``directory``.
+        """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         The ``VerosState`` goes through Veros' own HDF5 restart writer
-        because it is not a plain pytree; the derived and forcing structs
-        are pickled alongside it.
+        because it is not a plain pytree -- it is a mutable object holding
+        settings, dimensions and its own array backend. What is left of the
+        carry, the ``derived`` and ``forcing`` structs, is an ordinary pytree
+        and is written beside it by :func:`jem.checkpoint.save`, under the
+        same file name a coupled checkpoint uses, so one directory has one
+        carry file however deep in the model it sits.
+
+        Parameters
+        ----------
+        carry : Carry
+            ``{"state": VerosState, "derived": ..., "forcing": ...}``.
+        directory : pathlib.Path
+            Directory to write into; created if absent.
+
         """
-        save_veros_carry(carry, directory)
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        from veros.restart import write_restart
+
+        state = carry["state"]
+        with state.settings.unlock():
+            state.settings.restart_output_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+            logger.info(
+                "Saving ocean restart file to %s",
+                state.settings.restart_output_filename,
+            )
+        write_restart(state, force=True)
+
+        # The restart file first, the pytree carry file last: the coupled
+        # checkpoint treats the carry file as the completion marker, and this
+        # component keeps the same promise for its own directory.
+        save_carry(
+            {"derived": carry["derived"], "forcing": carry["forcing"]},
+            directory / CARRY_FILENAME,
+        )
 
     def load_state(self, directory: Path) -> Carry:
         """Read back a carry written by :meth:`save_state`.
 
         Veros' restart reader mutates ``model.state`` in place, so the
-        returned carry shares that object -- as :meth:`initialize` does.
+        returned carry shares that object -- as :meth:`initialize` does. The
+        ``derived`` and ``forcing`` structs are poured back into the templates
+        :meth:`initialize` builds, so a restart written on another grid is
+        refused by shape rather than silently adopted.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            A directory written by :meth:`save_state`.
+
+        Returns
+        -------
+        Carry
+
         """
-        return load_veros_carry(directory, self.model)
+        directory = Path(directory)
+
+        from veros.restart import read_restart
+
+        state = self.model.state
+        with state.settings.unlock():
+            state.settings.restart_input_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+        # Veros refuses to read a restart while `force_overwrite` is on, which
+        # this module turns on so that a coupled run may rewrite its own
+        # outputs; the context manager puts it back however the read ends.
+        with _veros_runtime_setting("force_overwrite", False):
+            read_restart(state)
+
+        template = {
+            "derived": VerosDerived.zeros(self.horizontal_shape),
+            "forcing": VerosForcing.zeros(self.horizontal_shape),
+        }
+        stored = load_carry(template, directory / CARRY_FILENAME)
+        return {"state": state, **stored}
 
 
 def make_jem_compatible(

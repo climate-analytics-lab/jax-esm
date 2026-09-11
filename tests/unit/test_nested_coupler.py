@@ -31,10 +31,10 @@ from jem.base.component import (
     SupportsXarray,
 )
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
-from jem.utils.checkpoints import (
-    COUPLED_STEP_FILENAME,
-    load_coupled_carry,
-    save_coupled_carry,
+from jem.checkpoint import (
+    CARRY_FILENAME,
+    load_coupled,
+    save_coupled,
 )
 
 DAY = 86400.0
@@ -78,9 +78,9 @@ class CheckpointingCounter(Counter):
     The point of the toy is the *path*: it records every directory it is
     handed, so a test can show that the coupler passed it the directory named
     after it, inside the one named after the coupler it lives in. Its format
-    is deliberately not a pickle, so a checkpoint that fell back to the
-    default pytree path would be visible as a missing file rather than as a
-    file that happens to work.
+    is deliberately not the shared carry file, so a checkpoint that fell back
+    to the default pytree path would be visible as a missing file rather than
+    as a file that happens to work.
     """
 
     FILENAME = "custom_format.json"
@@ -523,15 +523,25 @@ def test_nested_and_flat_forms_are_the_same_run():
 
 
 def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
-    """The inner CoupledCarry pickles like any other carry, and both clocks resume."""
+    """An inner CoupledCarry is an ordinary pytree, and both clocks resume.
+
+    The generic checkpoint path is used deliberately -- no savers, so the
+    nested :class:`CoupledCarry` is serialised leaf by leaf like any other
+    carry, and the template it is read back into is the nested coupler's own
+    ``initialize()``. That the *capability* path delegates instead is a
+    separate property, tested below.
+    """
     model = nested_model()
     initial = model.initialize()
     continuous_carry, _ = model.generate_trajectory_function(4)(initial)
 
     two = model.generate_trajectory_function(2)
     carry, _ = two(initial)
-    save_coupled_carry(carry, tmp_path / "checkpoint")
-    loaded = load_coupled_carry(tmp_path / "checkpoint", model.components)
+    save_coupled(carry, tmp_path / "checkpoint")
+    loaded = load_coupled(
+        tmp_path / "checkpoint",
+        {name: component.initialize() for name, component in model.components.items()},
+    )
 
     assert isinstance(loaded.components["atm_lnd"], CoupledCarry)
     assert int(loaded.step) == 2
@@ -568,18 +578,16 @@ def test_save_state_hands_each_component_its_own_directory(tmp_path):
 
     assert land.saved_directories == [root / "atm_lnd" / "lnd"]
     assert (root / "atm_lnd" / "lnd" / CheckpointingCounter.FILENAME).exists()
-    # Its sibling has an ordinary pytree carry and is still pickled, next to
-    # it, under the name the default path uses.
-    assert (root / "atm_lnd" / "atm_carry.pkl").exists()
-    assert (root / "ocn_carry.pkl").exists()
-    # The delegating saver replaces the pickle rather than accompanying it,
-    # for the component and for the nested coupler alike.
-    assert not (root / "atm_lnd" / "lnd_carry.pkl").exists()
-    assert not (root / "atm_lnd_carry.pkl").exists()
+    # A component with no capability of its own is not given a directory: its
+    # carry is a plain pytree and goes into the carry file of the coupler it
+    # belongs to, so the land's sibling leaves nothing beside it.
+    assert not (root / "atm_lnd" / "atm").exists()
+    assert not (root / "ocn").exists()
     # Both coupled models are complete checkpoints in their own right: the
-    # inner one wrote its own clock and its own completion marker.
-    assert (root / COUPLED_STEP_FILENAME).exists()
-    assert (root / "atm_lnd" / COUPLED_STEP_FILENAME).exists()
+    # inner one wrote its own clock and its own carry file, which is the
+    # completion marker.
+    assert (root / CARRY_FILENAME).exists()
+    assert (root / "atm_lnd" / CARRY_FILENAME).exists()
 
 
 def test_load_state_round_trips_a_nested_checkpoint(tmp_path):
@@ -635,14 +643,20 @@ def test_save_state_matches_the_explicit_helpers_for_an_all_pytree_model(tmp_pat
     carry, _ = model.generate_trajectory_function(2)(model.initialize())
 
     model.save_state(carry, tmp_path / "capability")
-    save_coupled_carry(carry, tmp_path / "explicit")
+    save_coupled(carry, tmp_path / "explicit")
 
     assert sorted(path.name for path in (tmp_path / "capability").iterdir()) == sorted(
         path.name for path in (tmp_path / "explicit").iterdir()
     )
     assert_trees_equal(
         model.load_state(tmp_path / "capability"),
-        load_coupled_carry(tmp_path / "explicit", model.components),
+        load_coupled(
+            tmp_path / "explicit",
+            {
+                name: component.initialize()
+                for name, component in model.components.items()
+            },
+        ),
     )
 
 

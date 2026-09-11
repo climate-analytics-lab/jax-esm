@@ -16,6 +16,7 @@ from jem.components.slab.base import (
     end_of_step,
     forcing_variable,
     load_monthly_climatology,
+    role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_ocean_model.params import (
@@ -550,6 +551,7 @@ class SlabOceanModel(SlabModelBase):
                 {
                     "long_name": "Sea surface temperature",
                     "units": "K",
+                    **role_attrs("state"),
                 },
             ),
             "mixed_layer_depth": (
@@ -558,6 +560,7 @@ class SlabOceanModel(SlabModelBase):
                 {
                     "long_name": "Mixed layer depth",
                     "units": "m",
+                    **role_attrs("derived"),
                 },
             ),
             # Not `forcing_total_heat_flux`: this is the flux the mixed
@@ -571,6 +574,7 @@ class SlabOceanModel(SlabModelBase):
                     "long_name": "Effective heat flux applied to the mixed layer",
                     "units": "W m-2",
                     "positive": "upward",
+                    **role_attrs("derived"),
                 },
             ),
             "ice_frazil_melt_energy": (
@@ -582,6 +586,7 @@ class SlabOceanModel(SlabModelBase):
                         "negative melts ice"
                     ),
                     "units": "J m-2",
+                    **role_attrs("derived"),
                 },
             ),
         }
@@ -596,6 +601,10 @@ class SlabOceanModel(SlabModelBase):
                     "long_name": "Prescribed Q-flux forcing",
                     "units": "W m-2",
                     "positive": "Heating the ocean",
+                    # A prescribed boundary condition, so `forcing` even
+                    # though it rides on the diagnostics rather than on the
+                    # carry's forcing section (see `_Q_FLUX_SNAPSHOT`).
+                    **role_attrs("forcing"),
                 },
             )
 
