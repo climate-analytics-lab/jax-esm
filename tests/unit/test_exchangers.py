@@ -592,3 +592,24 @@ def test_repr_lists_the_specs():
     assert "a.state.x -> b.forcing.y" in text
     assert "[r]" in text
     assert repr(Exchange([])) == "Exchange([])"
+
+
+def test_a_near_miss_component_name_is_warned_about(caplog):
+    """A sea-ice model left under its constructor default must not go quiet.
+
+    ``SlabSeaiceModel``'s own default name is ``"ice"``, but the standard
+    wiring is written for ``"seaice"``. Wiring ``"ice"`` anyway would be
+    guesswork; saying nothing would leave the component silently uncoupled.
+    """
+    with caplog.at_level("WARNING", logger="jem.exchangers"):
+        specs = default_exchanges(("atm", "ocn", "ice"))
+    assert all("ice" not in spec.dst.split(".")[0] for spec in specs)
+    assert "'seaice'" in caplog.text
+    assert "'ice'" in caplog.text
+
+
+def test_no_warning_when_both_names_are_present(caplog):
+    """A model that genuinely has an extra "ice" component is not nagged."""
+    with caplog.at_level("WARNING", logger="jem.exchangers"):
+        default_exchanges(("atm", "ocn", "seaice", "ice"))
+    assert caplog.text == ""

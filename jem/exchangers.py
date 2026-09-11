@@ -78,6 +78,22 @@ SECTIONS = ("state", "derived", "forcing")
 #: what the examples do.
 STANDARD_COMPONENT_NAMES = ("atm", "ocn", "lnd", "seaice")
 
+# Names a coupled model plausibly uses for a component the standard wiring
+# knows under another name. A component registered under one of these is not
+# wired -- the wiring is by name and guessing would be worse -- but it is worth
+# a warning, because the failure it would otherwise cause is silent: a sea-ice
+# model registered as "ice" would simply never receive or publish anything.
+# ``SlabSeaiceModel`` is constructed with ``name="ice"`` by default, which is
+# how a user meets this.
+_NEAR_MISS_NAMES = {
+    "ice": "seaice",
+    "sea_ice": "seaice",
+    "sic": "seaice",
+    "ocean": "ocn",
+    "land": "lnd",
+    "atmosphere": "atm",
+}
+
 #: Components that, in a mixed-grid configuration, live on the *ocean* grid
 #: rather than the atmosphere's. Which specs cross a grid boundary -- and so
 #: may need a regridder -- is decided from this: the land surface shares the
@@ -521,6 +537,16 @@ def default_exchanges(
             "Default exchange: no component named %s, so the specs that mention "
             "them are left out.", ", ".join(repr(name) for name in skipped),
         )
+    for name in sorted(present):
+        standard = _NEAR_MISS_NAMES.get(name)
+        if standard is not None and standard not in present:
+            logger.warning(
+                "The default coupling wires the %s component under the name %r, "
+                "not %r, so %r is left unconnected. Register it as %r (for "
+                "example SlabSeaiceModel(grid, name='seaice')) or write the "
+                "exchange out by hand.",
+                standard, standard, name, name, standard,
+            )
     return specs
 
 
