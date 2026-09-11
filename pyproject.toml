@@ -32,11 +32,14 @@ dependencies = [
     "netcdf4",
     "tree_math",
     "jax_datetime",
-    # 2.1.0b0 is the first jax-gcm release with the 2-D surface-flux layout
-    # the JCM adapter is being rewritten against (T0.2). It is not on PyPI
-    # yet, so this floor is currently satisfied only by an editable install
-    # of a jax-gcm `dev` checkout (CI does exactly that; see
-    # .github/workflows/tests.yml).
+    # A floor, not the pin. 2.1.0b0 is the first jax-gcm version with the 2-D
+    # surface-flux layout the JCM adapter reads, and it is not on PyPI, so
+    # this is satisfied only by an editable install of a jax-gcm checkout.
+    # Which checkout is recorded once, in `jem/components/jcm/contract.py`
+    # (JCM_SUPPORTED_REV), together with every jax-gcm name JAX-ESM calls and
+    # how to bump the pin; the CI workflow and the contract test both read
+    # from there. jax-gcm bumps its version only at release, so a version
+    # floor cannot express "this sha" -- do not try to tighten it here.
     "jcm>=2.1.0b0",
     "flax",
     "hydra-core",
