@@ -192,11 +192,6 @@ def test_gradient_is_finite():
     assert jnp.isfinite(g) and float(g) < 0.0   # colder surface -> thicker ice
 
 
-if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn(); print("ok", name)
-
 
 def test_ice_transport_conserves_mass_and_energy():
     """Transport moves ice between cells but changes neither the global ice/snow mass nor the enthalpy."""
@@ -285,3 +280,96 @@ def test_winton_two_step_trajectory_through_coupler():
     for leaf in jax.tree_util.tree_leaves(preds["ice"]):
         assert leaf.shape[0] == 2 and bool(jnp.all(jnp.isfinite(leaf)))
     assert float(final["ice"]["state"].ice_thickness.max()) > 0.0
+
+
+def _small_model(transport=False, **kw):
+    import numpy as np
+    from jem.components.slab.grid import SlabGrid
+    from jem.components.slab.winton_seaice_model import WintonSeaiceModel
+    nx, ny = 6, 4
+    land = np.zeros((nx, ny)); land[:, 0] = 1.0
+    lat = np.deg2rad(np.linspace(-60, 60, ny))[None, :].repeat(nx, 0); lon = np.deg2rad(np.linspace(0, 300, nx))[:, None].repeat(ny, 1)
+    grid = SlabGrid(fractional_mask=jnp.asarray(land), latitude_radian=jnp.asarray(lat), longitude_radian=jnp.asarray(lon), threshold=0.5)
+    tr = dict(dx=np.full((nx, ny), 2e5), dy=np.full((nx, ny), 2e5), diffusivity=2e4) if transport else None
+    return WintonSeaiceModel(grid=grid, timestep=86400.0, transport=tr, **kw)
+
+
+def _forcing(model, **over):
+    from jem.components.slab.winton_seaice_model.winton_seaice_model import KELVIN, T_FREEZE, WintonForcing
+    z = jnp.zeros(model.grid.shape)
+    base = dict(rsds=z, rlds=z + 250.0, air_temperature=z + 250.0, air_specific_humidity=z + 1e-3, wind_speed=z + 5.0,
+                normalized_surface_pressure=z + 1.0, snowfall=z, sea_surface_temperature=z + KELVIN + T_FREEZE,
+                ocean_frazil_melt_energy=z, atm_sea_heat_flux=z, ice_velocity_u=z, ice_velocity_v=z)
+    base.update({k: (z + v if jnp.ndim(v) == 0 else v) for k, v in over.items()})
+    return WintonForcing(**base)
+
+
+def test_energy_budget_closes_in_every_regime():
+    """One coupling step: dE_ice/dt - ocean_heat_flux_up + ocean_frazil_heating - atm_sea_heat_flux = 0 per cell,
+    for cold growth, melt at several fractions, frazil-only, snowfall, melt-out of thin ice and sliver disposal."""
+    import numpy as np
+    from jem.components.slab.winton_seaice_model.winton_seaice_model import KELVIN, T_FREEZE, WintonState
+    model = _small_model()
+    step = model._create_step_function_body()
+    z = jnp.zeros(model.grid.shape); ocn = model.grid.binary_mask == model.mask_value
+    def state(h, hs, f, T=-5.0):
+        return WintonState(jnp.zeros(()), z + h, z + hs, jnp.where(ocn, f, 0.0), z + T, z + T / 2, z + T)
+    regimes = {
+        "cold growth": (state(1.5, 0.0, 1.0, -8.0), dict(rlds=180.0, air_temperature=245.0)),
+        "melt, full cover": (state(1.0, 0.0, 1.0, -1.0), dict(rsds=250.0, rlds=310.0, air_temperature=278.0, sea_surface_temperature=KELVIN + 1.0, ocean_frazil_melt_energy=-2e6)),
+        "melt, half cover": (state(1.0, 0.0, 0.5, -1.0), dict(rsds=250.0, rlds=310.0, air_temperature=278.0, sea_surface_temperature=KELVIN + 1.0, ocean_frazil_melt_energy=-2e6)),
+        "frazil only": (state(0.0, 0.0, 0.0), dict(ocean_frazil_melt_energy=3e6)),
+        "weak frazil": (state(0.0, 0.0, 0.0), dict(ocean_frazil_melt_energy=5e5)),
+        "snowfall": (state(1.0, 0.0, 1.0, -8.0), dict(rlds=180.0, air_temperature=245.0, snowfall=1e-5)),
+        "thin ice melts out": (state(0.03, 0.0, 0.8, -0.5), dict(rsds=300.0, rlds=320.0, air_temperature=280.0, sea_surface_temperature=KELVIN + 2.0, ocean_frazil_melt_energy=-5e6)),
+        "sliver, no freezing": (state(0.005, 0.02, 0.5, -3.0), dict(rlds=250.0)),
+        "sliver, freezing": (state(0.005, 0.0, 0.005, -3.0), dict(ocean_frazil_melt_energy=2e5)),
+    }
+    for name, (s, over) in regimes.items():
+        fc = _forcing(model, **over)
+        out, _ = step({"state": s, "forcing": fc}, 0)
+        d = out["derived"]
+        frazil_heating = jnp.maximum(fc.ocean_frazil_melt_energy, 0.0) / model.timestep
+        resid = np.asarray(d.ice_energy_tendency - d.ocean_heat_flux_up + frazil_heating - fc.atm_sea_heat_flux)[np.asarray(ocn)]
+        assert np.abs(resid).max() < 1e-3, f"{name}: energy residual {np.abs(resid).max():.3e} W/m2"   # roundoff on ~1e8 J/m2 is ~1e-6
+        new = out["state"]
+        assert float(jnp.max(new.ice_fraction)) <= 1.0 and float(jnp.min(new.ice_thickness)) >= 0.0
+    # weak frazil must make ice rather than vanish
+    fc = _forcing(model, ocean_frazil_melt_energy=5e5)
+    out, _ = step({"state": regimes["weak frazil"][0], "forcing": fc}, 0)
+    assert float(jnp.max(out["state"].ice_fraction * out["state"].ice_thickness)) > 0.0
+
+
+def test_gradient_through_transport_is_finite():
+    import numpy as np
+    model = _small_model(transport=True)
+    step = model._create_step_function_body()
+    init = model.initialize()
+    s = init["state"]; f = jnp.where(model.grid.binary_mask == model.mask_value, 0.7, 0.0)
+    s = type(s)(s.sim_time, jnp.where(f > 0, 1.2, 0.0), s.snow_thickness, f, s.upper_ice_temperature - 5, s.lower_ice_temperature - 3, s.ice_surface_temperature - 8)
+    fc = _forcing(model, ice_velocity_u=0.1, ice_velocity_v=0.05)
+    def loss(u):
+        out, _ = step({"state": s, "forcing": type(fc)(**{**{k: getattr(fc, k) for k in vars(fc)}, "ice_velocity_u": u})}, 0)
+        return jnp.sum(out["state"].ice_thickness * out["state"].ice_fraction) + jnp.sum(out["derived"].effective_sea_surface_temperature)
+    g = jax.grad(loss)(fc.ice_velocity_u)
+    assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.abs(g).max()) > 0.0
+
+
+def test_derived_fields_match_final_state_with_transport():
+    model = _small_model(transport=True)
+    step = model._create_step_function_body()
+    init = model.initialize(); s = init["state"]
+    f = jnp.where(model.grid.binary_mask == model.mask_value, jnp.linspace(0.2, 1.0, s.ice_fraction.shape[0])[:, None] * jnp.ones_like(s.ice_fraction), 0.0)
+    s = type(s)(s.sim_time, jnp.where(f > 0, 1.0, 0.0), s.snow_thickness, f, s.upper_ice_temperature - 5, s.lower_ice_temperature - 3, s.ice_surface_temperature - 8)
+    out, _ = step({"state": s, "forcing": _forcing(model, ice_velocity_u=0.3, ice_velocity_v=-0.2)}, 0)
+    st, d = out["state"], out["derived"]
+    assert bool(jnp.allclose(d.ice_fraction, st.ice_fraction))
+    assert bool(jnp.allclose(d.ice_volume, st.ice_fraction * st.ice_thickness))
+    assert bool(jnp.allclose(d.ice_surface_temperature_K, st.ice_surface_temperature + 273.15))
+    assert float(jnp.abs(d.ice_energy_transport).max()) > 0.0
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn(); print("ok", name)

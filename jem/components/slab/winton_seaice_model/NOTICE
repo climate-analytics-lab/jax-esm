@@ -1,8 +1,8 @@
 The thermodynamic core of this package (winton_seaice_model.py: the implicit surface-temperature solve, the
 layer enthalpies, the thickness update with surface and basal melt, snowfall, flooding and layer
 re-equalisation) is a port to JAX of the MITgcm package pkg/thsice, routines THSICE_SOLVE4TEMP
-(thsice_solve4temp.F) and THSICE_CALC_THICKN (thsice_calc_thickn.F), and reproduces them to machine precision
-(tests/reference/thsice). MITgcm is distributed under the MIT License:
+(thsice_solve4temp.F) and THSICE_CALC_THICKN (thsice_calc_thickn.F), and reproduces those two routines to machine precision for full ice cover
+(tests/reference/thsice); the sub-grid fraction closure and the frazil path are this package's own. MITgcm is distributed under the MIT License:
 
     Copyright (c) 2018 MITgcm Developers and Contributors
 

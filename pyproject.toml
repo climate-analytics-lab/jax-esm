@@ -60,7 +60,7 @@ dev = [
 include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.setuptools.package-data]
-jem = ["data/*.nc"]
+jem = ["data/*.nc", "components/slab/winton_seaice_model/NOTICE"]
 
 [tool.black]
 line-length = 88

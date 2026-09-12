@@ -25,12 +25,13 @@ def _shift(x, axis, n, cyclic):
     return y.at[tuple(idx)].set(0.0)
 
 
-def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12, cyclic_x=True, compact=None):
+def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12, cyclic_x=True, compact_threshold=None):
     """Advect and diffuse per-cell-area quantities.
 
-    compact: optional bool mask of fully ice-covered cells; no advective flux may enter them (the cavitating-fluid
-    idea of Flato & Hibler 1992: no tensile strength, no convergence once the cover is compact), which stops
-    free drift from piling ice up against coasts. Diffusion still acts.
+    compact_threshold: if given, fields[0] is the ice fraction and no advective flux may enter a cell whose fraction
+    is at or above the threshold, re-evaluated every substep (the cavitating-fluid idea of Flato & Hibler 1992: no
+    tensile strength, no convergence once the cover is compact), which stops free drift from piling ice up against
+    coasts. Diffusion still acts.
 
     fields: tuple of (nx, ny) arrays (amount per unit cell area); u, v: cell-centred velocities (m/s) along the
     grid's own x and y; dx, dy: cell sizes (m) at centres; ocean: bool mask. All fields see the same linear,
@@ -47,11 +48,7 @@ def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12
     m_e, m_n = oc * east(oc), oc * north(oc)                      # no flux through land faces / the y edges
     dx_e, dy_n = 0.5 * (dx + east(dx)), 0.5 * (dy + north(dy))
     len_e, len_n = 0.5 * (dy + east(dy)), 0.5 * (dx + north(dx))   # face lengths
-    u_e, v_n = 0.5 * (u + east(u)) * m_e, 0.5 * (v + north(v)) * m_n
-    if compact is not None:
-        c = compact.astype(u.dtype)
-        u_e = u_e * (1.0 - jnp.where(u_e > 0, east(c), c))
-        v_n = v_n * (1.0 - jnp.where(v_n > 0, north(c), c))
+    u_e0, v_n0 = 0.5 * (u + east(u)) * m_e, 0.5 * (v + north(v)) * m_n
     # Every face flux is split into an outgoing part from each of its two cells, each proportional to that cell's
     # content: F_e = k_e_out(i) X_i - k_e_in(i) X_{i+1}, with k (m^2/s) = upwind advection + diffusion. The scheme
     # is then a positive linear operator, and non-negativity holds exactly when the total outgoing fraction of a
@@ -61,14 +58,21 @@ def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12
     # this is what limits the transport).
     cap = 0.9
     dif_e, dif_n = diffusivity * len_e / dx_e * m_e, diffusivity * len_n / dy_n * m_n
-    k_e_out = jnp.maximum(u_e, 0.0) * len_e + dif_e            # out of cell i through its east face
-    k_e_in = jnp.maximum(-u_e, 0.0) * len_e + dif_e            # out of cell i+1 through the same face
-    k_n_out = jnp.maximum(v_n, 0.0) * len_n + dif_n
-    k_n_in = jnp.maximum(-v_n, 0.0) * len_n + dif_n
-    total_out = k_e_out + west(k_e_in) + k_n_out + south(k_n_in)  # west face of i is the east face of i-1
-    s = jnp.where(total_out > 0, jnp.minimum(1.0, cap * area / (dts * jnp.maximum(total_out, 1e-300))), 1.0)
 
     def substep(fs, _):
+        u_e, v_n = u_e0, v_n0
+        if compact_threshold is not None:
+            c = (fs[0] >= compact_threshold).astype(u.dtype)
+            u_e = u_e * (1.0 - jnp.where(u_e > 0, east(c), c))
+            v_n = v_n * (1.0 - jnp.where(v_n > 0, north(c), c))
+        k_e_out = jnp.maximum(u_e, 0.0) * len_e + dif_e            # out of cell i through its east face
+        k_e_in = jnp.maximum(-u_e, 0.0) * len_e + dif_e            # out of cell i+1 through the same face
+        k_n_out = jnp.maximum(v_n, 0.0) * len_n + dif_n
+        k_n_in = jnp.maximum(-v_n, 0.0) * len_n + dif_n
+        total_out = k_e_out + west(k_e_in) + k_n_out + south(k_n_in)  # west face of i is the east face of i-1
+        positive = total_out > 0
+        denom = jnp.where(positive, total_out, 1.0)                # safe denominator: no inf in the unselected branch
+        s = jnp.where(positive, jnp.minimum(1.0, cap * area / (dts * denom)), 1.0)
         out = []
         for X in fs:
             F_e = s * k_e_out * X - east(s * X) * k_e_in

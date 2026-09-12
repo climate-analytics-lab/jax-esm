@@ -116,27 +116,39 @@ def qsat_ice(T_kelvin, p):
 
 
 def ice_surface_flux(Ts_c, rlds, t_air, q_air, wind, p_air, sfp=None, emis=None):
-    """SPEEDY-style non-solar surface flux over ice (positive downward) and dF/dTs.
+    """SPEEDY-style non-solar surface flux over ice (positive downward) and its exact derivative dF/dTs.
 
     sfp: JCM SurfaceFluxParameters (exchange coefficient chs, gust speed vgust, stability dtheta/fstab/lscasym);
     emis: longwave emissivity (JCM ModRadConParameters.emisfc). Defaults are JCM's defaults; physical constants
-    (cpd, rd, p0, sbc, alhc) are read from jcm.constants.physical_constants at call time.
+    (cpd, rd, p0, sbc, alhc) are read from jcm.constants.physical_constants when the step is traced. The
+    derivative is taken with forward-mode AD so it includes the stability dependence of the exchange velocity.
     """
     sfp = SurfaceFluxParameters.default() if sfp is None else sfp
     emis = ModRadConParameters.default().emisfc if emis is None else emis
     c = jcm_constants.physical_constants
     astab = jnp.where(sfp.lscasym, 0.5, 1.0)            # SPEEDY: asymmetric stability coefficient
-    Ts = Ts_c + KELVIN
     rho = c.p0 * p_air / (c.rd * t_air)
+
+    def flux(Ts_c_):
+        Ts = Ts_c_ + KELVIN
+        dth = jnp.where(Ts > t_air, jnp.minimum(sfp.dtheta, Ts - t_air), jnp.maximum(-sfp.dtheta, astab * (Ts - t_air)))
+        denv = rho * jnp.sqrt(wind ** 2 + sfp.vgust ** 2) * (1.0 + dth * sfp.fstab / sfp.dtheta)
+        q_s, _ = qsat_ice(Ts, c.p0 * p_air)
+        return rlds - emis * c.sbc * Ts ** 4 - sfp.chs * c.cpd * denv * (Ts - t_air) - sfp.chs * denv * c.alhc * (q_s - q_air)
+
+    F, dF_exact = jax.jvp(flux, (Ts_c,), (jnp.ones_like(Ts_c),))
+    # The exact derivative includes d(denv)/dTs from the stability correction; on the stable side that term can
+    # make dF positive, and the implicit surface solve needs dF < 0 (it divides by k12 - dF). So the linearisation
+    # uses the exact derivative where it is at least as steep as the derivative with the exchange velocity frozen,
+    # and the frozen-velocity derivative (always negative) otherwise: Newton where Newton is safe.
+    Ts = Ts_c + KELVIN
     dth = jnp.where(Ts > t_air, jnp.minimum(sfp.dtheta, Ts - t_air), jnp.maximum(-sfp.dtheta, astab * (Ts - t_air)))
     denv = rho * jnp.sqrt(wind ** 2 + sfp.vgust ** 2) * (1.0 + dth * sfp.fstab / sfp.dtheta)
-    q_s, dq_s = qsat_ice(Ts, c.p0 * p_air)
-    F = rlds - emis * c.sbc * Ts ** 4 - sfp.chs * c.cpd * denv * (Ts - t_air) - sfp.chs * denv * c.alhc * (q_s - q_air)
-    dF = -4.0 * emis * c.sbc * Ts ** 3 - sfp.chs * c.cpd * denv - sfp.chs * denv * c.alhc * dq_s
-    return F, dF
+    _, dq_s = qsat_ice(Ts, c.p0 * p_air)
+    dF_frozen = -4.0 * emis * c.sbc * Ts ** 3 - sfp.chs * c.cpd * denv - sfp.chs * denv * c.alhc * dq_s
+    return F, jnp.minimum(dF_exact, dF_frozen)
 
 
-# ---------------------------------------------------------------- temperature step (thsice_solve4temp)
 def winton_temperature_step(h, hs, T1, T2, Ts, flux_fn, sw_abs, dt, i0=0.3, ksolar=1.5, n_iter=1):
     """Implicit ice temperature update.
 
@@ -291,7 +303,8 @@ class WintonDerived:
     ice_atm_heat_flux: jnp.ndarray
     ocean_freshwater_flux_up: jnp.ndarray   # kg/m2/s per cell area; + = ice growth removes water from the ocean
     ice_albedo: jnp.ndarray                 # effective albedo of the ice-covered part (snow-aware)
-    ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; rate of change of the ice+snow enthalpy (relative to water at 0 C)
+    ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; THERMODYNAMIC rate of change of the ice+snow enthalpy (relative to water at 0 C), i.e. the exchange with ocean and atmosphere; transport is excluded
+    ice_energy_transport: jnp.ndarray       # W/m2 per cell area; change of ice+snow enthalpy by transport convergence (zero without transport)
 
 
 class WintonSeaiceModel(SlabModelBase):
@@ -341,7 +354,7 @@ class WintonSeaiceModel(SlabModelBase):
                          timestep=timestep, calendar=calendar)
         self.transport = None
         if transport is not None:
-            self.transport = {**dict(cyclic_x=True, diffusivity=2e4, n_substeps=12), **transport}
+            self.transport = {"cyclic_x": True, "diffusivity": 2e4, "n_substeps": 12, **transport}
             self.transport["dx"] = jnp.asarray(self.transport["dx"], dtype=float)
             self.transport["dy"] = jnp.asarray(self.transport["dy"], dtype=float)
 
@@ -353,7 +366,7 @@ class WintonSeaiceModel(SlabModelBase):
         z = jnp.zeros(shape)
         state = WintonState(jnp.zeros(()), h, z, f, z + T_FREEZE, z + T_FREEZE, z + T_FREEZE)
         forcing = WintonForcing(z, z, z + 288.15, z + 1e-3, z + 5.0, z + 1.0, z, z + 288.15, z, z, z, z)
-        derived = WintonDerived(f, z + 288.15, z, z + KELVIN + T_FREEZE, h * f, z, z, z, z, z, z + self.ice_albedo, z)
+        derived = WintonDerived(f, z + 288.15, z, z + KELVIN + T_FREEZE, h * f, z, z, z, z, z, z + self.ice_albedo, z, z)
         return {"state": state, "forcing": forcing, "derived": derived}
 
     def _create_step_function_body(self):
@@ -387,30 +400,49 @@ class WintonSeaiceModel(SlabModelBase):
             F_b = jnp.minimum(F_b_raw, surplus_flux)
             hn, hsn, q1n, q2n, e_ocn, vanished = winton_mass_step(
                 h_safe, hs, q_from_T1(T1n), q_from_T2(T2n), M_s, F_b, F_cb, fc.snowfall, dt, h_min)
-            # Hibler lateral melt on the thermodynamic thickness loss
+            # Hibler lateral melt: melting shrinks the ice-covered area by -(f/2h) dh; the volume the thermodynamics
+            # paid for is f*hn, so the thickness of the remaining area is raised to keep fn*hn = f*hn exactly.
             dh_melt = jnp.maximum(h_safe - hn, 0.0)
-            fn = f * (1.0 - 0.5 * dh_melt / h_safe)
-            # frazil (per cell area, per substep) makes new ice at Tf in leads / under the ice
+            fn_t = f * (1.0 - 0.5 * dh_melt / h_safe)
+            hn = jnp.where(fn_t > 0.0, f * hn / jnp.maximum(fn_t, 1e-12), hn)
+            # frazil (per cell area, per substep): the ocean's freezing potential makes ice at enthalpy qbot
             frazil = jnp.maximum(fc.ocean_frazil_melt_energy, 0.0) / n
             v_frazil = frazil / (RHO_ICE * qbot)
             alive_before = icy & ~vanished
-            vol = jnp.where(alive_before, fn * hn, 0.0) + v_frazil
-            fn = jnp.where(alive_before, fn, 0.0) + v_frazil / h0
-            fn = jnp.clip(fn, 0.0, 1.0)
-            alive = (vol > h_min * f_min) & (fn > f_min)
-            hn = jnp.where(alive, vol / jnp.maximum(fn, f_min), 0.0)
-            hsn = jnp.where(alive & alive_before, hsn * jnp.where(alive_before, f, 1.0) / jnp.maximum(fn, f_min), 0.0)  # snow volume conserved
+            # ice below the thermodynamic thresholds (a sliver, e.g. diffused in by transport or freshly frozen):
+            # kept and grown while the ocean keeps freezing, otherwise melted back into the ocean with its
+            # enthalpy charged to the ocean, so nothing is ever discarded without its energy
+            sliver = ~icy & (f * h > 0.0)
+            keep_sliver = sliver & (v_frazil > 0.0)
+            dispose = sliver & ~(v_frazil > 0.0)
+            e_dispose = jnp.where(dispose, f * column_enthalpy_to_melt(h, hs, q_from_T1(T1), q_from_T2(T2)), 0.0)
+            vol_old = jnp.where(alive_before, fn_t * hn, jnp.where(keep_sliver, f * h, 0.0))
+            f_old = jnp.where(alive_before, fn_t, jnp.where(keep_sliver, f, 0.0))
+            snow_old = jnp.where(alive_before, f * hsn, jnp.where(keep_sliver, f * hs, 0.0))   # snow volume per area
+            E1_old = 0.5 * jnp.where(alive_before, fn_t * hn * q1n, jnp.where(keep_sliver, f * h * q_from_T1(T1), 0.0))
+            E2_old = 0.5 * jnp.where(alive_before, fn_t * hn * q2n, jnp.where(keep_sliver, f * h * q_from_T2(T2), 0.0))
+            vol = vol_old + v_frazil
+            fn = jnp.clip(f_old + v_frazil / h0, 0.0, 1.0)
+            alive = vol > 0.0
+            fs = jnp.where(alive, jnp.maximum(fn, 1e-12), 1.0)
+            hn = jnp.where(alive, vol / fs, 0.0)
+            hsn = jnp.where(alive, snow_old / fs, 0.0)
+            # frazil enters both layers at qbot, so the column enthalpy grows by exactly v_frazil*qbot
+            half_v = jnp.where(alive, 0.5 * vol, 1.0)
+            q1n = (E1_old + 0.5 * v_frazil * qbot) / half_v
+            q2n = (E2_old + 0.5 * v_frazil * qbot) / half_v
+            T1n = jnp.where(alive, jnp.clip(T1_from_q(q1n), -80.0, T_MELT), T_FREEZE)
+            T2n = jnp.where(alive, jnp.clip(T2_from_q(q2n), -80.0, 0.0), T_FREEZE)
+            Tsn = jnp.where(alive, jnp.where(alive_before, Tsn, jnp.where(keep_sliver, Ts, T_FREEZE)), T_FREEZE)
             fn = jnp.where(alive, fn, 0.0)
-            # frazil added at Tf: layer-2 enthalpy mixes toward qbot (weight by volume)
-            w_new = jnp.where(alive, v_frazil / jnp.maximum(vol, 1e-300), 0.0)
-            q2n = jnp.where(alive_before, (1.0 - w_new) * q2n + w_new * qbot, qbot)
-            q1n = jnp.where(alive_before, q1n, q_from_T1(T_FREEZE))
-            T1n = jnp.where(alive, T1_from_q(q1n), T_FREEZE)
-            T2n = jnp.where(alive, T2_from_q(q2n), T_FREEZE)
-            Tsn = jnp.where(alive, jnp.where(alive_before, Tsn, T_FREEZE), T_FREEZE)
-            # energy to the ocean (downward positive), per cell area, over this substep
+            # energy to the ocean (downward positive), per cell area, over this substep: the atmosphere's flux over
+            # the sea cell minus what the ice absorbed, plus what the ice passes down, minus the basal heat it draws;
+            # the fusion enthalpy of snow that landed on ice (the atmosphere condensed it as liquid) and the
+            # enthalpy of disposed slivers are charged here so the coupled budget closes
             down = (fc.atm_sea_heat_flux - jnp.where(icy, f * F_ice_atm, 0.0)
-                    + jnp.where(icy, f * (sw_ocn + e_ocn / dt - F_b), 0.0))
+                    + jnp.where(icy, f * (sw_ocn + e_ocn / dt - F_b), 0.0)
+                    + jnp.where(icy & ~vanished, f * fc.snowfall * L_ICE, 0.0)
+                    - e_dispose / dt)
             new_s = WintonState(s.sim_time + dt, hn * ocn, hsn * ocn, fn * ocn, T1n, T2n, Tsn)
             intercepted = jnp.where(icy & ~vanished, f * fc.snowfall * dt, 0.0)   # snow mass that landed on ice, kg/m2
             diag = (jnp.where(icy, M_s, 0.0), jnp.where(icy, -(F_b + F_cb), 0.0), jnp.where(icy, F_ice_atm, 0.0), -down,
@@ -428,11 +460,11 @@ class WintonSeaiceModel(SlabModelBase):
                       -f * s.ice_surface_temperature)
             fn, Vn, Vsn, Q1n, Q2n, FTn = transport_fields(
                 fields, fc.ice_velocity_u, fc.ice_velocity_v, tr["dx"], tr["dy"], ocn, self.timestep,
-                tr["diffusivity"], tr["n_substeps"], tr["cyclic_x"], compact=f >= 0.98)
+                tr["diffusivity"], tr["n_substeps"], tr["cyclic_x"], compact_threshold=0.98)
             # Ice arriving in (nearly) empty cells comes with a diluted fraction; give it at least the lead-closing
             # thickness h0 (fraction from volume) and a fraction above the thermodynamics' threshold. Nothing is
-            # discarded here: sub-threshold slivers are dropped by the next thermodynamic step, whose water budget
-            # hands them to the ocean, so transport itself is exactly conservative.
+            # discarded here: sub-threshold slivers are kept by the next thermodynamic step while the ocean freezes,
+            # or melted back into it with their enthalpy charged to the ocean, so nothing leaks.
             diluted = fn < 2.0 * f_min
             f_use = jnp.where(diluted, jnp.clip(jnp.minimum(1.0, Vn / h0), 2.0 * f_min, 1.0), jnp.minimum(fn, 1.0))
             alive = Vn > 0.0
@@ -441,7 +473,8 @@ class WintonSeaiceModel(SlabModelBase):
             Ts_avg = jnp.clip(-FTn / jnp.maximum(fn, 1e-12), -80.0, 0.0)    # transported area-weighted mean
             return WintonState(
                 s.sim_time, jnp.where(alive, Vn / fs, 0.0), jnp.where(alive, Vsn / fs, 0.0), jnp.where(alive, f_use, 0.0),
-                jnp.where(alive, T1_from_q(Q1n / half_v), T_FREEZE), jnp.where(alive, T2_from_q(Q2n / half_v), T_FREEZE),
+                jnp.where(alive, jnp.clip(T1_from_q(Q1n / half_v), -80.0, T_MELT), T_FREEZE),
+                jnp.where(alive, jnp.clip(T2_from_q(Q2n / half_v), -80.0, 0.0), T_FREEZE),
                 jnp.where(alive, Ts_avg, T_FREEZE))
 
         def step_function(carry, step):
@@ -456,10 +489,13 @@ class WintonSeaiceModel(SlabModelBase):
             def energy(st):   # J/m2 per cell area, relative to liquid water at 0 C (ice/snow are negative)
                 return -st.ice_fraction * column_enthalpy_to_melt(st.ice_thickness, st.snow_thickness,
                                                                    q_from_T1(st.upper_ice_temperature), q_from_T2(st.lower_ice_temperature))
-            de_dt = (energy(new_state) - energy(state)) / self.timestep
+            de_dt = (energy(new_state) - energy(state)) / self.timestep     # thermodynamic tendency: exchange with ocean/atm
             # transport after the local budgets above: it moves ice between cells and exchanges nothing with the ocean
+            thermo_state = new_state
             if self.transport is not None:
                 new_state = apply_transport(new_state, forcing)
+            de_transport = (energy(new_state) - energy(thermo_state)) / self.timestep   # convergence of ice enthalpy
+            f = new_state.ice_fraction                                         # every derived field from the final state
             Ts_K = new_state.ice_surface_temperature + KELVIN
             derived = WintonDerived(
                 ice_fraction=f,
@@ -474,6 +510,7 @@ class WintonSeaiceModel(SlabModelBase):
                 ocean_freshwater_flux_up=fw_up,
                 ice_albedo=albedo,
                 ice_energy_tendency=de_dt,
+                ice_energy_transport=de_transport,
             )
             result = {"state": new_state, "forcing": forcing, "derived": derived}
             return result, stack_objects([result])
@@ -497,7 +534,8 @@ class WintonSeaiceModel(SlabModelBase):
             "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2"}),
             "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1"}),
             "ice_albedo": (dims, d.ice_albedo, {"units": "1"}),
-            "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area"}),
+            "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)"}),
+            "ice_energy_transport": (dims, d.ice_energy_transport, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area by transport convergence"}),
             "ocean_frazil_heating": (dims, jnp.maximum(predictions["forcing"].ocean_frazil_melt_energy, 0.0) / self.timestep,
                                      {"units": "W m-2", "long_name": "heat added to the ocean top layer by clamping it at the freezing point (frazil latent heat)"}),
             "basal_growth_flux": (dims, d.basal_growth_flux, {"units": "W m-2"}),

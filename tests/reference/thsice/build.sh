@@ -10,6 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
 mkdir -p upstream
 for f in thsice_solve4temp.F thsice_calc_thickn.F THSICE_PARAMS.h THSICE_SIZE.h; do
   [ -s "upstream/$f" ] || curl -sfL "https://raw.githubusercontent.com/MITgcm/MITgcm/$MITGCM_COMMIT/pkg/thsice/$f" -o "upstream/$f"
+  grep -qiE 'SUBROUTINE|COMMON|PARAMETER' "upstream/$f" || { echo "upstream/$f does not look like MITgcm Fortran (download failed?)" >&2; rm -f "upstream/$f"; exit 1; }
 done
 CPPFLAGS="-DALLOW_THSICE -I$HERE -I$HERE/upstream"
 FFLAGS="-ffixed-line-length-132 -O0 -g"
