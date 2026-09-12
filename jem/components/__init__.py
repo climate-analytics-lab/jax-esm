@@ -5,6 +5,7 @@ from jem.components.slab.slab_atmosphere_model import SlabAtmosphereModel
 from jem.components.slab.slab_land_model import SlabLandModel
 from jem.components.slab.slab_ocean_model import SlabOceanModel
 from jem.components.slab.slab_seaice_model import SlabSeaiceModel
+from jem.components.slab.winton_seaice_model import WintonSeaiceModel
 
 __all__ = [
     "JCM",
@@ -12,6 +13,7 @@ __all__ = [
     "SlabLandModel",
     "SlabOceanModel",
     "SlabSeaiceModel",
+    "WintonSeaiceModel",
 ]
 
 

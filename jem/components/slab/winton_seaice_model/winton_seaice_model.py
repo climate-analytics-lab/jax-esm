@@ -69,18 +69,12 @@ Q_SNOW = L_ICE           # thsice qsnow
 FLOOD_FAC = (RHO_SW - RHO_ICE) / RHO_SNOW
 B_MELT = 0.006           # thsice bMeltCoef
 USTAR_SLAB = 5.0e-3      # thsice ustar for zero ocean velocity: sqrt(25e-6)
-# SPEEDY bulk-flux constants (jcm.physics.speedy.params defaults / jcm.constants)
-CHS = 0.9e-3
-VGUST = 5.0
-DTHETA = 3.0
-FSTAB = 0.67
-ASTAB = 0.5
-EMIS = 0.98
-SBC = 5.67e-8
-CPD = 1004.64
-RD = 287.06
-L_VAP = 2.501e6
-P0 = 1.0e5
+# Bulk-flux constants and parameters over ice come from JCM at call time (jcm.constants.physical_constants and the
+# SPEEDY SurfaceFluxParameters / ModRadConParameters the coupled atmosphere uses), so an override on the JCM side
+# is seen here too; the model constructor takes the parameter objects explicitly.
+from jcm import constants as jcm_constants
+from jcm.physics.speedy.params import ModRadConParameters, SurfaceFluxParameters
+
 KELVIN = 273.15
 
 
@@ -121,15 +115,24 @@ def qsat_ice(T_kelvin, p):
     return q, dq
 
 
-def ice_surface_flux(Ts_c, rlds, t_air, q_air, wind, p_air):
-    """SPEEDY-style non-solar surface flux over ice (positive downward) and dF/dTs."""
+def ice_surface_flux(Ts_c, rlds, t_air, q_air, wind, p_air, sfp=None, emis=None):
+    """SPEEDY-style non-solar surface flux over ice (positive downward) and dF/dTs.
+
+    sfp: JCM SurfaceFluxParameters (exchange coefficient chs, gust speed vgust, stability dtheta/fstab/lscasym);
+    emis: longwave emissivity (JCM ModRadConParameters.emisfc). Defaults are JCM's defaults; physical constants
+    (cpd, rd, p0, sbc, alhc) are read from jcm.constants.physical_constants at call time.
+    """
+    sfp = SurfaceFluxParameters.default() if sfp is None else sfp
+    emis = ModRadConParameters.default().emisfc if emis is None else emis
+    c = jcm_constants.physical_constants
+    astab = jnp.where(sfp.lscasym, 0.5, 1.0)            # SPEEDY: asymmetric stability coefficient
     Ts = Ts_c + KELVIN
-    rho = P0 * p_air / (RD * t_air)
-    dth = jnp.where(Ts > t_air, jnp.minimum(DTHETA, Ts - t_air), jnp.maximum(-DTHETA, ASTAB * (Ts - t_air)))
-    denv = rho * jnp.sqrt(wind ** 2 + VGUST ** 2) * (1.0 + dth * FSTAB / DTHETA)
-    q_s, dq_s = qsat_ice(Ts, P0 * p_air)
-    F = rlds - EMIS * SBC * Ts ** 4 - CHS * CPD * denv * (Ts - t_air) - CHS * denv * L_VAP * (q_s - q_air)
-    dF = -4.0 * EMIS * SBC * Ts ** 3 - CHS * CPD * denv - CHS * denv * L_VAP * dq_s
+    rho = c.p0 * p_air / (c.rd * t_air)
+    dth = jnp.where(Ts > t_air, jnp.minimum(sfp.dtheta, Ts - t_air), jnp.maximum(-sfp.dtheta, astab * (Ts - t_air)))
+    denv = rho * jnp.sqrt(wind ** 2 + sfp.vgust ** 2) * (1.0 + dth * sfp.fstab / sfp.dtheta)
+    q_s, dq_s = qsat_ice(Ts, c.p0 * p_air)
+    F = rlds - emis * c.sbc * Ts ** 4 - sfp.chs * c.cpd * denv * (Ts - t_air) - sfp.chs * denv * c.alhc * (q_s - q_air)
+    dF = -4.0 * emis * c.sbc * Ts ** 3 - sfp.chs * c.cpd * denv - sfp.chs * denv * c.alhc * dq_s
     return F, dF
 
 
@@ -313,9 +316,15 @@ class WintonSeaiceModel(SlabModelBase):
         mask_value: float = 0.0,
         calendar: str = "365_day",
         transport: dict | None = None,
+        surface_flux_parameters: SurfaceFluxParameters | None = None,
+        emissivity=None,
     ):
         """transport: None (thermodynamics only) or dict(dx=, dy= (m, cell centres, grid shape), cyclic_x=True,
-        diffusivity=2e4 m2/s, n_substeps=12): advect the ice with forcing.ice_velocity_{u,v} and diffuse it."""
+        diffusivity=2e4 m2/s, n_substeps=12): advect the ice with forcing.ice_velocity_{u,v} and diffuse it.
+        surface_flux_parameters / emissivity: the JCM SurfaceFluxParameters and longwave emissivity used for the
+        bulk fluxes over ice; pass the same objects the coupled atmosphere runs with (defaults: JCM's defaults)."""
+        self.surface_flux_parameters = SurfaceFluxParameters.default() if surface_flux_parameters is None else surface_flux_parameters
+        self.emissivity = ModRadConParameters.default().emisfc if emissivity is None else emissivity
         self.n_substeps = n_substeps
         self.n_flux_iterations = n_flux_iterations
         self.ice_albedo = ice_albedo
@@ -363,7 +372,8 @@ class WintonSeaiceModel(SlabModelBase):
 
             def flux_fn(Ts_c):
                 return ice_surface_flux(Ts_c, fc.rlds, fc.air_temperature, fc.air_specific_humidity,
-                                        fc.wind_speed, fc.normalized_surface_pressure)
+                                        fc.wind_speed, fc.normalized_surface_pressure,
+                                        sfp=self.surface_flux_parameters, emis=self.emissivity)
 
             albedo = jnp.where(hs > 1e-3, jnp.where(Ts > -0.1, self.snow_melt_albedo, self.snow_albedo), self.ice_albedo)
             sw_abs = fc.rsds * (1.0 - albedo)

@@ -42,6 +42,8 @@ def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12
     # faces: east face of cell i sits between i and i+1, north face of cell j between j and j+1
     east = lambda x: _shift(x, 0, -1, cyclic_x)
     north = lambda x: _shift(x, 1, -1, False)
+    west = lambda x: _shift(x, 0, 1, cyclic_x)
+    south = lambda x: _shift(x, 1, 1, False)
     m_e, m_n = oc * east(oc), oc * north(oc)                      # no flux through land faces / the y edges
     dx_e, dy_n = 0.5 * (dx + east(dx)), 0.5 * (dy + north(dy))
     len_e, len_n = 0.5 * (dy + east(dy)), 0.5 * (dx + north(dx))   # face lengths
@@ -50,21 +52,29 @@ def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12
         c = compact.astype(u.dtype)
         u_e = u_e * (1.0 - jnp.where(u_e > 0, east(c), c))
         v_n = v_n * (1.0 - jnp.where(v_n > 0, north(c), c))
-    # explicit stability near the rotated poles where dx is small: limit the Courant number and the
-    # local diffusivity (ponytail: a limiter rather than implicit diffusion; only bites within ~8 deg of a pole)
-    u_e = jnp.clip(u_e, -0.4 * dx_e / dts, 0.4 * dx_e / dts)
-    v_n = jnp.clip(v_n, -0.4 * dy_n / dts, 0.4 * dy_n / dts)
-    D_e = jnp.minimum(diffusivity, 0.2 * dx_e ** 2 / dts) * m_e
-    D_n = jnp.minimum(diffusivity, 0.2 * dy_n ** 2 / dts) * m_n
+    # Every face flux is split into an outgoing part from each of its two cells, each proportional to that cell's
+    # content: F_e = k_e_out(i) X_i - k_e_in(i) X_{i+1}, with k (m^2/s) = upwind advection + diffusion. The scheme
+    # is then a positive linear operator, and non-negativity holds exactly when the total outgoing fraction of a
+    # cell per substep, dts/area * sum_faces k_out, is <= 1. Cells that would exceed `cap` have all their
+    # outgoing coefficients scaled down; the same scaled flux leaves one cell and enters its neighbour, so mass
+    # and enthalpy are conserved to roundoff and nothing is clipped (near the rotated poles, where dx is small,
+    # this is what limits the transport).
+    cap = 0.9
+    dif_e, dif_n = diffusivity * len_e / dx_e * m_e, diffusivity * len_n / dy_n * m_n
+    k_e_out = jnp.maximum(u_e, 0.0) * len_e + dif_e            # out of cell i through its east face
+    k_e_in = jnp.maximum(-u_e, 0.0) * len_e + dif_e            # out of cell i+1 through the same face
+    k_n_out = jnp.maximum(v_n, 0.0) * len_n + dif_n
+    k_n_in = jnp.maximum(-v_n, 0.0) * len_n + dif_n
+    total_out = k_e_out + west(k_e_in) + k_n_out + south(k_n_in)  # west face of i is the east face of i-1
+    s = jnp.where(total_out > 0, jnp.minimum(1.0, cap * area / (dts * jnp.maximum(total_out, 1e-300))), 1.0)
 
     def substep(fs, _):
         out = []
         for X in fs:
-            X_e, X_n = east(X), north(X)
-            F_e = (u_e * jnp.where(u_e > 0, X, X_e) - D_e * (X_e - X) / dx_e) * len_e
-            F_n = (v_n * jnp.where(v_n > 0, X, X_n) - D_n * (X_n - X) / dy_n) * len_n
-            div = F_e - _shift(F_e, 0, 1, cyclic_x) + F_n - _shift(F_n, 1, 1, False)
-            out.append(jnp.maximum(X - dts / area * div, 0.0) * oc)
+            F_e = s * k_e_out * X - east(s * X) * k_e_in
+            F_n = s * k_n_out * X - north(s * X) * k_n_in
+            div = F_e - west(F_e) + F_n - south(F_n)
+            out.append((X - dts / area * div) * oc)
         return tuple(out), None
 
     fields, _ = jax.lax.scan(substep, tuple(fields), None, length=n_substeps)

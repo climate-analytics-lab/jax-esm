@@ -241,3 +241,47 @@ def test_ice_transport_conserves_mass_and_energy():
     icy = np.asarray(out_t.ice_thickness) > 0.05
     assert np.all(np.asarray(out_t.ice_surface_temperature)[icy] < -0.5), "surface temperature lost its sign in transport"
     assert np.all(np.asarray(out_t.upper_ice_temperature)[icy] < -0.5)
+
+
+def test_ice_transport_limiter_positivity_and_conservation():
+    """With Courant numbers above one and a huge diffusivity the outflow limiter must keep every field
+    non-negative and conserve it exactly (no clipping): the property the scheme advertises."""
+    import numpy as np
+    from jem.components.slab.winton_seaice_model.ice_transport import transport_fields
+    rng = np.random.default_rng(3)
+    nx, ny = 20, 10
+    ocean = np.ones((nx, ny), bool); ocean[:, 0] = ocean[:, -1] = False; ocean[6:9, 3:6] = False
+    dx = np.full((nx, ny), 2.0e5); dy = np.full((nx, ny), 2.0e5); area = dx * dy
+    X1 = np.where(ocean, rng.uniform(0, 3, (nx, ny)) * (rng.uniform(size=(nx, ny)) > 0.5), 0.0)
+    X2 = np.where(ocean, rng.uniform(0, 1, (nx, ny)), 0.0)
+    u = rng.uniform(-3, 3, (nx, ny)); v = rng.uniform(-3, 3, (nx, ny))           # Courant ~1.3 per day
+    out = transport_fields((jnp.asarray(X1), jnp.asarray(X2)), jnp.asarray(u), jnp.asarray(v), jnp.asarray(dx),
+                           jnp.asarray(dy), jnp.asarray(ocean), 86400.0, diffusivity=1e6, n_substeps=1)
+    for X, Y in zip((X1, X2), out):
+        Y = np.asarray(Y)
+        assert Y.min() >= 0.0
+        assert abs((Y * area).sum() - (X * area).sum()) <= 1e-12 * (X * area).sum()
+        assert not np.any(Y[~ocean] != 0.0)
+        assert np.abs(Y - X).sum() > 0.0     # transport did happen
+
+
+def test_winton_two_step_trajectory_through_coupler():
+    """Integration: an initialized carry runs through Coupler.generate_trajectory_function(2), with transport."""
+    import numpy as np
+    from jem.base.coupler import Coupler
+    from jem.components.slab.grid import SlabGrid
+    from jem.components.slab.winton_seaice_model import WintonSeaiceModel
+    nx, ny = 12, 8
+    land = np.zeros((nx, ny)); land[:, 0] = land[:, -1] = 1.0
+    lat = np.deg2rad(np.linspace(-80, 80, ny))[None, :].repeat(nx, 0); lon = np.deg2rad(np.linspace(0, 330, nx))[:, None].repeat(ny, 1)
+    grid = SlabGrid(fractional_mask=jnp.asarray(land), latitude_radian=jnp.asarray(lat), longitude_radian=jnp.asarray(lon), threshold=0.5)
+    dx = 6371e3 * np.cos(lat) * np.deg2rad(30.0); dy = np.full((nx, ny), 6371e3 * np.deg2rad(160 / (ny - 1)))
+    model = WintonSeaiceModel(grid=grid, timestep=86400.0, initial_ice_thickness=1.0, transport=dict(dx=dx, dy=dy, diffusivity=2e4))
+    coupler = Coupler(components=dict(ice=model))
+    init = coupler.initialize()
+    traj = coupler.generate_trajectory_function(workflow=["ice"], iterations=2, jitted=True, show_progress=False)
+    final, preds = traj(init)
+    assert set(final["ice"]) == {"state", "forcing", "derived"}
+    for leaf in jax.tree_util.tree_leaves(preds["ice"]):
+        assert leaf.shape[0] == 2 and bool(jnp.all(jnp.isfinite(leaf)))
+    assert float(final["ice"]["state"].ice_thickness.max()) > 0.0

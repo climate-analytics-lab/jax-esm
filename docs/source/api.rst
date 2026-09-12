@@ -14,6 +14,7 @@ API Reference
    jem.components.slab.slab_land_model.SlabLandModel
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereModel
    jem.components.slab.slab_seaice_model.SlabSeaiceModel
+   jem.components.slab.winton_seaice_model.WintonSeaiceModel
 
    jem.components.slab.grid.SlabGrid
    jem.utils.esmf_regrid.ESMFRegridder
