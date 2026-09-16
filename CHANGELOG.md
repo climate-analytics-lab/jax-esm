@@ -161,7 +161,7 @@ Breaking changes are marked; everything else is additive.
   | Compose a whole jax-gcm bundle as the atmosphere | `+configuration@atmosphere=speedy-t31` |
   | Change one atmosphere group | `physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8` |
   | Set one atmosphere key | `atmosphere.run.time_step=7` |
-  | Choose a surface component | `ocean=slab_relax ocean.sst_clim_file=${jcm_data:bc/t30/clim/forcing.nc}` |
+  | Choose a surface component | `ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'` |
   | Drop one | `land=none` |
   | Set a component parameter | `+ocean.params.relaxation_time=1e6` |
   | Override a physical constant | `+atmosphere.constants.grav=9.7` |

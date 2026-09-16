@@ -23,7 +23,12 @@ JAX-ESM's own::
 
     python -m jem.main physics@atmosphere.physics=held_suarez \
         grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15 \
-        ocean=slab_relax ocean.sst_clim_file=${jcm_data:bc/t30/clim/forcing.nc}
+        ocean=slab_relax \
+        ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'
+
+The single quotes matter: ``${...}`` is a resolver Hydra expands when the
+config is composed, and an unquoted one would be expanded by the shell first
+-- to nothing -- so the override would arrive empty.
 
 ``python -m jem.main --help`` lists the groups and the override spellings;
 ``--cfg job`` prints the fully composed config without running anything.

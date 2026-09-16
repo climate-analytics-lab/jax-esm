@@ -62,7 +62,8 @@ template: |
     and `run` keys are not the atmosphere's and nothing would read them.
 
   Files shipped with the packages can be named without a machine-specific
-  path: ``$\${jcm_data:bc/t30/clim/forcing.nc}``,
-  ``$\${jem_data:JCM_T31.SCRIP.nc}``.
+  path -- in single quotes, so that the shell leaves the ``$\${...}`` for
+  Hydra to resolve: ``ocean.sst_clim_file='$\${jcm_data:bc/t30/clim/forcing.nc}'``,
+  ``ocean.grid_file='$\${jem_data:JCM_T31.SCRIP.nc}'``.
 
   See the project README for runnable examples and the most common overrides.
