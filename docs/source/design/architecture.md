@@ -874,7 +874,7 @@ from jem import run_chunked
 
 result = run_chunked(
     coupler,
-    total_time="10 years",
+    total_time="6 years",        # 2190 days: a whole number of chunks
     chunk="30 days",
     output_dir="output",
     output_averages=True,
@@ -1054,7 +1054,7 @@ a chunk of diagnostics:
 ```python
 monthly = monthly_mean(coupler)
 result = run_chunked(
-    coupler, total_time="10 years", chunk="30 days",
+    coupler, total_time="6 years", chunk="30 days",     # 73 whole chunks
     health_check=None,                 # required: see below
     accumulate=monthly,
 )

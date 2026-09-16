@@ -31,7 +31,7 @@ Breaking changes are marked; everything else is additive.
 
   result = run_chunked(
       coupler,
-      total_time="10 years",
+      total_time="6 years",        # 2190 days: a whole number of chunks
       chunk="30 days",             # a file, a restart and a health check a month
       output_dir="output",
       output_averages=True,        # one record per chunk: the monthly mean

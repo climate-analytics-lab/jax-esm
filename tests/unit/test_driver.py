@@ -439,6 +439,24 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
     assert result.steps_completed == 2
 
 
+def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler):
+    """The long-run snippet the docs show is one `run_chunked` accepts.
+
+    `total_time` must be a whole multiple of `chunk`, and on a 365-day
+    calendar "10 years" is 3650 days, which 30-day chunks do not divide -- so
+    the recipe every document repeated would have raised if anyone had run
+    it. Six years does divide, and this is what keeps the snippets honest
+    without integrating six years to find out.
+    """
+    from jem.driver import _whole_steps
+
+    coupling_days = coupler.dt_seconds / 86400.0
+    total = _whole_steps("6 years", coupling_days, coupler, "total_time")
+    per_chunk = _whole_steps("30 days", coupling_days, coupler, "chunk")
+    assert total == 2190
+    assert total % per_chunk == 0
+
+
 # ---------------------------------------------------------------------------
 # What the run says about the state it starts from
 # ---------------------------------------------------------------------------
@@ -530,6 +548,54 @@ def test_a_checkpoint_that_cannot_be_resumed_from_warns(
         f"Starting from coupler.initialize() at coupled step 0 ({checkpoint} "
         "holds no complete checkpoint)." in caplog.text
     )
+
+
+def test_a_failed_resume_does_not_claim_an_initial_carry_was_discarded(
+    coupler, tmp_path, caplog
+):
+    """A spun-up `initial_carry` is what the run falls back to, and is said so.
+
+    Starting from a spun-up state while checkpointing as you go is the normal
+    way to begin a production run, and on its first call there is no
+    checkpoint to resume. The warning must not then assert that the model is
+    back at its initial state at the start date -- that would contradict the
+    provenance line printed immediately after it, and a warning that is
+    routinely wrong is a warning nobody reads.
+    """
+    carry, _ = coupler.generate_trajectory_function(3)(coupler.initialize())
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            coupler, total_time="5 days", chunk="1 day",
+            initial_carry=carry, output_dir=tmp_path,
+            checkpoint_path=tmp_path / "checkpoint",
+        )
+
+    assert "There is no checkpoint at" in caplog.text
+    assert "rather than from a restart" in caplog.text
+    assert "begins again at the start date" not in caplog.text
+    assert "Starting from the initial_carry argument at coupled step 3." in caplog.text
+
+
+def test_a_resume_says_the_initial_carry_was_not_used(tmp_path, caplog):
+    """A checkpoint wins over `initial_carry`, and the log does not hide it."""
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="2 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+
+    coupler = two_slabs()
+    unused, _ = coupler.generate_trajectory_function(1)(coupler.initialize())
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            coupler, total_time="4 days", chunk="2 days",
+            initial_carry=unused, output_dir=tmp_path / "second",
+            checkpoint_path=checkpoint,
+        )
+
+    assert f"Resumed from checkpoint {checkpoint} at coupled step 2." in caplog.text
+    assert "The initial_carry argument was not used." in caplog.text
 
 
 def test_the_load_names_every_component_and_where_it_came_from(tmp_path, caplog):
@@ -669,6 +735,67 @@ def test_an_accumulated_run_equals_one_long_accumulated_trajectory(tmp_path):
         strict=True,
     ):
         np.testing.assert_allclose(np.asarray(got), np.asarray(want), atol=1e-12)
+
+
+def test_an_accumulated_run_compiles_one_trajectory_for_every_chunk(
+    coupler, tmp_path
+):
+    """The accumulator is seeded before the first chunk, not left as None.
+
+    `jax.jit` keys its cache on the argument treedefs, so a first chunk called
+    with None and a second with the accumulator pytree would compile the same
+    scan twice -- minutes, for an atmosphere. The trajectory factory is
+    wrapped to count how many distinct functions the driver builds and how
+    many times each is called with what, which is what catches a
+    reintroduction of the None.
+    """
+    seen = []
+    build = coupler.generate_trajectory_function
+
+    def counting(iterations, **kwargs):
+        trajectory = build(iterations, **kwargs)
+
+        def call(carry, accumulator):
+            seen.append(accumulator is None)
+            return trajectory(carry, accumulator)
+
+        return call
+
+    coupler.generate_trajectory_function = counting
+    run_chunked(
+        coupler, total_time="6 days", chunk="2 days", output_dir=tmp_path,
+        health_check=None, accumulate=monthly_mean(two_slabs()),
+    )
+
+    assert len(seen) == 3
+    assert not any(seen), "a chunk was handed None instead of an accumulator"
+
+
+def test_an_accumulated_run_with_nothing_to_do_still_returns_an_accumulator(
+    coupler, tmp_path
+):
+    """Re-running a finished job must not hand `finalize` a None.
+
+    Pointing the same command at a checkpoint already at `total_time` is the
+    documented way to confirm a run is done, and it integrates no chunks. The
+    accumulator it returns is the reduction's own empty one -- every bin NaN,
+    which is what "no steps were accumulated" means -- rather than a None that
+    `finalize` cannot unpack.
+    """
+    monthly = monthly_mean(two_slabs())
+    carry, _ = coupler.generate_trajectory_function(2)(coupler.initialize())
+
+    result = run_chunked(
+        coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path,
+        initial_carry=carry, health_check=None, accumulate=monthly,
+    )
+
+    assert result.completed
+    assert result.paths == []
+    means = monthly.finalize(result.accumulator)
+    assert np.all(
+        np.isnan(np.asarray(means["ocn"]["state"].sea_surface_temperature))
+    )
 
 
 def test_an_accumulated_run_writes_no_files(coupler, tmp_path, caplog):
