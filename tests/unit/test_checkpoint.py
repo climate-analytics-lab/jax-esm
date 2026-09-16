@@ -19,7 +19,7 @@ itself -- has no leaf to name and would otherwise be renamed unnoticed.
 
 *An interrupted save is never loadable.* The carry file is written last, so a
 run killed mid-save leaves a directory that :func:`latest_complete_checkpoint`
-skips and :func:`load_coupled` refuses.
+skips and :func:`load_coupled_carry` refuses.
 
 The Veros helpers are exercised by the experimental example drivers rather
 than here: they need the Veros fork and a real ``VerosState``.
@@ -39,10 +39,10 @@ from jem.checkpoint import (
     CARRY_FILENAME,
     latest_complete_checkpoint,
     load,
-    load_coupled,
+    load_coupled_carry,
     remaining_batches,
     save,
-    save_coupled,
+    save_coupled_carry,
 )
 
 
@@ -72,7 +72,7 @@ def toy_coupled_carry(step=0):
 
 
 def toy_component_templates():
-    """Return the per-component templates ``load_coupled`` needs for the toy."""
+    """Return the per-component templates ``load_coupled_carry`` needs for the toy."""
     return dict(toy_coupled_carry().components)
 
 
@@ -321,8 +321,8 @@ def test_checkpoint_roundtrip_restores_step(tmp_path):
     """
     carry = toy_coupled_carry(step=365)
 
-    save_coupled(carry, tmp_path / "checkpoint")
-    loaded = load_coupled(tmp_path / "checkpoint", toy_component_templates())
+    save_coupled_carry(carry, tmp_path / "checkpoint")
+    loaded = load_coupled_carry(tmp_path / "checkpoint", toy_component_templates())
 
     assert isinstance(loaded, CoupledCarry)
     assert int(loaded.step) == 365
@@ -336,7 +336,7 @@ def test_a_checkpoint_without_a_carry_file_is_refused_by_name(tmp_path):
     checkpoint_dir.mkdir()
 
     with pytest.raises(ValueError, match=CARRY_FILENAME):
-        load_coupled(checkpoint_dir, toy_component_templates())
+        load_coupled_carry(checkpoint_dir, toy_component_templates())
 
 
 def test_a_component_saver_is_delegated_to(tmp_path):
@@ -351,14 +351,14 @@ def test_a_component_saver_is_delegated_to(tmp_path):
         return {"loaded_from": str(directory)}
 
     checkpoint_dir = tmp_path / "checkpoint"
-    save_coupled(
+    save_coupled_carry(
         toy_coupled_carry(step=3), checkpoint_dir, component_savers={"ocn": save_ocn}
     )
 
     assert saved["directory"] == checkpoint_dir / "ocn"
     assert (checkpoint_dir / "ocn" / "marker").exists()
 
-    loaded = load_coupled(
+    loaded = load_coupled_carry(
         checkpoint_dir,
         {"lnd": toy_component_templates()["lnd"]},
         component_loaders={"ocn": load_ocn},
@@ -375,13 +375,13 @@ def test_a_renamed_component_with_an_empty_carry_is_refused(tmp_path):
     component called ``new`` when neither carries an array, so before the
     structure was recorded this resumed the wrong model at the saved step.
     """
-    save_coupled(
+    save_coupled_carry(
         CoupledCarry(components={"old": {}}, step=jnp.int32(7)),
         tmp_path / "checkpoint",
     )
 
     with pytest.raises(ValueError, match="pytree structure"):
-        load_coupled(tmp_path / "checkpoint", {"new": {}})
+        load_coupled_carry(tmp_path / "checkpoint", {"new": {}})
 
 
 def test_a_renamed_component_with_leaves_is_refused_by_leaf_path(tmp_path):
@@ -391,12 +391,12 @@ def test_a_renamed_component_with_leaves_is_refused_by_leaf_path(tmp_path):
     replacement for them: where a leaf *can* name the mismatch it still does,
     because that message is the more useful of the two.
     """
-    save_coupled(toy_coupled_carry(step=1), tmp_path / "checkpoint")
+    save_coupled_carry(toy_coupled_carry(step=1), tmp_path / "checkpoint")
 
     templates = toy_component_templates()
     templates["ice"] = templates.pop("ocn")
     with pytest.raises(ValueError, match=r"\['components'\]\['ice'\]"):
-        load_coupled(tmp_path / "checkpoint", templates)
+        load_coupled_carry(tmp_path / "checkpoint", templates)
 
 
 def test_a_renamed_delegated_component_is_refused_by_name(tmp_path):
@@ -408,14 +408,14 @@ def test_a_renamed_delegated_component_is_refused_by_name(tmp_path):
     not look at its directory would not notice at all.
     """
     checkpoint_dir = tmp_path / "checkpoint"
-    save_coupled(
+    save_coupled_carry(
         toy_coupled_carry(step=3),
         checkpoint_dir,
         component_savers={"ocn": lambda carry, directory: None},
     )
 
     with pytest.raises(ValueError, match="pytree structure") as excinfo:
-        load_coupled(
+        load_coupled_carry(
             checkpoint_dir,
             {"lnd": toy_component_templates()["lnd"]},
             component_loaders={"ocean": lambda directory: {}},
@@ -428,18 +428,18 @@ def test_a_component_that_gained_a_save_state_is_refused(tmp_path):
 
     A component that carries nothing at all and one that keeps its state in
     its own subdirectory both contribute no leaf, so the marker
-    ``save_coupled`` stores for a delegated component has to be distinguishable
+    ``save_coupled_carry`` stores for a delegated component has to be distinguishable
     from an empty carry. Otherwise a stateless component later given a
     ``save_state`` would load from a checkpoint that never wrote its
     directory, and fail inside its own loader instead of here.
     """
     checkpoint_dir = tmp_path / "checkpoint"
-    save_coupled(
+    save_coupled_carry(
         CoupledCarry(components={"ocn": None}, step=jnp.int32(2)), checkpoint_dir
     )
 
     with pytest.raises(ValueError, match="pytree structure"):
-        load_coupled(
+        load_coupled_carry(
             checkpoint_dir, {}, component_loaders={"ocn": lambda directory: {}}
         )
 
@@ -451,13 +451,13 @@ def test_an_unchanged_delegated_composition_still_round_trips(tmp_path):
     only the name -- so the loader still supplies the carry in full.
     """
     checkpoint_dir = tmp_path / "checkpoint"
-    save_coupled(
+    save_coupled_carry(
         toy_coupled_carry(step=9),
         checkpoint_dir,
         component_savers={"ocn": lambda carry, directory: None},
     )
 
-    loaded = load_coupled(
+    loaded = load_coupled_carry(
         checkpoint_dir,
         {"lnd": toy_component_templates()["lnd"]},
         component_loaders={"ocn": lambda directory: {"restored": True}},
@@ -471,10 +471,10 @@ def test_an_unchanged_delegated_composition_still_round_trips(tmp_path):
 def test_a_component_cannot_be_both_delegated_and_templated(tmp_path):
     """Naming a component twice is a caller bug, and says so."""
     checkpoint_dir = tmp_path / "checkpoint"
-    save_coupled(toy_coupled_carry(step=1), checkpoint_dir)
+    save_coupled_carry(toy_coupled_carry(step=1), checkpoint_dir)
 
     with pytest.raises(ValueError, match="ocn"):
-        load_coupled(
+        load_coupled_carry(
             checkpoint_dir,
             toy_component_templates(),
             component_loaders={"ocn": lambda directory: {}},
@@ -488,7 +488,7 @@ def test_a_failed_overwrite_leaves_no_carry_file(tmp_path):
     component data, and the mixture is indistinguishable from a good
     checkpoint.
     """
-    save_coupled(toy_coupled_carry(step=3), tmp_path)
+    save_coupled_carry(toy_coupled_carry(step=3), tmp_path)
     assert (tmp_path / CARRY_FILENAME).exists()
 
     def failing_saver(carry, directory):
@@ -496,12 +496,12 @@ def test_a_failed_overwrite_leaves_no_carry_file(tmp_path):
         raise OSError("disk full")
 
     with pytest.raises(OSError, match="disk full"):
-        save_coupled(
+        save_coupled_carry(
             toy_coupled_carry(step=4), tmp_path, component_savers={"lnd": failing_saver}
         )
     assert not (tmp_path / CARRY_FILENAME).exists()
     with pytest.raises(ValueError, match=CARRY_FILENAME):
-        load_coupled(tmp_path, toy_component_templates())
+        load_coupled_carry(tmp_path, toy_component_templates())
 
 
 def test_an_interrupted_save_is_skipped_by_latest_complete_checkpoint(tmp_path, caplog):
@@ -511,11 +511,11 @@ def test_an_interrupted_save_is_skipped_by_latest_complete_checkpoint(tmp_path, 
     directory and the delegated components' data exist, but the carry file --
     written last -- does not.
     """
-    save_coupled(toy_coupled_carry(step=5), tmp_path / "step_00000005")
-    save_coupled(toy_coupled_carry(step=10), tmp_path / "step_00000010")
+    save_coupled_carry(toy_coupled_carry(step=5), tmp_path / "step_00000005")
+    save_coupled_carry(toy_coupled_carry(step=10), tmp_path / "step_00000010")
     # Killed after the component directory, before the carry file.
     interrupted = tmp_path / "step_00000015"
-    save_coupled(
+    save_coupled_carry(
         toy_coupled_carry(step=15),
         interrupted,
         component_savers={"ocn": lambda carry, directory: None},
@@ -531,7 +531,7 @@ def test_an_interrupted_save_is_skipped_by_latest_complete_checkpoint(tmp_path, 
 
     # The returned directory is loadable, and the step a resume continues from
     # comes from inside it rather than from its name.
-    assert int(load_coupled(latest, toy_component_templates()).step) == 10
+    assert int(load_coupled_carry(latest, toy_component_templates()).step) == 10
 
 
 def test_no_complete_checkpoint_returns_none(tmp_path, caplog):
@@ -546,7 +546,7 @@ def test_no_complete_checkpoint_returns_none(tmp_path, caplog):
 
 def test_names_that_do_not_match_the_pattern_are_ignored(tmp_path, caplog):
     """Only ``pattern`` names a checkpoint, so nothing else is skipped or warned about."""
-    save_coupled(toy_coupled_carry(step=2), tmp_path / "step_00000002")
+    save_coupled_carry(toy_coupled_carry(step=2), tmp_path / "step_00000002")
     (tmp_path / "output").mkdir()
     (tmp_path / "zzz_scratch").mkdir()
     (tmp_path / "step_00000004.tmp").write_text("not a directory")

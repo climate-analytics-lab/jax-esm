@@ -33,8 +33,8 @@ from jem.base.component import (
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
 from jem.checkpoint import (
     CARRY_FILENAME,
-    load_coupled,
-    save_coupled,
+    load_coupled_carry,
+    save_coupled_carry,
 )
 
 DAY = 86400.0
@@ -537,8 +537,8 @@ def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
 
     two = model.generate_trajectory_function(2)
     carry, _ = two(initial)
-    save_coupled(carry, tmp_path / "checkpoint")
-    loaded = load_coupled(
+    save_coupled_carry(carry, tmp_path / "checkpoint")
+    loaded = load_coupled_carry(
         tmp_path / "checkpoint",
         {name: component.initialize() for name, component in model.components.items()},
     )
@@ -643,14 +643,14 @@ def test_save_state_matches_the_explicit_helpers_for_an_all_pytree_model(tmp_pat
     carry, _ = model.generate_trajectory_function(2)(model.initialize())
 
     model.save_state(carry, tmp_path / "capability")
-    save_coupled(carry, tmp_path / "explicit")
+    save_coupled_carry(carry, tmp_path / "explicit")
 
     assert sorted(path.name for path in (tmp_path / "capability").iterdir()) == sorted(
         path.name for path in (tmp_path / "explicit").iterdir()
     )
     assert_trees_equal(
         model.load_state(tmp_path / "capability"),
-        load_coupled(
+        load_coupled_carry(
             tmp_path / "explicit",
             {
                 name: component.initialize()

@@ -95,7 +95,7 @@ differences no leaf can show. There are three. A component whose carry holds no
 arrays (`{}` or `None`) contributes no leaf at all, so renaming one would
 otherwise load cleanly and resume a *different* composition at the saved step;
 so does a component that checkpoints itself, whose carry never reaches the
-shared file, which is why `save_coupled` stores its name there as an empty
+shared file, which is why `save_coupled_carry` stores its name there as an empty
 marker entry. A container that changed type without its contents moving (a list
 for a tuple) is the second. The third is a **static** (`pytree_node=False`)
 parameter that changed value: JAX keeps those inside the `PyTreeDef`, so
@@ -136,8 +136,8 @@ save would treat the inner `CoupledCarry` as a plain pytree and serialise it,
 which works only while nothing inside it needs a format of its own; a nested
 model containing Veros would silently bypass the restart path.
 
-`jem.checkpoint.save_coupled(coupled_carry, directory, component_savers=…)` and
-`load_coupled(directory, component_templates, component_loaders=…)` are the
+`jem.checkpoint.save_coupled_carry(coupled_carry, directory, component_savers=…)` and
+`load_coupled_carry(directory, component_templates, component_loaders=…)` are the
 underlying functions and still take the mappings explicitly, for a caller that
 wants to override a saver or supply one for something that is not a component
 capability. `Coupler.save_state` / `load_state` are the answer for every

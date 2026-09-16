@@ -1522,7 +1522,7 @@ class Coupler:
         pytree and serialise it -- which silently bypasses the HDF5 restart
         path a component like Veros requires.
 
-        :func:`jem.checkpoint.save_coupled` still takes an explicit
+        :func:`jem.checkpoint.save_coupled_carry` still takes an explicit
         ``component_savers`` mapping, for a caller that wants to override or
         supply a saver for something that is not a component capability. This
         method is the answer for the ordinary case.
@@ -1539,9 +1539,9 @@ class Coupler:
         # the component contract from `jem.base`, so the dependency runs the
         # other way round and a module-level import would make the two
         # modules' import order load-bearing.
-        from jem.checkpoint import save_coupled
+        from jem.checkpoint import save_coupled_carry
 
-        save_coupled(carry, directory, component_savers=self._component_savers())
+        save_coupled_carry(carry, directory, component_savers=self._component_savers())
 
     def load_state(self, directory: Path) -> CoupledCarry:
         """Read back a coupled carry written by :meth:`save_state`.
@@ -1576,9 +1576,9 @@ class Coupler:
 
         """
         # See `save_state` for why this import is not at module scope.
-        from jem.checkpoint import load_coupled
+        from jem.checkpoint import load_coupled_carry
 
-        return load_coupled(
+        return load_coupled_carry(
             directory,
             self._plain_component_templates(),
             component_loaders=self._component_loaders(),

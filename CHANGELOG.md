@@ -235,7 +235,8 @@ Breaking changes are marked; everything else is additive.
   boundary conditions an exchanger writes into jcm's own dataset, because the
   rest of those names are jcm's and their roles are not JEM's to assert.
 - **`jem.checkpoint`** — `save(carry, path)` / `load(template, path)` for any
-  pytree, and `save_coupled` / `load_coupled` for a whole `CoupledCarry`, in
+  pytree, and `save_coupled_carry` / `load_coupled_carry` for a whole
+  `CoupledCarry`, in
   the format jax-gcm already uses: the leaves flattened to typed arrays and
   serialised with flax's msgpack codec, the tree they came from *rebuilt* from
   a template at load time and recorded beside them only as a manifest to check
@@ -348,7 +349,8 @@ Breaking changes are marked; everything else is additive.
   `load_carry`, `save_component_carries`, `load_component_carries`,
   `save_coupled_carry`, `load_coupled_carry`, `save_veros_carry` and
   `load_veros_carry`. The first six are `jem.checkpoint.save` / `load` /
-  `save_coupled` / `load_coupled`; `latest_complete_checkpoint` and
+  `save_coupled_carry` / `load_coupled_carry` under their existing names;
+  `latest_complete_checkpoint` and
   `remaining_batches` moved to `jem.checkpoint` unchanged; the two Veros
   functions are now `VerosComponent.save_state` / `load_state`, where they
   belong — the HDF5 restart is Veros' business, not the coupler's. Call

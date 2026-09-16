@@ -14,7 +14,7 @@ Two layers live here, and a driver normally touches only the second:
   ``lax.scan``. The ``PyTreeDef`` manifest is what catches the mismatches the
   leaves cannot see: a component whose carry holds no arrays at all (``{}`` or
   ``None``) contributes no leaf, so renaming one would otherwise be invisible.
-- :func:`save_coupled` / :func:`load_coupled` lay a whole
+- :func:`save_coupled_carry` / :func:`load_coupled_carry` lay a whole
   :class:`~jem.base.component.CoupledCarry` out in a directory, delegating
   the components that write themselves. They are what
   :meth:`jem.base.coupler.Coupler.save_state` and
@@ -42,7 +42,7 @@ than resumed from a guess.
 **The carry file is the completion marker.** It is written last, and
 published by renaming a fully-flushed, fsynced temporary file over its final
 name, so it exists only once the whole checkpoint is on disk: an interrupted
-save leaves a directory that :func:`load_coupled` refuses and
+save leaves a directory that :func:`load_coupled_carry` refuses and
 :func:`latest_complete_checkpoint` skips. A separate ``COMPLETE`` file would
 add a second thing to keep in step with no gain, because the clock -- which
 a resume cannot do without -- lives in the carry file anyway, so its presence
@@ -368,7 +368,7 @@ def load(template: Carry, path: str | Path) -> Carry:
     return jax.tree_util.tree_unflatten(treedef, restored)
 
 
-def save_coupled(
+def save_coupled_carry(
     coupled_carry: CoupledCarry,
     directory: str | Path,
     component_savers: Mapping[str, Callable[[Carry, Path], None]] | None = None,
@@ -385,7 +385,7 @@ def save_coupled(
     marker entry beside the plain components. It costs nothing -- the marker
     holds no leaf, so nothing is written for it -- and it
     is what makes the set of delegated components part of what
-    :func:`load_coupled` checks: without it, renaming one would be met by its
+    :func:`load_coupled_carry` checks: without it, renaming one would be met by its
     own loader failing on a missing directory, or, for a loader that does not
     look at its directory, not met at all.
 
@@ -430,17 +430,17 @@ def save_coupled(
     save({"step": coupled_carry.step, "components": stored_components}, carry_file)
 
 
-def load_coupled(
+def load_coupled_carry(
     directory: str | Path,
     component_templates: Mapping[str, Carry],
     component_loaders: Mapping[str, Callable[[Path], Carry]] | None = None,
 ) -> CoupledCarry:
-    """Read back a coupled carry written by :func:`save_coupled`.
+    """Read back a coupled carry written by :func:`save_coupled_carry`.
 
     Parameters
     ----------
     directory : path-like
-        A directory written by :func:`save_coupled`.
+        A directory written by :func:`save_coupled_carry`.
     component_templates : mapping
         ``{component name: template carry}`` for the components stored in the
         shared carry file -- everything ``component_loaders`` does not cover.
@@ -491,7 +491,7 @@ def load_coupled(
         )
 
     # The delegated components go into the template as the same empty entries
-    # `save_coupled` stored for them, so that the checkpoint's set of
+    # `save_coupled_carry` stored for them, so that the checkpoint's set of
     # component names -- delegated ones included -- is checked as part of the
     # tree structure before any loader is called.
     template = {
@@ -515,7 +515,7 @@ def latest_complete_checkpoint(
     """Return the newest checkpoint directory that is actually complete.
 
     A driver that resumes by taking the last of ``sorted(root.glob(pattern))``
-    can pick a directory that no run can load. :func:`save_coupled` writes
+    can pick a directory that no run can load. :func:`save_coupled_carry` writes
     :data:`CARRY_FILENAME` *last*, precisely so that a save interrupted
     part-way through leaves a directory without it rather than one that
     silently mixes component carries from two different steps. The cost of
