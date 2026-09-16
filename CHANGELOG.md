@@ -32,9 +32,9 @@ Breaking changes are marked; everything else is additive.
   result = run_chunked(
       coupler,
       total_time="6 years",        # 2190 days: a whole number of chunks
-      chunk="30 days",             # a file, a restart and a health check a month
+      chunk="30 days",             # a file, a restart and a health check a chunk
       output_dir="output",
-      output_averages=True,        # one record per chunk: the monthly mean
+      output_averages=True,        # one record per chunk: its 30-day-window mean
       # checkpoint_path="checkpoint" is the default, relative to output_dir
   )
   ```
@@ -182,7 +182,16 @@ Breaking changes are marked; everything else is additive.
   option names are the group's own, distinct from jax-gcm's `run=smoke` /
   `run=longrun`: those configure the *atmosphere*, and a coupled option spelled
   like an atmosphere option is the same confusion the group's name already
-  exists to avoid.
+  exists to avoid. `long_run` is ~10 years in 30-day chunks with one averaged
+  record per chunk; its `total_time` is spelled in days (3600) because
+  `total_time` must be a whole multiple of `chunk` and 30 days does not divide
+  a 365-day year, so `coupled_run=long_run coupled_run.total_time="1 year"` is
+  refused — override it with a multiple of 30 days ("6 years" = 2190). Those
+  averaged records are 30-day *window* means, whose boundaries drift about five
+  days a year against the calendar, not calendar-month means: those are
+  `jem.accumulate.monthly_mean`, which bins each record by its own label. A
+  test composes every shipped option and fails if its `total_time`/`chunk`
+  pair does not divide.
 - **The YAML is wiring only**, and a test says so: a key earns its place by
   being `_target_`, a required input (`???`) or the non-default value that
   makes a named configuration what it is.

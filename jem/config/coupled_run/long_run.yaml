@@ -1,15 +1,27 @@
-# A ~10-year integration, chunked by month.
+# A ~10-year integration in fixed 30-day chunks.
 defaults:
   - default
   - _self_
 
+# 3600 days = 120 whole chunks. `total_time` must be a whole multiple of
+# `chunk`, which is why this is not "10 years": on the 365-day calendar a year
+# is 365 days, which 30 does not divide, and `coupled_run.total_time="1 year"`
+# on top of this option is refused before anything is compiled. Override it
+# with a multiple of 30 days ("6 years" = 2190, "2190 days", "300 days").
 total_time: "3600 days"
-# Monthly chunks: short enough that an unhealthy state is caught (and the run
+# 30-day chunks: short enough that an unhealthy state is caught (and the run
 # restarts) without losing much, long enough that the per-chunk output and
 # recompilation cost stays negligible.
 chunk: "30 days"
-# Monthly means rather than every coupling step: at this length the
+# One record per chunk instead of every coupling step: at this length the
 # instantaneous stream is both huge and not what a climate is read from.
+#
+# These are 30-day-WINDOW means, NOT calendar monthly means: the window is the
+# chunk, so on a 365-day calendar its boundaries drift about five days per
+# year and a bin spans parts of two months. For true calendar months use the
+# Python API -- `jem.accumulate.monthly_mean(coupler)` with
+# `run_chunked(..., accumulate=..., health_check=None)` -- which bins every
+# record by the month its own output label falls in, whatever the chunking.
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the

@@ -183,8 +183,8 @@ the same call:
     result = run_chunked(
         coupler,
         total_time="6 years",     # 2190 days: a whole number of 30-day chunks
-        chunk="30 days",          # a file, a restart and a health check a month
+        chunk="30 days",          # a file, a restart and a health check a chunk
         output_dir="output",
-        output_averages=True,     # one record per chunk: the monthly mean
+        output_averages=True,     # one record per chunk: its 30-day-window mean
         # checkpoint_path="checkpoint" is the default, relative to output_dir
     )

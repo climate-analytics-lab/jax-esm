@@ -52,8 +52,13 @@ time, carrying the CF ``cell_methods = "time: mean"`` that says so.
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
 labelled at its end") rather than inventing a second meaning for the same
-word, and it is the reduction a long run actually needs: monthly-mean output
-from a 30-day chunk. Note that in a coupled run the atmosphere's per-step
+word, and it is the reduction a long run actually needs: one record per chunk
+rather than one per coupling step. The bins are the **chunks**, so a 30-day
+chunk gives 30-day-window means and not calendar months -- on a 365-day
+calendar those windows drift about five days a year against the months. A
+calendar-month mean is :func:`jem.accumulate.monthly_mean`, which bins every
+record by the month of its own output label whatever the chunking. Note that
+in a coupled run the atmosphere's per-step
 records are *already* step means -- the JCM wrapper integrates each coupling
 step with ``output_averages=True`` -- so averaging a chunk of them is the
 chunk mean exactly, with no double counting.

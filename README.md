@@ -160,7 +160,7 @@ The YAML is wiring only — `_target_`, required input files, and the non-defaul
 choices that define a named configuration. Every physics default lives on the
 Python class that owns it, and every *run* default on `jem.driver.run_chunked`.
 
-## Long runs: checkpoints and monthly means
+## Long runs: checkpoints and chunk means
 
 `run_chunked` writes a restart after every chunk — checkpointing is **on by
 default** — and resuming is the same call:
@@ -169,9 +169,9 @@ default** — and resuming is the same call:
 result = run_chunked(
     coupler,
     total_time="6 years",        # 2190 days: a whole number of 30-day chunks
-    chunk="30 days",             # a health check, a file and a restart per month
+    chunk="30 days",             # a health check, a file and a restart per chunk
     output_dir="output",
-    output_averages=True,        # one record per chunk: the monthly mean
+    output_averages=True,        # one record per chunk: its 30-day-window mean
     # checkpoint_path="checkpoint" is the default, relative to output_dir
 )
 ```

@@ -880,7 +880,7 @@ result = run_chunked(
     total_time="6 years",        # 2190 days: a whole number of chunks
     chunk="30 days",
     output_dir="output",
-    output_averages=True,
+    output_averages=True,        # one record per chunk: its 30-day-window mean
     checkpoint_path="checkpoint",
 )
 ```
@@ -1039,8 +1039,11 @@ replaces each saved record with the mean over its save interval, labelled at the
 interval's end, and the coupler's records are already one per coupling step — so
 the coupler's output interval is the **chunk**, and the flag replaces a chunk's
 records with their time mean, labelled with the chunk's last time and carrying
-the CF `cell_methods = "time: mean"` that says so. Monthly-mean output is then a
-30-day chunk. In a coupled run the atmosphere's per-step records are *already*
+the CF `cell_methods = "time: mean"` that says so. The bins are therefore the
+chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
+five days a year against the calendar on a 365-day year, not monthly means —
+those are `jem.accumulate.monthly_mean`, which bins by each record's own label.
+In a coupled run the atmosphere's per-step records are *already*
 step means (the JCM wrapper integrates each coupling step with
 `output_averages=True`), so averaging a chunk of them is the chunk mean exactly,
 with no double counting. A variable with no time axis — a grid mask, a layer

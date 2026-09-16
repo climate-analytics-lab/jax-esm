@@ -221,6 +221,49 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
+#: The calendar every shipped configuration runs on -- JCM's default, and the
+#: one the driver parses a run's durations against. It is what makes "1 year"
+#: 365 days here, and so what decides which durations divide which.
+CALENDAR = "365_day"
+
+
+def _seconds(duration: str | float) -> int:
+    """Return a config duration in whole seconds, as the driver reads it."""
+    from jcm.date import parse_duration_days
+
+    return int(round(float(parse_duration_days(duration, CALENDAR)) * 86400))
+
+
+@pytest.mark.parametrize("option", _options("coupled_run"))
+def test_run_options_integrate_a_whole_number_of_chunks(option):
+    """Every shipped ``coupled_run`` option is a run ``run_chunked`` accepts.
+
+    ``run_chunked`` refuses a ``total_time`` that is not a whole multiple of
+    ``chunk`` -- ``iterations`` is static, so a short final chunk would mean a
+    second compiled trajectory -- and refuses either if it is not a whole
+    number of coupling steps. A shipped option that cannot be run at all is a
+    trap whose first victim is whoever launches it, so the arithmetic is
+    checked here, on the durations exactly as the driver parses them.
+
+    It is also what keeps a *documented* example honest: ``long_run``'s
+    ``total_time`` is spelled in days rather than years precisely because 30
+    days does not divide a 365-day year.
+    """
+    cfg = composed([_group_override("coupled_run", option)])
+    total = _seconds(cfg.coupled_run.total_time)
+    chunk = _seconds(cfg.coupled_run.chunk)
+    coupling = _seconds(cfg.coupling.timestep)
+
+    assert chunk % coupling == 0, (
+        f"coupled_run={option}: chunk={cfg.coupled_run.chunk!r} is not a whole "
+        f"number of coupling steps of {cfg.coupling.timestep!r}."
+    )
+    assert total % chunk == 0, (
+        f"coupled_run={option}: total_time={cfg.coupled_run.total_time!r} is "
+        f"not a whole number of chunks of {cfg.coupled_run.chunk!r}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # The YAML stays thin
 # ---------------------------------------------------------------------------

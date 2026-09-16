@@ -8,10 +8,14 @@ anything at all::
 
     python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 
-An Earth-like year, chunked by month, with monthly-mean output::
+Six Earth years in 30-day chunks, one 30-day mean per chunk::
 
     python -m jem.main +configuration=earth-slab coupled_run=long_run \
-        coupled_run.total_time="1 year"
+        coupled_run.total_time="2190 days"
+
+(2190 days is six 365-day years and 73 whole chunks; ``total_time`` must be a
+whole multiple of ``coupled_run.chunk``, so ``"1 year"`` is refused against
+this option's 30-day chunks.)
 
 The atmosphere is configured by jax-gcm's own groups, re-rooted under
 ``atmosphere`` (so the group's package is spelled out), and everything else by
