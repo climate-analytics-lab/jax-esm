@@ -129,9 +129,14 @@ def _initialize_with_params(name: str, component: Component, params: Any) -> Car
                 " builds its initial state from parameters can be named in"
                 " Coupler.initialize({...})."
             ) from exc
-    # The Component protocol's `initialize` takes no arguments -- taking
-    # parameters is an extra a component may offer, and only the signature
-    # check above can establish it, so the call is made through `Any`.
+    # `Component.initialize` is typed `() -> Carry`, because taking parameters
+    # is an extra a component may offer and not part of the contract every
+    # component satisfies. mypy therefore rejects `component.initialize(
+    # params=...)` on a `Component`-typed value however well the call is
+    # justified at run time -- the signature check above is `inspect`, which
+    # the type checker cannot see. The cast is the narrowest way to record
+    # that: "checked by inspection, not by the type", confined to this one
+    # call rather than loosening the protocol for every caller.
     return cast(Any, component.initialize)(params=params)
 
 
