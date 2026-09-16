@@ -10,6 +10,11 @@ written once:
     integrate a chunk -> label it -> write its (reduced) output ->
     check the state is still healthy -> checkpoint -> repeat
 
+or, given an ``accumulate`` reduction, the same loop with the middle two steps
+replaced by folding the chunk into an accumulator that crosses the chunk
+boundaries -- see :func:`run_chunked`'s Notes for what an accumulated run
+gives up in exchange (files, the health gate, and a checkpointed reduction).
+
 **Every default a run has lives here**, on :func:`run_chunked`'s signature.
 ``jem/config/coupled_run/*.yaml`` names the same keys and :mod:`jem.runners`
 passes them through, so a default can only be changed in one place.
@@ -103,8 +108,8 @@ from jem.output import (
     write_chunk,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - only the type checker needs the class
-    from jem.base.coupler import Coupler
+if TYPE_CHECKING:  # pragma: no cover - only the type checker needs these
+    from jem.base.coupler import Accumulator, Coupler
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +159,14 @@ class RunResult:
         One report per chunk, in order, exactly as the health check returned
         it. Empty when ``health_check`` is None.
     paths : list of pathlib.Path
-        Every output file written, in the order they were written.
+        Every output file written, in the order they were written. Empty for
+        an accumulated run, which writes none.
+    accumulator : pytree or None
+        What the run's ``accumulate`` reduction folded every coupled step
+        into, threaded across the chunks; ``None`` when the run was not given
+        one. Pass it to that reduction's ``finalize`` for the means. It is
+        **not** checkpointed, so it holds only what *this* call integrated --
+        see :func:`run_chunked`.
 
     """
 
@@ -163,6 +175,7 @@ class RunResult:
     completed: bool
     reports: list[dict]
     paths: list[Path]
+    accumulator: Any = None
 
 
 def default_health_check(
@@ -240,6 +253,7 @@ def run_chunked(
     health_check: HealthCheck | None = default_health_check,
     bail_on_unhealthy: bool = True,
     checkpoint_path: Path | str | None = None,
+    accumulate: "Accumulator | None" = None,
 ) -> RunResult:
     """Integrate ``coupler`` for ``total_time``, a chunk at a time.
 
@@ -288,18 +302,30 @@ def run_chunked(
         written there after every chunk the health gate accepts, and a run
         started with a complete checkpoint already there resumes from it.
         ``None`` disables checkpointing.
+    accumulate : pair of callables, optional
+        An **in-scan reduction** of the per-step diagnostics --
+        :func:`jem.accumulate.monthly_mean` or
+        :func:`jem.accumulate.windowed_mean`, or any ``(init, update)`` pair
+        :meth:`~jem.base.coupler.Coupler.generate_trajectory_function` takes.
+        Each chunk's trajectory is built with it and the accumulator is
+        threaded from chunk to chunk, so the memory a run needs stops growing
+        with ``chunk``: the reduction *is* the output. See the Notes for what
+        that costs.
 
     Returns
     -------
     RunResult
+        With ``accumulator`` set when ``accumulate`` was given, and
+        ``paths`` empty.
 
     Raises
     ------
     ValueError
         If ``chunk`` or ``total_time`` is not a whole number of coupling
         steps, ``total_time`` is not a whole number of chunks, or
-        ``subsample`` is not a positive integer. All of them are checked
-        before anything is compiled or integrated.
+        ``subsample`` is not a positive integer, or if ``accumulate`` is
+        given with a ``health_check``. All of them are checked before
+        anything is compiled or integrated.
 
     Notes
     -----
@@ -307,6 +333,31 @@ def run_chunked(
     starts at (``<component>-<first step>.nc``), which is unique however the
     run is chunked -- so a run resumed with a different ``chunk`` writes new
     files rather than over the ones it already wrote. See :mod:`jem.output`.
+
+    **An accumulated run has no per-step diagnostics**, by construction: the
+    scan returns the accumulator instead of stacking every step, which is the
+    whole reason to use one. Three consequences, none of them hidden:
+
+    - **No files are written.** ``chunk_datasets`` has nothing to label, so
+      ``paths`` is empty and ``output_averages`` and ``subsample`` -- which
+      reduce the files -- do nothing. The reduction is the output: take
+      ``RunResult.accumulator`` to the reduction's own ``finalize``.
+    - **The health gate cannot run**, so ``accumulate`` with a
+      ``health_check`` is a ``ValueError`` rather than a gate quietly skipped.
+      That is the safer of the two: the gate defaults to *on*, an atmosphere
+      is exactly what a long accumulated run is for, and a warning in a log
+      file is a poor way to find out weeks later that nothing was watching for
+      a blow-up. Passing ``health_check=None`` makes giving up the gate a
+      decision the caller took.
+    - **The accumulator is not checkpointed**, and a resumed run therefore
+      starts a fresh one and accumulates only what it integrates. The
+      checkpoint is the *model's restart state*; the accumulator is an
+      analysis product. Putting one in the other would make the checkpoint
+      format depend on which reduction the run happened to choose -- a
+      checkpoint only loadable by a run asking for the same means -- and would
+      make a restart able to corrupt an analysis. A run that needs a mean
+      across a restart boundary finalizes each call's accumulator and combines
+      them, or runs the whole span in one call.
 
     """
     # Every argument that can be wrong on its own is checked here, before a
@@ -326,6 +377,17 @@ def run_chunked(
             "chunk that divides the run, or a run length that is a multiple of "
             "the chunk."
         )
+    if accumulate is not None and health_check is not None:
+        raise ValueError(
+            "accumulate= reduces the per-step diagnostics inside the scan, so "
+            "there are no per-step datasets for a health check to look at. "
+            "Pass health_check=None to say that this run goes without the "
+            "gate. It is refused rather than skipped because the gate is on "
+            "by default and a long accumulated run of an atmosphere is "
+            "exactly the run that needs it -- finding out from a log line, "
+            "weeks later, that nothing was watching for a blow-up is not a "
+            "trade anyone would make on purpose."
+        )
 
     carry, provenance = _starting_carry(coupler, initial_carry, checkpoint_path)
     # One line, always, whatever the run does next: a modeller reading a log
@@ -334,16 +396,41 @@ def run_chunked(
     # says, before anything is compiled.
     logger.info("%s", provenance)
 
+    if accumulate is not None:
+        logger.info(
+            "Reducing each chunk inside the scan: no per-chunk files are "
+            "written, and the reduction is returned on RunResult.accumulator."
+        )
+        if output_averages or subsample != 1:
+            logger.warning(
+                "output_averages=%r and subsample=%r reduce the output FILES, "
+                "and an accumulated run writes none; they do nothing here.",
+                output_averages, subsample,
+            )
+        if checkpoint_path is not None:
+            logger.warning(
+                "The accumulator is not part of the checkpoint -- that holds "
+                "the model's restart state, not an analysis product -- so a "
+                "run resumed from %s starts a fresh accumulator and its means "
+                "cover only the chunks that call integrates.", checkpoint_path,
+            )
+
     output_dir = Path(output_dir)
     # Built once and cached by length: every chunk but (at most) the first of
     # a resumed run has the same number of steps, so this compiles one
     # trajectory for the whole run.
-    trajectories: dict[int, Callable[[CoupledCarry], tuple[CoupledCarry, Any]]] = {
-        steps_per_chunk: coupler.generate_trajectory_function(steps_per_chunk)
+    def build_trajectory(iterations: int) -> Callable[..., tuple[CoupledCarry, Any]]:
+        return coupler.generate_trajectory_function(iterations, accumulate=accumulate)
+
+    trajectories: dict[int, Callable[..., tuple[CoupledCarry, Any]]] = {
+        steps_per_chunk: build_trajectory(steps_per_chunk)
     }
 
     reports: list[dict] = []
     paths: list[Path] = []
+    # `None` on the first call means "start from the reduction's own init()",
+    # which is also what a run given no `accumulate` returns.
+    accumulator: Any = None
     batches = remaining_batches(int(carry.step), total_steps, steps_per_chunk)
     if not batches:
         logger.info(
@@ -361,32 +448,47 @@ def run_chunked(
         # different chunk length.
         chunk_index = first_step // steps_per_chunk
         if steps not in trajectories:
-            trajectories[steps] = coupler.generate_trajectory_function(steps)
-        carry, diagnostics = trajectories[steps](carry)
+            trajectories[steps] = build_trajectory(steps)
 
-        # The chunk is labelled once, unreduced, and then reduced only for
-        # the copy that is written: `output_averages` and `subsample` are
-        # both lossy in the direction the health gate cares about (a time
-        # mean skips NaNs and dilutes a finite extreme; a stride can drop the
-        # last record entirely), so a gate handed the reduced output would
-        # pass a state that went bad at the end of the chunk. See
-        # :mod:`jem.output`.
-        datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
-        reduced = postprocess_datasets(
-            datasets, output_averages=output_averages, subsample=subsample
-        )
-        paths.extend(write_chunk(reduced, output_dir, first_step))
+        datasets: dict[str, xr.Dataset] | None = None
+        if accumulate is None:
+            carry, diagnostics = trajectories[steps](carry)
+            # The chunk is labelled once, unreduced, and then reduced only for
+            # the copy that is written: `output_averages` and `subsample` are
+            # both lossy in the direction the health gate cares about (a time
+            # mean skips NaNs and dilutes a finite extreme; a stride can drop
+            # the last record entirely), so a gate handed the reduced output
+            # would pass a state that went bad at the end of the chunk. See
+            # :mod:`jem.output`.
+            datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+            reduced = postprocess_datasets(
+                datasets, output_averages=output_averages, subsample=subsample
+            )
+            paths.extend(write_chunk(reduced, output_dir, first_step))
+            written = f"{len(reduced)} file(s) written"
+        else:
+            # The accumulator crosses the chunk boundary untouched, which is
+            # what lets one compiled trajectory of whatever length suits the
+            # machine produce a reduction over bins of any other length.
+            carry, accumulator = trajectories[steps](carry, accumulator)
+            written = "reduced into the accumulator, no files written"
 
         elapsed_days = float(coupler.coupling_time(carry.step).sim_time) / SECONDS_PER_DAY
         logger.info(
             "Chunk %d: %d coupled steps run, at step %d, %.4g simulated days "
-            "(%.4g years); %d file(s) written.",
+            "(%.4g years); %s.",
             chunk_index, steps, int(carry.step), elapsed_days,
-            elapsed_days / coupler.days_per_year, len(reduced),
+            elapsed_days / coupler.days_per_year, written,
         )
 
+        # `datasets` is None exactly when `accumulate` is given, and that
+        # pairing is refused before anything is compiled -- so the second
+        # condition is never what decides this branch at run time. It is here
+        # because the type checker cannot reach that argument check from here,
+        # and an `assert` would be a claim in the shipped code rather than a
+        # restatement of the guard.
         ok = True
-        if health_check is not None:
+        if health_check is not None and datasets is not None:
             ok, report = health_check(datasets, chunk_index, elapsed_days)
             reports.append(report)
             if ok:
@@ -419,15 +521,19 @@ def run_chunked(
                 "passed. Pass bail_on_unhealthy=False to integrate an "
                 "unhealthy state anyway.", int(carry.step),
             )
-            return RunResult(carry, int(carry.step), False, reports, paths)
+            return RunResult(
+                carry, int(carry.step), False, reports, paths, accumulator
+            )
 
         # Both copies of the chunk are dropped before the next one is built.
         # Each is a chunk of host-side arrays -- a month of an atmosphere is
         # gigabytes -- and holding one while `chunk_datasets` labels the next
-        # would double the run's peak memory for nothing.
-        del datasets, reduced
+        # would double the run's peak memory for nothing. (An accumulated run
+        # never built either.)
+        if datasets is not None:
+            del datasets, reduced
 
-    return RunResult(carry, int(carry.step), True, reports, paths)
+    return RunResult(carry, int(carry.step), True, reports, paths, accumulator)
 
 
 def _whole_steps(

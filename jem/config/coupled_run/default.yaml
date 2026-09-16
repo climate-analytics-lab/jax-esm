@@ -8,7 +8,10 @@
 #
 # The keys are the keyword arguments of `jem.driver.run_chunked()`, which is
 # where their defaults live; the values here repeat only what this named
-# option is about. The group composes at `cfg.coupled_run`, not `cfg.run` --
+# option is about. Its two CALLABLE arguments -- `health_check` and
+# `accumulate` -- are the exceptions, and are Python-only: no YAML can name a
+# live function, and both take their defaults (the standard health gate, and
+# no in-scan reduction) when the run is launched from a config. The group composes at `cfg.coupled_run`, not `cfg.run` --
 # `atmosphere.run` is the atmosphere's own run config, and a group called
 # `run` here would shadow jcm's (see the comment in `config.yaml`). Select an
 # option with `coupled_run=smoke`, set one key with `coupled_run.chunk=...`.

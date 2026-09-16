@@ -216,6 +216,15 @@ carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
 
+`run_chunked(..., accumulate=monthly, health_check=None)` does the same from
+the driver, threading the accumulator across the chunks and returning it on
+`RunResult.accumulator`. An accumulated run has no per-step diagnostics, so it
+writes no files, cannot run the health gate (which is refused rather than
+skipped — losing the gate has to be a decision), and does not checkpoint the
+accumulator: the checkpoint is the model's restart state, the accumulator is an
+analysis product, and a resumed run therefore accumulates only what it
+integrates.
+
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
 `n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — sized either by `n_windows` or by

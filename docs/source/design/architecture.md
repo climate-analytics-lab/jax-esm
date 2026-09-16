@@ -902,7 +902,8 @@ for each chunk:
 It returns a `RunResult`: the `final_carry`, `steps_completed`
 (`int(final_carry.step)` — the run's position on the clock, including whatever
 a checkpoint restored, not the number of steps this call integrated),
-`completed`, one `report` per chunk and every `path` written.
+`completed`, one `report` per chunk, every `path` written, and the
+`accumulator` if the run was given a reduction.
 
 **Chunking rules.** `total_time` and `chunk` are `jcm.date.parse_duration_days`
 strings or numbers of days, parsed on the *coupler's* calendar, so `"1 year"` is
@@ -1044,6 +1045,43 @@ trajectory = coupler.generate_trajectory_function(365, accumulate=monthly)
 carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)        # (12, …) per variable
 ```
+
+**From the driver.** `run_chunked(..., accumulate=monthly)` builds each
+chunk's trajectory with the reduction and threads the accumulator across the
+chunks, so a ten-year run reduces to twelve monthly means without ever holding
+a chunk of diagnostics:
+
+```python
+monthly = monthly_mean(coupler)
+result = run_chunked(
+    coupler, total_time="10 years", chunk="30 days",
+    health_check=None,                 # required: see below
+    accumulate=monthly,
+)
+means = monthly.finalize(result.accumulator)
+```
+
+An accumulated run has no per-step diagnostics — that is the point — and the
+three consequences are chosen rather than inherited:
+
+- **No files are written.** There is nothing for `chunk_datasets` to label, so
+  `paths` is empty and `output_averages` / `subsample`, which reduce the
+  *files*, do nothing (the run warns if they were set). The reduction is the
+  output.
+- **The health gate cannot run**, so `accumulate` together with a
+  `health_check` is a `ValueError` rather than a gate quietly skipped. The gate
+  defaults to *on* and a long accumulated run of an atmosphere is exactly the
+  run that needs it, so losing it has to be something the caller asked for —
+  `health_check=None` — not something a log line mentions weeks too late.
+- **The accumulator is not checkpointed.** The checkpoint is the model's
+  restart state; the accumulator is an analysis product. Storing one in the
+  other would make the checkpoint format depend on which reduction a run chose
+  — a restart file loadable only by a run asking for the same means — and let a
+  restart corrupt an analysis. So the carry is checkpointed as usual, a resumed
+  run starts a fresh accumulator and covers only what it integrates, and the
+  run warns when both are given. A mean across a restart boundary is built by
+  finalizing each call's accumulator and combining them, or by running the span
+  in one call.
 
 `monthly_mean` takes only the coupler: the accumulator's shapes come from
 `jax.eval_shape` of one coupled step, and a step's month is a lookup in a static

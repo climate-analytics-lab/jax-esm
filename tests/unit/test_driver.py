@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from jem.accumulate import monthly_mean
 from jem.base.coupler import Coupler
 from jem.checkpoint import CARRY_FILENAME
 from jem.components.slab import SlabOceanModel, SlabSeaiceModel
@@ -629,6 +630,144 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
         sorted(output.glob("ocn-*.nc")), combine="by_coords"
     ) as combined:
         assert combined.sizes["time"] == 8
+
+
+# ---------------------------------------------------------------------------
+# Reducing inside the scan instead of writing every step
+# ---------------------------------------------------------------------------
+
+
+def test_an_accumulated_run_equals_one_long_accumulated_trajectory(tmp_path):
+    """Three chunks of an accumulated run are one accumulated trajectory.
+
+    This is the property that makes `accumulate` usable from the driver at
+    all: the accumulator is threaded from chunk to chunk, so where the chunk
+    boundaries fall must not touch the means. The comparison is against the
+    same reduction taken in a single call, which is the answer the driver has
+    to reproduce.
+    """
+    monthly = monthly_mean(two_slabs())
+    result = run_chunked(
+        two_slabs(),
+        total_time="9 days",
+        chunk="3 days",
+        output_dir=tmp_path,
+        health_check=None,
+        accumulate=monthly,
+    )
+
+    reference = two_slabs()
+    _, expected = reference.generate_trajectory_function(9, accumulate=monthly)(
+        reference.initialize()
+    )
+
+    assert result.completed
+    assert result.steps_completed == 9
+    for got, want in zip(
+        jax.tree_util.tree_leaves(monthly.finalize(result.accumulator)),
+        jax.tree_util.tree_leaves(monthly.finalize(expected)),
+        strict=True,
+    ):
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), atol=1e-12)
+
+
+def test_an_accumulated_run_writes_no_files(coupler, tmp_path, caplog):
+    """The reduction is the output: no per-chunk files, and `paths` is empty."""
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            coupler,
+            total_time="4 days",
+            chunk="2 days",
+            output_dir=tmp_path,
+            health_check=None,
+            accumulate=monthly_mean(coupler),
+        )
+
+    assert result.paths == []
+    assert list(tmp_path.glob("*.nc")) == []
+    assert "no per-chunk files are written" in caplog.text
+    assert "reduced into the accumulator, no files written" in caplog.text
+
+
+def test_a_run_without_accumulate_has_no_accumulator(coupler, tmp_path):
+    """`RunResult.accumulator` is None unless the run was given a reduction."""
+    result = run_chunked(
+        coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path
+    )
+    assert result.accumulator is None
+
+
+def test_accumulate_with_a_health_check_is_refused(coupler, tmp_path):
+    """The gate has nothing to look at, so it is refused rather than skipped.
+
+    The gate is on by default, so a run that simply passed `accumulate=` would
+    otherwise lose it silently -- and a long accumulated run of an atmosphere
+    is exactly the run that needs it. `health_check=None` makes going without
+    the gate something the caller decided.
+    """
+    def must_not_be_called(iterations, **kwargs):
+        raise AssertionError("a trajectory was built despite the bad pairing")
+
+    coupler.generate_trajectory_function = must_not_be_called
+    with pytest.raises(ValueError, match="health_check=None"):
+        run_chunked(
+            coupler,
+            total_time="2 days",
+            chunk="2 days",
+            output_dir=tmp_path,
+            accumulate=monthly_mean(two_slabs()),
+        )
+
+
+def test_an_accumulated_run_warns_that_the_accumulator_is_not_checkpointed(
+    coupler, tmp_path, caplog
+):
+    """The carry is still checkpointed; the accumulator deliberately is not.
+
+    The checkpoint is the model's restart state and the accumulator is an
+    analysis product; putting one in the other would make the checkpoint
+    format depend on which reduction a run happened to choose. The cost is
+    that a resumed run accumulates only what it integrates, which is not
+    something a modeller should have to deduce from the means.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    with caplog.at_level(logging.WARNING, logger="jem.driver"):
+        result = run_chunked(
+            coupler,
+            total_time="4 days",
+            chunk="2 days",
+            output_dir=tmp_path,
+            checkpoint_path=checkpoint,
+            health_check=None,
+            accumulate=monthly_mean(coupler),
+        )
+
+    assert "not part of the checkpoint" in caplog.text
+    assert result.accumulator is not None
+    # The restart state itself is written as usual, and holds no accumulator:
+    # the checkpoint of an accumulated run is loadable by a run that asks for
+    # no reduction at all, or for a different one.
+    assert sorted(p.name for p in checkpoint.iterdir()) == [CARRY_FILENAME]
+    assert int(two_slabs().load_state(checkpoint).step) == 4
+
+
+def test_an_accumulated_run_warns_that_output_reductions_do_nothing(
+    coupler, tmp_path, caplog
+):
+    """`output_averages` and `subsample` reduce files, and there are none."""
+    with caplog.at_level(logging.WARNING, logger="jem.driver"):
+        run_chunked(
+            coupler,
+            total_time="2 days",
+            chunk="2 days",
+            output_dir=tmp_path,
+            health_check=None,
+            output_averages=True,
+            subsample=2,
+            accumulate=monthly_mean(coupler),
+        )
+
+    assert "they do nothing here" in caplog.text
 
 
 # ---------------------------------------------------------------------------

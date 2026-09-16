@@ -68,8 +68,24 @@ Breaking changes are marked; everything else is additive.
 - `jem.driver.RunResult` — a frozen dataclass with `final_carry`,
   `steps_completed` (`int(final_carry.step)`, so it counts from the run's start
   date and includes what a checkpoint restored), `completed` (False if the
-  health gate stopped the run), `reports` (one per chunk) and `paths` (every
-  file written, in order).
+  health gate stopped the run), `reports` (one per chunk), `paths` (every
+  file written, in order) and `accumulator`.
+- **`run_chunked(..., accumulate=(init, update))`** — the in-scan reduction,
+  driven. Each chunk's trajectory is built with it and the accumulator is
+  threaded from chunk to chunk, so a ten-year run reduces to monthly means
+  without ever holding a chunk of diagnostics; the result is on
+  `RunResult.accumulator`, for that reduction's own `finalize`. An accumulated
+  run has no per-step diagnostics, and the three consequences are chosen, not
+  inherited: it writes **no files** (`paths` is empty, and `output_averages` /
+  `subsample` reduce the files, so they do nothing and the run says so); it
+  **refuses** a `health_check`, because the gate is on by default and a long
+  accumulated run of an atmosphere is exactly the run that needs it, so
+  `health_check=None` makes going without it a decision rather than a log
+  line; and the accumulator is **not checkpointed**, because the checkpoint is
+  the model's restart state while the accumulator is an analysis product —
+  storing one in the other would make the checkpoint format depend on which
+  reduction the run chose. The carry is checkpointed as usual, a resumed run
+  starts a fresh accumulator, and it warns when both are given.
 - `jem.driver.default_health_check(datasets, chunk_index, elapsed_days)` — it
   runs `jcm.diagnostics.check_health` on `datasets["atm"]`, so a coupled run
   stops on the same evidence an uncoupled atmosphere does. A coupled model with
