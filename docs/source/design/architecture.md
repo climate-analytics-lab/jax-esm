@@ -968,12 +968,16 @@ Starting from the initial_carry argument at coupled step 3.
 Resumed from checkpoint /scratch/run/checkpoint at coupled step 120.
 ```
 
-A `checkpoint_path` that holds no complete checkpoint adds a **WARNING** saying
-in as many words that every component starts from its initial state rather than
-from a restart. That covers both ways of failing to resume — a directory an
-interrupted save left without its carry file, and a path with nothing at it at
-all — because the loop cannot tell a first run from a mistyped path, and the
-consequence is the same either way. `Coupler.load_state` completes the picture
+A `checkpoint_path` that holds no complete checkpoint says so on the line
+before, in as many words: every component starts from its initial state rather
+than from a restart (or, if an `initial_carry` was passed, from that). The two
+ways of failing to resume are not equally alarming, so they are not equally
+loud. A directory an interrupted save left without its carry file is a
+**WARNING** — a run died and its last chunk is gone. A path with nothing at it
+is **INFO**: with checkpointing on by default into a fresh output directory,
+that is what every first run sees, and a warning nobody can avoid is a warning
+nobody reads. Both name the path, so a mistyped one is still visible in the
+line the run always prints. `Coupler.load_state` completes the picture
 from the other end, naming each component's own source (the shared carry file,
 or its own `load_state`) and the step restored, so no part of a resumed model's
 state is unaccounted for.
@@ -1095,8 +1099,9 @@ three consequences are chosen rather than inherited:
   other would make the checkpoint format depend on which reduction a run chose
   — a restart file loadable only by a run asking for the same means — and let a
   restart corrupt an analysis. So the carry is checkpointed as usual, a resumed
-  run starts a fresh accumulator and covers only what it integrates, and the
-  run warns when both are given. A mean across a restart boundary is built by
+  run starts a fresh accumulator and covers only what it integrates, and it
+  **warns** when it does — a first accumulated run, which has lost nothing yet,
+  is told the same fact at INFO. A mean across a restart boundary is built by
   finalizing each call's accumulator and combining them, or by running the span
   in one call.
 

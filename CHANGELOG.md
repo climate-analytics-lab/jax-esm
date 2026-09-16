@@ -67,10 +67,14 @@ Breaking changes are marked; everything else is additive.
   <path> at coupled step N.` — because resuming a run is the same command as
   starting one, so nothing else in the log distinguishes a restart from a cold
   start that repeats simulated time already paid for. A `checkpoint_path` that
-  holds no complete checkpoint adds a WARNING saying in as many words that
-  every component starts from its initial state rather than from a restart;
-  that covers both an interrupted save and a path with nothing at it, since
-  the loop cannot tell a first run from a mistyped path. `Coupler.load_state`
+  holds no complete checkpoint says so on the line before, in as many words:
+  every component starts from its initial state rather than from a restart (or
+  from the `initial_carry`, if one was given). A directory left without its
+  carry file by an interrupted save is a WARNING; a path with nothing at it is
+  INFO, because with checkpointing on by default that is what every first run
+  sees. Both name the path. A run that finds it has nothing left to integrate
+  also warns rather than noting it, since the caller asked for a run and got
+  none. `Coupler.load_state`
   / `jem.checkpoint.load_coupled_carry` log at INFO which components were
   restored from the shared carry file, which read themselves back through
   their own `load_state`, and at what step, so every component's source is

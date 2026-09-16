@@ -14,3 +14,21 @@ output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the
 # value would only be a second place for it to drift.
+#
+# HOW TO RESUME ONE. The default `checkpoint_path` is relative, so it lands in
+# the run's own Hydra output directory, and every launch gets a new one. A
+# requeued job therefore has to be told where the last one wrote, in one of
+# two ways:
+#
+#   # continue in the earlier run's directory (its output files are there too)
+#   python -m jem.main +configuration=earth-slab coupled_run=long_run \
+#       coupled_run.output_dir=outputs/2026-09-16/11-04-02
+#
+#   # or keep the restart state somewhere of its own, the same every launch
+#   python -m jem.main +configuration=earth-slab coupled_run=long_run \
+#       coupled_run.checkpoint_path=/scratch/$USER/earth-slab/checkpoint
+#
+# The second is what a queue script should do: one fixed absolute path, so the
+# resubmit command is the submit command. Either way the run logs which state
+# it started from, so a resume that silently became a cold start is visible in
+# the first lines of the log.

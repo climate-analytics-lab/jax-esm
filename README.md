@@ -190,9 +190,12 @@ resumed from.
 Because resuming is the same command as starting, the run **says where its
 starting state came from**, in one INFO line before anything is compiled —
 `coupler.initialize()`, the `initial_carry` argument, or a named checkpoint,
-always with the coupled step — and warns, in as many words, when a
-`checkpoint_path` holds no complete checkpoint and every component is therefore
-starting from its initial state rather than from a restart. `load_state` names
+always with the coupled step. When a `checkpoint_path` holds no complete
+checkpoint the line before says so in as many words: every component is
+starting from its initial state rather than from a restart. That is a WARNING
+when the directory is the wreckage of an interrupted save, and INFO when there
+is simply nothing there — which, with checkpointing on by default, is what
+every first run sees. `load_state` names
 each component's own source in turn. Loading is all-or-nothing: every leaf comes
 from the checkpoint, and a component the checkpoint does not hold is an error,
 never a silent fresh initialization.

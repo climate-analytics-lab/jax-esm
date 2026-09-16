@@ -426,8 +426,11 @@ def windowed_mean(
         The coupled model the accumulator is for.
     window : str or float
         Length of one window, as a ``jcm.date.parse_duration_days`` string
-        (``"5 days"``, ``"1 month"``) or a number of days, parsed on the
-        coupler's calendar. It must be a whole number of coupling steps: a
+        (``"5 days"``, ``"2 days"``, ``"12 hours"``) or a number of days,
+        parsed on the coupler's calendar. Note that ``"1 month"`` is a
+        *calendar-averaged* month -- 365/12 days, not a whole number of daily
+        steps -- so monthly bins come from :func:`monthly_mean`, which knows
+        the real month lengths, and not from here. It must be a whole number of coupling steps: a
         window that ended part-way through a step would have to attribute
         that step to one side or the other, and there is no defensible
         choice.

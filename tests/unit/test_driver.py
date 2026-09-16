@@ -461,6 +461,34 @@ def test_a_rerun_into_the_same_output_directory_resumes(tmp_path, caplog):
     ]
 
 
+def test_repeating_a_finished_run_warns_that_it_did_nothing(tmp_path, caplog):
+    """The same call twice resumes rather than repeating, and says so loudly.
+
+    `output_dir` is a fixed relative path for a plain Python caller, so with
+    checkpointing on the second of two identical calls -- a script re-run, a
+    notebook cell run again -- restores the first call's final state and has
+    nothing left to integrate. That is correct, and it is also not what
+    someone re-running a script expects, so it is a WARNING rather than a
+    note.
+    """
+    run_chunked(two_slabs(), total_time="2 days", chunk="2 days", output_dir=tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        again = run_chunked(
+            two_slabs(), total_time="2 days", chunk="2 days", output_dir=tmp_path
+        )
+
+    assert again.completed
+    assert again.steps_completed == 2
+    assert again.paths == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a run that integrated nothing must say so at WARNING"
+    assert "Nothing to integrate" in caplog.text
+    # The same line names where the state came from, so the reason it had
+    # nothing to do is in the message that reports it.
+    assert f"Resumed from checkpoint {tmp_path / 'checkpoint'}" in caplog.text
+
+
 def test_checkpointing_can_be_turned_off(coupler, tmp_path):
     """`checkpoint_path=None` writes no restart state at all."""
     run_chunked(
@@ -945,19 +973,19 @@ def test_accumulate_with_a_health_check_is_refused(coupler, tmp_path):
         )
 
 
-def test_an_accumulated_run_warns_that_the_accumulator_is_not_checkpointed(
+def test_an_accumulated_run_says_the_accumulator_is_not_checkpointed(
     coupler, tmp_path, caplog
 ):
     """The carry is still checkpointed; the accumulator deliberately is not.
 
     The checkpoint is the model's restart state and the accumulator is an
     analysis product; putting one in the other would make the checkpoint
-    format depend on which reduction a run happened to choose. The cost is
-    that a resumed run accumulates only what it integrates, which is not
-    something a modeller should have to deduce from the means.
+    format depend on which reduction a run happened to choose. A first run has
+    lost nothing yet, so it is told at INFO -- warning here would fire on
+    every accumulated run, which is how a warning stops being read.
     """
     checkpoint = tmp_path / "checkpoint"
-    with caplog.at_level(logging.WARNING, logger="jem.driver"):
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
         result = run_chunked(
             coupler,
             total_time="4 days",
@@ -968,13 +996,45 @@ def test_an_accumulated_run_warns_that_the_accumulator_is_not_checkpointed(
             accumulate=monthly_mean(coupler),
         )
 
-    assert "not part of the checkpoint" in caplog.text
+    assert "The accumulator is not part of the checkpoint" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert result.accumulator is not None
     # The restart state itself is written as usual, and holds no accumulator:
     # the checkpoint of an accumulated run is loadable by a run that asks for
     # no reduction at all, or for a different one.
     assert sorted(p.name for p in checkpoint.iterdir()) == [CARRY_FILENAME]
     assert int(two_slabs().load_state(checkpoint).step) == 4
+
+
+def test_a_resumed_accumulated_run_warns_that_its_means_are_partial(
+    tmp_path, caplog
+):
+    """The warning fires where the damage is: the run whose means are partial.
+
+    A run that resumed has an accumulator covering only the chunks this call
+    integrated, and the means it returns are not the means of the simulation
+    they appear to describe. That is worth a warning, and it is actionable --
+    unlike the same sentence on a first run, which has lost nothing.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    monthly = monthly_mean(two_slabs())
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="2 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+        health_check=None, accumulate=monthly,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="jem.driver"):
+        resumed = run_chunked(
+            two_slabs(), total_time="4 days", chunk="2 days",
+            output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+            health_check=None, accumulate=monthly,
+        )
+
+    assert "covers only the chunks this call integrates" in caplog.text
+    # Two of the run's four days were accumulated, and it is the second two.
+    _, counts = resumed.accumulator
+    assert int(np.sum(np.asarray(counts))) == 2
 
 
 def test_an_accumulated_run_warns_that_output_reductions_do_nothing(

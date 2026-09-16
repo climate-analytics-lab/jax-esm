@@ -84,12 +84,14 @@ cold-started repeats simulated time that has already been paid for. So
 integrate, at INFO, in exactly one line, before anything is compiled --
 ``coupler.initialize()``, the ``initial_carry`` argument, or a named
 checkpoint, always with the coupled step. A ``checkpoint_path`` that holds no
-complete checkpoint adds a WARNING naming the failure and what the run does
-instead -- for a run with no ``initial_carry``, in as many words, that every
-component starts from its initial state rather than from a restart. It covers
-both an interrupted save and a path with nothing at it, because the loop
-cannot tell a first run from a mistyped path and the consequence is the same
-either way. :meth:`jem.base.coupler.Coupler.load_state` completes the picture
+complete checkpoint says so on the line before, naming the failure and what
+the run does instead -- for a run with no ``initial_carry``, in as many words,
+that every component starts from its initial state rather than from a restart.
+The wreckage of an interrupted save is a WARNING, because a run died and its
+last chunk is gone; a path with nothing at it is INFO, because with
+checkpointing on by default that is what every first run sees, and a warning
+nobody can avoid is a warning nobody reads. Both name the path, so a mistyped
+one is visible in the line the run always prints. :meth:`jem.base.coupler.Coupler.load_state` completes the picture
 by naming each component's own source -- the shared carry file or its own
 ``load_state`` -- so no part of a resumed model's state is unaccounted for.
 
@@ -331,7 +333,18 @@ def run_chunked(
         ``output_dir`` is what resumes it -- the one action that resumes a run
         is the one that would otherwise overwrite its output. An **absolute**
         path is used exactly as given, which is how a run checkpoints to
-        scratch while writing output somewhere else.
+        scratch while writing output somewhere else, and how a queue script
+        makes its resubmit command identical to its submit command.
+
+        Two consequences of the default worth knowing. ``output_dir``
+        defaults to a *fixed* ``"outputs"`` for a plain Python caller, so
+        calling this function twice from the same working directory **resumes
+        the first call** rather than repeating it -- and a second call that
+        asks for no more time than the first has nothing to integrate, which
+        it warns about. And a run launched through Hydra gets a new output
+        directory each time, so resuming one from the command line means
+        naming the earlier run's ``output_dir``, or giving an absolute
+        ``checkpoint_path``.
     accumulate : pair of callables, optional
         An **in-scan reduction** of the per-step diagnostics --
         :func:`jem.accumulate.monthly_mean` or
@@ -422,7 +435,9 @@ def run_chunked(
     output_dir = Path(output_dir)
     checkpoint_dir = _checkpoint_directory(checkpoint_path, output_dir)
 
-    carry, provenance = _starting_carry(coupler, initial_carry, checkpoint_dir)
+    carry, provenance, resumed = _starting_carry(
+        coupler, initial_carry, checkpoint_dir
+    )
     # One line, always, whatever the run does next: a modeller reading a log
     # has to be able to see at a glance whether the state being integrated is
     # a restart or a cold start, and which. It is the first thing the run
@@ -440,12 +455,24 @@ def run_chunked(
                 "and an accumulated run writes none; they do nothing here.",
                 output_averages, subsample,
             )
-        if checkpoint_dir is not None:
+        if resumed:
+            # This run's means really are partial, so this is the moment the
+            # warning is about and the moment it can be acted on.
             logger.warning(
-                "The accumulator is not part of the checkpoint -- that holds "
-                "the model's restart state, not an analysis product -- so a "
-                "run resumed from %s starts a fresh accumulator and its means "
-                "cover only the chunks that call integrates.", checkpoint_dir,
+                "This run resumed from %s, and the accumulator is NOT part of "
+                "a checkpoint -- that holds the model's restart state, not an "
+                "analysis product. The reduction therefore starts empty and "
+                "covers only the chunks this call integrates, not the ones "
+                "the earlier run did.", checkpoint_dir,
+            )
+        elif checkpoint_dir is not None:
+            # Nothing is wrong yet; say it once, at INFO, so that a later
+            # resume is not a surprise. A warning here would fire on every
+            # accumulated run and so be read by nobody.
+            logger.info(
+                "The accumulator is not part of the checkpoint written to %s: "
+                "a run resumed from it will start a fresh reduction covering "
+                "only what it integrates.", checkpoint_dir,
             )
 
     # Built once and cached by length: every chunk but (at most) the first of
@@ -471,9 +498,15 @@ def run_chunked(
     accumulator: Any = None if accumulate is None else accumulate[0]()
     batches = remaining_batches(int(carry.step), total_steps, steps_per_chunk)
     if not batches:
-        logger.info(
+        # WARNING, not INFO: the caller asked for a run and got none. With
+        # checkpointing on by default, the usual way to reach this is calling
+        # `run_chunked` twice with the same `output_dir` -- a re-run of a
+        # script, or a notebook cell run again -- which resumes the first call
+        # and finds it already finished. That is correct, and it is also not
+        # what someone re-running a script to change something expects.
+        logger.warning(
             "Nothing to integrate: the run starts at coupled step %d and asks "
-            "for %d.", int(carry.step), total_steps,
+            "for %d. %s", int(carry.step), total_steps, provenance,
         )
     for steps in batches:
         first_step = int(carry.step)
@@ -627,8 +660,8 @@ def _starting_carry(
     coupler: "Coupler",
     initial_carry: CoupledCarry | None,
     checkpoint_dir: Path | None,
-) -> tuple[CoupledCarry, str]:
-    """Return the carry the run starts from, and a sentence saying where from.
+) -> tuple[CoupledCarry, str, bool]:
+    """Return the starting carry, where it came from, and whether it was resumed.
 
     There are only three places a run's starting state can come from -- a
     checkpoint, the ``initial_carry`` argument, or ``coupler.initialize()`` --
@@ -643,15 +676,15 @@ def _starting_carry(
     wreckage of an interrupted save (:mod:`jem.checkpoint` publishes that file
     last), so it is stepped over rather than loaded -- loading it would mean
     resuming from component states written at a step this run cannot know.
-    That, and a ``checkpoint_path`` with nothing at it at all, are **warned**
-    about rather than merely noted: in both the run was asked to resume and
-    could not, whether because a save died or because the path is not the one
-    the earlier run wrote (a typo resolves to a directory that does not
-    exist). The warning names the failure *and* what the run does instead,
+    Either way -- an interrupted save, or a ``checkpoint_path`` with nothing
+    at it -- the message names the failure *and* what the run does instead,
     which is why it is composed here and not in :func:`_load_checkpoint`: a
     caller who also passed an ``initial_carry`` -- a spun-up state, say -- is
-    not starting the model from scratch, and a warning saying so would be
-    false.
+    not starting the model from scratch, and saying so would be false. The
+    *level* comes from :func:`_load_checkpoint`, which is what distinguishes
+    the two: the wreckage of an interrupted save is a WARNING, and a path with
+    nothing at it is INFO, because with checkpointing on by default that is
+    what every first run sees.
     """
     path = checkpoint_dir
     restored, failure, level = (
@@ -666,7 +699,7 @@ def _starting_carry(
         return restored, (
             f"Resumed from checkpoint {path} at coupled step "
             f"{int(restored.step)}.{ignored}"
-        )
+        ), True
 
     if initial_carry is not None:
         carry = initial_carry
@@ -698,7 +731,7 @@ def _starting_carry(
         )
     if failure is not None:
         logger.log(level, "%s Nothing is restored from it: %s.", failure, consequence)
-    return carry, provenance
+    return carry, provenance, False
 
 
 def _load_checkpoint(

@@ -132,16 +132,23 @@ _STRUCTURE_CONTEXT = 60
 
 
 def _canonical_leaf(leaf: Any) -> np.ndarray:
-    """Return ``leaf`` as the numpy array JAX would carry it as.
+    """Return ``leaf`` as a host array with the dtype JAX would carry it as.
 
-    Both the saved value and the template go through this, and they have to,
-    because the same carry has two spellings: ``Coupler.initialize()`` may
-    leave a parameter as a Python ``float`` (a component's default), while the
-    carry that comes back out of ``lax.scan`` has it as a float32 array. Going
-    through ``jnp.asarray`` applies JAX's own dtype canonicalisation to both,
-    so the two spellings compare equal instead of reporting a spurious
-    float64-vs-float32 mismatch; ``np.asarray`` then brings it back to the host
-    for serialisation.
+    Numpy on the way **out only**. A carry's leaves are JAX arrays and come
+    back as JAX arrays: this is what :func:`save` writes, because flax's
+    MessagePack serializer takes host arrays, and :func:`load` puts every leaf
+    through ``jnp.asarray`` on the way back in (the ``restored.append`` near
+    its end), so the round trip is JAX array -> host array in the file -> JAX
+    array. Nothing that comes out of this module is a numpy array.
+
+    The ``jnp.asarray`` *first* is not redundant with the ``np.asarray``: it
+    applies JAX's own dtype canonicalisation, which is what makes the two
+    spellings of the same carry compare as one leaf. ``Coupler.initialize()``
+    may leave a parameter as a Python ``float`` (a component's default), while
+    the carry that comes back out of ``lax.scan`` has it as a float32 array,
+    and both the saved value and the template go through here -- so without
+    the canonicalisation the two would be reported as a spurious
+    float64-vs-float32 mismatch.
     """
     return np.asarray(jnp.asarray(leaf))
 
