@@ -3,8 +3,11 @@
 Two layers live here, and a driver normally touches only the second:
 
 - :func:`save` / :func:`load` persist **any** pytree carry to a single
-  ``msgpack`` file. The leaves are flattened to a plain list of arrays and
-  serialised with ``flax.serialization``; the tree they came from is *rebuilt*
+  **MessagePack** (``msgpack``) file -- a compact binary serialization
+  format, a binary cousin of JSON, and the one flax's own checkpoints use
+  through ``flax.serialization.msgpack_serialize``, which is why the file is
+  called ``carry.msgpack``. The leaves are flattened to a plain list of arrays
+  and serialised with ``flax.serialization``; the tree they came from is *rebuilt*
   from a ``template`` at load time, which is what keeps the format small, and
   is recorded beside them only as a manifest to check that template against --
   each leaf's path, shape and dtype, and the repr of the whole ``PyTreeDef``.
@@ -184,7 +187,7 @@ def _delegated_marker() -> Carry:
 
 
 def save(carry: Carry, path: str | Path) -> Path:
-    """Write any pytree ``carry`` to ``path`` as one msgpack file.
+    """Write any pytree ``carry`` to ``path`` as one MessagePack file.
 
     Only the leaves are written, as arrays, beside a manifest of the tree they
     came from -- each leaf's path and the repr of the whole ``PyTreeDef``. The

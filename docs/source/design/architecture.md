@@ -77,7 +77,10 @@ recoverable, and resuming at step 0 (or at a step reconstructed from a batch
 index) would silently move the run's calendar.
 
 The format is jax-gcm's: `jem.checkpoint.save(carry, path)` flattens any pytree
-to a list of typed arrays serialised with flax's msgpack codec, and
+to a list of typed arrays serialised with flax's **MessagePack** (`msgpack`)
+codec — a compact binary serialization format, a binary cousin of JSON, reached
+through `flax.serialization.msgpack_serialize`, which is where the
+`carry.msgpack` name comes from — and
 `load(template, path)` rebuilds the tree from a *template*'s treedef. The tree
 itself is never stored — rebuilding it from the template is what keeps the
 format small — but a manifest of it is, and that is what makes the format

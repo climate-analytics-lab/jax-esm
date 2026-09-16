@@ -287,7 +287,10 @@ Breaking changes are marked; everything else is additive.
   pytree, and `save_coupled_carry` / `load_coupled_carry` for a whole
   `CoupledCarry`, in
   the format jax-gcm already uses: the leaves flattened to typed arrays and
-  serialised with flax's msgpack codec, the tree they came from *rebuilt* from
+  serialised with flax's MessagePack (`msgpack`) codec — a compact binary
+  serialization format, a binary cousin of JSON, reached through
+  `flax.serialization.msgpack_serialize`, hence the `carry.msgpack` file name —
+  the tree they came from *rebuilt* from
   a template at load time and recorded beside them only as a manifest to check
   that template against. Every leaf is checked against the template's path,
   shape and dtype, so a checkpoint from another grid or another component
@@ -383,7 +386,7 @@ Breaking changes are marked; everything else is additive.
   `default_exchanges` still warns when a component is registered under a name
   that just misses the standard wiring (`ice`, `ocean`, `land`, `atmosphere`),
   because the failure it causes is otherwise silent.
-- **The checkpoint format is msgpack, and old checkpoints cannot be read**
+- **The checkpoint format is MessagePack, and old checkpoints cannot be read**
   (breaking). `jem/utils/checkpoints.py` wrote one pickle per component plus a
   pickled step counter; a pickle ties a checkpoint to the classes that wrote it
   and validates nothing. A checkpoint directory now holds one
