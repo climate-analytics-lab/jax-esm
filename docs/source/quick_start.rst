@@ -169,8 +169,14 @@ A long run checkpoints and writes chunk means:
 
     python -m jem.main +configuration=earth-slab coupled_run=longrun
 
-Run it again with the same ``coupled_run.checkpoint_path`` and it continues from
-the coupled step the checkpoint holds. In Python that is the same call:
+Checkpointing is on by default, into ``<output_dir>/checkpoint`` -- a relative
+``checkpoint_path`` resolves against the run's own output directory, which
+Hydra makes fresh each run. Point a second run at the first's output directory
+(``coupled_run.output_dir=outputs/2026-09-16/11-04-02``) and it continues from
+the coupled step the checkpoint holds, saying so in its log; an absolute
+``coupled_run.checkpoint_path`` is used as given, and
+``coupled_run.checkpoint_path=null`` turns checkpointing off. In Python that is
+the same call:
 
 .. code-block:: python
 
@@ -180,5 +186,5 @@ the coupled step the checkpoint holds. In Python that is the same call:
         chunk="30 days",          # a file, a restart and a health check a month
         output_dir="output",
         output_averages=True,     # one record per chunk: the monthly mean
-        checkpoint_path="checkpoint",
+        # checkpoint_path="checkpoint" is the default, relative to output_dir
     )

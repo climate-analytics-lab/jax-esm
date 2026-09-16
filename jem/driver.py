@@ -49,6 +49,19 @@ scratch (nothing there) or continues from where it stopped. The cost is that
 only the newest state survives; a run that wants a history of restart points
 keeps its own directory of them and passes each one in turn.
 
+**Checkpointing is on by default**, because a run long enough to be worth
+chunking is a run worth being able to restart, and a default of ``None`` made
+losing a week of compute the consequence of forgetting one argument. A
+*relative* ``checkpoint_path`` -- including the default ``"checkpoint"`` -- is
+resolved against ``output_dir`` rather than against the working directory, so
+each run gets its own restart directory (Hydra makes a fresh output directory
+per run) and two runs launched from one shell cannot overwrite each other's.
+Resuming is then pointing a second run at the first's output directory, which
+is the same action that would otherwise overwrite its files -- so it is never
+accidental, and the provenance line below says which happened. An absolute
+path is used as given, for a run that checkpoints to scratch while writing
+output elsewhere; ``None`` disables checkpointing entirely.
+
 Because there is only ever one checkpoint, the health gate runs *before* it
 is written and a chunk the gate rejects is not checkpointed at all: saving it
 would overwrite the last healthy restart point with a broken state, and a
@@ -123,6 +136,11 @@ SECONDS_PER_DAY = 86400.0
 #: an integer; anything a user would call "not a whole number of steps" is
 #: many orders of magnitude larger than this.
 STEP_TOLERANCE = 1e-9
+
+#: Where a run checkpoints when ``checkpoint_path`` is left at its default.
+#: Relative, so it lands inside ``output_dir`` -- see
+#: :func:`_checkpoint_directory`.
+DEFAULT_CHECKPOINT_PATH = "checkpoint"
 
 #: The component name :func:`default_health_check` looks for. It is
 #: :class:`~jem.components.jcm.component.JCMComponent`'s own ``name``, and the
@@ -253,7 +271,7 @@ def run_chunked(
     subsample: int = 1,
     health_check: HealthCheck | None = default_health_check,
     bail_on_unhealthy: bool = True,
-    checkpoint_path: Path | str | None = None,
+    checkpoint_path: Path | str | None = DEFAULT_CHECKPOINT_PATH,
     accumulate: "Accumulator | None" = None,
 ) -> RunResult:
     """Integrate ``coupler`` for ``total_time``, a chunk at a time.
@@ -272,8 +290,9 @@ def run_chunked(
         health checks, in the same forms. Must be a whole multiple of the
         coupling timestep.
     initial_carry : jem.base.component.CoupledCarry, optional
-        Where to start. Defaults to ``coupler.initialize()``. A checkpoint
-        found at ``checkpoint_path`` replaces it.
+        Where to start. Defaults to ``coupler.initialize()``. A complete
+        checkpoint found at ``checkpoint_path`` takes precedence over it, and
+        the run says so.
     output_dir : path-like
         Directory the chunk files are written into, created if absent.
     output_averages : bool
@@ -298,11 +317,21 @@ def run_chunked(
         checkpointed, so the restart point stays at the last chunk that
         passed. False logs the failure, checkpoints and carries on -- which
         is what a run studying the instability itself wants.
-    checkpoint_path : path-like, optional
-        Directory holding the run's restart state. The coupled carry is
-        written there after every chunk the health gate accepts, and a run
-        started with a complete checkpoint already there resumes from it.
-        ``None`` disables checkpointing.
+    checkpoint_path : path-like or None
+        Directory holding the run's restart state, ``"checkpoint"`` by
+        default -- **checkpointing is on**. The coupled carry is written
+        there after every chunk the health gate accepts, and a run started
+        with a complete checkpoint already there resumes from it. ``None``
+        disables checkpointing entirely.
+
+        A **relative** path is resolved against ``output_dir``, not against
+        the working directory: each run's output directory is its own (Hydra
+        makes a fresh one per run), so the default gives every run its own
+        restart directory, and pointing a second run at the same
+        ``output_dir`` is what resumes it -- the one action that resumes a run
+        is the one that would otherwise overwrite its output. An **absolute**
+        path is used exactly as given, which is how a run checkpoints to
+        scratch while writing output somewhere else.
     accumulate : pair of callables, optional
         An **in-scan reduction** of the per-step diagnostics --
         :func:`jem.accumulate.monthly_mean` or
@@ -390,7 +419,10 @@ def run_chunked(
             "trade anyone would make on purpose."
         )
 
-    carry, provenance = _starting_carry(coupler, initial_carry, checkpoint_path)
+    output_dir = Path(output_dir)
+    checkpoint_dir = _checkpoint_directory(checkpoint_path, output_dir)
+
+    carry, provenance = _starting_carry(coupler, initial_carry, checkpoint_dir)
     # One line, always, whatever the run does next: a modeller reading a log
     # has to be able to see at a glance whether the state being integrated is
     # a restart or a cold start, and which. It is the first thing the run
@@ -408,15 +440,14 @@ def run_chunked(
                 "and an accumulated run writes none; they do nothing here.",
                 output_averages, subsample,
             )
-        if checkpoint_path is not None:
+        if checkpoint_dir is not None:
             logger.warning(
                 "The accumulator is not part of the checkpoint -- that holds "
                 "the model's restart state, not an analysis product -- so a "
                 "run resumed from %s starts a fresh accumulator and its means "
-                "cover only the chunks that call integrates.", checkpoint_path,
+                "cover only the chunks that call integrates.", checkpoint_dir,
             )
 
-    output_dir = Path(output_dir)
     # Built once and cached by length: every chunk but (at most) the first of
     # a resumed run has the same number of steps, so this compiles one
     # trajectory for the whole run.
@@ -519,8 +550,8 @@ def run_chunked(
         # resumes by repeating the chunk that failed. A run integrating an
         # unhealthy state deliberately (`bail_on_unhealthy=False`) does
         # checkpoint it: it is carrying on, and has to stay resumable.
-        if checkpoint_path is not None and not stopping:
-            coupler.save_state(carry, Path(checkpoint_path))
+        if checkpoint_dir is not None and not stopping:
+            coupler.save_state(carry, checkpoint_dir)
         if stopping:
             logger.error(
                 "Stopping after %d coupled steps; the output written so far is "
@@ -567,10 +598,35 @@ def _whole_steps(
     return int(rounded)
 
 
+def _checkpoint_directory(
+    checkpoint_path: Path | str | None, output_dir: Path
+) -> Path | None:
+    """Return the directory the run checkpoints into, or None for no checkpoint.
+
+    A **relative** ``checkpoint_path`` is resolved against ``output_dir``
+    rather than against the working directory. That is what makes
+    checkpointing safe to have on by default: every run's output directory is
+    its own (Hydra makes a fresh one per run), so the default ``"checkpoint"``
+    cannot have two runs writing over each other's restart state, and the one
+    way to resume a run -- pointing a second run at the same ``output_dir`` --
+    is the same action that would otherwise overwrite its output, which the
+    provenance line then reports. Resolving against the working directory
+    instead would give every run launched from the same shell the same
+    checkpoint directory.
+
+    An absolute path is used as given, for a run that checkpoints to scratch
+    while writing its output elsewhere.
+    """
+    if checkpoint_path is None:
+        return None
+    path = Path(checkpoint_path)
+    return path if path.is_absolute() else output_dir / path
+
+
 def _starting_carry(
     coupler: "Coupler",
     initial_carry: CoupledCarry | None,
-    checkpoint_path: Path | str | None,
+    checkpoint_dir: Path | None,
 ) -> tuple[CoupledCarry, str]:
     """Return the carry the run starts from, and a sentence saying where from.
 
@@ -597,9 +653,9 @@ def _starting_carry(
     not starting the model from scratch, and a warning saying so would be
     false.
     """
-    path = None if checkpoint_path is None else Path(checkpoint_path)
-    restored, failure = (
-        (None, None) if path is None else _load_checkpoint(coupler, path)
+    path = checkpoint_dir
+    restored, failure, level = (
+        (None, None, logging.INFO) if path is None else _load_checkpoint(coupler, path)
     )
     if restored is not None:
         # A caller who passed both gets told which one won, because the
@@ -641,35 +697,40 @@ def _starting_carry(
             "restart, and the run begins again at the start date"
         )
     if failure is not None:
-        logger.warning("%s Nothing is restored from it: %s.", failure, consequence)
+        logger.log(level, "%s Nothing is restored from it: %s.", failure, consequence)
     return carry, provenance
 
 
 def _load_checkpoint(
     coupler: "Coupler", checkpoint_path: Path
-) -> tuple[CoupledCarry | None, str | None]:
-    """Return the carry ``checkpoint_path`` holds, or None and why not.
+) -> tuple[CoupledCarry | None, str | None, int]:
+    """Return the carry ``checkpoint_path`` holds, or None, why not, and how loudly.
 
     The reason comes back as a sentence rather than being logged here,
     because only :func:`_starting_carry` knows what the run will do
-    *instead* -- and a warning that named the failure without its consequence,
+    *instead* -- and a message that named the failure without its consequence,
     or asserted a consequence that the caller's ``initial_carry`` makes false,
     would be worse than none. :meth:`jem.base.coupler.Coupler.load_state` logs
     which component came from where, so nothing is said here about a load that
     worked.
+
+    The two ways of not resuming are not equally alarming, which is why the
+    level comes back too. A directory with no carry file is the wreckage of an
+    interrupted save (:mod:`jem.checkpoint` publishes that file last) -- a run
+    died, and its last chunk is gone -- so it is a **warning**. A path with
+    nothing at it at all is what every first run sees, and since
+    checkpointing is on by default into a fresh output directory, that is the
+    common case: it is reported at INFO, alongside the provenance line, which
+    names the path so a mistyped one is still visible.
     """
     if (checkpoint_path / CARRY_FILENAME).exists():
-        return coupler.load_state(checkpoint_path), None
+        return coupler.load_state(checkpoint_path), None, logging.INFO
     if checkpoint_path.is_dir():
         return None, (
             f"{checkpoint_path} holds no {CARRY_FILENAME}, so it is not a "
             "complete checkpoint: the save that wrote it was interrupted."
-        )
-    # Warned about rather than merely noted, even though it is also what a
-    # first run looks like: a mistyped checkpoint path is indistinguishable
-    # from one, and the cost of getting it wrong is a run that silently
-    # repeats simulated time already paid for.
+        ), logging.WARNING
     return None, (
         f"There is no checkpoint at {checkpoint_path}; a run asked to resume "
         "from it cannot. One will be written there after every chunk."
-    )
+    ), logging.INFO

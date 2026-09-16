@@ -162,8 +162,8 @@ Python class that owns it, and every *run* default on `jem.driver.run_chunked`.
 
 ## Long runs: checkpoints and monthly means
 
-`run_chunked` writes a restart after every chunk when it is given a path, and
-resuming is the same call:
+`run_chunked` writes a restart after every chunk — checkpointing is **on by
+default** — and resuming is the same call:
 
 ```python
 result = run_chunked(
@@ -172,13 +172,18 @@ result = run_chunked(
     chunk="30 days",             # a health check, a file and a restart per month
     output_dir="output",
     output_averages=True,        # one record per chunk: the monthly mean
-    checkpoint_path="checkpoint",
+    # checkpoint_path="checkpoint" is the default, relative to output_dir
 )
 ```
 
-Run it again with the same `checkpoint_path` and it continues from the coupled
-step the checkpoint holds — `python -m jem.main ... coupled_run=longrun` is the
-command-line form. The checkpoint is one directory, rewritten atomically each
+Run it again with the same `output_dir` (or the same `checkpoint_path`) and it
+continues from the coupled step the checkpoint holds —
+`python -m jem.main ... coupled_run=longrun` is the command-line form. A
+*relative* `checkpoint_path` resolves against `output_dir`, so every run gets
+its own restart directory — Hydra makes a fresh output directory per run — and
+resuming is deliberately the same action that would otherwise overwrite a run's
+output. An absolute path is used as given, and `checkpoint_path=None`
+(`coupled_run.checkpoint_path=null`) turns checkpointing off. The checkpoint is one directory, rewritten atomically each
 chunk; a save interrupted half way through is detected and skipped rather than
 resumed from.
 

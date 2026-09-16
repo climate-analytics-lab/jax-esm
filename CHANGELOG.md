@@ -35,7 +35,7 @@ Breaking changes are marked; everything else is additive.
       chunk="30 days",             # a file, a restart and a health check a month
       output_dir="output",
       output_averages=True,        # one record per chunk: the monthly mean
-      checkpoint_path="checkpoint",
+      # checkpoint_path="checkpoint" is the default, relative to output_dir
   )
   ```
 
@@ -46,6 +46,20 @@ Breaking changes are marked; everything else is additive.
   naming both quantities. A final partial chunk is refused rather than
   silently compiled a second time. The trajectory is compiled once, for a
   chunk's worth of coupled steps.
+- **Checkpointing is on by default.** `run_chunked`'s `checkpoint_path`
+  defaults to `"checkpoint"` rather than to `None`: a run long enough to be
+  worth chunking is a run worth being able to restart, and a default of `None`
+  made losing a week of compute the consequence of forgetting an argument.
+  `checkpoint_path=None` (`coupled_run.checkpoint_path=null`) disables it.
+  A **relative** path — including that default — is now resolved against
+  `output_dir` rather than against the working directory, so each run gets its
+  own restart directory (Hydra makes a fresh output directory per run) and two
+  runs launched from one shell cannot overwrite each other's restart state;
+  resuming is pointing a second run at the first's output directory, the same
+  action that would otherwise overwrite its files, and the provenance line says
+  which happened. An **absolute** path is used exactly as given, for a run that
+  checkpoints to scratch while writing output elsewhere.
+  `coupled_run/longrun.yaml` no longer repeats the setting.
 - **A run says where its starting state came from.** `run_chunked` logs one
   INFO line before anything is compiled — `Starting from coupler.initialize()
   at coupled step 0 (no checkpoint was given).`, `Starting from the

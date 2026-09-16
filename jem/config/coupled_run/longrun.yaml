@@ -11,5 +11,6 @@ chunk: "30 days"
 # Monthly means rather than every coupling step: at this length the
 # instantaneous stream is both huge and not what a climate is read from.
 output_averages: true
-# A run this long outlives a queue slot, so it always checkpoints.
-checkpoint_path: checkpoint
+# Nothing about checkpointing is set here: a run this long outlives a queue
+# slot and must checkpoint, and `default.yaml` already does -- repeating the
+# value would only be a second place for it to drift.

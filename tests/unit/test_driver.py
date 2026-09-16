@@ -414,6 +414,83 @@ def test_checkpoint_is_one_directory_rewritten_each_chunk(coupler, tmp_path):
     assert_carries_agree(restored, result.final_carry, atol=1e-12)
 
 
+def test_checkpointing_is_on_by_default_inside_the_output_directory(
+    coupler, tmp_path
+):
+    """A run with no `checkpoint_path` still leaves a restart point behind.
+
+    Checkpointing is on, and the default path is relative, so it lands in the
+    run's own output directory. That is what makes an on-by-default checkpoint
+    safe: every run's output directory is its own, so two runs launched from
+    the same shell cannot write over each other's restart state.
+    """
+    result = run_chunked(
+        coupler, total_time="4 days", chunk="2 days", output_dir=tmp_path
+    )
+
+    checkpoint = tmp_path / "checkpoint"
+    assert (checkpoint / CARRY_FILENAME).exists()
+    restored = two_slabs().load_state(checkpoint)
+    assert int(restored.step) == 4
+    assert_carries_agree(restored, result.final_carry, atol=1e-12)
+
+
+def test_a_rerun_into_the_same_output_directory_resumes(tmp_path, caplog):
+    """Pointing a second run at the same `output_dir` continues the first.
+
+    With a relative default resolved against `output_dir`, the action that
+    resumes a run is the same one that would otherwise overwrite its output --
+    and the provenance line says which happened, so it is never a silent
+    choice.
+    """
+    run_chunked(two_slabs(), total_time="2 days", chunk="2 days", output_dir=tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        resumed = run_chunked(
+            two_slabs(), total_time="4 days", chunk="2 days", output_dir=tmp_path
+        )
+
+    assert resumed.steps_completed == 4
+    assert (
+        f"Resumed from checkpoint {tmp_path / 'checkpoint'} at coupled step 2."
+        in caplog.text
+    )
+    # Only the second chunk was integrated, so only its file was written.
+    assert sorted(path.name for path in resumed.paths) == [
+        "ocn-00000002.nc", "seaice-00000002.nc"
+    ]
+
+
+def test_checkpointing_can_be_turned_off(coupler, tmp_path):
+    """`checkpoint_path=None` writes no restart state at all."""
+    run_chunked(
+        coupler, total_time="2 days", chunk="2 days",
+        output_dir=tmp_path, checkpoint_path=None,
+    )
+    assert not (tmp_path / "checkpoint").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "ocn-00000000.nc", "seaice-00000000.nc"
+    ]
+
+
+def test_an_absolute_checkpoint_path_is_used_as_given(coupler, tmp_path):
+    """An absolute path is not resolved against `output_dir`.
+
+    That is how a run checkpoints to scratch while writing its output
+    somewhere else -- and how a run keeps one restart directory across
+    several output directories.
+    """
+    output = tmp_path / "output"
+    elsewhere = tmp_path / "scratch" / "restart"
+    run_chunked(
+        coupler, total_time="2 days", chunk="2 days",
+        output_dir=output, checkpoint_path=elsewhere,
+    )
+
+    assert (elsewhere / CARRY_FILENAME).exists()
+    assert not (output / "checkpoint").exists()
+
+
 def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
     """A checkpoint directory with no carry file is stepped over, not loaded.
 
@@ -462,18 +539,45 @@ def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler)
 # ---------------------------------------------------------------------------
 
 
-def test_a_fresh_run_says_it_started_from_initialize(coupler, tmp_path, caplog):
+def test_a_run_with_checkpointing_off_says_it_started_from_initialize(
+    coupler, tmp_path, caplog
+):
     """No checkpoint, no carry: the log names `coupler.initialize()` and step 0.
 
     A run's starting state decides what its output means, and a reader of the
     log cannot see it in any other line -- so there is exactly one, always.
     """
     with caplog.at_level(logging.INFO, logger="jem.driver"):
-        run_chunked(coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path)
+        run_chunked(
+            coupler, total_time="2 days", chunk="2 days",
+            output_dir=tmp_path, checkpoint_path=None,
+        )
 
     assert (
         "Starting from coupler.initialize() at coupled step 0 "
         "(no checkpoint was given)." in caplog.text
+    )
+
+
+def test_a_first_run_names_the_empty_checkpoint_path_it_looked_at(
+    coupler, tmp_path, caplog
+):
+    """Checkpointing is on by default, so a first run says what it did not find.
+
+    It is reported at INFO, not WARNING: with a fresh output directory per run
+    this is what *every* first run sees, and a warning nobody can avoid is a
+    warning nobody reads. The path is named, so a mistyped one is still
+    visible in the one line the run always prints.
+    """
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert f"There is no checkpoint at {tmp_path / 'checkpoint'}" in caplog.text
+    assert (
+        f"Starting from coupler.initialize() at coupled step 0 "
+        f"({tmp_path / 'checkpoint'} holds no complete checkpoint)."
+        in caplog.text
     )
 
 
@@ -512,26 +616,21 @@ def test_a_resumed_run_names_the_checkpoint_it_came_from(tmp_path, caplog):
     assert f"Resumed from checkpoint {checkpoint} at coupled step 2." in caplog.text
 
 
-@pytest.mark.parametrize("make_directory", [False, True])
-def test_a_checkpoint_that_cannot_be_resumed_from_warns(
-    coupler, tmp_path, caplog, make_directory
-):
-    """Asking to resume and getting a cold start is a WARNING, not a note.
+def test_the_wreckage_of_an_interrupted_save_warns(coupler, tmp_path, caplog):
+    """A checkpoint directory with no carry file is a WARNING, not a note.
 
-    Both ways of failing to resume are covered: a directory an interrupted
-    save left without its carry file, and a path with nothing at it at all --
-    which is what a first run looks like, and equally what a mistyped
-    checkpoint path looks like. The run cannot tell those apart, so it says
-    what it is doing instead of guessing, and the words that matter are that
-    every component starts from its initial state rather than from a restart.
+    That is the one failure to resume that is genuinely abnormal: a run died
+    mid-save, and the chunk it was writing is gone. Unlike an empty path it is
+    not what every first run sees, so it is worth a warning -- which says both
+    what could not be read and that every component therefore starts from its
+    initial state rather than from a restart.
     """
     checkpoint = tmp_path / "checkpoint"
-    if make_directory:
-        run_chunked(
-            two_slabs(), total_time="2 days", chunk="2 days",
-            output_dir=tmp_path / "first", checkpoint_path=checkpoint,
-        )
-        (checkpoint / CARRY_FILENAME).unlink()
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="2 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+    (checkpoint / CARRY_FILENAME).unlink()
 
     with caplog.at_level(logging.INFO, logger="jem.driver"):
         run_chunked(
@@ -540,7 +639,7 @@ def test_a_checkpoint_that_cannot_be_resumed_from_warns(
         )
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings, "a run that could not resume must warn"
+    assert warnings, "an interrupted save must warn"
     assert "starts from its initial state rather than from a restart" in caplog.text
     # And the provenance line still says where the state did come from, naming
     # the path so the two lines cannot be read as being about different runs.

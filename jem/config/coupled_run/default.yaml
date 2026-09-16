@@ -40,15 +40,22 @@ subsample: 1
 # on (e.g. when the instability is the thing being studied).
 bail_on_unhealthy: true
 
-# Directory holding the run's restart state. null disables checkpointing; when
-# set, the coupled carry is written there after every chunk and a run started
-# with a complete checkpoint already there resumes from it -- so resuming is
-# the same command as starting. It is ONE directory, rewritten each chunk, not
-# a directory of dated restart points, and a relative path is resolved against
-# the directory the command was run from (Hydra does not change it), not
-# against the per-run output directory -- which changes every run and so could
-# never be resumed from.
-checkpoint_path: null
+# Directory holding the run's restart state. Checkpointing is ON: the coupled
+# carry is written here after every chunk the health gate accepts, and a run
+# started with a complete checkpoint already here resumes from it -- so
+# resuming is the same command as starting. It is ONE directory, rewritten
+# each chunk, not a directory of dated restart points.
+#
+# A RELATIVE path is resolved against `output_dir`, i.e. against the Hydra run
+# directory, which is fresh for every run: so this default gives each run its
+# own restart directory, two runs launched from the same shell cannot write
+# over each other's, and pointing a second run at an earlier run's output
+# directory (`coupled_run.output_dir=...`) is what resumes it -- reported by
+# the provenance line the run logs. An ABSOLUTE path is used as given, for a
+# run that checkpoints to scratch while writing output elsewhere.
+#
+# Disable with `coupled_run.checkpoint_path=null`.
+checkpoint_path: checkpoint
 
 # Logging level of the `jem` logger. Consumed by `jem.main` only -- it is not
 # an argument of `run_chunked()`, but it belongs with the run's other

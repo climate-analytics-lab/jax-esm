@@ -982,7 +982,21 @@ what makes resuming a run the same command as starting it: point at the path,
 and the run either starts from scratch or continues from where it stopped. The
 cost is that only the newest state survives; a run that wants a history of
 restart points keeps its own directory of them and hands each one in as
-`initial_carry`. Overwriting in place is safe because the carry file is written
+`initial_carry`.
+
+Checkpointing is **on by default** (`checkpoint_path="checkpoint"`): a run long
+enough to be worth chunking is a run worth being able to restart, and a default
+of `None` made losing a week of compute the consequence of forgetting an
+argument. A *relative* path — including that default — is resolved against
+`output_dir`, not against the working directory. Hydra gives every run a fresh
+output directory, so each run gets its own restart directory and two runs
+launched from one shell cannot overwrite each other's; resuming is pointing a
+second run at the first's output directory
+(`coupled_run.output_dir=outputs/2026-09-16/11-04-02`), which is the same
+action that would otherwise overwrite its files, so it is never accidental —
+and the provenance line says which of the two happened. An absolute path is
+used as given, for a run that checkpoints to scratch while writing output
+elsewhere; `checkpoint_path=null` turns checkpointing off. Overwriting in place is safe because the carry file is written
 last and removed first (see *Carry*), so an interrupted save leaves a directory
 the loop refuses to resume from — it logs and starts from the initial carry
 instead — rather than a mixture of two steps.
