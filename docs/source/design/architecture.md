@@ -1091,8 +1091,18 @@ relaxation_time = relaxation_time - learning_rate * gradient   # one plain step
 `tests/unit/test_accumulate.py` runs exactly this — the gradient of an
 accumulated July mean equals the gradient of the same quantity computed from
 the stacked diagnostics, and one descent step reduces the loss — so the snippet
-cannot rot. For a long calibration, `remat=True` on the trajectory trades
+cannot rot. Two practical notes it makes. `relaxation_time` is of order 1e6
+seconds while the loss is a few K², so `learning_rate` has to be scaled to the
+parameter (a real calibration hands the gradient to an optimizer, which does
+that for it); and for a long calibration `remat=True` on the trajectory trades
 recomputation for the memory the backward pass would otherwise need.
+
+Which parameter is varied *how* is the distinction in *Parameters: process and
+initial-condition* above: `relaxation_time` is read every step out of
+`carry["params"]`, so it could equally be replaced in the carry, while an
+initial-condition parameter has to go through `initialize` as it does here.
+Building the model inside `jax.grad` is not an alternative — a constructor
+validates its parameters, which needs concrete floats.
 
 ## Configuration
 

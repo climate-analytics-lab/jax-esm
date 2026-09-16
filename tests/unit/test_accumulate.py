@@ -544,6 +544,61 @@ def test_gradient_through_the_accumulated_mean(climatology_file, record_months):
     np.testing.assert_allclose(accumulated_gradient, stacked_gradient, rtol=1e-4)
 
 
+def test_calibrating_a_monthly_mean_against_a_target(climatology_file):
+    """The calibration loop the design doc documents, run.
+
+    ``docs/source/design/architecture.md`` answers "how do I apply a gradient
+    to calibrate monthly values?" with a snippet: build the trajectory with
+    ``accumulate=monthly``, take the squared error of
+    ``monthly.finalize(...)``'s July mean against a target, differentiate it
+    with respect to a carried ocean parameter, and take one plain descent
+    step. This *is* that snippet, so the documentation cannot drift away from
+    a loop that works: what it asserts is that the gradient is a usable
+    number (finite, non-zero) and that the step it implies actually reduces
+    the loss.
+    """
+    coupled = build_coupler(climatology_file)
+    ocn = coupled.components["ocn"]
+    monthly = monthly_mean(coupled)
+    trajectory = coupled.generate_trajectory_function(
+        STEPS_PER_YEAR, accumulate=monthly
+    )
+    JULY = 6  # `finalize`'s leading axis is January first.
+
+    def loss(relaxation_time, target_july_sst):
+        params = ocn.params.replace(relaxation_time=relaxation_time)
+        _, accumulator = trajectory(coupled.initialize({"ocn": params}))
+        july = monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature[
+            JULY
+        ]
+        return jnp.mean((july - target_july_sst) ** 2)
+
+    relaxation_time = jnp.float32(RELAXATION_TIME)
+    # A target the run misses, so there is a gradient to follow at all: the
+    # July mean this ocean settles at, one kelvin colder.
+    target_july_sst = (
+        monthly.finalize(trajectory(coupled.initialize())[1])["ocn"][
+            "state"
+        ].sea_surface_temperature[JULY]
+        - 1.0
+    )
+
+    before = float(loss(relaxation_time, target_july_sst))
+    gradient = float(jax.grad(loss)(relaxation_time, target_july_sst))
+    assert before > 0.0
+    assert np.isfinite(gradient)
+    assert gradient != 0.0
+
+    # One plain descent step. The learning rate is scaled by the parameter and
+    # the gradient because `relaxation_time` is of order 1e6 seconds while the
+    # loss is a few K^2 -- a bare constant would either do nothing or leave the
+    # parameter's physical range. A real calibration hands the same gradient to
+    # an optimizer, which does this scaling for it.
+    learning_rate = 0.05 * float(relaxation_time) / abs(gradient)
+    updated = relaxation_time - learning_rate * gradient
+    assert float(loss(updated, target_july_sst)) < before
+
+
 # ---------------------------------------------------------------------------
 # What monthly_mean refuses
 # ---------------------------------------------------------------------------
