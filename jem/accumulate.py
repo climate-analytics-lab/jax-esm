@@ -52,13 +52,17 @@ _MONTH_LENGTHS: dict[int, tuple[int, ...]] = {
 }
 
 
-def _month_of_day_table(days_per_year: float) -> np.ndarray:
+def _month_of_day_table(days_per_year: float) -> jnp.ndarray:
     """Return the 0-based month of each 0-based day of a fixed-length year.
 
     This table is what makes month binning cheap and static inside a scan: a
     month is a lookup on the day of year, not calendar arithmetic, and no
     branch depends on which month it is -- so one compiled trajectory covers
     a whole year whatever its steps straddle.
+
+    It comes back as a JAX array because the only thing that ever reads it is
+    a traced index inside the scan body; building it with numpy and handing
+    back a host array would leave every caller to convert it.
     """
     length = int(days_per_year)
     if length != days_per_year or length not in _MONTH_LENGTHS:
@@ -71,8 +75,9 @@ def _month_of_day_table(days_per_year: float) -> np.ndarray:
             "a static table cannot express -- bin such a run on the host, by "
             "the datetime64 labels of `Coupler.to_xarray`."
         )
-    return np.repeat(np.arange(MONTHS_PER_YEAR), _MONTH_LENGTHS[length]).astype(
-        np.int32
+    return jnp.asarray(
+        np.repeat(np.arange(MONTHS_PER_YEAR), _MONTH_LENGTHS[length]),
+        dtype=jnp.int32,
     )
 
 
@@ -226,7 +231,6 @@ def monthly_mean(coupler: Any, carry: Any = None) -> MonthlyMean:
             "a whole number of steps per year."
         )
     steps_per_year = seconds_per_year // dt_seconds
-    month_of_day_array = jnp.asarray(month_of_day)
 
     def month_index(step: jnp.ndarray) -> jnp.ndarray:
         """Return the 0-based month the step starting at ``step`` is counted in."""
@@ -237,7 +241,7 @@ def monthly_mean(coupler: Any, carry: Any = None) -> MonthlyMean:
         seconds_into_year = jnp.mod(
             year_offset_seconds + step_in_year * dt_seconds, seconds_per_year
         )
-        return month_of_day_array[seconds_into_year // _SECONDS_PER_DAY]
+        return month_of_day[seconds_into_year // _SECONDS_PER_DAY]
 
     if carry is None:
         carry = coupler.initialize()
