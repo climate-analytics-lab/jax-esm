@@ -182,6 +182,16 @@ command-line form. The checkpoint is one directory, rewritten atomically each
 chunk; a save interrupted half way through is detected and skipped rather than
 resumed from.
 
+Because resuming is the same command as starting, the run **says where its
+starting state came from**, in one INFO line before anything is compiled —
+`coupler.initialize()`, the `initial_carry` argument, or a named checkpoint,
+always with the coupled step — and warns, in as many words, when a
+`checkpoint_path` holds no complete checkpoint and every component is therefore
+starting from its initial state rather than from a restart. `load_state` names
+each component's own source in turn. Loading is all-or-nothing: every leaf comes
+from the checkpoint, and a component the checkpoint does not hold is an error,
+never a silent fresh initialization.
+
 The gate runs before the checkpoint, and a chunk it rejects is not
 checkpointed: there is one restart directory and it is overwritten in place, so
 a stopped run leaves it holding the last chunk that passed rather than the

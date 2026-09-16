@@ -54,8 +54,25 @@ last chunk that passed.
 The overwrite is safe because :mod:`jem.checkpoint` publishes the carry file
 -- which holds the coupled step counter -- last, after removing the previous
 one: a save interrupted half way through leaves a directory with no carry
-file, which this loop refuses to resume from (it logs and starts from
+file, which this loop refuses to resume from (it warns and starts from
 ``initial_carry`` instead) rather than resuming from a mixture of two steps.
+
+Where the starting state came from
+----------------------------------
+Because resuming a run is the *same command* as starting one, nothing in the
+command distinguishes the two, and a run that was meant to resume and quietly
+cold-started repeats simulated time that has already been paid for. So
+:func:`run_chunked` states the provenance of the carry it is about to
+integrate, at INFO, in exactly one line, before anything is compiled --
+``coupler.initialize()``, the ``initial_carry`` argument, or a named
+checkpoint, always with the coupled step. A ``checkpoint_path`` that holds no
+complete checkpoint adds a WARNING saying in as many words that every
+component starts from its initial state rather than from a restart: it covers
+both an interrupted save and a path with nothing at it, because the loop
+cannot tell a first run from a mistyped path and the consequence is the same
+either way. :meth:`jem.base.coupler.Coupler.load_state` completes the picture
+by naming each component's own source -- the shared carry file or its own
+``load_state`` -- so no part of a resumed model's state is unaccounted for.
 
 ``CoupledCarry.step`` restored from the checkpoint is the only source of truth
 for how far the run has got. Nothing is derived from the chunk index or from a
@@ -310,9 +327,12 @@ def run_chunked(
             "the chunk."
         )
 
-    carry = initial_carry if initial_carry is not None else coupler.initialize()
-    if checkpoint_path is not None:
-        carry = _resume(coupler, carry, Path(checkpoint_path))
+    carry, provenance = _starting_carry(coupler, initial_carry, checkpoint_path)
+    # One line, always, whatever the run does next: a modeller reading a log
+    # has to be able to see at a glance whether the state being integrated is
+    # a restart or a cold start, and which. It is the first thing the run
+    # says, before anything is compiled.
+    logger.info("%s", provenance)
 
     output_dir = Path(output_dir)
     # Built once and cached by length: every chunk but (at most) the first of
@@ -434,31 +454,82 @@ def _whole_steps(
     return int(rounded)
 
 
-def _resume(
-    coupler: "Coupler", carry: CoupledCarry, checkpoint_path: Path
-) -> CoupledCarry:
-    """Return the carry to start from: the checkpoint's, if there is one.
+def _starting_carry(
+    coupler: "Coupler",
+    initial_carry: CoupledCarry | None,
+    checkpoint_path: Path | str | None,
+) -> tuple[CoupledCarry, str]:
+    """Return the carry the run starts from, and a sentence saying where from.
 
-    A directory with no carry file is not a checkpoint but the wreckage of an
-    interrupted save (:mod:`jem.checkpoint` publishes that file last), so it is
-    logged and stepped over rather than loaded -- loading it would mean
+    There are only three places a run's starting state can come from -- a
+    checkpoint, the ``initial_carry`` argument, or ``coupler.initialize()`` --
+    and which one it was decides what the run *means*: a cold start where a
+    restart was intended repeats simulated time that has already been paid
+    for, and does it silently, because the command that resumes a run is the
+    command that starts one. So the choice is made here, in one place, and
+    handed back with the sentence :func:`run_chunked` logs, rather than each
+    branch logging its own half of the story.
+
+    A checkpoint directory with no carry file is not a checkpoint but the
+    wreckage of an interrupted save (:mod:`jem.checkpoint` publishes that file
+    last), so it is stepped over rather than loaded -- loading it would mean
     resuming from component states written at a step this run cannot know.
+    That, and a ``checkpoint_path`` with nothing at it at all, are **warned**
+    about rather than merely noted: in both the run was asked to resume and
+    could not, whether because a save died or because the path is not the one
+    the earlier run wrote (a typo resolves to a directory that does not
+    exist), and in both the consequence is a cold start.
     """
-    if not (checkpoint_path / CARRY_FILENAME).exists():
-        if checkpoint_path.is_dir():
-            logger.warning(
-                "%s holds no %s, so it is not a complete checkpoint: the save "
-                "that wrote it was interrupted. Starting from the initial "
-                "carry instead.", checkpoint_path, CARRY_FILENAME,
-            )
-        else:
-            logger.info(
-                "No checkpoint at %s; starting a new run and writing one there "
-                "after every chunk.", checkpoint_path,
-            )
-        return carry
-    restored = coupler.load_state(checkpoint_path)
-    logger.info(
-        "Resumed from %s at coupled step %d.", checkpoint_path, int(restored.step)
+    path = None if checkpoint_path is None else Path(checkpoint_path)
+    restored = None if path is None else _load_checkpoint(coupler, path)
+    if restored is not None:
+        return restored, (
+            f"Resumed from checkpoint {path} at coupled step "
+            f"{int(restored.step)}."
+        )
+    if initial_carry is not None:
+        return initial_carry, (
+            "Starting from the initial_carry argument at coupled step "
+            f"{int(initial_carry.step)}."
+        )
+    carry = coupler.initialize()
+    reason = (
+        "no checkpoint was given"
+        if path is None
+        else f"{path} holds no complete checkpoint"
     )
-    return restored
+    return carry, (
+        f"Starting from coupler.initialize() at coupled step {int(carry.step)} "
+        f"({reason})."
+    )
+
+
+def _load_checkpoint(
+    coupler: "Coupler", checkpoint_path: Path
+) -> CoupledCarry | None:
+    """Return the carry ``checkpoint_path`` holds, or None with a warning.
+
+    :meth:`jem.base.coupler.Coupler.load_state` logs which component came from
+    where, so nothing is said here about a load that worked -- the caller's
+    provenance line says the rest.
+    """
+    if (checkpoint_path / CARRY_FILENAME).exists():
+        return coupler.load_state(checkpoint_path)
+    if checkpoint_path.is_dir():
+        logger.warning(
+            "%s holds no %s, so it is not a complete checkpoint: the save that "
+            "wrote it was interrupted. NOTHING is restored from it -- every "
+            "component starts from its initial state rather than from a "
+            "restart, and the run begins again at the start date.",
+            checkpoint_path, CARRY_FILENAME,
+        )
+    else:
+        logger.warning(
+            "There is no checkpoint at %s, so nothing is resumed: every "
+            "component starts from its initial state rather than from a "
+            "restart, and the run begins at the start date. That is what a "
+            "first run does; if this was meant to resume one, the path is not "
+            "the one it wrote. A checkpoint will be written there after every "
+            "chunk.", checkpoint_path,
+        )
+    return None

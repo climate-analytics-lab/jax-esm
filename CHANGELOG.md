@@ -46,6 +46,25 @@ Breaking changes are marked; everything else is additive.
   naming both quantities. A final partial chunk is refused rather than
   silently compiled a second time. The trajectory is compiled once, for a
   chunk's worth of coupled steps.
+- **A run says where its starting state came from.** `run_chunked` logs one
+  INFO line before anything is compiled — `Starting from coupler.initialize()
+  at coupled step 0 (no checkpoint was given).`, `Starting from the
+  initial_carry argument at coupled step N.` or `Resumed from checkpoint
+  <path> at coupled step N.` — because resuming a run is the same command as
+  starting one, so nothing else in the log distinguishes a restart from a cold
+  start that repeats simulated time already paid for. A `checkpoint_path` that
+  holds no complete checkpoint adds a WARNING saying in as many words that
+  every component starts from its initial state rather than from a restart;
+  that covers both an interrupted save and a path with nothing at it, since
+  the loop cannot tell a first run from a mistyped path. `Coupler.load_state`
+  / `jem.checkpoint.load_coupled_carry` log at INFO which components were
+  restored from the shared carry file, which read themselves back through
+  their own `load_state`, and at what step, so every component's source is
+  named. Loading is **all-or-nothing** and the docs now say so: the template
+  built from `initialize()` supplies the pytree structure only, every leaf
+  comes from the checkpoint, and a component the checkpoint does not hold is a
+  `ValueError` — never a component quietly left freshly initialized while the
+  rest of the model continues from the saved step.
 - `jem.driver.RunResult` — a frozen dataclass with `final_carry`,
   `steps_completed` (`int(final_carry.step)`, so it counts from the run's start
   date and includes what a checkpoint restored), `completed` (False if the

@@ -1567,6 +1567,19 @@ class Coupler:
         removed, or rebuilt on another grid since it was written is a mismatch
         the load reports -- naming the leaf -- rather than papering over.
 
+        **Loading is all-or-nothing.** The template built from
+        ``initialize()`` supplies the pytree *structure* and nothing else:
+        every leaf of the returned carry comes from the checkpoint, and the
+        freshly-initialized values are discarded. A component the checkpoint
+        does not hold is a ``ValueError``, never a component silently left at
+        its initial state -- which would continue one part of the model from
+        the saved step and restart another at the start date, a run that is
+        neither a resume nor a cold start and that nothing downstream could
+        detect. Which component was read from the shared carry file and which
+        through its own ``load_state``, and at what step, is logged at INFO by
+        :func:`jem.checkpoint.load_coupled_carry` -- once, from there, so a
+        nested model reports each level as it is read rather than twice.
+
         Parameters
         ----------
         directory : pathlib.Path

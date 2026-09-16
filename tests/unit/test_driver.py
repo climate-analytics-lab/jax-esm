@@ -438,6 +438,124 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
     assert result.steps_completed == 2
 
 
+# ---------------------------------------------------------------------------
+# What the run says about the state it starts from
+# ---------------------------------------------------------------------------
+
+
+def test_a_fresh_run_says_it_started_from_initialize(coupler, tmp_path, caplog):
+    """No checkpoint, no carry: the log names `coupler.initialize()` and step 0.
+
+    A run's starting state decides what its output means, and a reader of the
+    log cannot see it in any other line -- so there is exactly one, always.
+    """
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path)
+
+    assert (
+        "Starting from coupler.initialize() at coupled step 0 "
+        "(no checkpoint was given)." in caplog.text
+    )
+
+
+def test_an_initial_carry_is_named_as_the_source(coupler, tmp_path, caplog):
+    """A carry handed in is reported as such, at the step it is already at.
+
+    This is the case that used to be silent: an in-process continuation and a
+    cold start produced identical logs, and the second is a run that repeats
+    simulated time already paid for.
+    """
+    carry, _ = coupler.generate_trajectory_function(3)(coupler.initialize())
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            coupler, total_time="5 days", chunk="1 day",
+            initial_carry=carry, output_dir=tmp_path,
+        )
+
+    assert "Starting from the initial_carry argument at coupled step 3." in caplog.text
+
+
+def test_a_resumed_run_names_the_checkpoint_it_came_from(tmp_path, caplog):
+    """A real resume says so, with the path and the step it restored."""
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="2 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            two_slabs(), total_time="4 days", chunk="2 days",
+            output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+        )
+
+    assert f"Resumed from checkpoint {checkpoint} at coupled step 2." in caplog.text
+
+
+@pytest.mark.parametrize("make_directory", [False, True])
+def test_a_checkpoint_that_cannot_be_resumed_from_warns(
+    coupler, tmp_path, caplog, make_directory
+):
+    """Asking to resume and getting a cold start is a WARNING, not a note.
+
+    Both ways of failing to resume are covered: a directory an interrupted
+    save left without its carry file, and a path with nothing at it at all --
+    which is what a first run looks like, and equally what a mistyped
+    checkpoint path looks like. The run cannot tell those apart, so it says
+    what it is doing instead of guessing, and the words that matter are that
+    every component starts from its initial state rather than from a restart.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    if make_directory:
+        run_chunked(
+            two_slabs(), total_time="2 days", chunk="2 days",
+            output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+        )
+        (checkpoint / CARRY_FILENAME).unlink()
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            coupler, total_time="2 days", chunk="2 days",
+            output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+        )
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a run that could not resume must warn"
+    assert "starts from its initial state rather than from a restart" in caplog.text
+    # And the provenance line still says where the state did come from, naming
+    # the path so the two lines cannot be read as being about different runs.
+    assert (
+        f"Starting from coupler.initialize() at coupled step 0 ({checkpoint} "
+        "holds no complete checkpoint)." in caplog.text
+    )
+
+
+def test_the_load_names_every_component_and_where_it_came_from(tmp_path, caplog):
+    """`load_state` reports each component's source and the restored step.
+
+    A coupled checkpoint is a mixture of two storage mechanisms -- the shared
+    carry file and the subdirectories components write themselves -- and which
+    a component used is invisible from the outside. The log says it, so
+    "which of my components actually came off disk?" is answered without
+    reading `jem.checkpoint`.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="2 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+
+    with caplog.at_level(logging.INFO, logger="jem.checkpoint"):
+        two_slabs().load_state(checkpoint)
+
+    assert f"Loaded checkpoint {checkpoint} at coupled step 2" in caplog.text
+    # Neither slab checkpoints itself, so both are in the shared file and the
+    # delegated list is empty -- and says so rather than being blank.
+    assert f"ocn, seaice restored from {CARRY_FILENAME}" in caplog.text
+    assert "(none) restored by their own load_state" in caplog.text
+
+
 def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     """A checkpoint part-way through a chunk is finished off in a short batch.
 

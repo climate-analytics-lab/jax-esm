@@ -111,6 +111,17 @@ array in the carry `lax.scan` returns, and the two have to compare as one leaf.
 It is also why `load_state` needs a template at all, and takes it from each
 component's own `initialize()`.
 
+**Loading is all-or-nothing.** The template built from `initialize()` supplies
+the pytree *structure* and nothing else: every leaf of the restored carry comes
+from the checkpoint, and the freshly-initialized values are discarded. A
+component the checkpoint does not hold is a `ValueError`, never a component
+quietly left at its initial state — that would continue one part of the model
+from the saved step while another restarted at the start date, a run that is
+neither a resume nor a cold start and that nothing downstream could detect.
+`load_coupled_carry` logs at INFO which components it read from the shared
+carry file, which read themselves back through their own `load_state`, and the
+step it restored, so every component's source is named.
+
 **The coupler is what a driver checkpoints through**, in one call each way:
 
 ```python
@@ -939,6 +950,29 @@ and have nothing left to go back to. Bailing instead leaves the restart point
 at the last chunk that passed, so the run resumes by repeating the chunk that
 failed — which is why that chunk's output files are overwritten on the resume,
 with the warning `write_chunk` logs.
+
+**What state the run started from.** Resuming a run is the *same command* as
+starting one — that is the point of a single checkpoint directory — so nothing
+in the command says which happened, and a run that was meant to resume and
+silently cold-started repeats simulated time that has already been paid for.
+`run_chunked` therefore logs the provenance of the carry it is about to
+integrate, at INFO, in exactly one line, before anything is compiled:
+
+```
+Starting from coupler.initialize() at coupled step 0 (no checkpoint was given).
+Starting from the initial_carry argument at coupled step 3.
+Resumed from checkpoint /scratch/run/checkpoint at coupled step 120.
+```
+
+A `checkpoint_path` that holds no complete checkpoint adds a **WARNING** saying
+in as many words that every component starts from its initial state rather than
+from a restart. That covers both ways of failing to resume — a directory an
+interrupted save left without its carry file, and a path with nothing at it at
+all — because the loop cannot tell a first run from a mistyped path, and the
+consequence is the same either way. `Coupler.load_state` completes the picture
+from the other end, naming each component's own source (the shared carry file,
+or its own `load_state`) and the step restored, so no part of a resumed model's
+state is unaccounted for.
 
 **Checkpoints and resume.** `checkpoint_path` is a **single directory**,
 rewritten after every chunk the health gate accepts, not a directory of dated

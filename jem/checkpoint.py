@@ -368,6 +368,16 @@ def load(template: Carry, path: str | Path) -> Carry:
     return jax.tree_util.tree_unflatten(treedef, restored)
 
 
+def _named(components: Mapping[str, Any]) -> str:
+    """Return a readable list of component names for a log line.
+
+    ``"(none)"`` rather than an empty string, because a log line reading
+    "restored from carry.msgpack, restored by their own load_state" leaves the
+    reader unable to tell an empty set from a formatting bug.
+    """
+    return ", ".join(sorted(components)) or "(none)"
+
+
 def save_coupled_carry(
     coupled_carry: CoupledCarry,
     directory: str | Path,
@@ -469,6 +479,19 @@ def load_coupled_carry(
         so a renamed component is refused here rather than by its own loader
         finding no directory.
 
+    Notes
+    -----
+    **Loading is all-or-nothing.** ``component_templates`` supplies the pytree
+    *structure* the saved leaves are poured into and nothing else: every leaf
+    of the result comes from the checkpoint, and the values in the templates
+    are discarded. A component the checkpoint does not hold is therefore a
+    :class:`ValueError` -- never a component quietly left at the initial state
+    the template happened to carry, which would resume a run with one
+    component at the saved step and another back at the start date. Which
+    component came from where is logged at INFO for the same reason: a
+    modeller has to be able to read off what state a run is actually
+    continuing from.
+
     """
     directory = Path(directory)
     component_loaders = component_loaders or {}
@@ -506,6 +529,21 @@ def load_coupled_carry(
     components = dict(stored["components"])
     for name, loader in component_loaders.items():
         components[name] = loader(directory / name)
+
+    # Every component's source, named, at INFO. A resumed run and a cold start
+    # are the same command, and a checkpoint is a mixture of two storage
+    # mechanisms, so "which of my components actually came off disk?" is a
+    # question the log has to answer without the operator reading this module.
+    logger.info(
+        "Loaded checkpoint %s at coupled step %d: %s restored from %s, %s "
+        "restored by their own load_state. Every leaf comes from the "
+        "checkpoint -- the templates supply structure only.",
+        directory,
+        int(stored["step"]),
+        _named(component_templates),
+        CARRY_FILENAME,
+        _named(component_loaders),
+    )
     return CoupledCarry(components=components, step=stored["step"])
 
 
