@@ -353,10 +353,18 @@ Breaking changes are marked; everything else is additive.
   directly as `n_windows` or counted from `total_time` (rounded up, so a run
   that does not divide into whole windows still has a bin for the one it ends
   inside). Both builders return the same `BinnedMean` named tuple from one
-  private `_binned_mean(coupler, bin_of_step, n_bins)`, and both bin a step by
-  the **label** of the record it produces; a run longer than the accumulator
-  wraps, so window *w* composites every *w*-th window exactly as the monthly
-  bins composite years. The accumulator is an ordinary pytree in the scan
+  private `_binned_mean(coupler, bin_of_record, n_bins)`, and both bin every
+  record by its own **label**; a run longer than the accumulator wraps, so
+  window *w* composites every *w*-th window exactly as the monthly bins
+  composite years. A coupled step is not always one record: a component the
+  workflow runs *n* times per step emits *n*, and a nested coupler's inner
+  steps are records in the same way, so the 24 hourly records of the daily
+  step covering 31 January are binned 23 in January and one (labelled 1
+  February 00:00) in February, as `to_xarray` writes them. That component's
+  sub-step axis is kept — `(n_bins, n, ...)`, a monthly-mean diurnal cycle —
+  and the accumulator's counts are one array per component when components
+  record at different rates, instead of the single `(n_bins,)` array a model
+  whose components all record once per coupled step keeps. The accumulator is an ordinary pytree in the scan
   carry, so a binned mean is **differentiable** — `jax.grad` of a loss on
   `finalize(...)` reaches a component parameter through the reduction, which
   is what calibrating against monthly observations needs; there is a worked

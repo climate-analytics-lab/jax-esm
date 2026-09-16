@@ -233,6 +233,12 @@ accumulator: the checkpoint is the model's restart state, the accumulator is an
 analysis product, and a resumed run therefore accumulates only what it
 integrates.
 
+A component the workflow runs *n* times per coupled step keeps that axis —
+`(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
+records is binned by its own label, so the hourly records of 31 January count
+in January even though the coupled step containing them is labelled 1
+February. A nested coupler's inner steps are treated the same way.
+
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
 `n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — sized either by `n_windows` or by

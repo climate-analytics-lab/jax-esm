@@ -8,6 +8,13 @@ which is labelled 1 January of the next one) actually occur. A year is also
 exactly 73 pentads, so the same run fills a ``windowed_mean`` accumulator once
 with nothing wrapping.
 
+The last two sections run the same pair of slabs *weaved*: the atmosphere
+stepped hourly within the daily coupling, once as a repeated workflow and once
+as a nested hourly coupler. Those runs are 40 days from 1 January, so they
+cross a month boundary -- the case in which a coupled step's sub-steps do not
+all belong to the same month, and the only case that can tell the two binning
+conventions apart.
+
 Every test here compares the reduction computed *inside* the ``lax.scan``
 with the same reduction computed on the host from the stacked diagnostics,
 because the point of the hook is to be indistinguishable from the obvious
@@ -487,6 +494,244 @@ def test_a_bad_n_windows_is_refused(coupler, n_windows):
     """`True` is an `int` that would silently mean "one window" -- the whole run."""
     with pytest.raises(ValueError, match="n_windows must be a positive integer"):
         windowed_mean(coupler, "5 days", n_windows=n_windows)
+
+
+# ---------------------------------------------------------------------------
+# Components that record more than once per coupled step
+# ---------------------------------------------------------------------------
+
+#: Sub-steps per coupled step in the weaved runs: an hourly atmosphere inside
+#: a daily coupling, which is the classic surface/ocean weaving.
+HOURS_PER_DAY = 24
+
+#: Coupled steps of the weaved runs: 1 January to 9 February, so the run holds
+#: a whole month boundary and then some. The daily step that covers 31 January
+#: produces hourly records labelled 01:00 on the 31st through 00:00 on 1
+#: February -- 23 of them in January and one in February -- which is the
+#: discrepancy the per-record binning exists to get right.
+BOUNDARY_STEPS = 40
+JANUARY_DAYS = 31
+
+
+def build_weaved_coupler(climatology_file) -> Coupler:
+    """Return the two slabs with the atmosphere weaved hourly into a daily step."""
+    grid = make_grid()
+    ocean = SlabOceanModel(
+        grid,
+        SlabOceanParameters(
+            forcing_method="relaxation", relaxation_time=RELAXATION_TIME
+        ),
+        sst_clim_file=climatology_file,
+    )
+    return Coupler(
+        {"atm": SlabAtmosphereModel(grid), "ocn": ocean},
+        {"exchange": slab_exchange},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        calendar=CALENDAR,
+        workflow=[["exchange", "atm"] * HOURS_PER_DAY, "ocn"],
+    )
+
+
+def build_nested_coupler(climatology_file) -> Coupler:
+    """Return the same weaving expressed as an hourly coupler inside a daily one."""
+    grid = make_grid()
+    ocean = SlabOceanModel(
+        grid,
+        SlabOceanParameters(
+            forcing_method="relaxation", relaxation_time=RELAXATION_TIME
+        ),
+        sst_clim_file=climatology_file,
+    )
+    hourly = Coupler(
+        {"atm": SlabAtmosphereModel(grid), "ocn": ocean},
+        {"exchange": slab_exchange},
+        coupling_timestep=jdt.to_timedelta(1, "hour"),
+        start_date=START_DATE,
+        calendar=CALENDAR,
+        name="fast",
+    )
+    return Coupler(
+        {"fast": hourly},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+
+def run_both_ways(coupler, reduction, steps=BOUNDARY_STEPS):
+    """Return the stacked diagnostics and the accumulator of the same run."""
+    _, diagnostics = coupler.generate_trajectory_function(steps)(coupler.initialize())
+    _, accumulator = coupler.generate_trajectory_function(
+        steps, accumulate=reduction
+    )(coupler.initialize())
+    return diagnostics, accumulator
+
+
+def fold_sub_steps(means, counts):
+    """Return the mean over every record of a bin, from the per-slot means.
+
+    ``finalize`` keeps the sub-step axis: bin `b`, slot `j` is the mean of the
+    records of call `j` that fell in `b`. Weighting each slot by its own count
+    is what recovers the mean over all of the bin's records -- which is what a
+    ``groupby`` of the written output computes. A straight mean over the slots
+    would equal it only where every slot holds the same number of records,
+    which is exactly what a month boundary breaks.
+    """
+    means = np.asarray(means)
+    counts = np.asarray(counts)
+    weights = counts.reshape(counts.shape + (1,) * (means.ndim - counts.ndim))
+    total = np.sum(np.where(weights == 0, 0.0, means) * weights, axis=1)
+    per_bin = counts.sum(axis=1)
+    per_bin = per_bin.reshape(per_bin.shape + (1,) * (total.ndim - per_bin.ndim))
+    return np.where(per_bin == 0, np.nan, total / np.where(per_bin == 0, 1, per_bin))
+
+
+@pytest.fixture(scope="module")
+def weaved(climatology_file):
+    """Return the weaved coupler, its stacked run and its monthly accumulator."""
+    coupler = build_weaved_coupler(climatology_file)
+    monthly = monthly_mean(coupler)
+    diagnostics, accumulator = run_both_ways(coupler, monthly)
+    return coupler, diagnostics, monthly, accumulator
+
+
+def test_a_sub_stepped_component_is_counted_record_by_record(weaved):
+    """The 24 hourly records of a coupled step land in the months they label.
+
+    The counts are what show the convention directly: 23 of the records of the
+    day covering 31 January are January's and the 24th, labelled 1 February
+    00:00, is February's. Binning the whole coupled step by its own label --
+    which is what the accumulator did before -- would have put all 24 in
+    February and disagreed with the written output by a day of records.
+    """
+    _, _, _, (_, counts) = weaved
+
+    # One count array per component, because the two record at different rates
+    # and so fill different bins as one coupled step is folded in.
+    assert set(counts) == {"atm", "ocn"}
+    assert counts["atm"].shape == (MONTHS_PER_YEAR, HOURS_PER_DAY)
+    assert counts["ocn"].shape == (MONTHS_PER_YEAR,)
+
+    atmosphere = np.asarray(counts["atm"])
+    np.testing.assert_array_equal(atmosphere[0], [JANUARY_DAYS] * 23 + [30])
+    february_days = BOUNDARY_STEPS - JANUARY_DAYS
+    np.testing.assert_array_equal(
+        atmosphere[1], [february_days] * 23 + [february_days + 1]
+    )
+    assert np.all(atmosphere[2:] == 0)
+    assert int(atmosphere.sum()) == BOUNDARY_STEPS * HOURS_PER_DAY
+    # The daily component is unaffected: its 40 records are labelled 2 January
+    # to 10 February.
+    np.testing.assert_array_equal(np.asarray(counts["ocn"])[:2], [30, 10])
+
+
+def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
+    """Both components agree with a ``groupby`` of the records they emitted.
+
+    The same contract the un-weaved run is held to, at the resolution the
+    records are actually written at: the hourly stream is binned by hour and
+    the daily stream by day, and both come out of one accumulator.
+    """
+    coupler, diagnostics, monthly, accumulator = weaved
+    _, counts = accumulator
+    means = monthly.finalize(accumulator)
+    datasets = coupler.to_xarray(diagnostics)
+
+    hourly = (
+        datasets["atm"].mean_air_temperature.groupby("time.month").mean("time")
+    )
+    np.testing.assert_array_equal(hourly.month.values, [1, 2])
+    folded = fold_sub_steps(
+        means["atm"]["state"].mean_air_temperature, counts["atm"]
+    )
+    np.testing.assert_allclose(folded[:2], hourly.values, rtol=1e-5, atol=1e-4)
+    # Every other month is empty, and empty means NaN rather than zero.
+    assert np.all(np.isnan(folded[2:]))
+
+    daily = (
+        datasets["ocn"].sea_surface_temperature.groupby("time.month").mean("time")
+    )
+    np.testing.assert_allclose(
+        np.asarray(means["ocn"]["state"].sea_surface_temperature)[:2],
+        daily.values,
+        rtol=1e-5,
+        atol=1e-4,
+    )
+
+
+def test_weaved_windowed_means_match_the_host_binning(climatology_file):
+    """Fixed windows bin the sub-steps by their own labels too.
+
+    A pentad boundary falls at 00:00, i.e. between two hourly records of a
+    coupled step, so the same discrepancy the month boundary shows would show
+    here -- at every window boundary rather than at every month's.
+    """
+    coupler = build_weaved_coupler(climatology_file)
+    windows = BOUNDARY_STEPS // PENTAD_DAYS
+    pentads = windowed_mean(coupler, f"{PENTAD_DAYS} days", n_windows=windows)
+    diagnostics, accumulator = run_both_ways(coupler, pentads)
+    _, counts = accumulator
+
+    # Every window holds five whole days of hourly records, in every slot.
+    np.testing.assert_array_equal(
+        np.asarray(counts["atm"]), np.full((windows, HOURS_PER_DAY), PENTAD_DAYS)
+    )
+
+    atmosphere = coupler.to_xarray(diagnostics)["atm"]
+    elapsed_days = (
+        atmosphere["time"].values - np.datetime64("2001-01-01")
+    ) / np.timedelta64(1, "D")
+    # `ceil(elapsed / window) - 1`: a window is closed at its end, which is
+    # where JEM labels the record covering it.
+    window = np.ceil(elapsed_days / PENTAD_DAYS).astype(int) - 1
+    from_output = (
+        atmosphere.mean_air_temperature.assign_coords(window=("time", window))
+        .groupby("window")
+        .mean("time")
+    )
+    np.testing.assert_array_equal(from_output.window.values, np.arange(windows))
+
+    folded = fold_sub_steps(
+        pentads.finalize(accumulator)["atm"]["state"].mean_air_temperature,
+        counts["atm"],
+    )
+    np.testing.assert_allclose(folded, from_output.values, rtol=1e-5, atol=1e-4)
+
+
+def test_a_nested_coupler_bins_its_inner_records_the_same_way(climatology_file):
+    """A nested coupler's inner steps are records of their own, and bin as such.
+
+    The outer coupler stacks an inner coupler's diagnostics on a leading axis
+    of one entry per *inner* coupled step, and labels them at the inner rate --
+    so they are the same kind of thing as a repeated component's sub-steps and
+    are treated identically, one bin per record, with the counts following the
+    inner structure.
+    """
+    coupler = build_nested_coupler(climatology_file)
+    monthly = monthly_mean(coupler)
+    diagnostics, accumulator = run_both_ways(coupler, monthly)
+    _, counts = accumulator
+
+    assert set(counts) == {"fast"}
+    assert set(counts["fast"]) == {"atm", "ocn"}
+    for component in ("atm", "ocn"):
+        np.testing.assert_array_equal(
+            np.asarray(counts["fast"][component])[0],
+            [JANUARY_DAYS] * 23 + [30],
+        )
+
+    means = monthly.finalize(accumulator)
+    hourly = (
+        coupler.to_xarray(diagnostics)["ocn"]
+        .sea_surface_temperature.groupby("time.month")
+        .mean("time")
+    )
+    folded = fold_sub_steps(
+        means["fast"]["ocn"]["state"].sea_surface_temperature,
+        counts["fast"]["ocn"],
+    )
+    np.testing.assert_allclose(folded[:2], hourly.values, rtol=1e-5, atol=1e-4)
 
 
 # ---------------------------------------------------------------------------

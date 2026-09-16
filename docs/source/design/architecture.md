@@ -1120,7 +1120,7 @@ with a message saying why, rather than binned approximately. Without
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
 Both are the same reduction with a different step-to-bin rule, so
-`jem.accumulate` is one private `_binned_mean(coupler, bin_of_step, n_bins)`
+`jem.accumulate` is one private `_binned_mean(coupler, bin_of_record, n_bins)`
 under two public builders, returning the same `BinnedMean` named tuple with the
 same `finalize`:
 
@@ -1148,9 +1148,26 @@ because a window is itself an interval and JEM labels an interval at its end
 (so the first 5-day window with daily coupling is the records labelled day 1 to
 day 5, which is what a forecast means by the first pentad), while a calendar
 month is closed at its start because that is what `groupby("time.month")` does
-and a monthly mean has to agree with the written output. In step-counter terms
-that is `step // steps_per_window` for a window and the month of `step + 1` for
-a month.
+and a monthly mean has to agree with the written output. In terms of the
+counter of records of length *r*, that is `record // (window/r)` for a window
+and the month of `record + 1` for a month.
+
+**A coupled step is not always one record.** A component the workflow runs
+*n* times per coupled step emits *n* records, each labelled at the end of its
+own sub-interval, and a nested coupler's inner steps are records in the same
+way — so a coupled step's records need not all fall in the same bin. The 24
+hourly records of the daily step covering 31 January are labelled 01:00 on the
+31st through 00:00 on 1 February: 23 in January, one in February, exactly as
+`to_xarray` writes them. Each record is therefore binned by **its own** label,
+from the coupler's own sub-step clock (`coupling_time_at_substep`), and the
+sub-step axis is kept rather than folded: that component accumulates into
+`(n_bins, n, …)`, bin *b* slot *j* holding the records of call *j* that fell in
+*b* — a monthly-mean diurnal cycle, which folding would destroy and which one
+count-weighted sum on the host recovers. Because components recording at
+different rates fill different bins as one step is folded in, the accumulator's
+counts are then one array per component (`(n_bins, *sub-step axes)`) instead of
+the single `(n_bins,)` array a model whose components all record once per
+coupled step keeps.
 
 A run longer than the accumulator **wraps**: window *w* also collects windows
 *w + n_windows*, *w + 2·n_windows*, … exactly as the monthly table wraps years
