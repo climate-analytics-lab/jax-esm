@@ -85,7 +85,8 @@ _SECONDS_PER_DAY = 86400.0
 #: pair ``(init, update)`` of an in-scan reduction of the per-step
 #: diagnostics. ``init()`` builds the accumulator, ``update(accumulator,
 #: diagnostics, time)`` folds one coupled step into it, inside the scan.
-#: :class:`jem.accumulate.MonthlyMean` is such a pair.
+#: :class:`jem.accumulate.BinnedMean` (a monthly or a fixed-window mean) is
+#: such a pair.
 Accumulator = tuple[
     Callable[[], Any],
     Callable[[Any, dict[str, Diagnostics], CouplingTime], Any],
@@ -1063,8 +1064,10 @@ class Coupler:
             time)`` runs inside the ``lax.scan`` body on that step's
             diagnostics, with the same :class:`CouplingTime` the step's
             components were handed, and returns the next accumulator.
-            :func:`jem.accumulate.monthly_mean` builds such a pair (and
-            unpacks as one) for a monthly mean.
+            :func:`jem.accumulate.monthly_mean` and
+            :func:`jem.accumulate.windowed_mean` build such a pair (and unpack
+            as one) for a monthly mean and for a mean over fixed-length
+            windows.
 
         Returns
         -------

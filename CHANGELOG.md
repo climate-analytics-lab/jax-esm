@@ -260,7 +260,8 @@ Breaking changes are marked; everything else is additive.
   `latest_complete_checkpoint(root,
   pattern="step_*")` and `remaining_batches(steps_done, total_steps,
   steps_per_batch)` moved here from `jem.utils.checkpoints` unchanged.
-- `jem.accumulate.monthly_mean(coupler)` and
+- `jem.accumulate.monthly_mean(coupler)`,
+  `jem.accumulate.windowed_mean(coupler, window, n_windows=…)` and
   `Coupler.generate_trajectory_function(iterations, accumulate=(init, update))`
   — an **in-scan reduction** of the per-step diagnostics. `update(accumulator,
   diagnostics, time)` runs inside the `lax.scan` body, with the same
@@ -278,6 +279,29 @@ Breaking changes are marked; everything else is additive.
   coupling step that does not divide the year are refused with a message
   saying why. **Without `accumulate` the generated function is exactly what it
   was.**
+
+  `windowed_mean` is the same reduction over `n_windows` windows of a fixed
+  length — the 5-day and 7-day means a sub-seasonal forecast is scored on:
+
+  ```python
+  pentads = windowed_mean(coupler, "5 days", n_windows=73)          # a year
+  weeks   = windowed_mean(coupler, "7 days", total_time="1 year")   # 53 of them
+  ```
+
+  `window` is a `jcm.date.parse_duration_days` string or a number of days and
+  must be a whole number of coupling steps; the accumulator's size is given
+  directly as `n_windows` or counted from `total_time` (rounded up, so a run
+  that does not divide into whole windows still has a bin for the one it ends
+  inside). Both builders return the same `BinnedMean` named tuple from one
+  private `_binned_mean(coupler, bin_of_step, n_bins)`, and both bin a step by
+  the **label** of the record it produces; a run longer than the accumulator
+  wraps, so window *w* composites every *w*-th window exactly as the monthly
+  bins composite years. The accumulator is an ordinary pytree in the scan
+  carry, so a binned mean is **differentiable** — `jax.grad` of a loss on
+  `finalize(...)` reaches a component parameter through the reduction, which
+  is what calibrating against monthly observations needs; there is a worked
+  example in `docs/source/design/architecture.md` and a test of it in
+  `tests/unit/test_accumulate.py`.
 - **`VerosComponent.from_setup(setup, ...)`** — the config-shaped
   door to Veros. The constructor takes an already-built Veros model, which is a
   live Python object no YAML can describe, so the `ocean=veros` group had no way

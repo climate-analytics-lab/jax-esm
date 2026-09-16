@@ -197,13 +197,26 @@ For a reduction that must not cost memory proportional to the run, accumulate
 it *inside* the scan instead of writing every step out:
 
 ```python
-from jem.accumulate import monthly_mean
+from jem.accumulate import monthly_mean, windowed_mean
 
-monthly = monthly_mean(coupler)
+monthly = monthly_mean(coupler)                            # 12 calendar months
+pentads = windowed_mean(coupler, "5 days", n_windows=73)   # or any fixed window
 trajectory = coupler.generate_trajectory_function(365, accumulate=monthly)
 carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
+
+`windowed_mean(coupler, window, n_windows=...)` is the same reduction over
+`n_windows` windows of a fixed length — the 5-day and 7-day means a
+sub-seasonal forecast is scored on — sized either by `n_windows` or by
+`total_time="1 year"`. A run longer than the accumulator wraps, so window *w*
+composites every *w*-th window, the way the monthly bins composite years.
+
+The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
+differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
+reaches a component parameter through the reduction exactly as it does through
+the trajectory, which is what calibrating against monthly observations needs.
+See the worked example in `docs/source/design/architecture.md`.
 
 ## Documentation
 

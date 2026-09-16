@@ -1020,10 +1020,79 @@ Which month a step counts in follows the label JEM writes on its output record
 `to_xarray(...).groupby("time.month").mean()` of the same run are the same
 numbers. A calendar with no fixed day-of-year to month table (gregorian, with
 its leap years) and a coupling step that does not divide the year are refused
-with a message saying why, rather than binned approximately. The accumulator is
-an ordinary pytree in the scan carry, so `jax.grad` of a monthly mean flows
-through the reduction exactly as it flows through the trajectory. Without
+with a message saying why, rather than binned approximately. Without
 `accumulate`, the generated function is what it always was.
+
+**Any fixed set of bins, not only the months.** A calendar month is one binning
+of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
+Both are the same reduction with a different step-to-bin rule, so
+`jem.accumulate` is one private `_binned_mean(coupler, bin_of_step, n_bins)`
+under two public builders, returning the same `BinnedMean` named tuple with the
+same `finalize`:
+
+```python
+from jem.accumulate import monthly_mean, windowed_mean
+
+monthly = monthly_mean(coupler)                                  # 12 bins
+pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
+weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
+```
+
+`window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
+on the coupler's calendar, and must be a whole number of coupling steps — a
+window ending part-way through a step could only be filled by splitting that
+step between two windows. The accumulator's size is `n_windows`, given directly
+or counted from `total_time` (rounding *up*, so a run that does not divide into
+whole windows still has a bin for the one it ends inside; that bin is divided by
+its own count, so it is the mean of what fell in it).
+
+Both binnings follow the **label** of the record a step produces — the end of
+the coupling interval — rather than where the interval starts. The boundaries
+close in opposite directions because the bins are defined by different things:
+window *w* is the labels in `(w·window, (w+1)·window]`, closed at the end
+because a window is itself an interval and JEM labels an interval at its end
+(so the first 5-day window with daily coupling is the records labelled day 1 to
+day 5, which is what a forecast means by the first pentad), while a calendar
+month is closed at its start because that is what `groupby("time.month")` does
+and a monthly mean has to agree with the written output. In step-counter terms
+that is `step // steps_per_window` for a window and the month of `step + 1` for
+a month.
+
+A run longer than the accumulator **wraps**: window *w* also collects windows
+*w + n_windows*, *w + 2·n_windows*, … exactly as the monthly table wraps years
+and gives a three-year run a January climatology. That is the price of a
+fixed-size accumulator, which is the whole point of reducing inside the scan —
+size it to the run if each window is to stand on its own.
+
+**Calibrating against a binned mean.** The accumulator is an ordinary pytree in
+the scan carry, so nothing about the reduction is special to differentiate:
+`jax.grad` of a monthly mean reaches a component parameter through the
+reduction exactly as it reaches one through the trajectory. A July SST
+calibration against a target, with a process parameter varied in the carry the
+way *Parameters: process and initial-condition* describes:
+
+```python
+monthly = monthly_mean(coupled)
+trajectory = coupled.generate_trajectory_function(365, accumulate=monthly)
+JULY = 6              # finalize()'s leading axis is January first
+
+def loss(relaxation_time, target_july_sst):
+    # `ocn` is the SlabOceanModel registered in `coupled`; replacing the
+    # parameters it is initialized with is what makes them differentiable.
+    params = ocn.params.replace(relaxation_time=relaxation_time)
+    _, accumulator = trajectory(coupled.initialize({"ocn": params}))
+    july = monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature[JULY]
+    return jnp.mean((july - target_july_sst) ** 2)
+
+gradient = jax.grad(loss)(relaxation_time, target_july_sst)
+relaxation_time = relaxation_time - learning_rate * gradient   # one plain step
+```
+
+`tests/unit/test_accumulate.py` runs exactly this — the gradient of an
+accumulated July mean equals the gradient of the same quantity computed from
+the stacked diagnostics, and one descent step reduces the loss — so the snippet
+cannot rot. For a long calibration, `remat=True` on the trajectory trades
+recomputation for the memory the backward pass would otherwise need.
 
 ## Configuration
 

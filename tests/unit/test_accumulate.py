@@ -1,10 +1,12 @@
-"""In-scan diagnostic reduction: the ``accumulate`` hook and monthly means.
+"""In-scan diagnostic reduction: the ``accumulate`` hook and the binned means.
 
 The model is a two-slab coupler -- an idealized atmosphere over a relaxing
 slab ocean on a 4x3 grid -- run for a whole 365-day year, which is the
 shortest run in which every month exists and the boundary cases (a step whose
 interval ends exactly on the first of a month, and the last step of the year,
-which is labelled 1 January of the next one) actually occur.
+which is labelled 1 January of the next one) actually occur. A year is also
+exactly 73 pentads, so the same run fills a ``windowed_mean`` accumulator once
+with nothing wrapping.
 
 Every test here compares the reduction computed *inside* the ``lax.scan``
 with the same reduction computed on the host from the stacked diagnostics,
@@ -18,7 +20,7 @@ import jax_datetime as jdt
 import numpy as np
 import pytest
 
-from jem.accumulate import MONTHS_PER_YEAR, monthly_mean
+from jem.accumulate import MONTHS_PER_YEAR, monthly_mean, windowed_mean
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabAtmosphereModel,
@@ -36,6 +38,13 @@ START_DATE = jdt.to_datetime("2001-01-01")
 CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 STEPS_PER_YEAR = 365
+
+#: The sub-seasonal window the `windowed_mean` tests use, and how many of them
+#: a 365-day year holds exactly -- so a whole year's records fill the
+#: accumulator once, with nothing wrapping, which is the case a forecast
+#: scored on pentads is run in.
+PENTAD_DAYS = 5
+PENTADS_PER_YEAR = STEPS_PER_YEAR // PENTAD_DAYS
 
 #: Short enough that the ocean tracks its seasonal climatology within the
 #: year, so the twelve monthly means differ from each other by far more than
@@ -313,6 +322,171 @@ def test_remat_does_not_change_the_accumulated_means(coupler, record_months):
         strict=True,
     ):
         np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
+# ---------------------------------------------------------------------------
+# Means over fixed-length windows
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def accumulated_pentads(coupler):
+    """Run the same year reducing to 5-day means inside the scan."""
+    pentads = windowed_mean(coupler, "5 days", n_windows=PENTADS_PER_YEAR)
+    trajectory = coupler.generate_trajectory_function(
+        STEPS_PER_YEAR, accumulate=pentads
+    )
+    carry, accumulator = trajectory(coupler.initialize())
+    return pentads, carry, accumulator
+
+
+def test_a_window_is_the_records_its_interval_ends_with(accumulated_pentads):
+    """The first pentad is days 1 to 5 of the run, and every pentad holds five.
+
+    This is the convention the docstring commits to -- a step is binned by the
+    label of the record it produces, and a window is closed at its end, so the
+    record labelled exactly day 5 finishes the first pentad rather than
+    starting the second. A forecast's "first pentad" is days 1-5, and an
+    off-by-one here would make it days 1-4.
+    """
+    _, carry, (_, counts) = accumulated_pentads
+
+    assert int(carry.step) == STEPS_PER_YEAR
+    assert counts.shape == (PENTADS_PER_YEAR,)
+    np.testing.assert_array_equal(
+        np.asarray(counts), np.full(PENTADS_PER_YEAR, PENTAD_DAYS)
+    )
+
+
+def test_windowed_means_match_an_xarray_groupby(coupler, stacked_year, accumulated_pentads):
+    """Every window equals the mean of the records whose labels fall in it.
+
+    The same tie to the written output the monthly test makes, for the bins
+    the *run* defines rather than the ones the calendar does: the window index
+    is computed here from the `datetime64` labels alone, so it fails if the
+    accumulator's step-to-window arithmetic and `TimeAxis.datetimes` ever stop
+    agreeing.
+    """
+    _, diagnostics = stacked_year
+    pentads, _, accumulator = accumulated_pentads
+
+    ocean = coupler.to_xarray(diagnostics)["ocn"]
+    elapsed_days = (
+        ocean["time"].values - np.datetime64("2001-01-01")
+    ) / np.timedelta64(1, "D")
+    # `ceil(elapsed / window) - 1`: the window a label belongs to when a window
+    # is the half-open interval (w*window, (w+1)*window] -- closed at the end,
+    # which is where JEM labels a record covering an interval.
+    window = np.ceil(elapsed_days / PENTAD_DAYS).astype(int) - 1
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(window=("time", window))
+        .groupby("window")
+        .mean("time")
+    )
+    np.testing.assert_array_equal(
+        from_output.window.values, np.arange(PENTADS_PER_YEAR)
+    )
+
+    accumulated = pentads.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
+    np.testing.assert_allclose(
+        np.asarray(accumulated), from_output.values, rtol=1e-5, atol=1e-4
+    )
+
+
+def test_a_window_with_no_steps_is_nan(coupler):
+    """An accumulator sized for a year, run for a fortnight, is mostly NaN."""
+    pentads = windowed_mean(coupler, "5 days", n_windows=PENTADS_PER_YEAR)
+    trajectory = coupler.generate_trajectory_function(14, accumulate=pentads)
+    _, accumulator = trajectory(coupler.initialize())
+    _, counts = accumulator
+
+    sea_surface_temperature = np.asarray(
+        pentads.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
+    )
+    # Days 1-5, 6-10 and then 11-14: the third pentad is short, and it is a
+    # mean of the four records that fell in it rather than of five.
+    np.testing.assert_array_equal(np.asarray(counts)[:4], [5, 5, 4, 0])
+    assert np.all(np.isfinite(sea_surface_temperature[:3]))
+    assert np.all(np.isnan(sea_surface_temperature[3:]))
+
+
+def test_a_run_longer_than_the_accumulator_wraps(coupler):
+    """Window `w` composites windows `w`, `w + n_windows`, ... of a long run.
+
+    The accumulator's size is fixed at trace time -- that is what makes the
+    reduction cost nothing per step -- so a run that outlasts it wraps, the
+    way the monthly table wraps years. The counts are what show it: with ten
+    pentads and 73 pentads of run, the first three bins collect eight windows
+    each and the rest seven.
+    """
+    pentads = windowed_mean(coupler, "5 days", n_windows=10)
+    trajectory = coupler.generate_trajectory_function(
+        STEPS_PER_YEAR, accumulate=pentads
+    )
+    _, (_, counts) = trajectory(coupler.initialize())
+
+    np.testing.assert_array_equal(
+        np.asarray(counts), [40, 40, 40, 35, 35, 35, 35, 35, 35, 35]
+    )
+    assert int(np.sum(np.asarray(counts))) == STEPS_PER_YEAR
+
+
+@pytest.mark.parametrize(
+    ("window", "expected"),
+    [("5 days", PENTADS_PER_YEAR), ("7 days", 53), (365, 1)],
+)
+def test_total_time_counts_the_windows_of_the_run(coupler, window, expected):
+    """`total_time` sizes the accumulator: enough windows to cover the run.
+
+    Seven days do not divide a 365-day year, so the year needs 53 weekly
+    windows and the last one holds a single day -- rounding down would drop it
+    into the first window instead, which is the silent corruption the ceiling
+    avoids.
+    """
+    accumulator = windowed_mean(coupler, window, total_time="1 year")
+    _, counts = accumulator.init()
+    assert counts.shape == (expected,)
+
+
+def test_total_time_and_n_windows_agree(coupler):
+    """The two ways of sizing the accumulator build the same thing."""
+    from_total = windowed_mean(coupler, "5 days", total_time="1 year")
+    from_count = windowed_mean(coupler, "5 days", n_windows=PENTADS_PER_YEAR)
+
+    trajectory = coupler.generate_trajectory_function(50, accumulate=from_total)
+    _, first = trajectory(coupler.initialize())
+    _, second = coupler.generate_trajectory_function(50, accumulate=from_count)(
+        coupler.initialize()
+    )
+    for got, want in zip(
+        jax.tree_util.tree_leaves(from_total.finalize(first)),
+        jax.tree_util.tree_leaves(from_count.finalize(second)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
+def test_a_window_that_is_not_whole_coupling_steps_is_refused(coupler):
+    """Half a step cannot be attributed to either side of the boundary."""
+    with pytest.raises(ValueError, match="whole number of coupling steps"):
+        windowed_mean(coupler, "36 hours", n_windows=4)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"n_windows": 4, "total_time": "20 days"}],
+)
+def test_exactly_one_of_n_windows_and_total_time_is_required(coupler, kwargs):
+    """Neither is unanswerable and both is two answers to one question."""
+    with pytest.raises(ValueError, match="exactly one of n_windows and total_time"):
+        windowed_mean(coupler, "5 days", **kwargs)
+
+
+@pytest.mark.parametrize("n_windows", [0, -3, 1.0, True])
+def test_a_bad_n_windows_is_refused(coupler, n_windows):
+    """`True` is an `int` that would silently mean "one window" -- the whole run."""
+    with pytest.raises(ValueError, match="n_windows must be a positive integer"):
+        windowed_mean(coupler, "5 days", n_windows=n_windows)
 
 
 # ---------------------------------------------------------------------------
