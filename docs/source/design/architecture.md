@@ -1200,7 +1200,7 @@ over it, and `python -m jem.main` (or the `jem` console script) is one command
 for a coupled run:
 
 ```bash
-python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 ```
 
 **Exit status.** `0` if the run reached `total_time`, `1` if the health gate
@@ -1230,8 +1230,11 @@ atmosphere would silently be handed the coupler's run keys, and every jax-gcm
 configuration bundle that says `override /run: longrun` (16 of the 19 shipped)
 would compose the wrong file. `atmosphere.run` also already exists and means
 something else. So the coupled run keeps its own name at both ends —
-`coupled_run=smoke` selects an option, `coupled_run.total_time="90 days"` sets
-one key — and `test_jcm_run_group_is_not_shadowed` pins it down.
+`coupled_run=short_run` selects an option, `coupled_run.total_time="90 days"` sets
+one key — and `test_jcm_run_group_is_not_shadowed` pins it down. The *options*
+are named apart for the same reason: `short_run` and `long_run` against jcm's
+`smoke` and `longrun`, so no override reads as though it might be configuring
+the atmosphere.
 
 **YAML is wiring, and a test enforces it.** A key earns its place in a group or
 configuration file only by being (a) `_target_`, (b) a required input marked

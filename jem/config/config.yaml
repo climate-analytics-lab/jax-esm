@@ -59,8 +59,11 @@ defaults:
   # every jax-gcm configuration bundle that says `override /run: longrun` (16
   # of the 19 shipped ones) would compose the wrong file. And for reading:
   # `atmosphere.run` already exists and means something else, so the coupled
-  # run keeps its own name at both ends -- `coupled_run=smoke` selects the
-  # option, `coupled_run.total_time="90 days"` sets one key.
+  # run keeps its own name at both ends -- `coupled_run=short_run` selects the
+  # option, `coupled_run.total_time="90 days"` sets one key. The OPTIONS are
+  # named separately too (`short_run`, `long_run`, against jcm's `smoke` and
+  # `longrun`), so an override never reads as though it might configure the
+  # atmosphere.
   - coupled_run: default
 
   - override hydra/help: custom_help

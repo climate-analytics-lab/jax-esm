@@ -100,7 +100,7 @@ def test_a_stopped_run_exits_one_as_a_process(tmp_path):
 
     finished = subprocess.run(
         [sys.executable, "-c", program,
-         "+configuration=aquaplanet-slab", "coupled_run=smoke"],
+         "+configuration=aquaplanet-slab", "coupled_run=short_run"],
         cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=600,
     )
     assert finished.returncode == 1, finished.stdout[-2000:] + finished.stderr[-2000:]

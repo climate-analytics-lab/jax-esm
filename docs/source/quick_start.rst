@@ -133,7 +133,7 @@ the run above is also one command:
 
 .. code-block:: bash
 
-    python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 
 JAX-ESM's own config groups (``ocean``, ``land``, ``seaice``, ``coupling``,
 ``regrid``, ``coupled_run``, ``configuration``) sit at the top level, and
@@ -167,7 +167,7 @@ A long run checkpoints and writes chunk means:
 
 .. code-block:: bash
 
-    python -m jem.main +configuration=earth-slab coupled_run=longrun
+    python -m jem.main +configuration=earth-slab coupled_run=long_run
 
 Checkpointing is on by default, into ``<output_dir>/checkpoint`` -- a relative
 ``checkpoint_path`` resolves against the run's own output directory, which

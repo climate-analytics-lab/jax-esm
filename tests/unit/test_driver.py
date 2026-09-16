@@ -1082,7 +1082,7 @@ def test_continuous_chunked_resumed_agree_with_jcm(tmp_path):
 
 @pytest.mark.slow
 def test_run_smoke_cli(tmp_path):
-    """`python -m jem.main` runs the shipped smoke configuration end to end.
+    """`python -m jem.main` runs the shipped `short_run` option end to end.
 
     A subprocess, in a scratch working directory, because that is what a user
     types: it exercises Hydra's composition from the installed package, the
@@ -1102,7 +1102,7 @@ def test_run_smoke_cli(tmp_path):
 
     finished = subprocess.run(
         [sys.executable, "-m", "jem.main",
-         "+configuration=aquaplanet-slab", "coupled_run=smoke"],
+         "+configuration=aquaplanet-slab", "coupled_run=short_run"],
         cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=1800,
     )
     assert finished.returncode == 0, finished.stderr[-4000:]

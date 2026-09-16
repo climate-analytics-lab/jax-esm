@@ -59,7 +59,7 @@ Breaking changes are marked; everything else is additive.
   action that would otherwise overwrite its files, and the provenance line says
   which happened. An **absolute** path is used exactly as given, for a run that
   checkpoints to scratch while writing output elsewhere.
-  `coupled_run/longrun.yaml` no longer repeats the setting.
+  `coupled_run/long_run.yaml` no longer repeats the setting.
 - **A run says where its starting state came from.** `run_chunked` logs one
   INFO line before anything is compiled — `Starting from coupler.initialize()
   at coupled step 0 (no checkpoint was given).`, `Starting from the
@@ -130,7 +130,7 @@ Breaking changes are marked; everything else is additive.
   run is now one command:
 
   ```bash
-  python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+  python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
   python -m jem.main --help          # every group, option and override spelling
   python -m jem.main +configuration=earth-slab --cfg job   # compose, don't run
   ```
@@ -161,7 +161,7 @@ Breaking changes are marked; everything else is additive.
   | Drop one | `land=none` |
   | Set a component parameter | `+ocean.params.relaxation_time=1e6` |
   | Override a physical constant | `+atmosphere.constants.grav=9.7` |
-  | Choose the run settings | `coupled_run=smoke`, `coupled_run.total_time="90 days"` |
+  | Choose the run settings | `coupled_run=short_run`, `coupled_run.total_time="90 days"` |
 
   Spell the `@atmosphere`: `+configuration=speedy-t31` without it composes that
   jax-gcm bundle at the *root*, where its `physics`, `terrain` and `run` keys
@@ -173,8 +173,12 @@ Breaking changes are marked; everything else is additive.
   every jax-gcm configuration bundle that says `override /run: longrun` (16 of
   the 19 shipped ones). And `atmosphere.run` already exists and means something
   else. `coupled_run/default.yaml` is the group's complete schema — every key
-  the driver reads, with the default `run_chunked` gives it — and `smoke` and
-  `longrun` inherit it, so any key is overridable without a `+`.
+  the driver reads, with the default `run_chunked` gives it — and `short_run`
+  and `long_run` inherit it, so any key is overridable without a `+`. Those two
+  option names are the group's own, distinct from jax-gcm's `run=smoke` /
+  `run=longrun`: those configure the *atmosphere*, and a coupled option spelled
+  like an atmosphere option is the same confusion the group's name already
+  exists to avoid.
 - **The YAML is wiring only**, and a test says so: a key earns its place by
   being `_target_`, a required input (`???`) or the non-default value that
   makes a named configuration what it is.
@@ -449,7 +453,7 @@ code this release adds:
   even when the restart read fails.
 - The health check is given each chunk **unreduced**, and only the copy that is
   written is thinned or averaged. `output_averages=True` (the shipped
-  `coupled_run=longrun`) replaced a chunk with its time mean before the gate
+  `coupled_run=long_run`) replaced a chunk with its time mean before the gate
   saw it: xarray's mean skips NaNs and dilutes a finite extreme, and
   `subsample>1` could drop the chunk's last record — which is the record
   `jcm.diagnostics.check_health` judges, so a model that went bad near the end

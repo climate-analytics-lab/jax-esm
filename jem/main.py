@@ -6,11 +6,11 @@ Examples
 The shipped aquaplanet, two coupled days, to check a machine can run
 anything at all::
 
-    python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 
 An Earth-like year, chunked by month, with monthly-mean output::
 
-    python -m jem.main +configuration=earth-slab coupled_run=longrun \
+    python -m jem.main +configuration=earth-slab coupled_run=long_run \
         coupled_run.total_time="1 year"
 
 The atmosphere is configured by jax-gcm's own groups, re-rooted under

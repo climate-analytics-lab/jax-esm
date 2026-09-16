@@ -265,7 +265,7 @@ else -- the whole thing is one command:
 
 .. code-block:: bash
 
-    python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 
 See :doc:`quick_start` for the override spellings and
 :doc:`design/architecture` for what the configuration layer may and may not

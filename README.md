@@ -123,7 +123,7 @@ that works in `python -m jcm.main` works here with the group's package spelled
 out.
 
 ```bash
-python -m jem.main +configuration=aquaplanet-slab coupled_run=smoke
+python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 python -m jem.main --help       # every group, option and override spelling
 python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't run
 ```
@@ -138,7 +138,7 @@ python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't
 | Drop one | `land=none` |
 | Set a component parameter | `+ocean.params.relaxation_time=1e6` |
 | Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
-| Choose the run settings | `coupled_run=smoke`, or `coupled_run.total_time="90 days"` |
+| Choose the run settings | `coupled_run=short_run`, or `coupled_run.total_time="90 days"` |
 
 Two things worth knowing:
 
@@ -178,7 +178,7 @@ result = run_chunked(
 
 Run it again with the same `output_dir` (or the same `checkpoint_path`) and it
 continues from the coupled step the checkpoint holds —
-`python -m jem.main ... coupled_run=longrun` is the command-line form. A
+`python -m jem.main ... coupled_run=long_run` is the command-line form. A
 *relative* `checkpoint_path` resolves against `output_dir`, so every run gets
 its own restart directory — Hydra makes a fresh output directory per run — and
 resuming is deliberately the same action that would otherwise overwrite a run's

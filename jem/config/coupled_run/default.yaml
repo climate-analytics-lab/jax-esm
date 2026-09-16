@@ -2,19 +2,27 @@
 #
 # This file is also the COMPLETE schema of the coupled run: every key the
 # driver reads lives here, with a default and a comment, and the other options
-# in this group (`smoke`, `longrun`) inherit it via `defaults: [default,
+# in this group (`short_run`, `long_run`) inherit it via `defaults: [default,
 # _self_]` and override only what they change. So every option exposes the
 # same keys, and any of them can be set on the command line without a `+`.
+#
+# The names are this group's own. jax-gcm's `run` group has options called
+# `smoke` and `longrun`, and those stay jax-gcm's: they configure the
+# atmosphere (`atmosphere.run=...`), not the coupled run, and a coupled option
+# sharing a spelling with an atmosphere option is exactly the confusion the
+# group's name already avoids.
 #
 # The keys are the keyword arguments of `jem.driver.run_chunked()`, which is
 # where their defaults live; the values here repeat only what this named
 # option is about. Its two CALLABLE arguments -- `health_check` and
 # `accumulate` -- are the exceptions, and are Python-only: no YAML can name a
 # live function, and both take their defaults (the standard health gate, and
-# no in-scan reduction) when the run is launched from a config. The group composes at `cfg.coupled_run`, not `cfg.run` --
-# `atmosphere.run` is the atmosphere's own run config, and a group called
-# `run` here would shadow jcm's (see the comment in `config.yaml`). Select an
-# option with `coupled_run=smoke`, set one key with `coupled_run.chunk=...`.
+# no in-scan reduction) when the run is launched from a config.
+#
+# The group composes at `cfg.coupled_run`, not `cfg.run` -- `atmosphere.run`
+# is the atmosphere's own run config, and a group called `run` here would
+# shadow jcm's (see the comment in `config.yaml`). Select an option with
+# `coupled_run=short_run`, set one key with `coupled_run.chunk=...`.
 
 # Total simulated time, as a `jcm.date.parse_duration_days` string.
 total_time: "30 days"
