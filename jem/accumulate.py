@@ -236,10 +236,10 @@ def _variable_window_rule(
     period = int(boundaries[-1])
     # The two conventions differ by one second of the label. A record's label
     # sits at the END of its interval, and `bin_of_record` counts how many
-    # boundaries lie at or before `label - shift_seconds`. With 5-day bins and
+    # boundaries lie at or before `label + shift_seconds`. With 5-day bins and
     # daily records (record k labelled at day k + 1):
     #
-    #   inclusive="right": shift 1 s. A label of day 5 is looked up a second
+    #   inclusive="right": shift -1 s. A label of day 5 is looked up a second
     #     before the first boundary, so no boundary precedes it -> bin 0; it
     #     is the LAST record of (day 0, day 5]. Day 6 -> bin 1.
     #   inclusive="left": no shift. A label of day 5 is looked up at the
@@ -249,7 +249,7 @@ def _variable_window_rule(
     # In calendar months from 1 January with daily records, the record
     # labelled 1 February 00:00 is therefore January's last record under
     # "right" and February's first under "left".
-    shift_seconds = 1 if inclusive == "right" else 0
+    shift_seconds = -1 if inclusive == "right" else 0
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         """Return the 0-based bin a record of ``record_seconds`` counts in.
@@ -279,7 +279,7 @@ def _variable_window_rule(
         # is split into whole records (`shifted`, folded into the counter) and
         # a remainder (`phase`, folded into the boundaries); the ceiling is
         # then the first record whose label reaches the boundary.
-        shifted, phase = divmod(offset_seconds - shift_seconds, record_seconds)
+        shifted, phase = divmod(offset_seconds + shift_seconds, record_seconds)
         # The last entry lands exactly on `records_per_period`: the period is
         # a whole number of records and `phase` is less than one, so the
         # ceiling cannot overshoot it, and every wrapped record has a bin.
