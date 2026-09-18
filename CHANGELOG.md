@@ -300,6 +300,24 @@ Breaking changes are marked; everything else is additive.
   — is deliberately left untagged, and the JCM wrapper tags only the surface
   boundary conditions an exchanger writes into jcm's own dataset, because the
   rest of those names are jcm's and their roles are not JEM's to assert.
+- **`psi`, the ocean's barotropic streamfunction**, in the Veros component's
+  output (`["time", "lon", "lat"]`, `m3 s-1`, `jem_role="derived"`). Veros
+  carries a real streamfunction only when the setup solves the external mode
+  for one (`settings.enable_streamfunction`); under the linear free surface
+  every Veros setup shipped with JEM chooses, the same `variables.psi` array
+  holds the *surface pressure* instead (`m^2 s^-2`, on the T grid), so
+  publishing it unconditionally would have published a different quantity
+  under the streamfunction's name. `psi` is therefore Veros' own field when
+  the run solves for one, and is otherwise diagnosed from the
+  depth-integrated zonal transport by the relation Veros itself inverts —
+  `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) / dyt[j]` — integrated
+  northwards from a southern boundary where it vanishes. Which of the two the
+  run used is recorded in the variable's `comment` attribute, with the
+  caveats that a free-surface barotropic flow is not exactly non-divergent
+  (so the diagnosis is the standard "meridionally integrated zonal transport"
+  rather than an exact streamfunction) and that, like `u` and `v`, the field
+  sits on Veros' staggered grid — the zeta points — while wearing the T-grid
+  `lon`/`lat` labels the dataset uses throughout.
 - **`jem.checkpoint`** — `save(carry, path)` / `load(template, path)` for any
   pytree, and `save_coupled_carry` / `load_coupled_carry` for a whole
   `CoupledCarry`, in

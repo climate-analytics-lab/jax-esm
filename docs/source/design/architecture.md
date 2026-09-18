@@ -698,7 +698,23 @@ The conventions, which are JCM's:
   `forcing_heat_flux`, `forcing_freshwater_flux`, `forcing_surface_taux`,
   `forcing_surface_tauy` and `forcing_surface_air_temperature` for the five
   fields an exchanger hands it, keeping plain names for the `temp`, `salt`,
-  `u`, `v` and sea-surface fields it computes.
+  `u`, `v`, `psi` and sea-surface fields it computes. The ocean's `psi` is
+  the barotropic streamfunction, and which of two things it is depends on
+  how the setup solves the external mode. With
+  `settings.enable_streamfunction` (Veros' own default) it is Veros'
+  prognostic `variables.psi` at the current time level. With the linear
+  free surface — what every Veros setup shipped with JEM selects — Veros
+  reuses that same array for the surface pressure, a different quantity in
+  different units on a different grid, so the wrapper diagnoses the
+  streamfunction instead: it integrates the depth-integrated zonal
+  transport northwards from a southern boundary where the streamfunction
+  vanishes, using exactly the discrete relation Veros inverts when it adds
+  the barotropic mode back onto the baroclinic velocity,
+  `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) / dyt[j]`. The two agree
+  to machine precision up to the additive constant a streamfunction is
+  defined up to (Veros fixes it by holding its first island at zero, the
+  diagnosis by the southern boundary), and the variable's `comment`
+  attribute says which of the two the file holds.
 - **A variable's role is metadata, not a name to parse.** Every packaged
   component tags each output variable with `jem_role`
   (`jem.base.component.role_attrs`), whose value is the section of the carry
