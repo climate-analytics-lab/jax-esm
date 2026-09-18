@@ -25,10 +25,10 @@ chunk: "30 days"
 #
 #   jem.accumulate.monthly_mean(coupler)
 #       twelve bins -- every January of the run in one, a climatology;
-#   jem.accumulate.windowed_mean(coupler, month_lengths(coupler),
-#                                total_time="3600 days")
-#       one bin per calendar month of the run, which is the non-drifting
-#       equivalent of what `output_averages` gives here.
+#   jem.accumulate.monthly_mean(coupler, total_time="3600 days")
+#       one bin per calendar month of the run (119 of them for this length,
+#       the first and last partial), which is the non-drifting equivalent of
+#       what `output_averages` gives here.
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the

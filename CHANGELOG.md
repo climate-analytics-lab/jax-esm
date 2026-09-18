@@ -329,7 +329,7 @@ Breaking changes are marked; everything else is additive.
   `latest_complete_checkpoint(root,
   pattern="step_*")` and `remaining_batches(steps_done, total_steps,
   steps_per_batch)` moved here from `jem.utils.checkpoints` unchanged.
-- `jem.accumulate.monthly_mean(coupler)`,
+- `jem.accumulate.monthly_mean(coupler, total_time=… | n_months=…)`,
   `jem.accumulate.windowed_mean(coupler, window, n_windows=…)` and
   `Coupler.generate_trajectory_function(iterations, accumulate=(init, update))`
   — an **in-scan reduction** of the per-step diagnostics. `update(accumulator,
@@ -339,26 +339,41 @@ Breaking changes are marked; everything else is additive.
   `iterations`; the call becomes `(carry, accumulator=None) -> (carry,
   accumulator)` and a chunked run threads the accumulator across chunk
   boundaries. `monthly_mean` needs only the coupler — the diagnostics' shapes
-  come from `jax.eval_shape` of one step, and a step's month is a lookup in a
-  static day-of-year table — so a whole year is one compiled trajectory instead
-  of the three that chunking by calendar month would need. Which month a step
-  counts in follows the label JEM writes on its output record, so
-  `monthly.finalize(acc)` and `to_xarray(...).groupby("time.month").mean()` of
-  the same run agree. A calendar with no fixed month table (gregorian) and a
-  coupling step that does not divide the year are refused with a message
-  saying why. **Without `accumulate` the generated function is exactly what it
-  was.**
+  come from `jax.eval_shape` of one step, and a record's month is a
+  `searchsorted` in a static table of month boundaries, reached from the record
+  counter reduced modulo the records in a year — so a whole year is one
+  compiled trajectory instead of the three that chunking by calendar month
+  would need. Which month a record counts in follows the label JEM writes on
+  it, so `monthly.finalize(acc)` and
+  `to_xarray(...).groupby("time.month").mean()` of the same run agree (for a
+  sub-stepped component, after `fold_records`, below). A calendar with no fixed
+  month table (gregorian) and a coupling step that does not divide the year are
+  refused with a message saying why. **Without `accumulate` the generated
+  function is exactly what it was.**
+
+  `monthly_mean(coupler)` bins into the **twelve** calendar months, so a
+  multi-year run composites its Januaries into one bin — a climatology.
+  `monthly_mean(coupler, total_time="10 years")` (or `n_months=120`) bins into
+  the months the run **passes through**, in order, each with a bin of its own:
+  the same month table rotated to the month the run starts in and phased to the
+  start date, so it is calendar months whatever day the run begins on, and
+  nothing drifts the way a fixed 30-day window does. The size counted from
+  `total_time` is the months the run's labels touch, which is why ten years is
+  121 bins and not 120 — the last record is labelled 00:00 on 1 January of the
+  eleventh year, which is that January's, and without a bin for it the
+  accumulator would wrap it into the first January. A run longer than
+  `n_months` months wraps, as a windowed mean does. The two forms are mutually
+  exclusive; giving neither is the climatology.
 
   `windowed_mean` is the same reduction over `n_windows` windows — of one
   fixed length, which is what a sub-seasonal forecast is scored on, or of a
-  repeating **pattern** of lengths, which with the calendar's own month
-  lengths gives one bin per calendar month of a long run:
+  repeating **pattern** of lengths, which the windows cycle through:
 
   ```python
   pentads = windowed_mean(coupler, "5 days", n_windows=73)          # a year
   weeks   = windowed_mean(coupler, "7 days", total_time="1 year")   # 53 of them
-  months  = windowed_mean(coupler, month_lengths(coupler),
-                          total_time="10 years")                    # 120 of them
+  leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],     # cycled
+                          total_time="30 days")
   ```
 
   Each length is a `jcm.date.parse_duration_days` string or a number of days
@@ -368,25 +383,33 @@ Breaking changes are marked; everything else is additive.
   ends inside), and a sequence given neither is used once through. Both
   builders return the same `BinnedMean` named tuple from one private
   `_binned_mean(coupler, bin_of_record, n_bins)` with one private
-  `_variable_window_rule(boundaries, offset, closed)` — `monthly_mean` *is*
-  twelve calendar-month windows phased to the run's start of year — and both
-  bin every record by its own **label**; a run longer than the accumulator
-  wraps, so window *w* composites every *w*-th window exactly as the monthly
-  bins composite years.
+  `_variable_window_rule(boundaries, offset, closed)` — a calendar month is
+  that rule with the month boundaries, the run's phase in the calendar and
+  bins closed at their start — and both bin every record by its own **label**;
+  a run longer than the accumulator wraps, so window *w* composites every
+  *w*-th window exactly as the twelve monthly bins composite years.
 
-  **`jem.accumulate.month_lengths(calendar_or_coupler)`** is public for that
-  use: the twelve month lengths in days of a fixed-length calendar, taken from
-  a coupler, a calendar name or a year length, refusing `gregorian` (whose
-  leap years change the table from year to year). The month *windows* and
-  `monthly_mean` differ by one record at every month boundary, by convention
-  and not by accident: a window closes at its end (JEM labels a record at the
-  end of the interval it covers, and a window is one such interval) while a
-  calendar month closes at its start (which is what `groupby("time.month")`
-  does), so the record labelled 00:00 on 1 February is the last of January's
-  window and the first of February's month. Use the windows for per-month bins
-  of a long run and `monthly_mean` when the answer must equal a `groupby` of
-  the written output record for record; there is deliberately no `closed=`
-  knob to mix the two. A coupled step is not always one record: a component the
+  A window is **not** a calendar month, whatever its length, and neither
+  builder pretends otherwise: a window is measured from the run's own start
+  date with no calendar phase and closes at its **end** (JEM labels a record at
+  the end of the interval it covers, and a window is one such interval), while
+  a calendar month is phased to the calendar and closes at its **start**
+  (which is what `groupby("time.month")` does). So a 31-day window started on 1
+  January takes the record labelled 00:00 on 1 February, which is February's
+  month, and from a 1 July start a pattern of month lengths is not months at
+  all. There is deliberately no `closed=` or `offset=` knob to mix the two:
+  each convention is what makes its own builder agree with the thing it must
+  agree with.
+
+  **`jem.accumulate.month_lengths(calendar_or_coupler)`** is public so that an
+  analysis can weight or label months without rebuilding the table: the twelve
+  month lengths in days of a fixed-length calendar, January first, taken from a
+  coupler, a calendar name or a year length, refusing `gregorian` (whose leap
+  years change the table from year to year).
+  **`jem.accumulate.fold_records(means, counts)`** is the count-weighted fold
+  of a component's kept sub-step axes — what makes a sub-stepped component's
+  binned mean equal a `groupby` of its output, and a no-op on a component that
+  records once per coupled step. A coupled step is not always one record: a component the
   workflow runs *n* times per step emits *n*, and a nested coupler's inner
   steps are records in the same way, so the 24 hourly records of the daily
   step covering 31 January are binned 23 in January and one (labelled 1

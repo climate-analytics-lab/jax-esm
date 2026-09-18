@@ -237,35 +237,53 @@ A component the workflow runs *n* times per coupled step keeps that axis —
 `(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
 records is binned by its own label, so the hourly records of 31 January count
 in January even though the coupled step containing them is labelled 1
-February. A nested coupler's inner steps are treated the same way.
+February. A nested coupler's inner steps are treated the same way. Fold that
+axis away with `fold_records`, which weights each slot by its own count (a
+straight mean over the slots is right only where every slot holds the same
+number of records, which is what a month boundary breaks):
+
+```python
+from jem.accumulate import fold_records
+
+sums, counts = accumulator                    # counts["atm"]: (12, n)
+means = monthly.finalize(accumulator)         # means["atm"]:  (12, n, ...)
+per_month = fold_records(means["atm"], counts["atm"])          # (12, ...)
+```
+
+**Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
+the twelve calendar months, so a ten-year run composites its ten Januaries —
+a climatology. Give it a size and it bins into the months the run passes
+through instead, in order, each with a bin of its own:
+
+```python
+months = monthly_mean(coupler, total_time="10 years")   # or n_months=120
+means = months.finalize(accumulator)   # 121 bins: Jul 2001, Aug 2001, …
+```
+
+These are calendar months whatever day the run starts on — the month table is
+rotated to the month of the start date and phased to it — and they do not
+drift the way a fixed 30-day window does. Ten years gives 121 bins, not 120:
+the run's last record is labelled 00:00 on 1 January of the eleventh year,
+which belongs to that January, and a bin has to exist for it rather than have
+it wrap into the first.
 
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
 `n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — sized either by `n_windows` or by
 `total_time="1 year"`. A run longer than the accumulator wraps, so window *w*
 composites every *w*-th window, the way the monthly bins composite years.
-
 `window` may also be a **sequence** of lengths, which the windows cycle
-through. Given the calendar's own month lengths, that is one bin per calendar
-month of the run instead of the twelve-month climatology `monthly_mean`
-accumulates — monthly means that neither drift, as a fixed 30-day window does,
-nor wrap:
+through (daily leads for a forecast's first week, then pentads).
 
-```python
-from jem.accumulate import month_lengths, windowed_mean
-
-months = windowed_mean(coupler, month_lengths(coupler), total_time="10 years")
-means = months.finalize(accumulator)   # 120 bins: Jan of year 1 … Dec of year 10
-```
-
-The two differ by one record at every month boundary, deliberately: a window
-closes at its **end**, because JEM labels a record at the end of the interval
-it covers and a window is one such interval, while a calendar month closes at
-its **start**, because that is what `groupby("time.month")` does. With daily
-coupling, the record labelled 00:00 on 1 February is the last of January's
-*window* and the first of February's *month*. Use `windowed_mean` for
-per-month bins of a long run, and `monthly_mean` when the answer has to equal
-a `groupby` of the written output record for record.
+A window is **not** a calendar month, whatever its length: every window is
+measured from the run's own start date, with no reference to the calendar, and
+closes at its **end** (JEM labels a record at the end of the interval it
+covers, and a window is one such interval) while a calendar month closes at
+its **start** (which is what `groupby("time.month")` does). So a 31-day window
+started on 1 January takes the record labelled 00:00 on 1 February, which is
+February's month; and from a 1 July start a pattern of month lengths is not
+months at all. Calendar months come from `monthly_mean`, which knows where in
+the calendar the run began.
 
 The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`

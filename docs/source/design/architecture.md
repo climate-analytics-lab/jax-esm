@@ -1042,9 +1042,9 @@ records with their time mean, labelled with the chunk's last time and carrying
 the CF `cell_methods = "time: mean"` that says so. The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
 five days a year against the calendar on a 365-day year, not monthly means —
-those are `jem.accumulate.monthly_mean` (twelve bins, a climatology) or
-`windowed_mean(coupler, month_lengths(coupler), total_time=…)` (one bin per
-month of the run), both of which bin by each record's own label.
+those are `jem.accumulate.monthly_mean(coupler)` (twelve bins, a climatology)
+or `monthly_mean(coupler, total_time=…)` (one bin per month of the run), both
+of which bin by each record's own label.
 In a coupled run the atmosphere's per-step records are *already*
 step means (the JCM wrapper integrates each coupling step with
 `output_averages=True`), so averaging a chunk of them is the chunk mean exactly,
@@ -1111,16 +1111,32 @@ three consequences are chosen rather than inherited:
   in one call.
 
 `monthly_mean` takes only the coupler: the accumulator's shapes come from
-`jax.eval_shape` of one coupled step, and a step's month is a lookup in a static
-day-of-year table reached from the step counter reduced modulo the steps in a
-year — exact integer arithmetic, and one compiled trajectory for a whole year.
-Which month a step counts in follows the label JEM writes on its output record
-(the *end* of the coupling interval), so `monthly.finalize(...)` and
-`to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers. A calendar with no fixed day-of-year to month table (gregorian, with
-its leap years) and a coupling step that does not divide the year are refused
-with a message saying why, rather than binned approximately. Without
-`accumulate`, the generated function is what it always was.
+`jax.eval_shape` of one coupled step, and a record's month is a `searchsorted`
+in a static table of month boundaries, reached from the record counter reduced
+modulo the records in a year — exact integer arithmetic, and one compiled
+trajectory for a whole year. Which month a record counts in follows the label
+JEM writes on it (the *end* of the interval it covers), so
+`monthly.finalize(...)` and `to_xarray(...).groupby("time.month").mean()` of
+the same run are the same numbers — for a component that records once per
+coupled step directly, and for one that records more often after its kept
+sub-step axis is folded with `fold_records` (below). A calendar with no fixed
+table of month lengths (gregorian, with its leap years) and a coupling step
+that does not divide the year are refused with a message saying why, rather
+than binned approximately. Without `accumulate`, the generated function is what
+it always was.
+
+**Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
+the twelve calendar months, so a ten-year run composites its ten Januaries into
+bin 0 — a climatology, and what a fixed `(12, …)` accumulator is for.
+`monthly_mean(coupler, total_time="10 years")` (or `n_months=`) instead gives
+the months the run passes through, in order, each with a bin of its own: the
+same month table rotated to the month the run starts in and phased to the start
+date, so it is calendar months whatever day the run begins on. It is sized by
+counting the months the run's labels touch, which is why ten years gives 121
+bins and not 120 — the last record is labelled 00:00 on 1 January of the
+eleventh year, which is that January's record, and without a bin for it the
+accumulator would wrap it into bin 0 and quietly spoil the first January. A run
+longer than `n_months` months wraps, exactly as a windowed mean does.
 
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
@@ -1133,10 +1149,11 @@ same `finalize`:
 from jem.accumulate import month_lengths, monthly_mean, windowed_mean
 
 monthly = monthly_mean(coupler)                                  # 12 bins
+months  = monthly_mean(coupler, total_time="10 years")           # 121: every month
 pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
 weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
-months  = windowed_mean(coupler, month_lengths(coupler),
-                        total_time="10 years")                   # 120: every month
+leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cycled
+                        total_time="30 days")
 ```
 
 `window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
@@ -1150,22 +1167,26 @@ its own count, so it is the mean of what fell in it).
 **The windows need not be equal.** `window` may be a *sequence* of lengths,
 which the accumulator's windows cycle through, repeating for as long as
 `n_windows` (or the count from `total_time`) asks and wrapping only at the sum
-of all of them. `month_lengths(calendar_or_coupler)` — the same table
-`monthly_mean` bins on, made public for exactly this — is then one bin per
-calendar month of the run: monthly means that neither drift the way a fixed
-30-day window does nor composite into a climatology the way `monthly_mean`'s
-twelve bins do. A sequence is the one case in which giving neither `n_windows`
-nor `total_time` is answerable, and it means one cycle of the pattern.
+of all of them — daily leads for a forecast's first week and pentads
+thereafter, say. A sequence is the one case in which giving neither
+`n_windows` nor `total_time` is answerable, and it means one cycle of the
+pattern.
 
-The two calendar-month reductions differ by **one record at every month
-boundary**, and that is the convention, not an off-by-one: a window closes at
-its end and a calendar month at its start (below), so with daily coupling the
-record labelled 00:00 on 1 February is the last of January's *window* and the
-first of February's *month*. `windowed_mean` is the one to use for per-month
-bins of a long run; `monthly_mean` is the one whose answer equals a
-`groupby("time.month")` of the written output record for record. No `closed=`
-knob is offered to mix them: each convention is what makes its own builder
-agree with the thing it has to agree with.
+**A window is not a calendar month, whatever its length.** Every window is
+measured from the run's own start date, with no phase and no reference to the
+calendar, so the month lengths of `month_lengths()` — which are always
+January-first — are calendar months only for a run starting at 00:00 on 1
+January; from 1 July they would bin the first 31 days together, then 28. That
+is why the per-month reduction is `monthly_mean(coupler, total_time=…)` and not
+a pattern handed to `windowed_mean`, and why `windowed_mean` has no `offset=`
+knob to fix it with: the builder that knows where in the calendar a run starts
+is the one that should own the phase. The two also close on opposite sides —
+a window at its end, a calendar month at its start (below) — so even from 1
+January a 31-day window and January differ by the record labelled 00:00 on 1
+February. No `closed=` knob is offered to mix them either: each convention is
+what makes its own builder agree with the thing it has to agree with (a
+forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
+of the written output).
 
 Both binnings follow the **label** of the record a step produces — the end of
 the coupling interval — rather than where the interval starts. The boundaries
@@ -1180,8 +1201,9 @@ and a monthly mean has to agree with the written output.
 Both rules are therefore one private
 `_variable_window_rule(boundaries_seconds, offset_seconds, closed)`: bins laid
 end to end as a cumulative sum of lengths, a phase (0 for windows the run
-defines, the run's offset into the calendar year for months) and which side a
-boundary closes on. Inside the scan it is a `searchsorted` in a static table,
+defines; the run's offset into the calendar year for the twelve-month
+climatology, and into its own first month for the sequential form) and which
+side a boundary closes on. Inside the scan it is a `searchsorted` in a static table,
 after the record counter is reduced modulo the records in one period of the
 bins — which is both what wraps a long run and what keeps the arithmetic
 inside int32. The boundaries themselves are converted from seconds to record
@@ -1199,18 +1221,22 @@ hourly records of the daily step covering 31 January are labelled 01:00 on the
 from the coupler's own sub-step clock (`coupling_time_at_substep`), and the
 sub-step axis is kept rather than folded: that component accumulates into
 `(n_bins, n, …)`, bin *b* slot *j* holding the records of call *j* that fell in
-*b* — a monthly-mean diurnal cycle, which folding would destroy and which one
-count-weighted sum on the host recovers. Because components recording at
+*b* — a monthly-mean diurnal cycle, which folding would destroy and which
+`fold_records(means["atm"], counts["atm"])` recovers by weighting each slot
+with its own count (a straight mean over the slots is the same number only
+where every slot holds the same number of records, which is exactly what a
+month boundary breaks). Because components recording at
 different rates fill different bins as one step is folded in, the accumulator's
 counts are then one array per component (`(n_bins, *sub-step axes)`) instead of
 the single `(n_bins,)` array a model whose components all record once per
 coupled step keeps.
 
 A run longer than the accumulator **wraps**: window *w* also collects windows
-*w + n_windows*, *w + 2·n_windows*, … exactly as the monthly table wraps years
-and gives a three-year run a January climatology. That is the price of a
-fixed-size accumulator, which is the whole point of reducing inside the scan —
-size it to the run if each window is to stand on its own.
+*w + n_windows*, *w + 2·n_windows*, … exactly as the twelve-month table wraps
+years and gives a three-year run a January climatology, and as `n_months` bins
+wrap at their own span. That is the price of a fixed-size accumulator, which is
+the whole point of reducing inside the scan — size it to the run if each bin is
+to stand on its own.
 
 **Calibrating against a binned mean.** The accumulator is an ordinary pytree in
 the scan carry, so nothing about the reduction is special to differentiate:
