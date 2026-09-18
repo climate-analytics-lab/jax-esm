@@ -233,6 +233,13 @@ def _variable_window_rule(
     of coupling steps and a record is a whole division of one.
 
     """
+    if inclusive not in ("left", "right"):
+        # `Literal` is a promise to the type checker, not a runtime check, so a
+        # misspelling ("rigth") would otherwise be read as "left" by the
+        # comparison below and silently shift every bin boundary by a record.
+        raise ValueError(
+            f'inclusive must be "left" or "right"; got {inclusive!r}.'
+        )
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
     assert period >= int(boundaries[-1]), "the bins must fit inside their period"

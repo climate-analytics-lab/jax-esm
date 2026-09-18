@@ -1425,3 +1425,16 @@ def test_a_run_starting_mid_year_bins_from_its_own_dates(climatology_file):
     expected[6] = 30
     expected[7] = 1
     np.testing.assert_array_equal(np.asarray(counts), expected)
+
+
+def test_a_misspelled_inclusive_is_refused():
+    """``Literal`` does not check at runtime, so the rule builder must.
+
+    Without this a misspelling would compare unequal to ``"right"`` and be
+    treated as ``"left"``, moving every bin boundary by one record with no
+    error anywhere.
+    """
+    from jem.accumulate import _variable_window_rule
+
+    with pytest.raises(ValueError, match="left.*right.*rigth"):
+        _variable_window_rule(np.array([5 * 86400]), 0, "rigth")  # type: ignore[arg-type]
