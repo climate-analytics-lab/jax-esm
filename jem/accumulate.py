@@ -62,8 +62,12 @@ from jem.base.component import CouplingTime, Diagnostics
 #: (see :func:`_record_axes`).
 BinnedAccumulator = tuple[Any, Any]
 
-#: Number of calendar months :func:`monthly_mean` bins into. The leading axis
-#: of everything it makes :meth:`BinnedMean.finalize` return is January first.
+#: Number of calendar months in a year, and the number of bins
+#: :func:`monthly_mean` accumulates into unless it is asked for one bin per
+#: month of the run (``total_time=`` / ``n_months=``). In the twelve-bin form
+#: the leading axis of everything :meth:`BinnedMean.finalize` returns is
+#: January first; in the sequential form it starts with the month the run
+#: starts in.
 MONTHS_PER_YEAR = 12
 
 _SECONDS_PER_DAY = 86400
@@ -151,21 +155,23 @@ def _variable_window_rule(
     boundaries_seconds: np.ndarray,
     offset_seconds: int,
     closed: Literal["left", "right"],
+    period_seconds: int | None = None,
 ) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
     """Return the ``bin_of_record`` rule for bins of the given lengths.
 
     The one piece of bin arithmetic in this module: both :func:`monthly_mean`
     and :func:`windowed_mean` are bins laid end to end, cycling for as long as
     the run lasts, and a record belongs to the bin its own label falls in.
-    They differ only in the three arguments here.
+    They differ only in the arguments here.
 
     Parameters
     ----------
     boundaries_seconds : numpy.ndarray
         The **ends** of the bins, in whole seconds from the start of the
         pattern: the cumulative sum of the bin lengths, strictly increasing,
-        one entry per bin. The last entry is the period the pattern repeats
-        with, which is what makes a run longer than the accumulator wrap.
+        one entry per bin. The last entry is where the bins end, and -- unless
+        ``period_seconds`` says otherwise -- the period they repeat with,
+        which is what makes a run longer than the accumulator wrap.
     offset_seconds : int
         Where the run's start date sits in that pattern -- 0 for windows the
         run itself defines, and the run's offset into the calendar year for
@@ -181,6 +187,15 @@ def _variable_window_rule(
         month starts at 00:00 on the 1st, which is what
         ``groupby("time.month")`` of the written output does and what a
         monthly mean has to agree with.
+    period_seconds : int, optional
+        The period the bins repeat with, when it is not where they end. It
+        must be at least ``boundaries_seconds[-1]`` and a whole number of
+        coupling steps; the last bin then also collects the gap between the
+        two, which is where a *wrapped* record labelled in it lands. The one
+        caller that needs this is :func:`monthly_mean`'s sequential form,
+        whose bins end on a calendar month boundary that a long coupling step
+        need not fall on -- see there for why rounding the period up costs
+        nothing observable.
 
     Returns
     -------
@@ -207,7 +222,8 @@ def _variable_window_rule(
 
     """
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
-    period_seconds = int(boundaries[-1])
+    period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
+    assert period >= int(boundaries[-1]), "the bins must fit inside their period"
     # One second of shift is the whole difference between the two conventions:
     # counting the boundaries at or before `label - 1` puts a label exactly on
     # a boundary in the bin that ends there, counting those at or before
@@ -216,7 +232,7 @@ def _variable_window_rule(
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         """Return the 0-based bin a record of ``record_seconds`` counts in."""
-        records_per_period, remainder = divmod(period_seconds, record_seconds)
+        records_per_period, remainder = divmod(period, record_seconds)
         # An invariant of the callers, not a user error: every builder checks
         # that the bins' period is a whole number of coupling steps, and the
         # coupler refuses a workflow whose sub-timestep is not a whole
@@ -225,7 +241,7 @@ def _variable_window_rule(
         # than assumed because a silent rounding here would drift every bin
         # boundary by a fraction of a record.
         assert not remainder, (
-            f"{period_seconds} s of bins is not a whole number of "
+            f"a period of {period} s is not a whole number of "
             f"{record_seconds} s records"
         )
         # Where the boundaries sit on this component's record grid. The run's
@@ -234,9 +250,15 @@ def _variable_window_rule(
         # a remainder (`phase`, folded into the boundaries); the ceiling is
         # then the first record whose label reaches the boundary.
         shifted, phase = divmod(offset_seconds - shift, record_seconds)
-        boundary_records = jnp.asarray(
-            -(-(boundaries - phase) // record_seconds), dtype=jnp.int32
-        )
+        in_records = -(-(boundaries - phase) // record_seconds)
+        # The last bin ends at the period: that is where it already ends when
+        # the period is where the bins end (the ceiling above lands exactly on
+        # `records_per_period`), and where it has to end when the period was
+        # rounded up past them, so that a wrapped record labelled in the gap
+        # is the last bin's rather than an index off the end of the
+        # accumulator.
+        in_records[-1] = records_per_period
+        boundary_records = jnp.asarray(in_records, dtype=jnp.int32)
         # `record + 1` because record k is labelled at the END of its own
         # interval. The modulo is what wraps a run longer than the pattern
         # and, with it, keeps the index inside the accumulator whatever the
@@ -562,9 +584,11 @@ class BinnedMean(NamedTuple):
         -------
         pytree
             The structure of one coupled step's diagnostics, every leaf with a
-            leading axis of length ``n_bins`` -- the twelve calendar months,
-            January first, for :func:`monthly_mean`; the ``n_windows`` windows
-            from the start of the run for :func:`windowed_mean`. A component
+            leading axis of length ``n_bins`` -- for :func:`monthly_mean`,
+            either the twelve calendar months, January first, or the
+            ``n_months`` months the run passes through, its first month first;
+            for :func:`windowed_mean`, the ``n_windows`` windows from the
+            start of the run. A component
             that records ``n`` times per coupled step keeps that axis after
             the bins, so its leaves are ``(n_bins, n, ...)``: bin ``b``, slot
             ``j`` is the mean of the records of call ``j`` whose labels fell
@@ -828,7 +852,7 @@ def monthly_mean(
 
         monthly_mean(coupler)                          # (12, ...): a climatology
         monthly_mean(coupler, total_time="10 years")   # (121, ...): every month
-        monthly_mean(coupler, n_months=120)            # sized directly instead
+        monthly_mean(coupler, n_months=121)            # sized directly instead
 
     The two forms bin by the same rule and the same convention; they differ in
     what the accumulator *is*. Twelve bins are the calendar months, so a
@@ -862,12 +886,27 @@ def monthly_mean(
     bin holds all three Januaries, which is a climatology and is what the
     fixed ``(12, ...)`` accumulator is for.
 
-    **The sequential form wraps at ``n_months``** instead, exactly as
-    :func:`windowed_mean` wraps at ``n_windows``: bin 0 is the month the run
-    starts in, and bin *m* is the month *m* months later, until it runs out
-    and month ``n_months`` folds back into bin 0. Size it with ``total_time``
-    and it does not wrap at all; size it larger than the run and the surplus
-    bins stay NaN, like any bin no record fell in.
+    **The sequential form wraps at the span of its bins** -- the total length
+    of the ``n_months`` months, not a number of months. A run that outlasts
+    the accumulator is folded back modulo that span, which realigns with the
+    calendar only when the span is a whole number of years, i.e. when
+    ``n_months`` is a multiple of twelve. Otherwise a wrapped calendar month
+    **straddles** two bins: with ``n_months=6`` from 1 January the bins span
+    181 days, so the second August of the run puts 28 of its records in the
+    February bin and 3 in the March bin. Wrapped bins of a sequential monthly
+    mean are therefore only meaningful for a multiple of twelve; size the
+    accumulator with ``total_time`` and it is never wrapped into at all, which
+    is the form to prefer. Sizing it *larger* than the run is harmless -- the
+    surplus bins stay NaN, like any bin no record fell in.
+
+    (The wrap point is rounded up to the next whole coupled step, because the
+    record counter is reduced modulo it and the span of a whole number of
+    calendar months need not be a whole number of steps -- a 5-day coupling
+    divides the 365-day year but not the 59 days of January and February. It
+    moves the wrap by less than one coupling step and leaves every bin
+    boundary exact, and since a wrapped bin is only calendar-aligned for a
+    multiple of twelve and a ``total_time``-sized accumulator never wraps,
+    there is nothing observable to pay for it.)
 
     The first and last bins of the sequential form are usually **partial**,
     and both for the same reason as everywhere else here: a bin holds the
@@ -948,11 +987,10 @@ def monthly_mean(
         :func:`month_lengths`).
     ValueError
         If both ``n_months`` and ``total_time`` are given, if ``n_months`` is
-        not a positive integer, if ``total_time`` is not positive, if the
+        not a positive integer, if ``total_time`` is not positive, or if the
         coupling timestep does not divide the year exactly -- the month of a
         record is then not a function of its counter reduced modulo a whole
-        number of steps per year -- or if it does not divide the span of the
-        sequential form's bins, which is the period they repeat with.
+        number of steps per year.
 
     """
     # Whole seconds throughout: `jdt.Timedelta` is integer-backed and the year
@@ -1021,23 +1059,24 @@ def monthly_mean(
     boundaries = np.cumsum(
         [rotated[index % MONTHS_PER_YEAR] for index in range(bins)]
     )
-    period_seconds = int(boundaries[-1])
-    if period_seconds % dt_seconds:
-        # The bins repeat at their own total span (a run longer than the
-        # accumulator wraps into them), and the record counter is reduced
-        # modulo that span, so it has to be a whole number of coupled steps.
-        # Any whole number of years is, whatever divides the year; it is a
-        # part-year span of an exotic timestep that is refused here.
-        raise ValueError(
-            f"A monthly mean of {bins} months spans {period_seconds} s, which "
-            f"the coupling timestep ({dt_seconds} s) does not divide exactly. "
-            "The bins repeat at that span, so it must be a whole number of "
-            "coupled steps; a whole number of years always is."
-        )
+    # The record counter is reduced modulo the period the bins repeat with, so
+    # that period has to be a whole number of coupled steps -- and the span of
+    # a whole number of calendar months need not be one (a 5-day coupling
+    # divides the 365-day year but not 59 days of January and February). The
+    # period is therefore rounded UP to the next coupled step, which extends
+    # the wrap point by less than one step past the last bin; the bin
+    # boundaries themselves stay exact. Nothing observable pays for it: an
+    # accumulator sized by `total_time` is never wrapped into at all, and a
+    # wrapped `n_months` bin only lines up with a calendar month when
+    # `n_months` is a multiple of twelve anyway (see the wrap paragraph in the
+    # docstring). Refusing instead would reject every `total_time` form on
+    # such a coupling, since counting months from a run always gives 12N+1 of
+    # them, whose span is never a whole number of years.
+    period_seconds = -(-int(boundaries[-1]) // dt_seconds) * dt_seconds
 
     return _binned_mean(
         coupler,
-        _variable_window_rule(boundaries, offset_seconds, "left"),
+        _variable_window_rule(boundaries, offset_seconds, "left", period_seconds),
         bins,
         carry,
     )

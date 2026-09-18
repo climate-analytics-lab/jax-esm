@@ -101,7 +101,10 @@ def seasonal_sst_climatology(path) -> str:
 
 
 def build_coupler(
-    climatology_file, relaxation_time=RELAXATION_TIME, start_date=START_DATE
+    climatology_file,
+    relaxation_time=RELAXATION_TIME,
+    start_date=START_DATE,
+    coupling_timestep=COUPLING_TIMESTEP,
 ) -> Coupler:
     """Return the two-slab coupler the tests run, started on `start_date`."""
     grid = make_grid()
@@ -115,7 +118,7 @@ def build_coupler(
     return Coupler(
         {"atm": SlabAtmosphereModel(grid), "ocn": ocean},
         {"exchange": slab_exchange},
-        coupling_timestep=COUPLING_TIMESTEP,
+        coupling_timestep=coupling_timestep,
         start_date=start_date,
         calendar=CALENDAR,
     )
@@ -527,25 +530,88 @@ def test_a_bad_n_months_is_refused(coupler, n_months):
         monthly_mean(coupler, n_months=n_months)
 
 
-def test_a_timestep_that_does_not_divide_the_bins_is_refused(climatology_file):
-    """The bins repeat at their own span, so a step has to fit a whole number.
+def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
+    climatology_file,
+):
+    """Five-day coupling: the bins are calendar months it does not fit into.
 
-    A five-day coupling divides the 365-day year, so the climatology is fine,
-    but three months of it is 90 days -- which five days does divide -- while
-    two is 59, which it does not. The bins repeat at that span (a longer run
-    wraps into them), so the record counter could not be reduced modulo it.
+    A five-day step divides the 365-day year but not 59 days of January and
+    February, so the span the bins repeat with is not a whole number of steps.
+    That span is rounded up to one -- the wrap moves by less than a step and
+    every bin boundary stays exact -- rather than refused, because counting
+    months from a run always gives `12N + 1` of them, whose span is never a
+    whole number of years: refusing would reject every `total_time` form on
+    this coupling. A `total_time`-sized accumulator is never wrapped into, so
+    the rounding cannot show up in the answer, and this is the test of that:
+    it still equals the groupby.
     """
-    coupler = Coupler(
-        {"atm": SlabAtmosphereModel(make_grid())},
-        coupling_timestep=jdt.to_timedelta(5, "day"),
-        start_date=START_DATE,
-        calendar=CALENDAR,
+    coupler = build_coupler(
+        climatology_file, coupling_timestep=jdt.to_timedelta(5, "day")
     )
-    del climatology_file
+    monthly = monthly_mean(coupler, total_time="1 year")
+    steps = STEPS_PER_YEAR // 5
+    _, accumulator = coupler.generate_trajectory_function(
+        steps, accumulate=monthly
+    )(coupler.initialize())
+    _, diagnostics = coupler.generate_trajectory_function(steps)(
+        coupler.initialize()
+    )
 
-    monthly_mean(coupler)  # the climatology: the year is 73 whole steps
-    with pytest.raises(ValueError, match="does not divide exactly"):
-        monthly_mean(coupler, n_months=2)
+    ocean = coupler.to_xarray(diagnostics)["ocn"]
+    bins = year_month_bins(ocean["time"].values)
+    # Thirteen months: the last record is labelled 00:00 on 1 January of the
+    # next year, which is that January's.
+    assert accumulator[1].shape == (MONTHS_PER_YEAR + 1,)
+    np.testing.assert_array_equal(np.asarray(accumulator[1]), np.bincount(bins))
+
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(year_month=("time", bins))
+        .groupby("year_month")
+        .mean("time")
+    )
+    np.testing.assert_allclose(
+        np.asarray(
+            monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
+        ),
+        from_output.values,
+        rtol=1e-5,
+        atol=1e-4,
+    )
+    # And the decade the docstrings quote builds on this coupling too, which
+    # is what the refusal this replaced made impossible.
+    _, decade_counts = monthly_mean(coupler, total_time="10 years").init()
+    assert decade_counts.shape == (10 * MONTHS_PER_YEAR + 1,)
+
+
+def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
+    """What wrapping an `n_months` accumulator really does, said honestly.
+
+    The wrap is modular in elapsed time over the **span** of the bins, not in
+    months, so it realigns with the calendar only when that span is a whole
+    number of years -- `n_months` a multiple of twelve. Six bins from 1
+    January span 181 days, so nine months of run folds the second August
+    across two of them. This is why `total_time`, which is never wrapped into,
+    is the form to prefer, and it is pinned here so the docstring cannot
+    quietly go back to claiming that month `n_months` lands in bin 0.
+    """
+    steps = 270
+    monthly = monthly_mean(coupler, n_months=6)
+    _, (_, counts) = coupler.generate_trajectory_function(steps, accumulate=monthly)(
+        coupler.initialize()
+    )
+
+    labels = coupler.time_axis(0, steps).datetimes()
+    elapsed = (labels - np.datetime64("2001-01-01")) / np.timedelta64(1, "D")
+    span = np.cumsum(month_lengths(coupler)[:6])
+    # A month is closed at its start, so the bin of a label is the number of
+    # boundaries at or before it -- of its elapsed time reduced modulo the span.
+    host = np.searchsorted(span, elapsed % span[-1], side="right")
+    np.testing.assert_array_equal(np.asarray(counts), np.bincount(host, minlength=6))
+
+    august = labels.astype("datetime64[M]") == np.datetime64("2001-08")
+    august_bins, august_counts = np.unique(host[august], return_counts=True)
+    np.testing.assert_array_equal(august_bins, [1, 2])
+    np.testing.assert_array_equal(august_counts, [28, 3])
 
 
 def test_folding_records_of_a_component_without_sub_steps_changes_nothing(
