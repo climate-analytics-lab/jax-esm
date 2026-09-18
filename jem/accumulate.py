@@ -7,11 +7,20 @@ packages the reductions a long run almost always wants -- a mean over each
 bin of a fixed set of bins -- as such a pair:
 
 - :func:`monthly_mean`, the twelve calendar months;
-- :func:`windowed_mean`, ``n_windows`` windows of a fixed length, which is
-  what a sub-seasonal forecast is scored on (pentads, weeks).
+- :func:`windowed_mean`, ``n_windows`` windows -- of one fixed length, which
+  is what a sub-seasonal forecast is scored on (pentads, weeks), or of a
+  repeating *pattern* of lengths, which is what gives a multi-year run one bin
+  per calendar month instead of a twelve-month climatology.
 
 Both are :func:`_binned_mean` with a different step-to-bin rule, so there is
-one running-sum-and-count implementation and one :meth:`BinnedMean.finalize`.
+one running-sum-and-count implementation and one :meth:`BinnedMean.finalize`;
+and both rules are :func:`_variable_window_rule` with different boundaries,
+so there is one piece of bin arithmetic. A calendar month is simply the
+window pattern :func:`month_lengths` returns, phased to the run's start of
+year -- which is why ``monthly_mean(coupler)`` and
+``windowed_mean(coupler, month_lengths(coupler), total_time=...)`` differ in
+what they *wrap at*, not in how they bin (see :func:`windowed_mean` for the
+one-record difference in where they close a month).
 
 Why it is in the scan at all. A twelve-month run reduced on the host must
 hold every step's diagnostics until the chunk ends, which for an atmosphere
@@ -29,8 +38,8 @@ worked calibration example in ``docs/source/design/architecture.md``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, NamedTuple
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -54,9 +63,10 @@ MONTHS_PER_YEAR = 12
 
 _SECONDS_PER_DAY = 86400
 
-#: Month lengths, in days, of the fixed-length calendars a static day-of-year
-#: to month table can be built for. ``jcm.date`` defines only ``365_day``
-#: (and ``gregorian``, whose leap years make no such table possible), so
+#: Month lengths, in days, of the fixed-length calendars a static month table
+#: can be built for, keyed by the length of their year. :func:`month_lengths`
+#: is the public way to read it. ``jcm.date`` defines only ``365_day`` (and
+#: ``gregorian``, whose leap years make no such table possible), so
 #: ``360_day`` is here because the table is the same kind of object, not
 #: because a ``Coupler`` can be built with it today.
 _MONTH_LENGTHS: dict[int, tuple[int, ...]] = {
@@ -65,33 +75,166 @@ _MONTH_LENGTHS: dict[int, tuple[int, ...]] = {
 }
 
 
-def _month_of_day_table(days_per_year: float) -> jnp.ndarray:
-    """Return the 0-based month of each 0-based day of a fixed-length year.
+def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
+    """Return the twelve month lengths, in days, of a fixed-length calendar.
 
-    This table is what makes month binning cheap and static inside a scan: a
-    month is a lookup on the day of year, not calendar arithmetic, and no
-    branch depends on which month it is -- so one compiled trajectory covers
-    a whole year whatever its steps straddle.
+    This is the table :func:`monthly_mean` bins on, made public because it is
+    also the window *pattern* that gives :func:`windowed_mean` one bin per
+    calendar month of a run rather than the twelve-bin climatology
+    :func:`monthly_mean` accumulates::
 
-    It comes back as a JAX array because the only thing that ever reads it is
-    a traced index inside the scan body; building it with numpy and handing
-    back a host array would leave every caller to convert it.
+        from jem.accumulate import month_lengths, windowed_mean
+
+        months = windowed_mean(
+            coupler, month_lengths(coupler), total_time="10 years"
+        )   # 120 bins: every month of the run, nothing wrapping
+
+    The lengths are plain days, which is one of the forms ``windowed_mean``
+    accepts for a window, so the pattern needs no conversion.
+
+    Parameters
+    ----------
+    calendar_or_coupler : Coupler or str or float
+        The coupled model whose calendar to tabulate (anything carrying a
+        ``days_per_year``, which is what a
+        :class:`~jem.base.coupler.Coupler` carries), the name of a calendar
+        (``"365_day"``), or a year length in days. A name is resolved through
+        ``jcm.date.days_per_year`` rather than through a table of JEM's own,
+        so the two cannot disagree about how long a calendar's year is.
+
+    Returns
+    -------
+    tuple of int
+        Twelve month lengths in days, January first, summing to the year.
+
+    Raises
+    ------
+    NotImplementedError
+        If the calendar's year is not a fixed whole number of days with fixed
+        month lengths -- ``gregorian``, whose leap years change the table from
+        year to year.
+
     """
+    # A coupler carries its year length; a bare number is one already.
+    days_per_year = getattr(calendar_or_coupler, "days_per_year", calendar_or_coupler)
+    if isinstance(days_per_year, str):
+        # Imported here rather than at module scope so that importing this
+        # module does not pull in jax-gcm; see `_whole_seconds`.
+        from jcm.date import days_per_year as jcm_days_per_year
+
+        days_per_year = jcm_days_per_year(days_per_year)
     length = int(days_per_year)
     if length != days_per_year or length not in _MONTH_LENGTHS:
         raise NotImplementedError(
-            f"Monthly means need a calendar whose year is a fixed whole number "
-            f"of days with fixed month lengths, so that the day-of-year to "
-            f"month table is a constant; this run's year is {days_per_year} "
-            f"days. Supported: {sorted(_MONTH_LENGTHS)} days. A Gregorian "
+            f"Calendar months need a calendar whose year is a fixed whole "
+            f"number of days with fixed month lengths, so that the table of "
+            f"them is a constant; this year is {days_per_year} days. "
+            f"Supported: {sorted(_MONTH_LENGTHS)} days. A Gregorian "
             "calendar's leap years change the table from year to year, which "
             "a static table cannot express -- bin such a run on the host, by "
             "the datetime64 labels of `Coupler.to_xarray`."
         )
-    return jnp.asarray(
-        np.repeat(np.arange(MONTHS_PER_YEAR), _MONTH_LENGTHS[length]),
-        dtype=jnp.int32,
-    )
+    return _MONTH_LENGTHS[length]
+
+
+def _variable_window_rule(
+    boundaries_seconds: np.ndarray,
+    offset_seconds: int,
+    closed: Literal["left", "right"],
+) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
+    """Return the ``bin_of_record`` rule for bins of the given lengths.
+
+    The one piece of bin arithmetic in this module: both :func:`monthly_mean`
+    and :func:`windowed_mean` are bins laid end to end, cycling for as long as
+    the run lasts, and a record belongs to the bin its own label falls in.
+    They differ only in the three arguments here.
+
+    Parameters
+    ----------
+    boundaries_seconds : numpy.ndarray
+        The **ends** of the bins, in whole seconds from the start of the
+        pattern: the cumulative sum of the bin lengths, strictly increasing,
+        one entry per bin. The last entry is the period the pattern repeats
+        with, which is what makes a run longer than the accumulator wrap.
+    offset_seconds : int
+        Where the run's start date sits in that pattern -- 0 for windows the
+        run itself defines, and the run's offset into the calendar year for
+        calendar months, so that a run starting on 1 July fills the July bin
+        first.
+    closed : {"left", "right"}
+        Which side of a boundary the record labelled exactly on it belongs
+        to. ``"right"`` closes a bin at its end, so that label is the *last*
+        record of the bin before it: a window is itself an interval and JEM
+        labels an interval at its end, so the first 5-day window is the
+        records labelled day 1 to day 5. ``"left"`` closes a bin at its start,
+        so that label is the *first* record of the bin after it: a calendar
+        month starts at 00:00 on the 1st, which is what
+        ``groupby("time.month")`` of the written output does and what a
+        monthly mean has to agree with.
+
+    Returns
+    -------
+    callable
+        ``(record, record_seconds) -> int32 bin index``, total by
+        construction (see :func:`_binned_mean`).
+
+    Notes
+    -----
+    **Why the boundaries are converted to record counts.** Record ``k`` of
+    length ``r`` is labelled at ``(k + 1)·r`` seconds from the start of the
+    run, so the obvious rule -- multiply the record counter by ``r`` and look
+    the result up in a table of seconds -- costs one multiplication whose
+    product grows with the run. JAX indices are int32 by default, and a
+    product of seconds passes 2^31 after 68 years of simulated time, at which
+    point the bins would silently wrap to nonsense. Reducing the record
+    counter modulo the records in one period *before* multiplying bounds the
+    product by the period rather than by the run, which the previous
+    fixed-window arithmetic did too; converting the boundaries to record
+    counts on the host, in int64, removes the multiplication from the traced
+    code altogether and so bounds nothing by int32 but the record counter
+    itself. The conversion is exact because every boundary is a whole number
+    of coupling steps and a record is a whole division of one.
+
+    """
+    boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
+    period_seconds = int(boundaries[-1])
+    # One second of shift is the whole difference between the two conventions:
+    # counting the boundaries at or before `label - 1` puts a label exactly on
+    # a boundary in the bin that ends there, counting those at or before
+    # `label` puts it in the bin that starts there.
+    shift = 1 if closed == "right" else 0
+
+    def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
+        """Return the 0-based bin a record of ``record_seconds`` counts in."""
+        records_per_period, remainder = divmod(period_seconds, record_seconds)
+        if remainder:
+            raise ValueError(
+                f"The bins repeat with a period of {period_seconds} s, which "
+                f"is not a whole number of the {record_seconds} s records a "
+                "component of this model produces, so a record could straddle "
+                "the point at which the bins repeat."
+            )
+        # Where the boundaries sit on this component's record grid. The run's
+        # offset into the pattern need not be a whole number of records, so it
+        # is split into whole records (`shifted`, folded into the counter) and
+        # a remainder (`phase`, folded into the boundaries); the ceiling is
+        # then the first record whose label reaches the boundary.
+        shifted, phase = divmod(offset_seconds - shift, record_seconds)
+        boundary_records = jnp.asarray(
+            -(-(boundaries - phase) // record_seconds), dtype=jnp.int32
+        )
+        # `record + 1` because record k is labelled at the END of its own
+        # interval. The modulo is what wraps a run longer than the pattern
+        # and, with it, keeps the index inside the accumulator whatever the
+        # run's length; it is also what keeps the arithmetic in int32.
+        label = jnp.mod(
+            jnp.asarray(record, dtype=jnp.int32) + (1 + shifted), records_per_period
+        )
+        return jnp.searchsorted(boundary_records, label, side="right").astype(
+            jnp.int32
+        )
+
+    return bin_of_record
 
 
 def _whole_seconds(duration: str | float, calendar: str, what: str) -> int:
@@ -378,8 +521,9 @@ def _binned_mean(
         recording once per coupled step, the sub-step counter and the
         sub-timestep for one recording more often. It must be total: an index
         outside the range would be clipped by ``.at[].add`` and silently
-        counted in the nearest bin, so every caller reduces modulo
-        ``n_bins``.
+        counted in the nearest bin, which is why :func:`_variable_window_rule`
+        -- what both public builders use -- reduces the record counter modulo
+        one period of the bins before looking a boundary up.
     n_bins : int
         Length of the accumulator's leading axis. Static, so that one
         compiled trajectory serves a run of any length.
@@ -576,7 +720,22 @@ def monthly_mean(coupler: Any, carry: Any = None) -> BinnedMean:
     and not the month since the run started: a three-year run's January bin
     holds all three Januaries, which is a climatology and is what the fixed
     ``(12, ...)`` accumulator is for. :func:`windowed_mean` wraps the same
-    way, at ``n_windows`` windows instead of at a year.
+    way, at ``n_windows`` windows instead of at a year -- so for one bin per
+    month of a long run rather than a climatology, give it the month lengths
+    as its window pattern::
+
+        from jem.accumulate import month_lengths, windowed_mean
+
+        months = windowed_mean(
+            coupler, month_lengths(coupler), total_time="10 years"
+        )   # 120 bins instead of 12
+
+    That is this same binning with the accumulator sized to the run; its one
+    difference is the side a month boundary closes on, which moves one record
+    per boundary and which :func:`windowed_mean` documents.
+
+    This function is that one too: twelve calendar-month windows, offset by
+    the run's start of year, wrapping at the year.
 
     **Sub-steps.** A component the workflow runs ``n > 1`` times per coupled
     step returns diagnostics with a leading sub-step axis of length ``n``, and
@@ -633,7 +792,7 @@ def monthly_mean(coupler: Any, carry: Any = None) -> BinnedMean:
         simulated time.
 
     """
-    month_of_day = _month_of_day_table(coupler.days_per_year)
+    lengths = month_lengths(coupler)
 
     # Whole seconds throughout: `jdt.Timedelta` is integer-backed and the year
     # offset is a difference of two dates, so this arithmetic is exact, which
@@ -648,41 +807,27 @@ def monthly_mean(coupler: Any, carry: Any = None) -> BinnedMean:
             "month of a step can be found from the step counter reduced modulo "
             "a whole number of steps per year."
         )
-    steps_per_year = seconds_per_year // dt_seconds
 
-    def month_index(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
-        """Return the 0-based month a record of ``record_seconds`` counts in.
-
-        ``record`` counts records of that length from the start of the run:
-        coupled steps for a component that records once per coupled step, and
-        sub-steps for one that records more often. The rule is the same
-        either way -- the month the record's own label falls in.
-        """
-        # A record's label is the END of the interval it covers, which is
-        # `record + 1` records after the start of the run. Reducing modulo the
-        # records in a year first keeps the product inside int32 for a run of
-        # any length, and is what makes a multi-year run's bins a climatology.
-        # The year is a whole number of records because it is a whole number
-        # of coupled steps and a coupled step is a whole number of records.
-        records_per_year = steps_per_year * (dt_seconds // record_seconds)
-        in_year = jnp.mod(jnp.asarray(record, dtype=jnp.int32) + 1, records_per_year)
-        seconds_into_year = jnp.mod(
-            year_offset_seconds + in_year * record_seconds, seconds_per_year
-        )
-        return month_of_day[seconds_into_year // _SECONDS_PER_DAY]
+    # Twelve windows laid end to end, phased so that window 0 is January
+    # wherever in the year the run starts, and repeating with the year -- so a
+    # multi-year run composites its Januaries, which is what the fixed
+    # `(12, ...)` accumulator is for. The month lengths sum to the calendar's
+    # year by construction, so the pattern's period *is* `seconds_per_year`.
+    boundaries = np.cumsum(np.asarray(lengths, dtype=np.int64)) * _SECONDS_PER_DAY
+    month_index = _variable_window_rule(boundaries, year_offset_seconds, "left")
 
     return _binned_mean(coupler, month_index, MONTHS_PER_YEAR, carry)
 
 
 def windowed_mean(
     coupler: Any,
-    window: str | float,
+    window: str | float | Sequence[str | float],
     *,
     n_windows: int | None = None,
     total_time: str | float | None = None,
     carry: Any = None,
 ) -> BinnedMean:
-    """Build the in-scan accumulator of a run's means over fixed-length windows.
+    """Build the in-scan accumulator of a run's means over successive windows.
 
     The reduction a sub-seasonal forecast is scored on: the mean over each
     pentad, or each week, of a run, rather than over each calendar month::
@@ -690,14 +835,28 @@ def windowed_mean(
         pentads = windowed_mean(coupler, "5 days", n_windows=73)   # a year
         weeks = windowed_mean(coupler, "7 days", total_time="1 year")
 
+    The windows need not all be the same length. Give a **sequence** of
+    lengths and it is a pattern that repeats for as long as the accumulator
+    is: with the twelve month lengths of the run's calendar, that is one bin
+    per calendar month of the run -- the monthly means of a long run, which
+    do not drift the way a fixed 30-day window does and do not composite into
+    a climatology the way :func:`monthly_mean`'s twelve bins do::
+
+        from jem.accumulate import month_lengths, windowed_mean
+
+        months = windowed_mean(
+            coupler, month_lengths(coupler), total_time="10 years"
+        )   # 120 bins: January of year 1 first, December of year 10 last
+
     **Which window a record counts in.** As in :func:`monthly_mean`, a record
     is binned by its own label -- the **end** of the interval it covers -- not
     by where that interval begins. Window ``w`` is therefore the records whose
-    labels fall in ``(w·window, (w+1)·window]`` measured from the run's start
+    labels fall in ``(start of w, end of w]`` measured from the run's start
     date, so with daily coupling the first 5-day window is the records
     labelled day 1 to day 5, which is what a forecast means by "the first
     pentad". In terms of the counter of records of length ``r`` that is
-    ``record // (window/r)``, since record ``k`` is labelled at ``(k+1)·r``.
+    ``record // (window/r)`` for equal windows, since record ``k`` is labelled
+    at ``(k+1)·r``.
 
     That is the same rule :func:`monthly_mean` follows -- bin by the label --
     applied to bins the *run* defines instead of bins the calendar defines,
@@ -709,14 +868,34 @@ def windowed_mean(
     with). It is one step of difference in each case and both are documented
     where they are; what neither does is bin by the *start* of the step.
 
-    **A run longer than ``n_windows · window`` wraps**, exactly as
+    **Calendar-month windows differ from** :func:`monthly_mean` **by one
+    record at every month boundary**, and the difference is exactly that
+    convention. With daily coupling, the record labelled 00:00 on 1 February
+    is the last record of the January *window* (windows close at their end)
+    and the first record of the February *month* (months close at their
+    start, as ``groupby("time.month")`` does). So
+    ``windowed_mean(coupler, month_lengths(coupler), ...)`` gives each month
+    of the run separately but shifted one record earlier than
+    ``groupby("time.year", "time.month")`` of the written output would, while
+    :func:`monthly_mean` matches that ``groupby`` exactly but composites every
+    January of the run into one bin. Choose by which matters: per-month bins
+    of a long run, or agreement with a ``groupby`` of the output record for
+    record. (No ``closed=`` knob is offered to split the difference: the
+    convention is not a preference but what makes each of these two agree with
+    the thing it is meant to agree with, and a run whose bins closed one way
+    and whose output was grouped the other would silently disagree with
+    itself.)
+
+    **A run longer than the accumulator wraps**, exactly as
     :func:`monthly_mean` wraps at a year: window ``w`` then also collects
     windows ``w + n_windows``, ``w + 2·n_windows`` and so on, giving the
     composite of every *w*-th window of the run. That is the price of an
     accumulator whose size is fixed at trace time and does not grow with the
     run -- the whole point of reducing inside the scan. Size the accumulator
     to the run (pass ``total_time``, or ``n_windows`` counted for the run) if
-    each window is meant to stand on its own.
+    each window is meant to stand on its own; with a *pattern* of window
+    lengths that is also what stops the bins from drifting, since the wrap is
+    at the sum of all ``n_windows`` lengths rather than at the pattern.
 
     Sub-steps and nested couplers are accumulated exactly as
     :func:`monthly_mean` describes: a component recording ``n`` times per
@@ -728,26 +907,32 @@ def windowed_mean(
     ----------
     coupler : jem.base.coupler.Coupler
         The coupled model the accumulator is for.
-    window : str or float
+    window : str or float or sequence of str or float
         Length of one window, as a ``jcm.date.parse_duration_days`` string
         (``"5 days"``, ``"2 days"``, ``"12 hours"``) or a number of days,
-        parsed on the coupler's calendar. Note that ``"1 month"`` is a
-        *calendar-averaged* month -- 365/12 days, not a whole number of daily
-        steps -- so monthly bins come from :func:`monthly_mean`, which knows
-        the real month lengths, and not from here. It must be a whole number of coupling steps: a
-        window that ended part-way through a step would have to attribute
-        that step to one side or the other, and there is no defensible
-        choice.
+        parsed on the coupler's calendar; or a **sequence** of such lengths,
+        which is a pattern the windows cycle through (``["10 days",
+        "20 days"]``, or the twelve values of :func:`month_lengths`). Note
+        that ``"1 month"`` is a *calendar-averaged* month -- 365/12 days, not
+        a whole number of daily steps -- so calendar months come from
+        :func:`month_lengths` (or from :func:`monthly_mean`, for a
+        climatology) and not from that string. Every length must be a whole
+        number of coupling steps: a window that ended part-way through a step
+        would have to attribute that step to one side or the other, and there
+        is no defensible choice.
     n_windows : int, optional
         How many windows the accumulator holds -- the length of the leading
-        axis of everything ``finalize`` returns. Exactly one of this and
-        ``total_time`` must be given.
+        axis of everything ``finalize`` returns, and, when it exceeds the
+        length of a pattern, how far the pattern is repeated. For a single
+        window length, exactly one of this and ``total_time`` must be given;
+        for a pattern, giving neither means one cycle of it
+        (``n_windows = len(window)``).
     total_time : str or float, optional
-        The length of the run, in the same forms as ``window``, from which
-        ``n_windows`` is counted: enough windows to cover the run, the last
-        one short if the run does not divide into whole windows (its mean is
-        then over the steps that did fall in it, because every bin is divided
-        by its own count).
+        The length of the run, in the same forms as a single ``window``, from
+        which ``n_windows`` is counted: enough windows to cover the run, the
+        last one short if the run does not end on a window boundary (its mean
+        is then over the steps that did fall in it, because every bin is
+        divided by its own count).
     carry : CoupledCarry, optional
         A carry to take the diagnostics' shapes from; see
         :func:`_binned_mean`.
@@ -761,9 +946,11 @@ def windowed_mean(
     Raises
     ------
     ValueError
-        If neither or both of ``n_windows`` and ``total_time`` are given, if
-        ``n_windows`` is not a positive integer, if either duration is not
-        positive, or if ``window`` is not a whole number of coupling steps.
+        If ``window`` is an empty sequence, if both ``n_windows`` and
+        ``total_time`` are given (or neither, for a single window length), if
+        ``n_windows`` is not a positive integer, if any duration is not
+        positive, or if any window length is not a whole number of coupling
+        steps.
 
     """
     dt_seconds = int(round(coupler.dt_seconds))
@@ -772,16 +959,31 @@ def windowed_mean(
             f"The coupling timestep is {dt_seconds} s; a windowed mean needs a "
             "positive one to count steps per window."
         )
-    window_seconds = _whole_seconds(window, coupler.calendar, "window")
-    if window_seconds % dt_seconds:
-        raise ValueError(
-            f"window={window!r} is {window_seconds} s, which is not a whole "
-            f"number of coupling steps of {dt_seconds} s. A window that ended "
-            "part-way through a coupled step could only be filled by splitting "
-            "that step between two windows, which the reduction does not do."
-        )
 
-    if (n_windows is None) == (total_time is None):
+    # A string is iterable, and one is a single window rather than a pattern
+    # of one-character ones; everything else iterable is a pattern.
+    pattern = not isinstance(window, str) and isinstance(window, Iterable)
+    entries: list[Any] = list(window) if pattern else [window]  # type: ignore[arg-type]
+    if not entries:
+        raise ValueError(
+            "window=[] has no windows for the accumulator to cycle through; "
+            "give at least one length."
+        )
+    lengths_seconds = []
+    for position, entry in enumerate(entries):
+        what = f"window[{position}]" if pattern else "window"
+        length_seconds = _whole_seconds(entry, coupler.calendar, what)
+        if length_seconds % dt_seconds:
+            raise ValueError(
+                f"{what}={entry!r} is {length_seconds} s, which is not a whole "
+                f"number of coupling steps of {dt_seconds} s. A window that "
+                "ended part-way through a coupled step could only be filled by "
+                "splitting that step between two windows, which the reduction "
+                "does not do."
+            )
+        lengths_seconds.append(length_seconds)
+
+    if n_windows is not None and total_time is not None:
         raise ValueError(
             "Give exactly one of n_windows and total_time: n_windows sets the "
             "accumulator's size directly, total_time counts it from the run "
@@ -793,7 +995,23 @@ def windowed_mean(
         # one, and that window has to exist to hold it. It is divided by its
         # own count like every other, so a short final window is the mean of
         # what fell in it rather than a mean diluted by missing steps.
-        bins = -(-total_seconds // window_seconds)
+        bins, covered = 0, 0
+        while covered < total_seconds:
+            covered += lengths_seconds[bins % len(lengths_seconds)]
+            bins += 1
+    elif n_windows is None:
+        if not pattern:
+            raise ValueError(
+                "Give exactly one of n_windows and total_time: n_windows sets "
+                "the accumulator's size directly, total_time counts it from "
+                "the run (got n_windows=None, total_time=None). Only a "
+                "sequence of window lengths may be given neither, and then it "
+                "is used once through."
+            )
+        # One cycle of the pattern is the only size a pattern implies on its
+        # own, and it is the useful one: a year of calendar months, a
+        # fortnight of alternating windows.
+        bins = len(lengths_seconds)
     elif isinstance(n_windows, bool) or not isinstance(n_windows, int) or n_windows < 1:
         # `bool` is an `int`, and `n_windows=True` would silently build a
         # one-window accumulator -- i.e. a mean of the whole run.
@@ -801,24 +1019,20 @@ def windowed_mean(
     else:
         bins = n_windows
 
-    def window_index(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
-        """Return the 0-based window a record of ``record_seconds`` counts in.
-
-        ``record`` counts records of that length from the start of the run,
-        so this is the coupled step for a component that records once per
-        coupled step and the sub-step for one that records more often; a
-        window holds a whole number of either, since the window is a whole
-        number of coupled steps and a coupled step of records.
-        """
-        # `record` rather than `record + 1` because the label of record k is
-        # at (k+1)·record_seconds and a window is closed at its end: the
-        # record labelled exactly `window` is the last of window 0, not the
-        # first of window 1. The modulo is what wraps a run longer than the
-        # accumulator and, with it, keeps the index inside the accumulator
-        # whatever the run's length.
-        records_per_window = window_seconds // record_seconds
-        return jnp.mod(
-            jnp.asarray(record, dtype=jnp.int32) // records_per_window, bins
-        )
+    # The window boundaries: the cumulative sum of the `bins` lengths, the
+    # pattern cycling for as long as the accumulator is. The last boundary is
+    # the period the whole accumulator repeats with, so a run longer than it
+    # wraps -- and a pattern sized to the run (the calendar-month case) does
+    # not wrap at all, which is the point of being able to size it.
+    boundaries = np.cumsum(
+        [lengths_seconds[index % len(lengths_seconds)] for index in range(bins)],
+        dtype=np.int64,
+    )
+    # Offset 0: the windows are measured from the run's own start date, not
+    # from anything in the calendar. Closed at the end: JEM labels a record at
+    # the end of the interval it covers and a window is one such interval, so
+    # the record labelled exactly on a boundary is the last of the window it
+    # closes.
+    window_index = _variable_window_rule(boundaries, 0, "right")
 
     return _binned_mean(coupler, window_index, bins, carry)

@@ -27,7 +27,12 @@ import jax_datetime as jdt
 import numpy as np
 import pytest
 
-from jem.accumulate import MONTHS_PER_YEAR, monthly_mean, windowed_mean
+from jem.accumulate import (
+    MONTHS_PER_YEAR,
+    month_lengths,
+    monthly_mean,
+    windowed_mean,
+)
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabAtmosphereModel,
@@ -497,6 +502,252 @@ def test_a_bad_n_windows_is_refused(coupler, n_windows):
 
 
 # ---------------------------------------------------------------------------
+# Windows of more than one length
+# ---------------------------------------------------------------------------
+
+#: The variable-window pattern the tests cycle through: a 10-day window and a
+#: 20-day one, so the bins are neither all the same length nor aligned with
+#: anything the calendar defines.
+PATTERN_DAYS = (10, 20)
+
+#: Coupled steps of the calendar-month-window run: 1 January 2001 to 5
+#: February 2002, so it passes a whole year. January 2002 is then a bin of its
+#: own rather than a second helping of the first -- which is the point of
+#: sizing the accumulator to the run -- and the last bin is a short one.
+MONTH_WINDOW_STEPS = 400
+
+
+def cycled_boundaries(lengths, bins):
+    """Return the ends, in days, of `bins` windows cycling through `lengths`."""
+    return np.cumsum([lengths[index % len(lengths)] for index in range(bins)])
+
+
+def window_of_label(boundaries_days, times):
+    """Return the window each `datetime64` label falls in, binned on the host.
+
+    A window is closed at its end -- the record labelled exactly on a boundary
+    is the last of the window it closes, not the first of the next one -- so
+    the window of a label is the first boundary at or after its elapsed time,
+    which is what `searchsorted(..., side="left")` returns.
+    """
+    elapsed_days = (times - np.datetime64("2001-01-01")) / np.timedelta64(1, "D")
+    return np.searchsorted(boundaries_days, elapsed_days, side="left")
+
+
+def test_a_pattern_of_windows_cycles_over_the_run(coupler, stacked_year):
+    """Alternating 10- and 20-day windows bin the year as the labels say.
+
+    The whole of the variable-window contract in one run: the lengths cycle,
+    `total_time` counts enough of them to cover the run (rounding up into a
+    short last one), and every record lands in the window its own label falls
+    in -- checked against a plain numpy binning of the stacked diagnostics and
+    against an xarray reduction of the same run's output.
+    """
+    _, diagnostics = stacked_year
+    pattern = [f"{days} days" for days in PATTERN_DAYS]
+    means = windowed_mean(coupler, pattern, total_time="1 year")
+    trajectory = coupler.generate_trajectory_function(
+        STEPS_PER_YEAR, accumulate=means
+    )
+    _, accumulator = trajectory(coupler.initialize())
+    _, counts = accumulator
+
+    # Twelve whole 30-day cycles cover 360 days, and one more 10-day window
+    # has to exist to hold the last five days of the year.
+    bins = 25
+    assert counts.shape == (bins,)
+    boundaries = cycled_boundaries(PATTERN_DAYS, bins)
+    expected = np.diff(np.concatenate([[0], boundaries]))
+    expected[-1] = STEPS_PER_YEAR - boundaries[-2]
+    np.testing.assert_array_equal(np.asarray(counts), expected)
+
+    means_by_window = means.finalize(accumulator)
+    ocean = coupler.to_xarray(diagnostics)["ocn"]
+    window = window_of_label(boundaries, ocean["time"].values)
+
+    # Against a numpy binning of the stacked diagnostics...
+    stacked = np.asarray(diagnostics["atm"]["state"].mean_air_temperature)
+    host = np.stack([stacked[window == index].mean(axis=0) for index in range(bins)])
+    np.testing.assert_allclose(
+        np.asarray(means_by_window["atm"]["state"].mean_air_temperature),
+        host,
+        rtol=1e-5,
+        atol=1e-4,
+    )
+
+    # ... and against the same binning expressed as an xarray reduction of the
+    # written output, which is how a user would check it.
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(window=("time", window))
+        .groupby("window")
+        .mean("time")
+    )
+    np.testing.assert_array_equal(from_output.window.values, np.arange(bins))
+    np.testing.assert_allclose(
+        np.asarray(means_by_window["ocn"]["state"].sea_surface_temperature),
+        from_output.values,
+        rtol=1e-5,
+        atol=1e-4,
+    )
+
+
+def test_a_pattern_shorter_than_the_accumulator_repeats_and_wraps(coupler):
+    """`n_windows` beyond the pattern repeats it; the run still wraps at the end.
+
+    Three windows of 10, 20 and 10 days are 40 days of accumulator, so a
+    60-day run wraps its last 20 days back into the first two bins -- the
+    fixed-size accumulator behaving exactly as it does for equal windows.
+    """
+    means = windowed_mean(coupler, ["10 days", "20 days"], n_windows=3)
+    trajectory = coupler.generate_trajectory_function(60, accumulate=means)
+    _, (_, counts) = trajectory(coupler.initialize())
+
+    np.testing.assert_array_equal(np.asarray(counts), [20, 30, 10])
+    assert int(np.sum(np.asarray(counts))) == 60
+
+
+def test_a_pattern_given_no_size_is_used_once(coupler):
+    """A sequence and neither `n_windows` nor `total_time` is one cycle of it.
+
+    The one case in which giving neither is answerable: the pattern itself
+    says how many windows there are. A single window length still has to be
+    told, since one window is never what was meant.
+    """
+    means = windowed_mean(coupler, ["10 days", "20 days"])
+    _, counts = means.init()
+    assert counts.shape == (2,)
+
+    trajectory = coupler.generate_trajectory_function(30, accumulate=means)
+    _, (_, counts) = trajectory(coupler.initialize())
+    np.testing.assert_array_equal(np.asarray(counts), [10, 20])
+
+
+@pytest.mark.parametrize("pattern", [["5 days", "36 hours"], [5, 1.5]])
+def test_a_pattern_element_that_is_not_whole_steps_is_refused(coupler, pattern):
+    """Every length is held to the rule a single window is held to."""
+    with pytest.raises(ValueError, match=r"window\[1\].*whole number of coupling"):
+        windowed_mean(coupler, pattern, n_windows=4)
+
+
+def test_an_empty_pattern_is_refused(coupler):
+    """No windows to cycle through is no accumulator to build."""
+    with pytest.raises(ValueError, match="no windows"):
+        windowed_mean(coupler, [], n_windows=2)
+
+
+def test_a_pattern_cannot_be_given_both_sizes(coupler):
+    """Two answers to one question, sequence or not."""
+    with pytest.raises(ValueError, match="exactly one of n_windows and total_time"):
+        windowed_mean(coupler, ["10 days"], n_windows=4, total_time="20 days")
+
+
+@pytest.fixture(scope="module")
+def calendar_month_windows(coupler):
+    """Run 400 days binned into calendar-month *windows*, stacked and reduced."""
+    months = windowed_mean(
+        coupler, month_lengths(coupler), total_time=f"{MONTH_WINDOW_STEPS} days"
+    )
+    _, accumulator = coupler.generate_trajectory_function(
+        MONTH_WINDOW_STEPS, accumulate=months
+    )(coupler.initialize())
+    _, diagnostics = coupler.generate_trajectory_function(MONTH_WINDOW_STEPS)(
+        coupler.initialize()
+    )
+    return months, accumulator, diagnostics
+
+
+def test_calendar_month_windows_do_not_wrap_into_a_climatology(
+    coupler, calendar_month_windows
+):
+    """Fourteen bins over 400 days: every month of the run, not twelve of them.
+
+    This is "monthly averages without drifting": the windows are the calendar's
+    own month lengths, so no bin spans parts of two months the way a fixed
+    30-day window does, and the accumulator is sized to the run, so January
+    2002 is bin 12 rather than more records in bin 0 -- which is what
+    `monthly_mean`'s twelve-bin climatology would make it.
+    """
+    _, (_, counts), _ = calendar_month_windows
+    lengths = month_lengths(coupler)
+
+    # The example the docstrings and the README give, counted: ten years of
+    # calendar months is 120 bins, not twelve.
+    _, decade_counts = windowed_mean(
+        coupler, lengths, total_time="10 years"
+    ).init()
+    assert decade_counts.shape == (10 * MONTHS_PER_YEAR,)
+
+    assert counts.shape == (MONTHS_PER_YEAR + 2,)
+    np.testing.assert_array_equal(
+        np.asarray(counts),
+        [*lengths, lengths[0], MONTH_WINDOW_STEPS - sum(lengths) - lengths[0]],
+    )
+
+
+def test_calendar_month_windows_match_a_year_month_grouping(
+    coupler, calendar_month_windows
+):
+    """Each bin is the mean of one month of the output, year by year.
+
+    The comparison is the reduction a user would write on the written output,
+    and it also pins down what a calendar-month *window* is in the output's own
+    terms: the records whose **interval** lies in that month, which is the
+    label grouped by month after stepping back one coupling step.
+    """
+    months, accumulator, diagnostics = calendar_month_windows
+    boundaries = cycled_boundaries(month_lengths(coupler), MONTHS_PER_YEAR + 2)
+    ocean = coupler.to_xarray(diagnostics)["ocn"]
+    window = window_of_label(boundaries, ocean["time"].values)
+
+    interval_months = (
+        ocean["time"].values - np.timedelta64(1, "D")
+    ).astype("datetime64[M]")
+    np.testing.assert_array_equal(
+        window, np.unique(interval_months, return_inverse=True)[1]
+    )
+
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(window=("time", window))
+        .groupby("window")
+        .mean("time")
+    )
+    np.testing.assert_array_equal(
+        from_output.window.values, np.arange(MONTHS_PER_YEAR + 2)
+    )
+    np.testing.assert_allclose(
+        np.asarray(
+            months.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
+        ),
+        from_output.values,
+        rtol=1e-5,
+        atol=1e-4,
+    )
+
+
+def test_a_month_window_and_a_month_differ_by_the_boundary_record(coupler):
+    """The documented one-record difference between the two reductions.
+
+    A window closes at its end and a calendar month closes at its start, so
+    the record labelled 00:00 on 1 February is the **last** of January's
+    window and the **first** of February's month. Nothing else separates
+    `windowed_mean(coupler, month_lengths(coupler), ...)` from
+    `monthly_mean(coupler)` bin for bin, so a user choosing between them is
+    choosing between per-month bins and agreement with
+    `groupby("time.month")` record for record.
+    """
+    labels = coupler.time_axis(0, MONTH_WINDOW_STEPS).datetimes()
+    boundary = np.flatnonzero(labels == np.datetime64("2001-02-01"))
+    window = window_of_label(
+        cycled_boundaries(month_lengths(coupler), MONTHS_PER_YEAR + 2), labels
+    )
+    month = labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
+
+    assert boundary.size == 1
+    assert int(window[boundary[0]]) == 0
+    assert int(month[boundary[0]]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Components that record more than once per coupled step
 # ---------------------------------------------------------------------------
 
@@ -734,6 +985,51 @@ def test_a_nested_coupler_bins_its_inner_records_the_same_way(climatology_file):
     np.testing.assert_allclose(folded[:2], hourly.values, rtol=1e-5, atol=1e-4)
 
 
+def test_weaved_variable_windows_bin_the_sub_steps_by_their_own_labels(
+    climatology_file,
+):
+    """A pattern of windows over an hourly component, record by record.
+
+    The variable-length rule is the same rule at any record rate: the boundary
+    of a 2- or 3-day window falls at 00:00, which is the label of the last
+    hourly record of the window's last day, and that record closes the window
+    rather than opening the next.
+    """
+    coupler = build_weaved_coupler(climatology_file)
+    pattern = (2, 3)
+    windows = windowed_mean(
+        coupler,
+        [f"{days} days" for days in pattern],
+        total_time=f"{BOUNDARY_STEPS} days",
+    )
+    diagnostics, accumulator = run_both_ways(coupler, windows)
+    _, counts = accumulator
+
+    # 40 days is eight whole cycles of the 5-day pattern, so nothing is short.
+    bins = BOUNDARY_STEPS // sum(pattern) * len(pattern)
+    boundaries = cycled_boundaries(pattern, bins)
+    lengths = np.diff(np.concatenate([[0], boundaries]))
+    np.testing.assert_array_equal(
+        np.asarray(counts["atm"]),
+        np.repeat(lengths[:, None], HOURS_PER_DAY, axis=1),
+    )
+
+    atmosphere = coupler.to_xarray(diagnostics)["atm"]
+    window = window_of_label(boundaries, atmosphere["time"].values)
+    from_output = (
+        atmosphere.mean_air_temperature.assign_coords(window=("time", window))
+        .groupby("window")
+        .mean("time")
+    )
+    np.testing.assert_array_equal(from_output.window.values, np.arange(bins))
+
+    folded = fold_sub_steps(
+        windows.finalize(accumulator)["atm"]["state"].mean_air_temperature,
+        counts["atm"],
+    )
+    np.testing.assert_allclose(folded, from_output.values, rtol=1e-5, atol=1e-4)
+
+
 # ---------------------------------------------------------------------------
 # Differentiability
 # ---------------------------------------------------------------------------
@@ -842,6 +1138,33 @@ def test_calibrating_a_monthly_mean_against_a_target(climatology_file):
     learning_rate = 0.05 * float(relaxation_time) / abs(gradient)
     updated = relaxation_time - learning_rate * gradient
     assert float(loss(updated, target_july_sst)) < before
+
+
+# ---------------------------------------------------------------------------
+# The month-length table
+# ---------------------------------------------------------------------------
+
+
+def test_month_lengths_takes_the_calendar_from_whatever_it_is_given(coupler):
+    """A coupler, a calendar name and a year length all name the same table.
+
+    The coupler is the form the reviewer's use needs -- `windowed_mean(coupler,
+    month_lengths(coupler), ...)` -- and the other two are what an analysis
+    script has when it has no coupler in hand.
+    """
+    expected = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+    assert month_lengths(coupler) == expected
+    assert month_lengths(CALENDAR) == expected
+    assert month_lengths(365) == expected
+    assert sum(month_lengths(coupler)) == STEPS_PER_YEAR
+    assert month_lengths(360) == (30,) * MONTHS_PER_YEAR
+
+
+def test_month_lengths_refuses_a_calendar_with_no_fixed_table():
+    """Leap years change the table from year to year, so there is no table."""
+    with pytest.raises(NotImplementedError, match="Gregorian"):
+        month_lengths("gregorian")
 
 
 # ---------------------------------------------------------------------------
