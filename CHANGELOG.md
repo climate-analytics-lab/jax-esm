@@ -515,6 +515,10 @@ Breaking changes are marked; everything else is additive.
 Defects found by the local review of this change before it was pushed, all in
 code this release adds:
 
+- `jax` and `jaxlib` are capped below 0.11.2 for as long as no released flax
+  survives it: jax 0.11.2 removed `jax.experimental.hijax.HiPrimitive`, which
+  flax 0.12.9 subclasses at import time, so an environment resolving the two
+  latest releases could not import `jcm` at all (#117 tracks lifting it).
 - `run_chunked` validates `subsample` before compiling a trajectory, instead of
   after the first chunk has been integrated.
 - `jem.runners` no longer reads a broken `_target_` lookup as "this component

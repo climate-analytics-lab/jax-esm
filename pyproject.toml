@@ -25,8 +25,14 @@ dynamic = ["version"]
 # `pip install jax-esm` in a model-running environment pulls no matplotlib,
 # cartopy or sphinx.
 dependencies = [
-    "jax>=0.4.0",
-    "jaxlib>=0.4.0",
+    # The ceiling is flax's, not ours: jax 0.11.2 removed
+    # `jax.experimental.hijax.HiPrimitive`, which every released flax up to
+    # 0.12.9 subclasses at import time, so `import flax.nnx` (and with it
+    # `import jcm`) fails before any model is built. flax main already carries
+    # the compatibility alias; lift the ceiling to a flax floor once that
+    # release is on PyPI (#117).
+    "jax>=0.4.0,<0.11.2",
+    "jaxlib>=0.4.0,<0.11.2",
     "numpy>=1.21.0",
     "xarray",
     "netcdf4",
