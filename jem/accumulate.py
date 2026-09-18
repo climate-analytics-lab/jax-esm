@@ -46,6 +46,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal, NamedTuple
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -346,14 +348,21 @@ def _exact_seconds(value: float, what: str) -> int:
     number of seconds is a broken invariant or a duration the bins cannot
     represent. Either way it is refused rather than rounded: rounding would
     silently move every bin boundary.
+
+    The comparison allows a float-rounding margin, because a duration given
+    in days reaches here through a float multiplication (``11 / 86400`` days
+    comes back as ``10.999999999999998`` s). A microsecond, plus a relative
+    part for durations of centuries, is far below anything a clock or a
+    duration can express and far above that rounding, so a genuine fraction
+    of a second is still refused.
     """
-    seconds = int(value)
-    if seconds != value:
+    seconds = round(value)
+    if not math.isclose(value, seconds, rel_tol=1e-12, abs_tol=1e-6):
         raise ValueError(
             f"{what} is {value!r} s, which is not a whole number of seconds; "
             "the bins are laid out in whole seconds."
         )
-    return seconds
+    return int(seconds)
 
 
 def _months_covering(

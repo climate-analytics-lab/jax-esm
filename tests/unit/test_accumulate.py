@@ -1444,3 +1444,13 @@ def test_a_duration_that_is_not_whole_seconds_is_refused(coupler):
     """A fractional second is refused, not rounded into a moved boundary."""
     with pytest.raises(ValueError, match="not a whole number of seconds"):
         windowed_mean(coupler, "0.00001 days", n_windows=4)
+
+
+def test_a_float_representation_of_whole_seconds_is_accepted():
+    """A days value that is whole seconds up to float rounding is not refused."""
+    from jem.accumulate import _exact_seconds
+
+    assert _exact_seconds(11 / 86400 * 86400, "window") == 11   # 10.999999999999998
+    assert _exact_seconds(3600.0, "window") == 3600
+    with pytest.raises(ValueError, match="not a whole number of seconds"):
+        _exact_seconds(10.5, "window")
