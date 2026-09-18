@@ -240,7 +240,7 @@ def _variable_window_rule(
         # `_record_seconds`), so this division is exact. It is asserted rather
         # than assumed because a silent rounding here would drift every bin
         # boundary by a fraction of a record.
-        assert not remainder, (
+        assert remainder == 0, (
             f"a period of {period} s is not a whole number of "
             f"{record_seconds} s records"
         )
@@ -408,7 +408,7 @@ def _record_seconds(dt_seconds: int, records: int) -> int:
     boundary by a second per record.
     """
     seconds, remainder = divmod(dt_seconds, records)
-    if remainder or seconds < 1:
+    if remainder != 0 or seconds < 1:
         raise ValueError(
             f"A component recording {records} times per coupled step records "
             f"every {dt_seconds}/{records} s, which is not a whole number of "
