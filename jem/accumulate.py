@@ -236,7 +236,7 @@ def _variable_window_rule(
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
     assert period >= int(boundaries[-1]), "the bins must fit inside their period"
-    # One second of shift_seconds is the whole difference between the two conventions:
+    # One second is the whole difference between the two conventions:
     # counting the boundaries at or before `label - 1` puts a label exactly on
     # a boundary in the bin that ends there, counting those at or before
     # `label` puts it in the bin that starts there.
