@@ -217,6 +217,19 @@ re-integrates the chunks after it on the resume, **rewriting** their output
 files — safe, because each file is named after the coupled step its chunk
 starts at, so the second pass writes the same names from the same state.
 
+That last part holds only while the resume keeps the same `chunk`. A resume
+that *rechunks* starts its files at different steps, so it would write beside
+the killed run's leftovers rather than over them and leave two passes' records
+for the same simulated time in one directory. So a resumed run checks, before
+anything is compiled, that every output file at or after the step it resumed
+from starts on one of its own chunk boundaries — it says at INFO how many it
+will rewrite — and **refuses** with a `ValueError` naming the files it would
+orphan, the step, the chunk and the ways out (resume with the chunk those
+files were written under, remove them, or write into another `output_dir`). It
+never deletes them itself: which of the two passes to keep is the user's call,
+not the driver's. Files from before the restart point, and files this coupler
+would never have written, are not in question.
+
 `output_averages` and `subsample` reduce the *files* only. The health check is
 given each chunk exactly as it was integrated — every record — because it
 judges a chunk by its last record and its extremes, and a chunk mean (which

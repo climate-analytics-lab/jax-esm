@@ -76,7 +76,19 @@ Breaking changes are marked; everything else is additive.
   What it gives up is a *killed* run, which falls back to the last interval
   boundary and re-integrates the chunks after it, **rewriting** their output
   files — safe because each is named after the coupled step its chunk starts
-  at. It is validated with the other durations, before anything is compiled,
+  at, and reported at INFO (how many existing files the resume will write
+  again) before the run starts. That rewrite lands on the same names only
+  while the resume keeps the same `chunk`: one that rechunks writes files at
+  different steps and would leave the killed run's beside its own, holding
+  records for the same simulated time. Such a resume is now **refused** — a
+  `ValueError`, before anything is compiled, naming the files that would be
+  orphaned, the restored step, the chunk and the ways out (resume under the
+  chunk those files were written with, remove them, or use another
+  `output_dir`) — rather than silently producing a directory with duplicate
+  time labels; the driver does not delete a killed run's output on its own
+  initiative. Files before the restart point, and files whose names this
+  coupler would never write, are untouched and never block a run.
+  It is validated with the other durations, before anything is compiled,
   and giving it with `checkpoint_path=None` is a `ValueError` rather than a
   setting silently ignored. A `total_time` that is not a whole number of
   intervals, and a run that starts part-way through a chunk — a resume under a

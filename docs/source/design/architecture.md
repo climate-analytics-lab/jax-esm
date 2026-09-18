@@ -1001,6 +1001,26 @@ on the resume and **rewrites** their output files, which is safe precisely
 because a file is named after the coupled step its chunk starts at — the second
 pass writes the same names from the same starting state.
 
+Safe, that is, while the resume keeps the same `chunk`; the chunk belongs to the
+run and not to the checkpoint, so a resume free to change it is also free to
+write files at steps the earlier pass's files do not sit on. A checkpoint at
+step 4 with one-day files at steps 4 and 5, resumed with two-day chunks, would
+overwrite the step-4 file with the records for steps 5–6 and leave the step-5
+file holding step 6 a second time — a duplicate no reader of the directory could
+tell from a real one, and one no later chunk would ever rewrite. So a resumed
+run tests, before anything is compiled, that every file of its own at or after
+the restored step starts on **its** chunk grid (`restored_step + k ×
+steps_per_chunk`, which is where its chunks begin, the short final batch
+included): those it reports at INFO and rewrites, and anything else is a
+`ValueError` naming the files, the restored step, the chunk and the three ways
+out — resume under the chunk those files were written with, remove them, or
+choose another `output_dir`. Deleting them for the user was the alternative and
+was rejected: the driver cannot know which pass's output is the one worth
+keeping. Files before the restart point are the run's history, and files whose
+names this coupler would never write (`jem.output.output_file_step` matches a
+name against the run's components, following a nested coupler into its inner
+ones) are neither examined nor touched.
+
 Two configurations the loop cannot honour exactly are warnings rather than
 refusals, because neither costs a restart point: a `total_time` that is not a
 whole number of intervals (the last gap between saves is simply shorter than the
