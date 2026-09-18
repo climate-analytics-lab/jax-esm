@@ -133,7 +133,7 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
     days_per_year = getattr(calendar_or_coupler, "days_per_year", calendar_or_coupler)
     if isinstance(days_per_year, str):
         # Imported here rather than at module scope so that importing this
-        # module does not pull in jax-gcm; see `_whole_seconds`.
+        # module does not pull in jax-gcm; see `_duration_to_seconds`.
         from jcm.date import days_per_year as jcm_days_per_year
 
         days_per_year = jcm_days_per_year(days_per_year)
@@ -324,7 +324,7 @@ def _ceil_div(numerator: Any, denominator: int) -> Any:
     return -((-numerator) // denominator)
 
 
-def _whole_seconds(duration: str | float, calendar: str, what: str) -> int:
+def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int:
     """Return ``duration`` as a whole positive number of seconds.
 
     The duration is parsed on the *coupler's* calendar, so ``"1 year"`` is as
@@ -404,7 +404,7 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     The nested coupler is recognised by duck-typing rather than by an
     ``isinstance`` check, because importing :mod:`jem.base.coupler` here would
     pull in jax-gcm (and with it the whole atmosphere) just to import this
-    module; :func:`_whole_seconds` defers its import for the same reason.
+    module; :func:`_duration_to_seconds` defers its import for the same reason.
     """
     multiplicities = coupler.multiplicities()
     axes: dict[str, Any] = {}
@@ -1098,7 +1098,7 @@ def monthly_mean(
     )
 
     if total_time is not None:
-        total_seconds = _whole_seconds(total_time, coupler.calendar, "total_time")
+        total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
         bins = _months_covering(rotated, offset_seconds, total_seconds)
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
         # `bool` is an `int`, and `n_months=True` would silently build a
@@ -1286,7 +1286,7 @@ def windowed_mean(
     lengths_seconds = []
     for position, entry in enumerate(entries):
         what = f"window[{position}]" if pattern else "window"
-        length_seconds = _whole_seconds(entry, coupler.calendar, what)
+        length_seconds = _duration_to_seconds(entry, coupler.calendar, what)
         if length_seconds % dt_seconds:
             raise ValueError(
                 f"{what}={entry!r} is {length_seconds} s, which is not a whole "
@@ -1304,7 +1304,7 @@ def windowed_mean(
             f"(got n_windows={n_windows!r}, total_time={total_time!r})."
         )
     if total_time is not None:
-        total_seconds = _whole_seconds(total_time, coupler.calendar, "total_time")
+        total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
         # Round *up*: a run that is not a whole number of windows ends inside
         # one, and that window has to exist to hold it. It is divided by its
         # own count like every other, so a short final window is the mean of
