@@ -250,9 +250,20 @@ def test_grid_metadata_drops_the_halo(component, veros_model, grid_shape):
             == veros_model.state.variables.maskT.shape[0] - 2 * GHOST_CELLS)
 
 
-def test_to_xarray_publishes_the_barotropic_streamfunction(component, grid_shape):
-    """`psi` is always in the output, labelled, and says which psi it is."""
-    nx, ny = grid_shape
+@pytest.mark.parametrize("component_fixture",
+                         ["component", "free_surface_component"])
+def test_to_xarray_publishes_the_barotropic_streamfunction(
+    request, component_fixture
+):
+    """`psi` is always in the output, labelled, and says which psi it is.
+
+    Run over both external-mode regimes because which of the two `psi` is
+    *is* the thing the attribute has to get right, and labelling needs no
+    integration: the free-surface branch of it would otherwise be reached
+    only by the slow tests.
+    """
+    component = request.getfixturevalue(component_fixture)
+    nx, ny = component.horizontal_shape
     diagnostics = _labelling_diagnostics(component, 2)
     psi = jnp.asarray(
         np.linspace(-1e6, 1e6, 2 * nx * ny).reshape(2, nx, ny))
@@ -264,11 +275,10 @@ def test_to_xarray_publishes_the_barotropic_streamfunction(component, grid_shape
     )
 
     assert dataset.psi.dims == ("time", "lon", "lat")
-    assert dataset.psi.attrs["units"] == "m3 s-1"
+    assert dataset.psi.attrs["units"] == "m^3/s"
     assert dataset.psi.attrs["long_name"] == "barotropic streamfunction"
     assert dataset.psi.attrs["jem_role"] == "derived"
     np.testing.assert_array_equal(dataset.psi.values, np.asarray(psi))
-    assert np.isfinite(dataset.psi.values).all()
 
     # Nothing in the numbers says whether this is Veros' own prognostic
     # streamfunction or the diagnosis that stands in for it under a free
@@ -278,6 +288,29 @@ def test_to_xarray_publishes_the_barotropic_streamfunction(component, grid_shape
     assert ("prognostic" in comment) is component.enable_streamfunction
     assert ("diagnosed" in comment) is not component.enable_streamfunction
     assert "zeta" in comment
+
+
+def test_to_xarray_publishes_the_masks_psi_is_read_with(component):
+    """The masks `psi`'s comment sends a reader to are in the file.
+
+    Over land the diagnosis carries `psi` through the integration rather
+    than computing it, and neither the zeta points it sits on nor the u grid
+    its depth integral ran over can be rebuilt from anything else the
+    dataset holds.
+    """
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 1),
+        TimeAxis(START_DATE, np.arange(1), COUPLING_TIMESTEP, CALENDAR),
+    )
+
+    assert dataset.mask_U.dims == ("lon", "lat", "depth")
+    np.testing.assert_array_equal(
+        dataset.mask_surface_U.values, np.asarray(component.mask_U)[:, :, -1])
+    np.testing.assert_array_equal(
+        dataset.mask_surface_Z.values, np.asarray(component.mask_surface_Z))
+    # Grid configuration rather than carry, so deliberately untagged.
+    for name in ("mask_U", "mask_surface_U", "mask_surface_Z"):
+        assert "jem_role" not in dataset[name].attrs
 
 
 def test_the_diagnosed_streamfunction_integrates_the_zonal_transport(
@@ -292,12 +325,24 @@ def test_the_diagnosed_streamfunction_integrates_the_zonal_transport(
     psi = np.asarray(component._barotropic_streamfunction(zonal_velocity))
 
     expected = _integrated_transport(component, zonal_velocity)
-    np.testing.assert_allclose(psi, expected, rtol=1e-5)
+    # `atol` as well as `rtol`: a cumulative sum is free to accumulate in a
+    # different order from the sequential reference, which says nothing
+    # about elements that have cancelled to near zero.
+    np.testing.assert_allclose(psi, expected, rtol=1e-5,
+                               atol=1e-9 * np.abs(expected).max())
     assert np.abs(psi).max() > 0
     # The integration starts from a boundary where psi vanishes, so the
     # southernmost emitted row holds one cell's worth of transport and no
-    # accumulated history.
-    np.testing.assert_allclose(psi[:, 0], expected[:, 0], rtol=1e-5)
+    # accumulated history. Computed here from `u` rather than taken from
+    # `expected`, which would only repeat the comparison above.
+    southernmost = np.sum(
+        np.asarray(zonal_velocity)[:, 0, :]
+        * np.asarray(component.mask_U)[:, 0, :]
+        * np.asarray(component.dzt),
+        axis=-1,
+    ) * np.asarray(component.dlatitude)[0]
+    np.testing.assert_allclose(psi[:, 0], -southernmost, rtol=1e-5,
+                               atol=1e-9 * np.abs(southernmost).max())
 
 
 def test_initialize_carry_structure(component, grid_shape):
@@ -460,7 +505,6 @@ def test_psi_is_veros_own_streamfunction_when_the_run_solves_for_one(component):
     psi = np.asarray(diagnostics["psi"])
     np.testing.assert_array_equal(
         psi, np.asarray(variables.psi[interior, interior, variables.tau]))
-    assert np.isfinite(psi).all()
     # The wind has spun something up, so what follows is not two fields of
     # zeros agreeing with each other.
     assert np.abs(psi).max() > 1.0
@@ -472,9 +516,9 @@ def test_psi_is_veros_own_streamfunction_when_the_run_solves_for_one(component):
         gauge, gauge.mean(), rtol=0, atol=1e-5 * np.abs(psi).max())
     # ...and the host-side reference is the same field, so the relation the
     # diagnosis implements is the one written down in its docstring.
-    np.testing.assert_allclose(
-        diagnosed, _integrated_transport(component, diagnostics["u"]),
-        rtol=1e-5)
+    reference = _integrated_transport(component, diagnostics["u"])
+    np.testing.assert_allclose(diagnosed, reference, rtol=1e-5,
+                               atol=1e-9 * np.abs(reference).max())
 
 
 @pytest.mark.slow
@@ -496,8 +540,9 @@ def test_psi_is_diagnosed_when_the_run_solves_a_free_surface(
     psi = np.asarray(diagnostics["psi"])
     assert np.isfinite(psi).all()
     assert np.abs(psi).max() > 1.0
-    np.testing.assert_allclose(
-        psi, _integrated_transport(component, diagnostics["u"]), rtol=1e-5)
+    reference = _integrated_transport(component, diagnostics["u"])
+    np.testing.assert_allclose(psi, reference, rtol=1e-5,
+                               atol=1e-9 * np.abs(reference).max())
 
     variables = carry["state"].variables
     interior = slice(GHOST_CELLS, -GHOST_CELLS)

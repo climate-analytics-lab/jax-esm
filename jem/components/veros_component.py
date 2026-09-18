@@ -220,12 +220,23 @@ class VerosComponent:
         ``"ocn"``.
     mask_T, mask_U : jax.Array
         Land-sea masks on the T and u grids, halo cells removed.
+    mask_surface_Z : jax.Array
+        Surface land-sea mask on the zeta (corner) points -- where the
+        barotropic streamfunction lives -- halo cells removed.
     longitude, latitude : jax.Array
         T-grid cell centres, halo cells removed.
-    dlongitude, dlatitude : jax.Array
-        T-grid cell widths in **metres**, halo cells removed. Veros converts
-        its grid spacings to a pseudo-Cartesian grid in ``calc_grid``, so
-        these are distances even when the coordinates are degrees.
+    dlatitude : jax.Array
+        T-grid cell heights, halo cells removed: Veros' ``dyt``, a true
+        meridional **distance in metres** whichever coordinates are in use
+        (``calc_grid`` converts it with ``degtom`` when they are degrees).
+    dlongitude : jax.Array
+        T-grid cell widths, halo cells removed: Veros' ``dxt``. In degree
+        coordinates this is the *nominal*, equatorial-equivalent zonal
+        spacing, **not** a distance: Veros keeps the spherical metric
+        separately in ``cost``/``cosu`` (``area_t = cost * dyt * dxt``), so a
+        true zonal distance is ``dlongitude * cos(latitude)``. In Cartesian
+        coordinates the two are the same thing and it is metres, like
+        ``dlatitude``.
     enable_streamfunction : bool
         Whether the wrapped setup solves the external mode for a barotropic
         streamfunction; it decides where the ``psi`` output comes from (see
@@ -255,13 +266,22 @@ class VerosComponent:
         # diagnosed from the depth-integrated *zonal* transport, which lives
         # on the u grid (see `_barotropic_streamfunction`).
         self.mask_U = jnp.array(variables.maskU)[interior, interior]
+        # `psi` is published on the zeta points, and over land it is carried
+        # through the integration rather than computed, so the mask that
+        # blanks it has to be published with it.
+        self.mask_surface_Z = jnp.array(variables.maskZ)[interior, interior, -1]
         self.dzt = jnp.array(variables.dzt)
         self.longitude = jnp.array(variables.xt)[interior]
         self.latitude = jnp.array(variables.yt)[interior]
         self.dlongitude = jnp.array(variables.dxt)[interior]
         self.dlatitude = jnp.array(variables.dyt)[interior]
-        self.longitude_units = "degrees_east" if settings.coord_degree else "km"
-        self.latitude_units = "degrees_north" if settings.coord_degree else "km"
+        # A Cartesian setup (``coord_degree=False``) gives its grid
+        # spacings in metres -- the dynamics divides by ``dxt``/``dyt`` as
+        # lengths and keeps the spherical metric separately in
+        # ``cost``/``cosu``, which it sets to 1 in that case -- so the
+        # coordinates those spacings accumulate into are metres too.
+        self.longitude_units = "degrees_east" if settings.coord_degree else "m"
+        self.latitude_units = "degrees_north" if settings.coord_degree else "m"
 
         # Which external mode the setup solves is fixed for the whole run, so
         # it is read once here as a Python bool and the `psi` branch in
@@ -651,20 +671,30 @@ class VerosComponent:
         therefore be wrong rather than merely approximate, and this diagnosis
         stands in for it.
 
-        It inverts the relation Veros itself uses when it adds the barotropic
-        mode back onto the baroclinic velocity
-        (``veros/core/external/solve_stream.py`` lines 205-213, with
-        ``hur = 1 / sum_k dzt maskU`` from ``veros/core/numerics.py`` lines
-        226-230). Veros adds ``-maskU (psi[i, j] - psi[i, j-1]) / dyt[j] *
-        hur`` to every level, and the baroclinic part it is added to has had
-        its vertical mean removed (lines 199-202), so the depth-integrated
-        zonal transport
+        The discrete relation it inverts is the one Veros uses **when it
+        does solve for a streamfunction**, in
+        ``veros.core.external.solve_stream.barotropic_velocity_update``: that
+        routine strips the vertical mean from the baroclinic velocity and
+        then adds ``-maskU (psi[i, j] - psi[i, j-1]) / dyt[j] * hur`` to every
+        level, with ``hur = 1 / sum_k dzt maskU`` from
+        ``veros.core.numerics.calc_topo_kernel``. The depth-integrated zonal
+        transport
 
             U[i, j] = sum_k u[i, j, k] dzt[k] maskU[i, j, k]
 
-        satisfies, exactly,
+        is then, exactly,
 
             U[i, j] = -(psi[i, j] - psi[i, j-1]) / dyt[j].
+
+        A free-surface run never reaches that routine -- it solves for a
+        surface pressure and the barotropic mode enters the momentum
+        equation as a pressure gradient instead
+        (``veros.core.external.solve_pressure``) -- so what carries over is
+        the *definition*, not that run's own arithmetic: the same discrete
+        relation, applied to the transports the free-surface run produced.
+        That the definition is the right one, with the sign and the metric
+        Veros uses, is what the streamfunction-mode cross-check in the tests
+        pins down, by making this diagnosis reproduce Veros' own psi.
 
         No ``cos`` metric factor enters: the difference is meridional, and
         ``dyt`` is already a distance in metres (``calc_grid`` converts the
@@ -785,8 +815,13 @@ class VerosComponent:
             Each variable that came out of the carry also carries the
             ``jem_role`` attribute (:func:`~jem.base.component.role_attrs`),
             which says the same thing without a name to parse; the grid
-            fields (``mask_T``, ``mask_surface_T``, ``dzt``) carry none,
-            because they are configuration rather than carry.
+            fields (the ``mask_*`` masks and ``dzt``) carry none, because
+            they are configuration rather than carry. The masks of all three
+            staggerings the output uses are published, because a reader
+            cannot rebuild them: ``mask_T`` for the tracers, ``mask_U`` for
+            ``u`` and for the depth integral behind ``psi``, and
+            ``mask_surface_Z`` for the zeta points ``psi`` itself sits on,
+            where its values over land are an artefact of the integration.
             The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
@@ -826,6 +861,9 @@ class VerosComponent:
                     ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
+                "mask_U": (["lon", "lat", "depth"], self.mask_U),
+                "mask_surface_U": (["lon", "lat"], self.mask_U[:, :, -1]),
+                "mask_surface_Z": (["lon", "lat"], self.mask_surface_Z),
                 "dzt": (["depth"], self.dzt),
             },
             coords={
@@ -860,17 +898,24 @@ class VerosComponent:
                 " The barotropic flow is then not exactly non-divergent, so"
                 " this is the standard `meridionally integrated zonal"
                 " transport` diagnostic rather than an exact streamfunction."
+                " Its values over land are carried through the integration"
+                " rather than computed, so blank them with `mask_surface_Z`"
+                " before reading them as transports; the depth integral it"
+                " comes from uses `mask_U` and `dzt`, both published here,"
+                " so it can be reproduced from this file."
             )
         psi_comment += (
             " Like `u` and `v` it lives on Veros' staggered grid -- here the"
-            " zeta (corner) points -- but is labelled with the T-grid"
+            " zeta (corner) points, whose surface land-sea mask is published"
+            " as `mask_surface_Z` -- but is labelled with the T-grid"
             " `lon`/`lat` coordinates this dataset uses throughout."
         )
 
         # `jem_role` records which section of the carry each variable came
         # from, so a reader does not have to parse the `forcing_` prefix.
-        # The last three are the grid itself -- time-invariant configuration,
-        # not state, diagnostics or forcing -- so they carry no role.
+        # The masks and `dzt` at the end are the grid itself -- time-invariant
+        # configuration, not state, diagnostics or forcing -- so they carry no
+        # role.
         var_attrs = {
             "temp": {"long_name": "ocean potential temperature", "units": "deg C",
                      **role_attrs("state")},
@@ -891,7 +936,7 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
-            "psi": {"long_name": "barotropic streamfunction", "units": "m3 s-1",
+            "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
                     "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
@@ -913,6 +958,12 @@ class VerosComponent:
                 **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
+            "mask_U": {"long_name": "land-sea mask on u grid", "units": "1",
+                       "comment": "the mask `u` lives on, and the one `psi`'s depth integral uses"},
+            "mask_surface_U": {"long_name": "land-sea mask on u grid, surface level", "units": "1"},
+            "mask_surface_Z": {"long_name": "land-sea mask on zeta (corner) points, surface level",
+                               "units": "1",
+                               "comment": "the points `psi` itself lives on"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
         }
         for name, attrs in var_attrs.items():

@@ -301,23 +301,36 @@ Breaking changes are marked; everything else is additive.
   boundary conditions an exchanger writes into jcm's own dataset, because the
   rest of those names are jcm's and their roles are not JEM's to assert.
 - **`psi`, the ocean's barotropic streamfunction**, in the Veros component's
-  output (`["time", "lon", "lat"]`, `m3 s-1`, `jem_role="derived"`). Veros
+  output (`["time", "lon", "lat"]`, `m^3/s`, `jem_role="derived"`). Veros
   carries a real streamfunction only when the setup solves the external mode
   for one (`settings.enable_streamfunction`); under the linear free surface
   every Veros setup shipped with JEM chooses, the same `variables.psi` array
-  holds the *surface pressure* instead (`m^2 s^-2`, on the T grid), so
+  holds the *surface pressure* instead (`m^2/s^2`, on the T grid), so
   publishing it unconditionally would have published a different quantity
   under the streamfunction's name. `psi` is therefore Veros' own field when
   the run solves for one, and is otherwise diagnosed from the
-  depth-integrated zonal transport by the relation Veros itself inverts —
-  `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) / dyt[j]` — integrated
-  northwards from a southern boundary where it vanishes. Which of the two the
-  run used is recorded in the variable's `comment` attribute, with the
+  depth-integrated zonal transport by the discrete relation Veros inverts
+  *when it does solve for a streamfunction* —
+  `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) / dyt[j]`, the relation behind
+  its barotropic-mode update — integrated northwards from a southern boundary
+  where it vanishes. A free-surface run never reaches that code: it solves for
+  a surface pressure, and the barotropic mode enters the momentum equation as
+  a pressure gradient. What carries over is therefore the *definition*,
+  applied to the transports that run did produce; that it is the right one,
+  with the sign and the metric Veros uses, is pinned by a test that makes the
+  diagnosis reproduce Veros' own `psi` where Veros has one. Which of the two
+  the run used is recorded in the variable's `comment` attribute, with the
   caveats that a free-surface barotropic flow is not exactly non-divergent
   (so the diagnosis is the standard "meridionally integrated zonal transport"
   rather than an exact streamfunction) and that, like `u` and `v`, the field
   sits on Veros' staggered grid — the zeta points — while wearing the T-grid
   `lon`/`lat` labels the dataset uses throughout.
+- **`mask_U`, `mask_surface_U` and `mask_surface_Z`** beside `mask_T` in that
+  same output. `psi`'s values over land are carried through the integration
+  rather than computed, so a reader needs the zeta-point mask to blank them,
+  and the u-grid mask is the one its depth integral ran over — with `dzt`,
+  that makes the diagnosis reproducible from the file alone. Grid
+  configuration rather than carry, so like `mask_T` they carry no `jem_role`.
 - **`jem.checkpoint`** — `save(carry, path)` / `load(template, path)` for any
   pytree, and `save_coupled_carry` / `load_coupled_carry` for a whole
   `CoupledCarry`, in

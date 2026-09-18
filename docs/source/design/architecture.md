@@ -708,13 +708,22 @@ The conventions, which are JCM's:
   different units on a different grid, so the wrapper diagnoses the
   streamfunction instead: it integrates the depth-integrated zonal
   transport northwards from a southern boundary where the streamfunction
-  vanishes, using exactly the discrete relation Veros inverts when it adds
-  the barotropic mode back onto the baroclinic velocity,
-  `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) / dyt[j]`. The two agree
-  to machine precision up to the additive constant a streamfunction is
+  vanishes, using the discrete relation Veros inverts *when it does solve
+  for a streamfunction* — `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) /
+  dyt[j]`, the relation behind its barotropic-mode update. A free-surface
+  run never reaches that code (it solves for a surface pressure, and the
+  barotropic mode enters the momentum equation as a pressure gradient), so
+  what carries over is the definition rather than that run's own
+  arithmetic, applied to the transports it did produce. That the
+  definition is the right one is pinned by a test that makes the diagnosis
+  reproduce Veros' own `psi` where Veros has one: there the two agree to
+  machine precision, up to the additive constant a streamfunction is
   defined up to (Veros fixes it by holding its first island at zero, the
-  diagnosis by the southern boundary), and the variable's `comment`
-  attribute says which of the two the file holds.
+  diagnosis by the southern boundary). The variable's `comment` attribute
+  says which of the two the file holds, and the masks a reader needs are
+  published beside it — `mask_surface_Z` for the zeta points `psi` sits on,
+  whose land values the integration carries through rather than computes,
+  and `mask_U` for the depth integral behind it.
 - **A variable's role is metadata, not a name to parse.** Every packaged
   component tags each output variable with `jem_role`
   (`jem.base.component.role_attrs`), whose value is the section of the carry
