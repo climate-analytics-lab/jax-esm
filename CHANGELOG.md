@@ -433,7 +433,7 @@ Breaking changes are marked; everything else is additive.
   ends inside), and a sequence given neither is used once through. Both
   builders return the same `BinnedMean` named tuple from one private
   `_binned_mean(coupler, bin_of_record, n_bins)` with one private
-  `_variable_window_rule(boundaries, offset, closed)` — a calendar month is
+  `_variable_window_rule(boundaries, offset, inclusive)` — a calendar month is
   that rule with the month boundaries, the run's phase in the calendar and
   bins closed at their start — and both bin every record by its own **label**;
   a run longer than the accumulator wraps, so window *w* composites every
@@ -447,7 +447,7 @@ Breaking changes are marked; everything else is additive.
   (which is what `groupby("time.month")` does). So a 31-day window started on 1
   January takes the record labelled 00:00 on 1 February, which is February's
   month, and from a 1 July start a pattern of month lengths is not months at
-  all. There is deliberately no `closed=` or `offset=` knob to mix the two:
+  all. There is deliberately no `inclusive=` or `offset=` knob to mix the two:
   each convention is what makes its own builder agree with the thing it must
   agree with.
 

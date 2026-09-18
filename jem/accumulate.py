@@ -154,7 +154,7 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
 def _variable_window_rule(
     boundaries_seconds: np.ndarray,
     offset_seconds: int,
-    closed: Literal["left", "right"],
+    inclusive: Literal["left", "right"],
     period_seconds: int | None = None,
 ) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
     """Return the ``bin_of_record`` rule for bins of the given lengths.
@@ -177,16 +177,28 @@ def _variable_window_rule(
         run itself defines, and the run's offset into the calendar year for
         calendar months, so that a run starting on 1 July fills the July bin
         first.
-    closed : {"left", "right"}
-        Which side of a boundary the record labelled exactly on it belongs
-        to. ``"right"`` closes a bin at its end, so that label is the *last*
-        record of the bin before it: a window is itself an interval and JEM
-        labels an interval at its end, so the first 5-day window is the
-        records labelled day 1 to day 5. ``"left"`` closes a bin at its start,
-        so that label is the *first* record of the bin after it: a calendar
-        month starts at 00:00 on the 1st, which is what
-        ``groupby("time.month")`` of the written output does and what a
-        monthly mean has to agree with.
+    inclusive : {"left", "right"}
+        Which end of a bin is included in it, in the sense of
+        :func:`pandas.date_range`'s ``inclusive``. A record labelled exactly
+        on a boundary between two bins belongs to the bin that includes that
+        end.
+
+        Take 5-day bins. ``inclusive="left"`` makes the first bin the labels
+        in ``[day 0, day 5)`` and the second ``[day 5, day 10)``, so a label
+        of exactly day 5 opens the second bin. ``inclusive="right"`` makes
+        the first bin ``(day 0, day 5]`` and the second ``(day 5, day 10]``,
+        so a label of exactly day 5 closes the first bin.
+
+        The same thing in calendar months, for a run starting 1 January
+        00:00 with daily records: with ``inclusive="left"`` the record
+        labelled 1 February 00:00 is the first of February's bin, which is
+        what ``groupby("time.month")`` of the written output does and why
+        :func:`monthly_mean` uses it. With ``inclusive="right"`` a label of
+        1 January 00:00 would be the last record of the bin *before* January
+        and 1 February 00:00 the last record of January's bin; that is what
+        :func:`windowed_mean` uses, because JEM labels a record at the end
+        of the interval it covers, so the first 5-day window is the records
+        labelled day 1 to day 5.
     period_seconds : int, optional
         The period the bins repeat with, when it is not where they end. It
         must be at least ``boundaries_seconds[-1]`` and a whole number of
@@ -228,7 +240,7 @@ def _variable_window_rule(
     # counting the boundaries at or before `label - 1` puts a label exactly on
     # a boundary in the bin that ends there, counting those at or before
     # `label` puts it in the bin that starts there.
-    shift = 1 if closed == "right" else 0
+    shift = 1 if inclusive == "right" else 0
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         """Return the 0-based bin a record of ``record_seconds`` counts in."""
@@ -1117,7 +1129,7 @@ def windowed_mean(
     of a run -- it rotates the month table to the month the run starts in and
     phases it to the start date, which is a thing the calendar knows and a
     window does not. No ``offset=`` knob is offered here for the same reason
-    ``closed=`` is not: a window's meaning is "so many days into the run", and
+    ``inclusive=`` is not: a window's meaning is "so many days into the run", and
     a bin that means something else belongs to the builder that knows what.
 
     **Which window a record counts in.** As in :func:`monthly_mean`, a record
@@ -1144,7 +1156,7 @@ def windowed_mean(
     record at their shared boundary even for a run that starts on 1 January:
     with daily coupling the record labelled 00:00 on 1 February is the last of
     a 31-day window starting the run and the first of February's month. No
-    ``closed=`` knob is offered to split the difference: the convention is not
+    ``inclusive=`` knob is offered to split the difference: the convention is not
     a preference but what makes each builder agree with the thing it is meant
     to agree with, and a run whose bins closed one way while its output was
     grouped the other would silently disagree with itself.

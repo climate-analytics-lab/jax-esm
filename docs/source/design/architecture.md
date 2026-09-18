@@ -1225,7 +1225,7 @@ knob to fix it with: the builder that knows where in the calendar a run starts
 is the one that should own the phase. The two also close on opposite sides —
 a window at its end, a calendar month at its start (below) — so even from 1
 January a 31-day window and January differ by the record labelled 00:00 on 1
-February. No `closed=` knob is offered to mix them either: each convention is
+February. No `inclusive=` knob is offered to mix them either: each convention is
 what makes its own builder agree with the thing it has to agree with (a
 forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
 of the written output).
@@ -1241,7 +1241,7 @@ month is closed at its start because that is what `groupby("time.month")` does
 and a monthly mean has to agree with the written output.
 
 Both rules are therefore one private
-`_variable_window_rule(boundaries_seconds, offset_seconds, closed)`: bins laid
+`_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins laid
 end to end as a cumulative sum of lengths, a phase (0 for windows the run
 defines; the run's offset into the calendar year for the twelve-month
 climatology, and into its own first month for the sequential form) and which
