@@ -95,8 +95,9 @@ rewrites, and it says at INFO how many. Anything else -- a file off the chunk
 grid, which would overlap this run's output, or one at or past the end of this
 run, which nothing it writes reaches -- it **refuses** with a ``ValueError``
 naming the files, grouped by which of the two they are, and the ways out:
-resume with the chunk they were written under, remove them, or write into
-another ``output_dir``. Deleting them instead would be a driver destroying a
+resume with the chunk they were written under (and, for those past the end,
+a ``total_time`` that reaches them), remove them, or write into another
+``output_dir``. Deleting them instead would be a driver destroying a
 killed run's output on its own initiative, which is not its decision to take.
 
 Because there is only ever one checkpoint, the health gate runs *before* it
@@ -1074,7 +1075,8 @@ def _check_resumed_output_is_rewritable(
             f"{restored_step} + k x {steps_per_chunk} coupled steps "
             f"(chunk={chunk!r}) up to step {total_steps}. "
             + ". ".join(reasons)
-            + ". Resume with the chunk those files were written under, or "
+            + ". Resume with the chunk those files were written under (and, "
+            "for those past the end, a total_time that reaches them), or "
             "remove them, or write this run into another output_dir. (The "
             f"output before step {restored_step} is the run's history and is "
             "not in question.)"

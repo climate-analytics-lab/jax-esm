@@ -228,8 +228,9 @@ over — on one of its own chunk boundaries **and** before the step it stops at 
 and says at INFO how many it will rewrite. Anything else and it **refuses**,
 with a `ValueError` naming the files it would leave behind, grouped by which of
 the two they are (an overlap, or past the end of this run), plus the step, the
-chunk and the ways out (resume with the chunk those files were written under,
-remove them, or write into another `output_dir`). It never deletes them itself:
+chunk and the ways out (resume with the chunk those files were written under
+and, for those past the end, a `total_time` that reaches them; remove them; or
+write into another `output_dir`). It never deletes them itself:
 which of the two passes to keep is the user's call, not the driver's. Files
 from before the restart point, and files this coupler would never have written,
 are not in question — and the check is skipped entirely for a run that writes
