@@ -930,7 +930,8 @@ for each chunk:
     paths += write_chunk(reduced, output_dir, first_step)
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
     if ok or not bail_on_unhealthy:
-        coupler.save_state(carry, checkpoint_path)
+        if due(int(carry.step)) or last chunk:      # see checkpoint_interval
+            coupler.save_state(carry, checkpoint_path)
 ```
 
 It returns a `RunResult`: the `final_carry`, `steps_completed`
@@ -975,6 +976,37 @@ a caller that wants the reduced form alone. What the gate can resolve is one
 `output_averages`, so the records being judged are already step means — a NaN
 propagates through that mean, a finite excursion shorter than a coupling step
 need not.
+
+**How often it checkpoints.** `checkpoint_interval` (`None` by default: after
+every chunk) saves less often than every chunk, for a run whose chunks are short
+for one of the *other* reasons a chunk exists — a health check every few days,
+an output file per day. It must be a whole multiple of `chunk`, because a chunk
+boundary is the only place the loop stops, and it is counted in coupled steps
+from the **start of the run** (`carry.step`, which a resume restored) rather
+than of the call, so a run stopped and resumed checkpoints at the same points an
+uninterrupted one does. Both are checked with the other durations, before
+anything is compiled; an interval given with `checkpoint_path=None` is refused
+rather than ignored, since it would otherwise leave a run that asked to
+checkpoint less often checkpointing not at all.
+
+Two guarantees make the interval safe to reach for, and they are why the loop
+keeps the last accepted carry in memory. The last chunk of a **completed** run
+is checkpointed whatever the interval says, so a finished run always leaves its
+final restart state. And a run the health gate **stops** writes the last chunk
+that *passed* before returning, naming the step it holds at INFO — so bailing
+still leaves the restart point at the last healthy state, exactly as it does
+without an interval. What the interval does give up is a run that is *killed*:
+that falls back to the last interval boundary, re-integrates the chunks after it
+on the resume and **rewrites** their output files, which is safe precisely
+because a file is named after the coupled step its chunk starts at — the second
+pass writes the same names from the same starting state.
+
+Two configurations the loop cannot honour exactly are warnings rather than
+refusals, because neither costs a restart point: a `total_time` that is not a
+whole number of intervals (the last gap between saves is simply shorter than the
+interval), and a resume that starts part-way through a chunk under a *different*
+chunk length, where no chunk end can be a multiple of the interval and the run
+would otherwise silently checkpoint only when it finished.
 
 The gate also runs **before** the checkpoint, and a chunk it rejects is not
 checkpointed (unless `bail_on_unhealthy=False`, where the run carries on and so

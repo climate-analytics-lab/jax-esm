@@ -205,6 +205,18 @@ checkpointed: there is one restart directory and it is overwritten in place, so
 a stopped run leaves it holding the last chunk that passed rather than the
 state that failed.
 
+`checkpoint_interval` (`coupled_run.checkpoint_interval`, null by default)
+saves less often than every chunk, for a run whose chunks are short for one of
+the other reasons a chunk exists — a health check every few days, an output
+file per day. It is a whole number of chunks, counted in coupled steps from the
+start of the *run*, so a resumed run checkpoints where an uninterrupted one
+would; a completed run always checkpoints its last chunk, and a run the health
+gate stops always checkpoints the last chunk that passed, so neither loses work
+to it. A run that is *killed* falls back to the last interval boundary and
+re-integrates the chunks after it on the resume, **rewriting** their output
+files — safe, because each file is named after the coupled step its chunk
+starts at, so the second pass writes the same names from the same state.
+
 `output_averages` and `subsample` reduce the *files* only. The health check is
 given each chunk exactly as it was integrated — every record — because it
 judges a chunk by its last record and its extremes, and a chunk mean (which

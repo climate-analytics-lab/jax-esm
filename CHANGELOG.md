@@ -60,6 +60,29 @@ Breaking changes are marked; everything else is additive.
   which happened. An **absolute** path is used exactly as given, for a run that
   checkpoints to scratch while writing output elsewhere.
   `coupled_run/long_run.yaml` no longer repeats the setting.
+- **`run_chunked(..., checkpoint_interval=...)`** — how often that checkpoint
+  is written, in the same duration forms as `chunk`. `None` (the default, and
+  `coupled_run.checkpoint_interval: null`) keeps a save after every chunk the
+  health gate accepts; a value must be a whole multiple of `chunk`, since a
+  chunk boundary is the only place the run stops, and is counted in coupled
+  steps from the **start of the run** rather than of the call, so a resumed run
+  checkpoints at the same points an uninterrupted one does. It is for a run
+  whose chunks are short for one of the *other* reasons a chunk exists — a
+  health check every few days, an output file per day — and which does not want
+  its restart state rewritten that often. Two guarantees survive it, so no run
+  loses work it would have kept without one: the last chunk of a completed run
+  is always checkpointed, and a run the health gate stops checkpoints the last
+  chunk that **passed** on the way out (an INFO line names the step it holds).
+  What it gives up is a *killed* run, which falls back to the last interval
+  boundary and re-integrates the chunks after it, **rewriting** their output
+  files — safe because each is named after the coupled step its chunk starts
+  at. It is validated with the other durations, before anything is compiled,
+  and giving it with `checkpoint_path=None` is a `ValueError` rather than a
+  setting silently ignored. A `total_time` that is not a whole number of
+  intervals, and a resume that starts part-way through a chunk (where no chunk
+  end can be a multiple of the interval), are WARNINGs rather than refusals:
+  neither loses anything, but both mean the saves do not fall where they were
+  asked for.
 - **A run says where its starting state came from.** `run_chunked` logs one
   INFO line before anything is compiled — `Starting from coupler.initialize()
   at coupled step 0 (no checkpoint was given).`, `Starting from the
