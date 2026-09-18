@@ -353,7 +353,7 @@ Breaking changes are marked; everything else is additive.
 
   `monthly_mean(coupler)` bins into the **twelve** calendar months, so a
   multi-year run composites its Januaries into one bin — a climatology.
-  `monthly_mean(coupler, total_time="10 years")` (or `n_months=120`) bins into
+  `monthly_mean(coupler, total_time="10 years")` (or `n_months=121`) bins into
   the months the run **passes through**, in order, each with a bin of its own:
   the same month table rotated to the month the run starts in and phased to the
   start date, so it is calendar months whatever day the run begins on, and
@@ -361,8 +361,17 @@ Breaking changes are marked; everything else is additive.
   `total_time` is the months the run's labels touch, which is why ten years is
   121 bins and not 120 — the last record is labelled 00:00 on 1 January of the
   eleventh year, which is that January's, and without a bin for it the
-  accumulator would wrap it into the first January. A run longer than
-  `n_months` months wraps, as a windowed mean does. The two forms are mutually
+  accumulator would wrap it into the first January. A run longer than the
+  accumulator wraps at the **span** of its bins, as a windowed mean wraps at
+  the span of its windows, so a wrapped bin is a calendar month only when
+  `n_months` is a multiple of twelve and otherwise holds parts of two —
+  `total_time`, which is never wrapped into, is the spelling to prefer. (That
+  span is rounded up to the next whole coupled step, because the record
+  counter is reduced modulo it and a whole number of calendar months need not
+  be a whole number of steps: a 5-day coupling divides the 365-day year but
+  not the 59 days of January and February. The wrap moves by less than one
+  step, every bin boundary stays exact, and neither a `total_time` accumulator
+  nor a calendar-aligned wrap can see it.) The two forms are mutually
   exclusive; giving neither is the climatology.
 
   `windowed_mean` is the same reduction over `n_windows` windows — of one

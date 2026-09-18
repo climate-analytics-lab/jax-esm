@@ -256,7 +256,7 @@ a climatology. Give it a size and it bins into the months the run passes
 through instead, in order, each with a bin of its own:
 
 ```python
-months = monthly_mean(coupler, total_time="10 years")   # or n_months=120
+months = monthly_mean(coupler, total_time="10 years")   # or n_months=121
 means = months.finalize(accumulator)   # 121 bins: Jul 2001, Aug 2001, …
 ```
 
@@ -265,7 +265,10 @@ rotated to the month of the start date and phased to it — and they do not
 drift the way a fixed 30-day window does. Ten years gives 121 bins, not 120:
 the run's last record is labelled 00:00 on 1 January of the eleventh year,
 which belongs to that January, and a bin has to exist for it rather than have
-it wrap into the first.
+it wrap into the first. `total_time` is the spelling to prefer for that
+reason — a run longer than the accumulator wraps at the *span* of its bins, so
+a wrapped bin is a calendar month only when `n_months` is a multiple of twelve
+and otherwise holds parts of two.
 
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
 `n_windows` windows of a fixed length — the 5-day and 7-day means a

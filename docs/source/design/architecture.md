@@ -1136,7 +1136,18 @@ counting the months the run's labels touch, which is why ten years gives 121
 bins and not 120 — the last record is labelled 00:00 on 1 January of the
 eleventh year, which is that January's record, and without a bin for it the
 accumulator would wrap it into bin 0 and quietly spoil the first January. A run
-longer than `n_months` months wraps, exactly as a windowed mean does.
+longer than the accumulator wraps at the **span** of its bins, exactly as a
+windowed mean wraps at the span of its windows — so a wrapped bin lines up with
+a calendar month only when `n_months` is a multiple of twelve, and otherwise
+holds parts of two (six bins from 1 January span 181 days, and the second
+August of the run splits 28 records into the February bin and 3 into March's).
+`total_time`, which sizes the accumulator so that it is never wrapped into, is
+the form to prefer. That span is rounded up to the next whole coupled step,
+because the record counter is reduced modulo it and a whole number of calendar
+months need not be a whole number of steps (a 5-day coupling divides the
+365-day year but not 59 days of January and February); the wrap moves by less
+than one step, every bin boundary stays exact, and nothing that is meaningful
+in the first place can see it.
 
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
@@ -1234,7 +1245,7 @@ coupled step keeps.
 A run longer than the accumulator **wraps**: window *w* also collects windows
 *w + n_windows*, *w + 2·n_windows*, … exactly as the twelve-month table wraps
 years and gives a three-year run a January climatology, and as `n_months` bins
-wrap at their own span. That is the price of a fixed-size accumulator, which is
+wrap at their own span (above). That is the price of a fixed-size accumulator, which is
 the whole point of reducing inside the scan — size it to the run if each bin is
 to stand on its own.
 
