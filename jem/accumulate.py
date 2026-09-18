@@ -155,7 +155,6 @@ def _variable_window_rule(
     boundaries_seconds: np.ndarray,
     offset_seconds: int,
     inclusive: Literal["left", "right"],
-    period_seconds: int | None = None,
 ) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
     """Return the ``bin_of_record`` rule for bins of the given lengths.
 
@@ -169,9 +168,11 @@ def _variable_window_rule(
     boundaries_seconds : numpy.ndarray
         The **ends** of the bins, in whole seconds from the start of the
         pattern: the cumulative sum of the bin lengths, strictly increasing,
-        one entry per bin. The last entry is where the bins end, and -- unless
-        ``period_seconds`` says otherwise -- the period they repeat with,
-        which is what makes a run longer than the accumulator wrap.
+        one entry per bin. The last entry is where the bins end and the
+        period they repeat with, which is what makes a run longer than the
+        accumulator wrap; it must be a whole number of coupling steps, so a
+        caller whose last bin does not end on one extends that bin itself
+        (:func:`monthly_mean`'s sequential form does, and says why).
     offset_seconds : int
         Where the run's start date sits in that pattern -- 0 for windows the
         run itself defines, and the run's offset into the calendar year for
@@ -199,15 +200,6 @@ def _variable_window_rule(
         :func:`windowed_mean` uses, because JEM labels a record at the end
         of the interval it covers, so the first 5-day window is the records
         labelled day 1 to day 5.
-    period_seconds : int, optional
-        The period the bins repeat with, when it is not where they end. It
-        must be at least ``boundaries_seconds[-1]`` and a whole number of
-        coupling steps; the last bin then also collects the gap between the
-        two, which is where a *wrapped* record labelled in it lands. The one
-        caller that needs this is :func:`monthly_mean`'s sequential form,
-        whose bins end on a calendar month boundary that a long coupling step
-        need not fall on -- see there for why rounding the period up costs
-        nothing observable.
 
     Returns
     -------
@@ -241,8 +233,7 @@ def _variable_window_rule(
             f'inclusive must be "left" or "right"; got {inclusive!r}.'
         )
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
-    period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
-    assert period >= int(boundaries[-1]), "the bins must fit inside their period"
+    period = int(boundaries[-1])
     # The two conventions differ by one second of the label. A record's label
     # sits at the END of its interval, and `bin_of_record` counts how many
     # boundaries lie at or before `label - shift_seconds`. With 5-day bins and
@@ -289,14 +280,10 @@ def _variable_window_rule(
         # a remainder (`phase`, folded into the boundaries); the ceiling is
         # then the first record whose label reaches the boundary.
         shifted, phase = divmod(offset_seconds - shift_seconds, record_seconds)
+        # The last entry lands exactly on `records_per_period`: the period is
+        # a whole number of records and `phase` is less than one, so the
+        # ceiling cannot overshoot it, and every wrapped record has a bin.
         in_records = _ceil_div(boundaries - phase, record_seconds)
-        # The last bin ends at the period: that is where it already ends when
-        # the period is where the bins end (the ceiling above lands exactly on
-        # `records_per_period`), and where it has to end when the period was
-        # rounded up past them, so that a wrapped record labelled in the gap
-        # is the last bin's rather than an index off the end of the
-        # accumulator.
-        in_records[-1] = records_per_period
         boundary_records = jnp.asarray(in_records, dtype=jnp.int32)
         # `record + 1` because record k is labelled at the END of its own
         # interval. The modulo is what wraps a run longer than the pattern
@@ -1134,24 +1121,24 @@ def monthly_mean(
     boundaries = np.cumsum(
         [rotated[index % MONTHS_PER_YEAR] for index in range(bins)]
     )
-    # The record counter is reduced modulo the period the bins repeat with, so
-    # that period has to be a whole number of coupled steps -- and the span of
-    # a whole number of calendar months need not be one (a 5-day coupling
-    # divides the 365-day year but not 59 days of January and February). The
-    # period is therefore rounded UP to the next coupled step, which extends
-    # the wrap point by less than one step past the last bin; the bin
-    # boundaries themselves stay exact. Nothing observable pays for it: an
-    # accumulator sized by `total_time` is never wrapped into at all, and a
-    # wrapped `n_months` bin only lines up with a calendar month when
-    # `n_months` is a multiple of twelve anyway (see the wrap paragraph in the
-    # docstring). Refusing instead would reject every `total_time` form on
-    # such a coupling, since counting months from a run always gives 12N+1 of
-    # them, whose span is never a whole number of years.
-    period_seconds = _ceil_div(int(boundaries[-1]), dt_seconds) * dt_seconds
+    # The bins repeat where the last one ends, and the record counter is
+    # reduced modulo that span, so it has to be a whole number of coupled
+    # steps -- and the span of a whole number of calendar months need not be
+    # one (a 5-day coupling divides the 365-day year but not the 59 days of
+    # January and February). The LAST bin is therefore extended to the next
+    # coupled step, by less than one step; every other boundary stays exact.
+    # Nothing observable pays for it: an accumulator sized by `total_time` is
+    # never wrapped into at all, and a wrapped `n_months` bin only lines up
+    # with a calendar month when `n_months` is a multiple of twelve anyway
+    # (see the wrap paragraph in the docstring). Refusing instead would reject
+    # every `total_time` form on such a coupling, since counting months from a
+    # run always gives 12N+1 of them, whose span is never a whole number of
+    # years.
+    boundaries[-1] = _ceil_div(int(boundaries[-1]), dt_seconds) * dt_seconds
 
     return _binned_mean(
         coupler,
-        _variable_window_rule(boundaries, offset_seconds, "left", period_seconds),
+        _variable_window_rule(boundaries, offset_seconds, "left"),
         bins,
         carry,
     )
