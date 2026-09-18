@@ -431,7 +431,8 @@ Breaking changes are marked; everything else is additive.
   the same run agree for a run whose output labels cross no Gregorian 29
   February (and, for a sub-stepped component, after `fold_records`, below).
   That condition is the labels' calendar, not the binning: labels are proleptic
-  Gregorian whatever the model calendar is (JCM's convention, jax-gcm#449),
+  Gregorian whatever the model calendar is (JCM's convention, jax-gcm#449;
+  calendar-consistent labels are tracked as #118),
   so a `365_day` run started on 1 January 2000 labels the record the model
   calls 1 March 00:00 as `2000-02-29` and accumulates it into March, and from
   there on a `groupby("time.month")` of the written output moves the first

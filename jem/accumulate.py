@@ -981,9 +981,10 @@ def monthly_mean(
     and the seasonal cycle follow, so the bins are still the model's own
     Februaries and Marches. (On ``gregorian`` the question does not arise:
     that calendar has no fixed month table and :func:`monthly_mean` refuses
-    it.) Whether JEM should emit calendar-consistent labels instead is
-    jax-gcm#449's question and not this module's; nothing here depends on the
-    answer.
+    it.) Emitting calendar-consistent labels instead -- ``cftime`` no-leap
+    dates, the atmosphere's output relabelled to match -- is tracked as #118
+    and would settle jax-gcm#449's question for JEM's output; nothing here
+    depends on the answer.
 
     **The twelve-bin form wraps at the year**, because the bin is the calendar
     month and not the month since the run started: a three-year run's January

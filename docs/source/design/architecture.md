@@ -686,6 +686,8 @@ The conventions, which are JCM's:
   below). The inconsistency is JCM's, recorded upstream
   as jax-gcm#449; JEM mirrors it rather than emitting labels of its own,
   which would no longer merge with the atmosphere's on one time axis.
+  Calendar-consistent labels for every component, the atmosphere's included,
+  are tracked as #118.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
@@ -1232,8 +1234,8 @@ first record of each month into the month before it (its February holds 29
 records where the accumulator's holds 28), while the accumulated bin stays the
 model's month, which is the month the forcing and the seasonal cycle follow.
 On `gregorian` the question does not arise, because `monthly_mean` refuses that
-calendar. Nothing in the reduction depends on how jax-gcm#449 is eventually
-settled. A calendar with no fixed
+calendar. Nothing in the reduction depends on how jax-gcm#449, or #118 (the
+same labels made calendar-consistent on JEM's side), is eventually settled. A calendar with no fixed
 table of month lengths (gregorian, with its leap years) and a coupling step
 that does not divide the year are refused with a message saying why, rather
 than binned approximately. Without `accumulate`, the generated function is what

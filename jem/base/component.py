@@ -402,7 +402,9 @@ class TimeAxis:
     user meets it, under **Leap days**. The inconsistency is JCM's and is
     recorded upstream as jax-gcm#449; JAX-ESM mirrors the convention rather
     than diverging from it, because labels of its own would no longer merge
-    with the atmosphere's on one time axis.
+    with the atmosphere's on one time axis. Emitting calendar-consistent
+    labels for every component, the atmosphere's included, is tracked as
+    #118.
 
     Attributes
     ----------
@@ -451,7 +453,8 @@ class TimeAxis:
         leap-day consequence the class docstring spells out. Making the labels
         calendar-consistent is not a change this method can make alone
         (jax-gcm#449): it would put JEM's output on a different time axis from
-        the JCM output it is written to merge with.
+        the JCM output it is written to merge with. Doing it for every
+        component at once is #118.
 
         Sub-day start dates are the one deliberate difference from JCM's own
         output path, which takes ``start_date.delta.days`` and drops

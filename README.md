@@ -260,7 +260,8 @@ The bins are the **model** calendar's months, so `monthly.finalize(...)` and
 `to_xarray(...).groupby("time.month").mean()` of the same run are the same
 numbers for a run whose output labels cross no Gregorian 29 February. The
 labels are proleptic Gregorian whatever the model calendar is (JCM's
-convention, jax-gcm#449), so a `365_day` run started on 1 January 2000 — where
+convention, jax-gcm#449; calendar-consistent labels are tracked as #118), so a
+`365_day` run started on 1 January 2000 — where
 the shipped examples start — labels the record the model calls 1 March 00:00
 as `2000-02-29` and accumulates it into March, and from there on
 `groupby("time.month")` of the written output moves the first record of each
