@@ -753,8 +753,12 @@ def test_a_resume_that_cannot_reach_the_interval_says_so(tmp_path, caplog):
         )
 
     assert result.steps_completed == 8
-    assert "resumes at coupled step 3" in caplog.text
+    assert "starts at coupled step 3" in caplog.text
     assert "not a whole number of the 2-step chunks" in caplog.text
+    assert "no chunk it integrates before the last" in caplog.text
+    # This run has a checkpoint whose chunk length it could match, so it is
+    # told how to get the interval back.
+    assert "the chunk the checkpoint was written under" in caplog.text
     # It still leaves its final restart state, which is the other guarantee.
     assert checkpoint_step(checkpoint) == 8
 
@@ -792,6 +796,102 @@ def test_a_total_time_that_is_whole_intervals_says_nothing(tmp_path, caplog):
             checkpoint_path=tmp_path / "checkpoint",
         )
     assert "checkpoint_interval" not in caplog.text
+
+
+def test_an_initial_carry_part_way_through_a_chunk_warns_without_a_remedy(
+    tmp_path, caplog
+):
+    """The same warning for a carry handed in, minus the advice that would lie.
+
+    A run also starts part-way through a chunk when it is given an
+    `initial_carry` at such a step -- it never resumed, and there is no
+    checkpoint whose chunk length it could match -- so the fact is stated and
+    the remedy is not.
+    """
+    coupler = two_slabs()
+    carry, _ = coupler.generate_trajectory_function(3)(coupler.initialize())
+
+    with caplog.at_level(logging.WARNING):
+        result = run_chunked(
+            coupler, total_time="8 days", chunk="2 days",
+            checkpoint_interval="4 days", initial_carry=carry,
+            output_dir=tmp_path / "output",
+            checkpoint_path=tmp_path / "checkpoint",
+        )
+
+    assert result.steps_completed == 8
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "starts at coupled step 3" in warnings[0]
+    assert "the chunk the checkpoint was written under" not in warnings[0]
+
+
+def test_an_accumulated_run_checkpoints_on_the_interval_too(tmp_path):
+    """The interval applies to a run reducing inside the scan.
+
+    An accumulated run writes no files and can have no health check, so there
+    is no hook to watch the checkpoint through: `save_state` itself is
+    wrapped, and what it records is the saves the interval allowed -- the
+    step-2 and step-4 boundaries, and the last chunk of the completed run.
+    """
+    coupler = two_slabs()
+    saved = []
+    save_state = coupler.save_state
+
+    def record(carry, path):
+        saved.append(int(carry.step))
+        return save_state(carry, path)
+
+    coupler.save_state = record
+    result = run_chunked(
+        coupler,
+        total_time="5 days",
+        chunk="1 day",
+        checkpoint_interval="2 days",
+        output_dir=tmp_path / "output",
+        checkpoint_path=tmp_path / "checkpoint",
+        health_check=None,
+        accumulate=monthly_mean(two_slabs()),
+    )
+
+    assert result.completed
+    assert result.paths == []
+    assert saved == [2, 4, 5]
+
+
+def test_an_ignored_health_failure_keeps_the_interval_and_bails_out_of_nothing(
+    tmp_path, caplog
+):
+    """`bail_on_unhealthy=False` never reaches the bail-out checkpoint.
+
+    The run carries on, so every chunk is "accepted" as far as the interval is
+    concerned and the saves fall exactly where a healthy run's would. The
+    extra save a bail-out makes is for the state a stopping run would
+    otherwise lose, and nothing stops here.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(),
+            total_time="5 days",
+            chunk="1 day",
+            checkpoint_interval="2 days",
+            output_dir=tmp_path / "output",
+            checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(
+                checkpoint, seen, rejects={0, 1, 2, 3, 4}
+            ),
+            bail_on_unhealthy=False,
+        )
+
+    assert result.completed
+    assert seen == [None, None, 2, 2, 4]
+    assert checkpoint_step(checkpoint) == 5
+    assert "Checkpointed the last chunk the health gate accepted" not in caplog.text
 
 
 @pytest.mark.parametrize(

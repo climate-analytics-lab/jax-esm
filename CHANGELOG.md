@@ -79,8 +79,10 @@ Breaking changes are marked; everything else is additive.
   at. It is validated with the other durations, before anything is compiled,
   and giving it with `checkpoint_path=None` is a `ValueError` rather than a
   setting silently ignored. A `total_time` that is not a whole number of
-  intervals, and a resume that starts part-way through a chunk (where no chunk
-  end can be a multiple of the interval), are WARNINGs rather than refusals:
+  intervals, and a run that starts part-way through a chunk — a resume under a
+  different `chunk`, or an `initial_carry` at such a step, where no chunk before
+  the last can end on a multiple of the interval — are WARNINGs rather than
+  refusals:
   neither loses anything, but both mean the saves do not fall where they were
   asked for.
 - **A run says where its starting state came from.** `run_chunked` logs one

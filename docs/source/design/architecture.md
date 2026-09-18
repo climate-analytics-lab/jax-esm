@@ -1004,9 +1004,10 @@ pass writes the same names from the same starting state.
 Two configurations the loop cannot honour exactly are warnings rather than
 refusals, because neither costs a restart point: a `total_time` that is not a
 whole number of intervals (the last gap between saves is simply shorter than the
-interval), and a resume that starts part-way through a chunk under a *different*
-chunk length, where no chunk end can be a multiple of the interval and the run
-would otherwise silently checkpoint only when it finished.
+interval), and a run that starts part-way through a chunk — a resume under a
+*different* chunk length, or an `initial_carry` handed in at such a step —
+where no chunk before the last can end on a multiple of the interval and the
+run would otherwise silently checkpoint only at the end.
 
 The gate also runs **before** the checkpoint, and a chunk it rejects is not
 checkpointed (unless `bail_on_unhealthy=False`, where the run carries on and so

@@ -289,6 +289,17 @@ def test_run_options_integrate_a_whole_number_of_chunks(option):
         f"coupled_run={option}: total_time={cfg.coupled_run.total_time!r} is "
         f"not a whole number of chunks of {cfg.coupled_run.chunk!r}."
     )
+    # Vacuous while every shipped option leaves the interval null, which is the
+    # point: the first option to set one is checked by the same arithmetic the
+    # driver applies, instead of failing at launch.
+    if cfg.coupled_run.checkpoint_interval is not None:
+        interval = _seconds(cfg.coupled_run.checkpoint_interval)
+        assert interval % chunk == 0, (
+            f"coupled_run={option}: checkpoint_interval="
+            f"{cfg.coupled_run.checkpoint_interval!r} is not a whole number of "
+            f"chunks of {cfg.coupled_run.chunk!r}; a checkpoint is only ever "
+            "written at a chunk boundary."
+        )
 
 
 # ---------------------------------------------------------------------------

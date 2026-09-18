@@ -71,15 +71,16 @@ the same points an uninterrupted one does, and it must be a whole number of
 chunks, because a chunk boundary is the only place this loop stops. It need not
 divide ``total_time``, since the last chunk is saved regardless, but the run
 warns when it does not, because the last gap between saves is then shorter than
-the interval. Two things survive it: the last chunk of a completed run is always checkpointed, so a
-finished run leaves its final restart state; and a run the health gate stops
-writes the last chunk that *passed* on the way out, so bailing still leaves the
-restart point at the last healthy state. What it gives up is a run that is
-**killed** -- a queue timeout, a node failure -- which falls back to the last
-interval boundary instead of the last chunk. The chunks after it are then
-re-integrated on the resume and their output files rewritten, which is safe
-because each file is named after the coupled step its chunk starts at: the
-second pass writes the same names from the same starting state.
+the interval. Two things survive it: the last chunk of a completed run is
+always checkpointed, so a finished run leaves its final restart state; and a
+run the health gate stops writes the last chunk that *passed* on the way out,
+so bailing still leaves the restart point at the last healthy state. What it
+gives up is a run that is **killed** -- a queue timeout, a node failure --
+which falls back to the last interval boundary instead of the last chunk. The
+chunks after it are then re-integrated on the resume and their output files
+rewritten, which is safe because each file is named after the coupled step its
+chunk starts at: the second pass writes the same names from the same starting
+state.
 
 Because there is only ever one checkpoint, the health gate runs *before* it
 is written and a chunk the gate rejects is not checkpointed at all: saving it
@@ -420,10 +421,10 @@ def run_chunked(
     Raises
     ------
     ValueError
-        If ``chunk`` or ``total_time`` is not a whole number of coupling
-        steps, ``total_time`` is not a whole number of chunks,
-        ``checkpoint_interval`` is not a whole number of chunks or was given
-        without a ``checkpoint_path``, or ``subsample`` is not a positive
+        If ``chunk``, ``total_time`` or ``checkpoint_interval`` is not a
+        whole number of coupling steps, ``total_time`` is not a whole number
+        of chunks, ``checkpoint_interval`` is not a whole number of chunks or
+        was given without a ``checkpoint_path``, or ``subsample`` is not a positive
         integer, or if ``accumulate`` is given with a ``health_check``. All of
         them are checked before anything is compiled or integrated.
 
@@ -587,21 +588,28 @@ def run_chunked(
         )
     elif steps_per_checkpoint is not None and int(carry.step) % steps_per_chunk:
         # The interval is counted from the start of the run and the loop can
-        # only stop at a chunk boundary, so when the restored step is not a
-        # whole number of THIS run's chunks, no chunk of this call can end on a
-        # multiple of the interval -- the run would checkpoint only at the end,
-        # which is worse than the interval asked for. A checkpoint lands
-        # part-way through a chunk only when the run that wrote it used a
-        # different `chunk`, so this is worth a warning and not a silent
-        # degradation.
+        # only stop at a chunk boundary, so when the starting step is not a
+        # whole number of THIS run's chunks, no chunk before the last can end
+        # on a multiple of the interval. (The last one can: `remaining_batches`
+        # makes the final batch the short one, so it ends exactly at
+        # `total_steps`.) Every save in between is lost, which is worse than
+        # what the interval asked for, so it is said rather than silently
+        # accepted. A run starts at such a step in two ways -- a checkpoint
+        # written by a run with a DIFFERENT `chunk`, or an `initial_carry`
+        # handed in part-way through one -- and only the first has a chunk
+        # length to go back to, so only it gets the remedy.
+        remedy = (
+            " Resuming with the chunk the checkpoint was written under "
+            "restores the interval."
+        ) if resumed else ""
         logger.warning(
-            "This run resumes at coupled step %d, which is not a whole number "
-            "of the %d-step chunks it is using, so no chunk it integrates can "
-            "end on a multiple of the %d-step checkpoint_interval: it will "
-            "checkpoint when it finishes (and, if the health gate stops it, at "
-            "the last chunk that passed), but not in between. Resuming with "
-            "the chunk the checkpoint was written under restores the interval.",
-            int(carry.step), steps_per_chunk, steps_per_checkpoint,
+            "This run starts at coupled step %d, which is not a whole number "
+            "of the %d-step chunks it is using, so no chunk it integrates "
+            "before the last can end on a multiple of the %d-step "
+            "checkpoint_interval: it will checkpoint when it finishes (and, if "
+            "the health gate stops it, at the last chunk that passed), but not "
+            "in between.%s",
+            int(carry.step), steps_per_chunk, steps_per_checkpoint, remedy,
         )
 
     # The last chunk the health gate accepted and the interval did NOT save, so

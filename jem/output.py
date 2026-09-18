@@ -251,7 +251,7 @@ def write_chunk(
     never checkpointed -- because the run was killed in between, because the
     health gate rejected that chunk, which is deliberately not checkpointed, or
     because ``run_chunked``'s ``checkpoint_interval`` spaces the saves out and
-    the run stopped after one of the chunks in between -- so the warning reports
+    the run was killed after one of the chunks in between -- so the warning reports
     a fact and does not assert which of them happened. The rewrite is of the
     same name from the same starting state, because a file is named after the
     coupled step its chunk starts at.
