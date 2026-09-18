@@ -20,14 +20,27 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
   initial conditions by passing them to `initialize`
 - **xarray Integration**: `Coupler.to_xarray()` labels every component's output on the
   same time axis and grid coordinates, so the datasets merge
+- **One run loop**: `jem.run_chunked()` integrates in chunks, writes a file per
+  component per chunk, checkpoints, and stops on an unhealthy state — and every
+  run default lives on it
+- **One command line**: `python -m jem.main` composes a coupled model from Hydra
+  config groups, JAX-GCM's own groups included, re-rooted under `atmosphere`
 
 ## Installation 
+
+JAX-ESM is developed and tested against **one** jax-gcm revision, recorded as
+`JCM_SUPPORTED_REV` in [`jem/components/jcm/contract.py`](jem/components/jcm/contract.py)
+together with every jax-gcm name JAX-ESM calls. The `jcm>=2.1.0b0` floor in
+`pyproject.toml` is the loosest statement of the same thing — jax-gcm bumps its
+version only at release, so the pin cannot be expressed as a version. Check out
+that revision if a coupled run fails with an `AttributeError` inside `jcm`:
+`pytest tests/unit/test_jcm_contract.py` reports exactly which name moved.
 
 ```
 # JAX-GCM (jcm) >= 2.1 is not on PyPI yet: install its dev branch from source FIRST
 git clone https://github.com/climate-analytics-lab/jax-gcm
 cd jax-gcm
-git switch dev
+git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
 pip install -e "."
 cd ..
 
@@ -49,40 +62,16 @@ Here is a complete, runnable aquaplanet simulation coupling the JCM atmosphere
 to JEM's slab ocean. It takes a couple of minutes on a laptop CPU.
 
 ```python
-from pathlib import Path
-
 import jax_datetime as jdt
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-from jem import Coupler
+from jem import Coupler, default_exchangers, run_chunked
 from jem.components import JCMComponent, SlabOceanModel
 from jem.components.slab import SlabGrid
 
 start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
-
-
-# An exchanger is the only place where components exchange information. It is
-# traced with everything else, so it must not write into the carries it is
-# handed: it builds new ones and returns the mapping to continue with.
-def atm_ocn_exchange(components, time):
-    del time  # this exchange does not depend on the date
-    atm, ocn = components["atm"], components["ocn"]
-    ocn = dict(
-        ocn,
-        forcing=ocn["forcing"].replace(
-            total_heat_flux=atm["derived"].total_heat_flux,
-        ),
-    )
-    atm = dict(
-        atm,
-        forcing=atm["forcing"].replace(
-            sea_surface_temperature=ocn["state"].sea_surface_temperature,
-        ),
-    )
-    return dict(components, atm=atm, ocn=ocn)
-
 
 # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
 atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
@@ -92,33 +81,268 @@ atm = JCMComponent(atm_model)
 # and with no fractional mask every cell is ocean.
 grid = SlabGrid.from_coords(atm_model.coords.horizontal)
 
+# An exchanger is the only place where components exchange information.
+# `default_exchangers` is the standard wiring written down once — here, the
+# atmosphere's surface heat flux drives the ocean and the ocean's SST comes
+# back as the atmosphere's boundary condition — filtered to whichever of the
+# standard components (`atm`, `ocn`, `lnd`, `seaice`) are present.
+components = {"atm": atm, "ocn": SlabOceanModel(grid)}
 coupler = Coupler(
-    {"atm": atm, "ocn": SlabOceanModel(grid)},
-    {"atm_ocn_exchange": atm_ocn_exchange},
+    components,
+    default_exchangers(components),
     coupling_timestep=coupling_timestep,
     start_date=start_date,
 )
 print(repr(coupler))
 
-# The default workflow is every exchanger followed by every component, so the
-# fields are exchanged first and both components then step on the same state.
-simulation_interval = jdt.to_timedelta(10, "day")
-run = coupler.generate_trajectory_function(
-    int(simulation_interval / coupling_timestep)
+# One run loop for every coupled run: integrate a chunk, write one file per
+# component, check the atmosphere is still healthy, repeat. Every run default
+# lives on `run_chunked` itself. Each file is named after the coupled step its
+# chunk starts at, so this writes `atm-00000000.nc` and `atm-00000005.nc`
+# (and the ocean's two) into `output/`.
+result = run_chunked(
+    coupler, total_time="10 days", chunk="5 days", output_dir="output"
 )
-final_carry, diagnostics = run(coupler.initialize())
-
-output_dir = Path("output")
-output_dir.mkdir(parents=True, exist_ok=True)
-for component_name, ds in coupler.to_xarray(diagnostics).items():
-    ds.to_netcdf(output_dir / f"{component_name:s}.nc", engine="netcdf4")
+print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 ```
 
-Longer versions of this run, including the sea-ice component and the plotting
-code that produced the animation below, are in
-`examples/01_basic/01_aquaplanet.ipynb`.
+An exchange the standard table cannot express — one that regrids, computes a
+flux, converts units or blends two fields — is written as a plain function
+instead; `docs/source/tutorial.rst` works one through. Longer versions of this
+run, including the sea-ice component and the plotting code that produced the
+animation below, are in `examples/01_basic/01_aquaplanet.ipynb`.
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
+
+## Running from the command line
+
+The same run as one command. `python -m jem.main` (or the `jem` console script)
+composes the model from Hydra config groups: JAX-ESM's own groups at the top
+level, and **jax-gcm's own groups re-rooted under `atmosphere`**, so anything
+that works in `python -m jcm.main` works here with the group's package spelled
+out.
+
+```bash
+python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
+python -m jem.main --help       # every group, option and override spelling
+python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't run
+```
+
+| To do this | Write this |
+| --- | --- |
+| Run a named coupled configuration | `+configuration=earth-slab` |
+| Compose a whole jax-gcm bundle as the atmosphere | `+configuration@atmosphere=speedy-t31` |
+| Change one atmosphere group | `physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8` |
+| Set one atmosphere key | `atmosphere.run.time_step=7` |
+| Choose a surface component | `ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'` |
+| Drop one | `land=none` |
+| Set a component parameter | `+ocean.params.relaxation_time=1e6` |
+| Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
+| Choose the run settings | `coupled_run=short_run`, or `coupled_run.total_time="90 days"` |
+
+Two things worth knowing:
+
+- **Spell the `@atmosphere`.** `+configuration=speedy-t31` without it composes
+  that jax-gcm bundle at the *root*, where its `physics`, `terrain` and `run`
+  keys are nobody's and nothing reads them. The atmosphere's groups always
+  carry their package: `<group>@atmosphere.<group>=<option>`.
+- **The coupled run's own settings are `coupled_run`, not `run`.**
+  `atmosphere.run` is the atmosphere's run config, and a `run` group here would
+  shadow jax-gcm's. `coupled_run/default.yaml` is the complete schema, so every
+  key is overridable without a `+`.
+- **The exit status means what a scheduler thinks it means.** `0` when the run
+  reached the time it was asked for, `1` when the health gate stopped it early
+  (the output and checkpoint written so far are kept, and the reason is
+  logged). So `python -m jem.main ... && <post-processing>` runs the
+  post-processing only on a run that finished.
+
+The YAML is wiring only — `_target_`, required input files, and the non-default
+choices that define a named configuration. Every physics default lives on the
+Python class that owns it, and every *run* default on `jem.driver.run_chunked`.
+
+## Long runs: checkpoints and chunk means
+
+`run_chunked` writes a restart after every chunk — checkpointing is **on by
+default** — and resuming is the same call:
+
+```python
+result = run_chunked(
+    coupler,
+    total_time="6 years",        # 2190 days: a whole number of 30-day chunks
+    chunk="30 days",             # a health check, a file and a restart per chunk
+    output_dir="output",
+    output_averages=True,        # one record per chunk: its 30-day-window mean
+    # checkpoint_path="checkpoint" is the default, relative to output_dir
+)
+```
+
+Run it again with the same `output_dir` (or the same `checkpoint_path`) and it
+continues from the coupled step the checkpoint holds —
+`python -m jem.main ... coupled_run=long_run` is the command-line form. A
+*relative* `checkpoint_path` resolves against `output_dir`, so every run gets
+its own restart directory — Hydra makes a fresh output directory per run — and
+resuming is deliberately the same action that would otherwise overwrite a run's
+output. An absolute path is used as given, and `checkpoint_path=None`
+(`coupled_run.checkpoint_path=null`) turns checkpointing off. The checkpoint is one directory, rewritten atomically each
+chunk; a save interrupted half way through is detected and skipped rather than
+resumed from.
+
+Because resuming is the same command as starting, the run **says where its
+starting state came from**, in one INFO line before anything is compiled —
+`coupler.initialize()`, the `initial_carry` argument, or a named checkpoint,
+always with the coupled step. When a `checkpoint_path` holds no complete
+checkpoint the line before says so in as many words: every component is
+starting from its initial state rather than from a restart. That is a WARNING
+when the directory is the wreckage of an interrupted save, and INFO when there
+is simply nothing there — which, with checkpointing on by default, is what
+every first run sees. `load_state` names
+each component's own source in turn. Loading is all-or-nothing: every leaf comes
+from the checkpoint, and a component the checkpoint does not hold is an error,
+never a silent fresh initialization.
+
+The gate runs before the checkpoint, and a chunk it rejects is not
+checkpointed: there is one restart directory and it is overwritten in place, so
+a stopped run leaves it holding the last chunk that passed rather than the
+state that failed.
+
+`checkpoint_interval` (`coupled_run.checkpoint_interval`, null by default)
+saves less often than every chunk, for a run whose chunks are short for one of
+the other reasons a chunk exists — a health check every few days, an output
+file per day. It is a whole number of chunks, counted in coupled steps from the
+start of the *run*, so a resumed run checkpoints where an uninterrupted one
+would; a completed run always checkpoints its last chunk, and a run the health
+gate stops always checkpoints the last chunk that passed, so neither loses work
+to it. A run that is *killed* falls back to the last interval boundary and
+re-integrates the chunks after it on the resume, **rewriting** their output
+files — safe, because each file is named after the coupled step its chunk
+starts at, so the second pass writes the same names from the same state.
+
+That last part holds only while the resume keeps the same `chunk` and runs at
+least as far as the killed pass got. A resume that *rechunks* starts its files
+at different steps, so it would write beside the killed run's leftovers rather
+than over them and leave two passes' records for the same simulated time in one
+directory; a resume that stops earlier leaves that pass's later files stranded
+beyond its own end. So a resumed run checks, before anything is compiled, that
+every output file at or after the step it resumed from is one it really writes
+over — on one of its own chunk boundaries **and** before the step it stops at —
+and says at INFO how many it will rewrite. Anything else and it **refuses**,
+with a `ValueError` naming the files it would leave behind, grouped by which of
+the two they are (an overlap, or past the end of this run), plus the step, the
+chunk and the ways out (resume with the chunk those files were written under
+and, for those past the end, a `total_time` that reaches them; remove them; or
+write into another `output_dir`). It never deletes them itself:
+which of the two passes to keep is the user's call, not the driver's. Files
+from before the restart point, and files this coupler would never have written,
+are not in question — and the check is skipped entirely for a run that writes
+no files: an accumulated run, or a call whose checkpoint has already reached
+`total_time` and so has nothing left to integrate.
+
+`output_averages` and `subsample` reduce the *files* only. The health check is
+given each chunk exactly as it was integrated — every record — because it
+judges a chunk by its last record and its extremes, and a chunk mean (which
+skips NaNs) or a stride that drops the last record would report an atmosphere
+that blew up at the end of the month as healthy.
+
+For a reduction that must not cost memory proportional to the run, accumulate
+it *inside* the scan instead of writing every step out:
+
+```python
+from jem.accumulate import monthly_mean, windowed_mean
+
+monthly = monthly_mean(coupler)                            # 12 calendar months
+pentads = windowed_mean(coupler, "5 days", n_windows=73)   # or any fixed window
+trajectory = coupler.generate_trajectory_function(365, accumulate=monthly)
+carry, accumulator = trajectory(coupler.initialize())
+means = monthly.finalize(accumulator)      # one (12, ...) record per variable
+```
+
+The bins are the **model** calendar's months, so `monthly.finalize(...)` and
+`to_xarray(...).groupby("time.month").mean()` of the same run are the same
+numbers for a run whose output labels cross no Gregorian 29 February. The
+labels are proleptic Gregorian whatever the model calendar is (JCM's
+convention, jax-gcm#449; calendar-consistent labels are tracked as #118), so a
+`365_day` run started on 1 January 2000 — where the shipped examples start —
+labels the record the model calls 1 March 00:00 as `2000-02-29` and
+accumulates it into March. `groupby("time.month")` of the written output
+therefore moves the first record of every month from March on into the month
+before it, gives February the record the model calls 1 March, and hands
+December the year's wrap record — the one the model calls 1 January of the
+next year — that the twelve bins count in January; the accumulated bin stays
+the model's month, which is the month the forcing and the seasonal cycle
+follow. To reproduce `finalize` from the written output across a leap day, bin
+on model day-of-year — each label's offset from the start date in whole days —
+rather than on `time.month`. A `gregorian` calendar is refused outright, since
+it has no fixed table of month lengths.
+
+`run_chunked(..., accumulate=monthly, health_check=None)` does the same from
+the driver, threading the accumulator across the chunks and returning it on
+`RunResult.accumulator`. An accumulated run has no per-step diagnostics, so it
+writes no files, cannot run the health gate (which is refused rather than
+skipped — losing the gate has to be a decision), and does not checkpoint the
+accumulator: the checkpoint is the model's restart state, the accumulator is an
+analysis product, and a resumed run therefore accumulates only what it
+integrates.
+
+A component the workflow runs *n* times per coupled step keeps that axis —
+`(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
+records is binned by the end of its own sub-interval, so the hourly records of
+31 January count in January even though the coupled step containing them ends
+on 1 February. A nested coupler's inner steps are treated the same way. Fold that
+axis away with `fold_records`, which weights each slot by its own count (a
+straight mean over the slots is right only where every slot holds the same
+number of records, which is what a month boundary breaks):
+
+```python
+from jem.accumulate import fold_records
+
+sums, counts = accumulator                    # counts["atm"]: (12, n)
+means = monthly.finalize(accumulator)         # means["atm"]:  (12, n, ...)
+per_month = fold_records(means["atm"], counts["atm"])          # (12, ...)
+```
+
+**Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
+the twelve calendar months, so a ten-year run composites its ten Januaries —
+a climatology. Give it a size and it bins into the months the run passes
+through instead, in order, each with a bin of its own:
+
+```python
+months = monthly_mean(coupler, total_time="10 years")   # or n_months=121
+means = months.finalize(accumulator)   # 121 bins: Jul 2001, Aug 2001, …
+```
+
+These are calendar months whatever day the run starts on — the month table is
+rotated to the month of the start date and phased to it — and they do not
+drift the way a fixed 30-day window does. Ten years gives 121 bins, not 120:
+the run's last record is labelled 00:00 on 1 January of the eleventh year,
+which belongs to that January, and a bin has to exist for it rather than have
+it wrap into the first. `total_time` is the spelling to prefer for that
+reason — a run longer than the accumulator wraps at the *span* of its bins, so
+a wrapped bin is a calendar month only when `n_months` is a multiple of twelve
+and otherwise holds parts of two.
+
+`windowed_mean(coupler, window, n_windows=...)` is the same reduction over
+`n_windows` windows of a fixed length — the 5-day and 7-day means a
+sub-seasonal forecast is scored on — sized either by `n_windows` or by
+`total_time="1 year"`. A run longer than the accumulator wraps, so window *w*
+composites every *w*-th window, the way the monthly bins composite years.
+`window` may also be a **sequence** of lengths, which the windows cycle
+through (daily leads for a forecast's first week, then pentads).
+
+A window is **not** a calendar month, whatever its length: every window is
+measured from the run's own start date, with no reference to the calendar, and
+closes at its **end** (JEM labels a record at the end of the interval it
+covers, and a window is one such interval) while a calendar month closes at
+its **start** (which is what `groupby("time.month")` does). So a 31-day window
+started on 1 January takes the record labelled 00:00 on 1 February, which is
+February's month; and from a 1 July start a pattern of month lengths is not
+months at all. Calendar months come from `monthly_mean`, which knows where in
+the calendar the run began.
+
+The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
+differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
+reaches a component parameter through the reduction exactly as it does through
+the trajectory, which is what calibrating against monthly observations needs.
+See the worked example in `docs/source/design/architecture.md`.
 
 ## Documentation
 
@@ -294,8 +518,8 @@ Contributions are welcome! Please:
 ## Development Status
 
 - **Version**: single-sourced from `jem.__version__`
-- **Status**: Alpha. The next release is 1.0.0a0, the "core API contract"
-  described at the top of [CHANGELOG.md](CHANGELOG.md).
+- **Status**: Alpha. The next release is 1.0.0b0, "the driver and configuration
+  layer", described at the top of [CHANGELOG.md](CHANGELOG.md).
 - **API Stability**: subject to change without deprecation until 1.0; every
   removal or rename is recorded in [CHANGELOG.md](CHANGELOG.md)
 

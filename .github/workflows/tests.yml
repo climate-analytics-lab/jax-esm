@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [ main ]
 
+# The jax-gcm revision every required job builds against. JAX-ESM is developed
+# against a source checkout of jax-gcm rather than a PyPI release, so `dev`
+# would mean the same JAX-ESM commit passes today and fails tomorrow for a
+# reason that is not in this repository. The supported revision is recorded in
+# `jem/components/jcm/contract.py` as JCM_SUPPORTED_REV, and
+# tests/unit/test_jcm_contract.py asserts that this value equals it -- change
+# one and the test tells you to change the other. The `canary-jcm-dev` job
+# below still tracks `dev`, so drift is visible without blocking a PR.
+env:
+  JCM_REV: 637bfee51b8737895c4974b62a602641c98ab32e
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -26,7 +37,8 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        ref: dev
+        # Pinned; see the JCM_REV comment at the top of this workflow.
+        ref: ${{ env.JCM_REV }}
         path: jax-gcm
 
     - name: Install the package and linters
@@ -62,9 +74,10 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        # `dev` until T2.0 pins an exact revision. `jcm>=2.1.0b0` is not on
-        # PyPI, so this checkout is the only thing that satisfies it.
-        ref: dev
+        # `jcm>=2.1.0b0` is not on PyPI, so this checkout is the only thing
+        # that satisfies it; pinned, see the JCM_REV comment at the top of
+        # this workflow.
+        ref: ${{ env.JCM_REV }}
         path: jax-gcm
 
     - name: Get jittable veros
@@ -119,7 +132,8 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        ref: dev
+        # Pinned; see the JCM_REV comment at the top of this workflow.
+        ref: ${{ env.JCM_REV }}
         path: jax-gcm
 
     - name: Get jittable veros
@@ -158,7 +172,8 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        ref: dev
+        # Pinned; see the JCM_REV comment at the top of this workflow.
+        ref: ${{ env.JCM_REV }}
         path: jax-gcm
 
     - name: Get jittable veros
@@ -190,3 +205,58 @@ jobs:
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         docs/build_docs.sh -c
+
+  canary-jcm-dev:
+    # Non-blocking early warning. The required jobs above pin
+    # `env.JCM_REV`, which keeps JAX-ESM's CI reproducible but also hides
+    # jax-gcm's own movement until somebody bumps the pin -- by which point a
+    # rename may be months old and tangled with several others. This job runs
+    # the same lint and fast tests against jax-gcm `dev`, so drift shows up as
+    # a failure on the very PR that happens to run next, while it is still one
+    # change to react to. `continue-on-error: true`: jax-gcm `dev` breaking is
+    # never a reason to block a JAX-ESM pull request. When it goes red, read
+    # `jem/components/jcm/contract.py` -- `test_jcm_contract.py` names the
+    # integration point that moved.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get jax-gcm dev
+      uses: actions/checkout@v4
+      with:
+        repository: climate-analytics-lab/jax-gcm
+        # Deliberately NOT env.JCM_REV: tracking the branch is this job's
+        # whole purpose.
+        ref: dev
+        path: jax-gcm
+
+    - name: Get jittable veros
+      uses: actions/checkout@v4
+      with:
+        repository: meteorologytoday/veros-jittable
+        ref: dev/naive-fix-AD-needs-physical-justification
+        path: veros-jittable
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      # Same ordering as the test job: jax-gcm first so that `jcm>=2.1.0b0`
+      # resolves against the checkout instead of failing to find it on PyPI.
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ./jax-gcm
+        pip install -e ".[dev]"
+        pip install -r veros-jittable/requirements.txt
+
+    - name: Lint with ruff
+      run: ruff check --output-format=github .
+
+    - name: Run unit tests with pytest
+      run: |
+        export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
+        pytest tests/unit -q -m "not slow"
