@@ -240,7 +240,9 @@ class VerosComponent:
     enable_streamfunction : bool
         Whether the wrapped setup solves the external mode for a barotropic
         streamfunction; it decides where the ``psi`` output comes from (see
-        :meth:`_barotropic_streamfunction`).
+        :meth:`_barotropic_streamfunction`) and whether there is an ``ssh``
+        output at all -- Veros carries a sea surface height only under the
+        linear free surface.
 
     """
 
@@ -319,7 +321,8 @@ class VerosComponent:
                 " `variables.psi` holds the surface pressure rather than a"
                 " streamfunction. The `psi` output variable is diagnosed"
                 " from the depth-integrated zonal transport instead"
-                " (see VerosComponent._barotropic_streamfunction).",
+                " (see VerosComponent._barotropic_streamfunction), and"
+                " that surface pressure over `grav` is published as `ssh`.",
                 self.name,
             )
 
@@ -520,7 +523,10 @@ class VerosComponent:
         -------
         tuple
             The new carry and this step's diagnostics as a dict of
-            ``(lon, lat[, depth])`` maps.
+            ``(lon, lat[, depth])`` maps. Which keys it holds is fixed at
+            construction, not per step: ``ssh`` is among them only for a run
+            that solves the linear free surface, the only regime in which
+            Veros carries a sea surface height.
 
         Raises
         ------
@@ -646,6 +652,31 @@ class VerosComponent:
             "heat_flux": forcing.heat_flux,
             "freshwater_flux": forcing.freshwater_flux,
         }
+        # Under the linear free surface Veros solves for a surface pressure,
+        # and the sea surface height that goes with it is that pressure over
+        # `grav` -- the relation Veros' own `barotropic_velocity_update`
+        # applies when it sets `variables.ssh`. In streamfunction mode there
+        # is no sea surface height at all (Veros deactivates the variable),
+        # so the key exists only in the regime that has one. The branch is on
+        # the Python bool read at construction, so a component's diagnostics
+        # keys are fixed for the whole run -- which is what `jax.eval_shape`
+        # of the step and the coupler's stacking of per-call diagnostics rely
+        # on.
+        #
+        # The relation is applied here rather than `variables.ssh` being read
+        # back, because Veros writes that field *before* it permutes its time
+        # indices at the end of the step: after a step `variables.ssh` is the
+        # surface pressure of the time level that has just become `taum1`,
+        # one Veros timestep behind the `psi`, `u`, `v` and tracers published
+        # in the same record (in the acc_basic free-surface case, a ~27%
+        # difference while the free surface spins up). Reading `psi` at `tau`
+        # like every other field here keeps one output record internally
+        # consistent.
+        if not self.enable_streamfunction:
+            diagnostics["ssh"] = (
+                variables.psi[interior, interior, tau] / state.settings.grav
+            )
+
         return (
             {
                 "state": state,
@@ -828,6 +859,10 @@ class VerosComponent:
             ``xr.merge`` joins the records instead of unioning two axes -- or,
             as before this coordinate was written at all, leaving the ocean's
             ``time`` as a bare 0..n-1 index that means nothing.
+            ``ssh`` is present only for a run that solves the linear free
+            surface, because that is the only regime in which Veros carries
+            a sea surface height; ``step`` emits it on the same static
+            branch, so the two always agree.
 
         """
         n_records = int(jnp.shape(diagnostics["sea_surface_temperature"])[0])
@@ -894,7 +929,9 @@ class VerosComponent:
                 " zonal transport, fixed to zero at the southern boundary:"
                 " this run solves the external mode for a linear free"
                 " surface (settings.enable_streamfunction is False), where"
-                " Veros' `variables.psi` holds the surface pressure instead."
+                " Veros' `variables.psi` holds the surface pressure instead;"
+                " that solve's own sea surface height is published here as"
+                " `ssh`."
                 " The barotropic flow is then not exactly non-divergent, so"
                 " this is the standard `meridionally integrated zonal"
                 " transport` diagnostic rather than an exact streamfunction."
@@ -966,6 +1003,31 @@ class VerosComponent:
                                "comment": "the points `psi` itself lives on"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
         }
+
+        # The sea surface height exists only where `step` emitted one, so it
+        # is added rather than sitting in the literals above. Unlike `psi` it
+        # needs no staggering note: it is a T-grid field, the grid this
+        # dataset's `lon`/`lat` already label.
+        if not self.enable_streamfunction:
+            dataset["ssh"] = (["time", "lon", "lat"], diagnostics["ssh"])
+            var_attrs["ssh"] = {
+                "long_name": "sea surface height", "units": "m",
+                "comment": (
+                    "the sea surface height of Veros' surface-pressure"
+                    " solve, `ssh = psi / grav` -- the relation Veros itself"
+                    " applies when it sets `variables.ssh` -- evaluated on"
+                    " the `variables.psi` of this record's own time level,"
+                    " which `variables.ssh` is one Veros timestep behind"
+                    " because Veros writes it before permuting its time"
+                    " indices. Present only for a run that solves the linear"
+                    " free surface (settings.enable_streamfunction is"
+                    " False), where `variables.psi` holds the surface"
+                    " pressure; a streamfunction run has no sea surface"
+                    " height to publish."
+                ),
+                **role_attrs("derived"),
+            }
+
         for name, attrs in var_attrs.items():
             dataset[name].attrs = attrs
 

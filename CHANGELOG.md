@@ -324,7 +324,17 @@ Breaking changes are marked; everything else is additive.
   (so the diagnosis is the standard "meridionally integrated zonal transport"
   rather than an exact streamfunction) and that, like `u` and `v`, the field
   sits on Veros' staggered grid — the zeta points — while wearing the T-grid
-  `lon`/`lat` labels the dataset uses throughout.
+  `lon`/`lat` labels the dataset uses throughout. A free-surface run also
+  publishes **`ssh`, the sea surface height** (`["time", "lon", "lat"]`, `m`,
+  `jem_role="derived"`) — the sea surface height of that surface-pressure
+  solve, `ssh = psi / grav`, the relation Veros itself applies when it sets
+  `variables.ssh`, on the T grid the dataset's `lon`/`lat` already label. The
+  relation is applied to the `psi` of the record's own time level rather than
+  `variables.ssh` being read back, because Veros writes that field before
+  permuting its time indices, leaving it one Veros timestep behind the `psi`,
+  `u`, `v` and tracers of the same record. A streamfunction run carries no sea
+  surface height, so the variable is absent there; the key set is fixed per
+  component at construction, not per step.
 - **`mask_U`, `mask_surface_U` and `mask_surface_Z`** beside `mask_T` in that
   same output. `psi`'s values over land are carried through the integration
   rather than computed, so a reader needs the zeta-point mask to blank them,

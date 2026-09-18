@@ -166,6 +166,10 @@ def _labelling_diagnostics(component, n_records):
             "heat_flux", "freshwater_flux",
         )
     })
+    # `step` emits a sea surface height only where Veros carries one, so the
+    # layout handed to `to_xarray` has to follow the same branch.
+    if not component.enable_streamfunction:
+        diagnostics["ssh"] = surface
     return diagnostics
 
 
@@ -252,15 +256,16 @@ def test_grid_metadata_drops_the_halo(component, veros_model, grid_shape):
 
 @pytest.mark.parametrize("component_fixture",
                          ["component", "free_surface_component"])
-def test_to_xarray_publishes_the_barotropic_streamfunction(
+def test_to_xarray_publishes_the_external_mode_outputs(
     request, component_fixture
 ):
-    """`psi` is always in the output, labelled, and says which psi it is.
+    """`psi` is always there and says which psi it is; `ssh` only sometimes.
 
     Run over both external-mode regimes because which of the two `psi` is
-    *is* the thing the attribute has to get right, and labelling needs no
-    integration: the free-surface branch of it would otherwise be reached
-    only by the slow tests.
+    *is* the thing the attribute has to get right -- and because the sea
+    surface height exists in only one of them. Labelling needs no
+    integration, so the free-surface branch of both would otherwise be
+    reached only by the slow tests.
     """
     component = request.getfixturevalue(component_fixture)
     nx, ny = component.horizontal_shape
@@ -268,6 +273,10 @@ def test_to_xarray_publishes_the_barotropic_streamfunction(
     psi = jnp.asarray(
         np.linspace(-1e6, 1e6, 2 * nx * ny).reshape(2, nx, ny))
     diagnostics["psi"] = psi
+    ssh = jnp.asarray(
+        np.linspace(-0.5, 0.5, 2 * nx * ny).reshape(2, nx, ny))
+    if not component.enable_streamfunction:
+        diagnostics["ssh"] = ssh
 
     dataset = component.to_xarray(
         diagnostics,
@@ -288,6 +297,19 @@ def test_to_xarray_publishes_the_barotropic_streamfunction(
     assert ("prognostic" in comment) is component.enable_streamfunction
     assert ("diagnosed" in comment) is not component.enable_streamfunction
     assert "zeta" in comment
+
+    # Veros carries a sea surface height only under the linear free surface
+    # (where `variables.psi` is the surface pressure it comes from), so the
+    # output variable exists exactly there and nowhere else.
+    if component.enable_streamfunction:
+        assert "ssh" not in dataset.variables
+    else:
+        assert dataset.ssh.dims == ("time", "lon", "lat")
+        assert dataset.ssh.attrs["long_name"] == "sea surface height"
+        assert dataset.ssh.attrs["units"] == "m"
+        assert dataset.ssh.attrs["jem_role"] == "derived"
+        assert "psi / grav" in dataset.ssh.attrs["comment"]
+        np.testing.assert_array_equal(dataset.ssh.values, np.asarray(ssh))
 
 
 def test_to_xarray_publishes_the_masks_psi_is_read_with(component):
@@ -505,6 +527,8 @@ def test_psi_is_veros_own_streamfunction_when_the_run_solves_for_one(component):
     psi = np.asarray(diagnostics["psi"])
     np.testing.assert_array_equal(
         psi, np.asarray(variables.psi[interior, interior, variables.tau]))
+    # Veros' `ssh` is inactive in this mode, so there is nothing to publish.
+    assert "ssh" not in diagnostics
     # The wind has spun something up, so what follows is not two fields of
     # zeros agreeing with each other.
     assert np.abs(psi).max() > 1.0
@@ -531,6 +555,12 @@ def test_psi_is_diagnosed_when_the_run_solves_a_free_surface(
     `variables.psi` for the surface pressure (m^2 s^-2, on the T grid), so
     publishing it would have published a different quantity under the
     streamfunction's name. Every Veros setup shipped with JEM runs this way.
+
+    This is also the only mode with a sea surface height, so `ssh` is
+    checked here -- against the surface pressure it is derived from, and
+    against Veros' own `variables.ssh`, which lags it by a timestep --
+    rather than in a test of its own that would pay for a second
+    integration.
     """
     component = free_surface_component
     assert not component.enable_streamfunction
@@ -549,6 +579,28 @@ def test_psi_is_diagnosed_when_the_run_solves_a_free_surface(
     surface_pressure = np.asarray(
         variables.psi[interior, interior, variables.tau])
     assert not np.allclose(psi, surface_pressure)
+
+    # ...and that surface pressure's sea surface height is published in its
+    # own right, by the relation Veros applies to it (`ssh = psi / grav`),
+    # on the same time level as everything else in the record.
+    grav = carry["state"].settings.grav
+    ssh = np.asarray(diagnostics["ssh"])
+    np.testing.assert_allclose(ssh, surface_pressure / grav, rtol=1e-6,
+                               atol=0)
+    # The wind has spun the free surface up, so that is not zero == zero.
+    assert np.abs(ssh).max() > 0
+
+    # Deliberately not `variables.ssh`, and this is why: Veros writes that
+    # field before permuting its time indices at the end of a step, so
+    # afterwards it holds the surface pressure of the level that has just
+    # become `taum1` -- a field one Veros timestep behind the record it
+    # would have been published in, by a wide margin during spin-up.
+    veros_ssh = np.asarray(variables.ssh[interior, interior])
+    np.testing.assert_allclose(
+        veros_ssh,
+        np.asarray(variables.psi[interior, interior, variables.taum1]) / grav,
+        rtol=1e-6, atol=0)
+    assert not np.allclose(ssh, veros_ssh)
 
 
 @pytest.mark.slow

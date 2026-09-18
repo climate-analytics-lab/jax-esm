@@ -723,7 +723,13 @@ The conventions, which are JCM's:
   says which of the two the file holds, and the masks a reader needs are
   published beside it — `mask_surface_Z` for the zeta points `psi` sits on,
   whose land values the integration carries through rather than computes,
-  and `mask_U` for the depth integral behind it.
+  and `mask_U` for the depth integral behind it. A free-surface run also
+  publishes the sea surface height of its surface-pressure solve as `ssh`
+  (m, on the T grid) — `ssh = psi / grav`, the relation Veros itself
+  applies, evaluated on the `psi` of the record's own time level because
+  Veros' `variables.ssh` is written before it permutes its time indices and
+  so lags the rest of the record by one Veros timestep; a streamfunction run
+  has no sea surface height and publishes none.
 - **A variable's role is metadata, not a name to parse.** Every packaged
   component tags each output variable with `jem_role`
   (`jem.base.component.role_attrs`), whose value is the section of the carry
