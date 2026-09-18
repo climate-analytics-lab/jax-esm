@@ -16,6 +16,7 @@ wrong without anyone noticing:
 
 import importlib
 import inspect
+import re
 import shutil
 import subprocess
 import sys
@@ -205,6 +206,32 @@ def test_help_is_jem_s_own():
         cfg = compose(config_name="config", overrides=[], return_hydra_config=True)
     assert cfg.hydra.help.app_name == "JEM"
     assert "python -m jem.main" in cfg.hydra.help.template
+
+
+def test_the_help_s_packaged_file_overrides_compose():
+    """The ``${jcm_data:}`` / ``${jem_data:}`` examples in ``--help`` run.
+
+    They are the overrides a user copies first, and an override that Hydra
+    refuses is worse than no example: `grid_file` is a runner-only key that no
+    `ocean` option declares, so it has to be *appended* with a leading `+`
+    while `sst_clim_file`, which `ocean=slab_relax` declares, must not be. The
+    examples are read out of the shipped help template rather than repeated
+    here, so this fails if the text drifts rather than passing against a copy
+    of it.
+    """
+    with initialize_config_module(config_module=CONFIG_MODULE, version_base="1.3"):
+        cfg = compose(config_name="config", overrides=[], return_hydra_config=True)
+    # The template escapes the resolver for Hydra's own help rendering; the
+    # shell sees (and a user types) the unescaped form.
+    template = cfg.hydra.help.template.replace("$$", "$")
+    # The single quotes are the shell's, not Hydra's: they stop it expanding
+    # `${...}`, and what Hydra is handed is the override without them.
+    examples = re.findall(
+        r"``(\+?[\w.]+=)'(\$\{(?:jcm|jem)_data:[^`']+)'``", template
+    )
+    assert len(examples) == 2, examples
+
+    composed(["+configuration=earth-slab", *(key + value for key, value in examples)])
 
 
 def test_run_options_share_one_schema():
