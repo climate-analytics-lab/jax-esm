@@ -24,10 +24,10 @@ calendar* and is closed at its start, so that it agrees with
 no Gregorian 29 February -- the bins are the model calendar's months while the
 labels are proleptic Gregorian, which :func:`monthly_mean` explains under
 **Leap days**); a window is measured from the run's start with no phase at
-all and is closed at its end, so that the first pentad is days 1 to 5. Handing :func:`month_lengths` to
-:func:`windowed_mean` is therefore calendar months only for a run starting at
-00:00 on 1 January -- :func:`monthly_mean` is the one that knows where in the
-calendar the run began.
+all and is closed at its end, so that the first pentad is days 1 to 5.
+Handing :func:`month_lengths` to :func:`windowed_mean` is therefore calendar
+months only for a run starting at 00:00 on 1 January -- :func:`monthly_mean`
+is the one that knows where in the calendar the run began.
 
 Why it is in the scan at all. A twelve-month run reduced on the host must
 hold every step's diagnostics until the chunk ends, which for an atmosphere
@@ -954,11 +954,16 @@ def monthly_mean(
     days** below). (For a component that records more than once per coupled
     step that equality holds after :func:`fold_records`, which folds the
     sub-step axis this reduction deliberately keeps; see **Sub-steps** below.)
-    The one visible consequence is at a boundary: the daily step covering 31
-    January is labelled 1 February and counted in February. Binning by the
-    start of the interval instead would be equally defensible, but then the
-    accumulated mean and the written output would disagree about the same run,
-    which is worse than either convention.
+
+    Two consequences follow, and they are separate things. The first is the
+    closing convention, and it shows at every month boundary: the daily step
+    covering 31 January is labelled 1 February and counted in February.
+    Binning by the start of the interval instead would be equally defensible,
+    but then the accumulated mean and the written output would disagree about
+    the same run, which is worse than either convention. The second is not
+    the boundary but the *labels' calendar*, shows only once a run's labels
+    reach a leap day, and is the condition on the equality above -- **Leap
+    days**, next.
 
     **Leap days**, and the one case in which the equality above does not
     hold. The bins are the *model* calendar's months, while
@@ -973,18 +978,26 @@ def monthly_mean(
     is where the shipped examples start) therefore labels its 59th record
     ``2000-02-29`` while the model calls that instant 1 March and counts it in
     March; the record the model calls 1 April 00:00 is labelled
-    ``2000-03-31``; and so on to the end of the Gregorian year. What a user
-    sees is that ``groupby("time.month")`` of the written output moves the
-    first record of each month into the month before it -- its February holds
-    29 records where this reduction's February holds 28 -- while the
-    accumulated bin stays the model's month, which is the month the forcing
-    and the seasonal cycle follow, so the bins are still the model's own
-    Februaries and Marches. (On ``gregorian`` the question does not arise:
-    that calendar has no fixed month table and :func:`monthly_mean` refuses
-    it.) Emitting calendar-consistent labels instead -- ``cftime`` no-leap
-    dates, the atmosphere's output relabelled to match -- is tracked as #118
-    and would settle jax-gcm#449's question for JEM's output; nothing here
-    depends on the answer.
+    ``2000-03-31``; and so on to the end of the Gregorian year.
+
+    What a user sees is that ``groupby("time.month")`` of the written output
+    moves the first record of every month from March on into the month before
+    it, gives February the record the model calls 1 March (29 records where
+    this reduction's February holds 28), and, in the twelve-bin form, hands
+    December the year's wrap record -- the one the model calls 1 January of
+    the next year, labelled ``2000-12-31`` -- which the reduction counts in
+    January. The accumulated bin stays the model's month, which is the month
+    the forcing and the seasonal cycle follow, so the bins are still the
+    model's own Februaries and Marches. To reproduce ``finalize`` from the
+    written output across a leap day, bin by **model day-of-year** -- each
+    label's offset from the start date in whole days, which is the same number
+    on both calendars -- rather than by ``time.month``. (On ``gregorian`` the
+    question does not arise: that calendar has no fixed month table and
+    :func:`monthly_mean` refuses it.) Emitting calendar-consistent labels
+    instead -- ``cftime`` no-leap dates, the atmosphere's output relabelled to
+    match -- is tracked as #118; what JCM writes on its own output is JCM's to
+    answer, and jax-gcm#449 records that inconsistency as tracking only.
+    Nothing here depends on whether either is ever taken up.
 
     **The twelve-bin form wraps at the year**, because the bin is the calendar
     month and not the month since the run started: a three-year run's January

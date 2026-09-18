@@ -432,15 +432,19 @@ Breaking changes are marked; everything else is additive.
   February (and, for a sub-stepped component, after `fold_records`, below).
   That condition is the labels' calendar, not the binning: labels are proleptic
   Gregorian whatever the model calendar is (JCM's convention, jax-gcm#449;
-  calendar-consistent labels are tracked as #118),
-  so a `365_day` run started on 1 January 2000 labels the record the model
-  calls 1 March 00:00 as `2000-02-29` and accumulates it into March, and from
-  there on a `groupby("time.month")` of the written output moves the first
-  record of each month into the month before it while the accumulated bin stays
-  the model's month — the month the forcing and the seasonal cycle follow.
-  A calendar with no fixed
-  month table (gregorian) and a coupling step that does not divide the year are
-  refused with a message saying why. **Without `accumulate` the generated
+  calendar-consistent labels are tracked as #118), so a `365_day` run started
+  on 1 January 2000 labels the record the model calls 1 March 00:00 as
+  `2000-02-29` and accumulates it into March. A `groupby("time.month")` of the
+  written output therefore moves the first record of every month from March on
+  into the month before it, gives February the record the model calls 1 March,
+  and hands December the year's wrap record — the one the model calls 1 January
+  of the next year — that the twelve-bin form counts in January; the
+  accumulated bin stays the model's month, which is the month the forcing and
+  the seasonal cycle follow. Reproduce it from the written output
+  by binning on model day-of-year (each label's offset from the start date in
+  whole days) rather than on `time.month`. A calendar with no fixed month table
+  (gregorian) and a coupling step that does not divide the year are refused
+  with a message saying why. **Without `accumulate` the generated
   function is exactly what it was.**
 
   `monthly_mean(coupler)` bins into the **twelve** calendar months, so a
@@ -509,12 +513,14 @@ Breaking changes are marked; everything else is additive.
   years change the table from year to year).
   **`jem.accumulate.fold_records(means, counts)`** is the count-weighted fold
   of a component's kept sub-step axes — what makes a sub-stepped component's
-  binned mean equal a `groupby` of its output, and a no-op on a component that
-  records once per coupled step. A coupled step is not always one record: a component the
-  workflow runs *n* times per step emits *n*, and a nested coupler's inner
-  steps are records in the same way, so the 24 hourly records of the daily
-  step covering 31 January are binned 23 in January and one (labelled 1
-  February 00:00) in February, as `to_xarray` writes them. That component's
+  binned mean equal a `groupby` of its output (on the bins' own terms; for a
+  monthly mean, under the leap-year condition above), and a no-op on a
+  component that records once per coupled step. A coupled step is not always
+  one record: a component the workflow runs *n* times per step emits *n*, and
+  a nested coupler's inner steps are records in the same way, so the 24 hourly
+  records of the daily step covering 31 January are binned 23 in January and
+  one (at 00:00 on 1 February) in February, which is where `to_xarray` writes
+  them too whenever label and model calendar agree. That component's
   sub-step axis is kept — `(n_bins, n, ...)`, a monthly-mean diurnal cycle —
   and the accumulator's counts are one array per component when components
   record at different rates, instead of the single `(n_bins,)` array a model

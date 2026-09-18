@@ -261,13 +261,18 @@ The bins are the **model** calendar's months, so `monthly.finalize(...)` and
 numbers for a run whose output labels cross no Gregorian 29 February. The
 labels are proleptic Gregorian whatever the model calendar is (JCM's
 convention, jax-gcm#449; calendar-consistent labels are tracked as #118), so a
-`365_day` run started on 1 January 2000 — where
-the shipped examples start — labels the record the model calls 1 March 00:00
-as `2000-02-29` and accumulates it into March, and from there on
-`groupby("time.month")` of the written output moves the first record of each
-month into the month before it, while the accumulated bin stays the model's
-month — the month the forcing and the seasonal cycle follow. A `gregorian`
-calendar is refused outright, since it has no fixed table of month lengths.
+`365_day` run started on 1 January 2000 — where the shipped examples start —
+labels the record the model calls 1 March 00:00 as `2000-02-29` and
+accumulates it into March. `groupby("time.month")` of the written output
+therefore moves the first record of every month from March on into the month
+before it, gives February the record the model calls 1 March, and hands
+December the year's wrap record — the one the model calls 1 January of the
+next year — that the twelve bins count in January; the accumulated bin stays
+the model's month, which is the month the forcing and the seasonal cycle
+follow. To reproduce `finalize` from the written output across a leap day, bin
+on model day-of-year — each label's offset from the start date in whole days —
+rather than on `time.month`. A `gregorian` calendar is refused outright, since
+it has no fixed table of month lengths.
 
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on

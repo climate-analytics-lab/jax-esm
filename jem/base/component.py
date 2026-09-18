@@ -377,15 +377,17 @@ class TimeAxis:
     with the same ``time`` coordinate and ``xr.merge`` of two components'
     datasets is an N-long join rather than a 2N-long union.
 
-    The labelling convention is JCM's, which JAX-ESM cannot change from the
-    outside (jax-gcm#758): record ``k`` is the average over
+    The labelling convention is JCM's: record ``k`` is the average over
     ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with the
     **end** of that interval, ``start_date + (k+1) dt``, as a
     ``datetime64[ns]`` on the proleptic Gregorian calendar whatever the
     model calendar is (a ``365_day`` run still writes real dates; the
     calendar governs only the seasonal cycle and forcing selection).
     :meth:`datetimes` implements exactly that and is the one place the
-    convention is written down.
+    convention is written down. It reimplements JCM's arithmetic rather than
+    calling it because the conversion was private at the pinned revision
+    (``JCM_SUPPORTED_REV``); jax-gcm#824 has since exposed it publicly, so
+    sharing one computation is a pin-bump task (jax-gcm#758).
 
     The consequence to know about is at a leap day. The labels are
     Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap

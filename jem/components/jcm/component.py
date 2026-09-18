@@ -434,9 +434,10 @@ class JCMComponent:
         and JEM does not relabel it, because a coupled dataset in which the
         atmosphere's time axis disagrees with the atmosphere's own output
         files would be worse than one where two components label the same
-        interval differently. JEM cannot reproduce JCM's calendar
-        arithmetic itself while ``Model._date_from_sim_time`` is private —
-        TODO(jax-gcm#758).
+        interval differently. JEM does not reproduce JCM's calendar
+        arithmetic itself because ``Model._date_from_sim_time`` is private at
+        the pinned revision; jax-gcm#824 has since made the conversion public,
+        so adopting it is a pin-bump task — TODO(jax-gcm#758).
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)

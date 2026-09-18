@@ -141,7 +141,10 @@ def record_months(coupler):
     Taken from the ``datetime64`` labels ``Coupler.to_xarray`` puts on the
     records -- the end of each coupling interval -- so this is the binning a
     user reading the written output would do, and what the accumulator has to
-    agree with.
+    agree with. It is the same binning as the model calendar's because this
+    run starts in 2001 and so crosses no Gregorian 29 February; where the two
+    calendars part company the accumulator follows the model's, which is what
+    the leap-year tests below pin.
     """
     labels = coupler.time_axis(0, STEPS_PER_YEAR).datetimes()
     return labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
@@ -234,7 +237,10 @@ def test_monthly_means_match_the_host_side_binning(
 
     This is the whole contract of ``monthly_mean``: the convention it bins by
     is the one the output labels imply, so the accumulated mean and a mean
-    taken from the written output are the same number.
+    taken from the written output are the same number -- for a run like this
+    one, whose 2001 start crosses no Gregorian 29 February. The bins are the
+    *model* calendar's months, and the leap-year tests below cover the year in
+    which that is visible.
     """
     _, diagnostics = stacked_year
     monthly, _, accumulator = accumulated_year
@@ -260,7 +266,9 @@ def test_monthly_means_match_an_xarray_groupby(coupler, stacked_year, accumulate
     The tie to ``xarray`` matters because the labelling convention lives in
     ``TimeAxis.datetimes``, not in this module: if the two ever drifted apart,
     an accumulated monthly mean and a ``groupby("time.month")`` of the same
-    run would quietly disagree.
+    run would quietly disagree. They agree here because a 2001 run's labels
+    cross no Gregorian 29 February; the one year in which the labels and the
+    model calendar disagree by construction is covered below.
     """
     _, diagnostics = stacked_year
     monthly, _, accumulator = accumulated_year
@@ -647,8 +655,9 @@ LEAP_START_DATE = "2000-01-01"
 #: such date, and calls that instant 00:00 on 1 March.
 LEAP_DAY_RECORD = 58
 
-#: The record the model calls 00:00 on 1 April -- 31 + 28 + 31 days after the
-#: start -- which the Gregorian labels write as 2000-03-31.
+#: The record whose instant the model calls 00:00 on 1 April: that is 31 + 28
+#: + 31 = 90 model days after the start, and record `k` is labelled at day
+#: `k + 1`, so it is record 89. The Gregorian labels write it as 2000-03-31.
 APRIL_RECORD = 89
 
 #: Month lengths of the 365-day calendar, written out so that a test asserting
@@ -682,7 +691,7 @@ def model_calendar_months(coupler, n_records):
     wrapping into bin 0, which is what makes the twelve bins a climatology.
     """
     day_of_year = np.arange(1, n_records + 1) % int(coupler.days_per_year)
-    month_starts = np.cumsum((0,) + month_lengths(coupler)[:-1])
+    month_starts = np.cumsum((0,) + MONTH_LENGTHS_365[:-1])
     return np.searchsorted(month_starts, day_of_year, side="right") - 1
 
 
@@ -767,12 +776,13 @@ def test_a_leap_year_groupby_of_the_written_output_differs_as_documented(leap_ye
     """`finalize` and `groupby("time.month")` part company, in the stated way.
 
     Grouping the written output by its own labels moves the first record of
-    each month into the month before it from the leap day on: February gains a
-    record it did not integrate (29 against the model's 28) and January, whose
-    twelfth-bin wrap is the record labelled 1 January of the next year, loses
-    the one the Gregorian year no longer reaches. The counts alone understate
-    it -- every month from March on holds the *same number* of records under
-    both binnings but not the same ones -- so the means differ too.
+    every month from March on into the month before it; February keeps its own
+    records and gains the one the model calls 1 March (29 against the model's
+    28); and January loses its year-wrap record -- the one the model calls
+    1 January 2001, labelled `2000-12-31` -- to December. The counts alone
+    understate it, because every month from March on holds the *same number*
+    of records under both binnings but not the same ones, so the means differ
+    too.
     """
     coupler, monthly, accumulator, diagnostics = leap_year
     _, counts = accumulator
@@ -793,8 +803,8 @@ def test_a_leap_year_groupby_of_the_written_output_differs_as_documented(leap_ye
     )
     # March is the clearest case: 31 records either way, shifted by one, and
     # the ocean's seasonal cycle makes that a difference far above float32
-    # noise (the accumulated means agree with the model-calendar binning to
-    # ~3e-5, asserted above).
+    # noise (the accumulated means match the model-calendar binning to the
+    # float32 tolerance asserted above, rtol 1e-5 / atol 1e-4).
     assert np.max(np.abs(accumulated[2] - from_output.values[2])) > 0.05
 
 
@@ -804,8 +814,9 @@ def test_sequential_months_over_a_leap_year_keep_the_model_month_lengths(
     """The one-bin-per-month form bins by the model calendar too.
 
     Sized by `total_time` the bins never wrap, so January's records are not
-    joined by the record labelled 1 January of the next year: the first bin
-    holds 30 and that record gets the thirteenth bin. Everything between is
+    joined by the record the model calls 1 January of the next year (labelled
+    `2000-12-31`): the first bin holds 30 and that record gets the thirteenth
+    bin. Everything between is
     the 365-day month lengths, unmoved by the labels' leap day.
     """
     coupler = build_coupler(

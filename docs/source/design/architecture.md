@@ -683,11 +683,10 @@ The conventions, which are JCM's:
   2000 labels the instant the model calls 1 March 00:00 as `2000-02-29`, and
   everything downstream that bins by the *label* parts company there from
   everything that bins by the *model calendar* (see the `accumulate` section
-  below). The inconsistency is JCM's, recorded upstream
-  as jax-gcm#449; JEM mirrors it rather than emitting labels of its own,
-  which would no longer merge with the atmosphere's on one time axis.
-  Calendar-consistent labels for every component, the atmosphere's included,
-  are tracked as #118.
+  below). The inconsistency is JCM's, recorded upstream as jax-gcm#449; JEM
+  mirrors it rather than emitting labels of its own, which would no longer
+  merge with the atmosphere's on one time axis. Calendar-consistent labels for
+  every component, the atmosphere's included, are tracked as #118.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
@@ -1229,13 +1228,20 @@ while the bins are the model calendar's months. On a `365_day` run started on
 1 January 2000 — where the shipped examples start — the record the model calls
 1 March 00:00 is labelled `2000-02-29` and is accumulated into March, the one
 the model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest
-of the Gregorian year: `groupby("time.month")` of the written output moves the
-first record of each month into the month before it (its February holds 29
-records where the accumulator's holds 28), while the accumulated bin stays the
-model's month, which is the month the forcing and the seasonal cycle follow.
-On `gregorian` the question does not arise, because `monthly_mean` refuses that
-calendar. Nothing in the reduction depends on how jax-gcm#449, or #118 (the
-same labels made calendar-consistent on JEM's side), is eventually settled. A calendar with no fixed
+of the Gregorian year. `groupby("time.month")` of the written output therefore
+moves the first record of every month from March on into the month before it,
+gives February the record the model calls 1 March (29 records where the
+accumulator's February holds 28), and hands December the year's wrap record —
+the one the model calls 1 January of the next year — that the twelve-bin form
+counts in January, while the accumulated bin stays the model's month, which is
+the month the forcing and the seasonal cycle follow. Reproducing `finalize`
+from the written output across a leap day means binning on model day-of-year
+(each label's offset from the start date in whole days) rather than on
+`time.month`. On `gregorian` the question does not arise, because
+`monthly_mean` refuses that calendar. Nothing in the reduction depends on
+whether #118 (calendar-consistent labels on JEM's side) or jax-gcm#449 (the
+same inconsistency in JCM's own output, recorded there as tracking only) is
+ever taken up. A calendar with no fixed
 table of month lengths (gregorian, with its leap years) and a coupling step
 that does not divide the year are refused with a message saying why, rather
 than binned approximately. Without `accumulate`, the generated function is what
