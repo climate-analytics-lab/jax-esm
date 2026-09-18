@@ -1438,3 +1438,9 @@ def test_a_misspelled_inclusive_is_refused():
 
     with pytest.raises(ValueError, match="left.*right.*rigth"):
         _variable_window_rule(np.array([5 * 86400]), 0, "rigth")  # type: ignore[arg-type]
+
+
+def test_a_duration_that_is_not_whole_seconds_is_refused(coupler):
+    """A fractional second is refused, not rounded into a moved boundary."""
+    with pytest.raises(ValueError, match="not a whole number of seconds"):
+        windowed_mean(coupler, "0.00001 days", n_windows=4)

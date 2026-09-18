@@ -329,9 +329,10 @@ def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int
 
     The duration is parsed on the *coupler's* calendar, so ``"1 year"`` is as
     long as the model's year rather than as long as a Gregorian one, and is
-    then rounded to whole seconds: everything downstream of here is integer
-    arithmetic on seconds, because a float32 count of seconds since the start
-    of a run stops being exact within a few decades of simulated time.
+    must be a whole number of seconds: everything downstream of here is
+    integer arithmetic on seconds, because a float32 count of seconds since
+    the start of a run stops being exact within a few decades of simulated
+    time, and a fractional second is refused rather than rounded away.
     """
     # Imported here rather than at module scope so that importing this module
     # does not pull in jax-gcm (and with it dinosaur and the whole
@@ -340,11 +341,30 @@ def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int
     from jcm.date import parse_duration_days
 
     days = float(parse_duration_days(duration, calendar))
-    seconds = int(round(days * _SECONDS_PER_DAY))
+    seconds = _exact_seconds(days * _SECONDS_PER_DAY, f"{what}={duration!r}")
     if seconds <= 0:
         raise ValueError(
             f"{what}={duration!r} is {seconds} s, which is not a positive "
             "duration."
+        )
+    return seconds
+
+
+def _exact_seconds(value: float, what: str) -> int:
+    """Return ``value`` as an ``int``, refusing a fractional second.
+
+    Everything in this module is integer arithmetic on seconds, and the
+    coupler only ever builds whole-second clocks (``Coupler._element_timestep``
+    refuses a sub-timestep that is not), so a value that is not a whole
+    number of seconds is a broken invariant or a duration the bins cannot
+    represent. Either way it is refused rather than rounded: rounding would
+    silently move every bin boundary.
+    """
+    seconds = int(value)
+    if seconds != value:
+        raise ValueError(
+            f"{what} is {value!r} s, which is not a whole number of seconds; "
+            "the bins are laid out in whole seconds."
         )
     return seconds
 
@@ -737,7 +757,7 @@ def _binned_mean(
     # side effects on components that have them.
     _, diagnostics_shapes = jax.eval_shape(coupler.generate_step_function(), carry)
 
-    dt_seconds = int(round(coupler.dt_seconds))
+    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
     axes = _record_axes(coupler)
     # True for a model whose every component records once per coupled step,
     # which is every model without workflow multiplicity or a sub-stepping
@@ -1050,9 +1070,13 @@ def monthly_mean(
     month_seconds = (
         np.asarray(month_lengths(coupler), dtype=np.int64) * _SECONDS_PER_DAY
     )
-    seconds_per_year = int(round(_SECONDS_PER_DAY * coupler.days_per_year))
-    dt_seconds = int(round(coupler.dt_seconds))
-    year_offset_seconds = int(round(coupler.year_offset_seconds))
+    seconds_per_year = _exact_seconds(
+        _SECONDS_PER_DAY * coupler.days_per_year, "the year"
+    )
+    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
+    year_offset_seconds = _exact_seconds(
+        coupler.year_offset_seconds, "the start date's offset into the year"
+    )
     if dt_seconds <= 0 or seconds_per_year % dt_seconds:
         raise ValueError(
             f"A monthly mean needs the coupling timestep ({dt_seconds} s) to "
@@ -1267,7 +1291,7 @@ def windowed_mean(
         steps.
 
     """
-    dt_seconds = int(round(coupler.dt_seconds))
+    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
     if dt_seconds <= 0:
         raise ValueError(
             f"The coupling timestep is {dt_seconds} s; a windowed mean needs a "
