@@ -243,14 +243,34 @@ def _variable_window_rule(
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
     assert period >= int(boundaries[-1]), "the bins must fit inside their period"
-    # One second is the whole difference between the two conventions:
-    # counting the boundaries at or before `label - 1` puts a label exactly on
-    # a boundary in the bin that ends there, counting those at or before
-    # `label` puts it in the bin that starts there.
+    # The two conventions differ by one second of the label. A record's label
+    # sits at the END of its interval, and `bin_of_record` counts how many
+    # boundaries lie at or before `label - shift_seconds`. With 5-day bins and
+    # daily records (record k labelled at day k + 1):
+    #
+    #   inclusive="right": shift 1 s. A label of day 5 is looked up a second
+    #     before the first boundary, so no boundary precedes it -> bin 0; it
+    #     is the LAST record of (day 0, day 5]. Day 6 -> bin 1.
+    #   inclusive="left": no shift. A label of day 5 is looked up at the
+    #     boundary itself, which now counts -> bin 1; it is the FIRST record
+    #     of [day 5, day 10).
+    #
+    # In calendar months from 1 January with daily records, the record
+    # labelled 1 February 00:00 is therefore January's last record under
+    # "right" and February's first under "left".
     shift_seconds = 1 if inclusive == "right" else 0
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
-        """Return the 0-based bin a record of ``record_seconds`` counts in."""
+        """Return the 0-based bin a record of ``record_seconds`` counts in.
+
+        ``record`` counts records of that length from the start of the run.
+        With daily records, 5-day bins and ``inclusive="right"``: record 0 is
+        labelled day 1 and lands in bin 0; record 4 (day 5) is the last of
+        bin 0; record 5 (day 6) is the first of bin 1; and in a 73-bin
+        accumulator record 365 -- labelled day 366, one year on -- wraps to
+        bin 0 again. Under ``inclusive="left"`` record 4 (day 5) is instead
+        the first of bin 1.
+        """
         records_per_period, remainder = divmod(period, record_seconds)
         # An invariant of the callers, not a user error: every builder checks
         # that the bins' period is a whole number of coupling steps, and the
