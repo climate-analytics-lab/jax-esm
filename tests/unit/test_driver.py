@@ -13,6 +13,7 @@ not the only thing this works on.
 
 import logging
 import pathlib
+import shutil
 
 import jax
 import jax_datetime as jdt
@@ -1220,6 +1221,333 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
         sorted(output.glob("ocn-*.nc")), combine="by_coords"
     ) as combined:
         assert combined.sizes["time"] == 8
+
+
+# ---------------------------------------------------------------------------
+# Output left past the restart point by a killed run
+# ---------------------------------------------------------------------------
+
+
+def killed_run_state(tmp_path):
+    """Build the directory and checkpoint a killed run leaves behind.
+
+    The state a `checkpoint_interval` makes ordinary, and the one the resume
+    check exists for: output written for coupled steps the checkpoint does not
+    reach. Four one-day chunks with a four-day interval put the checkpoint at
+    step 4 and files at steps 0-3; the run then carries on to six days,
+    writing files at steps 4 and 5, and is "killed" by putting the step-4
+    checkpoint back. Building it by running rather than by hand is what makes
+    the files real output of this coupler, so a test can compare them with
+    what a resume writes.
+
+    Returns the output directory and the checkpoint directory.
+    """
+    output = tmp_path / "output"
+    checkpoint = tmp_path / "checkpoint"
+    settings = {
+        "chunk": "1 day",
+        "checkpoint_interval": "4 days",
+        "output_dir": output,
+        "checkpoint_path": checkpoint,
+    }
+    run_chunked(two_slabs(), total_time="4 days", **settings)
+    assert checkpoint_step(checkpoint) == 4
+    at_four = tmp_path / "checkpoint-at-step-4"
+    shutil.copytree(checkpoint, at_four)
+
+    run_chunked(two_slabs(), total_time="6 days", **settings)
+    assert checkpoint_step(checkpoint) == 6
+    assert (output / "ocn-00000005.nc").exists()
+
+    shutil.rmtree(checkpoint)
+    shutil.copytree(at_four, checkpoint)
+    return output, checkpoint
+
+
+def output_names(output):
+    """Return the names of the netCDF files in an output directory, sorted."""
+    return sorted(path.name for path in output.glob("*.nc"))
+
+
+def test_a_resume_that_would_orphan_output_is_refused(tmp_path):
+    """The Codex scenario: a rechunked resume over a killed run's files raises.
+
+    A killed run leaves a checkpoint at step 4 and one-day files at steps 4
+    and 5. Resuming with two-day chunks would write a single file at step 4
+    holding steps 5 and 6 -- and step 5 is not a name this run writes, so the
+    old file would stay behind holding step 6 a second time and the directory
+    would read back with a duplicate nothing downstream could tell from a real
+    one. The run is refused instead, before anything is compiled, and the
+    message names the file that cannot be rewritten, the step the run resumed
+    from, the chunk it was asked for and the three ways out.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+    before = output_names(output)
+
+    with pytest.raises(ValueError) as raised:
+        run_chunked(
+            two_slabs(), total_time="6 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    message = str(raised.value)
+    assert "ocn-00000005.nc" in message
+    assert "seaice-00000005.nc" in message
+    # The files the resume WOULD have rewritten are not part of the complaint.
+    assert "ocn-00000004.nc" not in message
+    assert "coupled step 4" in message
+    assert "chunk='2 days'" in message
+    assert "Resume with the chunk those files were written under" in message
+
+    # Nothing was written, and nothing was deleted: the refusal leaves the
+    # killed run's output exactly as it found it, for the user to decide
+    # about.
+    assert output_names(output) == before
+    with xr.open_dataset(output / "ocn-00000004.nc") as untouched:
+        assert untouched.sizes["time"] == 1
+    assert checkpoint_step(checkpoint) == 4
+
+
+def test_a_resume_under_the_same_chunk_rewrites_and_is_allowed(
+    tmp_path, caplog
+):
+    """The ordinary killed-run resume still works, and rewrites identically.
+
+    Under the chunk the killed run used, every file at or after the restart
+    point starts on one of this run's chunk boundaries, so the resume writes
+    each of them again under the same name from the same starting state -- the
+    property that makes a `checkpoint_interval` safe. That must not be
+    collateral damage of refusing the rechunked resume, so it is asserted down
+    to the contents of the rewritten files, and the run says at INFO how many
+    it will rewrite.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+    before = {}
+    for name in ("ocn-00000004.nc", "ocn-00000005.nc"):
+        # Read into memory and close: netCDF4 will not let the resume
+        # overwrite a file this test still holds open.
+        with xr.open_dataset(output / name) as dataset:
+            before[name] = dataset.load()
+
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(), total_time="6 days", chunk="1 day",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 6
+    assert (
+        "4 existing output file(s) at or after coupled step 4 start on this "
+        "run's chunk boundaries" in caplog.text
+    )
+    assert output_names(output) == [
+        f"{name}-{step:08d}.nc"
+        for name in ("ocn", "seaice")
+        for step in range(6)
+    ]
+    for name, original in before.items():
+        with xr.open_dataset(output / name) as rewritten:
+            xr.testing.assert_identical(rewritten, original)
+
+    # And the directory as a whole -- the killed run's files, the rewritten
+    # ones and the chunk that finished the run -- reads back as the same six
+    # days an uninterrupted run writes: every label once, in order, with the
+    # same values. That is the property the refusal above protects.
+    uninterrupted = tmp_path / "uninterrupted"
+    run_chunked(
+        two_slabs(), total_time="6 days", chunk="1 day",
+        output_dir=uninterrupted, checkpoint_path=None,
+    )
+    with xr.open_mfdataset(
+        sorted(output.glob("ocn-*.nc")), combine="by_coords"
+    ) as combined, xr.open_mfdataset(
+        sorted(uninterrupted.glob("ocn-*.nc")), combine="by_coords"
+    ) as reference:
+        assert combined.sizes["time"] == 6
+        assert len(np.unique(combined["time"].values)) == 6
+        np.testing.assert_array_equal(
+            combined["time"].values, reference["time"].values
+        )
+        np.testing.assert_allclose(
+            combined["sea_surface_temperature"].values,
+            reference["sea_surface_temperature"].values,
+            atol=1e-12, rtol=0,
+        )
+
+
+def test_a_resume_ignores_files_it_did_not_write(tmp_path, caplog):
+    """Only this coupler's own output is examined, never anything else.
+
+    An output directory can hold more than one run's files -- another
+    component's, another model's, something a user put there -- and a file
+    this coupler would never write is neither a reason to refuse a resume nor
+    something the resume touches. `jem.output.output_file_step` is what draws
+    the line: it returns a step only for a name one of the run's components
+    would have been written under. The foreign file here sits at step 5, off
+    the two-day grid, so it would refuse this resume if it were counted.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+    # The run's own off-grid files, removed as the refusal's message suggests;
+    # what is left to test is the foreign file at the same step.
+    for name in ("ocn-00000005.nc", "seaice-00000005.nc"):
+        (output / name).unlink()
+    foreign = output / "atm-00000005.nc"
+    foreign.write_bytes(b"not this coupler's output")
+    unpatterned = output / "ocn.nc"
+    unpatterned.write_bytes(b"nor this")
+
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(), total_time="6 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 6
+    assert foreign.read_bytes() == b"not this coupler's output"
+    assert unpatterned.exists()
+    assert "atm-00000005.nc" not in caplog.text
+    # The run's own file at the restart point is on its chunk grid, so it was
+    # rewritten -- with the two-day chunk's two records.
+    with xr.open_dataset(output / "ocn-00000004.nc") as rewritten:
+        assert rewritten.sizes["time"] == 2
+
+
+def test_a_fresh_run_is_not_checked_against_the_directory(tmp_path, caplog):
+    """A run that did not resume is not refused, whatever is in the directory.
+
+    The check is justified only by a restart point: the files after one are
+    the ones this run's chunks are about to interleave with. With no
+    checkpoint to resume from there is no such point and no earlier pass of
+    *this* run to overlap, so an existing file is somebody's business and not
+    the driver's -- `write_chunk`'s overwrite warning remains the only thing
+    said about a directory that already holds output.
+    """
+    output = tmp_path / "output"
+    output.mkdir()
+    stray = output / "ocn-00000003.nc"
+    stray.write_bytes(b"an earlier run's file, at a step this run never writes")
+
+    with caplog.at_level(logging.INFO):
+        run_chunked(
+            two_slabs(), total_time="1 day", chunk="1 day",
+            output_dir=output, checkpoint_path=None,
+        )
+
+    assert stray.exists()
+    assert "chunk boundaries" not in caplog.text
+
+
+def test_a_resume_with_nothing_past_the_restart_point_says_nothing(
+    tmp_path, caplog
+):
+    """The common resume has no files to rewrite, and reports none.
+
+    Checkpointed after every chunk, the last file written is the one before
+    the restart point -- so there is nothing at or after it, nothing to
+    rewrite and nothing to say. The INFO line has to stay rare enough to mean
+    something when it appears.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    output = tmp_path / "output"
+    run_chunked(
+        two_slabs(), total_time="2 days", chunk="1 day",
+        output_dir=output, checkpoint_path=checkpoint,
+    )
+    with caplog.at_level(logging.INFO):
+        resumed = run_chunked(
+            two_slabs(), total_time="4 days", chunk="1 day",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert resumed.steps_completed == 4
+    assert "chunk boundaries" not in caplog.text
+    assert output_names(output) == [
+        f"{name}-{step:08d}.nc"
+        for name in ("ocn", "seaice")
+        for step in range(4)
+    ]
+
+
+def test_a_resume_with_nothing_to_integrate_is_not_refused(tmp_path, caplog):
+    """A call that writes nothing cannot overlap anything, so it is allowed.
+
+    The files past the restart point are only a problem because this call
+    would write that simulated time again. A call with nothing left to
+    integrate -- the checkpoint is already at `total_time` -- writes no files
+    at all, so refusing it would block a harmless re-invocation of a finished
+    run and, worse, make the killed run's last output impossible to look at
+    from the same directory.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        result = run_chunked(
+            two_slabs(), total_time="4 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 4
+    assert result.paths == []
+    assert "Nothing to integrate" in caplog.text
+    assert (output / "ocn-00000005.nc").exists()
+
+
+def test_an_accumulated_resume_is_not_refused(tmp_path, caplog):
+    """An accumulated resume writes no files, so no file can be orphaned.
+
+    `accumulate` reduces inside the scan and `run_chunked` writes nothing, so
+    the chunk length it uses cannot interleave anything with a killed run's
+    output -- and refusing it would stop a legitimate reduction over a
+    directory that merely happens to hold files.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+
+    result = run_chunked(
+        two_slabs(), total_time="6 days", chunk="2 days",
+        output_dir=output, checkpoint_path=checkpoint,
+        accumulate=monthly_mean(two_slabs()), health_check=None,
+    )
+
+    assert result.paths == []
+    assert result.steps_completed == 6
+    assert (output / "ocn-00000005.nc").exists()
+
+
+def test_a_nested_couplers_files_are_named_after_its_inner_components(tmp_path):
+    """The check knows the names a nested coupler's output is written under.
+
+    `Coupler.to_xarray` flattens a nested coupler's datasets into the result
+    under *its* components' names, so those -- not the name the inner coupler
+    is registered under -- are what its files are called. `_output_names`
+    follows the nesting for the same reason, or a nested run's files would
+    match nothing and an overlapping resume would go unnoticed.
+    """
+    from jem.driver import _output_names
+
+    grid = make_grid()
+    inner = Coupler(
+        {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)},
+        {},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        name="surface",
+    )
+    outer = Coupler(
+        {"surface": inner},
+        {},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+    assert _output_names(outer) == ["ocn", "seaice"]
+    # And the names really are what the files are called.
+    result = run_chunked(
+        outer, total_time="1 day", chunk="1 day", output_dir=tmp_path,
+        checkpoint_path=None,
+    )
+    assert sorted(path.name for path in result.paths) == [
+        "ocn-00000000.nc", "seaice-00000000.nc"
+    ]
 
 
 # ---------------------------------------------------------------------------

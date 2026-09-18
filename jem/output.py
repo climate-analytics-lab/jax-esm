@@ -12,7 +12,13 @@ is this module:
 - :func:`postprocess` reduces one dataset (subsample, chunk mean) and
   :func:`postprocess_datasets` does that to a whole mapping of them,
 - :func:`write_chunk` writes a mapping of datasets to
-  ``<output_dir>/<component>-<first step>.nc``,
+  ``<output_dir>/<component>-<first step>.nc``, naming each file with
+  :func:`output_file_name`,
+- :func:`output_file_step` is that naming rule read backwards -- the coupled
+  step a file in the directory holds, or None if the run did not write it --
+  so that anything which has to *recognise* this module's files (the driver's
+  check of what a resume would leave behind past a restart point) cannot
+  drift from what wrote them,
 - :func:`datasets_for_chunk` is the labelling and the reduction in one call,
   for a caller that wants only the reduced form.
 
@@ -68,7 +74,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +97,16 @@ TIME_MEAN_CELL_METHOD = f"{TIME_DIMENSION}: mean"
 # components arrive under their own names -- so nothing stops a name that is
 # a path fragment or worse. Anything else becomes an underscore.
 _UNSAFE_NAME_CHARACTERS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+# What an output file name looks like: a component name, a hyphen, and the
+# zero-padded coupled step its chunk starts at. The name part is greedy
+# because a component name may itself contain a hyphen, and the step is
+# ``\d{8,}`` rather than exactly eight because the padding is a minimum -- a
+# run long enough to pass a hundred million coupled steps writes nine.
+# :func:`output_file_step` still confirms a match by rebuilding the name with
+# :func:`output_file_name`, so the pattern only has to be no *narrower* than
+# what :func:`write_chunk` writes.
+_OUTPUT_FILE_PATTERN = re.compile(r"(?P<name>.+)-(?P<step>\d{8,})\.nc\Z")
 
 
 def _safe_name(name: str) -> str:
@@ -231,17 +247,84 @@ def postprocess(
     return averaged
 
 
+def output_file_name(name: str, first_step: int) -> str:
+    """Return the file name a chunk of ``name`` starting at ``first_step`` takes.
+
+    The one place the naming rule lives, so that everything which *reads* the
+    directory back -- :func:`output_file_step`, and through it the driver's
+    sweep of stale output on a resume -- agrees with what :func:`write_chunk`
+    wrote, by construction rather than by two copies of a format string.
+
+    Parameters
+    ----------
+    name : str
+        The dataset's name, normally a component's; anything in it that cannot
+        appear in a file name becomes an underscore.
+    first_step : int
+        The coupled step the chunk starts at.
+
+    Returns
+    -------
+    str
+        ``<component>-<first_step:08d>.nc``.
+
+    """
+    return f"{_safe_name(name)}-{first_step:08d}.nc"
+
+
+def output_file_step(path: Path | str, names: Iterable[str]) -> int | None:
+    """Return the coupled step ``path`` holds output for, or None if it is not ours.
+
+    The inverse of :func:`output_file_name`, and deliberately a *strict* one:
+    a candidate is accepted only when rebuilding the name from one of
+    ``names`` and the step reproduces the file name character for character.
+    So a file the run did not write -- another component's, a hand-made
+    ``ocn.nc``, a reanalysis someone dropped in the output directory -- comes
+    back as None rather than as a step, which is what lets the driver reason
+    about the output a resume would overlap without ever having to guess
+    whether a file is its own.
+
+    ``names`` is required for the same reason: a step alone cannot say whose
+    output a file is, and "every file whose name ends in eight digits" is not
+    a set a run should be refusing to start over.
+
+    Parameters
+    ----------
+    path : pathlib.Path or str
+        The file to examine; only its name is looked at, and nothing is read
+        from disk.
+    names : Iterable[str]
+        The dataset names whose files count -- the run's component names.
+
+    Returns
+    -------
+    int or None
+        The coupled step the chunk in ``path`` starts at, or None.
+
+    """
+    filename = Path(path).name
+    match = _OUTPUT_FILE_PATTERN.fullmatch(filename)
+    if match is None:
+        return None
+    step = int(match["step"])
+    for name in names:
+        if filename == output_file_name(name, step):
+            return step
+    return None
+
+
 def write_chunk(
     datasets: Mapping[str, xr.Dataset], output_dir: Path | str, first_step: int
 ) -> list[Path]:
     """Write one chunk's datasets as netCDF and return the paths, in a stable order.
 
-    One file per dataset, named ``<component>-<first_step:08d>.nc``: the
-    component first so a directory listing groups a component's files
-    together, and the coupled step the chunk starts at -- zero-padded so the
-    listing sorts in run order -- second. That step is the run's own clock, so
-    the name is unique however the run was chunked; see the module docstring
-    for why a chunk index is not.
+    One file per dataset, named by :func:`output_file_name`
+    (``<component>-<first_step:08d>.nc``): the component first so a directory
+    listing groups a component's files together, and the coupled step the
+    chunk starts at -- zero-padded so the listing sorts in run order --
+    second. That step is the run's own clock, so the name is unique however
+    the run was chunked; see the module docstring for why a chunk index is
+    not.
 
     An existing file is overwritten, with a warning. Writing a second run into
     a directory that already holds one is a deliberate act (a rerun, or a
@@ -255,6 +338,16 @@ def write_chunk(
     a fact and does not assert which of them happened. The rewrite is of the
     same name from the same starting state, because a file is named after the
     coupled step its chunk starts at.
+
+    Overwriting is only half of what a resume owes the directory, and this
+    function cannot do the other half: a file an earlier pass wrote is only
+    rewritten if the resumed run writes a chunk starting at that same step,
+    which it need not, since the chunk belongs to the run and not to the
+    checkpoint. So :func:`jem.driver.run_chunked` checks the directory before
+    it integrates anything -- using :func:`output_file_step` to pick out its
+    own files -- and refuses a resume that would leave any of them behind,
+    rather than interleaving one pass's files with another's holding records
+    for the same simulated time.
 
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
@@ -294,7 +387,7 @@ def write_chunk(
     paths: dict[Path, str] = {}
     written: list[Path] = []
     for name in sorted(datasets):
-        path = directory / f"{_safe_name(name)}-{first_step:08d}.nc"
+        path = directory / output_file_name(name, first_step)
         if path in paths:
             raise ValueError(
                 f"Datasets {paths[path]!r} and {name!r} would both be written to "
