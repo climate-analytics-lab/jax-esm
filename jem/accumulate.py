@@ -289,7 +289,7 @@ def _variable_window_rule(
         # a remainder (`phase`, folded into the boundaries); the ceiling is
         # then the first record whose label reaches the boundary.
         shifted, phase = divmod(offset_seconds - shift_seconds, record_seconds)
-        in_records = -(-(boundaries - phase) // record_seconds)
+        in_records = _ceil_div(boundaries - phase, record_seconds)
         # The last bin ends at the period: that is where it already ends when
         # the period is where the bins end (the ceiling above lands exactly on
         # `records_per_period`), and where it has to end when the period was
@@ -310,6 +310,18 @@ def _variable_window_rule(
         )
 
     return bin_of_record
+
+
+def _ceil_div(numerator: Any, denominator: int) -> Any:
+    """Return ``ceil(numerator / denominator)`` in integer arithmetic.
+
+    Python's ``//`` rounds towards negative infinity, so negating the
+    numerator, floor-dividing, and negating the result rounds *up* instead:
+    ``ceil(7 / 2) == -((-7) // 2) == 4``. It stays exact for the int64 arrays
+    and Python ints this module works in, where ``math.ceil(a / b)`` would go
+    through a float and lose precision past 2**53.
+    """
+    return -((-numerator) // denominator)
 
 
 def _whole_seconds(duration: str | float, calendar: str, what: str) -> int:
@@ -1111,7 +1123,7 @@ def monthly_mean(
     # docstring). Refusing instead would reject every `total_time` form on
     # such a coupling, since counting months from a run always gives 12N+1 of
     # them, whose span is never a whole number of years.
-    period_seconds = -(-int(boundaries[-1]) // dt_seconds) * dt_seconds
+    period_seconds = _ceil_div(int(boundaries[-1]), dt_seconds) * dt_seconds
 
     return _binned_mean(
         coupler,
