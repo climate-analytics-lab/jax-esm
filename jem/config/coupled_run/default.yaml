@@ -65,6 +65,20 @@ bail_on_unhealthy: true
 # Disable with `coupled_run.checkpoint_path=null`.
 checkpoint_path: checkpoint
 
+# How often that checkpoint is written, in the same duration forms as `chunk`.
+# null -- the default -- writes one after every chunk the health gate accepts.
+# A value must be a whole multiple of `chunk` (a chunk boundary is the only
+# place the run stops) and is counted in coupled steps from the START OF THE
+# RUN, so a resumed run checkpoints where an uninterrupted one would. It is for
+# a run whose chunks are short for another reason -- a health check every few
+# days, an output file per day -- and which does not want its restart state
+# rewritten that often; the cost is that a run which is KILLED falls back to the
+# last interval boundary and re-integrates (and rewrites the output files of)
+# the chunks after it. A completed run always checkpoints its last chunk, and a
+# run the health gate stops always checkpoints the last chunk that passed.
+# Setting it with `checkpoint_path=null` is an error, not a no-op.
+checkpoint_interval: null
+
 # Logging level of the `jem` logger. Consumed by `jem.main` only -- it is not
 # an argument of `run_chunked()`, but it belongs with the run's other
 # command-line settings. INFO because a coupled run reports each chunk as it

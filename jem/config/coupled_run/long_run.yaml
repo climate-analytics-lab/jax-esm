@@ -32,7 +32,10 @@ chunk: "30 days"
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the
-# value would only be a second place for it to drift.
+# value would only be a second place for it to drift. `checkpoint_interval`
+# stays null for the same reason it is null by default: the chunk here is
+# already 30 days, which is as rarely as a ten-year run should be willing to
+# lose work, so spacing the saves out further would only cost time in a requeue.
 #
 # HOW TO RESUME ONE. The default `checkpoint_path` is relative, so it lands in
 # the run's own Hydra output directory, and every launch gets a new one. A
