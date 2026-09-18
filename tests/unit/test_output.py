@@ -7,6 +7,7 @@ whole job is to sit on top of a real ``Coupler.to_xarray``.
 """
 
 import logging
+import pathlib
 
 import jax_datetime as jdt
 import numpy as np
@@ -19,6 +20,8 @@ from jem.exchangers import default_exchangers
 from jem.output import (
     chunk_datasets,
     datasets_for_chunk,
+    output_file_name,
+    output_file_step,
     postprocess,
     postprocess_datasets,
     write_chunk,
@@ -134,6 +137,74 @@ def test_postprocess_needs_a_time_dimension_to_reduce():
     dataset = simple_dataset().isel(time=0, drop=True)
     with pytest.raises(ValueError, match="no 'time' dimension"):
         postprocess(dataset, output_averages=True)
+
+
+# ---------------------------------------------------------------------------
+# The file name, and reading it back
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["ocn", "sea-ice", "atm2", "sea ice", "a-00000001"]
+)
+@pytest.mark.parametrize("step", [0, 12, 99999999, 123456789])
+def test_a_written_name_reads_back_as_the_step_it_was_written_for(name, step):
+    """Every name the writer produces is recognised, with its step, by the reader.
+
+    The two are used at opposite ends of a run -- one names a chunk's file,
+    the other decides what an existing file in the directory is -- so the only
+    thing that keeps a resume honest about which files are its own is that
+    they are exact inverses. The awkward cases are the point: a name with a
+    hyphen or a space in it (a component name is whatever a user called it),
+    and a step past the eight digits of the padding, where the name is a digit
+    longer.
+    """
+    filename = output_file_name(name, step)
+
+    assert output_file_step(filename, [name]) == step
+    # A path is accepted as readily as a bare name, and only the name is read.
+    assert output_file_step(pathlib.Path("/somewhere/else") / filename, [name]) == step
+    # A name this run does not write is not this run's file, whatever the step.
+    assert output_file_step(filename, ["something_else"]) is None
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        # The padding is eight digits, so a ninth here is a different name --
+        # not step 12 written by anything this module wrote.
+        "ocn-000000012.nc",
+        # A different component.
+        "ocean-00000004.nc",
+        # No step at all.
+        "ocn.nc",
+        # One digit short of the padding.
+        "ocn-0000004.nc",
+        # netCDF, but not the extension `write_chunk` writes.
+        "ocn-00000004.nc4",
+    ],
+)
+def test_a_name_this_module_would_not_have_written_is_not_recognised(filename):
+    """Recognition is by rebuilding the name, so near misses are misses.
+
+    Anything the check cannot prove is a run's own output has to come back as
+    "not ours": the driver uses it to decide which files in a directory a
+    resume is responsible for, and a false positive there is a run refusing to
+    start because of a stranger's file.
+    """
+    assert output_file_step(filename, ["ocn"]) is None
+
+
+def test_a_component_name_that_ends_like_a_step_is_read_as_its_own_name():
+    """A hyphen and digits inside a component name do not become the step.
+
+    The name is whatever the component was registered as, so it can end in
+    something that looks like a padded step. The file is that component's,
+    starting at step 4 -- and it is emphatically not component `a`'s, which is
+    what a lazy split on the first hyphen would have made it.
+    """
+    assert output_file_step("a-00000001-00000004.nc", ["a-00000001"]) == 4
+    assert output_file_step("a-00000001-00000004.nc", ["a"]) is None
 
 
 # ---------------------------------------------------------------------------

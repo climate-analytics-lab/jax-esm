@@ -78,16 +78,20 @@ Breaking changes are marked; everything else is additive.
   files — safe because each is named after the coupled step its chunk starts
   at, and reported at INFO (how many existing files the resume will write
   again) before the run starts. That rewrite lands on the same names only
-  while the resume keeps the same `chunk`: one that rechunks writes files at
-  different steps and would leave the killed run's beside its own, holding
-  records for the same simulated time. Such a resume is now **refused** — a
-  `ValueError`, before anything is compiled, naming the files that would be
-  orphaned, the restored step, the chunk and the ways out (resume under the
-  chunk those files were written with, remove them, or use another
+  while the resume keeps the same `chunk` and runs at least as far as the
+  killed pass got: one that rechunks writes files at different steps and would
+  leave the killed run's beside its own, holding records for the same
+  simulated time, and one that stops earlier leaves that run's later files
+  stranded past its end. Either is now **refused** — a `ValueError`, before
+  anything is compiled, naming the files that would be left behind and which
+  of the two they are, the restored step, the chunk and the ways out (resume
+  under the chunk those files were written with, remove them, or use another
   `output_dir`) — rather than silently producing a directory with duplicate
   time labels; the driver does not delete a killed run's output on its own
-  initiative. Files before the restart point, and files whose names this
-  coupler would never write, are untouched and never block a run.
+  initiative. Files before the restart point, files whose names this coupler
+  would never write, and every file in a directory a run that writes none (an
+  accumulated run, or a call with nothing left to integrate) resumes into, are
+  untouched and never block a run.
   It is validated with the other durations, before anything is compiled,
   and giving it with `checkpoint_path=None` is a `ValueError` rather than a
   setting silently ignored. A `total_time` that is not a whole number of

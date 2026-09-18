@@ -1009,17 +1009,24 @@ overwrite the step-4 file with the records for steps 5–6 and leave the step-5
 file holding step 6 a second time — a duplicate no reader of the directory could
 tell from a real one, and one no later chunk would ever rewrite. So a resumed
 run tests, before anything is compiled, that every file of its own at or after
-the restored step starts on **its** chunk grid (`restored_step + k ×
-steps_per_chunk`, which is where its chunks begin, the short final batch
-included): those it reports at INFO and rewrites, and anything else is a
-`ValueError` naming the files, the restored step, the chunk and the three ways
-out — resume under the chunk those files were written with, remove them, or
-choose another `output_dir`. Deleting them for the user was the alternative and
-was rejected: the driver cannot know which pass's output is the one worth
-keeping. Files before the restart point are the run's history, and files whose
-names this coupler would never write (`jem.output.output_file_step` matches a
-name against the run's components, following a nested coupler into its inner
-ones) are neither examined nor touched.
+the restored step is one this call really writes over, which takes both halves
+of what it is about to do: the file starts on **its** chunk grid
+(`restored_step + k × steps_per_chunk`, which is where its chunks begin, the
+short final batch included) **and** before `total_steps`, where it stops. Those
+it reports at INFO and rewrites. Anything else is a `ValueError` naming the
+files grouped by which half they fail — an overlap in the middle of the run, or
+output at or past its end, which a resume asking for less simulated time than an
+earlier pass already wrote leaves stranded — together with the restored step,
+the chunk and the three ways out: resume under the chunk those files were
+written with, remove them, or choose another `output_dir`. Deleting them for the
+user was the alternative and was rejected: the driver cannot know which pass's
+output is the one worth keeping. Files before the restart point are the run's
+history, and files whose names this coupler would never write are neither
+examined nor touched — `jem.output.output_file_step` matches a name against the
+run's components, following a nested coupler into its inner ones and skipping
+any component that has no `to_xarray`, since no file is ever written under such
+a name. A run that writes no files at all — an accumulated one, or a call with
+nothing left to integrate — is not checked, having nothing it could overlap.
 
 Two configurations the loop cannot honour exactly are warnings rather than
 refusals, because neither costs a restart point: a `total_time` that is not a

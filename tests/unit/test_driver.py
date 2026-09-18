@@ -16,6 +16,7 @@ import pathlib
 import shutil
 
 import jax
+import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
@@ -1511,6 +1512,130 @@ def test_an_accumulated_resume_is_not_refused(tmp_path, caplog):
     assert result.paths == []
     assert result.steps_completed == 6
     assert (output / "ocn-00000005.nc").exists()
+
+
+def test_a_resume_is_refused_over_on_grid_output_past_its_end(tmp_path):
+    """Being on the chunk grid is not enough: the run has to reach the file.
+
+    The killed run got to six days; this resume keeps its one-day chunk but
+    asks for five. The step-4 file is on the grid and inside the run, so it is
+    rewritten -- but the step-5 file is on the grid and *past the end*, so
+    nothing this run writes reaches it and it would be left beyond this run's
+    output as the longer pass's. That is a different complaint from an
+    overlap, and the message says which it is.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+    before = output_names(output)
+
+    with pytest.raises(ValueError) as raised:
+        run_chunked(
+            two_slabs(), total_time="5 days", chunk="1 day",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    message = str(raised.value)
+    assert "ocn-00000005.nc" in message
+    assert "at or past coupled step 5, where this run ends" in message
+    # It is not the overlap case, and the file the run does rewrite is not
+    # part of the complaint.
+    assert "under a different chunk" not in message
+    assert "ocn-00000004.nc" not in message
+    assert "Resume with the chunk those files were written under" in message
+    assert output_names(output) == before
+
+
+def test_a_resume_is_refused_over_off_grid_output_past_its_end(tmp_path):
+    """A file both off the grid and past the end is reported as past the end.
+
+    An earlier pass under a different chunk reached step 7; this run resumes
+    at step 4 with two-day chunks and stops at step 6. The step-7 file is off
+    this run's grid *and* beyond its end, and the second is the reason that
+    matters: no chunk of this run can reach step 7 whatever its length, so the
+    message must not tell the modeller that the file overlaps output this run
+    is about to write.
+    """
+    output, checkpoint = killed_run_state(tmp_path)
+    # The killed run's own off-grid files, removed as the message suggests;
+    # what is left is output from a pass that got further than this run goes.
+    for name in ("ocn-00000005.nc", "seaice-00000005.nc"):
+        (output / name).unlink()
+    shutil.copy(output / "ocn-00000004.nc", output / "ocn-00000007.nc")
+    before = output_names(output)
+
+    with pytest.raises(ValueError) as raised:
+        run_chunked(
+            two_slabs(), total_time="6 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    message = str(raised.value)
+    assert "ocn-00000007.nc" in message
+    assert "at or past coupled step 6, where this run ends" in message
+    assert "under a different chunk" not in message
+    assert output_names(output) == before
+
+
+class OutputlessCounter:
+    """A component that steps and writes no output: it has no ``to_xarray``.
+
+    The coupler steps it and stacks its diagnostics like any other, and
+    ``Coupler.to_xarray`` then skips it -- so no file is ever named after it.
+    """
+
+    def __init__(self, name="atm"):
+        """Name the component."""
+        self.name = name
+
+    def initialize(self):
+        return {"value": jnp.float32(0.0)}
+
+    def step(self, carry, time):
+        del time
+        new_carry = {"value": carry["value"] + 1.0}
+        return new_carry, {"value": new_carry["value"]}
+
+
+def test_a_component_that_writes_no_output_is_not_one_of_the_names(tmp_path):
+    """A file named after an output-less component is not this run's.
+
+    `Coupler.to_xarray` skips a component without `to_xarray`, so the run
+    never writes a file under its name -- and a file that happens to be called
+    after it therefore belongs to something else. Counting the name anyway
+    would have that stranger's file refuse a resume the run is perfectly able
+    to make, so `_output_names` applies the same `SupportsXarray` test the
+    output path does.
+    """
+    from jem.driver import _output_names
+
+    def coupler():
+        return Coupler(
+            {"ocn": SlabOceanModel(make_grid()), "atm": OutputlessCounter()},
+            {},
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=START_DATE,
+        )
+
+    assert _output_names(coupler()) == ["ocn"]
+
+    checkpoint = tmp_path / "checkpoint"
+    output = tmp_path / "output"
+    run_chunked(
+        coupler(), total_time="2 days", chunk="1 day",
+        output_dir=output, checkpoint_path=checkpoint,
+    )
+    assert output_names(output) == ["ocn-00000000.nc", "ocn-00000001.nc"]
+    # Off this resume's chunk grid, and named after the component that writes
+    # nothing: not this run's file, so not this run's business.
+    foreign = output / "atm-00000003.nc"
+    foreign.write_bytes(b"somebody else's output")
+
+    resumed = run_chunked(
+        coupler(), total_time="4 days", chunk="2 days",
+        output_dir=output, checkpoint_path=checkpoint,
+    )
+
+    assert resumed.steps_completed == 4
+    assert foreign.read_bytes() == b"somebody else's output"
 
 
 def test_a_nested_couplers_files_are_named_after_its_inner_components(tmp_path):

@@ -88,13 +88,16 @@ resume under a different chunk starts its files at different steps, so it would
 write *beside* the killed run's leftovers rather than over them and leave the
 directory holding two passes' records for overlapping simulated time. So a
 resumed run checks, before anything is compiled, that every output file at or
-after the step it restored starts on one of *its* chunk boundaries
-(:func:`_check_resumed_output_is_rewritable`): those it rewrites, and it says
-at INFO how many. One that does not, it **refuses** with a ``ValueError``
-naming the files and the ways out -- resume with the chunk they were written
-under, remove them, or write into another ``output_dir``. Deleting them
-instead would be a driver destroying a killed run's output on its own
-initiative, which is not its decision to take.
+after the step it restored is one this call really writes over
+(:func:`_check_resumed_output_is_rewritable`): it starts on one of *this*
+run's chunk boundaries **and** before the step this run stops at. Those it
+rewrites, and it says at INFO how many. Anything else -- a file off the chunk
+grid, which would overlap this run's output, or one at or past the end of this
+run, which nothing it writes reaches -- it **refuses** with a ``ValueError``
+naming the files, grouped by which of the two they are, and the ways out:
+resume with the chunk they were written under, remove them, or write into
+another ``output_dir``. Deleting them instead would be a driver destroying a
+killed run's output on its own initiative, which is not its decision to take.
 
 Because there is only ever one checkpoint, the health gate runs *before* it
 is written and a chunk the gate rejects is not checkpointed at all: saving it
@@ -149,7 +152,7 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from jem.base.component import CoupledCarry
+from jem.base.component import CoupledCarry, SupportsXarray
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
 from jem.output import (
     check_subsample,
@@ -416,13 +419,15 @@ def run_chunked(
         :func:`jem.output.write_chunk` warns as it overwrites each one, and
         this function says at INFO, before it starts, how many existing files
         the resume will write again. The rewrite lands on the same names only
-        while the resumed run keeps the same ``chunk``; a resume that changes
-        it writes files starting at different steps, which would leave the
-        killed run's files beside the new ones holding records for the same
-        simulated time. That resume is **refused** (``ValueError``, before
-        anything is compiled), naming the files that would be orphaned and the
-        ways out. Files *earlier* than the restart point are the run's history
-        and are never in question.
+        while the resumed run keeps the same ``chunk`` *and* runs at least as
+        far as the killed one got; a resume that changes the chunk writes
+        files starting at different steps, which would leave the killed run's
+        beside the new ones holding records for the same simulated time, and
+        one that stops earlier leaves that run's later files beyond its own
+        end. Either is **refused** (``ValueError``, before anything is
+        compiled), naming the files that would be left behind, which of the
+        two they are, and the ways out. Files *earlier* than the restart point
+        are the run's history and are never in question.
     accumulate : pair of callables, optional
         An **in-scan reduction** of the per-step diagnostics --
         :func:`jem.accumulate.monthly_mean` or
@@ -449,9 +454,10 @@ def run_chunked(
         integer, or if ``accumulate`` is given with a ``health_check``. All of
         them are checked before anything is compiled or integrated. Also if
         the run resumes from a checkpoint and ``output_dir`` already holds
-        output at or after the restored step that this run's chunking will not
-        rewrite -- an earlier pass's files, which would otherwise be left
-        overlapping the output this run is about to write.
+        output at or after the restored step that this run will not write
+        again -- an earlier pass's files, off this run's chunk grid or past
+        the step it stops at, which would otherwise be left overlapping the
+        output this run is about to write or stranded beyond its end.
 
     Notes
     -----
@@ -460,8 +466,9 @@ def run_chunked(
     run is chunked -- so a run resumed with a different ``chunk`` writes new
     files rather than over the ones it already wrote. That is also why such a
     resume is refused when the directory already holds output at or after the
-    restart point that the new chunking would not land on: the two passes'
-    files would overlap in simulated time. See :mod:`jem.output`.
+    restart point that this run will not write again -- off its chunk grid, so
+    the two passes' files would overlap in simulated time, or past the step it
+    stops at. See :mod:`jem.output`.
 
     **An accumulated run has no per-step diagnostics**, by construction: the
     scan returns the accumulator instead of stacking every step, which is the
@@ -551,7 +558,7 @@ def run_chunked(
         # business refusing to start over them.
         _check_resumed_output_is_rewritable(
             output_dir, _output_names(coupler), int(carry.step),
-            steps_per_chunk, chunk,
+            steps_per_chunk, total_steps, chunk,
         )
 
     if accumulate is not None:
@@ -900,6 +907,14 @@ def _output_names(coupler: "Coupler") -> list[str]:
     ``output_dir`` can carry are this coupler's components with every nested
     coupler replaced, recursively, by the components inside it.
 
+    A component that does not implement
+    :class:`~jem.base.component.SupportsXarray` is left out, because
+    ``to_xarray`` skips it and no file is ever written under its name. The
+    same runtime-checkable predicate is used here as there, so the two cannot
+    disagree: a name this run can never write is a name it must not reason
+    about, or an unrelated file that happens to be called after such a
+    component would refuse a perfectly good resume.
+
     This is used to decide which files in a directory are **this run's**, and
     it is therefore deliberately conservative in the one case it cannot
     enumerate: a component whose ``to_xarray`` returns a mapping under names
@@ -920,7 +935,7 @@ def _output_names(coupler: "Coupler") -> list[str]:
     for name, component in coupler.components.items():
         if isinstance(component, Coupler):
             names.extend(_output_names(component))
-        else:
+        elif isinstance(component, SupportsXarray):
             names.append(name)
     return names
 
@@ -930,9 +945,10 @@ def _check_resumed_output_is_rewritable(
     names: Sequence[str],
     restored_step: int,
     steps_per_chunk: int,
+    total_steps: int,
     chunk: str | float,
 ) -> list[Path]:
-    """Refuse a resume that would leave output overlapping what it writes.
+    """Refuse a resume that would leave output this run does not replace.
 
     A resumed run starts at the step its checkpoint holds, but the directory
     can already hold output for steps **after** it: the earlier run wrote each
@@ -953,17 +969,27 @@ def _check_resumed_output_is_rewritable(
     downstream can tell that duplicate from a real one, and no later chunk of
     this run will ever rewrite it.
 
-    So the test is whether every existing file at or after the restart point
-    lands on **this run's chunk grid** -- a starting step of
-    ``restored_step + k * steps_per_chunk``, which is where this run's chunks
-    begin, including the short final batch
-    (:func:`jem.checkpoint.remaining_batches` puts it last, so it too starts on
-    the grid). Those files this run writes again, and they are reported at
-    INFO. Anything off the grid makes the run raise **before** a trajectory is
-    compiled or a step integrated, naming the files and the three ways out,
-    because the alternatives are worse: silently writing the overlap is the bug
-    this exists for, and deleting somebody's output on a run's own initiative
-    is not a decision a driver should be taking.
+    A file at or after the restart point is therefore acceptable only if this
+    call really writes over it, which takes **both** halves of what the run is
+    about to do:
+
+    - it starts on this run's **chunk grid**, ``restored_step + k *
+      steps_per_chunk`` -- where this run's chunks begin, the short final batch
+      included (:func:`jem.checkpoint.remaining_batches` puts it last, so it
+      too starts on the grid); and
+    - it starts **before** ``total_steps``, because that is where this run
+      stops. A run resumed for less simulated time than an earlier, longer pass
+      already wrote leaves that pass's files beyond its own end: on the grid or
+      not, nothing this call writes replaces them, and the directory would
+      afterwards be one run's output followed by another's.
+
+    Everything else raises **before** a trajectory is compiled or a step
+    integrated, with the files named and grouped by which of the two they fail
+    -- an overlap in the middle of the run, or output past the end of it --
+    since the remedy a modeller reaches for differs. The alternatives are both
+    worse: silently writing the overlap is the bug this exists for, and
+    deleting somebody's output on a run's own initiative is not a decision a
+    driver should be taking.
 
     Files *before* the restart point are the run's history -- this call does
     not integrate that simulated time and nothing about it changes -- and are
@@ -983,20 +1009,22 @@ def _check_resumed_output_is_rewritable(
         The coupled step the run resumed from.
     steps_per_chunk : int
         This run's chunk, in coupled steps.
+    total_steps : int
+        The coupled step this run stops at; the first step it does not write.
     chunk : str or float
         The same chunk as the caller wrote it, for the message.
 
     Returns
     -------
     list[pathlib.Path]
-        The existing files at or after ``restored_step`` that this run
-        rewrites, in name order; empty if there are none.
+        The existing files this run rewrites, in name order; empty if there
+        are none.
 
     Raises
     ------
     ValueError
-        If any file at or after ``restored_step`` does not start on this run's
-        chunk grid.
+        If any file at or after ``restored_step`` is one this run will not
+        write again -- off its chunk grid, or at or beyond ``total_steps``.
 
     """
     if not output_dir.is_dir():
@@ -1008,27 +1036,48 @@ def _check_resumed_output_is_rewritable(
         and (step := output_file_step(path, names)) is not None
         and step >= restored_step
     )
-    rewritten = [
-        path
-        for path, step in existing
-        if (step - restored_step) % steps_per_chunk == 0
-    ]
-    overlapping = [path for path, _ in existing if path not in set(rewritten)]
-    if overlapping:
+    # One pass, three lists: a directory of a long run holds thousands of
+    # files, and every one of them is classified by two comparisons.
+    rewritten: list[Path] = []
+    overlapping: list[Path] = []
+    past_the_end: list[Path] = []
+    for path, step in existing:
+        if step >= total_steps:
+            past_the_end.append(path)
+        elif (step - restored_step) % steps_per_chunk:
+            overlapping.append(path)
+        else:
+            rewritten.append(path)
+
+    if overlapping or past_the_end:
+        reasons = []
+        if overlapping:
+            reasons.append(
+                f"{', '.join(path.name for path in overlapping)} -- written by "
+                "an earlier pass under a different chunk, so they would be "
+                "left beside this run's output holding records for the same "
+                "simulated time, a duplicate nothing reading the directory "
+                "back could tell from a real one"
+            )
+        if past_the_end:
+            reasons.append(
+                f"{', '.join(path.name for path in past_the_end)} -- at or "
+                f"past coupled step {total_steps}, where this run ends, so "
+                "nothing it writes reaches them and they would be left beyond "
+                "its output as an earlier, longer pass's"
+            )
         raise ValueError(
             f"{output_dir} already holds output at or after coupled step "
-            f"{restored_step}, which this run resumed from, that it will "
-            f"never rewrite: {', '.join(path.name for path in overlapping)}. "
-            f"A file is named after the coupled step its chunk starts at, and "
-            f"this run's chunks start at {restored_step} + k x "
-            f"{steps_per_chunk} coupled steps (chunk={chunk!r}), so these "
-            "files were written by an earlier pass under a different chunk "
-            "and would be left beside this run's output holding records for "
-            "the same simulated time -- a duplicate nothing reading the "
-            "directory back could tell from a real one. Resume with the chunk "
-            "those files were written under, or remove them, or write this "
-            "run into another output_dir. (The output before step "
-            f"{restored_step} is the run's history and is not in question.)"
+            f"{restored_step}, which this run resumed from, that this run will "
+            "never write again. A file is named after the coupled step its "
+            f"chunk starts at, and this run writes chunks starting at "
+            f"{restored_step} + k x {steps_per_chunk} coupled steps "
+            f"(chunk={chunk!r}) up to step {total_steps}. "
+            + ". ".join(reasons)
+            + ". Resume with the chunk those files were written under, or "
+            "remove them, or write this run into another output_dir. (The "
+            f"output before step {restored_step} is the run's history and is "
+            "not in question.)"
         )
     if rewritten:
         # INFO, not a warning: this is the ordinary state of a run killed
@@ -1037,8 +1086,8 @@ def _check_resumed_output_is_rewritable(
         # is also the evidence that the check above looked and was satisfied.
         logger.info(
             "%d existing output file(s) at or after coupled step %d start on "
-            "this run's chunk boundaries, so this run writes them again from "
-            "the same state: %s.",
+            "this run's chunk boundaries and before it ends, so this run "
+            "writes them again from the same state: %s.",
             len(rewritten), restored_step,
             ", ".join(path.name for path in rewritten),
         )
