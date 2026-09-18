@@ -236,11 +236,11 @@ def _variable_window_rule(
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1]) if period_seconds is None else int(period_seconds)
     assert period >= int(boundaries[-1]), "the bins must fit inside their period"
-    # One second of shift is the whole difference between the two conventions:
+    # One second of shift_seconds is the whole difference between the two conventions:
     # counting the boundaries at or before `label - 1` puts a label exactly on
     # a boundary in the bin that ends there, counting those at or before
     # `label` puts it in the bin that starts there.
-    shift = 1 if inclusive == "right" else 0
+    shift_seconds = 1 if inclusive == "right" else 0
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         """Return the 0-based bin a record of ``record_seconds`` counts in."""
@@ -261,7 +261,7 @@ def _variable_window_rule(
         # is split into whole records (`shifted`, folded into the counter) and
         # a remainder (`phase`, folded into the boundaries); the ceiling is
         # then the first record whose label reaches the boundary.
-        shifted, phase = divmod(offset_seconds - shift, record_seconds)
+        shifted, phase = divmod(offset_seconds - shift_seconds, record_seconds)
         in_records = -(-(boundaries - phase) // record_seconds)
         # The last bin ends at the period: that is where it already ends when
         # the period is where the bins end (the ceiling above lands exactly on
