@@ -256,6 +256,18 @@ carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
 
+The bins are the **model** calendar's months, so `monthly.finalize(...)` and
+`to_xarray(...).groupby("time.month").mean()` of the same run are the same
+numbers for a run whose output labels cross no Gregorian 29 February. The
+labels are proleptic Gregorian whatever the model calendar is (JCM's
+convention, jax-gcm#449), so a `365_day` run started on 1 January 2000 — where
+the shipped examples start — labels the record the model calls 1 March 00:00
+as `2000-02-29` and accumulates it into March, and from there on
+`groupby("time.month")` of the written output moves the first record of each
+month into the month before it, while the accumulated bin stays the model's
+month — the month the forcing and the seasonal cycle follow. A `gregorian`
+calendar is refused outright, since it has no fixed table of month lengths.
+
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on
 `RunResult.accumulator`. An accumulated run has no per-step diagnostics, so it
@@ -267,9 +279,9 @@ integrates.
 
 A component the workflow runs *n* times per coupled step keeps that axis —
 `(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
-records is binned by its own label, so the hourly records of 31 January count
-in January even though the coupled step containing them is labelled 1
-February. A nested coupler's inner steps are treated the same way. Fold that
+records is binned by the end of its own sub-interval, so the hourly records of
+31 January count in January even though the coupled step containing them ends
+on 1 February. A nested coupler's inner steps are treated the same way. Fold that
 axis away with `fold_records`, which weights each slot by its own count (a
 straight mean over the slots is right only where every slot holds the same
 number of records, which is what a month boundary breaks):

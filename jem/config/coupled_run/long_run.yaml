@@ -20,8 +20,9 @@ chunk: "30 days"
 # chunk, so on a 365-day calendar its boundaries drift about five days per
 # year and a bin spans parts of two months. For true calendar months use the
 # Python API with `run_chunked(..., accumulate=..., health_check=None)`, which
-# bins every record by the month its own output label falls in, whatever the
-# chunking:
+# bins every record by the month, on the MODEL calendar, that its own interval
+# ends in, whatever the chunking (see `monthly_mean`'s "Leap days" for where
+# that parts company with the Gregorian output labels):
 #
 #   jem.accumulate.monthly_mean(coupler)
 #       twelve bins -- every January of the run in one, a climatology;

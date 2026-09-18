@@ -20,9 +20,11 @@ so there is one piece of bin arithmetic. The two are **not**
 interchangeable, and the arguments of that rule are exactly how they differ:
 a calendar month is phased to where the run's start date falls *in the
 calendar* and is closed at its start, so that it agrees with
-``groupby("time.month")`` of the written output; a window is measured from
-the run's start with no phase at all and is closed at its end, so that the
-first pentad is days 1 to 5. Handing :func:`month_lengths` to
+``groupby("time.month")`` of the written output (for a run whose labels cross
+no Gregorian 29 February -- the bins are the model calendar's months while the
+labels are proleptic Gregorian, which :func:`monthly_mean` explains under
+**Leap days**); a window is measured from the run's start with no phase at
+all and is closed at its end, so that the first pentad is days 1 to 5. Handing :func:`month_lengths` to
 :func:`windowed_mean` is therefore calendar months only for a run starting at
 00:00 on 1 January -- :func:`monthly_mean` is the one that knows where in the
 calendar the run began.
@@ -195,7 +197,8 @@ def _variable_window_rule(
         The same thing in calendar months, for a run starting 1 January
         00:00 with daily records: with ``inclusive="left"`` the record
         labelled 1 February 00:00 is the first of February's bin, which is
-        what ``groupby("time.month")`` of the written output does and why
+        what ``groupby("time.month")`` of the written output does (under the
+        leap-year condition :func:`monthly_mean` states) and why
         :func:`monthly_mean` uses it. With ``inclusive="right"`` a label of
         1 January 00:00 would be the last record of the bin *before* January
         and 1 February 00:00 the last record of January's bin; that is what
@@ -380,9 +383,10 @@ def _months_covering(
     exactly on a month boundary belongs to the month it *opens*, which is why
     the boundary at that instant does not end the count. A one-month run from
     1 January therefore gets two bins, the second holding the single record
-    labelled 00:00 on 1 February -- the same record
-    ``groupby("time.month")`` of the output puts in February, which is the
-    whole reason the convention is what it is.
+    at 00:00 on 1 February -- the same record ``groupby("time.month")`` of the
+    output puts in February, whenever label and model calendar agree (see
+    :func:`monthly_mean`'s **Leap days**), which is the whole reason the
+    convention is what it is.
     """
     last_label = offset_seconds + total_seconds
     months, covered, cycle = 1, 0, len(rotated_months_seconds)
@@ -548,10 +552,12 @@ def fold_records(means: Any, counts: Any) -> Any:
         per_month = fold_records(means["atm"], counts["atm"])
 
     It is a *weighted* mean, by each slot's own count, which is what makes it
-    equal a ``groupby`` of the written output: a straight mean over the slots
-    is the same number only when every slot holds the same number of records,
-    and what breaks that is exactly the bin boundary this binning exists to
-    get right (23 of a day's hourly records in January, one in February).
+    equal a ``groupby`` of the written output (on the bins' own terms -- for a
+    monthly mean, under the leap-year condition in :func:`monthly_mean`'s
+    **Leap days**): a straight mean over the slots is the same number only
+    when every slot holds the same number of records, and what breaks that is
+    exactly the bin boundary this binning exists to get right (23 of a day's
+    hourly records in January, one in February).
 
     Parameters
     ----------
@@ -697,7 +703,9 @@ def _build_binned_mean(
     record with. Binning them all by the coupled step instead would put a
     whole day of hourly records in the month the day *ended* in, and the
     accumulated mean would disagree with a ``groupby`` of the written output
-    at every month boundary.
+    at every month boundary -- rather than only where the Gregorian labels and
+    the model calendar themselves part company, which is the one residual
+    disagreement and is :func:`monthly_mean`'s **Leap days**.
 
     The sub-step axis is **kept**, not folded: a component recording ``n``
     times per coupled step accumulates into ``(n_bins, n, ...)``, bin ``b``
@@ -935,11 +943,15 @@ def monthly_mean(
     **Which month a step counts in.** A coupled step covers
     ``[start + k·dt, start + (k+1)·dt)`` and JEM labels the output record it
     produces with the **end** of that interval (``TimeAxis.datetimes``, JCM's
-    convention). The bin follows the label: a step is counted in the month its
-    *label* falls in, so ``monthly.finalize(accumulator)`` is exactly
+    convention). The bin follows that instant, read on the **model** calendar:
+    a step is counted in the month the end of its interval falls in, so
+    ``monthly.finalize(accumulator)`` is
     ``coupler.to_xarray(diagnostics).groupby("time.month").mean()`` of the same
     run, leaf for leaf -- and, for the sequential form, the same grouped by
-    year and month. (For a component that records more than once per coupled
+    year and month -- **for a run whose output labels cross no Gregorian 29
+    February**, because the labels are proleptic Gregorian whatever the model
+    calendar is while the bins are the model calendar's months (see **Leap
+    days** below). (For a component that records more than once per coupled
     step that equality holds after :func:`fold_records`, which folds the
     sub-step axis this reduction deliberately keeps; see **Sub-steps** below.)
     The one visible consequence is at a boundary: the daily step covering 31
@@ -947,6 +959,31 @@ def monthly_mean(
     start of the interval instead would be equally defensible, but then the
     accumulated mean and the written output would disagree about the same run,
     which is worse than either convention.
+
+    **Leap days**, and the one case in which the equality above does not
+    hold. The bins are the *model* calendar's months, while
+    :meth:`~jem.base.component.TimeAxis.datetimes` writes every label as a
+    proleptic-Gregorian ``datetime64`` whatever the model calendar is -- JCM's
+    convention, kept so that a slab's output and the atmosphere's merge on one
+    time axis, and recorded as a known inconsistency in jax-gcm#449. On a
+    ``365_day`` run the two agree until the labels reach a Gregorian 29
+    February, and from that record on each label is one day *earlier* than the
+    model-calendar date of the instant it stands for -- one more day for every
+    leap year the run passes. A run starting at 00:00 on 1 January 2000 (which
+    is where the shipped examples start) therefore labels its 59th record
+    ``2000-02-29`` while the model calls that instant 1 March and counts it in
+    March; the record the model calls 1 April 00:00 is labelled
+    ``2000-03-31``; and so on to the end of the Gregorian year. What a user
+    sees is that ``groupby("time.month")`` of the written output moves the
+    first record of each month into the month before it -- its February holds
+    29 records where this reduction's February holds 28 -- while the
+    accumulated bin stays the model's month, which is the month the forcing
+    and the seasonal cycle follow, so the bins are still the model's own
+    Februaries and Marches. (On ``gregorian`` the question does not arise:
+    that calendar has no fixed month table and :func:`monthly_mean` refuses
+    it.) Whether JEM should emit calendar-consistent labels instead is
+    jax-gcm#449's question and not this module's; nothing here depends on the
+    answer.
 
     **The twelve-bin form wraps at the year**, because the bin is the calendar
     month and not the month since the run started: a three-year run's January
@@ -995,10 +1032,11 @@ def monthly_mean(
     monthly-mean diurnal cycle for a component sub-cycling through the day.
     Each of the ``n`` records is binned by **its own** label, not by the
     coupled step's, so the 23 hourly records of 31 January count in January
-    and the one labelled 1 February 00:00 counts in February, exactly as
-    ``groupby("time.month")`` of the written output does. :func:`fold_records`
-    folds that axis away, weighting each slot by its own count, when the plain
-    monthly mean is what was wanted::
+    and the one labelled 1 February 00:00 counts in February, as
+    ``groupby("time.month")`` of the written output does under the condition
+    in **Leap days** above. :func:`fold_records` folds that axis away,
+    weighting each slot by its own count, when the plain monthly mean is what
+    was wanted::
 
         sums, counts = accumulator                     # counts["atm"]: (12, n)
         means = monthly.finalize(accumulator)          # means["atm"]: (12, n, ...)
@@ -1207,9 +1245,12 @@ def windowed_mean(
     exactly on a boundary ends the window before it (JEM labels every record
     at the end of its interval, and a window is one such interval), while the
     same label starts the calendar month after it (which is what
-    ``groupby("time.month")`` does, and what a monthly mean has to agree
-    with). It is one step of difference in each case and both are documented
-    where they are; what neither does is bin by the *start* of the step.
+    ``groupby("time.month")`` does, and what a monthly mean has to agree with
+    -- for a run whose labels cross no Gregorian 29 February; see
+    :func:`monthly_mean`'s **Leap days**, which is a property of the calendar
+    and not of this closing convention). It is one step of difference in each
+    case and both are documented where they are; what neither does is bin by
+    the *start* of the step.
 
     So a month-long *window* and a calendar *month* would still differ by one
     record at their shared boundary even for a run that starts on 1 January:

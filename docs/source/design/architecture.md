@@ -677,7 +677,15 @@ The conventions, which are JCM's:
   it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
   xarray. The dates are proleptic Gregorian whatever the model calendar is;
   the calendar governs the seasonal cycle and forcing selection, not the
-  labels.
+  labels. The consequence is a leap day: a `365_day` year is a day shorter
+  than a Gregorian leap year, so the labels fall a day further behind the
+  model calendar at every Gregorian 29 February — a run started on 1 January
+  2000 labels the instant the model calls 1 March 00:00 as `2000-02-29`, and
+  everything downstream that bins by the *label* parts company there from
+  everything that bins by the *model calendar* (see the `accumulate` section
+  below). The inconsistency is JCM's, recorded upstream
+  as jax-gcm#449; JEM mirrors it rather than emitting labels of its own,
+  which would no longer merge with the atmosphere's on one time axis.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
@@ -1205,12 +1213,27 @@ three consequences are chosen rather than inherited:
 `jax.eval_shape` of one coupled step, and a record's month is a `searchsorted`
 in a static table of month boundaries, reached from the record counter reduced
 modulo the records in a year — exact integer arithmetic, and one compiled
-trajectory for a whole year. Which month a record counts in follows the label
-JEM writes on it (the *end* of the interval it covers), so
-`monthly.finalize(...)` and `to_xarray(...).groupby("time.month").mean()` of
-the same run are the same numbers — for a component that records once per
-coupled step directly, and for one that records more often after its kept
-sub-step axis is folded with `fold_records` (below). A calendar with no fixed
+trajectory for a whole year. Which month a record counts in follows the *end*
+of the interval it covers — the instant JEM labels it with — read on the model
+calendar, so `monthly.finalize(...)` and
+`to_xarray(...).groupby("time.month").mean()` of the same run are the same
+numbers for a run whose output labels cross no Gregorian 29 February — for a
+component that records once per coupled step directly, and for one that records
+more often after its kept sub-step axis is folded with `fold_records` (below).
+
+That condition is the labels' calendar, not the binning: the labels are
+proleptic Gregorian whatever the model calendar is (above, and jax-gcm#449),
+while the bins are the model calendar's months. On a `365_day` run started on
+1 January 2000 — where the shipped examples start — the record the model calls
+1 March 00:00 is labelled `2000-02-29` and is accumulated into March, the one
+the model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest
+of the Gregorian year: `groupby("time.month")` of the written output moves the
+first record of each month into the month before it (its February holds 29
+records where the accumulator's holds 28), while the accumulated bin stays the
+model's month, which is the month the forcing and the seasonal cycle follow.
+On `gregorian` the question does not arise, because `monthly_mean` refuses that
+calendar. Nothing in the reduction depends on how jax-gcm#449 is eventually
+settled. A calendar with no fixed
 table of month lengths (gregorian, with its leap years) and a coupling step
 that does not divide the year are refused with a message saying why, rather
 than binned approximately. Without `accumulate`, the generated function is what
@@ -1288,7 +1311,7 @@ January a 31-day window and January differ by the record labelled 00:00 on 1
 February. No `inclusive=` knob is offered to mix them either: each convention is
 what makes its own builder agree with the thing it has to agree with (a
 forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
-of the written output).
+of the written output, for a run whose labels cross no Gregorian 29 February).
 
 Both binnings follow the **label** of the record a step produces — the end of
 the coupling interval — rather than where the interval starts. The boundaries
@@ -1298,7 +1321,9 @@ because a window is itself an interval and JEM labels an interval at its end
 (so the first 5-day window with daily coupling is the records labelled day 1 to
 day 5, which is what a forecast means by the first pentad), while a calendar
 month is closed at its start because that is what `groupby("time.month")` does
-and a monthly mean has to agree with the written output.
+and a monthly mean has to agree with the written output — up to the leap-day
+difference above, which is a property of the labels' calendar rather than of
+which side a boundary closes on.
 
 Both rules are therefore one private
 `_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins laid

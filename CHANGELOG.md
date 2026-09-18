@@ -425,10 +425,19 @@ Breaking changes are marked; everything else is additive.
   `searchsorted` in a static table of month boundaries, reached from the record
   counter reduced modulo the records in a year — so a whole year is one
   compiled trajectory instead of the three that chunking by calendar month
-  would need. Which month a record counts in follows the label JEM writes on
-  it, so `monthly.finalize(acc)` and
-  `to_xarray(...).groupby("time.month").mean()` of the same run agree (for a
-  sub-stepped component, after `fold_records`, below). A calendar with no fixed
+  would need. Which month a record counts in follows the end of the interval it
+  covers — the instant JEM labels it with — read on the **model** calendar, so
+  `monthly.finalize(acc)` and `to_xarray(...).groupby("time.month").mean()` of
+  the same run agree for a run whose output labels cross no Gregorian 29
+  February (and, for a sub-stepped component, after `fold_records`, below).
+  That condition is the labels' calendar, not the binning: labels are proleptic
+  Gregorian whatever the model calendar is (JCM's convention, jax-gcm#449),
+  so a `365_day` run started on 1 January 2000 labels the record the model
+  calls 1 March 00:00 as `2000-02-29` and accumulates it into March, and from
+  there on a `groupby("time.month")` of the written output moves the first
+  record of each month into the month before it while the accumulated bin stays
+  the model's month — the month the forcing and the seasonal cycle follow.
+  A calendar with no fixed
   month table (gregorian) and a coupling step that does not divide the year are
   refused with a message saying why. **Without `accumulate` the generated
   function is exactly what it was.**

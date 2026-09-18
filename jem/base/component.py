@@ -387,6 +387,23 @@ class TimeAxis:
     :meth:`datetimes` implements exactly that and is the one place the
     convention is written down.
 
+    The consequence to know about is at a leap day. The labels are
+    Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap
+    year, so from the first 29 February a run's labels reach, every label
+    falls one day *behind* the model-calendar date of the instant it stands
+    for -- one more day for every leap year the run passes. A run starting on
+    1 January 2000 labels the record whose instant the model calls 1 March
+    00:00 as ``2000-02-29``, and the one the model calls 1 April 00:00 as
+    ``2000-03-31``. Anything binning the output by its own labels
+    (``groupby("time.month")``) therefore parts company from that record on
+    with anything binning by the model calendar -- which is what
+    :func:`jem.accumulate.monthly_mean` does, and what the forcing and the
+    seasonal cycle follow; ``monthly_mean`` documents the difference where a
+    user meets it, under **Leap days**. The inconsistency is JCM's and is
+    recorded upstream as jax-gcm#449; JAX-ESM mirrors the convention rather
+    than diverging from it, because labels of its own would no longer merge
+    with the atmosphere's on one time axis.
+
     Attributes
     ----------
     start_date : jdt.Datetime
@@ -427,6 +444,14 @@ class TimeAxis:
         components' output on one time axis. Computing the exact integer
         nanosecond count instead would be more accurate and would merge with
         nothing.
+
+        The count of days is a plain count, so the dates it lands on are
+        proleptic Gregorian and a ``365_day`` run's labels fall a day further
+        behind the model calendar at every Gregorian 29 February -- the
+        leap-day consequence the class docstring spells out. Making the labels
+        calendar-consistent is not a change this method can make alone
+        (jax-gcm#449): it would put JEM's output on a different time axis from
+        the JCM output it is written to merge with.
 
         Sub-day start dates are the one deliberate difference from JCM's own
         output path, which takes ``start_date.delta.days`` and drops
