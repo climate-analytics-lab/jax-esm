@@ -248,10 +248,13 @@ def write_chunk(
     configuration changed and repeated), and refusing it would be worse than
     saying so. A resumed run normally does not collide, because it starts from
     the step its checkpoint holds; it does when the chunk it already wrote was
-    never checkpointed -- either because the run was killed in between, or
-    because the health gate rejected that chunk, which is deliberately not
-    checkpointed -- so the warning reports a fact and does not assert which of
-    them happened.
+    never checkpointed -- because the run was killed in between, because the
+    health gate rejected that chunk, which is deliberately not checkpointed, or
+    because ``run_chunked``'s ``checkpoint_interval`` spaces the saves out and
+    the run stopped after one of the chunks in between -- so the warning reports
+    a fact and does not assert which of them happened. The rewrite is of the
+    same name from the same starting state, because a file is named after the
+    coupled step its chunk starts at.
 
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is

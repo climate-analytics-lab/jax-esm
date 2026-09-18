@@ -563,6 +563,303 @@ def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler)
 
 
 # ---------------------------------------------------------------------------
+# How often the checkpoint is written
+# ---------------------------------------------------------------------------
+
+
+def checkpoint_step(checkpoint):
+    """Return the coupled step a checkpoint holds, or None if there is none."""
+    if not (checkpoint / CARRY_FILENAME).exists():
+        return None
+    return int(two_slabs().load_state(checkpoint).step)
+
+
+def watch_the_checkpoint(checkpoint, seen, rejects=()):
+    """Return a health check that records what the checkpoint holds as it runs.
+
+    The gate runs after a chunk has been integrated and **before** that chunk
+    is saved, so the step it records is the one the chunks *before* it left
+    behind -- which is exactly the restart point the run would fall back to if
+    it died there. `rejects` names the chunk indices the gate fails.
+    """
+    def health_check(datasets, chunk_index, elapsed_days):
+        seen.append(checkpoint_step(checkpoint))
+        return chunk_index not in rejects, {"chunk": chunk_index}
+
+    return health_check
+
+
+def test_checkpoint_interval_saves_every_nth_chunk(tmp_path):
+    """Five one-day chunks with a two-chunk interval save at steps 2, 4 and 5.
+
+    `seen[i]` is what the checkpoint held when chunk `i` had just been
+    integrated: nothing for the first two, then the step-2 boundary, then the
+    step-4 one. The 5 at the end is the other rule -- the last chunk of a
+    completed run is saved whatever the interval says, so a finished run
+    always leaves its final restart state.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
+    result = run_chunked(
+        two_slabs(),
+        total_time="5 days",
+        chunk="1 day",
+        checkpoint_interval="2 days",
+        output_dir=tmp_path / "output",
+        checkpoint_path=checkpoint,
+        health_check=watch_the_checkpoint(checkpoint, seen),
+    )
+
+    assert result.completed
+    assert result.steps_completed == 5
+    assert seen == [None, None, 2, 2, 4]
+    assert checkpoint_step(checkpoint) == 5
+
+
+def test_without_an_interval_every_chunk_is_still_saved(tmp_path):
+    """The default is unchanged: no interval, a checkpoint after every chunk."""
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
+    run_chunked(
+        two_slabs(),
+        total_time="4 days",
+        chunk="1 day",
+        output_dir=tmp_path / "output",
+        checkpoint_path=checkpoint,
+        health_check=watch_the_checkpoint(checkpoint, seen),
+    )
+    assert seen == [None, 1, 2, 3]
+    assert checkpoint_step(checkpoint) == 4
+
+
+def test_the_interval_counts_from_the_start_of_the_run_not_of_the_call(tmp_path):
+    """A resumed run checkpoints where an uninterrupted one would.
+
+    Six one-day chunks with a two-chunk interval save at steps 2, 4 and 6.
+    Stopping after three days and resuming must not move those points: the
+    second call integrates the chunks ending at 4, 5 and 6 and saves at 4 --
+    the *run's* second boundary -- and not at 5, which is where an interval
+    counted from the start of the call would have landed.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    settings = {
+        "chunk": "1 day",
+        "checkpoint_interval": "2 days",
+        "checkpoint_path": checkpoint,
+    }
+
+    first = []
+    run_chunked(
+        two_slabs(), total_time="3 days", output_dir=tmp_path / "first",
+        health_check=watch_the_checkpoint(checkpoint, first), **settings,
+    )
+    # Step 2 is the interval boundary; step 3 is there because a completed run
+    # always checkpoints its last chunk.
+    assert first == [None, None, 2]
+    assert checkpoint_step(checkpoint) == 3
+
+    resumed = []
+    run_chunked(
+        two_slabs(), total_time="6 days", output_dir=tmp_path / "second",
+        health_check=watch_the_checkpoint(checkpoint, resumed), **settings,
+    )
+    assert resumed == [3, 4, 4]
+    assert checkpoint_step(checkpoint) == 6
+
+
+def test_a_bail_out_keeps_the_interval_checkpoint_it_had_already_written(tmp_path):
+    """The last accepted chunk was the interval boundary: nothing to add.
+
+    One-day chunks with a two-chunk interval, and the gate rejects the chunk
+    ending at step 3. The chunk before it ended on the boundary and was saved,
+    so the restart point is already the last healthy state and bailing writes
+    nothing further -- the rejected chunk itself is never checkpointed.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
+    result = run_chunked(
+        two_slabs(),
+        total_time="5 days",
+        chunk="1 day",
+        checkpoint_interval="2 days",
+        output_dir=tmp_path / "output",
+        checkpoint_path=checkpoint,
+        health_check=watch_the_checkpoint(checkpoint, seen, rejects={2}),
+    )
+
+    assert not result.completed
+    assert result.steps_completed == 3
+    assert seen == [None, None, 2]
+    assert checkpoint_step(checkpoint) == 2
+
+
+def test_a_bail_out_saves_the_accepted_chunk_the_interval_had_skipped(
+    tmp_path, caplog
+):
+    """Bailing must not lose the healthy chunks the interval had not saved.
+
+    One-day chunks with a three-chunk interval: the run saves at step 3, then
+    integrates the chunk ending at 4 (accepted, unsaved because of the
+    interval) and the chunk ending at 5, which the gate rejects. Left alone
+    the restart point would fall back to step 3 and the resume would
+    re-integrate a healthy chunk already paid for, so the last accepted carry
+    -- step 4 -- is written on the way out, and named in the log. The rejected
+    chunk is still not checkpointed.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(),
+            total_time="6 days",
+            chunk="1 day",
+            checkpoint_interval="3 days",
+            output_dir=tmp_path / "output",
+            checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(checkpoint, seen, rejects={4}),
+        )
+
+    assert not result.completed
+    assert result.steps_completed == 5
+    # Step 3 is all the interval had written by the time the chunk was rejected.
+    assert seen == [None, None, None, 3, 3]
+    assert checkpoint_step(checkpoint) == 4
+    assert (
+        "Checkpointed the last chunk the health gate accepted, at coupled step 4"
+        in caplog.text
+    )
+
+
+def test_a_resume_that_cannot_reach_the_interval_says_so(tmp_path, caplog):
+    """A resume part-way through a chunk warns that the interval cannot land.
+
+    The interval is counted from the start of the run and the loop stops only
+    at a chunk boundary, so a checkpoint written under a *different* chunk
+    length leaves an offset that no chunk end of this run can turn into a
+    multiple of the interval: the run would checkpoint only when it finished.
+    That is a real loss of restart points, so it is said out loud rather than
+    left to be discovered after a job was killed.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="3 days", chunk="3 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+    with caplog.at_level(logging.WARNING):
+        result = run_chunked(
+            two_slabs(), total_time="8 days", chunk="2 days",
+            checkpoint_interval="4 days",
+            output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 8
+    assert "resumes at coupled step 3" in caplog.text
+    assert "not a whole number of the 2-step chunks" in caplog.text
+    # It still leaves its final restart state, which is the other guarantee.
+    assert checkpoint_step(checkpoint) == 8
+
+
+def test_a_total_time_that_is_not_whole_intervals_warns_but_runs(tmp_path, caplog):
+    """Five chunks with a two-chunk interval run; the shorter last gap is said.
+
+    The interval need not divide `total_time`, because a completed run
+    checkpoints its last chunk whatever the interval says -- so this is a
+    warning and not a refusal. It is still worth one: the interval is what
+    someone sizing a requeue reasons with, and the last gap between saves
+    (step 4 to step 5 here) is shorter than it.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    with caplog.at_level(logging.WARNING):
+        result = run_chunked(
+            two_slabs(), total_time="5 days", chunk="1 day",
+            checkpoint_interval="2 days",
+            output_dir=tmp_path / "output", checkpoint_path=checkpoint,
+        )
+
+    assert result.completed
+    assert "total_time ('5 days', 5 coupled steps)" in caplog.text
+    assert "checkpoint_interval ('2 days', 2 coupled steps)" in caplog.text
+    assert checkpoint_step(checkpoint) == 5
+
+
+def test_a_total_time_that_is_whole_intervals_says_nothing(tmp_path, caplog):
+    """The warning is about a short final gap, so a run without one is silent."""
+    with caplog.at_level(logging.WARNING):
+        run_chunked(
+            two_slabs(), total_time="4 days", chunk="1 day",
+            checkpoint_interval="2 days",
+            output_dir=tmp_path / "output",
+            checkpoint_path=tmp_path / "checkpoint",
+        )
+    assert "checkpoint_interval" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("interval", "message"),
+    [
+        # Longer than a chunk but not a multiple of one.
+        ("3 days", "not a whole number of chunks"),
+        # Shorter than a chunk: the same refusal, since the run cannot stop
+        # in the middle of one to write a checkpoint.
+        ("1 day", "not a whole number of chunks"),
+        # Not even a whole number of coupled steps.
+        ("36 hours", "checkpoint_interval="),
+    ],
+)
+def test_run_chunked_rejects_a_checkpoint_interval_it_cannot_honour(
+    coupler, tmp_path, interval, message
+):
+    """An interval that is not a whole number of chunks is refused, naming both."""
+    with pytest.raises(ValueError, match=message):
+        run_chunked(
+            coupler, total_time="10 days", chunk="2 days",
+            checkpoint_interval=interval, output_dir=tmp_path,
+        )
+
+
+def test_a_bad_checkpoint_interval_is_refused_before_anything_is_compiled(
+    coupler, tmp_path
+):
+    """The interval is checked with the other durations, not at the first save.
+
+    It is not read until a chunk has been integrated and passed the gate, so
+    a run configured with an interval the driver cannot honour would otherwise
+    compile a trajectory and integrate a whole chunk before raising.
+    """
+    interval = "3 days"
+
+    def must_not_be_called(iterations, **kwargs):
+        raise AssertionError(
+            f"a {iterations}-step trajectory was built despite "
+            f"checkpoint_interval={interval!r}"
+        )
+
+    coupler.generate_trajectory_function = must_not_be_called
+    with pytest.raises(ValueError, match="not a whole number of chunks"):
+        run_chunked(
+            coupler, total_time="10 days", chunk="2 days",
+            checkpoint_interval=interval, output_dir=tmp_path,
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_checkpoint_interval_without_a_checkpoint_path_is_refused(
+    coupler, tmp_path
+):
+    """Spacing out saves that were switched off is a contradiction, not a no-op.
+
+    Ignoring it would leave a run that asked to checkpoint less often
+    checkpointing not at all, and finding out when it tried to resume.
+    """
+    with pytest.raises(ValueError, match="checkpoint_path=None"):
+        run_chunked(
+            coupler, total_time="4 days", chunk="2 days",
+            checkpoint_interval="4 days", checkpoint_path=None,
+            output_dir=tmp_path,
+        )
+
+
+# ---------------------------------------------------------------------------
 # What the run says about the state it starts from
 # ---------------------------------------------------------------------------
 

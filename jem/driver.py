@@ -62,6 +62,25 @@ accidental, and the provenance line below says which happened. An absolute
 path is used as given, for a run that checkpoints to scratch while writing
 output elsewhere; ``None`` disables checkpointing entirely.
 
+``checkpoint_interval`` spaces those saves out, for a run whose chunks are
+short for one of the *other* reasons a chunk exists -- a health check every few
+days, an output file per day -- and which does not want its restart state
+rewritten that often. It is counted in coupled steps from the **start of the
+run** rather than from the start of the call, so a resumed run checkpoints at
+the same points an uninterrupted one does, and it must be a whole number of
+chunks, because a chunk boundary is the only place this loop stops. It need not
+divide ``total_time``, since the last chunk is saved regardless, but the run
+warns when it does not, because the last gap between saves is then shorter than
+the interval. Two things survive it: the last chunk of a completed run is always checkpointed, so a
+finished run leaves its final restart state; and a run the health gate stops
+writes the last chunk that *passed* on the way out, so bailing still leaves the
+restart point at the last healthy state. What it gives up is a run that is
+**killed** -- a queue timeout, a node failure -- which falls back to the last
+interval boundary instead of the last chunk. The chunks after it are then
+re-integrated on the resume and their output files rewritten, which is safe
+because each file is named after the coupled step its chunk starts at: the
+second pass writes the same names from the same starting state.
+
 Because there is only ever one checkpoint, the health gate runs *before* it
 is written and a chunk the gate rejects is not checkpointed at all: saving it
 would overwrite the last healthy restart point with a broken state, and a
@@ -274,6 +293,7 @@ def run_chunked(
     health_check: HealthCheck | None = default_health_check,
     bail_on_unhealthy: bool = True,
     checkpoint_path: Path | str | None = DEFAULT_CHECKPOINT_PATH,
+    checkpoint_interval: str | float | None = None,
     accumulate: "Accumulator | None" = None,
 ) -> RunResult:
     """Integrate ``coupler`` for ``total_time``, a chunk at a time.
@@ -345,6 +365,42 @@ def run_chunked(
         directory each time, so resuming one from the command line means
         naming the earlier run's ``output_dir``, or giving an absolute
         ``checkpoint_path``.
+    checkpoint_interval : str or float, optional
+        How often that checkpoint is written, in the same duration forms as
+        ``chunk``. ``None``, the default, writes one after **every** chunk the
+        health gate accepts. A value must be a whole multiple of ``chunk`` --
+        a chunk boundary is the only place this loop stops, so an interval
+        between two of them could only round to one of them -- and is counted
+        in coupled steps from the **start of the run**, not from the start of
+        this call, so a resumed run checkpoints at the same points an
+        uninterrupted one does. It is what a run whose chunks are short for
+        another reason (a health check every few days, an output file per day)
+        uses to stop rewriting its restart state that often. Giving it with
+        ``checkpoint_path=None`` is a ``ValueError`` rather than a setting
+        silently ignored.
+
+        ``total_time`` need *not* be a whole number of intervals -- that
+        costs nothing, since the last chunk of a completed run is checkpointed
+        anyway -- but the run warns when it is not, naming both durations,
+        because the final gap between saves is then shorter than the interval
+        asked for.
+
+        Two guarantees survive the interval. The last chunk of a completed run
+        is always checkpointed, whatever the interval, so a finished run leaves
+        its final restart state. And if the health gate stops the run
+        (``bail_on_unhealthy``) while the last accepted chunk is still unsaved,
+        that chunk is checkpointed before this returns -- so bailing still
+        leaves the restart point at the last healthy state, exactly as it does
+        without an interval.
+
+        What the interval does cost is a run that is *killed* rather than
+        stopped -- a queue timeout, a node failure -- which resumes from the
+        last interval boundary instead of the last chunk. The chunks after it
+        are re-integrated and their output files **rewritten**: each file is
+        named after the coupled step its chunk starts at, so the second pass
+        writes the same names from the same starting state and leaves nothing
+        orphaned. :func:`jem.output.write_chunk` warns as it overwrites each
+        one.
     accumulate : pair of callables, optional
         An **in-scan reduction** of the per-step diagnostics --
         :func:`jem.accumulate.monthly_mean` or
@@ -365,10 +421,11 @@ def run_chunked(
     ------
     ValueError
         If ``chunk`` or ``total_time`` is not a whole number of coupling
-        steps, ``total_time`` is not a whole number of chunks, or
-        ``subsample`` is not a positive integer, or if ``accumulate`` is
-        given with a ``health_check``. All of them are checked before
-        anything is compiled or integrated.
+        steps, ``total_time`` is not a whole number of chunks,
+        ``checkpoint_interval`` is not a whole number of chunks or was given
+        without a ``checkpoint_path``, or ``subsample`` is not a positive
+        integer, or if ``accumulate`` is given with a ``health_check``. All of
+        them are checked before anything is compiled or integrated.
 
     Notes
     -----
@@ -420,6 +477,10 @@ def run_chunked(
             "chunk that divides the run, or a run length that is a multiple of "
             "the chunk."
         )
+    steps_per_checkpoint = _checkpoint_steps(
+        checkpoint_interval, checkpoint_path, chunk, steps_per_chunk,
+        coupling_days, coupler,
+    )
     if accumulate is not None and health_check is not None:
         raise ValueError(
             "accumulate= reduces the per-step diagnostics inside the scan, so "
@@ -475,6 +536,22 @@ def run_chunked(
                 "only what it integrates.", checkpoint_dir,
             )
 
+    if steps_per_checkpoint is not None and total_steps % steps_per_checkpoint:
+        # Not refused, unlike an interval that does not divide the CHUNK: this
+        # one costs nothing, because a completed run always checkpoints its
+        # last chunk. It is still worth saying, because the interval is what
+        # someone sizing a requeue reasons with, and the last gap is shorter
+        # than the one they asked for.
+        logger.warning(
+            "total_time (%r, %d coupled steps) is not a whole number of "
+            "checkpoint_interval (%r, %d coupled steps), so the run's last "
+            "checkpoint falls at the end of the run rather than on an interval "
+            "boundary -- the final gap between saves is shorter than the "
+            "interval. Nothing is lost by it: a completed run always "
+            "checkpoints its last chunk.",
+            total_time, total_steps, checkpoint_interval, steps_per_checkpoint,
+        )
+
     # Built once and cached by length: every chunk but (at most) the first of
     # a resumed run has the same number of steps, so this compiles one
     # trajectory for the whole run.
@@ -508,7 +585,31 @@ def run_chunked(
             "Nothing to integrate: the run starts at coupled step %d and asks "
             "for %d. %s", int(carry.step), total_steps, provenance,
         )
-    for steps in batches:
+    elif steps_per_checkpoint is not None and int(carry.step) % steps_per_chunk:
+        # The interval is counted from the start of the run and the loop can
+        # only stop at a chunk boundary, so when the restored step is not a
+        # whole number of THIS run's chunks, no chunk of this call can end on a
+        # multiple of the interval -- the run would checkpoint only at the end,
+        # which is worse than the interval asked for. A checkpoint lands
+        # part-way through a chunk only when the run that wrote it used a
+        # different `chunk`, so this is worth a warning and not a silent
+        # degradation.
+        logger.warning(
+            "This run resumes at coupled step %d, which is not a whole number "
+            "of the %d-step chunks it is using, so no chunk it integrates can "
+            "end on a multiple of the %d-step checkpoint_interval: it will "
+            "checkpoint when it finishes (and, if the health gate stops it, at "
+            "the last chunk that passed), but not in between. Resuming with "
+            "the chunk the checkpoint was written under restores the interval.",
+            int(carry.step), steps_per_chunk, steps_per_checkpoint,
+        )
+
+    # The last chunk the health gate accepted and the interval did NOT save, so
+    # that a bail-out can still leave the restart point at the last healthy
+    # state. Exactly one carry is held -- each accepted chunk replaces it -- so
+    # the interval costs one carry of device memory, not a history of them.
+    pending_carry: CoupledCarry | None = None
+    for batch_index, steps in enumerate(batches):
         first_step = int(carry.step)
         # A counter for the health check and the log line only. It is
         # run-global -- how many whole chunks of THIS run's length fit before
@@ -584,8 +685,38 @@ def run_chunked(
         # unhealthy state deliberately (`bail_on_unhealthy=False`) does
         # checkpoint it: it is carrying on, and has to stay resumable.
         if checkpoint_dir is not None and not stopping:
-            coupler.save_state(carry, checkpoint_dir)
+            # `checkpoint_interval` is counted in coupled steps from the start
+            # of the run -- `carry.step`, which a resumed run restored -- and
+            # not from the start of this call, so an interrupted run
+            # checkpoints at the same points an uninterrupted one does. The
+            # last chunk of a completed run is saved whatever the interval
+            # says: a finished run that left no final restart state would have
+            # to be re-integrated to be continued.
+            last_chunk = batch_index == len(batches) - 1
+            if (
+                steps_per_checkpoint is None
+                or last_chunk
+                or int(carry.step) % steps_per_checkpoint == 0
+            ):
+                coupler.save_state(carry, checkpoint_dir)
+                pending_carry = None
+            else:
+                pending_carry = carry
         if stopping:
+            if checkpoint_dir is not None and pending_carry is not None:
+                # The interval skipped the last accepted chunk and the run is
+                # stopping here, so that chunk is the last healthy state there
+                # will be: write it now rather than leave the restart point at
+                # an older interval boundary and make the resume re-integrate
+                # healthy chunks it has already paid for.
+                coupler.save_state(pending_carry, checkpoint_dir)
+                logger.info(
+                    "Checkpointed the last chunk the health gate accepted, at "
+                    "coupled step %d: checkpoint_interval had skipped it, and "
+                    "it is the state this run stops from.",
+                    int(pending_carry.step),
+                )
+                pending_carry = None
             logger.error(
                 "Stopping after %d coupled steps; the output written so far is "
                 "kept, and the checkpoint still holds the last chunk that "
@@ -629,6 +760,53 @@ def _whole_steps(
             "positive number of them."
         )
     return int(rounded)
+
+
+def _checkpoint_steps(
+    checkpoint_interval: str | float | None,
+    checkpoint_path: Path | str | None,
+    chunk: str | float,
+    steps_per_chunk: int,
+    coupling_days: float,
+    coupler: "Coupler",
+) -> int | None:
+    """Return ``checkpoint_interval`` in coupled steps, or None for every chunk.
+
+    Checked here, with the other durations, so that a run whose checkpointing
+    is misconfigured says so before it compiles a trajectory rather than after
+    it has integrated a chunk of an atmosphere.
+
+    The one modulo test covers both halves of "a whole number of chunks, and at
+    least one": an interval is a whole positive number of coupled steps
+    (:func:`_whole_steps` refuses anything else), and a positive number smaller
+    than ``steps_per_chunk`` can never be a multiple of it.
+    """
+    if checkpoint_interval is None:
+        return None
+    if checkpoint_path is None:
+        # Refused rather than ignored: the two settings say opposite things
+        # about a run, and a run that asked to checkpoint less often and got no
+        # checkpoints at all would find out when it tried to resume.
+        raise ValueError(
+            f"checkpoint_interval={checkpoint_interval!r} was given with "
+            "checkpoint_path=None, which switches checkpointing off entirely, "
+            "so there would be no saves for the interval to space out. Give a "
+            "checkpoint_path, or drop the interval."
+        )
+    steps = _whole_steps(
+        checkpoint_interval, coupling_days, coupler, "checkpoint_interval"
+    )
+    if steps % steps_per_chunk:
+        raise ValueError(
+            f"checkpoint_interval ({checkpoint_interval!r}, {steps} coupled "
+            f"steps) is not a whole number of chunks of {chunk!r} "
+            f"({steps_per_chunk} coupled steps): a checkpoint is only ever "
+            "written where the run stops, which is a chunk boundary, so an "
+            "interval between two of them -- or shorter than one chunk -- "
+            "could only be rounded to one of them. Choose a multiple of the "
+            "chunk, or None to checkpoint after every chunk."
+        )
+    return steps
 
 
 def _checkpoint_directory(
