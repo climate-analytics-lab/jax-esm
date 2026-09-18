@@ -13,7 +13,7 @@ bin of a fixed set of bins -- as such a pair:
   start date -- of one fixed length, which is what a sub-seasonal forecast is
   scored on (pentads, weeks), or of a repeating *pattern* of lengths.
 
-Both are :func:`_binned_mean` with a different step-to-bin rule, so there is
+Both are :func:`_build_binned_mean` with a different step-to-bin rule, so there is
 one running-sum-and-count implementation and one :meth:`BinnedMean.finalize`;
 and both rules are :func:`_variable_window_rule` with different boundaries,
 so there is one piece of bin arithmetic. The two are **not**
@@ -205,7 +205,7 @@ def _variable_window_rule(
     -------
     callable
         ``(record, record_seconds) -> int32 bin index``, total by
-        construction (see :func:`_binned_mean`).
+        construction (see :func:`_build_binned_mean`).
 
     Notes
     -----
@@ -405,7 +405,7 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     The axes are in the order the leading axes appear, which is the order the
     records were produced in, so flattening them row-major gives the records
     of one coupled step in time order. That is the whole reason this map
-    exists: :func:`_binned_mean` needs each record's own place in the coupled
+    exists: :func:`_build_binned_mean` needs each record's own place in the coupled
     step to bin it by its own label rather than by the step's.
 
     The nested coupler is recognised by duck-typing rather than by an
@@ -489,7 +489,7 @@ def _all_flat(axes: Any) -> bool:
     return bool(axes == ())
 
 
-def _binned_means(sums: Any, counts: Any) -> Any:
+def _divide_sums_by_counts(sums: Any, counts: Any) -> Any:
     """Return the running sums divided by the counts of their own bins.
 
     Recurses on ``counts`` rather than on ``sums``: the counts mirror the
@@ -498,7 +498,7 @@ def _binned_means(sums: Any, counts: Any) -> Any:
     sums are an opaque pytree of its diagnostics, which may itself be a dict.
     """
     if isinstance(counts, dict):
-        return {name: _binned_means(sums[name], node) for name, node in counts.items()}
+        return {name: _divide_sums_by_counts(sums[name], node) for name, node in counts.items()}
     counts = jnp.asarray(counts)
     empty = counts == 0
     # The division is taken against a count of 1 where there is no data
@@ -620,7 +620,7 @@ class BinnedMean(NamedTuple):
         ``(accumulator, diagnostics, time) -> BinnedAccumulator``; adds one
         coupled step's diagnostics into their bins -- one bin for the step
         when every component records once per coupled step, and otherwise one
-        per record (see :func:`_binned_mean`).
+        per record (see :func:`_build_binned_mean`).
 
     """
 
@@ -660,10 +660,10 @@ class BinnedMean(NamedTuple):
         # accumulator's own leading axis rather than anything captured when
         # the pair was built, so `finalize` is correct for whatever `init`
         # made and stays a plain function of its argument.
-        return _binned_means(sums, counts)
+        return _divide_sums_by_counts(sums, counts)
 
 
-def _binned_mean(
+def _build_binned_mean(
     coupler: Any,
     bin_of_record: Callable[[jnp.ndarray, int], jnp.ndarray],
     n_bins: int,
@@ -1015,7 +1015,7 @@ def monthly_mean(
         The coupled model the accumulator is for.
     carry : CoupledCarry, optional
         A carry to take the diagnostics' shapes from; see
-        :func:`_binned_mean`.
+        :func:`_build_binned_mean`.
     n_months : int, optional
         Build the **sequential** form with this many bins: the months the run
         passes through, in order, starting with the one the run starts in. At
@@ -1085,7 +1085,7 @@ def monthly_mean(
         # so a multi-year run composites its Januaries, which is what the
         # fixed `(12, ...)` accumulator is for. The month lengths sum to the
         # calendar's year by construction, so the period *is* the year.
-        return _binned_mean(
+        return _build_binned_mean(
             coupler,
             _variable_window_rule(
                 np.cumsum(month_seconds), year_offset_seconds, "left"
@@ -1136,7 +1136,7 @@ def monthly_mean(
     # years.
     boundaries[-1] = _ceil_div(int(boundaries[-1]), dt_seconds) * dt_seconds
 
-    return _binned_mean(
+    return _build_binned_mean(
         coupler,
         _variable_window_rule(boundaries, offset_seconds, "left"),
         bins,
@@ -1260,7 +1260,7 @@ def windowed_mean(
         divided by its own count).
     carry : CoupledCarry, optional
         A carry to take the diagnostics' shapes from; see
-        :func:`_binned_mean`.
+        :func:`_build_binned_mean`.
 
     Returns
     -------
@@ -1360,4 +1360,4 @@ def windowed_mean(
     # closes.
     window_index = _variable_window_rule(boundaries, 0, "right")
 
-    return _binned_mean(coupler, window_index, bins, carry)
+    return _build_binned_mean(coupler, window_index, bins, carry)

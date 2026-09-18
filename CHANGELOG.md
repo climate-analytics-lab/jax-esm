@@ -432,7 +432,7 @@ Breaking changes are marked; everything else is additive.
   run that does not divide into whole windows still has a bin for the one it
   ends inside), and a sequence given neither is used once through. Both
   builders return the same `BinnedMean` named tuple from one private
-  `_binned_mean(coupler, bin_of_record, n_bins)` with one private
+  `_build_binned_mean(coupler, bin_of_record, n_bins)` with one private
   `_variable_window_rule(boundaries, offset, inclusive)` — a calendar month is
   that rule with the month boundaries, the run's phase in the calendar and
   bins closed at their start — and both bin every record by its own **label**;

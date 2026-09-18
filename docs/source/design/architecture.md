@@ -1183,7 +1183,7 @@ in the first place can see it.
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
 Both are the same reduction with a different step-to-bin rule, so
-`jem.accumulate` is one private `_binned_mean(coupler, bin_of_record, n_bins)`
+`jem.accumulate` is one private `_build_binned_mean(coupler, bin_of_record, n_bins)`
 under two public builders, returning the same `BinnedMean` named tuple with the
 same `finalize`:
 
