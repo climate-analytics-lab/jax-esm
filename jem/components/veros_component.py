@@ -218,12 +218,18 @@ class VerosComponent:
     ----------
     name : str
         ``"ocn"``.
-    mask_T : jax.Array
-        Land-sea mask on the T grid, halo cells removed.
+    mask_T, mask_U : jax.Array
+        Land-sea masks on the T and u grids, halo cells removed.
     longitude, latitude : jax.Array
         T-grid cell centres, halo cells removed.
     dlongitude, dlatitude : jax.Array
-        T-grid cell widths, halo cells removed.
+        T-grid cell widths in **metres**, halo cells removed. Veros converts
+        its grid spacings to a pseudo-Cartesian grid in ``calc_grid``, so
+        these are distances even when the coordinates are degrees.
+    enable_streamfunction : bool
+        Whether the wrapped setup solves the external mode for a barotropic
+        streamfunction; it decides where the ``psi`` output comes from (see
+        :meth:`_barotropic_streamfunction`).
 
     """
 
@@ -245,6 +251,10 @@ class VerosComponent:
             model.state.dimensions["xt"], model.state.dimensions["yt"],
         )
         self.mask_T = jnp.array(variables.maskT)[interior, interior]
+        # `maskU` as well as `maskT`: the barotropic streamfunction is
+        # diagnosed from the depth-integrated *zonal* transport, which lives
+        # on the u grid (see `_barotropic_streamfunction`).
+        self.mask_U = jnp.array(variables.maskU)[interior, interior]
         self.dzt = jnp.array(variables.dzt)
         self.longitude = jnp.array(variables.xt)[interior]
         self.latitude = jnp.array(variables.yt)[interior]
@@ -252,6 +262,11 @@ class VerosComponent:
         self.dlatitude = jnp.array(variables.dyt)[interior]
         self.longitude_units = "degrees_east" if settings.coord_degree else "km"
         self.latitude_units = "degrees_north" if settings.coord_degree else "km"
+
+        # Which external mode the setup solves is fixed for the whole run, so
+        # it is read once here as a Python bool and the `psi` branch in
+        # `step` is taken at trace time rather than on a traced value.
+        self.enable_streamfunction = bool(settings.enable_streamfunction)
 
         # Number of Veros tracer timesteps per coupling step; set by bind().
         self._steps_per_coupling_step: int | None = None
@@ -277,6 +292,15 @@ class VerosComponent:
             logger.info(
                 "%s: settings.enable_tke is True; the coupled wind stress"
                 " drives `forc_tke_surface`.", self.name,
+            )
+        if not self.enable_streamfunction:
+            logger.info(
+                "%s: settings.enable_streamfunction is False, so Veros'"
+                " `variables.psi` holds the surface pressure rather than a"
+                " streamfunction. The `psi` output variable is diagnosed"
+                " from the depth-integrated zonal transport instead"
+                " (see VerosComponent._barotropic_streamfunction).",
+                self.name,
             )
 
         # Veros calls its setup's ``set_forcing`` from inside every ``step``.
@@ -573,8 +597,18 @@ class VerosComponent:
         sea_surface_temperature = jnp.where(
             sea_surface_temperature < 100, 288.15, sea_surface_temperature)
         sea_surface_salinity = variables.salt[interior, interior, -1, tau]
-        sea_surface_u = variables.u[interior, interior, -1, tau]
+        zonal_velocity = variables.u[interior, interior, :, tau]
+        sea_surface_u = zonal_velocity[:, :, -1]
         sea_surface_v = variables.v[interior, interior, -1, tau]
+
+        # The barotropic streamfunction, from whichever of the two this run
+        # actually has: Veros only carries a real one when it solves the
+        # external mode for it, and `_barotropic_streamfunction` explains
+        # what stands in for it when it does not.
+        if self.enable_streamfunction:
+            psi = variables.psi[interior, interior, tau]
+        else:
+            psi = self._barotropic_streamfunction(zonal_velocity)
 
         diagnostics = {
             "sea_surface_temperature": sea_surface_temperature,
@@ -583,8 +617,9 @@ class VerosComponent:
             "sea_surface_v": sea_surface_v,
             "temp": variables.temp[interior, interior, :, tau],
             "salt": variables.salt[interior, interior, :, tau],
-            "u": variables.u[interior, interior, :, tau],
+            "u": zonal_velocity,
             "v": variables.v[interior, interior, :, tau],
+            "psi": psi,
             "surface_air_temperature": forcing.surface_air_temperature,
             "surface_taux": forcing.surface_taux,
             "surface_tauy": forcing.surface_tauy,
@@ -603,6 +638,76 @@ class VerosComponent:
             },
             diagnostics,
         )
+
+    def _barotropic_streamfunction(self, zonal_velocity: jnp.ndarray) -> jnp.ndarray:
+        """Diagnose the barotropic streamfunction from the zonal transport.
+
+        Veros carries a barotropic streamfunction only when the setup solves
+        the external mode for one (``settings.enable_streamfunction``). Under
+        the linear free surface -- what every Veros setup shipped with JEM
+        chooses -- the *same* array ``variables.psi`` holds the surface
+        pressure instead: a different quantity, in m^2 s^-2, on the T grid
+        rather than the corner (zeta) points. Publishing it as ``psi`` would
+        therefore be wrong rather than merely approximate, and this diagnosis
+        stands in for it.
+
+        It inverts the relation Veros itself uses when it adds the barotropic
+        mode back onto the baroclinic velocity
+        (``veros/core/external/solve_stream.py`` lines 205-213, with
+        ``hur = 1 / sum_k dzt maskU`` from ``veros/core/numerics.py`` lines
+        226-230). Veros adds ``-maskU (psi[i, j] - psi[i, j-1]) / dyt[j] *
+        hur`` to every level, and the baroclinic part it is added to has had
+        its vertical mean removed (lines 199-202), so the depth-integrated
+        zonal transport
+
+            U[i, j] = sum_k u[i, j, k] dzt[k] maskU[i, j, k]
+
+        satisfies, exactly,
+
+            U[i, j] = -(psi[i, j] - psi[i, j-1]) / dyt[j].
+
+        No ``cos`` metric factor enters: the difference is meridional, and
+        ``dyt`` is already a distance in metres (``calc_grid`` converts the
+        spacings with ``degtom`` when ``coord_degree``). Inverting the
+        recurrence northwards from a boundary where psi vanishes gives the
+        cumulative sum this method computes,
+
+            psi[i, j] = -sum_{j' <= j} U[i, j'] dyt[j'],
+
+        with psi = 0 on the boundary row immediately south of the first
+        emitted one.
+
+        Two caveats, both recorded in the output's ``comment`` attribute:
+
+        - Under a free surface the barotropic flow is not exactly
+          non-divergent, so this is the standard "meridionally integrated
+          zonal transport" diagnostic rather than an exact streamfunction.
+        - A streamfunction is defined only up to a constant. Veros' solver
+          fixes that constant by holding its first island at zero; this
+          diagnosis fixes it at the southern boundary. In a domain whose
+          southern and northern boundaries belong to one land mass the two
+          agree outright; where a zonal channel carries a net throughflow
+          (an ACC) they differ by that transport, a constant, while the
+          gradients -- the transports the field is read for -- agree.
+
+        Parameters
+        ----------
+        zonal_velocity : jax.Array
+            ``u`` at the current time level on the exchanged interior grid,
+            shaped ``(lon, lat, depth)``.
+
+        Returns
+        -------
+        jax.Array
+            ``(lon, lat)`` streamfunction in m^3 s^-1, on the zeta points
+            that ``u``'s meridional differences sit between.
+
+        """
+        # Depth integral over the trailing axis, then the meridional
+        # integral over the latitude axis that leaves: shape-static, no
+        # branching, so it traces the same way inside the coupled scan.
+        transport = jnp.sum(zonal_velocity * self.mask_U * self.dzt, axis=-1)
+        return -jnp.cumsum(transport * self.dlatitude, axis=-1)
 
     def _report_clock_drift(self, carry: Carry, time: CouplingTime) -> None:
         """Log at ERROR if the ocean's own clock has left the coupler's.
@@ -708,6 +813,7 @@ class VerosComponent:
                 "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
+                "psi": (["time", "lon", "lat"], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
                     ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
                 forcing_variable("surface_taux"): (
@@ -734,6 +840,33 @@ class VerosComponent:
         dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
         dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
+        # Nothing in the numbers says whether `psi` is Veros' own prognostic
+        # streamfunction or the diagnosis that stands in for it, so the
+        # attribute does. See `_barotropic_streamfunction`.
+        if self.enable_streamfunction:
+            psi_comment = (
+                "Veros' own prognostic barotropic streamfunction"
+                " (`variables.psi` at the current time level): this run"
+                " solves the external mode for it"
+                " (settings.enable_streamfunction)."
+            )
+        else:
+            psi_comment = (
+                "diagnosed as the meridionally integrated depth-integrated"
+                " zonal transport, fixed to zero at the southern boundary:"
+                " this run solves the external mode for a linear free"
+                " surface (settings.enable_streamfunction is False), where"
+                " Veros' `variables.psi` holds the surface pressure instead."
+                " The barotropic flow is then not exactly non-divergent, so"
+                " this is the standard `meridionally integrated zonal"
+                " transport` diagnostic rather than an exact streamfunction."
+            )
+        psi_comment += (
+            " Like `u` and `v` it lives on Veros' staggered grid -- here the"
+            " zeta (corner) points -- but is labelled with the T-grid"
+            " `lon`/`lat` coordinates this dataset uses throughout."
+        )
+
         # `jem_role` records which section of the carry each variable came
         # from, so a reader does not have to parse the `forcing_` prefix.
         # The last three are the grid itself -- time-invariant configuration,
@@ -758,6 +891,8 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
+            "psi": {"long_name": "barotropic streamfunction", "units": "m3 s-1",
+                    "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
                 "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
