@@ -1042,7 +1042,9 @@ records with their time mean, labelled with the chunk's last time and carrying
 the CF `cell_methods = "time: mean"` that says so. The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
 five days a year against the calendar on a 365-day year, not monthly means —
-those are `jem.accumulate.monthly_mean`, which bins by each record's own label.
+those are `jem.accumulate.monthly_mean` (twelve bins, a climatology) or
+`windowed_mean(coupler, month_lengths(coupler), total_time=…)` (one bin per
+month of the run), both of which bin by each record's own label.
 In a coupled run the atmosphere's per-step records are *already*
 step means (the JCM wrapper integrates each coupling step with
 `output_averages=True`), so averaging a chunk of them is the chunk mean exactly,
@@ -1128,11 +1130,13 @@ under two public builders, returning the same `BinnedMean` named tuple with the
 same `finalize`:
 
 ```python
-from jem.accumulate import monthly_mean, windowed_mean
+from jem.accumulate import month_lengths, monthly_mean, windowed_mean
 
 monthly = monthly_mean(coupler)                                  # 12 bins
 pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
 weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
+months  = windowed_mean(coupler, month_lengths(coupler),
+                        total_time="10 years")                   # 120: every month
 ```
 
 `window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
@@ -1143,6 +1147,26 @@ or counted from `total_time` (rounding *up*, so a run that does not divide into
 whole windows still has a bin for the one it ends inside; that bin is divided by
 its own count, so it is the mean of what fell in it).
 
+**The windows need not be equal.** `window` may be a *sequence* of lengths,
+which the accumulator's windows cycle through, repeating for as long as
+`n_windows` (or the count from `total_time`) asks and wrapping only at the sum
+of all of them. `month_lengths(calendar_or_coupler)` — the same table
+`monthly_mean` bins on, made public for exactly this — is then one bin per
+calendar month of the run: monthly means that neither drift the way a fixed
+30-day window does nor composite into a climatology the way `monthly_mean`'s
+twelve bins do. A sequence is the one case in which giving neither `n_windows`
+nor `total_time` is answerable, and it means one cycle of the pattern.
+
+The two calendar-month reductions differ by **one record at every month
+boundary**, and that is the convention, not an off-by-one: a window closes at
+its end and a calendar month at its start (below), so with daily coupling the
+record labelled 00:00 on 1 February is the last of January's *window* and the
+first of February's *month*. `windowed_mean` is the one to use for per-month
+bins of a long run; `monthly_mean` is the one whose answer equals a
+`groupby("time.month")` of the written output record for record. No `closed=`
+knob is offered to mix them: each convention is what makes its own builder
+agree with the thing it has to agree with.
+
 Both binnings follow the **label** of the record a step produces — the end of
 the coupling interval — rather than where the interval starts. The boundaries
 close in opposite directions because the bins are defined by different things:
@@ -1151,9 +1175,19 @@ because a window is itself an interval and JEM labels an interval at its end
 (so the first 5-day window with daily coupling is the records labelled day 1 to
 day 5, which is what a forecast means by the first pentad), while a calendar
 month is closed at its start because that is what `groupby("time.month")` does
-and a monthly mean has to agree with the written output. In terms of the
-counter of records of length *r*, that is `record // (window/r)` for a window
-and the month of `record + 1` for a month.
+and a monthly mean has to agree with the written output.
+
+Both rules are therefore one private
+`_variable_window_rule(boundaries_seconds, offset_seconds, closed)`: bins laid
+end to end as a cumulative sum of lengths, a phase (0 for windows the run
+defines, the run's offset into the calendar year for months) and which side a
+boundary closes on. Inside the scan it is a `searchsorted` in a static table,
+after the record counter is reduced modulo the records in one period of the
+bins — which is both what wraps a long run and what keeps the arithmetic
+inside int32. The boundaries themselves are converted from seconds to record
+counts on the host, in int64, so nothing in the traced code multiplies a
+counter that grows with the run: a table of seconds would pass 2³¹ after 68
+simulated years and wrap to nonsense.
 
 **A coupled step is not always one record.** A component the workflow runs
 *n* times per coupled step emits *n* records, each labelled at the end of its

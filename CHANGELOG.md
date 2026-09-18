@@ -349,23 +349,44 @@ Breaking changes are marked; everything else is additive.
   saying why. **Without `accumulate` the generated function is exactly what it
   was.**
 
-  `windowed_mean` is the same reduction over `n_windows` windows of a fixed
-  length — the 5-day and 7-day means a sub-seasonal forecast is scored on:
+  `windowed_mean` is the same reduction over `n_windows` windows — of one
+  fixed length, which is what a sub-seasonal forecast is scored on, or of a
+  repeating **pattern** of lengths, which with the calendar's own month
+  lengths gives one bin per calendar month of a long run:
 
   ```python
   pentads = windowed_mean(coupler, "5 days", n_windows=73)          # a year
   weeks   = windowed_mean(coupler, "7 days", total_time="1 year")   # 53 of them
+  months  = windowed_mean(coupler, month_lengths(coupler),
+                          total_time="10 years")                    # 120 of them
   ```
 
-  `window` is a `jcm.date.parse_duration_days` string or a number of days and
-  must be a whole number of coupling steps; the accumulator's size is given
-  directly as `n_windows` or counted from `total_time` (rounded up, so a run
-  that does not divide into whole windows still has a bin for the one it ends
-  inside). Both builders return the same `BinnedMean` named tuple from one
-  private `_binned_mean(coupler, bin_of_record, n_bins)`, and both bin every
-  record by its own **label**; a run longer than the accumulator wraps, so
-  window *w* composites every *w*-th window exactly as the monthly bins
-  composite years. A coupled step is not always one record: a component the
+  Each length is a `jcm.date.parse_duration_days` string or a number of days
+  and must be a whole number of coupling steps; the accumulator's size is
+  given directly as `n_windows` or counted from `total_time` (rounded up, so a
+  run that does not divide into whole windows still has a bin for the one it
+  ends inside), and a sequence given neither is used once through. Both
+  builders return the same `BinnedMean` named tuple from one private
+  `_binned_mean(coupler, bin_of_record, n_bins)` with one private
+  `_variable_window_rule(boundaries, offset, closed)` — `monthly_mean` *is*
+  twelve calendar-month windows phased to the run's start of year — and both
+  bin every record by its own **label**; a run longer than the accumulator
+  wraps, so window *w* composites every *w*-th window exactly as the monthly
+  bins composite years.
+
+  **`jem.accumulate.month_lengths(calendar_or_coupler)`** is public for that
+  use: the twelve month lengths in days of a fixed-length calendar, taken from
+  a coupler, a calendar name or a year length, refusing `gregorian` (whose
+  leap years change the table from year to year). The month *windows* and
+  `monthly_mean` differ by one record at every month boundary, by convention
+  and not by accident: a window closes at its end (JEM labels a record at the
+  end of the interval it covers, and a window is one such interval) while a
+  calendar month closes at its start (which is what `groupby("time.month")`
+  does), so the record labelled 00:00 on 1 February is the last of January's
+  window and the first of February's month. Use the windows for per-month bins
+  of a long run and `monthly_mean` when the answer must equal a `groupby` of
+  the written output record for record; there is deliberately no `closed=`
+  knob to mix the two. A coupled step is not always one record: a component the
   workflow runs *n* times per step emits *n*, and a nested coupler's inner
   steps are records in the same way, so the 24 hourly records of the daily
   step covering 31 January are binned 23 in January and one (labelled 1

@@ -245,6 +245,28 @@ sub-seasonal forecast is scored on — sized either by `n_windows` or by
 `total_time="1 year"`. A run longer than the accumulator wraps, so window *w*
 composites every *w*-th window, the way the monthly bins composite years.
 
+`window` may also be a **sequence** of lengths, which the windows cycle
+through. Given the calendar's own month lengths, that is one bin per calendar
+month of the run instead of the twelve-month climatology `monthly_mean`
+accumulates — monthly means that neither drift, as a fixed 30-day window does,
+nor wrap:
+
+```python
+from jem.accumulate import month_lengths, windowed_mean
+
+months = windowed_mean(coupler, month_lengths(coupler), total_time="10 years")
+means = months.finalize(accumulator)   # 120 bins: Jan of year 1 … Dec of year 10
+```
+
+The two differ by one record at every month boundary, deliberately: a window
+closes at its **end**, because JEM labels a record at the end of the interval
+it covers and a window is one such interval, while a calendar month closes at
+its **start**, because that is what `groupby("time.month")` does. With daily
+coupling, the record labelled 00:00 on 1 February is the last of January's
+*window* and the first of February's *month*. Use `windowed_mean` for
+per-month bins of a long run, and `monthly_mean` when the answer has to equal
+a `groupby` of the written output record for record.
+
 The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
 reaches a component parameter through the reduction exactly as it does through

@@ -19,9 +19,16 @@ chunk: "30 days"
 # These are 30-day-WINDOW means, NOT calendar monthly means: the window is the
 # chunk, so on a 365-day calendar its boundaries drift about five days per
 # year and a bin spans parts of two months. For true calendar months use the
-# Python API -- `jem.accumulate.monthly_mean(coupler)` with
-# `run_chunked(..., accumulate=..., health_check=None)` -- which bins every
-# record by the month its own output label falls in, whatever the chunking.
+# Python API with `run_chunked(..., accumulate=..., health_check=None)`, which
+# bins every record by the month its own output label falls in, whatever the
+# chunking:
+#
+#   jem.accumulate.monthly_mean(coupler)
+#       twelve bins -- every January of the run in one, a climatology;
+#   jem.accumulate.windowed_mean(coupler, month_lengths(coupler),
+#                                total_time="3600 days")
+#       one bin per calendar month of the run, which is the non-drifting
+#       equivalent of what `output_averages` gives here.
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the
