@@ -27,6 +27,8 @@ from jem.exchangers import (
     default_exchangers,
     default_exchanges,
     default_workflow,
+    read_field,
+    replace_field,
 )
 from jem.output import (
     chunk_datasets,
@@ -65,6 +67,8 @@ __all__ = [
     "nested_carry",
     "postprocess",
     "postprocess_datasets",
+    "read_field",
+    "replace_field",
     "run_chunked",
     "with_nested_carry",
     "write_chunk",

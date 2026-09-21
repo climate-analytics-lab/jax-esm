@@ -572,6 +572,18 @@ Breaking changes are marked; everything else is additive.
   `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
   `dev` so drift stays visible without blocking a pull request.
 
+- **`jem.replace_field(carry, path, value)` / `jem.read_field(carry, path)`**
+  — write or read one `"component.section.field"` of a coupled carry, the
+  same address `jem.exchangers.Exchange` already uses. Every example that
+  customised a single initial condition rebuilt three nested containers by
+  hand to do it (`dict(carry, components=dict(carry.components, ocn=dict(
+  ocean_carry, state=ocean_carry["state"].replace(...))))`), and each did it
+  slightly differently; `replace_field` is that rebuild written once, and
+  works equally on a whole `CoupledCarry` or the bare `dict[str, Carry]`
+  mapping an exchanger is handed. Both live in `jem/exchangers.py`, which
+  already owns the path vocabulary and its error messages, rather than in a
+  new module.
+
 ### Changed
 
 - **jax-gcm configures no logging of its own, and `jcm.model.Model` takes no

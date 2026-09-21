@@ -28,6 +28,7 @@ import pytest
 import tree_math
 
 from jem import exchangers
+from jem.base.component import CoupledCarry
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabGrid,
@@ -42,6 +43,8 @@ from jem.exchangers import (
     default_exchangers,
     default_exchanges,
     default_workflow,
+    read_field,
+    replace_field,
 )
 from tests.unit.slab_test_utils import make_grid
 
@@ -868,3 +871,79 @@ def test_no_warning_when_both_names_are_present(caplog):
     with caplog.at_level("WARNING", logger="jem.exchangers"):
         default_exchanges(("atm", "ocn", "seaice", "ice"))
     assert caplog.text == ""
+
+
+# ---------------------------------------------------------------------------
+# read_field / replace_field
+# ---------------------------------------------------------------------------
+
+
+def test_replace_field_returns_a_new_coupled_carry(components):
+    """The input carry is unchanged and the two share the same pytree shape."""
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+    before_structure = jax.tree_util.tree_structure(carry)
+    before_sst = carry.components["ocn"]["state"].sea_surface_temperature
+
+    new_sst = before_sst + 1.0
+    updated = replace_field(carry, "ocn.state.sea_surface_temperature", new_sst)
+
+    assert isinstance(updated, type(carry))
+    assert jax.tree_util.tree_structure(updated) == before_structure
+    assert carry.components["ocn"]["state"].sea_surface_temperature is before_sst
+    assert jnp.array_equal(
+        updated.components["ocn"]["state"].sea_surface_temperature, new_sst
+    )
+
+
+def test_replace_field_accepts_the_exchanger_mapping(components):
+    """Given the bare ``dict[str, Carry]`` mapping, the result is a dict too."""
+    coupler = build_coupler(components, default_exchangers(components))
+    carries = coupler.initialize().components
+    before_sst = carries["ocn"]["state"].sea_surface_temperature
+
+    new_sst = before_sst + 1.0
+    updated = replace_field(carries, "ocn.state.sea_surface_temperature", new_sst)
+
+    assert isinstance(updated, dict)
+    assert not isinstance(updated, CoupledCarry)
+    assert carries["ocn"]["state"].sea_surface_temperature is before_sst
+    assert jnp.array_equal(updated["ocn"]["state"].sea_surface_temperature, new_sst)
+
+
+def test_read_field_round_trips_replace_field(components):
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+    new_sst = read_field(carry, "ocn.state.sea_surface_temperature") + 3.0
+
+    updated = replace_field(carry, "ocn.state.sea_surface_temperature", new_sst)
+
+    assert jnp.array_equal(
+        read_field(updated, "ocn.state.sea_surface_temperature"), new_sst
+    )
+
+
+@pytest.mark.parametrize("path,bad,available", [
+    # Unknown component: named, with the components that are there.
+    ("bogus.state.sea_surface_temperature", "bogus", "ocn"),
+    # Unknown section: named, with the sections a path may use.
+    ("ocn.diagnostics.sea_surface_temperature", "diagnostics", "state"),
+    # Unknown field: named, with the fields the section actually has.
+    ("ocn.state.surface_temperature", "surface_temperature", "sea_surface_temperature"),
+])
+def test_replace_field_names_the_bad_path(components, path, bad, available):
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+
+    with pytest.raises((KeyError, ValueError)) as excinfo:
+        replace_field(carry, path, 0.0)
+    message = str(excinfo.value)
+    assert bad in message
+    assert available in message
+
+    # read_field fails the same way, on the same lookup.
+    with pytest.raises((KeyError, ValueError)) as excinfo:
+        read_field(carry, path)
+    message = str(excinfo.value)
+    assert bad in message
+    assert available in message

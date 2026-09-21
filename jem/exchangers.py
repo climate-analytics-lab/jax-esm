@@ -72,7 +72,7 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
-from jem.base.component import Carry, Component, CouplingTime, Exchanger
+from jem.base.component import Carry, Component, CoupledCarry, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +295,50 @@ def _field_names(section: Any) -> list[str]:
     return sorted(name for name in dir(section) if not name.startswith("_"))
 
 
+def _resolve_section(
+    components: Mapping[str, Carry], name: str, section: str, context: str
+) -> Any:
+    """Return one section of one component's carry, or raise naming ``context``.
+
+    Shared by :class:`Exchange` (``context`` is the offending spec) and
+    :func:`read_field`/:func:`replace_field` (``context`` is the offending
+    path), so an unknown component or section is named the same way whichever
+    called it -- there is exactly one place this message is written.
+    """
+    if name not in components:
+        raise KeyError(
+            f"{context} names the component {name!r}, which this coupled "
+            f"model does not have (it has {sorted(components)!r})."
+        )
+    carry = components[name]
+    if not isinstance(carry, Mapping):
+        raise TypeError(
+            f"{context}: the carry of {name!r} is a {type(carry).__name__}, "
+            f"not a mapping, so it has no {section!r} section to address. "
+            "Couple this component with a hand-written exchanger."
+        )
+    if section not in carry:
+        raise KeyError(
+            f"{context}: {name!r}'s carry has no {section!r} section "
+            f"(it has {sorted(carry)!r})."
+        )
+    return carry[section]
+
+
+def _require_field(section: Any, field: str, context: str, path: str) -> None:
+    """Raise, naming ``context``, if ``section`` does not have ``field``.
+
+    See :func:`_resolve_section` for why this is a free function rather than
+    two copies of the same check.
+    """
+    if not hasattr(section, field):
+        raise ValueError(
+            f"{context}: {path!r} names the field {field!r}, which "
+            f"{type(section).__name__} does not have (it has "
+            f"{_field_names(section)!r})."
+        )
+
+
 class Exchange:
     """An :data:`~jem.base.component.Exchanger` built from a table of specs.
 
@@ -472,37 +516,14 @@ class Exchange:
         components: Mapping[str, Carry], name: str, section: str, spec: ExchangeSpec
     ) -> Any:
         """Return one section of one component's carry, or raise naming the spec."""
-        if name not in components:
-            raise KeyError(
-                f"Exchange spec {spec} names the component {name!r}, which this "
-                f"coupled model does not have (it has {sorted(components)!r})."
-            )
-        carry = components[name]
-        if not isinstance(carry, Mapping):
-            raise TypeError(
-                f"Exchange spec {spec}: the carry of {name!r} is a "
-                f"{type(carry).__name__}, not a mapping, so it has no {section!r} "
-                "section to address. Couple this component with a hand-written "
-                "exchanger."
-            )
-        if section not in carry:
-            raise KeyError(
-                f"Exchange spec {spec}: {name!r}'s carry has no {section!r} section "
-                f"(it has {sorted(carry)!r})."
-            )
-        return carry[section]
+        return _resolve_section(components, name, section, f"Exchange spec {spec}")
 
     @staticmethod
     def _require_field(
         section: Any, field: str, spec: ExchangeSpec, path: str
     ) -> None:
         """Raise, naming the spec, if ``section`` does not have ``field``."""
-        if not hasattr(section, field):
-            raise ValueError(
-                f"Exchange spec {spec}: {path!r} names the field {field!r}, which "
-                f"{type(section).__name__} does not have (it has "
-                f"{_field_names(section)!r})."
-            )
+        _require_field(section, field, f"Exchange spec {spec}", path)
 
 
 def default_exchanges(
@@ -744,3 +765,153 @@ def default_workflow(
 
     """
     return [*exchangers, *components]
+
+
+def _split_field_path(path: str) -> tuple[str, str, str]:
+    """Split a ``"component.section.field"`` path for :func:`read_field`/:func:`replace_field`.
+
+    The same three-part address :func:`_parse_path` checks for an
+    :class:`ExchangeSpec`, but there is no spec to attach the error to here --
+    the path itself is the only thing there is to name, so the message reads
+    around it directly rather than around ``f"Exchange spec {spec}"``.
+    """
+    parts = path.split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(
+            f"{path!r} is not of the form \"component.section.field\"."
+        )
+    component, section, field = parts
+    if section not in SECTIONS:
+        raise ValueError(
+            f"{path!r} names the carry section {section!r}, which is not one "
+            f"of {list(SECTIONS)!r}."
+        )
+    return component, section, field
+
+
+def _carry_components(carry: Any, path: str) -> Mapping[str, Carry]:
+    """Return the ``{name: carry}`` mapping ``carry`` addresses, or raise.
+
+    ``carry`` is either a whole :class:`~jem.base.component.CoupledCarry` (as
+    ``Coupler.initialize()`` returns) or the bare ``dict[str, Carry]`` mapping
+    an exchanger is handed -- see :func:`read_field`/:func:`replace_field`.
+    """
+    if isinstance(carry, CoupledCarry):
+        return carry.components
+    if isinstance(carry, Mapping):
+        return carry
+    raise TypeError(
+        f"{path!r}: `carry` is a {type(carry).__name__}, not a CoupledCarry "
+        "or a mapping of component carries."
+    )
+
+
+def read_field(carry: CoupledCarry | dict[str, Carry], path: str) -> Any:
+    """Return the value at ``"component.section.field"`` of a coupled carry.
+
+    The read side of :func:`replace_field` -- see its docstring for why both
+    exist. ``carry`` may be a whole :class:`~jem.base.component.CoupledCarry`
+    or the bare ``dict[str, Carry]`` mapping an exchanger is handed; either
+    way this reaches straight to the one field named by ``path`` instead of
+    the caller indexing through ``.components[...]["section"].field`` (or
+    ``carry["section"].field`` for the bare mapping) itself.
+
+    Parameters
+    ----------
+    carry : jem.base.component.CoupledCarry or dict[str, Carry]
+        The coupled carry, or a mapping of component carries.
+    path : str
+        ``"component.section.field"``, with ``section`` one of
+        :data:`SECTIONS`.
+
+    Returns
+    -------
+    Any
+        The value ``path`` names.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is malformed, or names a section or field the addressed
+        carry does not have.
+    KeyError
+        If ``path`` names a component the carry does not have.
+    TypeError
+        If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
+        component's carry is not a mapping of sections.
+
+    """
+    component, section, field = _split_field_path(path)
+    components = _carry_components(carry, path)
+    resolved = _resolve_section(components, component, section, repr(path))
+    _require_field(resolved, field, repr(path), path)
+    return getattr(resolved, field)
+
+
+def replace_field(
+    carry: CoupledCarry | dict[str, Carry], path: str, value: Any
+) -> CoupledCarry | dict[str, Carry]:
+    """Return a coupled carry with one ``"component.section.field"`` replaced.
+
+    Every example that customises one initial condition -- a bumped initial
+    sea surface temperature, an SST an ``jax.jvp`` differentiates -- had to
+    rebuild three nested containers by hand to change a single field
+    (``dict(carry, components=dict(carry.components, ocn=dict(ocean_carry,
+    state=ocean_carry["state"].replace(...))))``), and every example did it
+    slightly differently. This is that rebuild, written once against the
+    ``"component.section.field"`` vocabulary :class:`Exchange` already uses,
+    so a notebook or a driver names the field it wants changed rather than the
+    nested containers around it.
+
+    Nothing is mutated: a new section struct comes from ``.replace(**{field:
+    value})``, a new component carry from ``dict(carry, **{section: ...})``,
+    and a new components mapping from ``dict(components, **{name: ...})`` --
+    the same pattern :func:`~jem.base.coupler.with_nested_carry` uses for a
+    nested coupler. ``carry`` may be a whole
+    :class:`~jem.base.component.CoupledCarry` or the bare ``dict[str, Carry]``
+    mapping an exchanger is handed, and the return is the same kind: a
+    ``CoupledCarry`` is rebuilt with ``dataclasses.replace(carry,
+    components=...)`` so that a field added to it later (there is only
+    ``components`` and ``step`` today) is carried through unchanged, and a
+    bare mapping is returned as a new mapping.
+
+    Parameters
+    ----------
+    carry : jem.base.component.CoupledCarry or dict[str, Carry]
+        The coupled carry, or a mapping of component carries, to build the
+        replacement from.
+    path : str
+        ``"component.section.field"``, with ``section`` one of
+        :data:`SECTIONS`.
+    value : Any
+        The new value for the field. Its shape and dtype must match the
+        field it replaces, or the coupled ``lax.scan`` this carry eventually
+        goes through will reject it.
+
+    Returns
+    -------
+    jem.base.component.CoupledCarry or dict[str, Carry]
+        The same kind of object as ``carry``, with one field replaced.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is malformed, or names a section or field the addressed
+        carry does not have.
+    KeyError
+        If ``path`` names a component the carry does not have.
+    TypeError
+        If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
+        component's carry is not a mapping of sections.
+
+    """
+    component, section, field = _split_field_path(path)
+    components = _carry_components(carry, path)
+    resolved = _resolve_section(components, component, section, repr(path))
+    _require_field(resolved, field, repr(path), path)
+    new_section = resolved.replace(**{field: value})
+    new_component_carry = dict(components[component], **{section: new_section})
+    new_components = dict(components, **{component: new_component_carry})
+    if isinstance(carry, CoupledCarry):
+        return dataclasses.replace(carry, components=new_components)
+    return new_components
