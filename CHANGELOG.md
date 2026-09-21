@@ -571,6 +571,12 @@ Breaking changes are marked; everything else is additive.
   a workflow-level `JCM_REV`, which the test asserts equals
   `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
   `dev` so drift stays visible without blocking a pull request.
+- **`docs/source/python_api.md`** — the complete direct-Python construction of
+  a coupled model, which is also the README's Quick Start: the two blocks are
+  pinned to each other and executed by
+  `tests/unit/test_readme_quickstart.py`, so the quick start that used to live
+  in two places, only one of them tested, cannot go stale in either without a
+  test failing.
 
 ### Changed
 

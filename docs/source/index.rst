@@ -17,6 +17,7 @@ built on ``jax.lax.scan``.
    :caption: Contents:
 
    quick_start
+   python_api
    examples
    tutorial
    experimental
