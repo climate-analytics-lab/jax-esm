@@ -552,6 +552,21 @@ Breaking changes are marked; everything else is additive.
 
 ### Changed
 
+- **The pinned jax-gcm revision is `9e399ab2` (`jcm 3.0.0rc1`)**, up from
+  `637bfee5` (`2.1.0b0`), in `JCM_SUPPORTED_REV` / `JCM_SUPPORTED_VERSION`, in
+  the workflow's `JCM_REV` and as the `jcm>=3.0.0rc1` floor in
+  `pyproject.toml`. **jax-gcm no longer configures logging** at that revision
+  (jax-gcm#819) and `jcm.model.Model` no longer takes a `log_level` keyword.
+  Nothing under `jem/` ever passed it — only the test fixtures did, to silence
+  the `logging.basicConfig` that `import jcm` used to run — and it is gone from
+  them. A JAX-ESM process now configures its own logging and nothing else's,
+  which is what `jem.main` already assumed when it set the level of the `jem`
+  logger alone.
+- **`test_installed_jcm_matches_contract` checks `jcm.__version__`**, not the
+  distribution metadata. An editable install records its version when it is
+  installed, so a jax-gcm checkout moved to another revision keeps advertising
+  the old one — exactly the situation a pin bump creates, and a check that
+  passes on stale metadata is worse than none.
 - **`SlabSeaiceModel`'s constructor default is `name="seaice"`, not
   `name="ice"`** (breaking). The standard coupling wires the sea ice under
   `seaice`, which is what every example registers it as, so the old default
@@ -604,7 +619,7 @@ Breaking changes are marked; everything else is additive.
   `docs/source/design/architecture.md`, where the contract it illustrates is
   described.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
-  `jem` console script; its `jcm>=2.1.0b0` floor now points at `contract.py`
+  `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
 
 ### Removed

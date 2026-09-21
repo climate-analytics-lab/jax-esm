@@ -11,11 +11,11 @@ rather than on the class.
 from __future__ import annotations
 
 import importlib
-import importlib.metadata
 import importlib.resources
 import re
 from pathlib import Path
 
+import jcm
 import pytest
 from jcm.model import Model
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
@@ -44,7 +44,7 @@ WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "test
 def model() -> Model:
     """Build the cheapest real jcm model, once for the whole module."""
     coords = get_speedy_coords(layers=LAYERS, spectral_truncation=TRUNCATION)
-    return Model(coords=coords, terrain=TerrainData.aquaplanet(coords), log_level=50)
+    return Model(coords=coords, terrain=TerrainData.aquaplanet(coords))
 
 
 @pytest.fixture(scope="module")
@@ -263,16 +263,19 @@ def test_required_jobs_use_the_pin_and_the_canary_tracks_dev():
 
 
 def test_installed_jcm_matches_contract():
-    """Check the jcm in this environment is the version the contract names."""
-    try:
-        installed = importlib.metadata.version("jcm")
-    except importlib.metadata.PackageNotFoundError:  # pragma: no cover
-        pytest.skip(
-            "jcm is not installed as a distribution, so its version cannot be"
-            " read; install it with `pip install -e /path/to/jax-gcm`."
-        )
+    """Check the jcm in this environment is the version the contract names.
+
+    The version is read from ``jcm.__version__``, the source of the checkout
+    that is actually imported, and not from the distribution metadata: an
+    editable install records its version once, when it is installed, so a
+    checkout that has since been moved to another revision keeps advertising
+    the old one to ``importlib.metadata``. That is precisely the situation a
+    pin bump creates, and a check that passes because the metadata is stale
+    would be worse than no check at all.
+    """
+    installed = jcm.__version__
     assert installed == JCM_SUPPORTED_VERSION, (
-        f"The installed jcm reports {installed} but JAX-ESM is supported"
+        f"The imported jcm reports {installed} but JAX-ESM is supported"
         f" against {JCM_SUPPORTED_VERSION} ({JCM_SUPPORTED_REV}). Check out"
         " that revision, or update jem/components/jcm/contract.py if the move"
         " is deliberate."

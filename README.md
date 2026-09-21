@@ -30,14 +30,14 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 
 JAX-ESM is developed and tested against **one** jax-gcm revision, recorded as
 `JCM_SUPPORTED_REV` in [`jem/components/jcm/contract.py`](jem/components/jcm/contract.py)
-together with every jax-gcm name JAX-ESM calls. The `jcm>=2.1.0b0` floor in
+together with every jax-gcm name JAX-ESM calls. The `jcm>=3.0.0rc1` floor in
 `pyproject.toml` is the loosest statement of the same thing — jax-gcm bumps its
 version only at release, so the pin cannot be expressed as a version. Check out
 that revision if a coupled run fails with an `AttributeError` inside `jcm`:
 `pytest tests/unit/test_jcm_contract.py` reports exactly which name moved.
 
 ```
-# JAX-GCM (jcm) >= 2.1 is not on PyPI yet: install its dev branch from source FIRST
+# JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install its dev branch from source FIRST
 git clone https://github.com/climate-analytics-lab/jax-gcm
 cd jax-gcm
 git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it

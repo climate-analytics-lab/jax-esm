@@ -15,7 +15,7 @@ on:
 # one and the test tells you to change the other. The `canary-jcm-dev` job
 # below still tracks `dev`, so drift is visible without blocking a PR.
 env:
-  JCM_REV: 637bfee51b8737895c4974b62a602641c98ab32e
+  JCM_REV: 9e399ab2840bb02eff3a5ea60a86072ab37da495
 
 jobs:
   lint:
@@ -74,7 +74,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        # `jcm>=2.1.0b0` is not on PyPI, so this checkout is the only thing
+        # `jcm>=3.0.0rc1` is not on PyPI, so this checkout is the only thing
         # that satisfies it; pinned, see the JCM_REV comment at the top of
         # this workflow.
         ref: ${{ env.JCM_REV }}
@@ -93,8 +93,8 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
-      # jax-gcm goes in FIRST: installing it editable registers `jcm 2.1.0b0`
-      # with pip, so the `jcm>=2.1.0b0` requirement of jax-esm resolves against
+      # jax-gcm goes in FIRST: installing it editable registers `jcm 3.0.0rc1`
+      # with pip, so the `jcm>=3.0.0rc1` requirement of jax-esm resolves against
       # the checkout instead of failing to find it on PyPI.
       run: |
         python -m pip install --upgrade pip
@@ -245,7 +245,7 @@ jobs:
         python-version: "3.11"
 
     - name: Install dependencies
-      # Same ordering as the test job: jax-gcm first so that `jcm>=2.1.0b0`
+      # Same ordering as the test job: jax-gcm first so that `jcm>=3.0.0rc1`
       # resolves against the checkout instead of failing to find it on PyPI.
       run: |
         python -m pip install --upgrade pip

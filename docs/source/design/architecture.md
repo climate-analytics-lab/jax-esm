@@ -1553,11 +1553,12 @@ which is what makes it possible to decide whether an entry may be deleted.
 `tests/unit/test_jcm_contract.py` walks that list against the installed `jcm`,
 so a jax-gcm rename fails as "jax-gcm renamed or removed X, which JAX-ESM used
 for Y, at revision Z" — at the cheapest possible moment, rather than mid-run.
-The pin is a `dev` sha because no tagged jax-gcm release carries the two changes
-Phase 2 is written against (#750's one run schema and `configuration` group,
-#763's input-resolution engine); `pyproject.toml`'s `jcm>=2.1.0b0` is the
-loosest true statement of the same thing, since jax-gcm bumps its version only
-at release. Every required CI job checks that revision out through a
+The pin is a `dev` sha because no tagged jax-gcm release carries the changes
+JAX-ESM is written against — #750's one run schema and `configuration` group,
+#763's input-resolution engine, #819's removal of jax-gcm's own logging
+configuration and #824's public resumable state and date conversion;
+`pyproject.toml`'s `jcm>=3.0.0rc1` is the loosest true statement of the same
+thing, since jax-gcm bumps its version only at release. Every required CI job checks that revision out through a
 workflow-level `JCM_REV`, which the test asserts equals `JCM_SUPPORTED_REV`, and
 a non-blocking `canary-jcm-dev` job keeps tracking `dev` so drift stays visible
 without blocking a pull request. `contract.py`'s docstring is the procedure for

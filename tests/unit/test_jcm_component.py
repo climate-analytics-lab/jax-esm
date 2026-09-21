@@ -44,7 +44,6 @@ def _build_model() -> Model:
         terrain=TerrainData.aquaplanet(coords),
         start_date=START_DATE,
         calendar=CALENDAR,
-        log_level=50,
     )
 
 

@@ -23,21 +23,36 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 --------------------------------------------
-``JCM_SUPPORTED_REV`` is jax-gcm ``dev`` as it stood at the start of JAX-ESM's
-Phase 2. It is the first revision that carries both of the jax-gcm changes the
-JAX-ESM driver and configuration layers are written against:
+``JCM_SUPPORTED_REV`` is jax-gcm ``dev`` as it stood on 2026-09-21, and carries
+four things JAX-ESM is written against:
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
   under an ``atmosphere`` key instead of restating them;
 * **#763** -- the input-resolution engine, which is how boundary-condition and
-  initial-condition inputs are located at build time.
+  initial-condition inputs are located at build time;
+* **#819** -- jax-gcm configures no logging of its own. Importing ``jcm`` no
+  longer calls ``logging.basicConfig``, and ``Model.__init__`` no longer takes
+  a ``log_level`` keyword (``jcm.runners`` sets the ``jcm`` logger from
+  ``run.log_level`` instead). JAX-ESM never wanted jax-gcm to configure the
+  root logger -- ``jem.main`` sets the level of the ``jem`` logger alone -- so
+  this is the removal of a conflict, and the ``log_level=50`` the test
+  fixtures used to pass purely to silence that ``basicConfig`` is gone with
+  it;
+* **#824** -- the resumable model state and the date conversion are public.
+  ``Model.bootstrap_state()`` returns its ``(dycore_state, physics_carry)``
+  pair, the same pair is readable as ``Model.dycore_state`` /
+  ``Model.physics_carry``, ``ModelPredictions.with_context(model)`` re-attaches
+  the context a pytree round trip drops, and ``Model._date_from_sim_time`` is
+  now ``Model.date_from_sim_time`` (the old name kept only as a delegating
+  alias). Between them these retire every private jax-gcm attribute the JCM
+  adapter used to read.
 
-No tagged jax-gcm release contains either (``v2.0.1`` is the latest tag), so a
-commit sha is pinned until jax-gcm cuts a release from ``dev``. The
-``jcm>=2.1.0b0`` floor in ``pyproject.toml`` is the loosest statement of the
-same thing: it is satisfied by any jax-gcm that reports that version, whereas
-this module says *which one* was verified.
+jax-gcm reports ``3.0.0rc1`` here -- its first 3.0 release candidate -- but the
+tag is not cut, so a commit sha is still what is pinned. The ``jcm>=3.0.0rc1``
+floor in ``pyproject.toml`` is the loosest statement of the same thing: by
+PEP 440 a release candidate satisfies a floor naming it, so ``3.0.0rc1`` and
+every later 3.x pass, whereas this module says *which one* was verified.
 
 How to bump the pin
 -------------------
@@ -50,8 +65,8 @@ How to bump the pin
    new revision renamed or removed fails there, with the name, before it can
    fail inside a run. Fix the adapter and update the entry in the same change.
 
-When a tagged jax-gcm release finally contains #750 and #763, replace the sha
-with the tag and raise the ``pyproject.toml`` floor to match.
+When a tagged jax-gcm release finally contains all of the above, replace the
+sha with the tag and raise the ``pyproject.toml`` floor to match.
 """
 
 from __future__ import annotations
@@ -59,16 +74,21 @@ from __future__ import annotations
 from typing import NamedTuple
 
 #: The jax-gcm revision JAX-ESM is developed, tested and supported against:
-#: ``dev`` at the start of Phase 2 (2026-09-10). The full 40-character sha, not
-#: an abbreviation, because that is what ``actions/checkout`` needs and what
-#: ``git rev-parse`` in a jax-gcm checkout can be compared against directly.
-JCM_SUPPORTED_REV = "637bfee51b8737895c4974b62a602641c98ab32e"
+#: ``dev`` as of 2026-09-21. The full 40-character sha, not an abbreviation,
+#: because that is what ``actions/checkout`` needs and what ``git rev-parse``
+#: in a jax-gcm checkout can be compared against directly.
+JCM_SUPPORTED_REV = "9e399ab2840bb02eff3a5ea60a86072ab37da495"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
 #: -- many revisions share it -- but it is what a user's environment can be
-#: checked against without a git checkout.
-JCM_SUPPORTED_VERSION = "2.1.0b0"
+#: checked against without a git checkout, which is why
+#: ``test_installed_jcm_matches_contract`` reads ``jcm.__version__`` rather
+#: than the distribution metadata: an editable install records its version
+#: when it is installed, so the metadata of a checkout that has since moved
+#: to another revision is stale, which is exactly the situation a pin bump
+#: creates.
+JCM_SUPPORTED_VERSION = "3.0.0rc1"
 
 
 class IntegrationPoint(NamedTuple):

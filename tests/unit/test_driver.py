@@ -2185,7 +2185,6 @@ def test_continuous_chunked_resumed_agree_with_jcm(tmp_path):
             coords=coords,
             terrain=TerrainData.aquaplanet(coords),
             start_date=START_DATE,
-            log_level=50,
         )
         atm = JCMComponent(model)
         components = {

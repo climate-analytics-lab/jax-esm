@@ -38,15 +38,19 @@ dependencies = [
     "netcdf4",
     "tree_math",
     "jax_datetime",
-    # A floor, not the pin. 2.1.0b0 is the first jax-gcm version with the 2-D
-    # surface-flux layout the JCM adapter reads, and it is not on PyPI, so
-    # this is satisfied only by an editable install of a jax-gcm checkout.
-    # Which checkout is recorded once, in `jem/components/jcm/contract.py`
-    # (JCM_SUPPORTED_REV), together with every jax-gcm name JAX-ESM calls and
-    # how to bump the pin; the CI workflow and the contract test both read
-    # from there. jax-gcm bumps its version only at release, so a version
-    # floor cannot express "this sha" -- do not try to tighten it here.
-    "jcm>=2.1.0b0",
+    # A floor, not the pin. 3.0.0rc1 is what jax-gcm reports at the supported
+    # revision; it is the first version whose `Model` publishes its resumable
+    # state and its date conversion publicly and takes no `log_level`
+    # (jax-gcm#819, #824), which is what the JCM adapter is written against.
+    # It is not on PyPI, so this is satisfied only by an editable install of a
+    # jax-gcm checkout. Which checkout is recorded once, in
+    # `jem/components/jcm/contract.py` (JCM_SUPPORTED_REV), together with every
+    # jax-gcm name JAX-ESM calls and how to bump the pin; the CI workflow and
+    # the contract test both read from there. jax-gcm bumps its version only at
+    # release, so a version floor cannot express "this sha" -- do not try to
+    # tighten it here. (A release candidate satisfies a floor that names it:
+    # PEP 440 orders 3.0.0rc1 >= 3.0.0rc1, so the requirement is installable.)
+    "jcm>=3.0.0rc1",
     "flax",
     # >=1.3 for `hydra.utils.get_object`, which `jem.runners._accepts_grid`
     # uses to resolve a `_target_` that may be either a class or a
