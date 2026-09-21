@@ -387,8 +387,8 @@ class JCMComponent:
         after an exchange. Fields that are *not* named keep whatever jax-gcm
         built them as: a :class:`jcm.forcing.TimeSeries` stays a time series
         and goes on being sliced per internal timestep, so an unexchanged
-        climatology (vegetation, albedo, a land surface in a run without a
-        land model) still varies through the year.
+        climatology -- the land surface in a run without a land model -- still
+        varies through the year.
 
         Which fields those are is a property of the coupled model, not of the
         atmosphere, which is why it is set from outside rather than assumed

@@ -372,6 +372,21 @@ def declare_exchanged_forcing(
     on following the seasonal cycle, exactly as they would in an uncoupled
     run.
 
+    Both spellings get the same safety net, because both can get the set
+    wrong in the one direction that is silent. A field left *out* fails
+    loudly at trace time (the coupler refuses the carry), but a field left in
+    that nothing writes is a climatology frozen at its start-date value with
+    no symptom at all -- so an explicit declaration naming a field that is not
+    time-varying is warned about, and a time-varying field that neither branch
+    declared is warned about whenever a hand-written exchanger could be the
+    one writing it.
+
+    Raises
+    ------
+    ValueError
+        If ``coupling.exchanged_forcing`` is a bare string. It is a list of
+        field names, and a string would be read as its characters.
+
     Parameters
     ----------
     cfg : omegaconf.DictConfig
@@ -384,39 +399,72 @@ def declare_exchanged_forcing(
     """
     declared = cfg.coupling.get("exchanged_forcing")
     if declared is not None:
+        if isinstance(declared, str):
+            # `exchanged_forcing=sice_am` composes to a string, and a string is
+            # an iterable of characters: without this it would be declared as
+            # seven one-letter fields and the error would name those rather
+            # than the missing brackets.
+            raise ValueError(
+                "coupling.exchanged_forcing is a LIST of jcm.forcing.ForcingData "
+                f"field names, not one name; got the string {declared!r}. Write "
+                f"`+coupling.exchanged_forcing=[{declared}]`."
+            )
         fields = tuple(OmegaConf.to_container(declared, resolve=True)  # type: ignore[arg-type]
                        if isinstance(declared, ListConfig) else declared)
         logger.info(
             "The coupling supplies the atmosphere's %s (coupling.exchanged_forcing).",
             ", ".join(fields) or "nothing",
         )
+        # A name that is not time-varying is the declaration's own failure
+        # mode: declaring it collapses a field nothing writes, pinning it at
+        # the start date for the whole run. It is a warning rather than an
+        # error because a plain-array field collapses to itself, so the run is
+        # correct -- it is the *intent* that is probably wrong.
+        pinned = [
+            name for name in fields if name not in atm.time_varying_forcing
+        ]
+        if pinned and atm.time_varying_forcing:
+            logger.warning(
+                "coupling.exchanged_forcing names %s, which %s not time-varying "
+                "in this atmosphere's forcing (%s %s). Declaring a field only "
+                "matters when something writes it; if nothing does, it is "
+                "simply held at its start-date value.",
+                ", ".join(pinned),
+                "is" if len(pinned) == 1 else "are",
+                "the time-varying field(s) are",
+                ", ".join(atm.time_varying_forcing),
+            )
     else:
         fields = exchanged_fields(exchangers, atm.name)
-        opaque = sorted(
-            name for name, exchanger in exchangers.items()
-            if not isinstance(exchanger, Exchange)
+
+    # In BOTH branches: a time-varying field nobody declared is one an
+    # exchanger may still write, and the coupled step is then refused for
+    # changing the carry's structure. Only a hand-written exchanger can
+    # produce that silently -- a declarative table is where `fields` came
+    # from -- so the warning is gated on there being one.
+    opaque = sorted(
+        name for name, exchanger in exchangers.items()
+        if not isinstance(exchanger, Exchange)
+    )
+    undeclared = [name for name in atm.time_varying_forcing if name not in fields]
+    if opaque and undeclared:
+        # A hand-written exchanger is a function, so there is nothing to
+        # read: whatever it writes into `atm.forcing` is invisible here.
+        # Warned about rather than guessed at, because the guess that is
+        # wrong turns a climatology into a constant without saying so.
+        # Only when something is actually still a time series: with the
+        # default forcing every field is already a plain array and a
+        # hand-written exchanger has nothing to trip over.
+        logger.warning(
+            "The exchanger(s) %s are hand-written, so what they write into "
+            "the atmosphere's forcing cannot be read off a table, while %s "
+            "%s still time-varying. Any of those an exchanger overwrites "
+            "has to be listed in `coupling.exchanged_forcing`, or the "
+            "coupled step is refused for changing the carry's structure.",
+            ", ".join(repr(name) for name in opaque),
+            ", ".join(undeclared),
+            "is" if len(undeclared) == 1 else "are",
         )
-        undeclared = [
-            name for name in atm.time_varying_forcing if name not in fields
-        ]
-        if opaque and undeclared:
-            # A hand-written exchanger is a function, so there is nothing to
-            # read: whatever it writes into `atm.forcing` is invisible here.
-            # Warned about rather than guessed at, because the guess that is
-            # wrong turns a climatology into a constant without saying so.
-            # Only when something is actually still a time series: with the
-            # default forcing every field is already a plain array and a
-            # hand-written exchanger has nothing to trip over.
-            logger.warning(
-                "The exchanger(s) %s are hand-written, so what they write into "
-                "the atmosphere's forcing cannot be read off a table, while %s "
-                "%s still time-varying. Any of those an exchanger overwrites "
-                "has to be listed in `coupling.exchanged_forcing`, or the "
-                "coupled step is refused for changing the carry's structure.",
-                ", ".join(repr(name) for name in opaque),
-                ", ".join(undeclared),
-                "is" if len(undeclared) == 1 else "are",
-            )
     atm.set_exchanged_forcing(fields)
 
 

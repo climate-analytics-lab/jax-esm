@@ -553,6 +553,59 @@ def test_undeclared_file_forcing_is_refused_by_the_structure_check(
         )
 
 
+def test_validate_names_the_spec_for_an_undeclared_file_forcing(
+    model, file_forcing
+):
+    """The pre-flight catches it too, and names the row rather than the element.
+
+    `Exchange.validate` runs on the initial carries before anything is
+    compiled, so a `TimeSeries` destination that an exchanger would overwrite
+    with one array is a build-time `ValueError` naming the spec -- where the
+    coupler's own check, which still fires, can only name the workflow
+    element `'exchange'` at trace time.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model, forcing=file_forcing),
+        "ocn": SlabOceanModel(grid),
+    }
+    exchangers = default_exchangers(components)
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+    with pytest.raises(ValueError, match="atm.forcing.sea_surface_temperature"):
+        exchangers["exchange"].validate(coupler.initialize().components)
+
+
+def test_validate_passes_once_the_forcing_is_declared(model, file_forcing):
+    """Declaring the field makes both ends the same pytree, and validate agrees."""
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers, exchanged_fields
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    atm = JCMComponent(model, forcing=file_forcing)
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    exchangers = default_exchangers(components)
+    atm.set_exchanged_forcing(exchanged_fields(exchangers, atm.name))
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+    exchangers["exchange"].validate(coupler.initialize().components)
+
+
 @pytest.mark.slow
 def test_earth_slab_runs_from_the_command_line(tmp_path):
     """`+configuration=earth-slab` runs end to end with its file forcing.

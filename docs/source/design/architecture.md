@@ -69,8 +69,8 @@ keep but expensive to rediagnose:
   exactly those to the climatology at the run's start date. From `initialize()`
   onward the section has the structure an exchange preserves. Every field no
   component supplies keeps its time series and goes on being sliced by JCM, so
-  an albedo, a vegetation fraction, or a land surface in a run built with
-  `land=none` still follows the seasonal cycle.
+  a land surface in a run built with `land=none` still follows the seasonal
+  cycle.
 
   The names are a property of the *coupled model*, not of the atmosphere, which
   is why nothing assumes them: `jem.runners.build_coupler` reads them off the

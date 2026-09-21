@@ -786,7 +786,19 @@ code this release adds:
   what the `ice_clim_file` above is for. How much of a climatology the floor
   touches is logged at INFO when the model is built. Runs with no SST
   climatology are unaffected: the idealized profile starts near 288 K.
-
+- `Exchange.validate` compares the pytree **structure** of each row's two
+  ends and raises naming the row, so a destination that is a composite leaf
+  (a `jcm.forcing.TimeSeries` an exchanger would overwrite with one array)
+  is a build-time error naming `atm.forcing.<field>` instead of a trace-time
+  `RuntimeError` naming only the workflow element. Shapes and dtypes are
+  deliberately not compared, because a row that names a regridder changes
+  shape legitimately.
+- `coupling.exchanged_forcing` refuses a bare string, which is an iterable of
+  characters and would otherwise be declared as one-letter field names; the
+  message gives the `[...]` spelling. Its explicit branch now gets the same
+  safety net as the derived one: a declared field that is not time-varying,
+  and a time-varying field that nothing declared while a hand-written
+  exchanger is in play, are both warned about.
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
 Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component

@@ -547,6 +547,61 @@ def test_a_hand_written_exchanger_over_a_plain_forcing_is_not_warned_about(caplo
     assert "hand-written" not in caplog.text
 
 
+def test_a_bare_string_exchanged_forcing_is_refused():
+    """A string is an iterable of characters, so it is rejected by name.
+
+    `exchanged_forcing=sice_am` is the spelling a user reaches for first; read
+    as a list it declares seven one-letter fields and the error then names
+    those instead of the missing brackets.
+    """
+    cfg = composed([
+        "+configuration=earth-slab",
+        "+coupling.exchanged_forcing=sice_am",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    with pytest.raises(ValueError, match=r"\[sice_am\]"):
+        runners.declare_exchanged_forcing(cfg, atm, {})
+
+
+def test_declaring_a_field_nothing_varies_is_warned_about(caplog):
+    """A declared field that is not time-varying is pinned for nothing.
+
+    The declaration mechanism can reintroduce, by hand, exactly the failure
+    the derivation exists to avoid: a climatology held at its start-date value
+    with no symptom. `alb0` is a plain annual-mean array in the packaged file,
+    so declaring it says something the forcing cannot honour.
+    """
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "+coupling.exchanged_forcing=[sea_surface_temperature,alb0]",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    with caplog.at_level(logging.WARNING, logger="jem.runners"):
+        runners.declare_exchanged_forcing(cfg, atm, {})
+    assert "alb0" in caplog.text
+    assert "not time-varying" in caplog.text
+
+
+def test_an_explicit_declaration_still_warns_about_what_it_left_out(caplog):
+    """The safety net covers the declared branch too, not only the derived one."""
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+        "+coupling.exchanged_forcing=[sea_surface_temperature]",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    with caplog.at_level(logging.WARNING, logger="jem.runners"):
+        runners.declare_exchanged_forcing(
+            cfg, atm, {"exchange": example_exchanger}
+        )
+    # The four it did not declare are still time series, and a hand-written
+    # exchanger might be writing any of them.
+    assert "stl_am" in caplog.text
+    assert atm.exchanged_forcing == ("sea_surface_temperature",)
+
+
 # ---------------------------------------------------------------------------
 # The run settings
 # ---------------------------------------------------------------------------

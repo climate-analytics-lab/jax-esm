@@ -74,6 +74,8 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+import jax
+
 from jem.base.component import Carry, Component, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
@@ -427,6 +429,24 @@ class Exchange:
         regridder into an error that names the spec, instead of a trace-time
         failure inside the coupled step (or, worse, a silently unused field).
 
+        It also checks that each row's two ends have the **same pytree
+        structure**, because a row is a copy: writing the source's value into
+        the destination gives the destination the source's structure, and a
+        carry whose structure changes mid-step is one ``lax.scan`` cannot
+        carry. The coupler catches that too, but only at trace time and only
+        by naming the workflow element; here the offending row is named. The
+        case this exists for is a destination that is a *composite* leaf --
+        a ``jcm.forcing.TimeSeries`` (values, time axis, alignment mode) that
+        the atmosphere was given from a file and an exchanger overwrites with
+        one array (see
+        :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`,
+        which is how that is arranged).
+
+        Structure only: **shapes and dtypes are deliberately not compared**,
+        because a row that names a regridder legitimately changes shape, and a
+        row between grids of different resolution is the normal case rather
+        than an error.
+
         Parameters
         ----------
         components : Mapping[str, Carry]
@@ -439,7 +459,8 @@ class Exchange:
             If a spec names a component, a carry section or a regridder that
             does not exist.
         ValueError
-            If a spec names a field its section does not have.
+            If a spec names a field its section does not have, or if its two
+            ends have different pytree structures.
         TypeError
             If a component's carry is not a mapping, so it has no sections to
             address.
@@ -447,12 +468,36 @@ class Exchange:
         """
         for spec in self.specs:
             self._regridder(spec)
-            for path, (component, section, field) in (
-                (spec.src, spec.src_parts),
-                (spec.dst, spec.dst_parts),
+            values = {}
+            for end, path, (component, section, field) in (
+                ("src", spec.src, spec.src_parts),
+                ("dst", spec.dst, spec.dst_parts),
             ):
                 resolved = self._section(components, component, section, spec)
                 self._require_field(resolved, field, spec, path)
+                values[end] = getattr(resolved, field)
+            self._require_same_structure(spec, values["src"], values["dst"])
+
+    @staticmethod
+    def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
+        """Raise, naming the spec, if its two ends are different pytrees."""
+        # Typed as Any because `tree_structure` returns an opaque PyTreeDef
+        # that static analysis cannot compare, exactly as in
+        # `Coupler.generate_step_function`.
+        source_structure: Any = jax.tree_util.tree_structure(source)
+        destination_structure: Any = jax.tree_util.tree_structure(destination)
+        if source_structure == destination_structure:
+            return
+        raise ValueError(
+            f"Exchange spec {spec} copies a {source_structure} into a field "
+            f"that currently holds a {destination_structure}, so applying it "
+            "would change the pytree structure of the carries -- which "
+            "`lax.scan` cannot carry, and the coupled step refuses. The two "
+            "ends of a row have to be the same kind of pytree (shapes may "
+            "differ; a regridder changes those).\n"
+            f"  {spec.src}: {source_structure}\n"
+            f"  {spec.dst}: {destination_structure}"
+        )
 
     # -- lookups, shared by __call__ and validate --------------------------
 
