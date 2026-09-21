@@ -581,7 +581,11 @@ Breaking changes are marked; everything else is additive.
   named only half of it, and the pair now reads the same as the
   `jem.checkpoint.save_coupled_carry` / `load_coupled_carry` it is built on.
   Rename the calls — `model.save_carry(carry, directory)` /
-  `model.load_carry(directory)`; no alias is kept under the old names.
+  `model.load_carry(directory)`; no alias is kept under the old names, and
+  because the capability is matched by method name, a component that still
+  defines only the old pair is no longer recognised as checkpoint-capable:
+  its carry goes into the shared `carry.msgpack` like any other component's
+  rather than through its own writer.
 - `Coupler.load_carry` takes the template it needs from the components' own
   `initialize()`, so a checkpoint is loaded into the model meant to continue it
   and a component added, removed or rebuilt on another grid since it was written
