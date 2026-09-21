@@ -501,7 +501,7 @@ def test_an_explicit_coupling_table_is_used_as_given():
 # ---------------------------------------------------------------------------
 
 
-def test_earth_slab_couples_its_file_forcing():
+def test_earth_slab_couples_its_file_forcing(caplog):
     """The one shipped configuration with `forcing=from_file` builds and scans.
 
     `earth-slab` gives the atmosphere jax-gcm's packaged T30 climatology, in
@@ -511,16 +511,25 @@ def test_earth_slab_couples_its_file_forcing():
     the carry changes pytree structure at the first exchange and no step can
     be scanned at all. Traced with `jax.eval_shape`: the structure check is a
     trace-time check, and tracing it costs no compilation.
+
+    `earth-slab` does not set `coupling.exchanged_forcing`, so this also
+    exercises the derived branch of `declare_exchanged_forcing` -- the one a
+    user debugging a frozen climatology actually hits -- and its INFO log is
+    the only place the derived set is visible without reading the table.
     """
     from jcm.forcing import TimeSeries
 
-    coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
+    with caplog.at_level(logging.INFO, logger="jem.runners"):
+        coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
 
     # Read off the coupling table, not assumed: these are exactly the rows of
     # `jem.exchangers.STANDARD_EXCHANGES` that write into `atm.forcing`.
     assert set(coupler.components["atm"].exchanged_forcing) == {
         "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
     }
+    assert "derived from the exchanger table" in caplog.text
+    for name in coupler.components["atm"].exchanged_forcing:
+        assert name in caplog.text
 
     carry = coupler.initialize()
     forcing = carry.components["atm"]["forcing"]

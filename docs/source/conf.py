@@ -65,6 +65,17 @@ exclude_patterns = ['examples/README.md', 'examples/**/README.md']
 autosummary_generate = True
 autosummary_generate_overwrite = True  # Regenerate on each buil
 
+# Read the Docs installs docs/requirements.txt, which carries no Veros fork
+# (there is no released PyPI veros this project's `jem.components.veros`
+# subpackage could depend on instead); without a stub here, autosummary's
+# import of `jem.components.veros.setups.double_drake`/`.earth` and
+# `jem.components.veros_component` -- all of which import `veros` at module
+# scope to subclass its `VerosSetup` -- fails on RTD and those pages render
+# empty. The GitHub `docs` CI job checks out the jittable fork and puts it on
+# `PYTHONPATH` before building, so the real `veros` shadows this mock there
+# and the mock has no effect.
+autodoc_mock_imports = ['veros']
+
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 

@@ -52,9 +52,9 @@ thermodynamically forced.
 A Veros configuration also runs the **atmosphere** in double precision:
 importing Veros sets ``jax_enable_x64`` process-wide, and which of the
 atmosphere's own fields stay float32 depends on build order (whatever
-jax-gcm allocated before Veros was imported); :class:`~jem.fluxes.
-VerosExchange` reads each destination field's dtype at trace time rather
-than assuming one, so the coupling itself is robust to that.
+jax-gcm allocated before Veros was imported); :class:`~jem.fluxes.VerosExchange`
+reads each destination field's dtype at trace time rather than assuming one,
+so the coupling itself is robust to that.
 
 Veros is an optional dependency -- the jittable fork this project is built
 against, cloned and ``pip install -e``d as shown in the main

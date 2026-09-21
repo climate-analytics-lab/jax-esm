@@ -3,8 +3,9 @@
 Every example that produces a map or a time series was doing the same three
 things by hand: gluing a run's chunk files back into one dataset, weighting a
 horizontal mean by ``cos(latitude)``, and orienting a JEM field
-(``(..., lon, lat)``, see ``CLAUDE.md``'s "Output conventions") for
-``contourf``/``pcolormesh``. This module is those three things, written once.
+(``(..., lon, lat)``, see "Output conventions" in
+``docs/source/design/architecture.md``) for ``contourf``/``pcolormesh``. This
+module is those three things, written once.
 
 It is behind the optional ``plot`` extra (``pip install "jax-esm[plot]"``,
 ``matplotlib`` and ``cartopy``): **``matplotlib`` and ``cartopy`` are imported

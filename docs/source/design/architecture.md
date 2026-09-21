@@ -868,8 +868,12 @@ Veros integrates `forcing.surface_taux`/`tauy` and the atmosphere publishes a
 near-surface *wind*, so getting from one to the other is a bulk drag law (and,
 on a rotated grid, a rotation into its local frame) — a computation, not a
 copy, and therefore a hand-written exchanger. The shipped `veros-*`
-configurations run thermodynamically forced and mechanically at rest until one
-is given.
+configurations give one:
+`coupling.exchanger: jem.fluxes.VerosExchange` — a bulk drag law on the
+atmosphere's near-surface wind, regridded then rotated into the ocean grid's
+frame, plus a freezing-point mask on the heat and freshwater fluxes. See
+`jem.fluxes` for the exchanger itself; the declarative table above carries
+the rest of the coupling.
 
 Three properties are worth stating, because a hand-written exchanger has them
 only by accident:

@@ -6,16 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) from v1.0.0
 onwards. Before v1.0.0 the public API may change in any release; every such
 change is listed here.
 
-## [Unreleased] — 1.0.0b0, "the driver and configuration layer"
+## [Unreleased] — 1.0.0b0, "the driver, configuration and examples layer"
 
-Phase 2 of the [API hardening plan][plan]. Phase 1 made a coupled model a thing
-you could build in Python; this one makes it a thing you can *run*. It adds the
-one chunked run loop every example and experiment driver used to re-invent, the
-Hydra configuration that turns a coupled run into one command, the declarative
-exchange that writes the standard coupling down once, and a checkpoint format
-that validates what it loads. It also pins the jax-gcm revision all of that is
-built against, so "which jax-gcm does this work with?" has an answer in the
-repository.
+Phases 2 and 3 of the [API hardening plan][plan]. Phase 1 made a coupled model
+a thing you could build in Python; Phase 2 makes it a thing you can *run*: the
+one chunked run loop every example and experiment driver used to re-invent,
+the Hydra configuration that turns a coupled run into one command, the
+declarative exchange that writes the standard coupling down once, and a
+checkpoint format that validates what it loads. It also pins the jax-gcm
+revision all of that is built against, so "which jax-gcm does this work
+with?" has an answer in the repository. Phase 3 is the examples and user
+documentation written once against that API: the example notebooks, the
+`jem.plot` and `jem.fluxes` modules and the packaged Veros case setups they
+use, and the documentation pages that describe all of it.
 
 Breaking changes are marked; everything else is additive.
 
@@ -285,10 +288,11 @@ Breaking changes are marked; everything else is additive.
   shipped `veros-double-drake` and `veros-earth` configurations get a coupling
   that validates instead of one written for a slab carry. The wind stress is
   not in it and cannot be — Veros integrates a stress, the atmosphere publishes
-  a wind, and a drag law is not a copy — so those configurations run
-  thermodynamically forced and mechanically at rest until `coupling.exchanger`
-  names a hand-written one. A Veros ocean coupled to a sea-ice component is
-  warned about, because Veros publishes no freeze/melt potential to drive it.
+  a wind, and a drag law is not a copy — so the wind stress comes from a
+  `coupling.exchanger`: the shipped Veros configurations name
+  `jem.fluxes.VerosExchange` (below). A Veros ocean coupled to a sea-ice
+  component is warned about, because Veros publishes no freeze/melt potential
+  to drive it.
   The Veros wrapper's module is looked up in `sys.modules` rather than
   imported, so nothing here depends on the optional Veros install.
   `default_workflow` is the order a `Coupler` runs by default. The module
@@ -614,7 +618,6 @@ Breaking changes are marked; everything else is additive.
   every run. `test_idealised_terrain.py` regenerates it into a temp file and
   asserts the two are identical, so the tool and the shipped data cannot
   silently drift apart.
-
 - **`jem.replace_field(carry, path, value)` / `jem.read_field(carry, path)`**
   — write or read one `"component.section.field"` of a coupled carry, the
   same address `jem.exchangers.Exchange` already uses. Every example that
@@ -830,8 +833,9 @@ Breaking changes are marked; everything else is additive.
 
 ### Fixed
 
-Defects found by the local review of this change before it was pushed, all in
-code this release adds:
+Defects found by the local review of this change and by running its
+configurations end to end — some in code this release adds, some in older
+components these configurations are the first to exercise:
 
 - `jax` and `jaxlib` are capped below 0.11.2 for as long as no released flax
   survives it: jax 0.11.2 removed `jax.experimental.hijax.HiPrimitive`, which

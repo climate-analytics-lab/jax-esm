@@ -478,6 +478,11 @@ def declare_exchanged_forcing(
             )
     else:
         fields = exchanged_fields(exchangers, atm.name)
+        logger.info(
+            "The coupling supplies the atmosphere's %s (derived from the "
+            "exchanger table); the rest of its forcing stays time-varying.",
+            ", ".join(fields) or "nothing",
+        )
 
     # In BOTH branches: a time-varying field nobody declared is one an
     # exchanger may still write, and the coupled step is then refused for
