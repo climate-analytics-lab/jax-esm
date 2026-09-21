@@ -7,6 +7,7 @@ Skips if the standalone Fortran executable has not been built
 import sys
 from pathlib import Path
 
+import jax
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -18,7 +19,15 @@ sys.path.insert(0, str(REPO / "tests/reference/thsice"))
 def test_matches_thsice_fortran_to_roundoff():
     import thsice_compare as TC
 
-    rows = TC.run_all()
+    # `TC.run_all()` turns on `jax_enable_x64` (a process-global JAX flag) for the
+    # machine-precision comparison and does not turn it back off; restore whatever this worker
+    # had before so the setting cannot leak into whichever test module pytest-xdist runs next
+    # in this same process (see the fixture in test_winton_seaice.py for the failure this caused).
+    previous = jax.config.jax_enable_x64
+    try:
+        rows = TC.run_all()
+    finally:
+        jax.config.update("jax_enable_x64", previous)
     worst = max(rows, key=lambda r: abs(r[3] - r[4]) / max(abs(r[4]), 1.0))
     assert TC.max_relative_error(rows) < 1e-12, worst
 

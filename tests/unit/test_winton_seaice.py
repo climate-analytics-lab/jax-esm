@@ -8,16 +8,35 @@ prescribed surface flux and derivative.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
-jax.config.update("jax_enable_x64", True)
-
-from jem.components.slab.winton_seaice_model.winton_seaice_model import (  # noqa: E402
+from jem.components.slab.winton_seaice_model.winton_seaice_model import (
     C_ICE, K_ICE, K_SNOW, L_ICE, MU, RHO_ICE, S_ICE, T_FREEZE, T_MELT,
     T1_from_q, T2_from_q, column_enthalpy_to_melt, q_from_T1, q_from_T2,
     winton_mass_step, winton_temperature_step,
 )
 
 DAY = 86400.0
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _enable_x64_for_this_module():
+    """Enable float64 for this file's machine-precision checks, and restore it afterwards.
+
+    ``jax_enable_x64`` is a process-global JAX flag, not a per-test one: turning it on at
+    import time (as this module used to, unconditionally, before its first import) leaves it
+    on for every test module a pytest-xdist worker happens to run afterward, silently
+    promoting their float32 arrays to float64. That is what broke
+    ``test_coupler.py``/``test_coupled.py``/``test_accumulate.py`` (a ``lax.scan`` dtype
+    mismatch) once this file's tests ran in the same worker as theirs -- invisible in the PR's
+    own test run before jax-esm main's Phase 2 test suite existed alongside it. Scoping the
+    flag to this module's setup/teardown keeps the machine-precision comparisons exact without
+    leaking the setting to whichever module runs next.
+    """
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", previous)
 
 
 def thsice_solve4temp_numpy(h, hs, T1, T2, Ts, flux_at, dflux, sw_abs, dt, i0=0.3, ksolar=1.5):
@@ -262,6 +281,7 @@ def test_ice_transport_limiter_positivity_and_conservation():
 
 def test_winton_two_step_trajectory_through_coupler():
     """Integration: an initialized carry runs through Coupler.generate_trajectory_function(2), with transport."""
+    import jax_datetime as jdt
     import numpy as np
     from jem.base.coupler import Coupler
     from jem.components.slab.grid import SlabGrid
@@ -272,14 +292,21 @@ def test_winton_two_step_trajectory_through_coupler():
     grid = SlabGrid(fractional_mask=jnp.asarray(land), latitude_radian=jnp.asarray(lat), longitude_radian=jnp.asarray(lon), threshold=0.5)
     dx = 6371e3 * np.cos(lat) * np.deg2rad(30.0); dy = np.full((nx, ny), 6371e3 * np.deg2rad(160 / (ny - 1)))
     model = WintonSeaiceModel(grid=grid, timestep=86400.0, initial_ice_thickness=1.0, transport=dict(dx=dx, dy=dy, diffusivity=2e4))
-    coupler = Coupler(components=dict(ice=model))
+    # coupling_timestep/start_date are required keyword-only arguments of the Phase 1/2 Coupler
+    # (jax-esm main); the coupling timestep matches the model's own `timestep` here, but nothing
+    # enforces that the two agree in general -- see the design note on WintonSeaiceModel.step.
+    coupler = Coupler(
+        components=dict(ice=model),
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=jdt.to_datetime("2001-01-01"),
+    )
     init = coupler.initialize()
-    traj = coupler.generate_trajectory_function(workflow=["ice"], iterations=2, jitted=True, show_progress=False)
+    traj = coupler.generate_trajectory_function(iterations=2)
     final, preds = traj(init)
-    assert set(final["ice"]) == {"state", "forcing", "derived"}
+    assert set(final.components["ice"]) == {"state", "forcing", "derived"}
     for leaf in jax.tree_util.tree_leaves(preds["ice"]):
         assert leaf.shape[0] == 2 and bool(jnp.all(jnp.isfinite(leaf)))
-    assert float(final["ice"]["state"].ice_thickness.max()) > 0.0
+    assert float(final.components["ice"]["state"].ice_thickness.max()) > 0.0
 
 
 def _small_model(transport=False, **kw):
@@ -370,6 +397,9 @@ def test_derived_fields_match_final_state_with_transport():
 
 
 if __name__ == "__main__":
+    # Run without pytest, so the autouse fixture above never fires: enable x64 by hand, in a
+    # bare script there is nothing after this module for it to leak into.
+    jax.config.update("jax_enable_x64", True)
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
             fn(); print("ok", name)

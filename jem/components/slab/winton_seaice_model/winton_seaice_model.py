@@ -39,17 +39,17 @@ Provenance and licence: the thermodynamic core is a port of MITgcm pkg/thsice (M
 Flato and Hibler 1992). `tests/reference/thsice` rebuilds the Fortran oracle the port is checked against.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
 import tree_math
 
-from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.components.slab.base import SlabModelBase
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.winton_seaice_model.ice_transport import transport_fields
-from jem.utils.bulk_op import stack_objects
 
 # ---------------------------------------------------------------- constants (Winton 2000 Table 1)
 RHO_ICE = 905.0
@@ -313,7 +313,6 @@ class WintonSeaiceModel(SlabModelBase):
     def __init__(
         self,
         grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
         timestep: float = 86400.0,
         n_substeps: int = 4,
         n_flux_iterations: int = 3,
@@ -327,7 +326,6 @@ class WintonSeaiceModel(SlabModelBase):
         min_ice_fraction: float = 0.01,
         initial_ice_thickness: float = 0.0,
         mask_value: float = 0.0,
-        calendar: str = "365_day",
         transport: dict | None = None,
         surface_flux_parameters: SurfaceFluxParameters | None = None,
         emissivity=None,
@@ -335,9 +333,16 @@ class WintonSeaiceModel(SlabModelBase):
         """transport: None (thermodynamics only) or dict(dx=, dy= (m, cell centres, grid shape), cyclic_x=True,
         diffusivity=2e4 m2/s, n_substeps=12): advect the ice with forcing.ice_velocity_{u,v} and diffuse it.
         surface_flux_parameters / emissivity: the JCM SurfaceFluxParameters and longwave emissivity used for the
-        bulk fluxes over ice; pass the same objects the coupled atmosphere runs with (defaults: JCM's defaults)."""
+        bulk fluxes over ice; pass the same objects the coupled atmosphere runs with (defaults: JCM's defaults).
+
+        `timestep` is this component's own substepping interval (`self.timestep / n_substeps` per implicit
+        solve), kept as a constructor argument rather than read from the coupler's `CouplingTime.dt` because the
+        model predates `SlabModelBase`'s clock-owning redesign (see the class docstring note on `step`); it is
+        not automatically kept in sync with `Coupler(coupling_timestep=...)` -- see the design note on `step`.
+        """
         self.surface_flux_parameters = SurfaceFluxParameters.default() if surface_flux_parameters is None else surface_flux_parameters
         self.emissivity = ModRadConParameters.default().emisfc if emissivity is None else emissivity
+        self.timestep = timestep
         self.n_substeps = n_substeps
         self.n_flux_iterations = n_flux_iterations
         self.ice_albedo = ice_albedo
@@ -350,8 +355,7 @@ class WintonSeaiceModel(SlabModelBase):
         self.min_ice_fraction = min_ice_fraction
         self.initial_ice_thickness = initial_ice_thickness
         self.mask_value = mask_value
-        super().__init__(name="WintonSeaiceModel", grid=grid, start_datetime=start_datetime,
-                         timestep=timestep, calendar=calendar)
+        super().__init__(name="WintonSeaiceModel", grid=grid)
         self.transport = None
         if transport is not None:
             self.transport = {"cyclic_x": True, "diffusivity": 2e4, "n_substeps": 12, **transport}
@@ -369,7 +373,7 @@ class WintonSeaiceModel(SlabModelBase):
         derived = WintonDerived(f, z + 288.15, z, z + KELVIN + T_FREEZE, h * f, z, z, z, z, z, z + self.ice_albedo, z, z)
         return {"state": state, "forcing": forcing, "derived": derived}
 
-    def _create_step_function_body(self):
+    def _create_step_function_body(self) -> Callable[[Carry, Any], tuple[Carry, Diagnostics]]:
         ocn = self.grid.binary_mask == self.mask_value
         n = self.n_substeps
         dt = self.timestep / n
@@ -513,9 +517,30 @@ class WintonSeaiceModel(SlabModelBase):
                 ice_energy_transport=de_transport,
             )
             result = {"state": new_state, "forcing": forcing, "derived": derived}
-            return result, stack_objects([result])
+            # The new carry and this step's diagnostics are the same dict: the coupler's own
+            # `lax.scan` (via `Component.step`, see below) stacks diagnostics over iterations
+            # itself, so nothing here may pre-stack a leading axis -- unlike the pre-Phase-1
+            # contract, where `generate_step_function` drove its own trajectory loop outside
+            # `lax.scan` and expected each call's predictions already carrying one.
+            return result, result
 
         return step_function
+
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Advance one coupling step (the ``Component`` protocol's entry point).
+
+        Design note: unlike the other slab models, this model does not derive its physics
+        timestep from ``time.dt`` -- it substeps internally at ``self.timestep / n_substeps``,
+        with ``self.timestep`` a constructor argument independent of the coupler's
+        ``coupling_timestep``. ``time`` is accepted (and its step count threaded through, so a
+        component run at multiplicity > 1 by the workflow still gets distinct clocks per call)
+        but otherwise unused; the two timesteps must be kept in agreement by configuration, and
+        nothing here checks that they are. This predates the Phase 1/2 clock-ownership
+        redesign (`SlabModelBase.bind`) and is flagged as a design gap rather than fixed here
+        -- see the merge report for jax-esm PR #114.
+        """
+        step_function = self._create_step_function_body()
+        return step_function(carry, time.step)
 
     def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
         dims = ("time",) + tuple(self.grid.dims)

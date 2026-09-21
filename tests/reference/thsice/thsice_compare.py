@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -82,6 +81,14 @@ MASS_CASES = {
 
 
 def run_all():
+    # `jax_enable_x64` is a process-global JAX flag: setting it at import time (as this module
+    # used to) leaves it on for every test module a pytest-xdist worker happens to run
+    # afterward. `run_all()` is the one entry point both `test_winton_vs_thsice_fortran.py` and
+    # this module's own `__main__` block call, so enabling it here -- rather than at import --
+    # keeps the machine-precision comparison exact without leaking the setting at import time.
+    # This function does not restore the previous value itself (the `__main__` block below has
+    # nothing after it to protect); the pytest caller restores it around this call instead.
+    jax.config.update("jax_enable_x64", True)
     rows = []
     for name, args in TEMPERATURE_CASES.items():
         j, o = compare_temperature(*args)
