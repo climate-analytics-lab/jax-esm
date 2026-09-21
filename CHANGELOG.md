@@ -1012,6 +1012,24 @@ components these configurations are the first to exercise:
   exact-reconstruction check -- sorted by the step that returns; the
   `FileNotFoundError` still names the component, the directory and whatever
   components' files *are* there when nothing matches.
+- **`declare_exchanged_forcing` only reads exchangers the workflow actually
+  runs.** `coupling.workflow` may omit
+  `jem.exchangers.DEFAULT_EXCHANGER_NAME` (`"exchange"`) to step every
+  component side by side with no coupling at all, for comparison against a
+  coupled run -- but the derived branch read every exchanger
+  `build_exchangers` registered regardless, so with
+  `forcing@atmosphere.forcing=from_file` an uncoupled workflow still
+  collapsed the fields the (never-run) exchanger would have written to
+  their start-date value: a climatology frozen with no symptom, in exactly
+  the field left unwritten because nothing coupled it. It now derives from
+  `coupler.workflow` -- the coupler's own resolution of an explicit
+  `coupling.workflow` or its default order, reused rather than duplicated --
+  so an exchanger the workflow does not run contributes no fields and is not
+  warned about as opaque. `_validate_exchangers` skips such an exchanger for
+  the same reason: its rows would otherwise be checked against a carry in
+  which the atmosphere's side is correctly still a `jcm.forcing.TimeSeries`
+  while the surface component's side is a plain array, raising a structure
+  mismatch that can only arise from an exchange that never executes.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

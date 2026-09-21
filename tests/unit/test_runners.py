@@ -564,6 +564,55 @@ def test_an_unexchanged_climatology_stays_a_climatology():
         assert isinstance(getattr(forcing, name), TimeSeries), name
 
 
+def test_a_workflow_without_the_exchanger_leaves_forcing_unfrozen():
+    """`coupling.workflow` may omit the exchanger, to run every component
+    side by side with no coupling at all -- the supported way to compare
+    against a coupled run (see the module docstring of `jem.exchangers`).
+
+    Deriving `declare_exchanged_forcing`'s field set from every *registered*
+    exchanger, rather than only the ones `workflow` actually runs, collapsed
+    `sea_surface_temperature`/`sice_am` to their start-date value even though
+    the "exchange" step that would write them never runs at all -- the
+    climatology-frozen-with-no-symptom failure this function exists to avoid,
+    just triggered by the workflow omitting the exchanger rather than a wrong
+    field list. `land=none` (the default) keeps this to the two fields the
+    default coupling table would otherwise still exchange.
+
+    Fixing that alone would move the bug rather than remove it:
+    `_validate_exchangers` would then call the never-run "exchange"
+    exchanger's `.validate()` against the initial carry, in which the
+    atmosphere's forcing fields are correctly still `TimeSeries` (nothing
+    wrote them) while the surface components' fields are plain arrays --
+    a structure mismatch that can only happen because of an exchange that
+    never executes. So `_validate_exchangers` also has to skip an exchanger
+    the resolved workflow does not run, which this test exercises by simply
+    calling `build_coupler` at all: it would raise before returning if that
+    skip were missing.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "coupling.workflow=[atm,ocn,seaice]",
+    ]))
+
+    # Nothing is declared: the only exchanger this coupler owns is
+    # "exchange", and the workflow this test composed never runs it.
+    assert coupler.components["atm"].exchanged_forcing == ()
+    assert "exchange" not in coupler.workflow
+
+    forcing = coupler.initialize().components["atm"]["forcing"]
+    for name in ("sea_surface_temperature", "sice_am"):
+        assert isinstance(getattr(forcing, name), TimeSeries), name
+
+    # The one-step structure is stable: an uncoupled workflow scans exactly
+    # as well as a coupled one, just without exchanging anything.
+    carry = coupler.initialize()
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
 def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     """The ice the atmosphere is handed on step 0 is the file's, not zero.
 

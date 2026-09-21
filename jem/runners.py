@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import hydra.utils
@@ -382,7 +382,11 @@ def build_exchangers(
 
 
 def declare_exchanged_forcing(
-    cfg: DictConfig, atm: JCMComponent, exchangers: Mapping[str, Any]
+    cfg: DictConfig,
+    atm: JCMComponent,
+    exchangers: Mapping[str, Any],
+    *,
+    workflow: Sequence[str] | None = None,
 ) -> None:
     """Tell the atmosphere which of its boundary conditions the coupling supplies.
 
@@ -423,6 +427,18 @@ def declare_exchanged_forcing(
     declared is warned about whenever a hand-written exchanger could be the
     one writing it.
 
+    An exchanger that is registered but that the coupled model's ``workflow``
+    never runs writes nothing either -- ``coupling.workflow`` omitting
+    :data:`jem.exchangers.DEFAULT_EXCHANGER_NAME` is the supported way to
+    step every component side by side with no coupling at all, for
+    comparison against a coupled run (see the module docstring of
+    :mod:`jem.exchangers`). ``workflow`` is how this function is told which
+    exchangers that is, so the derived branch reads the table only of the
+    ones that actually run and the safety-net warning only fires for those:
+    an exchanger nothing runs is not "opaque", it is simply inert, and a
+    field it would have written but does not is correctly left as the
+    time-varying climatology an uncoupled run needs.
+
     Raises
     ------
     ValueError
@@ -437,8 +453,28 @@ def declare_exchanged_forcing(
         The built atmosphere, which is told the answer.
     exchangers : Mapping[str, Any]
         What :func:`build_exchangers` returned.
+    workflow : sequence of str, optional
+        The coupled model's actual workflow -- pass ``coupler.workflow``, the
+        already-resolved and validated tuple (the explicit
+        ``coupling.workflow``, flattened, or the default order
+        :class:`~jem.base.coupler.Coupler` builds when none was given) --
+        so that an exchanger the workflow does not run contributes no fields
+        and triggers no warning. ``None`` (the default) uses every exchanger
+        in ``exchangers`` unfiltered, for a caller -- such as a direct unit
+        test of one exchanger -- that has no workflow to resolve.
 
     """
+    # Only the exchangers the workflow actually runs can write anything; one
+    # that is registered but that `workflow` never names (the uncoupled
+    # comparison run the module docstring above describes) is exactly as
+    # inert as one that was never built at all. `workflow=None` -- a caller
+    # with no coupler to resolve one from -- keeps the old behaviour of
+    # reading every registered exchanger.
+    active = (
+        exchangers if workflow is None
+        else {name: exchanger for name, exchanger in exchangers.items()
+              if name in workflow}
+    )
     declared = cfg.coupling.get("exchanged_forcing")
     if declared is not None:
         if isinstance(declared, str):
@@ -477,7 +513,7 @@ def declare_exchanged_forcing(
                 ", ".join(atm.time_varying_forcing),
             )
     else:
-        fields = exchanged_fields(exchangers, atm.name)
+        fields = exchanged_fields(active, atm.name)
         logger.info(
             "The coupling supplies the atmosphere's %s (derived from the "
             "exchanger table); the rest of its forcing stays time-varying.",
@@ -490,7 +526,7 @@ def declare_exchanged_forcing(
     # produce that silently -- a declarative table is where `fields` came
     # from -- so the warning is gated on there being one.
     opaque = sorted(
-        name for name, exchanger in exchangers.items()
+        name for name, exchanger in active.items()
         if not isinstance(exchanger, Exchange)
     )
     undeclared = [name for name in atm.time_varying_forcing if name not in fields]
@@ -543,9 +579,6 @@ def build_coupler(cfg: DictConfig) -> Coupler:
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)
-    # Before the coupler, because this decides the structure of the carry
-    # `atm.initialize()` builds, and the coupler is what scans that carry.
-    declare_exchanged_forcing(cfg, atm, exchangers)
     workflow = cfg.coupling.get("workflow")
     coupler = Coupler(
         components,
@@ -555,6 +588,18 @@ def build_coupler(cfg: DictConfig) -> Coupler:
         calendar=atm.model.calendar,
         workflow=None if workflow is None else list(workflow),
     )
+    # After the coupler, not before: what `declare_exchanged_forcing` needs is
+    # not the exchangers `build_exchangers` registered but the ones the
+    # workflow actually runs, and only `Coupler.__init__` resolves that --
+    # flattening and validating an explicit `coupling.workflow`, or falling
+    # back to the default order (every exchanger, then every component,
+    # `jem.exchangers.default_workflow`) if none was given. `coupler.workflow`
+    # is that resolution, reused here rather than duplicated. This is still
+    # in time: `Coupler.__init__` only binds each component to its clock
+    # (`bind`), it does not call `atm.initialize()` -- `_validate_exchangers`
+    # below makes that first call, and `atm.set_exchanged_forcing` has to
+    # land before it does, which it does here.
+    declare_exchanged_forcing(cfg, atm, exchangers, workflow=coupler.workflow)
     _validate_exchangers(coupler)
     logger.info("Built %r", coupler)
     return coupler
@@ -800,10 +845,27 @@ def _validate_exchangers(coupler: Coupler) -> None:
     pieces the run then reuses -- to catch a broken coupling table before a
     model is integrated at all. Exchangers that are plain functions have
     nothing to check and are skipped.
+
+    An exchanger the workflow does not run is skipped too, because its rows
+    describe a coupling this coupled model never executes. Left out of
+    ``coupling.workflow`` is the supported way to step every component with
+    no coupling at all, for comparison against a coupled run (see
+    :func:`declare_exchanged_forcing`), and that is exactly what makes such
+    an exchanger's rows unvalidatable rather than merely unused:
+    ``declare_exchanged_forcing`` correctly leaves the destination fields it
+    would have written as the time-varying climatology an uncoupled
+    atmosphere needs, so checking the row anyway would compare that (still a
+    ``jcm.forcing.TimeSeries``) against its still-plain-array source and
+    raise on a structure mismatch that can only ever arise from an exchange
+    that never runs.
     """
+    active = {
+        name: exchanger for name, exchanger in coupler.exchangers.items()
+        if name in coupler.workflow
+    }
     checkable = [
         exchanger
-        for exchanger in coupler.exchangers.values()
+        for exchanger in active.values()
         if hasattr(exchanger, "validate")
     ]
     if not checkable:
