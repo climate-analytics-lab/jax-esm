@@ -45,8 +45,11 @@ four things JAX-ESM is written against:
   ``Model.physics_carry``, ``ModelPredictions.with_context(model)`` re-attaches
   the context a pytree round trip drops, and ``Model._date_from_sim_time`` is
   now ``Model.date_from_sim_time`` (the old name kept only as a delegating
-  alias). Between them these retire every private jax-gcm attribute the JCM
-  adapter used to read.
+  alias). ``JCMComponent`` is built on all four, so it reaches for no private
+  jax-gcm attribute at all; and because the old private date name only
+  delegates, an instance-level override of it -- the season freeze in
+  ``examples/02_experimental/03_jcm_veros_earth`` -- has to move to the public
+  name or it silently stops taking effect.
 
 jax-gcm reports ``3.0.0rc1`` here -- its first 3.0 release candidate -- but the
 tag is not cut, so a commit sha is still what is pinned. The ``jcm>=3.0.0rc1``
@@ -106,9 +109,11 @@ class IntegrationPoint(NamedTuple):
         ``key.field`` path into the diagnostics dict; for
         ``access="package data"`` it is a path relative to the package root.
     access : str
-        ``"public"``, ``"private"`` (with the jax-gcm issue tracking the gap,
-        e.g. ``"private, TODO(jax-gcm#755)"``), ``"diagnostics"`` or
-        ``"package data"``. The contract test dispatches on the first word.
+        ``"public"``, ``"private"`` (followed, where a jax-gcm issue tracks
+        the missing public API, by the issue -- ``"private,
+        TODO(jax-gcm#123)"``), ``"diagnostics"`` or ``"package data"``. The
+        contract test dispatches on the first word, so the trailing note is
+        free-form.
     used_for : str
         Why JAX-ESM needs it. Read this before deleting an entry: if nothing
         described here is still true, the entry goes.
@@ -195,7 +200,33 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "jcm.model.Model", "bootstrap_state", "public",
         "Build the initial dycore state and physics carry without integrating"
         " a step, which is what lets JCMComponent.initialize() produce a carry"
-        " of the exact structure step 1 will return.",
+        " of the exact structure step 1 will return. Returns the"
+        " `(dycore_state, physics_carry)` pair directly (jax-gcm#824), so"
+        " JAX-ESM unpacks the return value rather than reading it back off the"
+        " model.",
+    ),
+    IntegrationPoint(
+        "jcm.model.Model", "dycore_state", "public",
+        "Read-only view of the dycore state bootstrap_state/run installed on"
+        " the model. JCMComponent.initialize() takes the state from"
+        " bootstrap_state's return value; this is the name the contract test"
+        " watches so that the pair stays readable without a private read"
+        " (jax-gcm#824 closed jax-gcm#755 with it).",
+    ),
+    IntegrationPoint(
+        "jcm.model.Model", "physics_carry", "public",
+        "Read-only view of the cross-step physics carry paired with"
+        " dycore_state; same provenance and the same reason to watch it.",
+    ),
+    IntegrationPoint(
+        "jcm.model.Model", "date_from_sim_time", "public",
+        "jax-gcm's own elapsed-seconds -> DateData conversion, and the method"
+        " jcm.model.Model calls internally for date-aware forcing. The"
+        " season-freeze helper in"
+        " examples/02_experimental/03_jcm_veros_earth/model_setup.py overrides"
+        " it on the model instance, so a rename turns that override into a"
+        " silent no-op rather than an error (which is exactly what the rename"
+        " from _date_from_sim_time in jax-gcm#824 would have done).",
     ),
     IntegrationPoint(
         "jcm.model.Model", "run_from_state_with_carry", "public",
@@ -279,29 +310,21 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "Serialization of the atmosphere's output; JAX-ESM deliberately does"
         " not reimplement jax-gcm's CF metadata.",
     ),
+    IntegrationPoint(
+        "jcm.predictions.ModelPredictions", "with_context", "public",
+        "Re-attaches the coords/physics/dycore a JAX pytree round trip drops,"
+        " so a ModelPredictions stacked by JAX-ESM's lax.scan can serialize"
+        " itself again. Public since jax-gcm#824 (closing jax-gcm#756); it"
+        " replaced JAX-ESM's read of the private `_predictions` payload.",
+    ),
     # ------------------------------------------------------------------
-    # Private names. Where a jax-gcm issue tracks the missing public API the
-    # entry names it, and the adapter helper that does the read carries the
-    # same TODO, so the two cannot drift apart.
+    # Private names. One is left: JAX-ESM copies its *values* rather than
+    # importing it, so there is nothing for jax-gcm to make public and no
+    # issue to track -- but a jax-gcm that stopped defining it would leave
+    # the copies describing nothing, so it is watched here. An entry that
+    # does have a jax-gcm issue behind it names that issue in `access`
+    # ("private, TODO(jax-gcm#123)"), and so does the code that reads it.
     # ------------------------------------------------------------------
-    IntegrationPoint(
-        "jcm.model.Model", "_final_dycore_state", "private, TODO(jax-gcm#755)",
-        "The dycore state bootstrap_state() just built. bootstrap_state is"
-        " public but publishes its result only through this attribute; a"
-        " public Model.initial_state() would remove the read.",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "_final_physics_state", "private, TODO(jax-gcm#755)",
-        "The initial cross-step physics carry bootstrap_state() built; same"
-        " gap as _final_dycore_state.",
-    ),
-    IntegrationPoint(
-        "jcm.predictions.ModelPredictions", "_predictions",
-        "private, TODO(jax-gcm#756)",
-        "The raw prediction pytree, re-wrapped with coords/physics/dycore"
-        " after a lax.scan round trip drops them. A public"
-        " ModelPredictions.with_context(...) would remove the read.",
-    ),
     IntegrationPoint(
         "jcm.cf_metadata", "_COORD_ATTRS", "private",
         "The CF attributes jax-gcm gives its horizontal coordinates. The slab"

@@ -1544,10 +1544,11 @@ coupled run.
 `jem/components/jcm/contract.py` records both halves of the contract:
 `JCM_SUPPORTED_REV`, the revision every gate runs against, and
 `JCM_INTEGRATION_POINTS`, every jax-gcm name JAX-ESM reaches for — the functions
-it calls, the private attributes it still reads (each tagged with the jax-gcm
-issue that will remove the need), the physics diagnostics fields the surface
-exchange is read out of, the package data it resolves, and the constructors its
-documented workflow asks a user to call. Each entry says what it is used for,
+it calls, the one private name it still depends on (`cf_metadata._COORD_ATTRS`,
+whose values the slab components copy so their axes describe themselves exactly
+as the atmosphere's do), the physics diagnostics fields the surface exchange is
+read out of, the package data it resolves, and the constructors its documented
+workflow asks a user to call. Each entry says what it is used for,
 which is what makes it possible to decide whether an entry may be deleted.
 
 `tests/unit/test_jcm_contract.py` walks that list against the installed `jcm`,
@@ -1581,8 +1582,9 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
 }
 ```
 
-`initialize()` builds those pytrees from `Model.bootstrap_state()` and a
-structural template of the diagnostics dict; it does **not** integrate. Each
+`initialize()` builds those pytrees from the `(dycore_state, physics_carry)`
+pair `Model.bootstrap_state()` returns, plus a structural template of the
+diagnostics dict; it does **not** integrate. Each
 `step` calls `model.run_from_state_with_carry()` with the coupling interval as
 both `save_interval` and `total_time`, so JCM sub-steps internally at its own
 timestep and returns exactly one saved record per coupling step, then reads the
@@ -1597,13 +1599,35 @@ the diagnostics keys; the ECHAM reader raises `NotImplementedError` naming
 jax-gcm#754, the issue that will have every JCM physics package publish the same
 surface-exchange struct.
 
-Three JCM private attributes are still read, each in one helper tagged with the
-jax-gcm issue that will remove it: `_final_dycore_state` and
-`_final_physics_state` (jax-gcm#755, a public initial-state / physics-carry
-API), and `ModelPredictions._predictions` (jax-gcm#756,
-`ModelPredictions.with_context`). The atmosphere's output keeps JCM's own time
-labelling because JEM cannot reproduce its calendar arithmetic while
-`Model._date_from_sim_time` is private (jax-gcm#758).
+Every JCM name the wrapper touches is public at the pinned revision: the
+initial state and physics carry are the pair `Model.bootstrap_state()` returns
+(also readable as `Model.dycore_state` / `Model.physics_carry`), and a stacked
+`ModelPredictions` is repaired with `ModelPredictions.with_context(model)`.
+jax-gcm#824 is what made all three public, and each is a
+`JCM_INTEGRATION_POINTS` entry, so a JCM refactor that moved one fails the
+contract test by name instead of inside somebody's run. `with_context` also
+stamps the atmosphere dataset's `jcm_prov_params` attribute with JCM's
+`parameters_rederived_from_live_context` note, which is the truthful record
+for a coupled run: the trajectory is traced once and scanned, so those
+parameter values are read from the live physics afterwards rather than
+captured at trace time.
+
+The atmosphere's output still keeps JCM's own `time` labelling, and
+`TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic rather than
+calling JCM. That is now a decision, not a gap. jax-gcm#824 also made
+`Model.date_from_sim_time` public, but it is the **model clock** conversion —
+exact integer day/second arithmetic on the model calendar, returning a
+`DateData` for forcing and physics — whereas the labels have to match the
+float64 days-since-epoch product in `ModelPredictions._trajectory_dataset`,
+which is what JCM's own output files carry and is still internal. Adopting the
+clock conversion would give the exact nanosecond count where that product has
+a 128 ns ulp. The two agree for a coupling step that is a power-of-two
+fraction of a day — every configuration JAX-ESM ships — and disagree for one
+that is not: a 10- or 20-minute step puts about half the labels 128 ns off, at
+which point a slab dataset and the atmosphere's no longer share a time axis and
+`xr.merge` returns a 2N-long union. Sharing one computation needs JCM to
+publish its *output* labelling, which is jax-gcm#758; the reasoning is recorded
+on `TimeAxis`.
 
 Each `step` also compares the dycore state's own `sim_time` with the coupler's
 and logs at ERROR if they have parted, which can only happen if the carry came

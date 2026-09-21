@@ -562,6 +562,36 @@ Breaking changes are marked; everything else is additive.
   them. A JAX-ESM process now configures its own logging and nothing else's,
   which is what `jem.main` already assumed when it set the level of the `jem`
   logger alone.
+- **The JCM wrapper reads no JCM private attributes** (jax-gcm#824, at the
+  pinned revision). `Model.bootstrap_state()` returns its
+  `(dycore_state, physics_carry)` pair — also readable as `Model.dycore_state`
+  / `Model.physics_carry` — and `ModelPredictions.with_context(model)` repairs
+  a prediction object that a `lax.scan` round trip stripped, so the three
+  private reads the adapter isolated in helpers (`_final_dycore_state`,
+  `_final_physics_state`, `_predictions`) are gone and their contract entries
+  are now `public`. `Model._date_from_sim_time` became
+  `Model.date_from_sim_time`, with the old name kept only as a delegating
+  alias: the season-freeze helper in
+  `examples/02_experimental/03_jcm_veros_earth` overrides the conversion on the
+  model instance and now overrides the public name, because overriding the
+  alias would have left JCM's own callers on the unpatched method and let the
+  season go on advancing silently.
+
+  One visible consequence in the output: a coupled run's atmosphere dataset
+  now carries jax-gcm's `parameters_rederived_from_live_context` note inside
+  the `jcm_prov_params` global attribute (and so a different
+  `jcm_prov_params_sha`). It is accurate — a coupled trajectory is traced
+  once and scanned, so the parameters in that record are read from the live
+  physics after the fact, not captured at trace time — and saying so is the
+  point of the note.
+
+  `TimeAxis.datetimes()` deliberately still does **not** call JCM's now-public
+  `Model.date_from_sim_time`: that is JCM's model-clock conversion, not the
+  float64 arithmetic its output files are labelled with, and for a coupling
+  step that is not a power-of-two fraction of a day (10 or 20 minutes, say)
+  the two differ by up to 128 ns — enough to take JEM's labels off the
+  atmosphere's time axis. Sharing one computation needs JCM to publish its
+  *output* labelling (jax-gcm#758); the reasoning is recorded on `TimeAxis`.
 - **`test_installed_jcm_matches_contract` checks `jcm.__version__`**, not the
   distribution metadata. An editable install records its version when it is
   installed, so a jax-gcm checkout moved to another revision keeps advertising

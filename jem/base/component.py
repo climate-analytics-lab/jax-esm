@@ -385,9 +385,26 @@ class TimeAxis:
     calendar governs only the seasonal cycle and forcing selection).
     :meth:`datetimes` implements exactly that and is the one place the
     convention is written down. It reimplements JCM's arithmetic rather than
-    calling it because the conversion was private at the pinned revision
-    (``JCM_SUPPORTED_REV``); jax-gcm#824 has since exposed it publicly, so
-    sharing one computation is a pin-bump task (jax-gcm#758).
+    calling JCM, and at the pinned revision (``JCM_SUPPORTED_REV``) that is a
+    deliberate choice rather than a missing API: jax-gcm#824 made
+    ``Model.date_from_sim_time`` public, but that is JCM's *model clock*
+    conversion -- exact integer day/second arithmetic on the model calendar,
+    returning a ``jcm.date.DateData`` for forcing and physics -- and not the
+    conversion these labels have to match, which is the float64
+    days-since-epoch product in ``ModelPredictions._trajectory_dataset``
+    (still internal, and still what JCM's own output files are labelled with).
+    Calling the public one would give the exact nanosecond count where JCM's
+    own output gives a float64 product whose ulp at a 2000s date is 128 ns.
+    The two agree whenever the step is a power-of-two fraction of a day (every
+    configuration JAX-ESM ships, and hence today's tests), and part company
+    when it is not -- a 10- or 20-minute coupling step puts roughly half the
+    labels 128 ns off -- at which point a slab dataset stops aligning with the
+    atmosphere's on one time axis and ``xr.merge`` gives a 2N-long union
+    instead of an N-long join, which is the very thing this class exists to
+    prevent. Sharing one computation therefore needs JCM to publish its
+    *output* labelling (jax-gcm#758), not just its clock; adopting
+    ``date_from_sim_time`` here on its own would be a regression waiting for
+    the first sub-hourly run.
 
     The consequence to know about is at a leap day. The labels are
     Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap

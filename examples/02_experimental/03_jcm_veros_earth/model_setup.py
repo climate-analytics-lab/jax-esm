@@ -69,7 +69,7 @@ def _freeze_season(atm_model, freeze_season_at_day):
     """Pin `atm_model`'s seasonal (day-of-year) forcing to a fixed day, while
     leaving the diurnal (time-of-day) cycle running.
 
-    `jcm.model.Model._date_from_sim_time` turns elapsed `sim_time` into a
+    `jcm.model.Model.date_from_sim_time` turns elapsed `sim_time` into a
     `DateData`; its "days" component sets the season (`tyear`/`orbital_phase`
     in `jcm.forcing._solar_from_date`, and any climatological `TimeSeries`
     forcing sliced by `ForcingData.select`), while its "seconds-within-day"
@@ -80,18 +80,24 @@ def _freeze_season(atm_model, freeze_season_at_day):
 
     This monkey-patches the *instance*, not the `jcm.model.Model` class:
     Python attribute lookup checks the instance's `__dict__` before the
-    class's, so `atm_model._date_from_sim_time` (called internally as
-    `self._date_from_sim_time(...)`) resolves to this wrapper without
+    class's, so `atm_model.date_from_sim_time` (called internally as
+    `self.date_from_sim_time(...)`) resolves to this wrapper without
     touching the `jcm` package itself.
+
+    The public name is the one that must be overridden. `jcm` keeps
+    `_date_from_sim_time` as an alias that *delegates* to
+    `date_from_sim_time`, so overriding the private name would leave jcm's
+    own call sites on the unpatched method: the season would silently go on
+    advancing rather than the run failing.
     """
-    original_date_from_sim_time = atm_model._date_from_sim_time
+    original_date_from_sim_time = atm_model.date_from_sim_time
     frozen_days_seconds = freeze_season_at_day * 86400.0
 
     def frozen_date_from_sim_time(sim_time):
         seconds_of_day = sim_time % 86400.0
         return original_date_from_sim_time(frozen_days_seconds + seconds_of_day)
 
-    atm_model._date_from_sim_time = frozen_date_from_sim_time
+    atm_model.date_from_sim_time = frozen_date_from_sim_time
 
 
 def _build_jcm_terrain_file(mask_file, output_file):
