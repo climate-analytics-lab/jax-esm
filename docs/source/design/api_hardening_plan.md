@@ -275,6 +275,11 @@ They override the text below where they differ.
 - **Phase 0 landed as one PR** (#108, merged 2026-09-04) rather than one PR per
   task; each later phase is also one PR per phase, at the maintainer's
   request, so a reviewer sees the whole contract change together.
+- **`save_state`/`load_state` → `save_carry`/`load_carry`** (#112 review,
+  meteorologytoday). The checkpoint holds the carry -- state, parameters
+  and clock together -- so the capability is named after what it saves,
+  and the pair reads like `save_coupled_carry`/`load_coupled_carry`. The
+  T1.1 protocol sketch and T2.3/T3.2 below use the new spelling.
 - **"mapper" → "exchanger"** (#108 review, meteorologytoday; confirmed by the
   maintainer). "mapper" reads as regridding, whereas the function may regrid,
   compute fluxes, convert units or copy a field; the defining property is that
@@ -405,8 +410,8 @@ class SupportsXarray(Protocol):          # optional capability
 
 @runtime_checkable
 class SupportsCheckpoint(Protocol):      # optional capability (Veros)
-    def save_state(self, carry: Carry, directory: Path) -> None: ...
-    def load_state(self, directory: Path) -> Carry: ...
+    def save_carry(self, carry: Carry, directory: Path) -> None: ...
+    def load_carry(self, directory: Path) -> Carry: ...
 
 @runtime_checkable
 class SupportsBind(Protocol):            # optional: receive the coupler's clock at registration
@@ -943,7 +948,7 @@ atomic `.tmp` rename) for a `CoupledCarry`: `save(carry, path)` /
 the payload and is the source of truth on resume**; `elapsed_days` is
 derived from it, never the reverse. Components that are
 `SupportsCheckpoint` (Veros) get their sub-carry delegated to
-`save_state/load_state` in a sibling directory. Delete
+`save_carry/load_carry` in a sibling directory. Delete
 `jem/utils/checkpoints.py`; `save_veros_carry/load_veros_carry` become
 those two methods on `VerosComponent`.
 
@@ -1018,7 +1023,7 @@ importable) and executes the two notebooks.
   coupling, checkpoint contents.
 - Delete `tutorial.rst`'s monkey-patching walkthrough; `Component` protocol
   page replaces it ("Adding a component": implement `initialize`/`step`,
-  optionally `to_xarray`, `save_state`/`load_state`, `bind`).
+  optionally `to_xarray`, `save_carry`/`load_carry`, `bind`).
 
 ## Phase 4 — residual cleanup and API freeze
 
