@@ -9,6 +9,8 @@ writes -- rather than on a real atmosphere or ocean, since nothing here needs
 either model to be built.
 """
 
+from importlib import resources
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,7 +26,8 @@ from jem.fluxes import (
     rotate_vector,
 )
 
-ROTATED_SCRIP_FILE = "jem/data/RotatedGaussianLatLon.SCRIP.nc"
+DATA = resources.files("jem.data")
+ROTATED_SCRIP_FILE = str(DATA / "RotatedGaussianLatLon.SCRIP.nc")
 
 TIME = CouplingTime(
     step=jnp.int32(0), sim_time=jnp.float32(0.0), dt=86400.0,
@@ -139,7 +142,7 @@ def test_read_rotation_angles_uses_the_scrip_layout():
 def test_read_rotation_angles_names_the_file_when_unrotated():
     """An unrotated grid's SCRIP file has no rotation angles at all."""
     with pytest.raises(KeyError, match="JCM_T31.SCRIP.nc"):
-        read_rotation_angles("jem/data/JCM_T31.SCRIP.nc")
+        read_rotation_angles(str(DATA / "JCM_T31.SCRIP.nc"))
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +238,17 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
     Regression test for the real failure mode this closes: Veros runs in
     double precision (importing `veros.core` flips the process-global
     `jax_enable_x64` setting to True as a side effect), so its carry is
-    float64 while the atmosphere's stays float32 -- and `jax.lax.scan`
-    requires a step's *output* carry to match its *input* dtype exactly, so
-    an uncast value crossing that boundary breaks the very first coupled
-    step with an opaque error deep inside the coupler, not a physics one.
+    entirely float64, while the atmosphere's carry is *mixed* -- whatever
+    jax-gcm allocated before Veros was imported stays float32, and anything
+    allocated after the flip (every per-step diagnostic) is float64 too, so
+    which atmosphere fields are float32 depends on build order. This test
+    uses the simplest instance of that -- an all-float32 atmosphere carry
+    against an all-float64 ocean one -- since the cast this exercises is
+    per-field regardless of which side of the split each one landed on.
+    `jax.lax.scan` requires a step's *output* carry to match its *input*
+    dtype exactly, so an uncast value crossing that boundary breaks the very
+    first coupled step with an opaque error deep inside the coupler, not a
+    physics one.
 
     `jax_enable_x64` is process-global, so this snapshots and restores it --
     the same guard jax-gcm's own `configurations_test.py` uses for the
@@ -348,4 +358,5 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
     assert "VerosExchange" in text
     assert ROTATED_SCRIP_FILE in text
     assert "a2o_flux=identity" in text  # no regrid was given to this instance
+    assert "o2a_state=identity" in text
     assert "rotates=yes" in text

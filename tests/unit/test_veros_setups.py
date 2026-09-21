@@ -26,6 +26,8 @@ test -- already isolated from the rest of the suite by running in a process
 of its own (see `CLAUDE.md`, jax-esm#113).
 """
 
+from importlib import resources
+
 import jax
 import numpy as np
 import pytest
@@ -35,9 +37,10 @@ pytest.importorskip("veros")
 
 from jem.components import veros_component  # noqa: E402
 
-DOUBLE_DRAKE_MASK_FILE = "jem/data/terrain_double_drake_T31.nc"
-ROTATED_SCRIP_FILE = "jem/data/RotatedGaussianLatLon.SCRIP.nc"
-ROTATED_LANDSEA_MASK_FILE = "jem/data/landsea_mask_fraction_RotatedGaussianLatLon.nc"
+DATA = resources.files("jem.data")
+DOUBLE_DRAKE_MASK_FILE = str(DATA / "terrain_double_drake_T31.nc")
+ROTATED_SCRIP_FILE = str(DATA / "RotatedGaussianLatLon.SCRIP.nc")
+ROTATED_LANDSEA_MASK_FILE = str(DATA / "landsea_mask_fraction_RotatedGaussianLatLon.nc")
 
 #: `jax_enable_x64` as it was before this process ever ran a test that
 #: imports a Veros setup module -- i.e. before anything in this file, since
@@ -47,19 +50,29 @@ _JAX_X64_BEFORE_ANY_VEROS_SETUP_IMPORT = jax.config.read("jax_enable_x64")
 
 @pytest.fixture(autouse=True, scope="module")
 def _restore_jax_x64_after_this_module():
-    """Restore `jax_enable_x64` once every test in this module has run.
+    """Set `jax_enable_x64` for this module's tests, and restore it after.
 
     Whichever of this module's tests actually runs -- the one fast test
     alone under `-m "not slow"`, or all five together (the Veros slow-test
-    gate, jax-esm#113) -- needs `jax_enable_x64` left exactly as Veros wants
-    it (on) for every test *in this module*, so nothing restores it
-    mid-module; restoring after each test individually broke the later slow
-    tests, which then found Veros silently degraded to float32 precision.
-    This restores it only once, in this fixture's teardown, which runs after
-    the *last* selected test in the module finishes, protecting whichever
-    unrelated test file shares this worker afterward without disturbing
-    anything Veros does for the rest of this module's own run.
+    gate, jax-esm#113) -- needs `jax_enable_x64` on for every test *in this
+    module*, so nothing restores it mid-module; restoring after each test
+    individually broke the later slow tests, which then found Veros silently
+    degraded to float32 precision. This restores it only once, in this
+    fixture's teardown, which runs after the *last* selected test in the
+    module finishes, protecting whichever unrelated test file shares this
+    worker afterward without disturbing anything Veros does for the rest of
+    this module's own run.
+
+    The setup half explicitly sets it to `True` too, not only restores it in
+    teardown: under `-n N --dist load` (the xdist default), a worker that
+    interleaves this module's tests with another's tears this fixture down
+    and back up again between them, and the *first* test to run after such a
+    re-entry would otherwise find `jax_enable_x64` however the previous
+    fixture invocation's teardown left it (`False`, ordinarily) instead of
+    the `True` Veros needs -- silently degrading precision rather than
+    failing loudly, exactly the class of bug this module exists to avoid.
     """
+    jax.config.update("jax_enable_x64", True)
     yield
     jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_SETUP_IMPORT)
 
@@ -93,6 +106,25 @@ def test_double_drake_setup_takes_its_shape_from_the_mask():
     settings = model.state.settings
     assert (int(settings.nx), int(settings.ny)) == (96, 48)
     assert int(settings.nz) == len(LAYER_THICKNESSES)
+
+
+@pytest.mark.slow
+def test_double_drake_setup_rejects_a_fractional_mask(tmp_path):
+    """A non-binary `lsm` is refused, naming the file and the value range.
+
+    `double_drake_setup` does not threshold a fractional mask the way
+    `earth_setup` does, so `(1 - lsm)` on one would silently give a
+    fractional `kbot`; this is checked before any of that arithmetic runs.
+    """
+    from jem.components.veros.setups.double_drake import double_drake_setup
+
+    reference = xr.open_dataset(DOUBLE_DRAKE_MASK_FILE)
+    fractional = reference.copy(deep=True)
+    fractional["lsm"] = fractional["lsm"] * 0 + 0.5
+    mask_file = tmp_path / "fractional_mask.nc"
+    fractional.to_netcdf(mask_file)
+    with pytest.raises(ValueError, match="binary 0/1"):
+        double_drake_setup(land_sea_mask_file=str(mask_file))
 
 
 @pytest.mark.slow

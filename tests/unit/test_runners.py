@@ -66,6 +66,25 @@ class RecordingExchanger:
         return components
 
 
+class SingleGridExchanger:
+    """An exchanger class that takes no `regrid` argument at all.
+
+    Stands in for a hand-written exchanger on a single shared grid, which
+    `regrid=same_grid` composes to an empty mapping for -- such a class is
+    not obliged to declare a `regrid` parameter at all, and `build_exchangers`
+    must not inject one it does not accept.
+    """
+
+    def __init__(self, drag_coefficient: float = 1e-3):
+        """Record the one keyword this class actually declares."""
+        self.drag_coefficient = drag_coefficient
+
+    def __call__(self, components: dict[str, Carry], time: CouplingTime):
+        """Return the carries unchanged; only `__init__`'s recording matters."""
+        del time
+        return components
+
+
 class TakesAGrid:
     """A component built *on* a grid, like every slab model. See below."""
 
@@ -417,6 +436,38 @@ def test_exchanger_node_is_instantiated_with_the_regridders():
     assert built.regrid == regridders
 
 
+def test_exchanger_node_without_regrid_parameter_is_not_given_one():
+    """A single-grid exchanger class that takes no `regrid=` is a valid node.
+
+    `regrid` is injected only when the target's own signature declares it
+    (the same rule `_accepts_grid` applies to a component's `grid`), so a
+    class like `SingleGridExchanger` -- which does not accept `regrid` at
+    all -- is instantiated with none, instead of `instantiate` failing on an
+    unexpected keyword argument.
+    """
+    cfg = composed([
+        "+coupling.exchanger._target_=tests.unit.test_runners.SingleGridExchanger",
+    ])
+    regridders = {"a2o_flux": example_exchanger, "o2a_state": example_exchanger}
+    exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, regridders)
+    built = exchangers["exchange"]
+    assert isinstance(built, SingleGridExchanger)
+    assert not hasattr(built, "regrid")
+
+
+def test_exchanger_node_without_target_names_the_key():
+    """A `coupling.exchanger` mapping with no `_target_` names no exchanger.
+
+    Without this check, `hydra.utils.instantiate` would silently return the
+    mapping as a plain `dict` -- a non-callable that only fails once the
+    coupled step is traced, far from this call and naming nothing about the
+    cause.
+    """
+    cfg = composed(["+coupling.exchanger.regrid=null"])
+    with pytest.raises(ValueError, match="_target_"):
+        runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
+
+
 def test_exchanger_and_exchangers_together_are_an_error():
     """Setting both leaves it undecided which couples the run, so it is refused."""
     cfg = composed([
@@ -424,8 +475,10 @@ def test_exchanger_and_exchangers_together_are_an_error():
         "+coupling.exchangers=[{src: 'ocn.state.sea_surface_temperature',"
         " dst: 'atm.forcing.sea_surface_temperature'}]",
     ])
-    with pytest.raises(ValueError, match="are both"):
+    with pytest.raises(ValueError, match="are both") as excinfo:
         runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
+    # Names both spellings rather than dumping the whole DictConfig inline.
+    assert "a dotted path, or a mapping" in str(excinfo.value)
 
 
 def test_an_explicit_coupling_table_is_used_as_given():

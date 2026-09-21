@@ -25,6 +25,7 @@ from jem.components import veros_component  # noqa: F401
 from collections.abc import Sequence
 
 import jax.numpy as npx
+import numpy as np
 import xarray as xr
 from veros import VerosSetup, veros_routine
 from veros.core.operators import at, update
@@ -48,8 +49,10 @@ def double_drake_setup(
     ----------
     land_sea_mask_file : str
         A JCM-canonical terrain file (``jem.tools.idealised_terrain``'s
-        output) whose ``lsm`` (1 = land, 0 = ocean) both masks the ocean and
-        fixes ``nx``/``ny`` from its shape.
+        output) whose ``lsm`` -- a **binary** 0/1 mask, 1 = land, 0 = ocean,
+        not a fractional one (unlike :func:`~jem.components.veros.setups.
+        earth.earth_setup`, this factory does not threshold) -- both masks
+        the ocean and fixes ``nx``/``ny`` from its shape.
     layer_thicknesses : Sequence[float]
         Vertical layer thicknesses in metres, surface first. Default
         :data:`jem.components.veros.setups._layers.LAYER_THICKNESSES` (15
@@ -67,10 +70,25 @@ def double_drake_setup(
     -------
     type[veros.VerosSetup]
 
+    Raises
+    ------
+    ValueError
+        If ``land_sea_mask_file``'s ``lsm`` holds any value other than 0 or
+        1 -- a fractional mask would give a fractional ``kbot``, which Veros
+        would silently truncate rather than refuse.
+
     """
+    lsm = xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()
+    if not np.isin(lsm, (0, 1)).all():
+        raise ValueError(
+            f"{land_sea_mask_file!r}'s lsm must be a binary 0/1 land-sea "
+            "mask (1 = land, 0 = ocean); double_drake_setup does not "
+            "threshold a fractional mask the way earth_setup does. Got "
+            f"values ranging {float(lsm.min())!r} to {float(lsm.max())!r}."
+        )
     # 1 = land, 0 = ocean in the terrain file; Veros' `kbot` wants the
     # opposite (0 = land, so the column is inactive from the bottom up).
-    land_sea_mask = 1 - xr.open_dataset(land_sea_mask_file)["lsm"].to_numpy()
+    land_sea_mask = (1 - lsm).astype(int)
     nx, ny = land_sea_mask.shape
 
     ddz = npx.array(layer_thicknesses)

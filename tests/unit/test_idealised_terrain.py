@@ -1,20 +1,25 @@
 """Tests for :mod:`jem.tools.idealised_terrain`."""
 
+from importlib import resources
+
 import numpy as np
 import pytest
 import xarray as xr
 
 from jem.tools.idealised_terrain import CAP_LATITUDE, idealised_terrain
 
-REFERENCE_FILE = "jem/data/terrain_JCM_T31.nc"
-PACKAGED_DOUBLE_DRAKE_FILE = "jem/data/terrain_double_drake_T31.nc"
+DATA = resources.files("jem.data")
+REFERENCE_FILE = str(DATA / "terrain_JCM_T31.nc")
+PACKAGED_DOUBLE_DRAKE_FILE = str(DATA / "terrain_double_drake_T31.nc")
 
 
 def test_double_drake_matches_the_packaged_file(tmp_path):
     """Regenerating from the reference file reproduces the packaged one exactly.
 
     This is what keeps the tool and the shipped data from drifting apart: if
-    either changes without the other, this test catches it.
+    either changes without the other, this test catches it. Dtype is checked
+    too, not only values -- `assert_array_equal` alone would miss a fresh
+    file drifting to a different precision than the one actually shipped.
     """
     regenerated = idealised_terrain(
         REFERENCE_FILE, "double_drake", tmp_path / "terrain_double_drake_T31.nc"
@@ -23,6 +28,8 @@ def test_double_drake_matches_the_packaged_file(tmp_path):
     fresh = xr.open_dataset(regenerated)
     np.testing.assert_array_equal(fresh["lsm"].to_numpy(), packaged["lsm"].to_numpy())
     np.testing.assert_array_equal(fresh["orog"].to_numpy(), packaged["orog"].to_numpy())
+    assert fresh["lsm"].dtype == packaged["lsm"].dtype
+    assert fresh["orog"].dtype == packaged["orog"].dtype
 
 
 def test_aquaplanet_is_land_only_at_the_caps(tmp_path):
@@ -35,7 +42,7 @@ def test_aquaplanet_is_land_only_at_the_caps(tmp_path):
     # `lsm` is `(lon, lat)`; broadcasting `(lat,)` against it aligns on the
     # trailing (lat) axis, giving every longitude the same land/ocean value.
     expected = np.broadcast_to(
-        (np.abs(lat) >= CAP_LATITUDE).astype(np.float64), ds["lsm"].shape
+        (np.abs(lat) >= CAP_LATITUDE).astype(ds["lsm"].dtype), ds["lsm"].shape
     )
     np.testing.assert_array_equal(ds["lsm"].to_numpy(), expected)
 

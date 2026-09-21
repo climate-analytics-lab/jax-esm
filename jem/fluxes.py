@@ -119,6 +119,21 @@ def bulk_wind_stress(
     tuple[jax.Array, jax.Array]
         The wind stress's components, in the same frame as ``u``/``v``.
 
+    Notes
+    -----
+    This bulk law is a deliberately independent computation, not a lookup of
+    what SPEEDY itself already computed. JCM's own surface scheme separately
+    derives a sea-surface stress (``jcm.physics.surface.speedy_surface_flux``,
+    published as ``SurfaceTypeFluxes.ustr``/``vstr``, e.g.
+    ``ustr = -sfp.cds * rho_wind * air.u_bottom`` with a stability-corrected
+    ``rho_wind``), and this function's ``drag_coefficient=1e-3``,
+    ``air_density=1.22`` law over the same near-surface wind will not agree
+    with it in general. Momentum is therefore *not* conserved between the
+    atmosphere and the ocean across this exchange -- this is faithful to the
+    original (pre-package) double-drake/earth drivers, which computed the
+    ocean's wind stress this same independent way rather than reusing
+    SPEEDY's.
+
     """
     speed = jnp.sqrt(jnp.maximum(u**2 + v**2, min_speed**2))
     scale = drag_coefficient * air_density * speed
@@ -276,6 +291,13 @@ class VerosExchange:
     read and the regridder lookups are resolved once, here in ``__init__``;
     :meth:`__call__` runs inside the traced coupled step and does no I/O.
 
+    The destination-dtype cast this exchanger applies (see the build-order
+    comment in :meth:`__call__`) is not unique to this hand-written class:
+    the declarative :class:`jem.exchangers.Exchange` table is gaining the
+    same cast (in the sibling branch that owns ``jem/exchangers.py``), so an
+    ``ocean=veros`` configuration that composes the default table instead of
+    this exchanger steps through the same fix.
+
     """
 
     def __init__(
@@ -337,19 +359,26 @@ class VerosExchange:
         # Read every source first, before any carry is replaced. The target
         # dtypes are read here too, from the untouched forcing sections:
         # Veros runs double precision internally (importing its JAX backend
-        # flips `jax.config.jax_enable_x64` to True as a side effect the
-        # first time `veros.core` is imported -- see
-        # `jem.components.veros_component.configure_veros_runtime`), so
-        # every field this exchanger builds crosses a genuine precision
-        # boundary in *both* directions: the ocean's carry is entirely
-        # float64 and the atmosphere's stays whatever jax-gcm built it as
-        # (typically float32). `jax.lax.scan` requires a step's output carry
-        # to match its input dtype for dtype exactly, so a value written
-        # across that boundary without a matching cast breaks the *very
-        # first* coupled step with an opaque dtype-mismatch error from deep
-        # inside `Coupler.generate_trajectory_function` -- not a physics bug,
-        # but one this exchanger is the right place to close, since it is
-        # the one place a value is known to cross the boundary.
+        # flips `jax.config.jax_enable_x64` to True process-wide as a side
+        # effect the first time `veros.core` is imported -- see
+        # `jem.components.veros_component.configure_veros_runtime`), and that
+        # flip lands wherever `build_coupler` happens to be when it fires: the
+        # ocean's own carry is built afterward and so is entirely float64,
+        # while the atmosphere's carry is *mixed* -- whatever jax-gcm had
+        # already allocated at `Model` construction (built first) stays
+        # float32, and anything allocated after the flip (every per-step
+        # diagnostic, including `derived.u0` and `derived.total_heat_flux`)
+        # comes out float64 too. So which atmosphere fields are float32
+        # depends on build order, not on any promise this module makes.
+        # `jax.lax.scan` requires a step's output carry to match its input
+        # dtype exactly regardless, so a value written across the atm/ocn
+        # boundary without a matching cast breaks the *very first* coupled
+        # step with an opaque dtype-mismatch error from deep inside
+        # `Coupler.generate_trajectory_function` -- not a physics bug, but
+        # one this exchanger is the right place to close, since it is the one
+        # place a value is known to cross the boundary, and reading the
+        # destination's dtype at trace time (rather than assuming one) is
+        # what makes the coupling robust to that ordering.
         u0 = atm["derived"].u0
         v0 = atm["derived"].v0
         total_heat_flux = atm["derived"].total_heat_flux
@@ -366,7 +395,16 @@ class VerosExchange:
         )
 
         # Wind stress: regrid the wind onto the ocean grid, rotate into its
-        # local frame if it has one, then apply the bulk drag law.
+        # local frame if it has one, then apply the bulk drag law. Regridding
+        # *before* rotating (never the other way around) is deliberate: JCM's
+        # own grid is unrotated, so `u0`/`v0` are true east/north everywhere
+        # on it, which is what makes a component-wise conservative regrid of
+        # each of them well defined (there is no single frame change that
+        # could be "moved before" the regrid to simplify this). The rotation
+        # angles, by contrast, are defined per *ocean* cell
+        # (`read_rotation_angles` reads them off the ocean's own SCRIP file),
+        # so they only make sense to apply once the wind is already sitting
+        # on that grid.
         wind_x = self._a2o_flux(u0)
         wind_y = self._a2o_flux(v0)
         if self._rotation_angles is not None:
@@ -412,9 +450,13 @@ class VerosExchange:
 
     def __repr__(self) -> str:
         """Name the regridders this exchange holds and whether it rotates."""
-        a2o = "identity" if self._a2o_flux is _identity \
-            else getattr(self._a2o_flux, "__name__", repr(self._a2o_flux))
-        o2a = getattr(self._o2a_state, "__name__", repr(self._o2a_state))
+        def name(regridder: Callable[[Any], Any]) -> str:
+            if regridder is _identity:
+                return "identity"
+            return getattr(regridder, "__name__", repr(regridder))
+
+        a2o = name(self._a2o_flux)
+        o2a = name(self._o2a_state)
         rotates = (
             "no" if self._rotation_angles is None
             else f"yes ({self.rotation_grid_file})"

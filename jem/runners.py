@@ -289,10 +289,15 @@ def build_exchangers(
       a bare function can be given. A bare dotted path is called with no
       arguments (``hydra.utils.get_method`` only resolves it), so it cannot
       be handed the regridders a mixed-grid exchange needs; a node is
-      instead built with :func:`hydra.utils.instantiate`, with
-      ``regrid=dict(regridders)`` injected -- the same regridder mapping
+      instead built with :func:`hydra.utils.instantiate`. ``regrid=
+      dict(regridders)`` -- the same regridder mapping
       :func:`jem.exchangers.default_exchangers` receives below, so a
-      hand-written exchanger and the default table draw on one vocabulary.
+      hand-written exchanger and the default table draw on one vocabulary --
+      is injected **only if the target's signature declares a ``regrid``
+      parameter** (:func:`_target_accepts_keyword`, the same rule
+      :func:`_accepts_grid` applies to a component's ``grid``), so a
+      single-grid hand-written exchanger that takes no ``regrid`` at all is
+      still a valid node instead of failing on an unexpected keyword.
     - ``coupling.exchangers`` -- an explicit coupling table in YAML, a list of
       ``{src, dst, regrid}`` mappings.
     - neither (both ``null``, the default) --
@@ -317,6 +322,10 @@ def build_exchangers(
     ValueError
         If both ``exchanger`` and ``exchangers`` are set; they are two answers
         to one question, and guessing which was meant is worse than asking.
+        Also if ``exchanger`` is a mapping with no ``_target_`` -- otherwise
+        ``hydra.utils.instantiate`` would silently return it as a plain
+        ``dict``, a non-callable that only fails once the coupled step is
+        traced, far from this call and naming nothing about the cause.
 
     """
     coupling = cfg.coupling
@@ -324,24 +333,35 @@ def build_exchangers(
     specs = coupling.get("exchangers")
     if path and specs:
         raise ValueError(
-            f"coupling.exchanger ({path!r}) and coupling.exchangers are both "
-            "set. `exchanger` names one Python function used INSTEAD of the "
-            "table, so setting both leaves it undecided which couples the run; "
-            "clear one (coupling.exchanger=null or coupling.exchangers=null)."
+            "coupling.exchanger and coupling.exchangers are both set. "
+            "`exchanger` names one exchanger (a dotted path, or a mapping "
+            "with a `_target_`) used INSTEAD of the table, so setting both "
+            "leaves it undecided which couples the run; clear one "
+            "(coupling.exchanger=null or coupling.exchangers=null)."
         )
     if isinstance(path, DictConfig):
-        logger.info(
-            "Coupling through the instantiated exchanger %s.", path.get("_target_")
+        if "_target_" not in path:
+            raise ValueError(
+                f"coupling.exchanger={dict(path)!r} is a mapping with no "
+                "`_target_`, so it names no exchanger at all. Use either "
+                "coupling.exchanger=<dotted.path.to.a.function> (a bare "
+                "function) or coupling.exchanger._target_="
+                "<dotted.path.to.a.class> (an instantiated node)."
+            )
+        # `regrid=dict(regridders)` only if the target declares a `regrid`
+        # parameter (see the docstring), so a single-grid hand-written
+        # exchanger class that takes none is still a valid node.
+        injected = (
+            {"regrid": dict(regridders)}
+            if _target_accepts_keyword(path, "regrid") else {}
         )
         # `_convert_="object"` for the same two reasons `build_component`
         # gives: a plain Python `regrid` mapping reaches the constructor
         # rather than an OmegaConf container, and the regridders it holds --
         # injected objects, not configured ones -- survive as themselves.
-        return {
-            DEFAULT_EXCHANGER_NAME: hydra.utils.instantiate(
-                path, regrid=dict(regridders), _convert_="object"
-            )
-        }
+        exchanger = hydra.utils.instantiate(path, **injected, _convert_="object")
+        logger.info("Coupling through the instantiated exchanger %r.", exchanger)
+        return {DEFAULT_EXCHANGER_NAME: exchanger}
     if path:
         logger.info("Coupling through the exchanger %s.", path)
         return {DEFAULT_EXCHANGER_NAME: hydra.utils.get_method(path)}
@@ -501,30 +521,56 @@ def _accepts_grid(node: Any) -> bool:
     bathymetry and its own land-sea mask -- does not take one, and handing it
     a grid anyway is not a harmless extra: ``VerosComponent.from_setup``
     passes every keyword it does not recognise on to the Veros setup factory,
-    which rejects an unknown ``grid``.
+    which rejects an unknown ``grid``. See :func:`_target_accepts_keyword`
+    for how the question is actually answered.
 
-    So the question is asked of the target itself rather than answered by a
-    list of component names here: the ``_target_`` is resolved to the class
-    or function it names and its signature inspected for an explicit ``grid``
-    parameter. A ``**kwargs`` catch-all does not count -- that is exactly the
-    case that swallows the keyword and fails somewhere else.
+    Parameters
+    ----------
+    node : omegaconf.DictConfig or None
+        One component's config node.
+
+    Returns
+    -------
+    bool
+
+    """
+    return _target_accepts_keyword(node, GRID_KEYWORD)
+
+
+def _target_accepts_keyword(node: Any, keyword: str) -> bool:
+    """Return whether the thing ``node``'s ``_target_`` builds takes ``keyword=``.
+
+    Used for both a component's ``grid=`` (:func:`_accepts_grid`) and an
+    exchanger node's ``regrid=`` (:func:`build_exchangers`): in both cases an
+    object no configuration file can name -- a live grid, a live mapping of
+    regridders -- is only injected if the target actually declares the
+    keyword, so that a single-grid hand-written exchanger (or a component
+    that brings its own grid) is not handed an argument it does not accept.
+
+    The question is asked of the target itself rather than answered by a
+    list of names here: the ``_target_`` is resolved to the class or
+    function it names and its signature inspected for an explicit
+    ``keyword`` parameter. A ``**kwargs`` catch-all does not count -- that is
+    exactly the case that swallows the keyword and fails somewhere else.
 
     A target that cannot be resolved (a typo, or an optional dependency that
-    is not installed) answers ``False``: no grid is built, and
+    is not installed) answers ``False``: nothing is injected, and
     ``hydra.utils.instantiate`` then raises the real import error, which says
     far more than anything this could invent. Only the errors a *lookup*
     raises are swallowed for that -- ``ImportError`` and the ``ValueError``
     Hydra gives an invalid dotstring. Anything else means the lookup itself is
     broken rather than the target missing, and it must not be mistaken for
-    "this component takes no grid": that answer is indistinguishable from the
-    truthful one, and it would silently deny every slab component the grid it
+    "this target takes no such keyword": that answer is indistinguishable
+    from the truthful one, and it would silently deny a target the value it
     requires, leaving a run to die inside ``instantiate`` with a message
     naming nothing.
 
     Parameters
     ----------
     node : omegaconf.DictConfig or None
-        One component's config node.
+        A config node carrying a ``_target_``.
+    keyword : str
+        The keyword-argument name to look for.
 
     Returns
     -------
@@ -541,13 +587,15 @@ def _accepts_grid(node: Any) -> bool:
         # -- and the typed lookups reject (and log an error about) the other.
         resolved = hydra.utils.get_object(str(target))
     except (ImportError, ValueError):
-        logger.debug("Could not resolve _target_ %r; no grid injected.", target)
+        logger.debug(
+            "Could not resolve _target_ %r; %s not injected.", target, keyword
+        )
         return False
     try:
         signature = inspect.signature(resolved)
     except (TypeError, ValueError):
         return False
-    parameter = signature.parameters.get(GRID_KEYWORD)
+    parameter = signature.parameters.get(keyword)
     return parameter is not None and parameter.kind in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
     )

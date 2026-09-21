@@ -131,12 +131,19 @@ def idealised_terrain(
             & (mesh_lon < basin.lon_beg + basin.width)
         )
         is_land = is_land | in_basin
-    mask = is_land.astype(np.float64)
+    # Cast to the reference file's own `lsm` dtype (float32 for the packaged
+    # ERA5-derived terrain) rather than a hardcoded one, so an idealised
+    # geography is stored at the same precision as the real one it stands in
+    # for -- the deleted `modify_jcm_terrain.py` got this for free by
+    # mutating the reference dataset's own array in place; building a fresh
+    # one here means matching its dtype explicitly instead.
+    mask = is_land.astype(reference["lsm"].dtype)
+    orog = np.zeros_like(reference["orog"].to_numpy())
 
     output = xr.Dataset(
         data_vars=dict(
             lsm=(("lon", "lat"), mask),
-            orog=(("lon", "lat"), np.zeros_like(mask)),
+            orog=(("lon", "lat"), orog),
         ),
         coords=dict(lon=("lon", lon), lat=("lat", lat)),
         attrs=dict(grid_type=reference.attrs.get("grid_type", "gaussian")),
