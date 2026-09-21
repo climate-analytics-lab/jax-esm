@@ -108,9 +108,12 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
 An exchange the standard table cannot express — one that regrids, computes a
 flux, converts units or blends two fields — is written as a plain function
-instead; `docs/source/tutorial.rst` works one through. Longer versions of this
-run, including the sea-ice component and the plotting code that produced the
-animation below, are in `examples/01_basic/01_aquaplanet.ipynb`.
+instead; `docs/source/adding_a_component.rst` works one through, and
+`docs/source/python_api.md` is this same block with the full construction
+around it. Longer versions of this run, including the sea-ice component and
+the plotting code that produced the animation below, are in
+`examples/01_basic/01_aquaplanet.ipynb` -- `examples/README.md` lists every
+example and the command or notebook that runs it.
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
 
@@ -140,12 +143,16 @@ python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't
 | Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
 | Choose the run settings | `coupled_run=short_run`, or `coupled_run.total_time="90 days"` |
 
-Two things worth knowing:
+Things worth knowing:
 
 - **Spell the `@atmosphere`.** `+configuration=speedy-t31` without it composes
   that jax-gcm bundle at the *root*, where its `physics`, `terrain` and `run`
   keys are nobody's and nothing reads them. The atmosphere's groups always
   carry their package: `<group>@atmosphere.<group>=<option>`.
+- **Single-quote a `${...}` resolver**, as `ocean.sst_clim_file='${jcm_data:...}'`
+  does above: it is a resolver Hydra expands when the config is composed, and
+  an unquoted one is expanded by the shell first — to nothing — so the
+  override arrives empty.
 - **The coupled run's own settings are `coupled_run`, not `run`.**
   `atmosphere.run` is the atmosphere's run config, and a `run` group here would
   shadow jax-gcm's. `coupled_run/default.yaml` is the complete schema, so every
@@ -366,7 +373,9 @@ pip install -r requirements.txt
 make html
 ```
 
-Then open `docs/build/html/index.html` in your browser.
+Then open `docs/build/html/index.html` in your browser. The two starting
+points are `docs/source/getting_started.rst` (install and the command line)
+and `docs/source/python_api.md` (the complete direct-Python construction).
 
 ## Architecture
 
@@ -440,11 +449,13 @@ See `docs/source/design/architecture.md` for the carry layout and the full
 contract.
 
 ## Examples
-- `examples/01_basic`: aquaplanet setups coupling JCM to the slab models.
-- `examples/02_experimental`: features under development, such as earth-like
-  topography and JCM-Veros coupling.
-- `examples/03_non_geoscience`: a spring system, showing that the coupler is
-  not specific to climate components.
+
+Every example is either one `python -m jem.main +configuration=...` command
+or a notebook doing one thing the command line cannot (plotting, building a
+carry by hand); `examples/README.md` lists every one of them with the command
+or notebook that runs it. `examples/03_non_geoscience` couples a spring system
+rather than an atmosphere and an ocean, showing that the coupler is not
+specific to climate components.
 
 ## Integration with JAX-GCM (JCM)
 JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean, land, and sea-ice models.

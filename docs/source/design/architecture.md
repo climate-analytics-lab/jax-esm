@@ -2,7 +2,9 @@
 
 How JEM couples black-box components. This is the reference for developers
 adding a component or debugging an exchange; the user-facing walkthrough is
-{doc}`../tutorial`.
+{doc}`../adding_a_component`. {doc}`../python_api` shows the same objects --
+`Coupler`, the exchangers, `run_chunked` -- built directly, for a reader who
+wants the construction rather than the design rationale.
 
 Every statement about the coupling core is checkable against
 `jem/base/component.py` and `jem/base/coupler.py`, which are the whole of it;
@@ -1687,6 +1689,9 @@ checks report through `jax.debug.callback` rather than raising: they run inside
 the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
 
 ## Adding a new component
+
+See {doc}`../adding_a_component` for the narrative version of this checklist,
+worked through end to end for JCM; keep the two in sync when either changes.
 
 1. Write the class (or a wrapper class for an external model) under
    `jem/components/`. Give it a `name`, an `initialize()` and a

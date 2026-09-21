@@ -108,8 +108,9 @@ user-facing behaviour is incomplete until the docs say so:
    files in the repo root.
  - **User-facing behaviour changes** (new or changed defaults, new component
    constructor arguments, new carry keys, new CLI/config knobs) must be
-   reflected in `README.md` and/or `docs/source/quick_start.rst` in the same
-   PR.
+   reflected in `README.md` and/or `docs/source/getting_started.rst` (a new
+   CLI/config knob) or `docs/source/python_api.md` (a new constructor
+   argument) in the same PR.
  - Keep code cross-references (docstrings/comments pointing at design docs)
    updated when a doc moves.
 

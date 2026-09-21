@@ -636,6 +636,12 @@ Breaking changes are marked; everything else is additive.
   this is that written once. Behind the `plot` extra, with matplotlib and
   cartopy imported inside the functions that need them, so `import jem` (and
   `import jem.plot`) never requires either.
+- **`docs/source/python_api.md`** — the complete direct-Python construction of
+  a coupled model, which is also the README's Quick Start:
+  `tests/unit/test_readme_quickstart.py` pins the two blocks to each other in
+  its fast, CI-gated test, and executes the page's block end to end in its
+  slow one, so the quick start that used to live in two places, only one of
+  them tested, cannot silently drift apart.
 
 ### Changed
 
@@ -722,7 +728,7 @@ Breaking changes are marked; everything else is additive.
   turn; `latest_complete_checkpoint` is still there for that.
 - The README quick start builds its coupling with `default_exchangers(components)`
   and runs it with `run_chunked`; the hand-written exchanger it used to show is
-  now the worked example in `docs/source/tutorial.rst` and
+  now the worked example in `docs/source/adding_a_component.rst` and
   `docs/source/design/architecture.md`, where the contract it illustrates is
   described.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
@@ -754,6 +760,16 @@ Breaking changes are marked; everything else is additive.
   notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
   caused it) rather than one test per example group; the `run.sh` driver it
   used to also execute is gone (see *Removed*).
+- **`docs/source/quick_start.rst` is `docs/source/getting_started.rst`.** The
+  page stopped being a copy-and-paste script once that block moved to
+  `docs/source/python_api.md`, so it now leads with a command-line section
+  that mirrors jax-gcm's own (`--help`, `--cfg job`, the override spellings,
+  `+configuration=`) and hands the Python construction over to the new page.
+- **`docs/source/tutorial.rst` is `docs/source/adding_a_component.rst`.** The
+  five-step JCM walkthrough it used to be structured as is now organised
+  around the `Component` protocol instead, with JCM as its worked example
+  rather than its shape -- the substance did not change, since Phase 1 had
+  already replaced the monkey-patching content the plan meant to remove.
 
 ### Removed
 

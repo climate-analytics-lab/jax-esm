@@ -34,10 +34,14 @@ seen, not discover it.
 grabs the same GPU.
 
 Two suites sit behind those gates. ``tests/unit`` is fast and needs no external
-data. ``tests/examples`` executes every notebook under ``examples/`` and every
-``run.sh`` it finds, with a 600 s budget each; CI runs it on pull requests only,
-because it integrates whole coupled models. Run it before changing the public
-API, since the examples are the largest body of code that uses it:
+data. ``tests/examples`` executes every notebook under ``examples/`` and runs
+every named configuration under ``jem/config/configuration/`` for two coupled
+days, with a 600 s budget each; CI runs it on pull requests only, because it
+integrates whole coupled models. There are no ``run.sh`` drivers left to run --
+every runnable configuration is a notebook or a ``python -m jem.main
++configuration=...`` command, listed with the rest in ``examples/README.md``.
+Run it before changing the public API, since the examples are the largest body
+of code that uses it:
 
 .. code-block:: bash
 
