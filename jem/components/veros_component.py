@@ -12,8 +12,11 @@ with a no-op or Veros overwrites the surface forcing the coupler just
 handed it. That is done once, in the constructor, and said out loud there.
 """
 
+import importlib
 import logging
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +33,12 @@ from jem.base.component import (
     Diagnostics,
     TimeAxis,
     forcing_variable,
+    role_attrs,
 )
+from jem.checkpoint import CARRY_FILENAME
+from jem.checkpoint import load as load_pytree
+from jem.checkpoint import save as save_pytree
 from jem.components.clock import clock_tolerance_seconds
-from jem.utils.checkpoints import load_veros_carry, save_veros_carry
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,11 @@ REFERENCE_SALINITY = 35.0  # PSU
 # at this value squared, which bounds sqrt and its derivative and caps the
 # resulting magnitude from below.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
+
+#: Name of the HDF5 restart file :meth:`VerosComponent.save_carry` writes
+#: inside its checkpoint directory. Veros owns the format; JEM only chooses
+#: where it goes, and fixes the name so that the loader finds it.
+VEROS_RESTART_FILENAME = "veros.restart.h5"
 
 
 def configure_veros_runtime() -> None:
@@ -98,6 +109,42 @@ def configure_veros_runtime() -> None:
                 " configure_veros_runtime()) before importing any Veros setup"
                 " module or veros.core."
             ) from exc
+
+
+@contextmanager
+def _veros_runtime_setting(name: str, value: object) -> Iterator[None]:
+    """Set one locked Veros runtime setting for the duration of a block.
+
+    ``runtime_settings`` locks itself once ``veros.core`` is imported, and
+    reading a restart needs ``force_overwrite`` off while the rest of a
+    coupled run needs it on. Veros itself offers no supported way to flip a
+    locked setting, so the lock flag is cleared and restored around each
+    assignment.
+
+    It is a context manager, and the restore is in a ``finally``, because the
+    settings are **process-global**: a failed ``read_restart`` -- a missing or
+    mismatched HDF5 file -- would otherwise leave the whole process with
+    ``force_overwrite`` off, and the next thing that tried to write an output
+    or a restart would fail for a reason with no connection to the one that
+    actually went wrong. The previous value is put back rather than a
+    hard-coded one, so this makes no assumption about who set it.
+    """
+    previous = getattr(runtime_settings, name)
+    was_locked = getattr(runtime_settings, "__locked__", False)
+
+    def assign(to: object) -> None:
+        object.__setattr__(runtime_settings, "__locked__", False)
+        try:
+            setattr(runtime_settings, name, to)
+        finally:
+            object.__setattr__(runtime_settings, "__locked__", was_locked)
+
+    assign(value)
+    try:
+        yield
+    finally:
+        assign(previous)
+
 
 # Deliberate import-time side effect: see configure_veros_runtime(). This is the
 # only way to guarantee the setting precedes the operator import that binds it.
@@ -171,12 +218,31 @@ class VerosComponent:
     ----------
     name : str
         ``"ocn"``.
-    mask_T : jax.Array
-        Land-sea mask on the T grid, halo cells removed.
+    mask_T, mask_U : jax.Array
+        Land-sea masks on the T and u grids, halo cells removed.
+    mask_surface_Z : jax.Array
+        Surface land-sea mask on the zeta (corner) points -- where the
+        barotropic streamfunction lives -- halo cells removed.
     longitude, latitude : jax.Array
         T-grid cell centres, halo cells removed.
-    dlongitude, dlatitude : jax.Array
-        T-grid cell widths, halo cells removed.
+    dlatitude : jax.Array
+        T-grid cell heights, halo cells removed: Veros' ``dyt``, a true
+        meridional **distance in metres** whichever coordinates are in use
+        (``calc_grid`` converts it with ``degtom`` when they are degrees).
+    dlongitude : jax.Array
+        T-grid cell widths, halo cells removed: Veros' ``dxt``. In degree
+        coordinates this is the *nominal*, equatorial-equivalent zonal
+        spacing, **not** a distance: Veros keeps the spherical metric
+        separately in ``cost``/``cosu`` (``area_t = cost * dyt * dxt``), so a
+        true zonal distance is ``dlongitude * cos(latitude)``. In Cartesian
+        coordinates the two are the same thing and it is metres, like
+        ``dlatitude``.
+    enable_streamfunction : bool
+        Whether the wrapped setup solves the external mode for a barotropic
+        streamfunction; it decides where the ``psi`` output comes from (see
+        :meth:`_barotropic_streamfunction`) and whether there is an ``ssh``
+        output at all -- Veros carries a sea surface height only under the
+        linear free surface.
 
     """
 
@@ -198,13 +264,31 @@ class VerosComponent:
             model.state.dimensions["xt"], model.state.dimensions["yt"],
         )
         self.mask_T = jnp.array(variables.maskT)[interior, interior]
+        # `maskU` as well as `maskT`: the barotropic streamfunction is
+        # diagnosed from the depth-integrated *zonal* transport, which lives
+        # on the u grid (see `_barotropic_streamfunction`).
+        self.mask_U = jnp.array(variables.maskU)[interior, interior]
+        # `psi` is published on the zeta points, and over land it is carried
+        # through the integration rather than computed, so the mask that
+        # blanks it has to be published with it.
+        self.mask_surface_Z = jnp.array(variables.maskZ)[interior, interior, -1]
         self.dzt = jnp.array(variables.dzt)
         self.longitude = jnp.array(variables.xt)[interior]
         self.latitude = jnp.array(variables.yt)[interior]
         self.dlongitude = jnp.array(variables.dxt)[interior]
         self.dlatitude = jnp.array(variables.dyt)[interior]
-        self.longitude_units = "degrees_east" if settings.coord_degree else "km"
-        self.latitude_units = "degrees_north" if settings.coord_degree else "km"
+        # A Cartesian setup (``coord_degree=False``) gives its grid
+        # spacings in metres -- the dynamics divides by ``dxt``/``dyt`` as
+        # lengths and keeps the spherical metric separately in
+        # ``cost``/``cosu``, which it sets to 1 in that case -- so the
+        # coordinates those spacings accumulate into are metres too.
+        self.longitude_units = "degrees_east" if settings.coord_degree else "m"
+        self.latitude_units = "degrees_north" if settings.coord_degree else "m"
+
+        # Which external mode the setup solves is fixed for the whole run, so
+        # it is read once here as a Python bool and the `psi` branch in
+        # `step` is taken at trace time rather than on a traced value.
+        self.enable_streamfunction = bool(settings.enable_streamfunction)
 
         # Number of Veros tracer timesteps per coupling step; set by bind().
         self._steps_per_coupling_step: int | None = None
@@ -231,6 +315,16 @@ class VerosComponent:
                 "%s: settings.enable_tke is True; the coupled wind stress"
                 " drives `forc_tke_surface`.", self.name,
             )
+        if not self.enable_streamfunction:
+            logger.info(
+                "%s: settings.enable_streamfunction is False, so Veros'"
+                " `variables.psi` holds the surface pressure rather than a"
+                " streamfunction. The `psi` output variable is diagnosed"
+                " from the depth-integrated zonal transport instead"
+                " (see VerosComponent._barotropic_streamfunction), and"
+                " that surface pressure over `grav` is published as `ssh`.",
+                self.name,
+            )
 
         # Veros calls its setup's ``set_forcing`` from inside every ``step``.
         # In a coupled run the forcing comes from the exchangers, so the
@@ -244,6 +338,75 @@ class VerosComponent:
             self.name,
         )
         model.set_forcing = lambda state: None
+
+    @classmethod
+    def from_setup(cls, setup: str, **setup_kwargs: Any) -> "VerosComponent":
+        """Build the component from an importable Veros setup.
+
+        The constructor takes an already-built Veros model, which is a live
+        Python object no configuration file can name. This is the door a
+        config comes through (``jem/config/ocean/veros.yaml``): it imports
+        ``setup``, builds it with ``setup_kwargs``, runs the setup's own
+        ``setup()`` -- which is what allocates the grid and the initial
+        conditions this wrapper reads its geometry from -- and wraps it.
+
+        Parameters
+        ----------
+        setup : str
+            Importable dotted path of either a ``VerosSetup`` subclass or a
+            factory returning one. It is never a file path: the module has to
+            be importable like any other, so a setup that lives in an example
+            directory needs that directory on ``sys.path``. Both spellings
+            are accepted because the setups shipped with the examples are
+            factories -- that is how a case is parameterised by its grid file
+            and timesteps -- and which one a path names is only discoverable
+            by calling it.
+        **setup_kwargs
+            Passed to the class or factory.
+
+        Returns
+        -------
+        VerosComponent
+            Wrapping a setup whose ``setup()`` has been called.
+
+        Raises
+        ------
+        ImportError
+            If ``setup`` is not a dotted path, its module cannot be imported,
+            or the module has no such attribute.
+
+        """
+        module_path, _, attribute = setup.rpartition(".")
+        if not module_path:
+            raise ImportError(
+                f"{setup!r} is not an importable dotted path to a Veros setup"
+                " (expected something like"
+                " 'my_package.my_case.MySetup')."
+            )
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ImportError(
+                f"Cannot import {module_path!r} for the Veros setup {setup!r}."
+                " A setup that lives outside an installed package (the ones"
+                " under examples/ do) needs its directory on PYTHONPATH."
+            ) from exc
+        try:
+            factory = getattr(module, attribute)
+        except AttributeError as exc:
+            raise ImportError(
+                f"{module_path!r} has no attribute {attribute!r}"
+                f" (from the Veros setup {setup!r})."
+            ) from exc
+
+        model = factory(**setup_kwargs)
+        if isinstance(model, type):
+            # ``factory`` was a factory returning the setup *class*, not the
+            # class itself; the shipped example cases are written that way so
+            # that the class can close over the case's grid and settings.
+            model = model()
+        model.setup()
+        return cls(model)
 
     def bind(
         self,
@@ -360,7 +523,10 @@ class VerosComponent:
         -------
         tuple
             The new carry and this step's diagnostics as a dict of
-            ``(lon, lat[, depth])`` maps.
+            ``(lon, lat[, depth])`` maps. Which keys it holds is fixed at
+            construction, not per step: ``ssh`` is among them only for a run
+            that solves the linear free surface, the only regime in which
+            Veros carries a sea surface height.
 
         Raises
         ------
@@ -457,8 +623,18 @@ class VerosComponent:
         sea_surface_temperature = jnp.where(
             sea_surface_temperature < 100, 288.15, sea_surface_temperature)
         sea_surface_salinity = variables.salt[interior, interior, -1, tau]
-        sea_surface_u = variables.u[interior, interior, -1, tau]
+        zonal_velocity = variables.u[interior, interior, :, tau]
+        sea_surface_u = zonal_velocity[:, :, -1]
         sea_surface_v = variables.v[interior, interior, -1, tau]
+
+        # The barotropic streamfunction, from whichever of the two this run
+        # actually has: Veros only carries a real one when it solves the
+        # external mode for it, and `_barotropic_streamfunction` explains
+        # what stands in for it when it does not.
+        if self.enable_streamfunction:
+            psi = variables.psi[interior, interior, tau]
+        else:
+            psi = self._barotropic_streamfunction(zonal_velocity)
 
         diagnostics = {
             "sea_surface_temperature": sea_surface_temperature,
@@ -467,14 +643,40 @@ class VerosComponent:
             "sea_surface_v": sea_surface_v,
             "temp": variables.temp[interior, interior, :, tau],
             "salt": variables.salt[interior, interior, :, tau],
-            "u": variables.u[interior, interior, :, tau],
+            "u": zonal_velocity,
             "v": variables.v[interior, interior, :, tau],
+            "psi": psi,
             "surface_air_temperature": forcing.surface_air_temperature,
             "surface_taux": forcing.surface_taux,
             "surface_tauy": forcing.surface_tauy,
             "heat_flux": forcing.heat_flux,
             "freshwater_flux": forcing.freshwater_flux,
         }
+        # Under the linear free surface Veros solves for a surface pressure,
+        # and the sea surface height that goes with it is that pressure over
+        # `grav` -- the relation Veros' own `barotropic_velocity_update`
+        # applies when it sets `variables.ssh`. In streamfunction mode there
+        # is no sea surface height at all (Veros deactivates the variable),
+        # so the key exists only in the regime that has one. The branch is on
+        # the Python bool read at construction, so a component's diagnostics
+        # keys are fixed for the whole run -- which is what `jax.eval_shape`
+        # of the step and the coupler's stacking of per-call diagnostics rely
+        # on.
+        #
+        # The relation is applied here rather than `variables.ssh` being read
+        # back, because Veros writes that field *before* it permutes its time
+        # indices at the end of the step: after a step `variables.ssh` is the
+        # surface pressure of the time level that has just become `taum1`,
+        # one Veros timestep behind the `psi`, `u`, `v` and tracers published
+        # in the same record (in the acc_basic free-surface case, a ~27%
+        # difference while the free surface spins up). Reading `psi` at `tau`
+        # like every other field here keeps one output record internally
+        # consistent.
+        if not self.enable_streamfunction:
+            diagnostics["ssh"] = (
+                variables.psi[interior, interior, tau] / state.settings.grav
+            )
+
         return (
             {
                 "state": state,
@@ -487,6 +689,86 @@ class VerosComponent:
             },
             diagnostics,
         )
+
+    def _barotropic_streamfunction(self, zonal_velocity: jnp.ndarray) -> jnp.ndarray:
+        """Diagnose the barotropic streamfunction from the zonal transport.
+
+        Veros carries a barotropic streamfunction only when the setup solves
+        the external mode for one (``settings.enable_streamfunction``). Under
+        the linear free surface -- what every Veros setup shipped with JEM
+        chooses -- the *same* array ``variables.psi`` holds the surface
+        pressure instead: a different quantity, in m^2 s^-2, on the T grid
+        rather than the corner (zeta) points. Publishing it as ``psi`` would
+        therefore be wrong rather than merely approximate, and this diagnosis
+        stands in for it.
+
+        The discrete relation it inverts is the one Veros uses **when it
+        does solve for a streamfunction**, in
+        ``veros.core.external.solve_stream.barotropic_velocity_update``: that
+        routine strips the vertical mean from the baroclinic velocity and
+        then adds ``-maskU (psi[i, j] - psi[i, j-1]) / dyt[j] * hur`` to every
+        level, with ``hur = 1 / sum_k dzt maskU`` from
+        ``veros.core.numerics.calc_topo_kernel``. The depth-integrated zonal
+        transport
+
+            U[i, j] = sum_k u[i, j, k] dzt[k] maskU[i, j, k]
+
+        is then, exactly,
+
+            U[i, j] = -(psi[i, j] - psi[i, j-1]) / dyt[j].
+
+        A free-surface run never reaches that routine -- it solves for a
+        surface pressure and the barotropic mode enters the momentum
+        equation as a pressure gradient instead
+        (``veros.core.external.solve_pressure``) -- so what carries over is
+        the *definition*, not that run's own arithmetic: the same discrete
+        relation, applied to the transports the free-surface run produced.
+        That the definition is the right one, with the sign and the metric
+        Veros uses, is what the streamfunction-mode cross-check in the tests
+        pins down, by making this diagnosis reproduce Veros' own psi.
+
+        No ``cos`` metric factor enters: the difference is meridional, and
+        ``dyt`` is already a distance in metres (``calc_grid`` converts the
+        spacings with ``degtom`` when ``coord_degree``). Inverting the
+        recurrence northwards from a boundary where psi vanishes gives the
+        cumulative sum this method computes,
+
+            psi[i, j] = -sum_{j' <= j} U[i, j'] dyt[j'],
+
+        with psi = 0 on the boundary row immediately south of the first
+        emitted one.
+
+        Two caveats, both recorded in the output's ``comment`` attribute:
+
+        - Under a free surface the barotropic flow is not exactly
+          non-divergent, so this is the standard "meridionally integrated
+          zonal transport" diagnostic rather than an exact streamfunction.
+        - A streamfunction is defined only up to a constant. Veros' solver
+          fixes that constant by holding its first island at zero; this
+          diagnosis fixes it at the southern boundary. In a domain whose
+          southern and northern boundaries belong to one land mass the two
+          agree outright; where a zonal channel carries a net throughflow
+          (an ACC) they differ by that transport, a constant, while the
+          gradients -- the transports the field is read for -- agree.
+
+        Parameters
+        ----------
+        zonal_velocity : jax.Array
+            ``u`` at the current time level on the exchanged interior grid,
+            shaped ``(lon, lat, depth)``.
+
+        Returns
+        -------
+        jax.Array
+            ``(lon, lat)`` streamfunction in m^3 s^-1, on the zeta points
+            that ``u``'s meridional differences sit between.
+
+        """
+        # Depth integral over the trailing axis, then the meridional
+        # integral over the latitude axis that leaves: shape-static, no
+        # branching, so it traces the same way inside the coupled scan.
+        transport = jnp.sum(zonal_velocity * self.mask_U * self.dzt, axis=-1)
+        return -jnp.cumsum(transport * self.dlatitude, axis=-1)
 
     def _report_clock_drift(self, carry: Carry, time: CouplingTime) -> None:
         """Log at ERROR if the ocean's own clock has left the coupler's.
@@ -561,12 +843,26 @@ class VerosComponent:
             :func:`~jem.base.component.forcing_variable` applies, exactly as the
             slab models' output does, so merging this dataset with the
             atmosphere's does not collide on a name two components both hold.
+            Each variable that came out of the carry also carries the
+            ``jem_role`` attribute (:func:`~jem.base.component.role_attrs`),
+            which says the same thing without a name to parse; the grid
+            fields (the ``mask_*`` masks and ``dzt``) carry none, because
+            they are configuration rather than carry. The masks of all three
+            staggerings the output uses are published, because a reader
+            cannot rebuild them: ``mask_T`` for the tracers, ``mask_U`` for
+            ``u`` and for the depth integral behind ``psi``, and
+            ``mask_surface_Z`` for the zeta points ``psi`` itself sits on,
+            where its values over land are an artefact of the integration.
             The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
             ``xr.merge`` joins the records instead of unioning two axes -- or,
             as before this coordinate was written at all, leaving the ocean's
             ``time`` as a bare 0..n-1 index that means nothing.
+            ``ssh`` is present only for a run that solves the linear free
+            surface, because that is the only regime in which Veros carries
+            a sea surface height; ``step`` emits it on the same static
+            branch, so the two always agree.
 
         """
         n_records = int(jnp.shape(diagnostics["sea_surface_temperature"])[0])
@@ -587,6 +883,7 @@ class VerosComponent:
                 "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
+                "psi": (["time", "lon", "lat"], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
                     ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
                 forcing_variable("surface_taux"): (
@@ -599,6 +896,9 @@ class VerosComponent:
                     ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
+                "mask_U": (["lon", "lat", "depth"], self.mask_U),
+                "mask_surface_U": (["lon", "lat"], self.mask_U[:, :, -1]),
+                "mask_surface_Z": (["lon", "lat"], self.mask_surface_Z),
                 "dzt": (["depth"], self.dzt),
             },
             coords={
@@ -613,56 +913,209 @@ class VerosComponent:
         dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
         dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
+        # Nothing in the numbers says whether `psi` is Veros' own prognostic
+        # streamfunction or the diagnosis that stands in for it, so the
+        # attribute does. See `_barotropic_streamfunction`.
+        if self.enable_streamfunction:
+            psi_comment = (
+                "Veros' own prognostic barotropic streamfunction"
+                " (`variables.psi` at the current time level): this run"
+                " solves the external mode for it"
+                " (settings.enable_streamfunction)."
+            )
+        else:
+            psi_comment = (
+                "diagnosed as the meridionally integrated depth-integrated"
+                " zonal transport, fixed to zero at the southern boundary:"
+                " this run solves the external mode for a linear free"
+                " surface (settings.enable_streamfunction is False), where"
+                " Veros' `variables.psi` holds the surface pressure instead;"
+                " that solve's own sea surface height is published here as"
+                " `ssh`."
+                " The barotropic flow is then not exactly non-divergent, so"
+                " this is the standard `meridionally integrated zonal"
+                " transport` diagnostic rather than an exact streamfunction."
+                " Its values over land are carried through the integration"
+                " rather than computed, so blank them with `mask_surface_Z`"
+                " before reading them as transports; the depth integral it"
+                " comes from uses `mask_U` and `dzt`, both published here,"
+                " so it can be reproduced from this file."
+            )
+        psi_comment += (
+            " Like `u` and `v` it lives on Veros' staggered grid -- here the"
+            " zeta (corner) points, whose surface land-sea mask is published"
+            " as `mask_surface_Z` -- but is labelled with the T-grid"
+            " `lon`/`lat` coordinates this dataset uses throughout."
+        )
+
+        # `jem_role` records which section of the carry each variable came
+        # from, so a reader does not have to parse the `forcing_` prefix.
+        # The masks and `dzt` at the end are the grid itself -- time-invariant
+        # configuration, not state, diagnostics or forcing -- so they carry no
+        # role.
         var_attrs = {
-            "temp": {"long_name": "ocean potential temperature", "units": "deg C"},
-            "salt": {"long_name": "ocean salinity", "units": "g/kg"},
-            "u": {"long_name": "zonal ocean velocity", "units": "m/s"},
-            "v": {"long_name": "meridional ocean velocity", "units": "m/s"},
+            "temp": {"long_name": "ocean potential temperature", "units": "deg C",
+                     **role_attrs("state")},
+            "salt": {"long_name": "ocean salinity", "units": "g/kg",
+                     **role_attrs("state")},
+            "u": {"long_name": "zonal ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
+            "v": {"long_name": "meridional ocean velocity", "units": "m/s",
+                  **role_attrs("state")},
             "sea_surface_temperature": {
                 "long_name": "sea surface temperature", "units": "K",
                 "comment": "unlike `temp`, this field is shifted by +273.15 to Kelvin",
+                **role_attrs("derived"),
             },
-            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s"},
-            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s"},
-            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg"},
+            "sea_surface_u": {"long_name": "sea surface zonal velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_v": {"long_name": "sea surface meridional velocity", "units": "m/s",
+                              **role_attrs("derived")},
+            "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
+                                     **role_attrs("derived")},
+            "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
+                    "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
                 "long_name": "surface air temperature forcing", "units": "K",
                 "comment": "unit inferred by convention; not dimensionally enforced anywhere in this module",
+                **role_attrs("forcing"),
             },
             forcing_variable("surface_taux"): {
-                "long_name": "zonal surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "zonal surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("surface_tauy"): {
-                "long_name": "meridional surface wind stress forcing", "units": "N/m^2"},
+                "long_name": "meridional surface wind stress forcing", "units": "N/m^2",
+                **role_attrs("forcing")},
             forcing_variable("heat_flux"): {
-                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2"},
+                "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2",
+                **role_attrs("forcing")},
             forcing_variable("freshwater_flux"): {
                 "long_name": "net surface freshwater flux forcing (upward positive)",
-                "units": "kg/m^2/s"},
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},
+            "mask_U": {"long_name": "land-sea mask on u grid", "units": "1",
+                       "comment": "the mask `u` lives on, and the one `psi`'s depth integral uses"},
+            "mask_surface_U": {"long_name": "land-sea mask on u grid, surface level", "units": "1"},
+            "mask_surface_Z": {"long_name": "land-sea mask on zeta (corner) points, surface level",
+                               "units": "1",
+                               "comment": "the points `psi` itself lives on"},
             "dzt": {"long_name": "vertical grid spacing (T)", "units": "m"},
         }
+
+        # The sea surface height exists only where `step` emitted one, so it
+        # is added rather than sitting in the literals above. Unlike `psi` it
+        # needs no staggering note: it is a T-grid field, the grid this
+        # dataset's `lon`/`lat` already label.
+        if not self.enable_streamfunction:
+            dataset["ssh"] = (["time", "lon", "lat"], diagnostics["ssh"])
+            var_attrs["ssh"] = {
+                "long_name": "sea surface height", "units": "m",
+                "comment": (
+                    "the sea surface height of Veros' surface-pressure"
+                    " solve, `ssh = psi / grav` -- the relation Veros itself"
+                    " applies when it sets `variables.ssh` -- evaluated on"
+                    " the `variables.psi` of this record's own time level,"
+                    " which `variables.ssh` is one Veros timestep behind"
+                    " because Veros writes it before permuting its time"
+                    " indices. Present only for a run that solves the linear"
+                    " free surface (settings.enable_streamfunction is"
+                    " False), where `variables.psi` holds the surface"
+                    " pressure; a streamfunction run has no sea surface"
+                    " height to publish."
+                ),
+                **role_attrs("derived"),
+            }
+
         for name, attrs in var_attrs.items():
             dataset[name].attrs = attrs
 
         return dataset
 
-    def save_state(self, carry: Carry, directory: Path) -> None:
-        """Write the carry to ``directory``.
+    def save_carry(self, carry: Carry, directory: Path) -> None:
+        """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         The ``VerosState`` goes through Veros' own HDF5 restart writer
-        because it is not a plain pytree; the derived and forcing structs
-        are pickled alongside it.
-        """
-        save_veros_carry(carry, directory)
+        because it is not a plain pytree -- it is a mutable object holding
+        settings, dimensions and its own array backend. What is left of the
+        carry, the ``derived`` and ``forcing`` structs, is an ordinary pytree
+        and is written beside it by :func:`jem.checkpoint.save`, under the
+        same file name a coupled checkpoint uses, so one directory has one
+        carry file however deep in the model it sits.
 
-    def load_state(self, directory: Path) -> Carry:
-        """Read back a carry written by :meth:`save_state`.
+        Parameters
+        ----------
+        carry : Carry
+            ``{"state": VerosState, "derived": ..., "forcing": ...}``.
+        directory : pathlib.Path
+            Directory to write into; created if absent.
+
+        """
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        from veros.restart import write_restart
+
+        state = carry["state"]
+        with state.settings.unlock():
+            state.settings.restart_output_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+            logger.info(
+                "Saving ocean restart file to %s",
+                state.settings.restart_output_filename,
+            )
+        write_restart(state, force=True)
+
+        # The restart file first, the pytree carry file last: the coupled
+        # checkpoint treats the carry file as the completion marker, and this
+        # component keeps the same promise for its own directory.
+        save_pytree(
+            {"derived": carry["derived"], "forcing": carry["forcing"]},
+            directory / CARRY_FILENAME,
+        )
+
+    def load_carry(self, directory: Path) -> Carry:
+        """Read back a carry written by :meth:`save_carry`.
 
         Veros' restart reader mutates ``model.state`` in place, so the
-        returned carry shares that object -- as :meth:`initialize` does.
+        returned carry shares that object -- as :meth:`initialize` does. The
+        ``derived`` and ``forcing`` structs are poured back into the templates
+        :meth:`initialize` builds, so a restart written on another grid is
+        refused by shape rather than silently adopted.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            A directory written by :meth:`save_carry`.
+
+        Returns
+        -------
+        Carry
+
         """
-        return load_veros_carry(directory, self.model)
+        directory = Path(directory)
+
+        from veros.restart import read_restart
+
+        state = self.model.state
+        with state.settings.unlock():
+            state.settings.restart_input_filename = str(
+                directory / VEROS_RESTART_FILENAME
+            )
+        # Veros refuses to read a restart while `force_overwrite` is on, which
+        # this module turns on so that a coupled run may rewrite its own
+        # outputs; the context manager puts it back however the read ends.
+        with _veros_runtime_setting("force_overwrite", False):
+            read_restart(state)
+
+        template = {
+            "derived": VerosDerived.zeros(self.horizontal_shape),
+            "forcing": VerosForcing.zeros(self.horizontal_shape),
+        }
+        stored = load_pytree(template, directory / CARRY_FILENAME)
+        return {"state": state, **stored}
 
 
 def make_jem_compatible(

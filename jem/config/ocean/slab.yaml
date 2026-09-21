@@ -1,0 +1,12 @@
+# The default ocean: a slab mixed layer with everything at its Python default
+# (`SlabOceanParameters`), i.e. no extra forcing term -- the SST responds to
+# the coupled surface heat flux alone.
+#
+# The runner injects `grid=`; a slab grid is built from another component's
+# geometry and can never be named in YAML.
+_target_: jem.components.SlabOceanModel
+params:
+  # Present with no keys of its own so that `+ocean.params.<field>=<value>`
+  # reaches a real node on the command line. Every field it does not carry
+  # comes from the dataclass.
+  _target_: jem.components.slab.SlabOceanParameters

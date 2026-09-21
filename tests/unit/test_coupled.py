@@ -160,7 +160,6 @@ def jcm_model(speedy_coords) -> Model:
         terrain=TerrainData.aquaplanet(speedy_coords),
         start_date=START_DATE,
         calendar=CALENDAR,
-        log_level=50,
     )
 
 

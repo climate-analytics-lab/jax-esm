@@ -24,8 +24,14 @@ whole coupling interval just to discover the shape of the diagnostics it
 would later store, which both cost a full model step per run and started
 the atmosphere one interval ahead of the coupler's clock.
 
-JCM private attributes are still read in three places, each isolated in one
-helper below and tagged with the jax-gcm issue that will remove it.
+Every JCM *attribute* this wrapper touches is public at the pinned revision
+(``jem.components.jcm.contract``), apart from the underscore-prefixed
+diagnostics keys the surface exchange reads (jax-gcm#754 is the issue that
+will publish the same surface-exchange struct from every physics package).
+That is why the initial state comes from ``bootstrap_state``'s return value
+and a stacked prediction is repaired with ``ModelPredictions.with_context``:
+an adapter that reached into JCM's internals would break on a JCM refactor
+that broke nothing else.
 """
 
 from __future__ import annotations
@@ -42,13 +48,36 @@ from jcm.forcing import ForcingData, default_forcing
 from jcm.model import Model
 from jcm.predictions import ModelPredictions
 
-from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
+from jem.base.component import (
+    Carry,
+    CouplingTime,
+    Diagnostics,
+    TimeAxis,
+    role_attrs,
+)
 from jem.components.clock import clock_tolerance_seconds
 from jem.components.jcm import exchange_fields
 
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 86400.0
+
+#: Fields of :class:`jcm.forcing.ForcingData` that a coupled run's exchangers
+#: write -- the surface boundary conditions an uncoupled JCM run prescribes
+#: and a coupled one receives from the surface components (see
+#: :func:`jem.exchangers.default_exchanges`). Where one of these appears in
+#: JCM's own output dataset it is tagged ``jem_role = "forcing"``, so the
+#: atmosphere's output can be queried for its forcing the same way every
+#: other component's can. The rest of JCM's variables are left untagged:
+#: those names are JCM's, and the roles of its diagnostics are not JEM's to
+#: assert.
+FORCING_VARIABLE_NAMES = (
+    "sea_surface_temperature",
+    "sice_am",
+    "stl_am",
+    "snowc_am",
+    "soilw_am",
+)
 
 
 @tree_math.struct
@@ -107,25 +136,6 @@ class JCMDerived:
         return cls(physics, **fields)
 
 
-def _bootstrapped_dycore_state(model: Model) -> Any:
-    """Return the dycore state ``bootstrap_state`` just built.
-
-    TODO(jax-gcm#755): ``bootstrap_state`` is public but only publishes its
-    result through the private ``_final_dycore_state`` attribute; a public
-    ``Model.initial_state()`` would remove this read.
-    """
-    return model._final_dycore_state
-
-
-def _bootstrapped_physics_carry(model: Model) -> Any:
-    """Return the initial cross-step physics carry ``bootstrap_state`` built.
-
-    TODO(jax-gcm#755): same gap as :func:`_bootstrapped_dycore_state`; a
-    public ``Model.physics_carry`` would remove this read.
-    """
-    return model._final_physics_state
-
-
 def _with_model_context(predictions: ModelPredictions,
                         model: Model) -> ModelPredictions:
     """Re-attach the coords/physics/dycore a pytree round-trip dropped.
@@ -133,16 +143,23 @@ def _with_model_context(predictions: ModelPredictions,
     ``ModelPredictions`` is registered as a pytree whose only children are
     the raw prediction arrays, so everything JEM's ``lax.scan`` hands back
     has ``coords``, ``physics`` and ``dycore`` set to ``None`` and cannot
-    serialize itself.
+    serialize itself. ``ModelPredictions.with_context(model)`` is jax-gcm's
+    own spelling of the repair; the model-bound form is used rather than the
+    ``(coords, physics)`` one so that the dycore -- which owns the
+    trajectory-to-Dataset conversion for non-separable grids -- comes along
+    with them. The one-line wrapper earns its place by putting that reason
+    next to JEM's ``lax.scan``, which is what creates the need.
 
-    TODO(jax-gcm#756): a public
-    ``ModelPredictions.with_context(coords, physics, dycore)`` would remove
-    this read of the private ``_predictions`` payload.
+    One visible consequence: the dataset's ``jcm_prov_params`` global
+    attribute gains jax-gcm's ``parameters_rederived_from_live_context``
+    note (and therefore a different ``jcm_prov_params_sha``). That is
+    accurate and wanted. A coupled trajectory is traced once and scanned, so
+    the parameters recorded here really are read from the live physics
+    afterwards rather than captured at trace time, and a reader of a coupled
+    atmosphere file should be told so rather than be shown a provenance
+    record that claims more than it knows.
     """
-    return ModelPredictions(
-        predictions._predictions, model.coords, model.physics,
-        dycore=model.dycore,
-    )
+    return predictions.with_context(model)
 
 
 def _diagnostics_template(model: Model) -> Any:
@@ -303,10 +320,10 @@ class JCMComponent:
             "derived": JCMDerived, "forcing": ForcingData}``.
 
         """
-        self.model.bootstrap_state()
+        dycore_state, physics_carry = self.model.bootstrap_state()
         return {
-            "state": _bootstrapped_dycore_state(self.model),
-            "physics": _bootstrapped_physics_carry(self.model),
+            "state": dycore_state,
+            "physics": physics_carry,
             "derived": JCMDerived.zeros(
                 self.nodal_shape, _diagnostics_template(self.model)),
             "forcing": self.forcing,
@@ -396,15 +413,27 @@ class JCMComponent:
 
         Notes
         -----
+        Every variable in the dataset is JCM's, named as JCM names it, so the
+        ``forcing_`` prefix the other components use is deliberately not
+        applied here -- renaming JCM's output would make a coupled run's
+        atmosphere files disagree with an uncoupled run's. The variables that
+        *are* recognisably the surface forcing an exchanger writes
+        (:data:`FORCING_VARIABLE_NAMES`) are marked with the ``jem_role``
+        attribute where they appear; everything else is left untagged rather
+        than guessed at, because JCM owns those names and their meaning.
+
         The ``time`` coordinate is JCM's, not the coupler's: JCM labels each
         averaged record with the **end** of the interval it covers
         (``datetime64[ns]``, absolute, from the model's own ``start_date``),
         and JEM does not relabel it, because a coupled dataset in which the
         atmosphere's time axis disagrees with the atmosphere's own output
         files would be worse than one where two components label the same
-        interval differently. JEM cannot reproduce JCM's calendar
-        arithmetic itself while ``Model._date_from_sim_time`` is private —
-        TODO(jax-gcm#758).
+        interval differently. The labels the other components carry come from
+        ``TimeAxis.datetimes``, which reproduces JCM's *output* arithmetic
+        rather than calling ``Model.date_from_sim_time`` -- public since
+        jax-gcm#824, but a different conversion, for the reason set out on
+        :class:`jem.base.component.TimeAxis`. Publishing the labelling
+        itself is jax-gcm#862.
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)
@@ -417,6 +446,13 @@ class JCMComponent:
                 " passed here are not the ones this run produced."
             )
         dataset: xr.Dataset = predictions.to_xarray()
+        for name in FORCING_VARIABLE_NAMES:
+            if name in dataset.variables:
+                # A fresh dict: xarray keeps the one it is handed, and the
+                # attrs on JCM's variable are JCM's to own.
+                dataset[name].attrs = {
+                    **dataset[name].attrs, **role_attrs("forcing")
+                }
         return dataset
 
     def _report_clock_drift(self, state: Any, time: CouplingTime) -> None:

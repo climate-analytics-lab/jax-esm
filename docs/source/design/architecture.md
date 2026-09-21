@@ -4,8 +4,12 @@ How JEM couples black-box components. This is the reference for developers
 adding a component or debugging an exchange; the user-facing walkthrough is
 {doc}`../tutorial`.
 
-Every statement here is checkable against `jem/base/component.py` and
-`jem/base/coupler.py`, which together are the whole of the coupling core.
+Every statement about the coupling core is checkable against
+`jem/base/component.py` and `jem/base/coupler.py`, which are the whole of it;
+the layers built on that core — the declarative exchange (`jem/exchangers.py`),
+the run loop (`jem/driver.py`, `jem/output.py`, `jem/checkpoint.py`) and the
+configuration (`jem/config/`, `jem/runners.py`, `jem/main.py`) — have a section
+each below.
 
 ## Core concepts
 
@@ -64,54 +68,111 @@ makes a chunked run (or a restart from a checkpoint) continue the same
 simulation instead of replaying the first year.
 
 For the same reason `step` is part of a **checkpoint**. A checkpoint directory
-holds one `{name}_carry.pkl` per component — or a subdirectory, for a component
-that writes itself — plus `coupled_step.pkl` holding the counter. A checkpoint
-directory with no `coupled_step.pkl` is refused with a `ValueError`: its
-position in the seasonal cycle is not recoverable, and resuming at step 0 (or
-at a step reconstructed from a batch index) would silently move the run's
-calendar. `save_component_carries` / `load_component_carries` are the
-mapping-only halves, for a sub-carry that has no clock of its own — which is
-how the Veros restart writer stores its `derived` and `forcing` structs.
+holds one `carry.msgpack` — every component that does not write itself, plus the
+coupled step counter, plus the *name* of every component that does — beside one
+subdirectory per component that writes itself (`VerosComponent`, a nested
+`Coupler`). A directory with no `carry.msgpack` is
+refused with a `ValueError`: its position in the seasonal cycle is not
+recoverable, and resuming at step 0 (or at a step reconstructed from a batch
+index) would silently move the run's calendar.
+
+The format is jax-gcm's: `jem.checkpoint.save(carry, path)` flattens any pytree
+to a list of typed arrays serialised with flax's **MessagePack** (`msgpack`)
+codec — a compact binary serialization format, a binary cousin of JSON, reached
+through `flax.serialization.msgpack_serialize`, which is where the
+`carry.msgpack` name comes from — and
+`load(template, path)` rebuilds the tree from a *template*'s treedef. The tree
+itself is never stored — rebuilding it from the template is what keeps the
+format small — but a manifest of it is, and that is what makes the format
+self-checking. Every leaf is compared with the template's path, shape and
+dtype, so a checkpoint written by another grid or another component composition
+fails naming the leaf instead of deserialising into something that only explodes
+later inside a `lax.scan`. The leaf paths are stored because leaf count, shape
+and dtype together cannot tell two same-shaped carries apart, and silently
+swapping two components' carries on resume is the failure that would follow.
+
+The manifest also holds the repr of the whole `PyTreeDef`, compared after the
+leaves — leaf-level checks name the offending leaf, which is more use than two
+tree reprs, so the structure comparison is left as the catch-all for the
+differences no leaf can show. There are three. A component whose carry holds no
+arrays (`{}` or `None`) contributes no leaf at all, so renaming one would
+otherwise load cleanly and resume a *different* composition at the saved step;
+so does a component that checkpoints itself, whose carry never reaches the
+shared file, which is why `save_coupled_carry` stores its name there as an empty
+marker entry. A container that changed type without its contents moving (a list
+for a tuple) is the second. The third is a **static** (`pytree_node=False`)
+parameter that changed value: JAX keeps those inside the `PyTreeDef`, so
+resuming with `forcing_method` edited from `"none"` to `"qflux"` is refused
+rather than continued. That is deliberate — a static parameter selects a code
+path at trace time, so the resumed run would be a different model — and the
+mismatch message names it as one of the causes and shows the difference. A
+*differentiable* parameter is a leaf, so it is restored from the checkpoint
+instead: editing one between runs is overridden, not refused.
+Both the stored leaf and the template go through `jnp.asarray` first: a
+component's parameter default is a Python float in `initialize()` and a float32
+array in the carry `lax.scan` returns, and the two have to compare as one leaf.
+It is also why `load_carry` needs a template at all, and takes it from each
+component's own `initialize()`.
+
+**Loading is all-or-nothing.** The template built from `initialize()` supplies
+the pytree *structure* and nothing else: every leaf of the restored carry comes
+from the checkpoint, and the freshly-initialized values are discarded. A
+component the checkpoint does not hold is a `ValueError`, never a component
+quietly left at its initial state — that would continue one part of the model
+from the saved step while another restarted at the start date, a run that is
+neither a resume nor a cold start and that nothing downstream could detect.
+`load_coupled_carry` logs at INFO which components it read from the shared
+carry file, which read themselves back through their own `load_carry`, and the
+step it restored, so every component's source is named.
 
 **The coupler is what a driver checkpoints through**, in one call each way:
 
 ```python
-model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
-carry = model.load_state(saved)
+model.save_carry(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+carry = model.load_carry(saved)
 ```
 
 Which components need writing by hand rather than pickling is a property of the
 *components* — `VerosComponent` has to go through Veros' HDF5 restart writer
 because a `VerosState` is not a pytree — and the coupler is the one object that
-knows them all. `Coupler.save_state` therefore derives the savers itself, as
-`{name: component.save_state for … if isinstance(component, SupportsCheckpoint)}`,
-and `load_state` derives the loaders from the same capability. A driver never
+knows them all. `Coupler.save_carry` therefore derives the savers itself, as
+`{name: component.save_carry for … if isinstance(component, SupportsCheckpoint)}`,
+and `load_carry` derives the loaders from the same capability. A driver never
 enumerates them, so it cannot get the set wrong or forget one when a component
 is swapped.
 
 A `Coupler` implements `SupportsCheckpoint` itself, so this **recurses**: an
 outer coupler sees a nested coupler as a component that writes itself, hands it
 `directory / <the name it is registered under>`, and the inner coupler writes
-its own components and its own `coupled_step.pkl` there — an inner checkpoint
-that is complete in its own right, holding the inner clock. Without that, the
-outer save would treat the inner `CoupledCarry` as a plain pytree and pickle it,
+its own components and its own `carry.msgpack` there — an inner checkpoint that
+is complete in its own right, holding the inner clock. Without that, the outer
+save would treat the inner `CoupledCarry` as a plain pytree and serialise it,
 which works only while nothing inside it needs a format of its own; a nested
 model containing Veros would silently bypass the restart path.
 
-`save_coupled_carry(coupled_carry, directory, component_savers=…)` and
-`load_coupled_carry(directory, names, component_loaders=…)` are still the
+`jem.checkpoint.save_coupled_carry(coupled_carry, directory, component_savers=…)` and
+`load_coupled_carry(directory, component_templates, component_loaders=…)` are the
 underlying functions and still take the mappings explicitly, for a caller that
 wants to override a saver or supply one for something that is not a component
-capability. `Coupler.save_state` / `load_state` are the answer for every
+capability. `Coupler.save_carry` / `load_carry` are the answer for every
 ordinary case.
 
-Because the marker is written last, a save interrupted part-way through leaves
-a directory that has no marker — and, in a run that names its checkpoints
-`step_00000000`, `step_00000005`, …, that directory sorts *newest*. A driver
-resuming from a directory of checkpoints therefore asks
-`latest_complete_checkpoint(root, pattern="step_*")` for the newest one that
-holds a marker rather than the newest name; it warns about each incomplete
+**The carry file is the marker**, and it is written last — published by renaming
+a flushed, fsynced temporary over its final name, and removed first when an
+existing checkpoint is overwritten, so a failure part-way through cannot leave a
+stale clock beside freshly written component data. A separate `COMPLETE` file
+would be a second thing to keep in step for no gain: a resume cannot do without
+the clock, which lives in the carry file anyway, so that file's presence is
+exactly the condition "this checkpoint can be resumed from".
+
+A save interrupted part-way through therefore leaves a directory with no marker
+— and, in a run that names its checkpoints `step_00000000`, `step_00000005`, …,
+that directory sorts *newest*. A driver resuming from a directory of checkpoints
+asks `latest_complete_checkpoint(root, pattern="step_*")` for the newest one
+that holds a marker rather than the newest name; it warns about each incomplete
 directory it steps over, since one means an earlier run died mid-save.
+`jem.driver.run_chunked` keeps a single checkpoint directory instead (see
+*Running a model*) and makes the same check on it.
 
 A checkpoint is named after the coupled step it was written at, and how much of
 a run is left is computed from the step counter *inside* the restored
@@ -206,7 +267,7 @@ at a random call site:
 |---|---|---|
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
-| `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent`, `Coupler` |
+| `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -342,6 +403,10 @@ Two rules, both enforced by what `lax.scan` will accept:
 These were called "mappers" before v1.0. The name changed because "mapper" reads
 as a regridding operation, whereas an exchanger may regrid, compute a flux,
 convert units or simply copy a field.
+
+An exchange that only *moves* fields — which is most of a coupled model — does
+not need to be written as a function at all; see *The declarative exchange*
+below.
 
 ### Workflow and the coupled step
 
@@ -501,9 +566,9 @@ model = Coupler(
   diagnostics gain no extra axis, mirroring multiplicity 1.
 - **The carry** of the inner coupler is a `CoupledCarry` living inside the
   outer one's `components`, so there are two step counters: the outer counts
-  outer steps, the inner counts its own. `outer.save_state(carry, directory)`
+  outer steps, the inner counts its own. `outer.save_carry(carry, directory)`
   writes the inner model into `directory / <its registered name>` through the
-  inner coupler's own `save_state`, and `outer.load_state(directory)` reads it
+  inner coupler's own `save_carry`, and `outer.load_carry(directory)` reads it
   back the same way, so a resume continues both clocks — and a component inside
   the inner model that needs its own format (Veros) still gets it.
 - **Exchangers in the outer coupler** see the inner `CoupledCarry` under its
@@ -612,7 +677,16 @@ The conventions, which are JCM's:
   it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
   xarray. The dates are proleptic Gregorian whatever the model calendar is;
   the calendar governs the seasonal cycle and forcing selection, not the
-  labels.
+  labels. The consequence is a leap day: a `365_day` year is a day shorter
+  than a Gregorian leap year, so the labels fall a day further behind the
+  model calendar at every Gregorian 29 February — a run started on 1 January
+  2000 labels the instant the model calls 1 March 00:00 as `2000-02-29`, and
+  everything downstream that bins by the *label* parts company there from
+  everything that bins by the *model calendar* (see the `accumulate` section
+  below). The inconsistency is JCM's, recorded upstream as jax-gcm#449; JEM
+  mirrors it rather than emitting labels of its own, which would no longer
+  merge with the atmosphere's on one time axis. Calendar-consistent labels for
+  every component, the atmosphere's included, are tracked as #118.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
@@ -633,7 +707,56 @@ The conventions, which are JCM's:
   `forcing_heat_flux`, `forcing_freshwater_flux`, `forcing_surface_taux`,
   `forcing_surface_tauy` and `forcing_surface_air_temperature` for the five
   fields an exchanger hands it, keeping plain names for the `temp`, `salt`,
-  `u`, `v` and sea-surface fields it computes.
+  `u`, `v`, `psi` and sea-surface fields it computes. The ocean's `psi` is
+  the barotropic streamfunction, and which of two things it is depends on
+  how the setup solves the external mode. With
+  `settings.enable_streamfunction` (Veros' own default) it is Veros'
+  prognostic `variables.psi` at the current time level. With the linear
+  free surface — what every Veros setup shipped with JEM selects — Veros
+  reuses that same array for the surface pressure, a different quantity in
+  different units on a different grid, so the wrapper diagnoses the
+  streamfunction instead: it integrates the depth-integrated zonal
+  transport northwards from a southern boundary where the streamfunction
+  vanishes, using the discrete relation Veros inverts *when it does solve
+  for a streamfunction* — `sum_k u dzt maskU = -(psi[i,j] - psi[i,j-1]) /
+  dyt[j]`, the relation behind its barotropic-mode update. A free-surface
+  run never reaches that code (it solves for a surface pressure, and the
+  barotropic mode enters the momentum equation as a pressure gradient), so
+  what carries over is the definition rather than that run's own
+  arithmetic, applied to the transports it did produce. That the
+  definition is the right one is pinned by a test that makes the diagnosis
+  reproduce Veros' own `psi` where Veros has one: there the two agree to
+  machine precision, up to the additive constant a streamfunction is
+  defined up to (Veros fixes it by holding its first island at zero, the
+  diagnosis by the southern boundary). The variable's `comment` attribute
+  says which of the two the file holds, and the masks a reader needs are
+  published beside it — `mask_surface_Z` for the zeta points `psi` sits on,
+  whose land values the integration carries through rather than computes,
+  and `mask_U` for the depth integral behind it. A free-surface run also
+  publishes the sea surface height of its surface-pressure solve as `ssh`
+  (m, on the T grid) — `ssh = psi / grav`, the relation Veros itself
+  applies, evaluated on the `psi` of the record's own time level because
+  Veros' `variables.ssh` is written before it permutes its time indices and
+  so lags the rest of the record by one Veros timestep; a streamfunction run
+  has no sea surface height and publishes none.
+- **A variable's role is metadata, not a name to parse.** Every packaged
+  component tags each output variable with `jem_role`
+  (`jem.base.component.role_attrs`), whose value is the section of the carry
+  the variable came from: `state` (what the component integrates), `derived`
+  (what it diagnosed for others to read) or `forcing` (what it was given). So
+  `ds.filter_by_attrs(jem_role="forcing")` is the whole query. This does not
+  replace the `forcing_` prefix and is not redundant with it: the prefix exists
+  to stop an `xr.merge` collision between a field one component computed and
+  the lagged copy another received — they are genuinely different variables —
+  while matching a prefix cannot tell a *received* `forcing_q_flux` from a
+  model whose own field happens to start with the same word, and says nothing
+  at all about the variables that are not forcing. A variable that is none of
+  the three — a grid mask, a layer thickness, anything time-invariant that came
+  from the component's configuration rather than its carry — is left untagged,
+  which is a meaningful answer rather than an omission. The JCM wrapper returns
+  jcm's own dataset and tags only the surface boundary conditions an exchanger
+  writes into it; the rest of those names are jcm's, and their roles are not
+  JEM's to assert.
 - **A configuration-dependent variable is decided by the run, not by the
   component object.** `SlabOceanModel` writes `forcing_q_flux` only when the
   trajectory actually applied a Q-flux, and `step` follows the
@@ -649,6 +772,798 @@ The conventions, which are JCM's:
 
 Together these are what make `xr.merge([datasets["atm"], datasets["ocn"]])` an
 N-long join rather than a 2N-long outer union.
+
+## The declarative exchange
+
+Almost every exchange in a coupled Earth-system model is the same shape: field
+X of component A becomes field Y of component B, optionally regridded on the
+way. `jem.exchangers` writes that as a table instead of a function.
+
+```python
+from jem import Coupler, default_exchangers
+
+components = {"atm": atm, "ocn": ocn, "seaice": seaice}
+coupler = Coupler(components, default_exchangers(components),
+                  coupling_timestep=jdt.to_timedelta(1, "day"),
+                  start_date=start_date)
+```
+
+`ExchangeSpec(src, dst, regrid=None)` is one row, addressing a field as
+`"component.section.field"` with `section` one of `state`, `derived`, `forcing`
+— the carry layout every packaged component shares. `Exchange(specs,
+regridders)` executes a list of rows and *is* an ordinary `Exchanger`, so
+nothing in the coupler knows the difference. A component whose carry is shaped
+differently can still be coupled, with a hand-written exchanger.
+
+`default_exchanges(components)` is the standard wiring, in one place:
+
+| source | destination |
+| --- | --- |
+| `atm.derived.total_heat_flux` | `ocn.forcing.total_heat_flux` |
+| `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
+| `ocn.derived.ice_frazil_melt_energy` | `seaice.forcing.ice_frazil_melt_energy` |
+| `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
+| `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
+| `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
+| `lnd.state.snowc` | `atm.forcing.snowc_am` |
+| `lnd.state.soilw` | `atm.forcing.soilw_am` |
+
+A row survives only if **both** its components are present, so an aquaplanet
+with no land model gets the four rows that do not mention `lnd`, and an
+atmosphere/ocean pair gets two. The wiring is by *name* —
+`("atm", "ocn", "lnd", "seaice")` — and a component registered under a name
+that just misses one of those (`ice`, `ocean`, `land`) is left unconnected with
+a warning, because the failure it would otherwise cause is silent: the sea ice
+simply never receives anything.
+
+**One table per carry layout.** Component wrappers do not all name the same
+physical field the same way, nor keep it in the same section: the Veros ocean
+takes its surface heat flux as `forcing.heat_flux` and publishes its sea
+surface temperature from `derived` (its `state` is Veros' own `VerosState`
+object, not a struct of exchangeable fields), where a slab has
+`forcing.total_heat_flux` and `state.sea_surface_temperature`. So the table
+above is `STANDARD_EXCHANGES`, and a `VerosComponent` registered as `"ocn"`
+selects `VEROS_OCEAN_EXCHANGES` instead — the same wiring in Veros' names, plus
+the freshwater flux Veros also takes, and with no `ocn` → `seaice` row because
+Veros publishes no freeze/melt potential (that combination is warned about).
+The choice is made by *type*, which needs real components: called with a list
+of names, `default_exchanges` cannot tell one ocean from another and gives the
+slab table. The check looks the wrapper's module up in `sys.modules` rather
+than importing it, so a JAX-ESM without the optional Veros dependency never
+imports Veros to find out that it has no Veros ocean.
+
+What the Veros table deliberately does **not** carry is the **wind stress**:
+Veros integrates `forcing.surface_taux`/`tauy` and the atmosphere publishes a
+near-surface *wind*, so getting from one to the other is a bulk drag law (and,
+on a rotated grid, a rotation into its local frame) — a computation, not a
+copy, and therefore a hand-written exchanger. The shipped `veros-*`
+configurations run thermodynamically forced and mechanically at rest until one
+is given.
+
+Three properties are worth stating, because a hand-written exchanger has them
+only by accident:
+
+- **An exchange is simultaneous, not sequential.** Every source is read from
+  the mapping as it arrives, before any destination is written, so reordering
+  the table cannot change a run. Two rows writing the same destination is a
+  `ValueError` at construction for the same reason.
+- **It is checkable before the run.** `Exchange.validate(carries)` — which
+  `jem.runners` calls with `coupler.initialize().components` — turns a mistyped
+  component, section, field or regridder into an error naming the spec, before
+  a model is integrated. The same lookups fail the same way at trace time for a
+  caller that skips it, which is still far earlier than a wrong number.
+- **It never mutates.** New section structs with `.replace(...)`, new carries
+  with `dict(carry, ...)`, and a new mapping — the rule the exchanger contract
+  states above, enforced here once for every table.
+
+**Regridding.** A row that crosses the atmosphere/ocean grid boundary may name
+a regridder, and `default_exchanges` names one from a mapping keyed by
+*direction and kind*: `a2o`/`o2a` for the direction, `flux`/`state` for the
+kind. The kind is written on each row of the table rather than inferred from
+the carry section the field is read from, because the two do not agree — the
+same intensive sea surface temperature comes from `state` on a slab and from
+`derived` on a Veros ocean. That split is the one the
+mixed-grid example makes by hand — extensive quantities (heat fluxes, the
+freeze/melt energy, an areal ice fraction) are mapped conservatively so their
+budgets survive the interface, while an intensive state variable such as SST is
+interpolated bilinearly, which does not leave a conservative map's staircase in
+a smooth field. Rows that stay on one grid never get a regridder.
+
+```python
+default_exchangers(components, regrid={
+    "a2o_flux":  ESMFRegridder(a2o_conservative_weights),
+    "o2a_flux":  ESMFRegridder(o2a_conservative_weights),
+    "o2a_state": ESMFRegridder(o2a_bilinear_weights),
+})
+```
+
+The maps themselves are `jem.regrid.ESMFRegridders`, an immutable named
+collection built from ESMF weight files generated offline by
+`ESMF_RegridWeightGen` — JEM applies weights, it does not compute them, because
+they depend only on the two grids and never on the run.
+
+### Coupling is lagged
+
+None of this changes *when* fields move, and with the default workflow the
+exchange is lagged by one coupling step. With `["exchange", "atm", "ocn"]`:
+
+- `exchange` runs **first**, on the carries as they were left at the end of
+  step *n−1*. So at step *n* the ocean is driven by the atmosphere's fluxes
+  from step *n−1*, and the atmosphere sees the SST the ocean reached at the end
+  of step *n−1*.
+- On the **first** step there is no previous step, so each component receives
+  whatever its `initialize()` put in its forcing section — zeros, for every
+  packaged component. A run therefore begins with one step of uncoupled
+  spin-up: the ocean's first step sees no heat flux at all.
+- The lag is a property of the *workflow*, not of the exchanger. An
+  `["atm", "exchange", "ocn"]` workflow hands the ocean the atmosphere's fluxes
+  from the same step, at the cost of giving the atmosphere a two-step-old SST.
+  Neither order gives every component same-step information; that needs an
+  iterated (implicit) exchange or a partitioned workflow, which is a follow-up.
+
+Writing the default coupling down in one place is what makes the lag reviewable
+at all: before, every example spelled the same exchange out by hand and none of
+them said which step the fields came from.
+
+## Running a model
+
+A `Coupler` produces functions, not runs. `jem.driver.run_chunked` is the one
+loop that turns one into a run, and **every run default lives on its
+signature** — the config group `coupled_run` names the same keys and repeats
+none of the values.
+
+```python
+from jem import run_chunked
+
+result = run_chunked(
+    coupler,
+    total_time="6 years",        # 2190 days: a whole number of chunks
+    chunk="30 days",
+    output_dir="output",
+    output_averages=True,        # one record per chunk: its 30-day-window mean
+    checkpoint_path="checkpoint",
+)
+```
+
+Per chunk it integrates, labels and writes the output, checkpoints, and checks
+the state is still healthy:
+
+```
+carry = initial_carry or coupler.initialize()          # or the checkpoint's
+for steps in batches:                # `steps` is the chunk, except that the
+    first_step = int(carry.step)     #   last batch of a resume can be short
+    trajectory = compiled[steps]     # one compiled trajectory per length
+    carry, diagnostics = trajectory(carry)
+    datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+    reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…,
+                                    first_step=first_step, steps=steps)
+    paths += write_chunk(reduced, output_dir, first_step)
+    ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
+    if ok or not bail_on_unhealthy:
+        if due(int(carry.step)) or last chunk:      # see checkpoint_interval
+            coupler.save_carry(carry, checkpoint_path)
+```
+
+It returns a `RunResult`: the `final_carry`, `steps_completed`
+(`int(final_carry.step)` — the run's position on the clock, including whatever
+a checkpoint restored, not the number of steps this call integrated),
+`completed`, one `report` per chunk, every `path` written, and the
+`accumulator` if the run was given a reduction.
+
+**Chunking rules.** `total_time` and `chunk` are `jcm.date.parse_duration_days`
+strings or numbers of days, parsed on the *coupler's* calendar, so `"1 year"` is
+as long as the atmosphere's year. Both must be whole multiples of the coupling
+timestep — a coupled step is the smallest thing the loop can integrate — and
+`total_time` must be a whole multiple of `chunk`. All three are checked before
+anything is built or compiled, and each message names both quantities. A final
+partial chunk is refused rather than accommodated: it would need a second
+compiled trajectory for one call, and a run length that does not divide into
+chunks is far more often a mistake in the configuration than a request.
+
+**The health gate.** `default_health_check` runs `jcm.diagnostics.check_health`
+on `datasets["atm"]`, so a coupled run stops on the same evidence an uncoupled
+atmosphere does, and `bail_on_unhealthy` (the default) stops at the first chunk
+it rejects rather than spending a queue slot integrating a broken state. The
+output written so far is kept and `RunResult.completed` is False. A coupled
+model with **no** atmosphere gets `{"skipped": "no atmosphere"}` — an
+abstention, not a pass: a gate for the surface components would have to know
+each one's physical ranges, which is the components' business.
+`health_check=None` removes the gate entirely, and `bail_on_unhealthy=False`
+logs and carries on, which is what a run studying the instability itself wants.
+
+The gate is given the chunk **as it was integrated** — every record — and not
+the thinned or averaged datasets that were written. That distinction is the
+difference between a working gate and one that cannot see: `check_health`
+judges a chunk by its last record and by extremes, while `output_averages=True`
+replaces the chunk with a mean that (xarray skips NaNs) drops a NaN entirely
+and dilutes a finite extreme, and `subsample=n` need not keep the last record
+at all. An atmosphere that blew up in the last hours of a month would then be
+reported healthy and checkpointed. So the loop labels the chunk once with
+`chunk_datasets`, hands *that* to the gate, and applies `postprocess_datasets`
+only to the copy it writes; `datasets_for_chunk` remains the two composed, for
+a caller that wants the reduced form alone. What the gate can resolve is one
+**coupling step**: `JCMComponent` integrates each coupling step with JCM's own
+`output_averages`, so the records being judged are already step means — a NaN
+propagates through that mean, a finite excursion shorter than a coupling step
+need not.
+
+**How often it checkpoints.** `checkpoint_interval` (`None` by default: after
+every chunk) saves less often than every chunk, for a run whose chunks are short
+for one of the *other* reasons a chunk exists — a health check every few days,
+an output file per day. It must be a whole multiple of `chunk`, because a chunk
+boundary is the only place the loop stops, and it is counted in coupled steps
+from the **start of the run** (`carry.step`, which a resume restored) rather
+than of the call, so a run stopped and resumed checkpoints at the same points an
+uninterrupted one does. Both are checked with the other durations, before
+anything is compiled; an interval given with `checkpoint_path=None` is refused
+rather than ignored, since it would otherwise leave a run that asked to
+checkpoint less often checkpointing not at all.
+
+Two guarantees make the interval safe to reach for, and they are why the loop
+keeps the last accepted carry in memory. The last chunk of a **completed** run
+is checkpointed whatever the interval says, so a finished run always leaves its
+final restart state. And a run the health gate **stops** writes the last chunk
+that *passed* before returning, naming the step it holds at INFO — so bailing
+still leaves the restart point at the last healthy state, exactly as it does
+without an interval. What the interval does give up is a run that is *killed*:
+that falls back to the last interval boundary, re-integrates the chunks after it
+on the resume and **rewrites** their output files, which is safe precisely
+because a file is named after the coupled step its chunk starts at — the second
+pass writes the same names from the same starting state.
+
+Safe, that is, while the resume keeps the same `chunk`; the chunk belongs to the
+run and not to the checkpoint, so a resume free to change it is also free to
+write files at steps the earlier pass's files do not sit on. A checkpoint at
+step 4 with one-day files at steps 4 and 5, resumed with two-day chunks, would
+overwrite the step-4 file with the records for steps 5–6 and leave the step-5
+file holding step 6 a second time — a duplicate no reader of the directory could
+tell from a real one, and one no later chunk would ever rewrite. So a resumed
+run tests, before anything is compiled, that every file of its own at or after
+the restored step is one this call really writes over, which takes both halves
+of what it is about to do: the file starts on **its** chunk grid
+(`restored_step + k × steps_per_chunk`, which is where its chunks begin, the
+short final batch included) **and** before `total_steps`, where it stops. Those
+it reports at INFO and rewrites. Anything else is a `ValueError` naming the
+files grouped by which half they fail — an overlap in the middle of the run, or
+output at or past its end, which a resume asking for less simulated time than an
+earlier pass already wrote leaves stranded — together with the restored step,
+the chunk and the three ways out: resume under the chunk those files were
+written with, remove them, or choose another `output_dir`. Deleting them for the
+user was the alternative and was rejected: the driver cannot know which pass's
+output is the one worth keeping. Files before the restart point are the run's
+history, and files whose names this coupler would never write are neither
+examined nor touched — `jem.output.output_file_step` matches a name against the
+run's components, following a nested coupler into its inner ones and skipping
+any component that has no `to_xarray`, since no file is ever written under such
+a name. A run that writes no files at all — an accumulated one, or a call with
+nothing left to integrate — is not checked, having nothing it could overlap.
+
+Two configurations the loop cannot honour exactly are warnings rather than
+refusals, because neither costs a restart point: a `total_time` that is not a
+whole number of intervals (the last gap between saves is simply shorter than the
+interval), and a run that starts part-way through a chunk — a resume under a
+*different* chunk length, or an `initial_carry` handed in at such a step —
+where no chunk before the last can end on a multiple of the interval and the
+run would otherwise silently checkpoint only at the end.
+
+The gate also runs **before** the checkpoint, and a chunk it rejects is not
+checkpointed (unless `bail_on_unhealthy=False`, where the run carries on and so
+must stay resumable). There is only one checkpoint directory and it is
+overwritten in place, so saving a rejected state would replace the last healthy
+restart point with a broken one and a resume would start from that, fail again,
+and have nothing left to go back to. Bailing instead leaves the restart point
+at the last chunk that passed, so the run resumes by repeating the chunk that
+failed — which is why that chunk's output files are overwritten on the resume,
+with the warning `write_chunk` logs.
+
+**What state the run started from.** Resuming a run is the *same command* as
+starting one — that is the point of a single checkpoint directory — so nothing
+in the command says which happened, and a run that was meant to resume and
+silently cold-started repeats simulated time that has already been paid for.
+`run_chunked` therefore logs the provenance of the carry it is about to
+integrate, at INFO, in exactly one line, before anything is compiled:
+
+```
+Starting from coupler.initialize() at coupled step 0 (no checkpoint was given).
+Starting from the initial_carry argument at coupled step 3.
+Resumed from checkpoint /scratch/run/checkpoint at coupled step 120.
+```
+
+A `checkpoint_path` that holds no complete checkpoint says so on the line
+before, in as many words: every component starts from its initial state rather
+than from a restart (or, if an `initial_carry` was passed, from that). The two
+ways of failing to resume are not equally alarming, so they are not equally
+loud. A directory an interrupted save left without its carry file is a
+**WARNING** — a run died and its last chunk is gone. A path with nothing at it
+is **INFO**: with checkpointing on by default into a fresh output directory,
+that is what every first run sees, and a warning nobody can avoid is a warning
+nobody reads. Both name the path, so a mistyped one is still visible in the
+line the run always prints. `Coupler.load_carry` completes the picture
+from the other end, naming each component's own source (the shared carry file,
+or its own `load_carry`) and the step restored, so no part of a resumed model's
+carry is unaccounted for.
+
+**Checkpoints and resume.** `checkpoint_path` is a **single directory**,
+rewritten after every chunk the health gate accepts, not a directory of dated
+restart points. That is
+what makes resuming a run the same command as starting it: point at the path,
+and the run either starts from scratch or continues from where it stopped. The
+cost is that only the newest state survives; a run that wants a history of
+restart points keeps its own directory of them and hands each one in as
+`initial_carry`.
+
+Checkpointing is **on by default** (`checkpoint_path="checkpoint"`): a run long
+enough to be worth chunking is a run worth being able to restart, and a default
+of `None` made losing a week of compute the consequence of forgetting an
+argument. A *relative* path — including that default — is resolved against
+`output_dir`, not against the working directory. Hydra gives every run a fresh
+output directory, so each run gets its own restart directory and two runs
+launched from one shell cannot overwrite each other's; resuming is pointing a
+second run at the first's output directory
+(`coupled_run.output_dir=outputs/2026-09-16/11-04-02`), which is the same
+action that would otherwise overwrite its files, so it is never accidental —
+and the provenance line says which of the two happened. An absolute path is
+used as given, for a run that checkpoints to scratch while writing output
+elsewhere; `checkpoint_path=null` turns checkpointing off. Overwriting in place is safe because the carry file is written
+last and removed first (see *Carry*), so an interrupted save leaves a directory
+the loop refuses to resume from — it logs and starts from the initial carry
+instead — rather than a mixture of two steps.
+
+`CoupledCarry.step`, restored from the checkpoint, is the only source of truth
+for how far the run has got; nothing is derived from a chunk index or a file
+name. What is left is `remaining_batches(int(carry.step), total_steps,
+steps_per_chunk)`, so a run resumed with a *different* chunk length — a
+perfectly legitimate choice, since the chunk is a property of the run and not of
+the checkpoint — runs whole chunks and then one short final batch (one extra
+compile, on that batch only), and still stops exactly at `total_time`.
+
+**Output files.** One file per component per chunk,
+`<output_dir>/<component>-<first step:08d>.nc`, named after the coupled step
+the chunk starts at. That step is the run's clock — the same number the
+checkpoint holds and the records are labelled from — so the name is unique
+however the run was chunked, and zero-padding it keeps a directory listing in
+run order. A chunk *index* would not do: the chunk length belongs to the run
+and not to the checkpoint, so a run resumed with a different `chunk` gives the
+same simulated time a different index and would write over a file the earlier
+run already wrote. `write_chunk` warns when it does overwrite an existing file. That
+normally means a rerun into the same directory; the one other way to reach it
+is a run killed after a chunk's output was written and before its checkpoint
+was, which resumes at the step it already wrote — so the warning reports the
+fact without asserting which happened. The
+chunk index survives as what it is: a counter for the health check and the log
+line. Each chunk is labelled with its own dates, because `first_step` is passed
+through to `Coupler.to_xarray`.
+
+`subsample=n` keeps every *n*-th coupling step — every *n*-th step of the
+**run**, counting from its start, not of the chunk in hand, which is why
+`postprocess` is told the chunk's `first_step` and its number of coupled
+`steps` as well as the stride. The cadence then belongs to the run: an
+uninterrupted run, the same run in chunks of any length and a run resumed from
+a checkpoint all write exactly the same records, and step 0 is always one of
+them. (A stride reapplied from each chunk's first record instead gives an
+irregular cadence and more output than was asked for — three-step chunks with
+`subsample=2` keeping global steps 0, 2, 3, 5 rather than 0, 2, 4.) The unit
+is a coupled *step*, not a record: a component the workflow runs `n` times per
+coupled step, or a nested coupler's inner steps, contributes `n` records per
+step and they are kept or dropped together, so components recording at
+different rates stay on one cadence. `postprocess` reads each component's
+records per step off its own record count (`len(time) // steps`) and refuses a
+count that is not a whole multiple of the chunk's steps, since the step a
+record belongs to would then be undefined. A chunk can contain no coupled step
+on the stride at all — a `subsample` longer than `chunk` gives that, and so
+does the short final batch a resume under a different chunk length ends with —
+and such a chunk gets **no file**, rather than a record the run's cadence does
+not call for or an empty one that `xr.open_mfdataset` cannot read back. So
+`RunResult.paths` holds one file per component per chunk *except* for the
+chunks that kept nothing, and the skip is reported at INFO. `write_chunk` also
+**removes** a file already at that name: this pass's output for that chunk is
+nothing, the name is this chunk's, and on a rechunked resume an earlier pass's
+file can sit on the new chunk grid — declared rewritable by the resume check
+above — and would otherwise survive holding a record this pass writes under a
+different name. That is the only thing the driver deletes, and it is a name it
+is itself responsible for.
+
+`output_averages=True` is defined against jcm's meaning of the same word
+rather than beside it: jcm replaces each saved record with the mean over its
+save interval, labelled at the
+interval's end, and the coupler's records are already one per coupling step — so
+the coupler's output interval is the **chunk**, and the flag replaces a chunk's
+records with their time mean, labelled with the chunk's last time and carrying
+the CF `cell_methods = "time: mean"` that says so. That label is the end of the
+chunk whether or not `subsample` kept the record sitting there, so a run that
+sets both still writes one evenly spaced mean per chunk; what varies is how
+many records went into each one, since the number of a chunk's steps the
+run-global stride keeps depends on where the chunk falls in the stride period.
+
+The bins are therefore the
+chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
+five days a year against the calendar on a 365-day year, not monthly means —
+those are `jem.accumulate.monthly_mean(coupler)` (twelve bins, a climatology)
+or `monthly_mean(coupler, total_time=…)` (one bin per month of the run), both
+of which bin by each record's own label.
+In a coupled run the atmosphere's per-step records are *already*
+step means (the JCM wrapper integrates each coupling step with
+`output_averages=True`), so averaging a chunk of them is the chunk mean exactly,
+with no double counting. A variable with no time axis — a grid mask, a layer
+thickness — is passed through by both reductions rather than averaged into a
+one-record time series.
+
+**Reductions that must not cost memory.** Writing every step out and reducing on
+the host means holding a chunk's diagnostics — for an atmosphere, the largest
+array in the run — until the chunk ends; and chunking *by calendar month* means
+compiling a 28-, a 30- and a 31-day trajectory, because `iterations` is static.
+`generate_trajectory_function(iterations, accumulate=(init, update))` does
+neither: `update(accumulator, diagnostics, time)` runs inside the `lax.scan`
+body, with the same `CouplingTime` that step's components were handed, and the
+scan returns nothing per step. The call becomes `(carry, accumulator=None) ->
+(carry, accumulator)`, so a chunked run threads the accumulator from one call to
+the next and the chunk boundaries need not line up with anything.
+
+```python
+from jem.accumulate import monthly_mean
+
+monthly = monthly_mean(coupler)
+trajectory = coupler.generate_trajectory_function(365, accumulate=monthly)
+carry, accumulator = trajectory(coupler.initialize())
+means = monthly.finalize(accumulator)        # (12, …) per variable
+```
+
+**From the driver.** `run_chunked(..., accumulate=monthly)` builds each
+chunk's trajectory with the reduction and threads the accumulator across the
+chunks, so a ten-year run reduces to twelve monthly means without ever holding
+a chunk of diagnostics:
+
+```python
+monthly = monthly_mean(coupler)
+result = run_chunked(
+    coupler, total_time="6 years", chunk="30 days",     # 73 whole chunks
+    health_check=None,                 # required: see below
+    accumulate=monthly,
+)
+means = monthly.finalize(result.accumulator)
+```
+
+An accumulated run has no per-step diagnostics — that is the point — and the
+three consequences are chosen rather than inherited:
+
+- **No files are written.** There is nothing for `chunk_datasets` to label, so
+  `paths` is empty and `output_averages` / `subsample`, which reduce the
+  *files*, do nothing (the run warns if they were set). The reduction is the
+  output.
+- **The health gate cannot run**, so `accumulate` together with a
+  `health_check` is a `ValueError` rather than a gate quietly skipped. The gate
+  defaults to *on* and a long accumulated run of an atmosphere is exactly the
+  run that needs it, so losing it has to be something the caller asked for —
+  `health_check=None` — not something a log line mentions weeks too late.
+- **The accumulator is not checkpointed.** The checkpoint is the model's
+  restart state; the accumulator is an analysis product. Storing one in the
+  other would make the checkpoint format depend on which reduction a run chose
+  — a restart file loadable only by a run asking for the same means — and let a
+  restart corrupt an analysis. So the carry is checkpointed as usual, a resumed
+  run starts a fresh accumulator and covers only what it integrates, and it
+  **warns** when it does — a first accumulated run, which has lost nothing yet,
+  is told the same fact at INFO. A mean across a restart boundary is built by
+  finalizing each call's accumulator and combining them, or by running the span
+  in one call.
+
+`monthly_mean` takes only the coupler: the accumulator's shapes come from
+`jax.eval_shape` of one coupled step, and a record's month is a `searchsorted`
+in a static table of month boundaries, reached from the record counter reduced
+modulo the records in a year — exact integer arithmetic, and one compiled
+trajectory for a whole year. Which month a record counts in follows the *end*
+of the interval it covers — the instant JEM labels it with — read on the model
+calendar, so `monthly.finalize(...)` and
+`to_xarray(...).groupby("time.month").mean()` of the same run are the same
+numbers for a run whose output labels cross no Gregorian 29 February — for a
+component that records once per coupled step directly, and for one that records
+more often after its kept sub-step axis is folded with `fold_records` (below).
+
+That condition is the labels' calendar, not the binning: the labels are
+proleptic Gregorian whatever the model calendar is (above, and jax-gcm#449),
+while the bins are the model calendar's months. On a `365_day` run started on
+1 January 2000 — where the shipped examples start — the record the model calls
+1 March 00:00 is labelled `2000-02-29` and is accumulated into March, the one
+the model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest
+of the Gregorian year. `groupby("time.month")` of the written output therefore
+moves the first record of every month from March on into the month before it,
+gives February the record the model calls 1 March (29 records where the
+accumulator's February holds 28), and hands December the year's wrap record —
+the one the model calls 1 January of the next year — that the twelve-bin form
+counts in January, while the accumulated bin stays the model's month, which is
+the month the forcing and the seasonal cycle follow. Reproducing `finalize`
+from the written output across a leap day means binning on model day-of-year
+(each label's offset from the start date in whole days) rather than on
+`time.month`. On `gregorian` the question does not arise, because
+`monthly_mean` refuses that calendar. Nothing in the reduction depends on
+whether #118 (calendar-consistent labels on JEM's side) or jax-gcm#449 (the
+same inconsistency in JCM's own output, recorded there as tracking only) is
+ever taken up. A calendar with no fixed
+table of month lengths (gregorian, with its leap years) and a coupling step
+that does not divide the year are refused with a message saying why, rather
+than binned approximately. Without `accumulate`, the generated function is what
+it always was.
+
+**Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
+the twelve calendar months, so a ten-year run composites its ten Januaries into
+bin 0 — a climatology, and what a fixed `(12, …)` accumulator is for.
+`monthly_mean(coupler, total_time="10 years")` (or `n_months=`) instead gives
+the months the run passes through, in order, each with a bin of its own: the
+same month table rotated to the month the run starts in and phased to the start
+date, so it is calendar months whatever day the run begins on. It is sized by
+counting the months the run's labels touch, which is why ten years gives 121
+bins and not 120 — the last record is labelled 00:00 on 1 January of the
+eleventh year, which is that January's record, and without a bin for it the
+accumulator would wrap it into bin 0 and quietly spoil the first January. A run
+longer than the accumulator wraps at the **span** of its bins, exactly as a
+windowed mean wraps at the span of its windows — so a wrapped bin lines up with
+a calendar month only when `n_months` is a multiple of twelve, and otherwise
+holds parts of two (six bins from 1 January span 181 days, and the second
+August of the run splits 28 records into the February bin and 3 into March's).
+`total_time`, which sizes the accumulator so that it is never wrapped into, is
+the form to prefer. That span is rounded up to the next whole coupled step,
+because the record counter is reduced modulo it and a whole number of calendar
+months need not be a whole number of steps (a 5-day coupling divides the
+365-day year but not 59 days of January and February); the wrap moves by less
+than one step, every bin boundary stays exact, and nothing that is meaningful
+in the first place can see it.
+
+**Any fixed set of bins, not only the months.** A calendar month is one binning
+of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
+Both are the same reduction with a different step-to-bin rule, so
+`jem.accumulate` is one private `_build_binned_mean(coupler, bin_of_record, n_bins)`
+under two public builders, returning the same `BinnedMean` named tuple with the
+same `finalize`:
+
+```python
+from jem.accumulate import month_lengths, monthly_mean, windowed_mean
+
+monthly = monthly_mean(coupler)                                  # 12 bins
+months  = monthly_mean(coupler, total_time="10 years")           # 121: every month
+pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
+weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
+leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cycled
+                        total_time="30 days")
+```
+
+`window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
+on the coupler's calendar, and must be a whole number of coupling steps — a
+window ending part-way through a step could only be filled by splitting that
+step between two windows. The accumulator's size is `n_windows`, given directly
+or counted from `total_time` (rounding *up*, so a run that does not divide into
+whole windows still has a bin for the one it ends inside; that bin is divided by
+its own count, so it is the mean of what fell in it).
+
+**The windows need not be equal.** `window` may be a *sequence* of lengths,
+which the accumulator's windows cycle through, repeating for as long as
+`n_windows` (or the count from `total_time`) asks and wrapping only at the sum
+of all of them — daily leads for a forecast's first week and pentads
+thereafter, say. A sequence is the one case in which giving neither
+`n_windows` nor `total_time` is answerable, and it means one cycle of the
+pattern.
+
+**A window is not a calendar month, whatever its length.** Every window is
+measured from the run's own start date, with no phase and no reference to the
+calendar, so the month lengths of `month_lengths()` — which are always
+January-first — are calendar months only for a run starting at 00:00 on 1
+January; from 1 July they would bin the first 31 days together, then 28. That
+is why the per-month reduction is `monthly_mean(coupler, total_time=…)` and not
+a pattern handed to `windowed_mean`, and why `windowed_mean` has no `offset=`
+knob to fix it with: the builder that knows where in the calendar a run starts
+is the one that should own the phase. The two also close on opposite sides —
+a window at its end, a calendar month at its start (below) — so even from 1
+January a 31-day window and January differ by the record labelled 00:00 on 1
+February. No `inclusive=` knob is offered to mix them either: each convention is
+what makes its own builder agree with the thing it has to agree with (a
+forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
+of the written output, for a run whose labels cross no Gregorian 29 February).
+
+Both binnings follow the **label** of the record a step produces — the end of
+the coupling interval — rather than where the interval starts. The boundaries
+close in opposite directions because the bins are defined by different things:
+window *w* is the labels in `(w·window, (w+1)·window]`, closed at the end
+because a window is itself an interval and JEM labels an interval at its end
+(so the first 5-day window with daily coupling is the records labelled day 1 to
+day 5, which is what a forecast means by the first pentad), while a calendar
+month is closed at its start because that is what `groupby("time.month")` does
+and a monthly mean has to agree with the written output — up to the leap-day
+difference above, which is a property of the labels' calendar rather than of
+which side a boundary closes on.
+
+Both rules are therefore one private
+`_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins laid
+end to end as a cumulative sum of lengths, a phase (0 for windows the run
+defines; the run's offset into the calendar year for the twelve-month
+climatology, and into its own first month for the sequential form) and which
+side a boundary closes on. Inside the scan it is a `searchsorted` in a static table,
+after the record counter is reduced modulo the records in one period of the
+bins — which is both what wraps a long run and what keeps the arithmetic
+inside int32. The boundaries themselves are converted from seconds to record
+counts on the host, in int64, so nothing in the traced code multiplies a
+counter that grows with the run: a table of seconds would pass 2³¹ after 68
+simulated years and wrap to nonsense.
+
+**A coupled step is not always one record.** A component the workflow runs
+*n* times per coupled step emits *n* records, each labelled at the end of its
+own sub-interval, and a nested coupler's inner steps are records in the same
+way — so a coupled step's records need not all fall in the same bin. The 24
+hourly records of the daily step covering 31 January are labelled 01:00 on the
+31st through 00:00 on 1 February: 23 in January, one in February, exactly as
+`to_xarray` writes them. Each record is therefore binned by **its own** label,
+from the coupler's own sub-step clock (`coupling_time_at_substep`), and the
+sub-step axis is kept rather than folded: that component accumulates into
+`(n_bins, n, …)`, bin *b* slot *j* holding the records of call *j* that fell in
+*b* — a monthly-mean diurnal cycle, which folding would destroy and which
+`fold_records(means["atm"], counts["atm"])` recovers by weighting each slot
+with its own count (a straight mean over the slots is the same number only
+where every slot holds the same number of records, which is exactly what a
+month boundary breaks). Because components recording at
+different rates fill different bins as one step is folded in, the accumulator's
+counts are then one array per component (`(n_bins, *sub-step axes)`) instead of
+the single `(n_bins,)` array a model whose components all record once per
+coupled step keeps.
+
+A run longer than the accumulator **wraps**: window *w* also collects windows
+*w + n_windows*, *w + 2·n_windows*, … exactly as the twelve-month table wraps
+years and gives a three-year run a January climatology, and as `n_months` bins
+wrap at their own span (above). That is the price of a fixed-size accumulator, which is
+the whole point of reducing inside the scan — size it to the run if each bin is
+to stand on its own.
+
+**Calibrating against a binned mean.** The accumulator is an ordinary pytree in
+the scan carry, so nothing about the reduction is special to differentiate:
+`jax.grad` of a monthly mean reaches a component parameter through the
+reduction exactly as it reaches one through the trajectory. A July SST
+calibration against a target, with a process parameter varied in the carry the
+way *Parameters: process and initial-condition* describes:
+
+```python
+monthly = monthly_mean(coupled)
+trajectory = coupled.generate_trajectory_function(365, accumulate=monthly)
+JULY = 6              # finalize()'s leading axis is January first
+
+def loss(relaxation_time, target_july_sst):
+    # `ocn` is the SlabOceanModel registered in `coupled`; replacing the
+    # parameters it is initialized with is what makes them differentiable.
+    params = ocn.params.replace(relaxation_time=relaxation_time)
+    _, accumulator = trajectory(coupled.initialize({"ocn": params}))
+    july = monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature[JULY]
+    return jnp.mean((july - target_july_sst) ** 2)
+
+gradient = jax.grad(loss)(relaxation_time, target_july_sst)
+relaxation_time = relaxation_time - learning_rate * gradient   # one plain step
+```
+
+`tests/unit/test_accumulate.py` runs exactly this — the gradient of an
+accumulated July mean equals the gradient of the same quantity computed from
+the stacked diagnostics, and one descent step reduces the loss — so the snippet
+cannot rot. Two practical notes it makes. `relaxation_time` is of order 1e6
+seconds while the loss is a few K², so `learning_rate` has to be scaled to the
+parameter (a real calibration hands the gradient to an optimizer, which does
+that for it); and for a long calibration `remat=True` on the trajectory trades
+recomputation for the memory the backward pass would otherwise need.
+
+Which parameter is varied *how* is the distinction in *Parameters: process and
+initial-condition* above: `relaxation_time` is read every step out of
+`carry["params"]`, so it could equally be replaced in the carry, while an
+initial-condition parameter has to go through `initialize` as it does here.
+Building the model inside `jax.grad` is not an alternative — a constructor
+validates its parameters, which needs concrete floats.
+
+## Configuration
+
+Python is the primary interface. The configuration layer is a thin wiring layer
+over it, and `python -m jem.main` (or the `jem` console script) is one command
+for a coupled run:
+
+```bash
+python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
+```
+
+**Exit status.** `0` if the run reached `total_time`, `1` if the health gate
+stopped it early — `jem.main` raises `SystemExit(1)` after logging the last
+report. A run stopped by the gate keeps everything it wrote, but it did not do
+what it was asked to, and the exit status is the only thing a queue system, a
+CI job or a shell `&&` can see.
+
+**jax-gcm's own groups, re-rooted under `atmosphere`.** `jem/config/config.yaml`
+puts `pkg://jcm.config` on Hydra's search path and composes jcm's groups at
+`atmosphere.*`, so `cfg.atmosphere` is exactly the config
+`jcm.runners.build_model` expects and jcm's group and option names are
+unchanged. The price is that the group's package has to be spelled out in an
+override — `physics@atmosphere.physics=echam`,
+`+configuration@atmosphere=speedy-t31` — and that spelling it wrong is quiet:
+`+configuration=speedy-t31` composes that bundle at the *root*, where its
+`physics`, `terrain` and `run` keys are nobody's and nothing reads them.
+JAX-ESM's own groups (`ocean`, `land`, `seaice`, `coupling`, `regrid`,
+`coupled_run`) sit at the top level, and `configuration` composes a named
+coupled model out of all of them.
+
+**The group-name collision, and why the run group is `coupled_run`.** Hydra
+resolves a group option from the first search-path entry that has it, and the
+primary config package precedes `pkg://jcm.config`. A group called `run` here
+would therefore shadow jcm's own `run/default.yaml` and `run/longrun.yaml`: the
+atmosphere would silently be handed the coupler's run keys, and every jax-gcm
+configuration bundle that says `override /run: longrun` (16 of the 19 shipped)
+would compose the wrong file. `atmosphere.run` also already exists and means
+something else. So the coupled run keeps its own name at both ends —
+`coupled_run=short_run` selects an option, `coupled_run.total_time="90 days"` sets
+one key — and `test_jcm_run_group_is_not_shadowed` pins it down. The *options*
+are named apart for the same reason: `short_run` and `long_run` against jcm's
+`smoke` and `longrun`, so no override reads as though it might be configuring
+the atmosphere.
+
+**YAML is wiring, and a test enforces it.** A key earns its place in a group or
+configuration file only by being (a) `_target_`, (b) a required input marked
+`???`, or (c) a value that differs from the Python default *and* is what the
+named configuration is about. `test_config_has_no_python_defaults` instantiates
+every group option and every configuration and fails if a supplied value equals
+the target's own default, so a physics default cannot acquire a second home in
+the configuration and drift from the class that owns it. `jem.runners` never
+reads a physics parameter either: its one table is `GROUP_TO_NAME`, and
+`test_runners_has_no_component_kwargs` fails if any component parameter's name
+appears in its source at all. What the runner *does* supply is what a config
+file cannot name — a surface component's `SlabGrid` (from the built
+atmosphere's `coords.horizontal` and `terrain.fmask`, or from a SCRIP
+`grid_file`), the regridders, and the coupling timestep — injected into
+`hydra.utils.instantiate` after the keys that describe them are removed.
+
+**A grid goes only to a component that asks for one.** `_accepts_grid` resolves
+the node's `_target_` (a class or a classmethod — both spellings occur) and
+looks for an explicit `grid` parameter in its signature; a `**kwargs` catch-all
+does not count, because that is the signature that swallows the keyword and
+fails elsewhere. `VerosComponent.from_setup` forwards every keyword it does not
+recognise to the Veros setup factory, so an injected `grid=` would have been
+rejected *there*, with a message about the factory. A component that takes no
+grid does not get one **built** either: it brings its own bathymetry and
+land-sea mask, and a `SlabGrid` made from the atmosphere's geometry would
+describe a grid nothing runs on.
+
+**Packaged data resolvers.** `${jcm_data:bc/t30/clim/forcing.nc}` and
+`${jem_data:DisplacedPoleGrid.SCRIP.nc}` resolve to files inside the installed
+`jcm.data` and `jem.data` packages; importing `jem.config` registers them. They
+exist so the shipped configurations run **offline**: jax-gcm's own
+configurations fetch boundary data from an `hf://` mirror, which needs the
+network and a warm cache, while everything named through these is already on
+disk beside the code. A path that does not exist is reported while composing,
+naming the key, rather than much later as a netCDF open error.
+
+`+atmosphere.constants.grav=9.7` reaches `jcm.runners.apply_constants_overrides`
+before the model is built, because the dynamical core reads the live
+`jcm.constants` singleton at construction. The override is process-global and
+the surface components read the same singleton, so one such setting moves the
+whole Earth system, not only the atmosphere.
+
+## The jax-gcm dependency contract
+
+JAX-ESM is built on jax-gcm but lives in its own repository and is installed
+against a source *checkout* of it, not a PyPI release. Without a recorded pin,
+"which jax-gcm does this work with?" has no answer, and a rename on the jax-gcm
+side surfaces as an `AttributeError` or a `KeyError` deep inside somebody's
+coupled run.
+
+`jem/components/jcm/contract.py` records both halves of the contract:
+`JCM_SUPPORTED_REV`, the revision every gate runs against, and
+`JCM_INTEGRATION_POINTS`, every jax-gcm name JAX-ESM reaches for — the functions
+it calls, the one private name it still depends on (`cf_metadata._COORD_ATTRS`,
+whose values the slab components copy so their axes describe themselves exactly
+as the atmosphere's do), the physics diagnostics fields the surface exchange is
+read out of, the package data it resolves, and the constructors its documented
+workflow asks a user to call. Each entry says what it is used for,
+which is what makes it possible to decide whether an entry may be deleted.
+
+`tests/unit/test_jcm_contract.py` walks that list against the installed `jcm`,
+so a jax-gcm rename fails as "jax-gcm renamed or removed X, which JAX-ESM used
+for Y, at revision Z" — at the cheapest possible moment, rather than mid-run.
+The pin is a `dev` sha because no tagged jax-gcm release carries the changes
+JAX-ESM is written against — #750's one run schema and `configuration` group,
+#763's input-resolution engine, #819's removal of jax-gcm's own logging
+configuration and #824's public resumable state and date conversion;
+`pyproject.toml`'s `jcm>=3.0.0rc1` is the loosest true statement of the same
+thing, since jax-gcm bumps its version only at release. Every required CI job
+checks that revision out through a workflow-level `JCM_REV`, which the test
+asserts equals `JCM_SUPPORTED_REV`, and a non-blocking `canary-jcm-dev` job
+keeps tracking `dev` so drift stays visible without blocking a pull request.
+`contract.py`'s docstring is the procedure for bumping the pin.
 
 ## The JCM adapter
 
@@ -667,8 +1582,9 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
 }
 ```
 
-`initialize()` builds those pytrees from `Model.bootstrap_state()` and a
-structural template of the diagnostics dict; it does **not** integrate. Each
+`initialize()` builds those pytrees from the `(dycore_state, physics_carry)`
+pair `Model.bootstrap_state()` returns, plus a structural template of the
+diagnostics dict; it does **not** integrate. Each
 `step` calls `model.run_from_state_with_carry()` with the coupling interval as
 both `save_interval` and `total_time`, so JCM sub-steps internally at its own
 timestep and returns exactly one saved record per coupling step, then reads the
@@ -683,13 +1599,38 @@ the diagnostics keys; the ECHAM reader raises `NotImplementedError` naming
 jax-gcm#754, the issue that will have every JCM physics package publish the same
 surface-exchange struct.
 
-Three JCM private attributes are still read, each in one helper tagged with the
-jax-gcm issue that will remove it: `_final_dycore_state` and
-`_final_physics_state` (jax-gcm#755, a public initial-state / physics-carry
-API), and `ModelPredictions._predictions` (jax-gcm#756,
-`ModelPredictions.with_context`). The atmosphere's output keeps JCM's own time
-labelling because JEM cannot reproduce its calendar arithmetic while
-`Model._date_from_sim_time` is private (jax-gcm#758).
+Every JCM *attribute* the wrapper touches is public at the pinned revision,
+apart from the underscore-prefixed diagnostics keys the surface exchange reads
+(jax-gcm#754, above): the initial state and physics carry are the pair
+`Model.bootstrap_state()` returns, and a stacked `ModelPredictions` is repaired
+with `ModelPredictions.with_context(model)`. jax-gcm#824 is what made both
+public, and each is a `JCM_INTEGRATION_POINTS` entry, so a JCM refactor that
+moved one fails the contract test by name instead of inside somebody's run.
+The same state and carry are also installed on the model as
+`Model.dycore_state` / `Model.physics_carry`; the wrapper takes them from
+`bootstrap_state`'s return value and never reads those attributes, so they are
+not watched. `with_context` also stamps the atmosphere dataset's
+`jcm_prov_params` attribute with JCM's `parameters_rederived_from_live_context`
+note, which is the truthful record for a coupled run: the trajectory is traced
+once and scanned, so those parameter values are read from the live physics
+afterwards rather than captured at trace time.
+
+The atmosphere's output still keeps JCM's own `time` labelling, and
+`TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic rather than
+calling JCM. That is now a decision, not a gap. jax-gcm#824 also made
+`Model.date_from_sim_time` public, but it is the **model clock** conversion —
+exact integer day/second arithmetic on the model calendar, returning a
+`DateData` for forcing and physics — whereas the labels have to match the
+float64 days-since-epoch product in `ModelPredictions._trajectory_dataset`,
+which is what JCM's own output files carry and is still internal. Adopting the
+clock conversion would give the exact nanosecond count where that product has
+a 128 ns ulp. The two agree for a coupling step that is a power-of-two
+fraction of a day — every configuration JAX-ESM ships — and disagree for one
+that is not: a 10- or 20-minute step puts about half the labels 128 ns off, at
+which point a slab dataset and the atmosphere's no longer share a time axis and
+`xr.merge` returns a 2N-long union. Sharing one computation needs JCM to
+publish its *output* labelling, which is jax-gcm#862 — jax-gcm#824 published
+the clock, not the labelling; the reasoning is recorded on `TimeAxis`.
 
 Each `step` also compares the dycore state's own `sim_time` with the coupler's
 and logs at ERROR if they have parted, which can only happen if the carry came
@@ -728,11 +1669,20 @@ the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
    construction is a dead leaf in the carry.
 3. Add `bind(...)` if the model has an internal timestep, and raise `ValueError`
    when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
-   time)` if it produces output, and `save_state`/`load_state` if its carry
+   time)` if it produces output, and `save_carry`/`load_carry` if its carry
    cannot be checkpointed as a plain pytree.
 4. Export it from `jem/components/__init__.py` (lazily, via the module's
    `__getattr__`, if it pulls in an optional dependency — as Veros does).
-5. Register it: `Coupler({"mycomp": MyComponent(...)}, ...)`.
-6. Add tests under `tests/unit/`, including a two-step run through
+5. Register it: `Coupler({"mycomp": MyComponent(...)}, ...)`. If it is one of
+   the standard surface components, register it under the name
+   `default_exchanges` wires (`ocn`, `lnd`, `seaice`) and the standard coupling
+   applies with no table of your own; otherwise give `Exchange` the rows it
+   needs, or write an exchanger.
+6. To make it configurable, add a `jem/config/<group>/<option>.yaml` naming it
+   as `_target_` — wiring only, no parameter defaults — and, if it is a new
+   *kind* of component, one line in `jem.runners.GROUP_TO_NAME`. Nothing else
+   in the runner changes: a component is configured by a group file, never by a
+   branch there.
+7. Add tests under `tests/unit/`, including a two-step run through
    `Coupler.generate_trajectory_function(2)` — a component-only test cannot
    catch a carry-structure mismatch, which only `lax.scan` sees.

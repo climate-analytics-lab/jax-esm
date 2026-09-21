@@ -15,7 +15,7 @@ import jcm
 import jax_datetime as jdt
 
 import jem
-from jem.utils.checkpoints import (
+from jem.checkpoint import (
     latest_complete_checkpoint, remaining_batches,
 )
 
@@ -108,7 +108,7 @@ carry = model.initialize()
 checkpoint_dir = output_dir / "checkpoint"
 # The newest `step_*` directory is not necessarily a loadable checkpoint: a
 # save interrupted after the directory was created but before its completion
-# marker was written leaves one behind, and `model.load_state` refuses it.
+# marker was written leaves one behind, and `model.load_carry` refuses it.
 # `latest_complete_checkpoint` skips those (logging each) and returns the newest
 # checkpoint the run can actually resume from.
 saved = latest_complete_checkpoint(checkpoint_dir)
@@ -117,7 +117,7 @@ if saved is not None:
     # The coupler knows which of its components read themselves back by hand
     # -- the Veros ocean, through its HDF5 restart file -- so the driver does
     # not have to name them.
-    carry = model.load_state(saved)
+    carry = model.load_carry(saved)
     print(f"Resuming at coupled step {int(carry.step):d}")
 
 # What is left to run comes from the restored carry's own clock -- the only
@@ -206,7 +206,7 @@ for batch_length in batch_lengths:
         ds.close()
   
     carry = final_carry
-    model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+    model.save_carry(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
 
 print("Program ends.")
 

@@ -81,6 +81,17 @@ _REQUIRED_COMPONENT_ATTRIBUTES = ("name", "initialize", "step")
 
 _SECONDS_PER_DAY = 86400.0
 
+#: What ``Coupler.generate_trajectory_function(accumulate=...)`` takes: the
+#: pair ``(init, update)`` of an in-scan reduction of the per-step
+#: diagnostics. ``init()`` builds the accumulator, ``update(accumulator,
+#: diagnostics, time)`` folds one coupled step into it, inside the scan.
+#: :class:`jem.accumulate.BinnedMean` (a monthly or a fixed-window mean) is
+#: such a pair.
+Accumulator = tuple[
+    Callable[[], Any],
+    Callable[[Any, dict[str, Diagnostics], CouplingTime], Any],
+]
+
 
 def _missing_component_attributes(component: Any) -> list[str]:
     """Return the names of the :class:`Component` members ``component`` lacks."""
@@ -119,9 +130,14 @@ def _initialize_with_params(name: str, component: Component, params: Any) -> Car
                 " builds its initial state from parameters can be named in"
                 " Coupler.initialize({...})."
             ) from exc
-    # The Component protocol's `initialize` takes no arguments -- taking
-    # parameters is an extra a component may offer, and only the signature
-    # check above can establish it, so the call is made through `Any`.
+    # `Component.initialize` is typed `() -> Carry`, because taking parameters
+    # is an extra a component may offer and not part of the contract every
+    # component satisfies. mypy therefore rejects `component.initialize(
+    # params=...)` on a `Component`-typed value however well the call is
+    # justified at run time -- the signature check above is `inspect`, which
+    # the type checker cannot see. The cast is the narrowest way to record
+    # that: "checked by inspection, not by the type", confined to this one
+    # call rather than loosening the protocol for every caller.
     return cast(Any, component.initialize)(params=params)
 
 
@@ -443,7 +459,7 @@ class Coupler:
     registered name and reaches inside it with :func:`nested_carry` and
     :func:`with_nested_carry`.
 
-    :meth:`save_state` / :meth:`load_state` checkpoint the whole coupled
+    :meth:`save_carry` / :meth:`load_carry` checkpoint the whole coupled
     model in one call, deriving each component's writer from the component
     itself; because a coupler implements the capability too, a nested model
     checkpoints by recursion into a subdirectory of its own.
@@ -1028,7 +1044,8 @@ class Coupler:
         *,
         remat: bool = False,
         jit: bool = True,
-    ) -> Callable[[CoupledCarry], tuple[CoupledCarry, dict[str, Diagnostics]]]:
+        accumulate: Accumulator | None = None,
+    ) -> Callable[..., tuple[CoupledCarry, Any]]:
         """Return the function that runs ``iterations`` coupled steps.
 
         Parameters
@@ -1040,35 +1057,102 @@ class Coupler:
             for memory when differentiating through a long trajectory.
         jit : bool
             Wrap the trajectory in ``jax.jit``.
+        accumulate : pair of callables, optional
+            ``(init, update)``: an **in-scan reduction** of the per-step
+            diagnostics. ``init()`` returns the initial accumulator pytree,
+            whose shapes must be static; ``update(accumulator, diagnostics,
+            time)`` runs inside the ``lax.scan`` body on that step's
+            diagnostics, with the same :class:`CouplingTime` the step's
+            components were handed, and returns the next accumulator.
+            :func:`jem.accumulate.monthly_mean` and
+            :func:`jem.accumulate.windowed_mean` build such a pair (and unpack
+            as one) for a monthly mean and for a mean over fixed-length
+            windows.
 
         Returns
         -------
         Callable
-            ``carry -> (final_carry, diagnostics)``, where every diagnostics
-            leaf has a leading axis of length ``iterations`` (``lax.scan``
-            stacks them); a component the workflow runs ``n > 1`` times per
-            coupled step has a second axis of length ``n`` after it. The
-            clock is the carry's own ``step``, not the scan index, so calling
-            the function twice continues the run rather than restarting it.
+            Without ``accumulate``: ``carry -> (final_carry, diagnostics)``,
+            where every diagnostics leaf has a leading axis of length
+            ``iterations`` (``lax.scan`` stacks them); a component the
+            workflow runs ``n > 1`` times per coupled step has a second axis
+            of length ``n`` after it.
+
+            With ``accumulate``: ``(carry, accumulator=None) -> (final_carry,
+            accumulator)``. The per-step diagnostics are **not** stacked --
+            the scan returns nothing per step -- so the memory a call needs no
+            longer grows with ``iterations``. Passing the accumulator a
+            previous call returned continues the reduction across a chunked
+            run; omitting it (or passing ``None``) starts from ``init()``.
+
+            Either way the clock is the carry's own ``step``, not the scan
+            index, so calling the function twice continues the run rather
+            than restarting it.
+
+        Notes
+        -----
+        Without ``accumulate`` this is byte for byte the function it was
+        before the hook existed: the same scan, over the same body, returning
+        the same stacked diagnostics.
+
+        The hook exists for long runs whose reductions must not dictate the
+        loop structure. A twelve-month run reduced on the host has to hold
+        every step's diagnostics until the chunk ends, and a run chunked *by
+        month* has to compile a 28-, a 30- and a 31-day trajectory. Reducing
+        inside the scan does neither: one compiled trajectory of whatever
+        length suits the machine, and an accumulator of fixed size that
+        crosses chunk boundaries untouched.
 
         """
         step = self.generate_step_function()
 
-        def scan_body(
-            carry: CoupledCarry, _: None
-        ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            return step(carry)
+        if accumulate is None:
+            def scan_body(
+                carry: CoupledCarry, _: None
+            ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
+                return step(carry)
 
-        body = jax.checkpoint(scan_body) if remat else scan_body
+            body = jax.checkpoint(scan_body) if remat else scan_body
 
-        def trajectory(
-            carry: CoupledCarry,
-        ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            # No `xs`: the steps are identical and the only per-step input,
-            # the clock, is derived from the carry.
-            return jax.lax.scan(body, carry, xs=None, length=iterations)
+            def trajectory(
+                carry: CoupledCarry,
+            ) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
+                # No `xs`: the steps are identical and the only per-step
+                # input, the clock, is derived from the carry.
+                return jax.lax.scan(body, carry, xs=None, length=iterations)
 
-        return jax.jit(trajectory) if jit else trajectory
+            return jax.jit(trajectory) if jit else trajectory
+
+        initialize_accumulator, update_accumulator = accumulate
+
+        def accumulating_body(
+            state: tuple[CoupledCarry, Any], _: None
+        ) -> tuple[tuple[CoupledCarry, Any], None]:
+            carry, accumulator = state
+            # The clock of the step about to run, rebuilt from the same step
+            # counter `step` itself reads, so `update` sees exactly the
+            # `CouplingTime` the components of that step were handed.
+            time = self.coupling_time(carry.step)
+            new_carry, diagnostics = step(carry)
+            return (new_carry, update_accumulator(accumulator, diagnostics, time)), None
+
+        accumulating = (
+            jax.checkpoint(accumulating_body) if remat else accumulating_body
+        )
+
+        def accumulating_trajectory(
+            carry: CoupledCarry, accumulator: Any = None
+        ) -> tuple[CoupledCarry, Any]:
+            if accumulator is None:
+                accumulator = initialize_accumulator()
+            # `ys` is dropped: not stacking the per-step diagnostics is the
+            # whole point of the hook.
+            (final_carry, final_accumulator), _ = jax.lax.scan(
+                accumulating, (carry, accumulator), xs=None, length=iterations
+            )
+            return final_carry, final_accumulator
+
+        return jax.jit(accumulating_trajectory) if jit else accumulating_trajectory
 
     # -- the coupled model as a component of a slower one -------------------
 
@@ -1378,7 +1462,7 @@ class Coupler:
     # -- checkpointing -----------------------------------------------------
 
     def _component_savers(self) -> dict[str, Callable[[Carry, Path], None]]:
-        """Return the ``save_state`` of every component that has one.
+        """Return the ``save_carry`` of every component that has one.
 
         Which components need writing by hand rather than pickling is a
         property of the components, and the coupler is the one object that
@@ -1388,47 +1472,68 @@ class Coupler:
         have to know it again for every model it builds.
         """
         return {
-            name: component.save_state
+            name: component.save_carry
             for name, component in self.components.items()
             if isinstance(component, SupportsCheckpoint)
         }
 
     def _component_loaders(self) -> dict[str, Callable[[Path], Carry]]:
-        """Return the ``load_state`` of every component that has one.
+        """Return the ``load_carry`` of every component that has one.
 
         The inverse of :meth:`_component_savers`, derived from the same
-        capability, so a carry written by a component's ``save_state`` is
-        always read back by that component's ``load_state``.
+        capability, so a carry written by a component's ``save_carry`` is
+        always read back by that component's ``load_carry``.
         """
         return {
-            name: component.load_state
+            name: component.load_carry
             for name, component in self.components.items()
             if isinstance(component, SupportsCheckpoint)
         }
 
-    def save_state(self, carry: CoupledCarry, directory: Path) -> None:
+    def _plain_component_templates(self) -> dict[str, Carry]:
+        """Return a template carry for every component that does not load itself.
+
+        :func:`jem.checkpoint.load` stores only leaves, so reading a carry
+        back needs a pytree of the right structure, shapes and dtypes to pour
+        them into. For the components stored in the shared carry file that
+        template is ``component.initialize()`` -- the same call a fresh run
+        makes, and the one object guaranteed to have the structure the
+        component's ``step`` threads. The values are discarded; only the
+        shape of the tree is used.
+
+        Components that are :class:`~jem.base.component.SupportsCheckpoint`
+        are absent, because they read themselves back and need no template
+        from here.
+        """
+        return {
+            name: component.initialize()
+            for name, component in self.components.items()
+            if not isinstance(component, SupportsCheckpoint)
+        }
+
+    def save_carry(self, carry: CoupledCarry, directory: Path) -> None:
         """Write the coupled carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         This is what a driver calls: one line that checkpoints the whole
         coupled model, however it is put together. Every component that
         implements :class:`~jem.base.component.SupportsCheckpoint` writes its
         own carry into ``directory / <its registered name>``; every other
-        component's carry is pickled as ``<name>_carry.pkl``; and the coupled
-        step counter is written last, as the completion marker (see
-        :func:`jem.utils.checkpoints.save_coupled_carry`).
+        component's carry, together with the coupled step counter, goes into
+        the single ``directory / carry.msgpack``, which is written last and is
+        the checkpoint's completion marker (see :mod:`jem.checkpoint`).
 
         A :class:`Coupler` implements the capability itself, so a **nested**
         coupled model is checkpointed by recursion: the outer coupler hands
         the inner one the subdirectory named after it, and the inner one
-        writes its own components and its own marker there. Without that,
+        writes its own components and its own carry file there. Without that,
         the outer save would treat the inner :class:`CoupledCarry` as a plain
-        pytree and pickle it -- which silently bypasses the HDF5 restart path
-        a component like Veros requires.
+        pytree and serialise it -- which silently bypasses the HDF5 restart
+        path a component like Veros requires.
 
-        :func:`jem.utils.checkpoints.save_coupled_carry` still takes an
-        explicit ``component_savers`` mapping, for a caller that wants to
-        override or supply a saver for something that is not a component
-        capability. This method is the answer for the ordinary case.
+        :func:`jem.checkpoint.save_coupled_carry` still takes an explicit
+        ``component_savers`` mapping, for a caller that wants to override or
+        supply a saver for something that is not a component capability. This
+        method is the answer for the ordinary case.
 
         Parameters
         ----------
@@ -1438,16 +1543,16 @@ class Coupler:
             Directory to write into; created if absent.
 
         """
-        # Imported here rather than at module scope: `jem.utils.checkpoints`
-        # imports the component contract from `jem.base`, so the dependency
-        # runs the other way round and a module-level import would make the
-        # two modules' import order load-bearing.
-        from jem.utils.checkpoints import save_coupled_carry
+        # Imported here rather than at module scope: `jem.checkpoint` imports
+        # the component contract from `jem.base`, so the dependency runs the
+        # other way round and a module-level import would make the two
+        # modules' import order load-bearing.
+        from jem.checkpoint import save_coupled_carry
 
         save_coupled_carry(carry, directory, component_savers=self._component_savers())
 
-    def load_state(self, directory: Path) -> CoupledCarry:
-        """Read back a coupled carry written by :meth:`save_state`.
+    def load_carry(self, directory: Path) -> CoupledCarry:
+        """Read back a coupled carry written by :meth:`save_carry`.
 
         The exact inverse: the loaders are derived from the same components,
         so a nested coupler reads its own subdirectory back and a component
@@ -1455,15 +1560,30 @@ class Coupler:
         a :class:`CoupledCarry` that can be handed straight to a trajectory
         function, which continues the run from the step the checkpoint holds.
 
-        The components read are the ones registered *now*: a checkpoint is
-        loaded into the model that is meant to continue it, and a component
-        added or removed since it was written is a mismatch the load reports
-        (a missing file) rather than papering over.
+        The components read are the ones registered *now*, and their present
+        ``initialize()`` supplies the template the saved leaves are poured
+        into (:meth:`_plain_component_templates`): a checkpoint is loaded into
+        the model that is meant to continue it, and a component added,
+        removed, or rebuilt on another grid since it was written is a mismatch
+        the load reports -- naming the leaf -- rather than papering over.
+
+        **Loading is all-or-nothing.** The template built from
+        ``initialize()`` supplies the pytree *structure* and nothing else:
+        every leaf of the returned carry comes from the checkpoint, and the
+        freshly-initialized values are discarded. A component the checkpoint
+        does not hold is a ``ValueError``, never a component silently left at
+        its initial state -- which would continue one part of the model from
+        the saved step and restart another at the start date, a run that is
+        neither a resume nor a cold start and that nothing downstream could
+        detect. Which component was read from the shared carry file and which
+        through its own ``load_carry``, and at what step, is logged at INFO by
+        :func:`jem.checkpoint.load_coupled_carry` -- once, from there, so a
+        nested model reports each level as it is read rather than twice.
 
         Parameters
         ----------
         directory : pathlib.Path
-            A directory written by :meth:`save_state`.
+            A directory written by :meth:`save_carry`.
 
         Returns
         -------
@@ -1472,15 +1592,17 @@ class Coupler:
         Raises
         ------
         ValueError
-            If ``directory`` holds no completion marker, i.e. it is not a
-            complete checkpoint.
+            If ``directory`` holds no carry file, i.e. it is not a complete
+            checkpoint, or if what it holds does not match this model.
 
         """
-        # See `save_state` for why this import is not at module scope.
-        from jem.utils.checkpoints import load_coupled_carry
+        # See `save_carry` for why this import is not at module scope.
+        from jem.checkpoint import load_coupled_carry
 
         return load_coupled_carry(
-            directory, self.components, component_loaders=self._component_loaders()
+            directory,
+            self._plain_component_templates(),
+            component_loaders=self._component_loaders(),
         )
 
     def __repr__(self) -> str:

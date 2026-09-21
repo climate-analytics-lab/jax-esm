@@ -32,12 +32,16 @@ from jem.base.component import (
 )
 # The forcing_ output-name convention belongs to the component contract, not to
 # the slab family -- every component that writes output follows it, the Veros
-# adapter included. Re-exported here (the redundant aliases make that explicit
-# to linters and type checkers) because this is where the slab models and the
-# documentation have always imported it from.
+# adapter included. The same goes for the `jem_role` variable attribute, which
+# records the same thing in machine-readable form. Re-exported here (the
+# redundant aliases make that explicit to linters and type checkers) because
+# this is where the slab models and the documentation have always imported them
+# from.
 from jem.base.component import (
     FORCING_VARIABLE_PREFIX as FORCING_VARIABLE_PREFIX,
+    ROLE_ATTRIBUTE as ROLE_ATTRIBUTE,
     forcing_variable as forcing_variable,
+    role_attrs as role_attrs,
 )
 from jem.components.slab.grid import SlabGrid, to_degrees
 
@@ -467,7 +471,11 @@ class SlabModelBase(ABC):
         ``forcing_`` prefix :func:`forcing_variable` applies; its own state and
         derived diagnostics keep their plain names. That is what lets every
         component of a coupled run be merged into one dataset without two of
-        them claiming the same variable.
+        them claiming the same variable. Every variable also carries the
+        ``jem_role`` attribute :func:`~jem.base.component.role_attrs` builds,
+        so the same fact is readable without parsing names:
+        ``ds.filter_by_attrs(jem_role="forcing")`` is every field this
+        component was given.
 
         Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
         a slab dataset from the same run aligns instead of producing an outer

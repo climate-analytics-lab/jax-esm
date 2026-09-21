@@ -43,22 +43,30 @@ CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 
-@pytest.fixture(scope="module")
-def veros_model(tmp_path_factory):
+def _acc_basic_model(workdir, **setting_overrides):
+    """Yield a set-up ``acc_basic``, with Veros' own output diagnostics off.
+
+    Two reasons for turning them off, both of which apply to a real coupled
+    run as much as to this test: a coupled run's output comes from the
+    coupler, not from each component writing its own files; and Veros'
+    NetCDF writer goes through h5netcdf, which fails inside a process that
+    has already loaded another HDF5 binding (importing ``jcm``/``xarray``
+    pulls in ``netCDF4``) -- so leaving them on makes this module pass alone
+    and fail in a suite.
+
+    ``setting_overrides`` are applied after the setup's own
+    ``set_parameter``, which is how the free-surface variant of the case is
+    built.
+    """
     from veros import veros_routine
     from veros.setups.acc_basic.acc_basic import ACCBasicSetup
 
     class CoupledACCBasic(ACCBasicSetup):
-        """``acc_basic`` with Veros' own output diagnostics switched off.
-
-        Two reasons, both of which apply to a real coupled run as much as
-        to this test: a coupled run's output comes from the coupler, not
-        from each component writing its own files; and Veros' NetCDF writer
-        goes through h5netcdf, which fails inside a process that has
-        already loaded another HDF5 binding (importing ``jcm``/``xarray``
-        pulls in ``netCDF4``) -- so leaving them on makes this module pass
-        alone and fail in a suite.
-        """
+        @veros_routine
+        def set_parameter(self, state):
+            super().set_parameter(state)
+            for name, value in setting_overrides.items():
+                setattr(state.settings, name, value)
 
         @veros_routine
         def set_diagnostics(self, state):
@@ -66,7 +74,6 @@ def veros_model(tmp_path_factory):
 
     # Belt and braces: run from a scratch directory so anything Veros does
     # write (a restart, say) lands there rather than in the repository.
-    workdir = tmp_path_factory.mktemp("veros_acc_basic")
     previous_directory = os.getcwd()
     os.chdir(workdir)
     try:
@@ -78,20 +85,51 @@ def veros_model(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
+def veros_model(tmp_path_factory):
+    yield from _acc_basic_model(tmp_path_factory.mktemp("veros_acc_basic"))
+
+
+@pytest.fixture(scope="module")
+def free_surface_veros_model(tmp_path_factory):
+    """``acc_basic`` again, but solving the external mode for a free surface.
+
+    Veros' own default -- which ``acc_basic`` keeps -- is to solve for a
+    barotropic streamfunction, while every Veros setup shipped with JEM
+    turns that off. The two branches of the ``psi`` output are genuinely
+    different code paths reading different Veros fields, so covering the one
+    the shipped setups take needs a second model.
+    """
+    yield from _acc_basic_model(
+        tmp_path_factory.mktemp("veros_free_surface"),
+        enable_streamfunction=False,
+    )
+
+
+@pytest.fixture(scope="module")
 def grid_shape(veros_model):
     return (veros_model.state.dimensions["xt"],
             veros_model.state.dimensions["yt"])
 
 
-@pytest.fixture
-def component(veros_model) -> VerosComponent:
-    wrapper = VerosComponent(veros_model)
+def _bound(model) -> VerosComponent:
+    """Wrap ``model`` and bind it to this module's coupler clock."""
+    wrapper = VerosComponent(model)
     wrapper.bind(
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
         calendar=CALENDAR,
     )
     return wrapper
+
+
+@pytest.fixture
+def component(veros_model) -> VerosComponent:
+    return _bound(veros_model)
+
+
+@pytest.fixture
+def free_surface_component(free_surface_veros_model) -> VerosComponent:
+    return _bound(free_surface_veros_model)
 
 
 def _coupling_time(step: int) -> CouplingTime:
@@ -103,6 +141,84 @@ def _coupling_time(step: int) -> CouplingTime:
         year_offset_seconds=0.0,
         days_per_year=365.0,
     )
+
+
+def _labelling_diagnostics(component, n_records):
+    """Return ``n_records`` of zero-filled diagnostics in ``step``'s layout.
+
+    ``to_xarray`` labels what it is handed and reads nothing else, so this
+    layout is all it needs -- and building it here rather than by
+    integrating keeps the labelling checks in the fast suite, where the
+    others of their kind cost a Veros integration apiece.
+    """
+    nx, ny = component.horizontal_shape
+    nz = int(component.dzt.shape[0])
+    surface = jnp.zeros((n_records, nx, ny))
+    volume = jnp.zeros((n_records, nx, ny, nz))
+    diagnostics = {name: volume for name in ("temp", "salt", "u", "v")}
+    diagnostics.update({
+        name: surface
+        for name in (
+            "psi",
+            "sea_surface_temperature", "sea_surface_salinity",
+            "sea_surface_u", "sea_surface_v",
+            "surface_air_temperature", "surface_taux", "surface_tauy",
+            "heat_flux", "freshwater_flux",
+        )
+    })
+    # `step` emits a sea surface height only where Veros carries one, so the
+    # layout handed to `to_xarray` has to follow the same branch.
+    if not component.enable_streamfunction:
+        diagnostics["ssh"] = surface
+    return diagnostics
+
+
+def _step_under_wind(component, n_steps):
+    """Step ``component`` under a zonal wind stress; return the last step.
+
+    The coupler's forcing replaces the setup's own, so an ocean stepped from
+    a zero-filled carry stays exactly at rest -- and a streamfunction of
+    zeros agrees with anything. The stress is the shape ``acc_basic`` drives
+    itself with, applied afresh each step because the exchangers a real run
+    has are not in the loop here.
+    """
+    carry = component.initialize()
+    nx, ny = component.horizontal_shape
+    latitude = np.asarray(component.latitude)
+    taux = jnp.asarray(np.broadcast_to(
+        0.1 * np.sin(np.pi * (latitude - latitude.min()) / np.ptp(latitude)),
+        (nx, ny),
+    ))
+    diagnostics = None
+    for step in range(n_steps):
+        carry = dict(carry,
+                     forcing=carry["forcing"].replace(surface_taux=taux))
+        carry, diagnostics = component.step(carry, _coupling_time(step))
+    return carry, diagnostics
+
+
+def _integrated_transport(component, zonal_velocity):
+    """Integrate the depth-integrated zonal transport northwards, on the host.
+
+    The reference the ``psi`` tests check against, written as the recurrence
+    Veros' barotropic-mode update inverts -- ``psi[j] = psi[j-1]
+    - U[j] * dyt[j]``, from a southern boundary where psi vanishes -- rather
+    than as a second cumulative sum, so that it checks the axes and the
+    starting point as well as the arithmetic.
+    """
+    transport = np.sum(
+        np.asarray(zonal_velocity)
+        * np.asarray(component.mask_U)
+        * np.asarray(component.dzt),
+        axis=-1,
+    )
+    dyt = np.asarray(component.dlatitude)
+    psi = np.zeros_like(transport)
+    southern_neighbour = np.zeros(transport.shape[0])
+    for j in range(transport.shape[1]):
+        southern_neighbour = southern_neighbour - transport[:, j] * dyt[j]
+        psi[:, j] = southern_neighbour
+    return psi
 
 
 def test_configure_veros_runtime_is_idempotent():
@@ -136,6 +252,119 @@ def test_grid_metadata_drops_the_halo(component, veros_model, grid_shape):
     assert component.latitude.shape == (ny,)
     assert (component.mask_T.shape[0]
             == veros_model.state.variables.maskT.shape[0] - 2 * GHOST_CELLS)
+
+
+@pytest.mark.parametrize("component_fixture",
+                         ["component", "free_surface_component"])
+def test_to_xarray_publishes_the_external_mode_outputs(
+    request, component_fixture
+):
+    """`psi` is always there and says which psi it is; `ssh` only sometimes.
+
+    Run over both external-mode regimes because which of the two `psi` is
+    *is* the thing the attribute has to get right -- and because the sea
+    surface height exists in only one of them. Labelling needs no
+    integration, so the free-surface branch of both would otherwise be
+    reached only by the slow tests.
+    """
+    component = request.getfixturevalue(component_fixture)
+    nx, ny = component.horizontal_shape
+    diagnostics = _labelling_diagnostics(component, 2)
+    psi = jnp.asarray(
+        np.linspace(-1e6, 1e6, 2 * nx * ny).reshape(2, nx, ny))
+    diagnostics["psi"] = psi
+    ssh = jnp.asarray(
+        np.linspace(-0.5, 0.5, 2 * nx * ny).reshape(2, nx, ny))
+    if not component.enable_streamfunction:
+        diagnostics["ssh"] = ssh
+
+    dataset = component.to_xarray(
+        diagnostics,
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR),
+    )
+
+    assert dataset.psi.dims == ("time", "lon", "lat")
+    assert dataset.psi.attrs["units"] == "m^3/s"
+    assert dataset.psi.attrs["long_name"] == "barotropic streamfunction"
+    assert dataset.psi.attrs["jem_role"] == "derived"
+    np.testing.assert_array_equal(dataset.psi.values, np.asarray(psi))
+
+    # Nothing in the numbers says whether this is Veros' own prognostic
+    # streamfunction or the diagnosis that stands in for it under a free
+    # surface, so the comment has to -- along with the staggering, which the
+    # `lon`/`lat` labels do not carry either.
+    comment = dataset.psi.attrs["comment"]
+    assert ("prognostic" in comment) is component.enable_streamfunction
+    assert ("diagnosed" in comment) is not component.enable_streamfunction
+    assert "zeta" in comment
+
+    # Veros carries a sea surface height only under the linear free surface
+    # (where `variables.psi` is the surface pressure it comes from), so the
+    # output variable exists exactly there and nowhere else.
+    if component.enable_streamfunction:
+        assert "ssh" not in dataset.variables
+    else:
+        assert dataset.ssh.dims == ("time", "lon", "lat")
+        assert dataset.ssh.attrs["long_name"] == "sea surface height"
+        assert dataset.ssh.attrs["units"] == "m"
+        assert dataset.ssh.attrs["jem_role"] == "derived"
+        assert "psi / grav" in dataset.ssh.attrs["comment"]
+        np.testing.assert_array_equal(dataset.ssh.values, np.asarray(ssh))
+
+
+def test_to_xarray_publishes_the_masks_psi_is_read_with(component):
+    """The masks `psi`'s comment sends a reader to are in the file.
+
+    Over land the diagnosis carries `psi` through the integration rather
+    than computing it, and neither the zeta points it sits on nor the u grid
+    its depth integral ran over can be rebuilt from anything else the
+    dataset holds.
+    """
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 1),
+        TimeAxis(START_DATE, np.arange(1), COUPLING_TIMESTEP, CALENDAR),
+    )
+
+    assert dataset.mask_U.dims == ("lon", "lat", "depth")
+    np.testing.assert_array_equal(
+        dataset.mask_surface_U.values, np.asarray(component.mask_U)[:, :, -1])
+    np.testing.assert_array_equal(
+        dataset.mask_surface_Z.values, np.asarray(component.mask_surface_Z))
+    # Grid configuration rather than carry, so deliberately untagged.
+    for name in ("mask_U", "mask_surface_U", "mask_surface_Z"):
+        assert "jem_role" not in dataset[name].attrs
+
+
+def test_the_diagnosed_streamfunction_integrates_the_zonal_transport(
+    component, grid_shape
+):
+    """The diagnosis is the northward integral of the zonal transport."""
+    nx, ny = grid_shape
+    nz = int(component.dzt.shape[0])
+    rng = np.random.default_rng(20250918)
+    zonal_velocity = jnp.asarray(rng.standard_normal((nx, ny, nz)))
+
+    psi = np.asarray(component._barotropic_streamfunction(zonal_velocity))
+
+    expected = _integrated_transport(component, zonal_velocity)
+    # `atol` as well as `rtol`: a cumulative sum is free to accumulate in a
+    # different order from the sequential reference, which says nothing
+    # about elements that have cancelled to near zero.
+    np.testing.assert_allclose(psi, expected, rtol=1e-5,
+                               atol=1e-9 * np.abs(expected).max())
+    assert np.abs(psi).max() > 0
+    # The integration starts from a boundary where psi vanishes, so the
+    # southernmost emitted row holds one cell's worth of transport and no
+    # accumulated history. Computed here from `u` rather than taken from
+    # `expected`, which would only repeat the comparison above.
+    southernmost = np.sum(
+        np.asarray(zonal_velocity)[:, 0, :]
+        * np.asarray(component.mask_U)[:, 0, :]
+        * np.asarray(component.dzt),
+        axis=-1,
+    ) * np.asarray(component.dlatitude)[0]
+    np.testing.assert_allclose(psi[:, 0], -southernmost, rtol=1e-5,
+                               atol=1e-9 * np.abs(southernmost).max())
 
 
 def test_initialize_carry_structure(component, grid_shape):
@@ -277,6 +506,104 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
 
 
 @pytest.mark.slow
+def test_psi_is_veros_own_streamfunction_when_the_run_solves_for_one(component):
+    """In streamfunction mode `psi` is Veros', and the diagnosis recovers it.
+
+    This is the check that the diagnosis' sign and metric factors are the
+    ones Veros uses: the wrapper publishes Veros' own field here, and the
+    diagnosis -- what a free-surface run gets instead -- has to come back to
+    it. It can only do so up to a constant, because a streamfunction is
+    defined up to one and the two fix it differently: Veros holds its first
+    island at zero, the diagnosis the southern boundary. In this channel
+    setup the difference is the throughflow, which is why the check is on
+    the spread of the difference rather than on the difference.
+    """
+    assert component.enable_streamfunction
+
+    carry, diagnostics = _step_under_wind(component, n_steps=2)
+
+    variables = carry["state"].variables
+    interior = slice(GHOST_CELLS, -GHOST_CELLS)
+    psi = np.asarray(diagnostics["psi"])
+    np.testing.assert_array_equal(
+        psi, np.asarray(variables.psi[interior, interior, variables.tau]))
+    # Veros' `ssh` is inactive in this mode, so there is nothing to publish.
+    assert "ssh" not in diagnostics
+    # The wind has spun something up, so what follows is not two fields of
+    # zeros agreeing with each other.
+    assert np.abs(psi).max() > 1.0
+
+    diagnosed = np.asarray(
+        component._barotropic_streamfunction(diagnostics["u"]))
+    gauge = diagnosed - psi
+    np.testing.assert_allclose(
+        gauge, gauge.mean(), rtol=0, atol=1e-5 * np.abs(psi).max())
+    # ...and the host-side reference is the same field, so the relation the
+    # diagnosis implements is the one written down in its docstring.
+    reference = _integrated_transport(component, diagnostics["u"])
+    np.testing.assert_allclose(diagnosed, reference, rtol=1e-5,
+                               atol=1e-9 * np.abs(reference).max())
+
+
+@pytest.mark.slow
+def test_psi_is_diagnosed_when_the_run_solves_a_free_surface(
+    free_surface_component
+):
+    """Under a free surface `psi` is diagnosed, not read from Veros.
+
+    Which matters more than a missing field would: in this mode Veros reuses
+    `variables.psi` for the surface pressure (m^2 s^-2, on the T grid), so
+    publishing it would have published a different quantity under the
+    streamfunction's name. Every Veros setup shipped with JEM runs this way.
+
+    This is also the only mode with a sea surface height, so `ssh` is
+    checked here -- against the surface pressure it is derived from, and
+    against Veros' own `variables.ssh`, which lags it by a timestep --
+    rather than in a test of its own that would pay for a second
+    integration.
+    """
+    component = free_surface_component
+    assert not component.enable_streamfunction
+
+    carry, diagnostics = _step_under_wind(component, n_steps=1)
+
+    psi = np.asarray(diagnostics["psi"])
+    assert np.isfinite(psi).all()
+    assert np.abs(psi).max() > 1.0
+    reference = _integrated_transport(component, diagnostics["u"])
+    np.testing.assert_allclose(psi, reference, rtol=1e-5,
+                               atol=1e-9 * np.abs(reference).max())
+
+    variables = carry["state"].variables
+    interior = slice(GHOST_CELLS, -GHOST_CELLS)
+    surface_pressure = np.asarray(
+        variables.psi[interior, interior, variables.tau])
+    assert not np.allclose(psi, surface_pressure)
+
+    # ...and that surface pressure's sea surface height is published in its
+    # own right, by the relation Veros applies to it (`ssh = psi / grav`),
+    # on the same time level as everything else in the record.
+    grav = carry["state"].settings.grav
+    ssh = np.asarray(diagnostics["ssh"])
+    np.testing.assert_allclose(ssh, surface_pressure / grav, rtol=1e-6,
+                               atol=0)
+    # The wind has spun the free surface up, so that is not zero == zero.
+    assert np.abs(ssh).max() > 0
+
+    # Deliberately not `variables.ssh`, and this is why: Veros writes that
+    # field before permuting its time indices at the end of a step, so
+    # afterwards it holds the surface pressure of the level that has just
+    # become `taum1` -- a field one Veros timestep behind the record it
+    # would have been published in, by a wide margin during spin-up.
+    veros_ssh = np.asarray(variables.ssh[interior, interior])
+    np.testing.assert_allclose(
+        veros_ssh,
+        np.asarray(variables.psi[interior, interior, variables.taum1]) / grav,
+        rtol=1e-6, atol=0)
+    assert not np.allclose(ssh, veros_ssh)
+
+
+@pytest.mark.slow
 def test_to_xarray_rejects_a_mismatched_time_axis(component):
     """A time axis that does not match the records is a coupler-side bug."""
     carry = component.initialize()
@@ -319,3 +646,87 @@ def test_rebinding_to_a_different_timestep_is_rejected(component):
             start_date=START_DATE,
             calendar=CALENDAR,
         )
+
+
+@pytest.mark.slow
+def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
+    """The carry survives the split between the HDF5 restart and the carry file.
+
+    The ``VerosState`` goes through Veros' own restart writer and the rest of
+    the carry through :mod:`jem.checkpoint`, and only a round trip shows that
+    the two halves come back as one carry -- with the restart file where the
+    loader looks for it, and the pytree half restored leaf for leaf.
+    """
+    from jem.checkpoint import CARRY_FILENAME
+    from jem.components.veros_component import VEROS_RESTART_FILENAME
+
+    carry = component.initialize()
+    carry = dict(
+        carry,
+        derived=carry["derived"].replace(
+            sea_surface_temperature=jnp.full(grid_shape, 290.5)
+        ),
+        forcing=carry["forcing"].replace(heat_flux=jnp.full(grid_shape, -12.5)),
+    )
+
+    directory = tmp_path / "ocn"
+    component.save_carry(carry, directory)
+    assert (directory / VEROS_RESTART_FILENAME).exists()
+    # The carry file is written last: it is the completion marker of this
+    # component's directory as much as of a coupled checkpoint.
+    assert (directory / CARRY_FILENAME).exists()
+
+    loaded = component.load_carry(directory)
+
+    assert set(loaded) == {"state", "derived", "forcing"}
+    # Veros' reader mutates the model's state in place, so the restored carry
+    # shares that object rather than holding a copy of it.
+    assert loaded["state"] is component.model.state
+    np.testing.assert_array_equal(
+        np.asarray(loaded["derived"].sea_surface_temperature),
+        np.asarray(carry["derived"].sea_surface_temperature),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(loaded["forcing"].heat_flux),
+        np.asarray(carry["forcing"].heat_flux),
+    )
+
+
+def test_a_runtime_setting_is_restored_even_when_the_block_raises():
+    """The process-global Veros setting goes back however the block ends.
+
+    `load_carry` has to turn `force_overwrite` off to read a restart, and the
+    rest of a coupled run needs it on. The settings are process-global, so a
+    failed read -- a missing or mismatched HDF5 file -- must not leave the
+    flag flipped: the next thing to write an output would then fail for a
+    reason with no connection to what actually went wrong.
+    """
+    from veros import runtime_settings
+
+    from jem.components.veros_component import _veros_runtime_setting
+
+    before = runtime_settings.force_overwrite
+    locked_before = getattr(runtime_settings, "__locked__", False)
+
+    with pytest.raises(RuntimeError, match="restart is missing"):
+        with _veros_runtime_setting("force_overwrite", not before):
+            assert runtime_settings.force_overwrite is (not before)
+            raise RuntimeError("the restart is missing")
+
+    assert runtime_settings.force_overwrite is before
+    # And the lock the settings were under is put back as it was, rather than
+    # assumed: this module runs before and after `veros.core` is imported.
+    assert getattr(runtime_settings, "__locked__", False) is locked_before
+
+
+@pytest.mark.slow
+def test_load_carry_restores_force_overwrite_when_the_restart_is_missing(
+    component, tmp_path
+):
+    """A failed restart read leaves the runtime settings as it found them."""
+    from veros import runtime_settings
+
+    before = runtime_settings.force_overwrite
+    with pytest.raises(Exception):
+        component.load_carry(tmp_path / "not-a-checkpoint")
+    assert runtime_settings.force_overwrite is before

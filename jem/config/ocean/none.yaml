@@ -1,0 +1,7 @@
+# @package _global_
+# No ocean component. The `_global_` package header is what makes the key
+# literally null instead of an empty node: a group option is merged *into*
+# its key, so a file whose body is `null` composes to `{}`. Assigning the key
+# from the global root is the only spelling that lets the runner ask
+# `cfg.ocean is None`.
+ocean: null

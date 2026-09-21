@@ -16,7 +16,7 @@ env/
 
 # Output written by the example drivers alongside themselves:
 # examples/<group>/<example>/output_T<truncation>/<run name>/ holds the netCDF
-# output, a checkpoint/ directory (component pickles and Veros HDF5 restarts)
+# output, a checkpoint/ directory (a msgpack carry file and Veros HDF5 restarts)
 # and the explosion log. Each Veros run.sh deletes its own before running;
 # these rules keep whatever a manual or interrupted run leaves behind out of
 # the index.

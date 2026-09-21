@@ -40,7 +40,7 @@ import dataclasses
 import datetime
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
 import jax
 import jax.numpy as jnp
@@ -112,6 +112,74 @@ def forcing_variable(name: str) -> str:
     if name.startswith(FORCING_VARIABLE_PREFIX):
         return name
     return f"{FORCING_VARIABLE_PREFIX}{name}"
+
+
+#: Name of the variable attribute that records which part of a component's
+#: carry an output variable came from. See :func:`role_attrs`.
+ROLE_ATTRIBUTE = "jem_role"
+
+#: What a variable's role may be: the three sections of the carry layout the
+#: packaged components share (``jem.exchangers`` addresses fields by them).
+Role = Literal["state", "derived", "forcing"]
+
+#: The roles, as a tuple, for validation and for iterating in a test.
+ROLES: tuple[str, ...] = get_args(Role)
+
+
+def role_attrs(role: Role) -> dict[str, str]:
+    """Return the variable attributes marking an output variable's role.
+
+    A packaged component's output says which part of its carry a variable
+    came from in **two** ways, and they are not redundant:
+
+    - The ``forcing_`` name prefix (:func:`forcing_variable`) exists to stop
+      an ``xr.merge`` collision. A field one component computed and the copy
+      another was given through the coupler are *different* variables --
+      coupling is lagged, so the copy is a step behind -- and under one name
+      ``xr.merge`` refuses the two datasets outright. Renaming is the only
+      thing that fixes that, so the prefix stays.
+    - This attribute exists so that nothing has to *parse* names to find out
+      what a variable is. ``ds.filter_by_attrs(jem_role="forcing")`` is the
+      whole query; the alternative, matching a prefix, cannot tell a received
+      ``forcing_q_flux`` from a model whose own field happens to be called
+      ``forcing_shortwave_flux``, and says nothing at all about the rest --
+      whether ``total_heat_flux`` in the ocean's output is state the ocean
+      integrated or a diagnostic it computed.
+
+    So the prefix is a naming rule and this is metadata; every packaged
+    component sets both. The roles are the sections of the carry layout the
+    packaged components share and that :mod:`jem.exchangers` addresses:
+    ``state`` is what the component integrates, ``derived`` what it diagnosed
+    for others to read, ``forcing`` what it was given. A variable that is
+    none of those -- a grid mask, a layer thickness, anything time-invariant
+    that came from the component's configuration rather than its carry -- is
+    left untagged, which is a meaningful answer and not an omission.
+
+    A fresh dict is returned on every call, because xarray keeps the dict it
+    is handed: two variables sharing one attrs dict would share any later
+    edit to it.
+
+    Parameters
+    ----------
+    role : {"state", "derived", "forcing"}
+        Which section of the carry the variable was read from.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{"jem_role": role}``, ready to merge into a variable's attributes.
+
+    Raises
+    ------
+    ValueError
+        If ``role`` is not one of the three.
+
+    """
+    if role not in ROLES:
+        raise ValueError(
+            f"Unknown variable role {role!r}; it must be one of {list(ROLES)!r}."
+        )
+    return {ROLE_ATTRIBUTE: role}
 
 
 def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:
@@ -309,15 +377,53 @@ class TimeAxis:
     with the same ``time`` coordinate and ``xr.merge`` of two components'
     datasets is an N-long join rather than a 2N-long union.
 
-    The labelling convention is JCM's, which JAX-ESM cannot change from the
-    outside (jax-gcm#758): record ``k`` is the average over
+    The labelling convention is JCM's: record ``k`` is the average over
     ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with the
     **end** of that interval, ``start_date + (k+1) dt``, as a
     ``datetime64[ns]`` on the proleptic Gregorian calendar whatever the
     model calendar is (a ``365_day`` run still writes real dates; the
     calendar governs only the seasonal cycle and forcing selection).
     :meth:`datetimes` implements exactly that and is the one place the
-    convention is written down.
+    convention is written down. It reimplements JCM's arithmetic rather than
+    calling JCM, and at the pinned revision (``JCM_SUPPORTED_REV``) that is a
+    deliberate choice rather than a missing API: jax-gcm#824 made
+    ``Model.date_from_sim_time`` public, but that is JCM's *model clock*
+    conversion -- exact integer day/second arithmetic on the model calendar,
+    returning a ``jcm.date.DateData`` for forcing and physics -- and not the
+    conversion these labels have to match, which is the float64
+    days-since-epoch product in ``ModelPredictions._trajectory_dataset``
+    (still internal, and still what JCM's own output files are labelled with).
+    Calling the public one would give the exact nanosecond count where JCM's
+    own output gives a float64 product whose ulp at a 2000s date is 128 ns.
+    The two agree whenever the step is a power-of-two fraction of a day (every
+    configuration JAX-ESM ships, and hence today's tests), and part company
+    when it is not -- a 10- or 20-minute coupling step puts roughly half the
+    labels 128 ns off -- at which point a slab dataset stops aligning with the
+    atmosphere's on one time axis and ``xr.merge`` gives a 2N-long union
+    instead of an N-long join, which is the very thing this class exists to
+    prevent. Sharing one computation therefore needs JCM to publish its
+    *output* labelling, which is jax-gcm#862; jax-gcm#824 published the
+    clock, not the labelling, so adopting ``date_from_sim_time`` here on its
+    own would be a regression waiting for the first sub-hourly run.
+
+    The consequence to know about is at a leap day. The labels are
+    Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap
+    year, so from the first 29 February a run's labels reach, every label
+    falls one day *behind* the model-calendar date of the instant it stands
+    for -- one more day for every leap year the run passes. A run starting on
+    1 January 2000 labels the record whose instant the model calls 1 March
+    00:00 as ``2000-02-29``, and the one the model calls 1 April 00:00 as
+    ``2000-03-31``. Anything binning the output by its own labels
+    (``groupby("time.month")``) therefore parts company from that record on
+    with anything binning by the model calendar -- which is what
+    :func:`jem.accumulate.monthly_mean` does, and what the forcing and the
+    seasonal cycle follow; ``monthly_mean`` documents the difference where a
+    user meets it, under **Leap days**. The inconsistency is JCM's and is
+    recorded upstream as jax-gcm#449; JAX-ESM mirrors the convention rather
+    than diverging from it, because labels of its own would no longer merge
+    with the atmosphere's on one time axis. Emitting calendar-consistent
+    labels for every component, the atmosphere's included, is tracked as
+    #118.
 
     Attributes
     ----------
@@ -359,6 +465,15 @@ class TimeAxis:
         components' output on one time axis. Computing the exact integer
         nanosecond count instead would be more accurate and would merge with
         nothing.
+
+        The count of days is a plain count, so the dates it lands on are
+        proleptic Gregorian and a ``365_day`` run's labels fall a day further
+        behind the model calendar at every Gregorian 29 February -- the
+        leap-day consequence the class docstring spells out. Making the labels
+        calendar-consistent is not a change this method can make alone
+        (jax-gcm#449): it would put JEM's output on a different time axis from
+        the JCM output it is written to merge with. Doing it for every
+        component at once is #118.
 
         Sub-day start dates are the one deliberate difference from JCM's own
         output path, which takes ``start_date.delta.days`` and drops
@@ -429,11 +544,11 @@ class SupportsXarray(Protocol):
 
 @runtime_checkable
 class SupportsCheckpoint(Protocol):
-    """Optional: components whose carry cannot be pickled as a plain pytree (Veros)."""
+    """Optional: components whose carry is not a plain pytree of arrays (Veros)."""
 
-    def save_state(self, carry: Carry, directory: Path) -> None: ...
+    def save_carry(self, carry: Carry, directory: Path) -> None: ...
 
-    def load_state(self, directory: Path) -> Carry: ...
+    def load_carry(self, directory: Path) -> Carry: ...
 
 
 @runtime_checkable
