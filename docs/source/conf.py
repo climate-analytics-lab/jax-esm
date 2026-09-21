@@ -52,7 +52,17 @@ myst_heading_anchors = 3
 nbsphinx_execute = 'never'
 
 templates_path = ['_templates']
-exclude_patterns = []
+# `docs/Makefile`'s `copy_examples` rsyncs `examples/` into
+# `docs/source/examples/`, and MyST parses every `.md` under there; a
+# `README.md` anywhere under `examples/` (the top-level index and one per
+# example directory) is a GitHub-facing index (rendered on github.com, never
+# linked from a toctree), not a docs page -- the actual Sphinx pages for the
+# examples are `examples.rst`/`experimental.rst` -- so without this it is
+# orphaned and warns "document isn't included in any toctree". Both patterns
+# are needed: Sphinx's `**` glob requires at least one directory between
+# `examples/` and the filename, so it alone misses the top-level
+# `examples/README.md`.
+exclude_patterns = ['examples/README.md', 'examples/**/README.md']
 
 autosummary_generate = True
 autosummary_generate_overwrite = True  # Regenerate on each buil
