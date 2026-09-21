@@ -591,9 +591,25 @@ Breaking changes are marked; everything else is additive.
   exchange and the default table draw on one vocabulary.
   `jem/config/coupling/daily.yaml`'s `exchanger:` comment documents both
   spellings.
+- **`jem.components.veros.setups.double_drake.double_drake_setup` and
+  `.earth.earth_setup`** — the two example drivers' `veros_case_setup.py`
+  (`generateVerosSetup`), moved into the package as importable factories so a
+  configuration can name them without a `PYTHONPATH` trick. Both derive their
+  grid shape (`nx`/`ny`) from their mask file's own shape rather than taking
+  it as an argument. `earth_setup`'s `GridInfo` — the grid-spacing
+  reconstruction that reproduces Veros' own `u_centered_grid` recursion
+  exactly, and the true-latitude Coriolis parameter — moved with every
+  explanatory comment intact.
 
 ### Changed
 
+- **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
+  — the value the examples' `run.sh` validated, not the `1800.0` the copied
+  files carried — and take their layer count as `layer_thicknesses` (a
+  `Sequence[float]`), replacing the old `[:number_of_ocean_layers]` slicing
+  in the caller. `cold_start_ocean_temperature_reference_K` is renamed
+  `cold_start_temperature_celsius`: the value it holds was always degrees
+  Celsius (`vs.temp`'s own units), never Kelvin.
 - **jax-gcm configures no logging of its own, and `jcm.model.Model` takes no
   `log_level` keyword** (jax-gcm#819, at the pinned revision). Nothing under
   `jem/` ever passed it — only the test fixtures did, to silence the

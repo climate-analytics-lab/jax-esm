@@ -46,6 +46,8 @@ Components
    jem.components.jcm.contract
    jem.components.jcm.exchange_fields
    jem.components.veros_component
+   jem.components.veros.setups.double_drake
+   jem.components.veros.setups.earth
 
    jem.components.slab.slab_ocean_model.SlabOceanModel
    jem.components.slab.slab_ocean_model.SlabOceanParameters
