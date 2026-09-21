@@ -33,8 +33,15 @@ seen, not discover it.
 ``JAX_PLATFORMS=cpu`` is required on GPU hosts, otherwise every test process
 grabs the same GPU.
 
-Two suites sit behind those gates. ``tests/unit`` is fast and needs no external
-data. ``tests/examples`` has two files: ``test_examples.py`` executes every
+Two suites sit behind those gates. ``tests/unit``'s fast gate is
+``-m "not slow"`` and needs no external data; its ``@pytest.mark.slow`` tests
+(whole-model builds and the Veros setups -- ``test_readme_quickstart.py``,
+which executes the README quick-start block end to end, is among them) are not
+part of that gate. They run in the ``examples`` CI job below, as three
+separate ``pytest`` invocations per #113 (the two Veros files cannot share a
+process with each other or with the netCDF-writing slow tests), and locally
+with ``JAX_PLATFORMS=cpu pytest tests/unit -m slow`` when a change touches
+what they cover. ``tests/examples`` has two files: ``test_examples.py`` executes every
 notebook under ``examples/`` end to end (a 1800 s budget each), and
 ``test_configurations.py`` composes, builds and runs every named configuration
 under ``jem/config/configuration/`` for two coupled days

@@ -40,6 +40,9 @@ CORE_NAMES = (
     "default_workflow",
     # What of a component's carry the table says somebody else supplies.
     "exchanged_fields",
+    # Reading and writing one field of a coupled carry by the same address.
+    "read_field",
+    "replace_field",
     # Writing a chunk of a run out: the labelling and the reduction, each on
     # its own (the health gate needs the unreduced chunk) and composed.
     "chunk_datasets",

@@ -119,10 +119,14 @@ jobs:
         fail_ci_if_error: false
 
   examples:
-    # Notebooks and run.sh drivers execute whole coupled models, so they are
-    # far too slow for every push; a pull request is the point at which it is
-    # worth knowing whether the examples still run.
+    # Notebooks and configuration smoke runs execute whole coupled models, so
+    # they are far too slow for every push; a pull request is the point at
+    # which it is worth knowing whether the examples still run. This job also
+    # already installs everything the 23 @pytest.mark.slow tests under
+    # tests/unit need (the [plot] extra, veros-jittable, jupyter), so it runs
+    # those too rather than leaving them uncovered by any job.
     if: github.event_name == 'pull_request'
+    timeout-minutes: 180
     runs-on: ubuntu-latest
 
     steps:
@@ -157,10 +161,25 @@ jobs:
         pip install jupyter ipykernel
         python -m ipykernel install --user --name python3 --display-name "Python 3"
 
-    - name: Run example notebooks and run.sh drivers
+    - name: Run the example notebooks and the configuration smoke runs
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         pytest tests/examples -q
+
+    - name: Run the slow unit tests
+      # Three invocations, not one, per #113: importing a Veros setup module
+      # flips the process-global jax_enable_x64 flag on (Veros runs double
+      # precision internally), which would silently contaminate whichever
+      # other slow test shares that process afterward -- including the
+      # netCDF-writing ones (test_driver.py, test_coupled.py,
+      # test_readme_quickstart.py, test_jcm_component.py). So the two Veros
+      # files run in their own process, isolated from each other too, and
+      # everything else runs together in a third.
+      run: |
+        export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
+        JAX_PLATFORMS=cpu pytest tests/unit -q -m slow -p no:cacheprovider --ignore=tests/unit/test_veros_component.py --ignore=tests/unit/test_veros_setups.py
+        JAX_PLATFORMS=cpu pytest tests/unit/test_veros_component.py -q -m slow -p no:cacheprovider
+        JAX_PLATFORMS=cpu pytest tests/unit/test_veros_setups.py -q -p no:cacheprovider
 
   docs:
     runs-on: ubuntu-latest
