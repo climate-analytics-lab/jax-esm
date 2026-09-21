@@ -2,7 +2,9 @@
 
 How JEM couples black-box components. This is the reference for developers
 adding a component or debugging an exchange; the user-facing walkthrough is
-{doc}`../adding_a_component`.
+{doc}`../adding_a_component`. {doc}`../python_api` shows the same objects --
+`Coupler`, the exchangers, `run_chunked` -- built directly, for a reader who
+wants the construction rather than the design rationale.
 
 Every statement about the coupling core is checkable against
 `jem/base/component.py` and `jem/base/coupler.py`, which are the whole of it;

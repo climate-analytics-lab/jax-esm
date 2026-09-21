@@ -373,7 +373,9 @@ pip install -r requirements.txt
 make html
 ```
 
-Then open `docs/build/html/index.html` in your browser.
+Then open `docs/build/html/index.html` in your browser. The two starting
+points are `docs/source/getting_started.rst` (install and the command line)
+and `docs/source/python_api.md` (the complete direct-Python construction).
 
 ## Architecture
 
@@ -447,11 +449,13 @@ See `docs/source/design/architecture.md` for the carry layout and the full
 contract.
 
 ## Examples
-- `examples/01_basic`: aquaplanet setups coupling JCM to the slab models.
-- `examples/02_experimental`: features under development, such as earth-like
-  topography and JCM-Veros coupling.
-- `examples/03_non_geoscience`: a spring system, showing that the coupler is
-  not specific to climate components.
+
+Every example is either one `python -m jem.main +configuration=...` command
+or a notebook doing one thing the command line cannot (plotting, building a
+carry by hand); `examples/README.md` lists every one of them with the command
+or notebook that runs it. `examples/03_non_geoscience` couples a spring system
+rather than an atmosphere and an ocean, showing that the coupler is not
+specific to climate components.
 
 ## Integration with JAX-GCM (JCM)
 JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean, land, and sea-ice models.
