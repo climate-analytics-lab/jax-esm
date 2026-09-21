@@ -600,6 +600,20 @@ Breaking changes are marked; everything else is additive.
   reconstruction that reproduces Veros' own `u_centered_grid` recursion
   exactly, and the true-latitude Coriolis parameter — moved with every
   explanatory comment intact.
+- **`jem.tools.idealised_terrain(reference_file, planet_type, output_file)`**
+  — the example drivers' `modify_jcm_terrain.py`, as a pure function (no
+  `argparse`, no `__main__`, no `print`) taking a full `output_file` path
+  rather than a directory plus an implied name, and building a fresh
+  `xarray.Dataset` rather than mutating one it had opened for reading. Its
+  `else` branch's `NameError` (`args.planet_type`, out of scope) is now a
+  `ValueError` naming the bad value and the valid ones.
+- **`jem/data/terrain_double_drake_T31.nc`** (packaged data, 96x48) — the
+  double-drake geography, generated once by
+  `jem.tools.idealised_terrain(jem/data/terrain_JCM_T31.nc, "double_drake",
+  ...)` and committed, rather than regenerated into a cache directory by
+  every run. `test_idealised_terrain.py` regenerates it into a temp file and
+  asserts the two are identical, so the tool and the shipped data cannot
+  silently drift apart.
 
 ### Changed
 
