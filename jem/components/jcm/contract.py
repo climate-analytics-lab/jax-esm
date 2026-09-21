@@ -41,11 +41,10 @@ four things JAX-ESM is written against:
   it;
 * **#824** -- the resumable model state and the date conversion are public.
   ``Model.bootstrap_state()`` returns its ``(dycore_state, physics_carry)``
-  pair, the same pair is readable as ``Model.dycore_state`` /
-  ``Model.physics_carry``, ``ModelPredictions.with_context(model)`` re-attaches
-  the context a pytree round trip drops, and ``Model._date_from_sim_time`` is
-  now ``Model.date_from_sim_time`` (the old name kept only as a delegating
-  alias). ``JCMComponent`` is built on all four, so it reaches for no private
+  pair, ``ModelPredictions.with_context(model)`` re-attaches the context a
+  pytree round trip drops, and ``Model._date_from_sim_time`` is now
+  ``Model.date_from_sim_time`` (the old name kept only as a delegating
+  alias). ``JCMComponent`` is built on all three, so it reaches for no private
   jax-gcm attribute at all; and because the old private date name only
   delegates, an instance-level override of it -- the season freeze in
   ``examples/02_experimental/03_jcm_veros_earth`` -- has to move to the public
@@ -134,7 +133,23 @@ class IntegrationPoint(NamedTuple):
 #: keys and struct fields it *reads*; and the constructors JAX-ESM's public
 #: workflow, quick start and tests tell a user to call to build the objects
 #: they hand to JAX-ESM. Names JAX-ESM merely mentions in prose are not here.
+#:
+#: ``jcm.__version__`` is listed as well. It is not part of anybody's run, but
+#: it is what ``test_installed_jcm_matches_contract`` compares against
+#: :data:`JCM_SUPPORTED_VERSION`, so a jax-gcm that stopped defining it should
+#: fail as a named contract point rather than as an ``AttributeError`` inside
+#: the test.
 JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
+    # ------------------------------------------------------------------
+    # The package itself: how the contract test identifies what is installed.
+    # ------------------------------------------------------------------
+    IntegrationPoint(
+        "jcm", "__version__", "public",
+        "The version string the contract test compares with"
+        " JCM_SUPPORTED_VERSION; read from the module rather than"
+        " importlib.metadata because an editable install's metadata is frozen"
+        " at install time while the attribute tracks the checkout.",
+    ),
     # ------------------------------------------------------------------
     # Driver (jem.driver, T2.2): building a model and a forcing from a
     # composed Hydra config, and running it in health-gated chunks.
@@ -201,22 +216,11 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "Build the initial dycore state and physics carry without integrating"
         " a step, which is what lets JCMComponent.initialize() produce a carry"
         " of the exact structure step 1 will return. Returns the"
-        " `(dycore_state, physics_carry)` pair directly (jax-gcm#824), so"
-        " JAX-ESM unpacks the return value rather than reading it back off the"
-        " model.",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "dycore_state", "public",
-        "Read-only view of the dycore state bootstrap_state/run installed on"
-        " the model. JCMComponent.initialize() takes the state from"
-        " bootstrap_state's return value; this is the name the contract test"
-        " watches so that the pair stays readable without a private read"
-        " (jax-gcm#824 closed jax-gcm#755 with it).",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "physics_carry", "public",
-        "Read-only view of the cross-step physics carry paired with"
-        " dycore_state; same provenance and the same reason to watch it.",
+        " `(dycore_state, physics_carry)` pair directly (jax-gcm#824, which"
+        " closed jax-gcm#755), so JAX-ESM unpacks the return value; the same"
+        " two objects are also installed on the model as `Model.dycore_state`"
+        " / `Model.physics_carry`, which JAX-ESM deliberately does not read,"
+        " so neither name is watched here.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "date_from_sim_time", "public",

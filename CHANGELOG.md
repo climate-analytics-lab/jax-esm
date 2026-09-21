@@ -538,60 +538,65 @@ Breaking changes are marked; everything else is additive.
   and wraps it. Both a `VerosSetup` subclass and a factory returning one are
   accepted, decided on what calling it returns.
 - **`jem/components/jcm/contract.py`** — the jax-gcm revision JAX-ESM is
-  supported against (`JCM_SUPPORTED_REV`, a `dev` sha because no tagged release
-  carries jax-gcm #750's run/config schema or #763's input-resolution engine)
-  and `JCM_INTEGRATION_POINTS`, every jax-gcm name JAX-ESM reaches for — calls,
-  private reads with the issue tracking each gap, diagnostics keys, package
-  data — with what each is used for. `tests/unit/test_jcm_contract.py` walks the
-  list against the installed `jcm`, so a jax-gcm rename fails as "jax-gcm
-  renamed or removed X, which JAX-ESM used for Y" instead of as an
-  `AttributeError` in the middle of a run. Every required CI job now checks out
-  that revision through a workflow-level `JCM_REV`, which the test asserts
-  equals `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps
-  tracking `dev` so drift stays visible without blocking a pull request.
+  supported against, and every jax-gcm name it reaches for.
+  `JCM_SUPPORTED_REV` is `9e399ab2`, and `JCM_SUPPORTED_VERSION` the
+  `3.0.0rc1` that revision reports. It is a `dev` sha rather than a tag
+  because no tagged jax-gcm release carries the four changes JAX-ESM is
+  written against — #750's one run schema and `configuration` group, #763's
+  input-resolution engine, #819's removal of jax-gcm's own logging
+  configuration, and #824's public resumable state (`Model.bootstrap_state()`
+  returns the `(dycore_state, physics_carry)` pair;
+  `ModelPredictions.with_context(model)` repairs a prediction object a
+  `lax.scan` round trip stripped) and public date conversion
+  (`Model.date_from_sim_time`, with `Model._date_from_sim_time` kept only as
+  a delegating alias, which is why the season-freeze helper in
+  `examples/02_experimental/03_jcm_veros_earth` overrides the public name:
+  overriding the alias would leave jax-gcm's own callers on the unpatched
+  method and let the season go on advancing silently). The `jcm>=3.0.0rc1`
+  floor in `pyproject.toml` is the loosest true statement of the same pin,
+  since jax-gcm bumps its version only at release.
+
+  `JCM_INTEGRATION_POINTS` records each name with what it is used for: the
+  calls, the constructors JAX-ESM's documented workflow asks a user to make,
+  the package data it resolves, the underscore-prefixed SPEEDY diagnostics
+  keys the surface exchange reads (jax-gcm#754 is the issue that will replace
+  them with a published struct), and the one private attribute JAX-ESM still
+  depends on — `cf_metadata._COORD_ATTRS`, whose *values* the slab components
+  copy so their axes describe themselves exactly as the atmosphere's do.
+  Every other jax-gcm attribute the JCM wrapper touches is public at the
+  pinned revision. `tests/unit/test_jcm_contract.py` walks the list against
+  the installed `jcm`, so a jax-gcm rename fails as "jax-gcm renamed or
+  removed X, which JAX-ESM used for Y" instead of as an `AttributeError` in
+  the middle of a run. Every required CI job checks that revision out through
+  a workflow-level `JCM_REV`, which the test asserts equals
+  `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
+  `dev` so drift stays visible without blocking a pull request.
 
 ### Changed
 
-- **The pinned jax-gcm revision is `9e399ab2` (`jcm 3.0.0rc1`)**, up from
-  `637bfee5` (`2.1.0b0`), in `JCM_SUPPORTED_REV` / `JCM_SUPPORTED_VERSION`, in
-  the workflow's `JCM_REV` and as the `jcm>=3.0.0rc1` floor in
-  `pyproject.toml`. **jax-gcm no longer configures logging** at that revision
-  (jax-gcm#819) and `jcm.model.Model` no longer takes a `log_level` keyword.
-  Nothing under `jem/` ever passed it — only the test fixtures did, to silence
-  the `logging.basicConfig` that `import jcm` used to run — and it is gone from
+- **jax-gcm configures no logging of its own, and `jcm.model.Model` takes no
+  `log_level` keyword** (jax-gcm#819, at the pinned revision). Nothing under
+  `jem/` ever passed it — only the test fixtures did, to silence the
+  `logging.basicConfig` that `import jcm` used to run — and it is gone from
   them. A JAX-ESM process now configures its own logging and nothing else's,
   which is what `jem.main` already assumed when it set the level of the `jem`
   logger alone.
-- **The JCM wrapper reads no JCM private attributes** (jax-gcm#824, at the
-  pinned revision). `Model.bootstrap_state()` returns its
-  `(dycore_state, physics_carry)` pair — also readable as `Model.dycore_state`
-  / `Model.physics_carry` — and `ModelPredictions.with_context(model)` repairs
-  a prediction object that a `lax.scan` round trip stripped, so the three
-  private reads the adapter isolated in helpers (`_final_dycore_state`,
-  `_final_physics_state`, `_predictions`) are gone and their contract entries
-  are now `public`. `Model._date_from_sim_time` became
-  `Model.date_from_sim_time`, with the old name kept only as a delegating
-  alias: the season-freeze helper in
-  `examples/02_experimental/03_jcm_veros_earth` overrides the conversion on the
-  model instance and now overrides the public name, because overriding the
-  alias would have left JCM's own callers on the unpatched method and let the
-  season go on advancing silently.
-
-  One visible consequence in the output: a coupled run's atmosphere dataset
-  now carries jax-gcm's `parameters_rederived_from_live_context` note inside
-  the `jcm_prov_params` global attribute (and so a different
-  `jcm_prov_params_sha`). It is accurate — a coupled trajectory is traced
-  once and scanned, so the parameters in that record are read from the live
-  physics after the fact, not captured at trace time — and saying so is the
-  point of the note.
-
-  `TimeAxis.datetimes()` deliberately still does **not** call JCM's now-public
-  `Model.date_from_sim_time`: that is JCM's model-clock conversion, not the
-  float64 arithmetic its output files are labelled with, and for a coupling
-  step that is not a power-of-two fraction of a day (10 or 20 minutes, say)
-  the two differ by up to 128 ns — enough to take JEM's labels off the
-  atmosphere's time axis. Sharing one computation needs JCM to publish its
-  *output* labelling (jax-gcm#758); the reasoning is recorded on `TimeAxis`.
+- **A coupled run's atmosphere dataset now carries jax-gcm's
+  `parameters_rederived_from_live_context` note** inside the
+  `jcm_prov_params` global attribute (and so a different
+  `jcm_prov_params_sha`), because the stacked predictions are repaired with
+  `ModelPredictions.with_context(model)` before they are serialized. The note
+  is accurate — a coupled trajectory is traced once and scanned, so the
+  parameters in that record are read from the live physics after the fact,
+  not captured at trace time — and saying so is the point of it.
+- **`TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic** and
+  deliberately does not adopt the now-public `Model.date_from_sim_time`: that
+  is JCM's model-clock conversion, not the float64 arithmetic its output
+  files are labelled with, and for a coupling step that is not a
+  power-of-two fraction of a day (10 or 20 minutes, say) the two differ by up
+  to 128 ns — enough to take JEM's labels off the atmosphere's time axis.
+  Sharing one computation needs JCM to publish its *output* labelling, which
+  is jax-gcm#862; the reasoning is recorded on `TimeAxis`.
 - **`test_installed_jcm_matches_contract` checks `jcm.__version__`**, not the
   distribution metadata. An editable install records its version when it is
   installed, so a jax-gcm checkout moved to another revision keeps advertising

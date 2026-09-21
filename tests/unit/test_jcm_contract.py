@@ -273,10 +273,10 @@ def test_installed_jcm_matches_contract():
     pin bump creates, and a check that passes because the metadata is stale
     would be worse than no check at all.
     """
-    installed = jcm.__version__
+    installed = getattr(jcm, "__version__", None)
     assert installed == JCM_SUPPORTED_VERSION, (
         f"The imported jcm reports {installed} but JAX-ESM is supported"
-        f" against {JCM_SUPPORTED_VERSION} ({JCM_SUPPORTED_REV}). Check out"
-        " that revision, or update jem/components/jcm/contract.py if the move"
-        " is deliberate."
+        f" against {JCM_SUPPORTED_VERSION} ({JCM_SUPPORTED_REV}); None means"
+        " this jcm defines no `__version__` at all. Check out that revision,"
+        " or update jem/components/jcm/contract.py if the move is deliberate."
     )

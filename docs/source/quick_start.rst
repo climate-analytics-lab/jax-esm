@@ -8,10 +8,10 @@ Install JEM
 
 .. code-block:: bash
 
-    # JAX-GCM (jcm) >= 2.1 is not on PyPI yet: install its dev branch from source FIRST
+    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install its dev branch from source FIRST
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git switch dev          # then `git checkout <JCM_SUPPORTED_REV>` to pin it
+    git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
     pip install -e "."
     cd ..
 
@@ -19,9 +19,9 @@ Install JEM
     git clone https://github.com/climate-analytics-lab/jax-esm
     cd jax-esm
     pip install -e "."
+    cd ..
 
     # Optional: the jittable Veros fork, only needed for the JCM-Veros examples
-    cd ..
     git clone https://github.com/meteorologytoday/veros-jittable.git
     cd veros-jittable
     pip install -e "."

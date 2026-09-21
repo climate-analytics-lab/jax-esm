@@ -271,6 +271,12 @@ def load(template: Carry, path: str | Path) -> Carry:
     different model. A differentiable parameter, being a leaf, is instead
     restored from the checkpoint.
 
+    Every one of those checks is **structural**: a checkpoint written against
+    a different jax-gcm revision, whose leaves keep their shapes and dtypes
+    but change *meaning* -- jax-gcm#824 rescaled the condensate tracers from
+    g/kg to kg/kg -- is restored without complaint, which is what #119 (a
+    jax-gcm revision stamp in ``carry.msgpack``) is for.
+
     The values in ``template`` are never used; only its structure is. A
     caller with no carry to hand can therefore build one from
     ``jax.eval_shape``.

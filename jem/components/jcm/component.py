@@ -24,11 +24,14 @@ whole coupling interval just to discover the shape of the diagnostics it
 would later store, which both cost a full model step per run and started
 the atmosphere one interval ahead of the coupler's clock.
 
-Every JCM name this wrapper touches is public at the pinned revision
-(``jem.components.jcm.contract``), which is why the initial state comes from
-``bootstrap_state``'s return value and a stacked prediction is repaired with
-``ModelPredictions.with_context``: an adapter that reached into JCM's
-internals would break on a JCM refactor that broke nothing else.
+Every JCM *attribute* this wrapper touches is public at the pinned revision
+(``jem.components.jcm.contract``), apart from the underscore-prefixed
+diagnostics keys the surface exchange reads (jax-gcm#754 is the issue that
+will publish the same surface-exchange struct from every physics package).
+That is why the initial state comes from ``bootstrap_state``'s return value
+and a stacked prediction is repaired with ``ModelPredictions.with_context``:
+an adapter that reached into JCM's internals would break on a JCM refactor
+that broke nothing else.
 """
 
 from __future__ import annotations
@@ -429,7 +432,8 @@ class JCMComponent:
         ``TimeAxis.datetimes``, which reproduces JCM's *output* arithmetic
         rather than calling ``Model.date_from_sim_time`` -- public since
         jax-gcm#824, but a different conversion, for the reason set out on
-        :class:`jem.base.component.TimeAxis` (jax-gcm#758).
+        :class:`jem.base.component.TimeAxis`. Publishing the labelling
+        itself is jax-gcm#862.
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)

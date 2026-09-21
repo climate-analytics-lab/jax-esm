@@ -402,9 +402,9 @@ class TimeAxis:
     atmosphere's on one time axis and ``xr.merge`` gives a 2N-long union
     instead of an N-long join, which is the very thing this class exists to
     prevent. Sharing one computation therefore needs JCM to publish its
-    *output* labelling (jax-gcm#758), not just its clock; adopting
-    ``date_from_sim_time`` here on its own would be a regression waiting for
-    the first sub-hourly run.
+    *output* labelling, which is jax-gcm#862; jax-gcm#824 published the
+    clock, not the labelling, so adopting ``date_from_sim_time`` here on its
+    own would be a regression waiting for the first sub-hourly run.
 
     The consequence to know about is at a leap day. The labels are
     Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap

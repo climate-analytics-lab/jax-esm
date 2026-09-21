@@ -1559,11 +1559,11 @@ JAX-ESM is written against — #750's one run schema and `configuration` group,
 #763's input-resolution engine, #819's removal of jax-gcm's own logging
 configuration and #824's public resumable state and date conversion;
 `pyproject.toml`'s `jcm>=3.0.0rc1` is the loosest true statement of the same
-thing, since jax-gcm bumps its version only at release. Every required CI job checks that revision out through a
-workflow-level `JCM_REV`, which the test asserts equals `JCM_SUPPORTED_REV`, and
-a non-blocking `canary-jcm-dev` job keeps tracking `dev` so drift stays visible
-without blocking a pull request. `contract.py`'s docstring is the procedure for
-bumping the pin.
+thing, since jax-gcm bumps its version only at release. Every required CI job
+checks that revision out through a workflow-level `JCM_REV`, which the test
+asserts equals `JCM_SUPPORTED_REV`, and a non-blocking `canary-jcm-dev` job
+keeps tracking `dev` so drift stays visible without blocking a pull request.
+`contract.py`'s docstring is the procedure for bumping the pin.
 
 ## The JCM adapter
 
@@ -1599,18 +1599,21 @@ the diagnostics keys; the ECHAM reader raises `NotImplementedError` naming
 jax-gcm#754, the issue that will have every JCM physics package publish the same
 surface-exchange struct.
 
-Every JCM name the wrapper touches is public at the pinned revision: the
-initial state and physics carry are the pair `Model.bootstrap_state()` returns
-(also readable as `Model.dycore_state` / `Model.physics_carry`), and a stacked
-`ModelPredictions` is repaired with `ModelPredictions.with_context(model)`.
-jax-gcm#824 is what made all three public, and each is a
-`JCM_INTEGRATION_POINTS` entry, so a JCM refactor that moved one fails the
-contract test by name instead of inside somebody's run. `with_context` also
-stamps the atmosphere dataset's `jcm_prov_params` attribute with JCM's
-`parameters_rederived_from_live_context` note, which is the truthful record
-for a coupled run: the trajectory is traced once and scanned, so those
-parameter values are read from the live physics afterwards rather than
-captured at trace time.
+Every JCM *attribute* the wrapper touches is public at the pinned revision,
+apart from the underscore-prefixed diagnostics keys the surface exchange reads
+(jax-gcm#754, above): the initial state and physics carry are the pair
+`Model.bootstrap_state()` returns, and a stacked `ModelPredictions` is repaired
+with `ModelPredictions.with_context(model)`. jax-gcm#824 is what made both
+public, and each is a `JCM_INTEGRATION_POINTS` entry, so a JCM refactor that
+moved one fails the contract test by name instead of inside somebody's run.
+The same state and carry are also installed on the model as
+`Model.dycore_state` / `Model.physics_carry`; the wrapper takes them from
+`bootstrap_state`'s return value and never reads those attributes, so they are
+not watched. `with_context` also stamps the atmosphere dataset's
+`jcm_prov_params` attribute with JCM's `parameters_rederived_from_live_context`
+note, which is the truthful record for a coupled run: the trajectory is traced
+once and scanned, so those parameter values are read from the live physics
+afterwards rather than captured at trace time.
 
 The atmosphere's output still keeps JCM's own `time` labelling, and
 `TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic rather than
@@ -1626,8 +1629,8 @@ fraction of a day — every configuration JAX-ESM ships — and disagree for one
 that is not: a 10- or 20-minute step puts about half the labels 128 ns off, at
 which point a slab dataset and the atmosphere's no longer share a time axis and
 `xr.merge` returns a 2N-long union. Sharing one computation needs JCM to
-publish its *output* labelling, which is jax-gcm#758; the reasoning is recorded
-on `TimeAxis`.
+publish its *output* labelling, which is jax-gcm#862 — jax-gcm#824 published
+the clock, not the labelling; the reasoning is recorded on `TimeAxis`.
 
 Each `step` also compares the dycore state's own `sim_time` with the coupler's
 and logs at ERROR if they have parted, which can only happen if the carry came
