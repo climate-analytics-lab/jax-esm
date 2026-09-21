@@ -334,12 +334,36 @@ class VerosExchange:
         atm = components["atm"]
         ocn = components["ocn"]
 
-        # Read every source first, before any carry is replaced.
+        # Read every source first, before any carry is replaced. The target
+        # dtypes are read here too, from the untouched forcing sections:
+        # Veros runs double precision internally (importing its JAX backend
+        # flips `jax.config.jax_enable_x64` to True as a side effect the
+        # first time `veros.core` is imported -- see
+        # `jem.components.veros_component.configure_veros_runtime`), so
+        # every field this exchanger builds crosses a genuine precision
+        # boundary in *both* directions: the ocean's carry is entirely
+        # float64 and the atmosphere's stays whatever jax-gcm built it as
+        # (typically float32). `jax.lax.scan` requires a step's output carry
+        # to match its input dtype for dtype exactly, so a value written
+        # across that boundary without a matching cast breaks the *very
+        # first* coupled step with an opaque dtype-mismatch error from deep
+        # inside `Coupler.generate_trajectory_function` -- not a physics bug,
+        # but one this exchanger is the right place to close, since it is
+        # the one place a value is known to cross the boundary.
         u0 = atm["derived"].u0
         v0 = atm["derived"].v0
         total_heat_flux = atm["derived"].total_heat_flux
         total_freshwater_flux = atm["derived"].total_freshwater_flux
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
+        ocean_forcing_dtypes = {
+            "surface_taux": ocn["forcing"].surface_taux.dtype,
+            "surface_tauy": ocn["forcing"].surface_tauy.dtype,
+            "heat_flux": ocn["forcing"].heat_flux.dtype,
+            "freshwater_flux": ocn["forcing"].freshwater_flux.dtype,
+        }
+        atmosphere_sea_surface_temperature_dtype = (
+            atm["forcing"].sea_surface_temperature.dtype
+        )
 
         # Wind stress: regrid the wind onto the ocean grid, rotate into its
         # local frame if it has one, then apply the bulk drag law.
@@ -371,11 +395,16 @@ class VerosExchange:
         )
 
         ocn = dict(ocn, forcing=ocn["forcing"].replace(
-            surface_taux=surface_taux,
-            surface_tauy=surface_tauy,
-            heat_flux=heat_flux,
-            freshwater_flux=freshwater_flux,
+            surface_taux=surface_taux.astype(ocean_forcing_dtypes["surface_taux"]),
+            surface_tauy=surface_tauy.astype(ocean_forcing_dtypes["surface_tauy"]),
+            heat_flux=heat_flux.astype(ocean_forcing_dtypes["heat_flux"]),
+            freshwater_flux=freshwater_flux.astype(
+                ocean_forcing_dtypes["freshwater_flux"]
+            ),
         ))
+        sea_surface_temperature_on_atm = sea_surface_temperature_on_atm.astype(
+            atmosphere_sea_surface_temperature_dtype
+        )
         atm = dict(atm, forcing=atm["forcing"].replace(
             sea_surface_temperature=sea_surface_temperature_on_atm,
         ))

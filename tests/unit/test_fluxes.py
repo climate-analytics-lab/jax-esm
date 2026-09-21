@@ -229,6 +229,62 @@ def test_veros_exchange_drives_the_ocean():
     )
 
 
+def test_veros_exchange_casts_to_the_destination_carrys_dtype():
+    """A value crossing the atm/ocn precision boundary matches what it lands in.
+
+    Regression test for the real failure mode this closes: Veros runs in
+    double precision (importing it flips `jax.config.jax_enable_x64` to
+    True as a side effect of importing `veros.core`), so its carry is
+    float64 while the atmosphere's stays float32 -- and `jax.lax.scan`
+    requires a step's *output* carry to match its *input* dtype exactly, so
+    an uncast value crossing that boundary breaks the very first coupled
+    step with an opaque error deep inside the coupler, not a physics one.
+
+    `jax_enable_x64` is process-global, so this snapshots and restores it --
+    the same guard jax-gcm's own `configurations_test.py` uses for the
+    identical hazard (a physics term that flips it at construction) -- so a
+    genuine float64 array can be built here without leaking the setting into
+    every other test sharing this process.
+    """
+    x64_was_enabled = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        shape = (4,)
+        atm = {
+            "derived": _AtmDerived(
+                u0=jnp.full(shape, 5.0, dtype=jnp.float32),
+                v0=jnp.full(shape, -3.0, dtype=jnp.float32),
+                total_heat_flux=jnp.full(shape, 20.0, dtype=jnp.float32),
+                total_freshwater_flux=jnp.full(shape, 1e-6, dtype=jnp.float32),
+            ),
+            "forcing": _AtmForcing(
+                sea_surface_temperature=jnp.full(shape, 290.0, dtype=jnp.float32)
+            ),
+        }
+        ocn = {
+            "forcing": _OcnForcing(
+                surface_taux=jnp.zeros(shape, dtype=jnp.float64),
+                surface_tauy=jnp.zeros(shape, dtype=jnp.float64),
+                heat_flux=jnp.zeros(shape, dtype=jnp.float64),
+                freshwater_flux=jnp.zeros(shape, dtype=jnp.float64),
+            ),
+            "derived": _OcnDerived(
+                sea_surface_temperature=jnp.full(shape, 285.0, dtype=jnp.float64)
+            ),
+        }
+        components = {"atm": atm, "ocn": ocn}
+        exchange = VerosExchange()
+        result = exchange(components, TIME)
+
+        assert result["ocn"]["forcing"].surface_taux.dtype == jnp.float64
+        assert result["ocn"]["forcing"].surface_tauy.dtype == jnp.float64
+        assert result["ocn"]["forcing"].heat_flux.dtype == jnp.float64
+        assert result["ocn"]["forcing"].freshwater_flux.dtype == jnp.float64
+        assert result["atm"]["forcing"].sea_surface_temperature.dtype == jnp.float32
+    finally:
+        jax.config.update("jax_enable_x64", x64_was_enabled)
+
+
 def test_veros_exchange_uses_the_regridders_it_was_given():
     """`regrid["a2o_flux"]`/`["o2a_state"]` are called on the right fields."""
     a2o_calls = []

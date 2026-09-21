@@ -777,6 +777,17 @@ code this release adds:
   survives it: jax 0.11.2 removed `jax.experimental.hijax.HiPrimitive`, which
   flax 0.12.9 subclasses at import time, so an environment resolving the two
   latest releases could not import `jcm` at all (#117 tracks lifting it).
+- **`VerosExchange` casts every value it writes to the destination carry's own
+  dtype.** Importing `veros.core` flips `jax.config.jax_enable_x64` to `True`
+  as a side effect (Veros runs double precision internally), so the ocean's
+  carry is entirely float64 while the atmosphere's stays whatever jax-gcm
+  built it as (float32, for the shipped configurations) — and `jax.lax.scan`
+  requires a step's output carry to match its input dtype exactly, so an
+  uncast value crossing that boundary broke the *first* coupled step of
+  `+configuration=veros-double-drake` with an opaque dtype-mismatch error
+  from inside `Coupler.generate_trajectory_function`, not a physics one.
+  Found by actually running both Veros configurations end to end, which no
+  earlier phase of this project had done.
 - `run_chunked` validates `subsample` before compiling a trajectory, instead of
   after the first chunk has been integrated.
 - `jem.runners` no longer reads a broken `_target_` lookup as "this component
