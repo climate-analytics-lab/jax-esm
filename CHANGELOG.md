@@ -706,9 +706,57 @@ Breaking changes are marked; everything else is additive.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
   `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
+- **`+configuration=veros-double-drake` and `+configuration=veros-earth` run
+  as one command** (breaking for anyone running the examples they replace):
+  `python -m jem.main +configuration=veros-double-drake` /
+  `...=veros-earth`, with no `PYTHONPATH`, no `???` left to fill in, and
+  nothing to generate first. Both name their setup from
+  `jem.components.veros.setups`, read their terrain from packaged data, and
+  couple through `jem.fluxes.VerosExchange` — closing the "thermodynamically
+  forced but mechanically at rest" limitation their own WHY comments used to
+  record. `tests/examples/test_configurations.py` runs both (and every other
+  named configuration) for two coupled days as its smoke test.
 
 ### Removed
 
+- **The three `examples/02_experimental` Veros directories**
+  (`02_experimental_JCM_Veros`, `02_jcm_veros_double_drake`,
+  `03_jcm_veros_earth`; breaking for anyone running them directly), and the
+  `pyproject.toml` ruff ignore that existed only because of them. Every
+  capability they had is now in the package or the run loop:
+  - `main.py`'s argparse driver, chunk loop, resume, health check and output
+    naming/averaging → `jem.driver.run_chunked` (already true since Phase 2;
+    this removes the last callers of the old pattern).
+  - `run.sh` → the two `configuration/veros-*.yaml` files, run with
+    `python -m jem.main +configuration=...`.
+  - `model_setup.py`'s coupled-model construction → `jem.runners.build_coupler`
+    plus the two configurations; its hand-written wind stress and sea-ice mask
+    closure → `jem.fluxes.VerosExchange`, named as `coupling.exchanger`.
+  - `veros_case_setup.py` → `jem.components.veros.setups.double_drake` /
+    `.earth`.
+  - `modify_jcm_terrain.py` → `jem.tools.idealised_terrain`, with its
+    double-drake output now packaged as `jem/data/terrain_double_drake_T31.nc`
+    instead of regenerated per run.
+  - `model_setup.py`'s `is_pytree_all_finite`/`report_first_nonfinite` debug
+    machinery → `run_chunked`'s health gate, which does the same job at chunk
+    granularity without tracing debug prints into every step.
+  - `veros_helper.py` → nothing; nothing imported it, and `VerosComponent`
+    already publishes `derived.sea_surface_temperature`.
+  - **The `fakelnd` stand-in is gone.** It was a `SlabOceanModel` named
+    `"fakelnd"` whose only job was handing the atmosphere a clipped `stl_am`;
+    both configurations already compose `land=none`, and their WHY comments
+    already documented that the atmosphere's land boundary conditions stay
+    at `jcm.forcing.ForcingData.zeros`. Keeping it would have meant a fourth
+    component with no configuration group. Use `land=slab_speedy` (with its
+    climatology file) for a responding land surface, or
+    `forcing@atmosphere.forcing=from_file` for a prescribed one.
+  - **The `_freeze_season` (perpetual-season) knob is gone.** It
+    monkey-patched a `jcm.model.Model` *instance*'s `date_from_sim_time`; no
+    shipped configuration used it (`freeze_season_at_day` defaulted to
+    `None`), and keeping dead code alive with its own test
+    (`tests/unit/test_examples_model_setup.py`, also removed) was worse than
+    recording the gap. A frozen seasonal cycle needs a supported hook in
+    jax-gcm itself — tracked as jax-esm#120.
 - **`jem.utils.checkpoints`** (whole module, breaking): `save_carry`,
   `load_carry`, `save_component_carries`, `load_component_carries`,
   `save_coupled_carry`, `load_coupled_carry`, `save_veros_carry` and
