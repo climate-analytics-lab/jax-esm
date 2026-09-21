@@ -1911,6 +1911,110 @@ def test_an_accumulated_run_warns_that_output_reductions_do_nothing(
 # ---------------------------------------------------------------------------
 
 
+def written_labels(output_dir, name="ocn"):
+    """Return every record label a run left in ``output_dir``, in run order.
+
+    The files are named after the coupled step their chunk starts at and
+    zero-padded, so sorting them by name is sorting them by run time.
+    """
+    labels = []
+    for path in sorted(pathlib.Path(output_dir).glob(f"{name}-*.nc")):
+        with xr.open_dataset(path) as dataset:
+            labels += list(dataset["time"].values)
+    return labels
+
+
+def step_labels(*steps):
+    """Return the output label of each coupled step, as a record carries it."""
+    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
+    start = np.datetime64("2001-01-01", "ns")
+    # Record k covers step k and is labelled at the END of it.
+    return [start + (step + 1) * day for step in steps]
+
+
+def test_subsample_keeps_the_same_records_however_the_run_is_chunked(tmp_path):
+    """The stride is the run's, so `chunk` is free to be chosen for memory.
+
+    Six steps with `subsample=2`, run whole and in three-step chunks: both
+    keep coupled steps 0, 2 and 4. A stride restarted at each chunk would
+    give 0, 2, 3, 5 -- an irregular cadence, and four records where three
+    were asked for.
+    """
+    whole = run_chunked(
+        two_slabs(), total_time="6 days", chunk="6 days",
+        output_dir=tmp_path / "whole", subsample=2,
+    )
+    chunked = run_chunked(
+        two_slabs(), total_time="6 days", chunk="3 days",
+        output_dir=tmp_path / "chunked", subsample=2,
+    )
+
+    assert whole.steps_completed == chunked.steps_completed == 6
+    assert written_labels(tmp_path / "whole") == step_labels(0, 2, 4)
+    assert written_labels(tmp_path / "chunked") == step_labels(0, 2, 4)
+
+
+def test_subsample_survives_a_resume(tmp_path):
+    """A run stopped and resumed writes the records the whole run writes.
+
+    The phase comes from the coupled step in the carry, which the checkpoint
+    holds, so the resumed pass continues the stride rather than starting it
+    again at its own first chunk -- here mid-period, since it restarts at
+    step 3 with `subsample=2`.
+    """
+    uninterrupted = run_chunked(
+        two_slabs(), total_time="6 days", chunk="1 day",
+        output_dir=tmp_path / "whole", subsample=2,
+    )
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="3 days", chunk="1 day",
+        output_dir=tmp_path / "restarted", checkpoint_path=checkpoint,
+        subsample=2,
+    )
+    resumed = run_chunked(
+        two_slabs(), total_time="6 days", chunk="1 day",
+        output_dir=tmp_path / "restarted", checkpoint_path=checkpoint,
+        subsample=2,
+    )
+
+    assert uninterrupted.steps_completed == resumed.steps_completed == 6
+    assert written_labels(tmp_path / "whole") == step_labels(0, 2, 4)
+    assert written_labels(tmp_path / "restarted") == step_labels(0, 2, 4)
+    # Every chunk still wrote its file, so the directory is a complete record
+    # of the run; the chunks whose step the stride drops hold no records.
+    assert len(list((tmp_path / "restarted").glob("ocn-*.nc"))) == 6
+
+
+def test_a_sub_stepped_component_is_thinned_by_coupled_step(tmp_path):
+    """All of a kept step's records are written, and none of a dropped one's."""
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    exchangers = default_exchangers(components)
+    weaved = Coupler(
+        components,
+        exchangers,
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        # The ocean runs twice per coupled step, so it records twice a step
+        # while the sea ice records once.
+        workflow=[list(exchangers), ["ocn"] * 2, "seaice"],
+    )
+
+    run_chunked(
+        weaved, total_time="4 days", chunk="2 days",
+        output_dir=tmp_path, subsample=2,
+    )
+
+    half_day = np.timedelta64(12, "h").astype("timedelta64[ns]")
+    # Coupled steps 0 and 2: the ocean's two half-day records for each of
+    # them, the sea ice's one.
+    assert written_labels(tmp_path, "ocn") == sorted(
+        step_labels(0, 2) + [label - half_day for label in step_labels(0, 2)]
+    )
+    assert written_labels(tmp_path, "seaice") == step_labels(0, 2)
+
+
 def test_output_options_reach_the_files(coupler, tmp_path):
     """`output_averages` and `subsample` are passed through to the postprocessing."""
     averaged = run_chunked(

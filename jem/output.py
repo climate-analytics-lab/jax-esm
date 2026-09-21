@@ -32,7 +32,8 @@ NaNs and dilutes a finite extreme, and a stride can drop the very last record
 :func:`jem.driver.run_chunked` therefore calls :func:`chunk_datasets` once and
 feeds the gate that, reducing only the copy it writes.
 
-The **coupled step a chunk starts at** is what labels a file, rather than a
+The **coupled step a chunk starts at** is also what places the chunk in the
+run's ``subsample`` stride (see below), and what labels a file, rather than a
 chunk index. A chunk index counts chunks of one particular length, so the same
 simulated time has a different index under a different chunk length -- and a
 run resumed with a different chunk (a perfectly legitimate choice: the chunk
@@ -44,6 +45,23 @@ it keeps a directory listing in run order.
 
 Nothing here holds state, opens a run or decides when a chunk ends; the run
 loop does that and calls these.
+
+What ``subsample`` means here
+-----------------------------
+``subsample=n`` keeps every ``n``-th **coupled step of the run** -- the step
+``s`` when ``s % n == 0``, counting from the start of the run -- and with it
+every record that step produced. Two consequences are the point of counting
+run-global steps rather than the records in front of us. The retained cadence
+is regular across chunk boundaries and across a resume: an uninterrupted run,
+the same run in chunks of any length, and a run continued from a checkpoint
+all write exactly the same records, so ``chunk`` stays free to be chosen for
+memory and restart granularity alone. And a component the workflow runs ``n``
+times per coupled step -- or a nested coupler's inner steps -- keeps all of a
+kept step's records and none of a dropped step's, rather than being thinned at
+a different rate from everyone else; the stride is in coupled steps, not in
+records. :func:`postprocess` therefore takes the chunk's ``first_step`` and
+its number of coupled ``steps``, and reads each component's records per step
+off its own record count.
 
 What ``output_averages`` means here
 -----------------------------------
@@ -78,6 +96,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import xarray as xr
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
@@ -141,7 +160,7 @@ def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
 
 
 def check_subsample(subsample: Any) -> int:
-    """Return ``subsample`` if it is a valid record stride, else raise.
+    """Return ``subsample`` if it is a valid coupled-step stride, else raise.
 
     The rule lives here, beside the reduction that applies it, and is called
     both by :func:`postprocess` and -- before anything is compiled -- by
@@ -163,7 +182,7 @@ def check_subsample(subsample: Any) -> int:
     ValueError
         If it is not a positive integer. ``bool`` is rejected too: ``True``
         would pass ``isinstance(_, int)`` and silently mean "keep every
-        record", which is not what anyone writing it meant.
+        step", which is not what anyone writing it meant.
 
     """
     if not isinstance(subsample, int) or isinstance(subsample, bool) or subsample < 1:
@@ -171,8 +190,90 @@ def check_subsample(subsample: Any) -> int:
     return subsample
 
 
+def _kept_records(
+    n_records: int, *, first_step: int, steps: int, subsample: int
+) -> slice | np.ndarray:
+    """Return the time selection that keeps every ``subsample``-th coupled step.
+
+    The stride counts **coupled steps of the run**, not records of this chunk:
+    the step ``s`` is kept when ``s % subsample == 0``, counting from the start
+    of the run, so step 0 is always kept. That is what makes the retained
+    cadence a property of the run rather than of how it happened to be cut up:
+    a chunk that begins part-way through a stride period continues the phase
+    instead of restarting it, so an uninterrupted run, the same run in chunks
+    of any length, and a run resumed from a checkpoint all keep exactly the
+    same records. A stride reapplied from each chunk's first record instead
+    would give an irregular cadence, and more output than was asked for:
+    three-step chunks with ``subsample=2`` would keep global coupled steps
+    0, 2, 3 and 5 rather than 0, 2 and 4.
+
+    A component the workflow runs ``n > 1`` times per coupled step (or a
+    nested coupler's inner steps) contributes ``n`` consecutive records per
+    step, and they are kept or dropped **together**, because the stride is in
+    coupled steps and not in records. ``n`` is read off the chunk as
+    ``len(time) // steps`` rather than asked of the coupler, so this works for
+    whatever produced the dataset.
+
+    Parameters
+    ----------
+    n_records : int
+        Records along the time dimension of the chunk being reduced.
+    first_step : int
+        The coupled step the chunk starts at -- the same number that labels
+        its records and its file.
+    steps : int
+        Coupled steps in the chunk.
+    subsample : int
+        The stride, in coupled steps; already checked by
+        :func:`check_subsample`.
+
+    Returns
+    -------
+    slice or numpy.ndarray
+        Something to hand to ``Dataset.isel``. A plain slice for the usual
+        one-record-per-step chunk, and an index array when a step contributes
+        several records, since those are runs of ``n`` and not a stride.
+
+    Raises
+    ------
+    ValueError
+        If ``steps`` is not positive, ``first_step`` is negative, or
+        ``n_records`` is not a whole positive multiple of ``steps`` -- a
+        component records the same number of times every coupled step, so
+        anything else leaves the step a record belongs to, and with it the
+        stride, undefined.
+
+    """
+    if steps < 1:
+        raise ValueError(f"steps must be a positive integer; got {steps!r}.")
+    if first_step < 0:
+        raise ValueError(f"first_step must not be negative; got {first_step!r}.")
+    records_per_step, remainder = divmod(n_records, steps)
+    if remainder or records_per_step < 1:
+        raise ValueError(
+            f"A chunk of {steps} coupled step(s) cannot hold {n_records} "
+            f"record(s): a component records the same whole number of times "
+            f"every coupled step, so the coupled step each record belongs to "
+            f"-- and with it a stride over coupled steps -- is undefined here."
+        )
+    # Where this chunk sits in the run's stride period: the first of its
+    # coupled steps whose run-global index is a multiple of `subsample`.
+    first_kept = -first_step % subsample
+    if records_per_step == 1:
+        return slice(first_kept, None, subsample)
+    kept_steps = np.arange(first_kept, steps, subsample)
+    return (
+        kept_steps[:, np.newaxis] * records_per_step + np.arange(records_per_step)
+    ).ravel()
+
+
 def postprocess(
-    dataset: xr.Dataset, *, output_averages: bool = False, subsample: int = 1
+    dataset: xr.Dataset,
+    *,
+    output_averages: bool = False,
+    subsample: int = 1,
+    first_step: int = 0,
+    steps: int | None = None,
 ) -> xr.Dataset:
     """Thin and/or average one component's records for a chunk.
 
@@ -181,7 +282,11 @@ def postprocess(
     whatever is left to its mean. Asking for both is legal but unusual --
     the mean is then over the retained records only, which is a worse
     estimate of the chunk mean than averaging all of them; normally a run
-    sets one or the other.
+    sets one or the other. The order still holds with ``first_step``: the
+    stride is decided from the run's clock and not from the mean's, so
+    averaging cannot move it, and reversing the two would make the stride
+    select among one-record chunk means -- a stride over *chunks*, which is
+    not what ``subsample`` means anywhere else.
 
     Variables without a time dimension (grid masks, layer thicknesses) are
     passed through untouched by both reductions.
@@ -196,18 +301,34 @@ def postprocess(
         every variable that was averaged. See the module docstring for why
         the chunk is the averaging interval.
     subsample : int
-        Keep every ``subsample``-th record, starting with the first. ``1``
-        (the default) keeps all of them.
+        Keep every ``subsample``-th **coupled step** of the run, counting
+        from its start, with all of the records that step produced; ``1``
+        (the default) keeps everything. See :func:`_kept_records` for why the
+        stride is in coupled steps of the run rather than in records of this
+        chunk.
+    first_step : int
+        The coupled step this chunk starts at, which is what places the
+        chunk in the run's stride period. The default, 0, means "the start of
+        the run", so a single dataset reduced on its own keeps its records
+        0, ``subsample``, ``2 * subsample`` ...
+    steps : int, optional
+        Coupled steps in the chunk, from which the records each step
+        contributed are counted (``len(time) // steps``). Defaults to the
+        number of records, i.e. one record per coupled step.
 
     Returns
     -------
     xarray.Dataset
+        A chunk none of whose coupled steps the stride keeps comes back with
+        no records -- possible only for a ``subsample`` longer than the chunk
+        -- rather than with a record the run's cadence does not call for.
 
     Raises
     ------
     ValueError
-        If ``subsample`` is not a positive integer, or a reduction was asked
-        for and the dataset has no time dimension to reduce.
+        If ``subsample`` is not a positive integer, a reduction was asked for
+        and the dataset has no time dimension to reduce, or (when the stride
+        is applied) the record count is not a whole multiple of ``steps``.
 
     """
     check_subsample(subsample)
@@ -220,8 +341,24 @@ def postprocess(
         )
 
     if subsample > 1:
-        dataset = dataset.isel({TIME_DIMENSION: slice(None, None, subsample)})
+        n_records = int(dataset.sizes[TIME_DIMENSION])
+        dataset = dataset.isel(
+            {
+                TIME_DIMENSION: _kept_records(
+                    n_records,
+                    first_step=first_step,
+                    steps=n_records if steps is None else steps,
+                    subsample=subsample,
+                )
+            }
+        )
     if not output_averages:
+        return dataset
+    if not dataset.sizes[TIME_DIMENSION]:
+        # The stride kept none of this chunk's coupled steps, so there is
+        # nothing to average and no last time to label a mean with. An empty
+        # chunk is the honest answer; inventing a record here would put one in
+        # the output at a cadence the run did not ask for.
         return dataset
 
     timed = _timed_variables(dataset)
@@ -453,12 +590,21 @@ def postprocess_datasets(
     *,
     output_averages: bool = False,
     subsample: int = 1,
+    first_step: int = 0,
+    steps: int | None = None,
 ) -> dict[str, xr.Dataset]:
     """Apply :func:`postprocess` to every dataset of a chunk.
 
     The reductions are the same ones, applied with the same options to each
     component: a chunk is one interval of the run's clock, so a run whose
     output is chunk means wants them from every component that wrote any.
+
+    ``first_step`` and ``steps`` describe the **chunk**, so they are one pair
+    for all of its datasets even though the components need not record at the
+    same rate: :func:`postprocess` reads each component's records-per-step off
+    its own record count, and a component the workflow runs ``n`` times per
+    coupled step keeps or drops all ``n`` of a step's records together with
+    everyone else's.
 
     Nothing here copies. With neither reduction asked for this is the
     identity and the returned datasets **are** the given ones, so a caller
@@ -475,6 +621,11 @@ def postprocess_datasets(
         Passed to :func:`postprocess`.
     subsample : int
         Passed to :func:`postprocess`.
+    first_step : int
+        The coupled step the chunk starts at; passed to :func:`postprocess`,
+        where it places the chunk in the run's stride period.
+    steps : int, optional
+        Coupled steps in the chunk; passed to :func:`postprocess`.
 
     Returns
     -------
@@ -484,7 +635,11 @@ def postprocess_datasets(
     """
     return {
         name: postprocess(
-            dataset, output_averages=output_averages, subsample=subsample
+            dataset,
+            output_averages=output_averages,
+            subsample=subsample,
+            first_step=first_step,
+            steps=steps,
         )
         for name, dataset in datasets.items()
     }
@@ -495,6 +650,7 @@ def datasets_for_chunk(
     diagnostics: Mapping[str, Any],
     *,
     first_step: int = 0,
+    steps: int | None = None,
     output_averages: bool = False,
     subsample: int = 1,
 ) -> dict[str, xr.Dataset]:
@@ -515,7 +671,12 @@ def datasets_for_chunk(
     diagnostics : Mapping[str, Any]
         What the chunk's trajectory function returned.
     first_step : int
-        The coupled step the first record of this chunk covers.
+        The coupled step the first record of this chunk covers. It labels the
+        records *and* places the chunk in the run's ``subsample`` period, so
+        one number does both and the two cannot disagree.
+    steps : int, optional
+        Coupled steps in the chunk; passed to :func:`postprocess_datasets`.
+        Defaults to one coupled step per record.
     output_averages : bool
         Passed to :func:`postprocess`.
     subsample : int
@@ -531,4 +692,6 @@ def datasets_for_chunk(
         chunk_datasets(coupler, diagnostics, first_step=first_step),
         output_averages=output_averages,
         subsample=subsample,
+        first_step=first_step,
+        steps=steps,
     )

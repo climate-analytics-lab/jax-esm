@@ -127,6 +127,90 @@ def test_postprocess_composes_subsample_then_average():
     assert result["time"].values[0] == dataset["time"].values[4]
 
 
+def test_postprocess_stride_counts_coupled_steps_of_the_whole_run():
+    """A chunk part-way through the stride continues its phase, not restarts it.
+
+    Six records in two three-step chunks: the stride is in coupled steps of
+    the run, so the pair keeps global steps 0, 2 and 4 -- the records an
+    unchunked run keeps -- and not 0, 2, 3, 5, which is what a slice that
+    restarts at each chunk's first record gives (an irregular cadence, and
+    more output than was asked for).
+    """
+    whole = simple_dataset(6)
+    chunks = [
+        postprocess(
+            whole.isel(time=slice(0, 3)), subsample=2, first_step=0, steps=3
+        ),
+        postprocess(
+            whole.isel(time=slice(3, 6)), subsample=2, first_step=3, steps=3
+        ),
+    ]
+
+    kept_times = np.concatenate([chunk["time"].values for chunk in chunks])
+    np.testing.assert_array_equal(kept_times, whole["time"].values[[0, 2, 4]])
+    np.testing.assert_array_equal(
+        kept_times, postprocess(whole, subsample=2)["time"].values
+    )
+    np.testing.assert_array_equal(
+        np.concatenate([chunk["temperature"].values for chunk in chunks]),
+        whole["temperature"].values[::2],
+    )
+
+
+def test_postprocess_keeps_every_record_of_a_kept_coupled_step():
+    """A component recording twice a step is thinned by step, not by record."""
+    dataset = simple_dataset(6)  # three coupled steps, two records each
+
+    first = postprocess(dataset, subsample=2, first_step=0, steps=3)
+    # Steps 0 and 2 are kept, both of each one's records with them.
+    np.testing.assert_array_equal(
+        first["temperature"].values, dataset["temperature"].values[[0, 1, 4, 5]]
+    )
+
+    # Steps 3, 4 and 5: only step 4 is on the stride, and it keeps both.
+    second = postprocess(dataset, subsample=2, first_step=3, steps=3)
+    np.testing.assert_array_equal(
+        second["temperature"].values, dataset["temperature"].values[[2, 3]]
+    )
+
+
+def test_postprocess_needs_a_whole_number_of_records_per_coupled_step():
+    """Without that, the coupled step a record belongs to is undefined."""
+    with pytest.raises(ValueError, match="cannot hold 5 record"):
+        postprocess(simple_dataset(5), subsample=2, steps=3)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [({"steps": 0}, "steps must be a positive"), ({"first_step": -1}, "negative")],
+)
+def test_postprocess_rejects_a_nonsensical_chunk(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        postprocess(simple_dataset(6), subsample=2, **kwargs)
+
+
+def test_postprocess_keeps_nothing_from_a_chunk_the_stride_skips():
+    """A stride longer than the chunk skips whole chunks rather than bending.
+
+    Keeping a record here anyway -- the chunk's first, say -- is exactly what
+    would break the cadence the stride promises; an empty chunk is the honest
+    answer, and `output_averages` has nothing to average in it.
+    """
+    dataset = simple_dataset(3)  # coupled steps 6, 7, 8 of the run
+
+    assert postprocess(dataset, subsample=5, first_step=6, steps=3).sizes["time"] == 0
+    assert (
+        postprocess(
+            dataset, subsample=5, first_step=6, steps=3, output_averages=True
+        ).sizes["time"]
+        == 0
+    )
+    # The chunk before it does hold a multiple of the stride -- step 5 -- and
+    # keeps that one record.
+    kept = postprocess(dataset, subsample=5, first_step=3, steps=3)
+    np.testing.assert_array_equal(kept["time"].values, dataset["time"].values[[2]])
+
+
 @pytest.mark.parametrize("subsample", [0, -1, 1.5, True])
 def test_postprocess_rejects_a_bad_subsample(subsample):
     with pytest.raises(ValueError, match="positive integer"):
@@ -389,6 +473,74 @@ def test_datasets_for_chunk_labels_and_postprocesses(two_slab_coupler, tmp_path)
             ].values.mean(axis=0),
             rtol=1e-6,
         )
+
+
+@pytest.fixture
+def sub_stepped_coupler():
+    """Return the same pair with the ocean run twice per coupled step.
+
+    The classic weaving, in miniature: one component on a faster clock inside
+    the coupled step, so its chunk holds two records per step while the other
+    holds one -- which is what makes the stride's unit (coupled steps, not
+    records) observable.
+    """
+    grid = make_grid()
+    components = {
+        "ocn": SlabOceanModel(grid),
+        "seaice": SlabSeaiceModel(grid, name="seaice"),
+    }
+    exchangers = default_exchangers(components)
+    return Coupler(
+        components,
+        exchangers,
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[list(exchangers), ["ocn"] * 2, "seaice"],
+    )
+
+
+def test_components_recording_at_different_rates_are_thinned_in_step(
+    sub_stepped_coupler,
+):
+    """One `(first_step, steps)` pair thins every component by the same steps."""
+    run = sub_stepped_coupler.generate_trajectory_function(3)
+    _, diagnostics = run(sub_stepped_coupler.initialize())
+    full = chunk_datasets(sub_stepped_coupler, diagnostics, first_step=0)
+    assert full["ocn"].sizes["time"] == 6
+    assert full["seaice"].sizes["time"] == 3
+
+    reduced = postprocess_datasets(full, subsample=2, first_step=0, steps=3)
+
+    # Coupled steps 0 and 2 are kept: both of the ocean's records for each of
+    # them, and the sea ice's single record for each.
+    np.testing.assert_array_equal(
+        reduced["ocn"]["time"].values, full["ocn"]["time"].values[[0, 1, 4, 5]]
+    )
+    np.testing.assert_array_equal(
+        reduced["seaice"]["time"].values, full["seaice"]["time"].values[[0, 2]]
+    )
+
+
+def test_datasets_for_chunk_carries_the_chunk_through_to_the_stride(
+    two_slab_coupler,
+):
+    """`first_step` labels the records and places them in the run's stride."""
+    run = two_slab_coupler.generate_trajectory_function(3)
+    carry, first = run(two_slab_coupler.initialize())
+    _, second = run(carry)
+
+    kept = [
+        datasets_for_chunk(two_slab_coupler, first, first_step=0, steps=3,
+                           subsample=2)["ocn"],
+        datasets_for_chunk(two_slab_coupler, second, first_step=3, steps=3,
+                           subsample=2)["ocn"],
+    ]
+    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
+    start = np.datetime64("2001-01-01", "ns")
+    np.testing.assert_array_equal(
+        np.concatenate([dataset["time"].values for dataset in kept]),
+        np.array([start + (step + 1) * day for step in (0, 2, 4)]),
+    )
 
 
 def test_datasets_for_chunk_labels_a_later_chunk_from_its_first_step(

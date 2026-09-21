@@ -935,7 +935,8 @@ for each chunk:
     first_step = int(carry.step)
     carry, diagnostics = trajectory(carry)
     datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
-    reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…)
+    reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…,
+                                    first_step=first_step, steps=steps_per_chunk)
     paths += write_chunk(reduced, output_dir, first_step)
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
     if ok or not bail_on_unhealthy:
@@ -1133,8 +1134,27 @@ chunk index survives as what it is: a counter for the health check and the log
 line. Each chunk is labelled with its own dates, because `first_step` is passed
 through to `Coupler.to_xarray`.
 
-`subsample=n` keeps every *n*-th coupling step. `output_averages=True` is
-defined against jcm's meaning of the same word rather than beside it: jcm
+`subsample=n` keeps every *n*-th coupling step — every *n*-th step of the
+**run**, counting from its start, not of the chunk in hand, which is why
+`postprocess` is told the chunk's `first_step` and its number of coupled
+`steps` as well as the stride. The cadence then belongs to the run: an
+uninterrupted run, the same run in chunks of any length and a run resumed from
+a checkpoint all write exactly the same records, and step 0 is always one of
+them. (A stride reapplied from each chunk's first record instead gives an
+irregular cadence and more output than was asked for — three-step chunks with
+`subsample=2` keeping global steps 0, 2, 3, 5 rather than 0, 2, 4.) The unit
+is a coupled *step*, not a record: a component the workflow runs `n` times per
+coupled step, or a nested coupler's inner steps, contributes `n` records per
+step and they are kept or dropped together, so components recording at
+different rates stay on one cadence. `postprocess` reads each component's
+records per step off its own record count (`len(time) // steps`) and refuses a
+count that is not a whole multiple of the chunk's steps, since the step a
+record belongs to would then be undefined. A `subsample` longer than `chunk`
+is legal and means some chunks contain no kept step at all; those chunks' files
+hold no records, rather than a record the run's cadence does not call for.
+
+`output_averages=True` is defined against jcm's meaning of the same word
+rather than beside it: jcm
 replaces each saved record with the mean over its save interval, labelled at the
 interval's end, and the coupler's records are already one per coupling step — so
 the coupler's output interval is the **chunk**, and the flag replaces a chunk's

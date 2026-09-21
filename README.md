@@ -243,6 +243,12 @@ judges a chunk by its last record and its extremes, and a chunk mean (which
 skips NaNs) or a stride that drops the last record would report an atmosphere
 that blew up at the end of the month as healthy.
 
+`subsample=n` keeps every *n*-th **coupled step of the run**, counting from
+its start, with every record that step produced (a component the workflow runs
+several times per coupled step keeps all of them, or none). So the files hold
+the same records however the run was chunked and wherever it was resumed, and
+`chunk` stays free to be chosen for memory and restart granularity alone.
+
 For a reduction that must not cost memory proportional to the run, accumulate
 it *inside* the scan instead of writing every step out:
 

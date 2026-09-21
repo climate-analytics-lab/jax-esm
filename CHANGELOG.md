@@ -646,6 +646,23 @@ code this release adds:
   `subsample>1` could drop the chunk's last record — which is the record
   `jcm.diagnostics.check_health` judges, so a model that went bad near the end
   of a chunk was reported healthy and checkpointed.
+- `subsample` counts coupled steps of the **run**, so the cadence it writes
+  survives chunking and resume. The stride was applied to each chunk's records
+  from that chunk's first one, so with three-step chunks and `subsample=2` a
+  six-step run kept global steps 0, 2, 3 and 5 instead of 0, 2 and 4 — an
+  irregular cadence, and more output than was asked for, changing with a
+  `chunk` that is meant to be free to choose for memory and restart
+  granularity. `jem.output.postprocess` and `postprocess_datasets` now take
+  the chunk's `first_step` and its number of coupled `steps` (`run_chunked`
+  passes both), keep the step `s` when `s % subsample == 0` counting from the
+  start of the run, and keep or drop **all** of the records a step produced —
+  so a component the workflow runs `n` times per coupled step is thinned on
+  the same cadence as everyone else. A record count that is not a whole
+  multiple of the chunk's steps is a `ValueError`, since the step a record
+  belongs to is then undefined, and a chunk containing no kept step (possible
+  only for a `subsample` longer than `chunk`) writes a file with no records.
+  `postprocess(dataset, subsample=k)` on its own is unchanged: no offset means
+  the start of a run.
 - A chunk the health gate rejects is no longer checkpointed. The gate now runs
   before the save, so a run stopped by it leaves its single restart directory
   holding the last chunk that *passed*, instead of overwriting it with the

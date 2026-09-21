@@ -30,7 +30,11 @@ trajectory for one call, and a run whose length does not divide into chunks is
 much more often a mistake in the configuration than a deliberate request. All
 three are checked before anything is built or compiled, and the message names
 both quantities -- as is ``subsample``, which is otherwise not read until the
-first chunk has already been integrated.
+first chunk has already been integrated. ``chunk`` is then free to be chosen
+for memory and restart granularity alone: neither what the files hold nor when
+the checkpoints fall depends on it, because ``subsample`` counts coupled steps
+from the start of the **run** (:mod:`jem.output`) and so does
+``checkpoint_interval``.
 
 The trajectory is compiled **once**, for ``chunk`` worth of coupled steps, and
 called once per chunk. A resumed run is the one case that can need a second
@@ -343,7 +347,16 @@ def run_chunked(
         the *files* only; ``health_check`` still sees the whole chunk.
     subsample : int
         Keep every ``subsample``-th coupled step in the output -- again, in
-        the files only.
+        the files only. The stride counts coupled steps from the **start of
+        the run** (the step a record covers, not its position in its chunk),
+        so a chunked run and a resumed one keep exactly the records an
+        uninterrupted run keeps, and the first step of the run is always
+        kept. A component that records ``n`` times per coupled step keeps all
+        ``n`` records of a kept step and none of a dropped one: the stride is
+        in coupled steps, not in records. A ``subsample`` longer than
+        ``chunk`` is legal and means some chunks contain no kept step, whose
+        files then hold no records -- the price of a cadence that belongs to
+        the run rather than to the chunking.
     health_check : callable, optional
         ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run after
         each chunk has been written and **before** it is checkpointed.
@@ -697,8 +710,14 @@ def run_chunked(
             # would pass a state that went bad at the end of the chunk. See
             # :mod:`jem.output`.
             datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+            # `first_step` and `steps` place the chunk on the run's clock, so
+            # the `subsample` stride counts coupled steps of the RUN: the
+            # retained cadence is then the same however the run was chunked
+            # and wherever it was resumed, instead of restarting at each
+            # chunk's first record.
             reduced = postprocess_datasets(
-                datasets, output_averages=output_averages, subsample=subsample
+                datasets, output_averages=output_averages, subsample=subsample,
+                first_step=first_step, steps=steps,
             )
             paths.extend(write_chunk(reduced, output_dir, first_step))
             written = f"{len(reduced)} file(s) written"
