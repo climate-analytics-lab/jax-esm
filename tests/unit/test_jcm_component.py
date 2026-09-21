@@ -26,6 +26,7 @@ from jem.base.component import (
     SupportsXarray,
     TimeAxis,
 )
+from jem import constants
 from jem.components.jcm import JCMComponent, exchange_fields
 
 START_DATE = jdt.to_datetime("2000-01-01")
@@ -588,3 +589,26 @@ def test_earth_slab_runs_from_the_command_line(tmp_path):
         "atm-00000000.nc", "lnd-00000000.nc",
         "ocn-00000000.nc", "seaice-00000000.nc",
     ]
+
+    # The polar surface the run starts from, end to end. The first record is
+    # what `seaice.initialize()` published, which under the standard workflow
+    # is also what the atmosphere was handed for its first two steps: it has
+    # to be the observed cover, not an ice-free ocean. And the ice must still
+    # be a plausible thickness two days later -- a run that begins out of
+    # balance with its own freezing point answers with tens of metres of ice
+    # in a single coupling step.
+    import xarray as xr
+
+    with xr.open_dataset(run_directories[0] / "seaice-00000000.nc") as sea_ice:
+        first = sea_ice["ice_fraction"].isel(time=0).values
+        assert float(first.max()) > 0.9
+        assert float(first.mean()) > 0.01
+        thickness = sea_ice["ice_thickness"].values
+        assert np.isfinite(thickness).all()
+        assert float(thickness.max()) < 5.0, float(thickness.max())
+
+    with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
+        # The whole field: land carries the 288.15 K fill value, which is
+        # above the floor and so cannot hide an ocean cell below it.
+        sst = ocean["sea_surface_temperature"].isel(time=0).values
+        assert float(sst.min()) >= constants.seawater_freezing_point_K

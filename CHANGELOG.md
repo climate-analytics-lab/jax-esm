@@ -757,6 +757,35 @@ code this release adds:
   lists them for a configuration coupled by a hand-written
   `coupling.exchanger`, which cannot be read that way. The coupler's
   structure check is unchanged: it is what caught this.
+- **`+configuration=earth-slab` starts its sea ice from the observed cover.**
+  `SlabSeaiceModel` takes an optional `ice_clim_file` — a 12-month `icec`
+  concentration climatology on the model grid, read the way the slab ocean
+  reads `sst_clim_file` — and `initialize()` samples it at the run's start
+  date and inverts the `1 - exp(-h / scale)` fraction closure to a thickness,
+  capped at the new `max_initial_ice_thickness` (3 m) because the closure
+  saturates and a fully covered cell would otherwise invert to an infinite
+  depth. `earth-slab` wires the packaged file's `icec` in. It matters because
+  the exchange runs before the components and a `derived` field is only
+  rewritten at the end of a step, so `initialize()`'s `ice_fraction` is what
+  the atmosphere is handed for the first *two* coupling steps: the
+  configuration's claim that "the climatological sea-ice cover the atmosphere
+  sees comes from this component" was true only once the slab had grown some.
+  Without a file the behaviour is unchanged — a uniform
+  `initial_ice_thickness`, zero by default.
+- **A slab ocean no longer starts colder than it is allowed to be.**
+  `SlabOceanModel.initialize()` holds the initial sea surface temperature at
+  or above `jem.constants.seawater_freezing_point_K`, the floor `step` has
+  always maintained. An observed "SST" climatology is generally a *surface*
+  temperature, so where the surface is sea ice it reports the ice surface:
+  the packaged T30 file is below freezing on 5902 of 36960 ocean
+  point-months, by up to 31.9 K. Taken verbatim that deficit reached the
+  first step as `deficit * mixed_layer_depth * rho * cp` of freeze/melt
+  potential and the sea ice answered with **25.2 m** of ice in one coupling
+  day; with the floor applied, `earth-slab`'s two-day maximum is 3.7 m. The
+  ice such a cell really carries is the sea-ice component's to hold, which is
+  what the `ice_clim_file` above is for. How much of a climatology the floor
+  touches is logged at INFO when the model is built. Runs with no SST
+  climatology are unaffected: the idealized profile starts near 288 K.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

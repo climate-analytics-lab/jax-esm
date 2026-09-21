@@ -17,7 +17,9 @@ import inspect
 import logging
 
 import jax
+import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import pytest
 from hydra import compose, initialize_config_module
 from omegaconf import OmegaConf
@@ -449,6 +451,54 @@ def test_an_unexchanged_climatology_stays_a_climatology():
     forcing = coupler.initialize().components["atm"]["forcing"]
     for name in ("stl_am", "snowc_am", "soilw_am"):
         assert isinstance(getattr(forcing, name), TimeSeries), name
+
+
+def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
+    """The ice the atmosphere is handed on step 0 is the file's, not zero.
+
+    The exchange runs before the components and a `derived` field is only
+    rewritten at the end of a step, so `seaice.initialize()`'s `ice_fraction`
+    is what `atm.forcing.sice_am` holds for the first two coupling steps. An
+    Earth-like run must not begin with ice-free poles.
+    """
+    coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
+    carries = coupler.initialize().components
+
+    ice_fraction = carries["seaice"]["derived"].ice_fraction
+    assert float(jnp.max(ice_fraction)) > 0.9
+    assert float(jnp.mean(ice_fraction)) > 0.01
+    # Finite, because the fraction closure's inverse is capped: a fully
+    # covered cell would otherwise be infinitely thick.
+    thickness = carries["seaice"]["state"].ice_thickness
+    assert bool(jnp.all(jnp.isfinite(thickness)))
+    assert float(jnp.max(thickness)) <= float(
+        coupler.components["seaice"].params.max_initial_ice_thickness
+    )
+
+    # And it reaches the atmosphere: the exchange puts it in `sice_am`.
+    exchanged = coupler.exchangers["exchange"](dict(carries), coupler.coupling_time(0))
+    np.testing.assert_allclose(
+        np.asarray(exchanged["atm"]["forcing"].sice_am), np.asarray(ice_fraction)
+    )
+
+
+def test_earth_slab_ocean_starts_at_or_above_freezing():
+    """The packaged SST climatology is sub-freezing under ice; the ocean is not.
+
+    Taken verbatim the mixed layer would start tens of kelvin below the floor
+    `step` holds it to, and the first step would turn the whole deficit into
+    frazil ice.
+    """
+    from jem import constants
+
+    coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
+    carries = coupler.initialize().components
+
+    ocean = np.asarray(coupler.components["ocn"].grid.binary_mask == 0.0)
+    sea_surface_temperature = np.asarray(
+        carries["ocn"]["state"].sea_surface_temperature
+    )
+    assert sea_surface_temperature[ocean].min() >= constants.seawater_freezing_point_K
 
 
 def test_exchanged_forcing_can_be_declared_in_the_config():
