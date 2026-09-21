@@ -10,7 +10,7 @@ built on ``jax.lax.scan``.
   coupled run.
 - Building a coupled model in Python? See :doc:`python_api` for the complete
   construction.
-- Integrating your own model? Follow :doc:`tutorial`.
+- Integrating your own model? Follow :doc:`adding_a_component`.
 - Looking for a specific class or function? See :doc:`api_superset`.
 
 
@@ -21,7 +21,7 @@ built on ``jax.lax.scan``.
    getting_started
    python_api
    examples
-   tutorial
+   adding_a_component
    experimental
 
    issues

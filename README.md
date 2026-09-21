@@ -108,9 +108,12 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
 An exchange the standard table cannot express — one that regrids, computes a
 flux, converts units or blends two fields — is written as a plain function
-instead; `docs/source/tutorial.rst` works one through. Longer versions of this
-run, including the sea-ice component and the plotting code that produced the
-animation below, are in `examples/01_basic/01_aquaplanet.ipynb`.
+instead; `docs/source/adding_a_component.rst` works one through, and
+`docs/source/python_api.md` is this same block with the full construction
+around it. Longer versions of this run, including the sea-ice component and
+the plotting code that produced the animation below, are in
+`examples/01_basic/01_aquaplanet.ipynb` -- `examples/README.md` lists every
+example and the command or notebook that runs it.
 
 ![Surface specific humidity](gallery/JCM_SOM_demo.gif)
 
