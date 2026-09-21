@@ -571,6 +571,17 @@ Breaking changes are marked; everything else is additive.
   a workflow-level `JCM_REV`, which the test asserts equals
   `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
   `dev` so drift stays visible without blocking a pull request.
+- **`jem.fluxes`** (`bulk_wind_stress`, `mask_fluxes_under_ice`,
+  `rotate_vector`, `read_rotation_angles`, `VerosExchange`) — the computed
+  half of a Veros ocean's coupling that
+  `jem.exchangers.VEROS_OCEAN_EXCHANGES` deliberately cannot carry: a bulk
+  drag law turning the atmosphere's near-surface wind into the wind stress
+  Veros integrates (rotated into a rotated ocean grid's own frame first, when
+  one is given), and a "swamp" sea-ice mask on the heat and freshwater
+  fluxes once the surface reaches the freezing point. `VerosExchange` is the
+  `Exchanger` built from them; wiring it in as `coupling.exchanger` is what
+  makes the Veros configurations mechanically, not just thermodynamically,
+  forced — closing the limitation their own WHY comments recorded.
 
 ### Changed
 
