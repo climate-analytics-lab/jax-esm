@@ -291,6 +291,33 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " coupling step.",
     ),
     IntegrationPoint(
+        "jcm.forcing", "TimeSeries", "public",
+        "The time-varying forcing leaf a from-file boundary condition is"
+        " built as. JAX-ESM never constructs one; it is watched because"
+        " whether a ForcingData field IS one decides the pytree structure of"
+        " the atmosphere's carry, which is what JCMComponent.initialize()"
+        " has to settle before a coupled run can scan.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "select", "public",
+        "Collapse every TimeSeries leaf to one date's slice."
+        " JCMComponent.initialize() takes the fields the coupling supplies"
+        " from the start-date slice, so they are the plain arrays an"
+        " exchanger writes rather than time series."
+        " Signature: select(date: DateData, calendar=...) -> ForcingData.",
+    ),
+    IntegrationPoint(
+        "jcm.date", "DateData", "public",
+        "The per-step date object ForcingData.select takes; JCMComponent"
+        " builds one for the run's start date with DateData.set_date.",
+    ),
+    IntegrationPoint(
+        "jcm.date.DateData", "set_date", "public",
+        "Build a DateData at a given jax_datetime.Datetime."
+        " Signature: set_date(model_time, model_step=None, dt_seconds=None,"
+        " calendar=...) -> DateData.",
+    ),
+    IntegrationPoint(
         "jcm.forcing", "default_forcing", "public",
         "Default prescribed-SST boundary conditions when a JCMComponent is"
         " built without an explicit forcing.",

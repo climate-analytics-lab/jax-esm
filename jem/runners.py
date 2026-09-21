@@ -34,7 +34,7 @@ import hydra.utils
 import jax_datetime as jdt
 import xarray as xr
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 # Importing the config package registers the ${jcm_data:}/${jem_data:}
 # resolvers. A config composed elsewhere (`jem.main`, a test) has already done
@@ -49,6 +49,7 @@ from jem.exchangers import (
     DEFAULT_EXCHANGER_NAME,
     Exchange,
     default_exchangers,
+    exchanged_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -338,6 +339,87 @@ def build_exchangers(
     return {DEFAULT_EXCHANGER_NAME: Exchange(table, regridders)}
 
 
+def declare_exchanged_forcing(
+    cfg: DictConfig, atm: JCMComponent, exchangers: Mapping[str, Any]
+) -> None:
+    """Tell the atmosphere which of its boundary conditions the coupling supplies.
+
+    The atmosphere's ``forcing`` section is the one carry section a coupled
+    model both *reads from a file* and *overwrites every step*. With
+    ``forcing@atmosphere.forcing=from_file`` jax-gcm builds each time-varying
+    boundary condition as a :class:`jcm.forcing.TimeSeries` -- values, time
+    axis and alignment mode -- and slices it by date inside the model; an
+    exchanger writes a single array into the same field. Something has to say
+    which fields are which, and the coupling table is the only place that
+    knows: see
+    :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`
+    for what the atmosphere then does with the answer.
+
+    Two spellings, in precedence order:
+
+    - ``coupling.exchanged_forcing`` -- an explicit list of
+      :class:`jcm.forcing.ForcingData` field names. This is how a
+      configuration coupled by a hand-written ``coupling.exchanger`` says what
+      that function writes, since a Python function cannot be read off the way
+      a table can.
+    - unset (``null``, the default) -- read off the built exchangers with
+      :func:`jem.exchangers.exchanged_fields`, so the declarative table
+      remains the single description of the coupling.
+
+    Deriving rather than assuming a fixed set is what keeps an unexchanged
+    climatology climatological: with ``land=none`` nothing supplies the land
+    surface, so ``stl_am``/``snowc_am``/``soilw_am`` stay time series and go
+    on following the seasonal cycle, exactly as they would in an uncoupled
+    run.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The whole composed config; only ``cfg.coupling`` is read.
+    atm : jem.components.jcm.component.JCMComponent
+        The built atmosphere, which is told the answer.
+    exchangers : Mapping[str, Any]
+        What :func:`build_exchangers` returned.
+
+    """
+    declared = cfg.coupling.get("exchanged_forcing")
+    if declared is not None:
+        fields = tuple(OmegaConf.to_container(declared, resolve=True)  # type: ignore[arg-type]
+                       if isinstance(declared, ListConfig) else declared)
+        logger.info(
+            "The coupling supplies the atmosphere's %s (coupling.exchanged_forcing).",
+            ", ".join(fields) or "nothing",
+        )
+    else:
+        fields = exchanged_fields(exchangers, atm.name)
+        opaque = sorted(
+            name for name, exchanger in exchangers.items()
+            if not isinstance(exchanger, Exchange)
+        )
+        undeclared = [
+            name for name in atm.time_varying_forcing if name not in fields
+        ]
+        if opaque and undeclared:
+            # A hand-written exchanger is a function, so there is nothing to
+            # read: whatever it writes into `atm.forcing` is invisible here.
+            # Warned about rather than guessed at, because the guess that is
+            # wrong turns a climatology into a constant without saying so.
+            # Only when something is actually still a time series: with the
+            # default forcing every field is already a plain array and a
+            # hand-written exchanger has nothing to trip over.
+            logger.warning(
+                "The exchanger(s) %s are hand-written, so what they write into "
+                "the atmosphere's forcing cannot be read off a table, while %s "
+                "%s still time-varying. Any of those an exchanger overwrites "
+                "has to be listed in `coupling.exchanged_forcing`, or the "
+                "coupled step is refused for changing the carry's structure.",
+                ", ".join(repr(name) for name in opaque),
+                ", ".join(undeclared),
+                "is" if len(undeclared) == 1 else "are",
+            )
+    atm.set_exchanged_forcing(fields)
+
+
 def build_coupler(cfg: DictConfig) -> Coupler:
     """Build the whole coupled model from a composed config.
 
@@ -366,6 +448,9 @@ def build_coupler(cfg: DictConfig) -> Coupler:
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)
+    # Before the coupler, because this decides the structure of the carry
+    # `atm.initialize()` builds, and the coupler is what scans that carry.
+    declare_exchanged_forcing(cfg, atm, exchangers)
     workflow = cfg.coupling.get("workflow")
     coupler = Coupler(
         components,

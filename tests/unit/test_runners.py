@@ -14,6 +14,7 @@ branch to the runner.
 
 import dataclasses
 import inspect
+import logging
 
 import jax
 import jax_datetime as jdt
@@ -389,6 +390,111 @@ def test_an_explicit_coupling_table_is_used_as_given():
     (spec,) = exchangers["exchange"].specs
     assert spec.src == "ocn.state.sea_surface_temperature"
     assert spec.regrid is None
+
+
+# ---------------------------------------------------------------------------
+# Which of the atmosphere's boundary conditions the coupling supplies
+# ---------------------------------------------------------------------------
+
+
+def test_earth_slab_couples_its_file_forcing():
+    """The one shipped configuration with `forcing=from_file` builds and scans.
+
+    `earth-slab` gives the atmosphere jax-gcm's packaged T30 climatology, in
+    which every surface boundary condition is a time-varying `TimeSeries`,
+    and then has the surface components overwrite five of them with plain
+    arrays every step. The runner has to tell the atmosphere which five, or
+    the carry changes pytree structure at the first exchange and no step can
+    be scanned at all. Traced with `jax.eval_shape`: the structure check is a
+    trace-time check, and tracing it costs no compilation.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
+
+    # Read off the coupling table, not assumed: these are exactly the rows of
+    # `jem.exchangers.STANDARD_EXCHANGES` that write into `atm.forcing`.
+    assert set(coupler.components["atm"].exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
+    }
+
+    carry = coupler.initialize()
+    forcing = carry.components["atm"]["forcing"]
+    for name in coupler.components["atm"].exchanged_forcing:
+        assert not isinstance(getattr(forcing, name), TimeSeries), name
+
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
+def test_an_unexchanged_climatology_stays_a_climatology():
+    """With no land model nothing supplies the land surface, so it keeps varying.
+
+    The default configuration (`land=none`) with the same file forcing. This
+    is why the set is derived from the coupling table rather than fixed:
+    assuming the standard five would freeze this file's land climatology at
+    the start date in every run built without a land model, which is most of
+    them.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+    ]))
+
+    assert set(coupler.components["atm"].exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am",
+    }
+    forcing = coupler.initialize().components["atm"]["forcing"]
+    for name in ("stl_am", "snowc_am", "soilw_am"):
+        assert isinstance(getattr(forcing, name), TimeSeries), name
+
+
+def test_exchanged_forcing_can_be_declared_in_the_config():
+    """A hand-written exchanger cannot be read, so the config says what it writes."""
+    cfg = composed([
+        "+configuration=earth-slab",
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+        "+coupling.exchanged_forcing=[sea_surface_temperature]",
+    ])
+    coupler = runners.build_coupler(cfg)
+    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
+
+
+def test_a_hand_written_exchanger_over_a_file_forcing_is_warned_about(caplog):
+    """Nothing to read and nothing declared: say so rather than guess.
+
+    The warning is worth its noise only when something is actually still a
+    time series, so it names the fields that are.
+    """
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    with caplog.at_level(logging.WARNING, logger="jem.runners"):
+        runners.declare_exchanged_forcing(
+            cfg, atm, {"exchange": example_exchanger}
+        )
+    assert "hand-written" in caplog.text
+    assert "sea_surface_temperature" in caplog.text
+    assert atm.exchanged_forcing == ()
+
+
+def test_a_hand_written_exchanger_over_a_plain_forcing_is_not_warned_about(caplog):
+    """With the default forcing every field is already an array: nothing to say."""
+    cfg = composed([
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    assert atm.time_varying_forcing == ()
+    with caplog.at_level(logging.WARNING, logger="jem.runners"):
+        runners.declare_exchanged_forcing(
+            cfg, atm, {"exchange": example_exchanger}
+        )
+    assert "hand-written" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

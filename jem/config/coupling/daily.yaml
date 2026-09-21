@@ -27,3 +27,15 @@ exchangers: null
 # converts units or blends two fields. Setting both is an error the runner
 # reports.
 exchanger: null
+
+# Which of the atmosphere's boundary conditions the coupling supplies, as
+# `jcm.forcing.ForcingData` field names. They stop being read from the
+# atmosphere's own forcing file and become per-step values an exchanger
+# writes, which is what lets a `forcing@atmosphere.forcing=from_file`
+# atmosphere be coupled at all: a field left as a time series would change
+# the carry's pytree structure the first time an exchanger wrote an array
+# into it.
+# null -> read off the declarative exchange table, so the table stays the one
+# description of the coupling. A hand-written `exchanger` cannot be read that
+# way, so a configuration that uses one lists here what it writes.
+exchanged_forcing: null

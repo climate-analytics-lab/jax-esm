@@ -737,6 +737,26 @@ code this release adds:
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.
+- A coupled atmosphere built with `forcing@atmosphere.forcing=from_file` runs.
+  `+configuration=earth-slab` failed at trace time with `Workflow element
+  'exchange' changed the structure of the component carries`: jax-gcm builds
+  each time-varying boundary condition as a `jcm.forcing.TimeSeries` (values,
+  time axis, alignment mode — three pytree leaves) and slices it by date
+  internally, while the standard exchange writes one `(ix, il)` array into the
+  same five fields, so the atmosphere's carry had a different pytree structure
+  after the first exchange than before it. `JCMComponent` now takes the names
+  of the forcing fields the coupling supplies
+  (`set_exchanged_forcing(names)`, also a constructor keyword) and
+  `initialize()` collapses exactly those to the climatology at the run's start
+  date, which is the structure an exchange preserves; every other field keeps
+  its time series and goes on being sliced per internal timestep.
+  `jem.runners.build_coupler` reads the names off the built coupling table
+  with the new `jem.exchangers.exchanged_fields(exchangers, "atm")`, so an
+  unexchanged climatology stays climatological — with `land=none` the land
+  surface still follows the seasonal cycle — and `coupling.exchanged_forcing`
+  lists them for a configuration coupled by a hand-written
+  `coupling.exchanger`, which cannot be read that way. The coupler's
+  structure check is unchanged: it is what caught this.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

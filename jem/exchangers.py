@@ -13,8 +13,10 @@ sea-ice wiring that every example in this repository writes out by hand
 today. A declarative exchange is not more capable than a hand-written one --
 an exchanger that computes a flux, converts units or blends two fields still
 has to be a function -- but it is checkable: :meth:`Exchange.validate` names
-a mistyped field *before* a run starts, and :meth:`Exchange.__repr__` prints
-the whole coupling as a table.
+a mistyped field *before* a run starts, :meth:`Exchange.__repr__` prints
+the whole coupling as a table, and :func:`exchanged_fields` answers, for one
+component, which of its fields somebody else supplies -- which is what a
+component needs to know before it builds a carry the coupled step can scan.
 
 Carry layout
 ------------
@@ -713,6 +715,63 @@ def default_exchangers(
     return {DEFAULT_EXCHANGER_NAME: Exchange(
         default_exchanges(components, names), regridders
     )}
+
+
+def exchanged_fields(
+    exchangers: Mapping[str, Exchanger] | Iterable[Exchanger],
+    component: str,
+    section: str = "forcing",
+) -> tuple[str, ...]:
+    """Return the fields a coupling table writes into one carry section.
+
+    "Which of my fields does somebody else supply?" is a question a component
+    has to be able to answer before it builds its carry: a field an exchanger
+    overwrites every step has to be *shaped* like what the exchanger writes,
+    and the only place that is written down is the coupling table. The
+    atmosphere is the case that needs it -- with ``forcing=from_file`` its
+    boundary conditions are time series until a surface component takes one
+    over (see
+    :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`)
+    -- but the question is not specific to it, so the answer is read off the
+    table here rather than restated anywhere else.
+
+    Only :class:`Exchange` exchangers are read: a hand-written exchanger is an
+    arbitrary function and there is nothing in it to inspect, so it
+    contributes no names. A model coupled by one has to declare what it
+    writes itself; guessing would be worse, because the guess that is wrong
+    silently freezes a climatology instead of failing.
+
+    Parameters
+    ----------
+    exchangers : Mapping[str, Exchanger] or iterable of Exchanger
+        The coupled model's exchangers, as a mapping (its values are read) or
+        as a plain iterable.
+    component : str
+        Destination component name, e.g. ``"atm"``.
+    section : str, optional
+        Destination carry section; ``"forcing"`` by default, which is the
+        section an exchanger writes to by convention.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The destination field names, de-duplicated, in table order.
+
+    """
+    values = (
+        exchangers.values() if isinstance(exchangers, Mapping) else exchangers
+    )
+    # A dict rather than a set: the table's order is the order this reads
+    # best in, and a set would make the result depend on hash ordering.
+    fields: dict[str, None] = {}
+    for exchanger in values:
+        if not isinstance(exchanger, Exchange):
+            continue
+        for spec in exchanger.specs:
+            dst_component, dst_section, field = spec.dst_parts
+            if dst_component == component and dst_section == section:
+                fields[field] = None
+    return tuple(fields)
 
 
 def default_workflow(
