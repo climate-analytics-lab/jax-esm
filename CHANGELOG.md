@@ -583,6 +583,16 @@ Breaking changes are marked; everything else is additive.
   mapping an exchanger is handed. Both live in `jem/exchangers.py`, which
   already owns the path vocabulary and its error messages, rather than in a
   new module.
+- **`jem.plot`** — the plotting the example notebooks share:
+  `open_output` glues a chunked run's files for one component back into one
+  dataset, `area_mean` is the cos(latitude)-weighted horizontal mean,
+  `map_plot` draws one 2-D field (handling both a separable lon/lat grid and
+  a curvilinear one, and the `(..., lon, lat)` transpose every JEM field
+  needs), and `animate_map` steps it through time. The four notebooks that
+  produced a map each carried ~90 lines of their own cartopy animation code;
+  this is that written once. Behind the `plot` extra, with matplotlib and
+  cartopy imported inside the functions that need them, so `import jem` (and
+  `import jem.plot`) never requires either.
 
 ### Changed
 

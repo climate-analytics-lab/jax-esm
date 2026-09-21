@@ -67,5 +67,6 @@ Constants and utilities
    :recursive:
 
    jem.constants
+   jem.plot
    jem.utils.esmf_regrid.ESMFRegridder
    jem.utils.esmf_regrid.ESMFWeights
