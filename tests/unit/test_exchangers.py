@@ -947,3 +947,169 @@ def test_replace_field_names_the_bad_path(components, path, bad, available):
     message = str(excinfo.value)
     assert bad in message
     assert available in message
+
+
+# ---------------------------------------------------------------------------
+# replace_field validates the replacement, not just the path
+# ---------------------------------------------------------------------------
+
+
+def test_replace_field_rejects_a_different_shape(components):
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+
+    with pytest.raises(ValueError, match="shape") as excinfo:
+        replace_field(
+            carry, "ocn.state.sea_surface_temperature", jnp.zeros((2, 2))
+        )
+    assert "ocn.state.sea_surface_temperature" in str(excinfo.value)
+
+
+def test_replace_field_rejects_a_different_dtype(components):
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+    sst = carry.components["ocn"]["state"].sea_surface_temperature
+
+    with pytest.raises(ValueError, match="dtype"):
+        replace_field(
+            carry, "ocn.state.sea_surface_temperature", sst.astype(jnp.int32)
+        )
+
+
+def test_replace_field_rejects_a_python_scalar(components):
+    """No implicit broadcasting: a scalar does not stand in for a (4, 3) field."""
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+
+    with pytest.raises(ValueError, match="jnp.full_like"):
+        replace_field(carry, "ocn.state.sea_surface_temperature", 300.0)
+
+
+def test_replace_field_rejects_a_different_pytree_structure(components):
+    """A field built from several leaves cannot be replaced by a plain array.
+
+    This is the earth-slab failure mode by hand: a boundary-condition field
+    with several leaves (e.g. a ``TimeSeries``) collapsed to one leaf.
+    """
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+    sst = carry.components["ocn"]["state"].sea_surface_temperature
+
+    with pytest.raises(ValueError, match="structure") as excinfo:
+        replace_field(carry, "ocn.state.sea_surface_temperature", (sst, sst))
+    assert "ocn.state.sea_surface_temperature" in str(excinfo.value)
+
+
+def test_replace_field_rejects_a_bad_value_under_jit(components):
+    """The check is trace-safe: it fires from inside `jax.jit` too."""
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+
+    @jax.jit
+    def bad_replace(carry):
+        return replace_field(
+            carry, "ocn.state.sea_surface_temperature", jnp.zeros((2, 2))
+        )
+
+    with pytest.raises(ValueError, match="shape"):
+        bad_replace(carry)
+
+
+def test_replace_field_accepts_a_same_shaped_replacement_under_jit(components):
+    """A well-formed replacement is unaffected by the new check, even under jit."""
+    coupler = build_coupler(components, default_exchangers(components))
+    carry = coupler.initialize()
+    sst = carry.components["ocn"]["state"].sea_surface_temperature
+
+    @jax.jit
+    def good_replace(carry, value):
+        return replace_field(carry, "ocn.state.sea_surface_temperature", value)
+
+    updated = good_replace(carry, sst + 1.0)
+    assert jnp.array_equal(
+        updated.components["ocn"]["state"].sea_surface_temperature, sst + 1.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exchange casts a destination dtype mismatch, but not a shape mismatch
+# ---------------------------------------------------------------------------
+
+
+def test_exchange_casts_a_dtype_mismatch_to_the_destination_dtype():
+    """Cast a source's dtype to the destination's rather than change it.
+
+    Importing Veros sets `jax_enable_x64` process-wide, so a Veros ocean's
+    carry is float64 while parts of the atmosphere's carry stay float32 --
+    exactly what `ocean=veros` hits on its first coupled step
+    (`VEROS_OCEAN_EXCHANGES`). `Exchange.__call__` must cast the source to
+    the destination's own dtype rather than hand `lax.scan` a carry whose
+    dtype silently changed.
+    """
+    previous_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        @tree_math.struct
+        class _Section:
+            x: jnp.ndarray
+
+        source_value = jnp.full((4, 3), 2.0, dtype=jnp.float64)
+        destination_value = jnp.zeros((4, 3), dtype=jnp.float32)
+        carries = {
+            "a": {"state": _Section(source_value)},
+            "b": {"state": _Section(destination_value)},
+        }
+        before_structure = jax.tree_util.tree_structure(carries)
+        exchange = Exchange([ExchangeSpec("a.state.x", "b.state.x")])
+
+        exchanged = exchange(carries, time=None)
+
+        written = exchanged["b"]["state"].x
+        assert written.dtype == jnp.float32
+        assert jnp.array_equal(written, source_value.astype(jnp.float32))
+        # Nothing else moved: the source keeps its own dtype, and the whole
+        # mapping's pytree structure (and every OTHER leaf's dtype) is the
+        # same as what was handed in.
+        assert exchanged["a"]["state"].x.dtype == jnp.float64
+        assert jax.tree_util.tree_structure(exchanged) == before_structure
+    finally:
+        jax.config.update("jax_enable_x64", previous_x64)
+
+
+def test_exchange_still_rejects_a_shape_mismatch():
+    """No silent broadcasting: only the dtype is fixed automatically.
+
+    `Exchange.__call__` itself never validates a leaf's shape (`.replace()`
+    does not either), so the mismatch has to be exercised through a real
+    coupled step -- `lax.scan` is what actually rejects it, exactly the
+    "two steps through a real trajectory" test CLAUDE.md asks a coupling
+    change to have.
+    """
+
+    @tree_math.struct
+    class _Section:
+        x: jnp.ndarray
+
+    class _ConstantComponent:
+        """Holds a fixed-shape state; step is a no-op past what Exchange did."""
+
+        def __init__(self, name, shape):
+            self.name = name
+            self._shape = shape
+
+        def initialize(self):
+            return {"state": _Section(jnp.zeros(self._shape, dtype=jnp.float32))}
+
+        def step(self, carry, time):
+            del time
+            return carry, {}
+
+    stub_components = {
+        "a": _ConstantComponent("a", (4, 3)),
+        "b": _ConstantComponent("b", (2, 2)),  # a different shape from "a"
+    }
+    exchange = Exchange([ExchangeSpec("a.state.x", "b.state.x")])
+    coupler = build_coupler(stub_components, {"exchange": exchange})
+
+    with pytest.raises(TypeError, match="shapes do not match"):
+        coupler.generate_trajectory_function(2)(coupler.initialize())

@@ -72,6 +72,9 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+import jax
+import jax.numpy as jnp
+
 from jem.base.component import Carry, Component, CoupledCarry, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
@@ -296,7 +299,12 @@ def _field_names(section: Any) -> list[str]:
 
 
 def _resolve_section(
-    components: Mapping[str, Carry], name: str, section: str, context: str
+    components: Mapping[str, Carry],
+    name: str,
+    section: str,
+    context: str,
+    *,
+    not_a_mapping_hint: str,
 ) -> Any:
     """Return one section of one component's carry, or raise naming ``context``.
 
@@ -304,6 +312,16 @@ def _resolve_section(
     :func:`read_field`/:func:`replace_field` (``context`` is the offending
     path), so an unknown component or section is named the same way whichever
     called it -- there is exactly one place this message is written.
+
+    What to suggest when the component's carry is not a mapping at all --
+    which is what a nested :class:`~jem.base.coupler.Coupler` looks like from
+    here, since its carry is a whole ``CoupledCarry`` rather than a mapping of
+    sections -- differs by caller: an exchange table needs a hand-written
+    exchanger, while :func:`read_field`/:func:`replace_field` need
+    :func:`~jem.base.coupler.nested_carry`/
+    :func:`~jem.base.coupler.with_nested_carry`. ``not_a_mapping_hint`` is
+    therefore a required parameter rather than a second copy of the message
+    with a different tail.
     """
     if name not in components:
         raise KeyError(
@@ -315,7 +333,7 @@ def _resolve_section(
         raise TypeError(
             f"{context}: the carry of {name!r} is a {type(carry).__name__}, "
             f"not a mapping, so it has no {section!r} section to address. "
-            "Couple this component with a hand-written exchanger."
+            f"{not_a_mapping_hint}"
         )
     if section not in carry:
         raise KeyError(
@@ -326,14 +344,19 @@ def _resolve_section(
 
 
 def _require_field(section: Any, field: str, context: str, path: str) -> None:
-    """Raise, naming ``context``, if ``section`` does not have ``field``.
+    """Raise, naming ``context`` and ``path``, if ``section`` lacks ``field``.
 
     See :func:`_resolve_section` for why this is a free function rather than
-    two copies of the same check.
+    two copies of the same check. ``context`` and ``path`` name two different
+    things for an :class:`Exchange` spec -- the whole spec, and which of its
+    two endpoints (source or destination) is the bad one -- so both appear in
+    the message; :func:`read_field`/:func:`replace_field` have only the one
+    path and pass ``context=""``, which prints it once rather than twice.
     """
     if not hasattr(section, field):
+        prefix = f"{context}: " if context else ""
         raise ValueError(
-            f"{context}: {path!r} names the field {field!r}, which "
+            f"{prefix}{path!r} names the field {field!r}, which "
             f"{type(section).__name__} does not have (it has "
             f"{_field_names(section)!r})."
         )
@@ -451,6 +474,22 @@ class Exchange:
             # TypeError naming neither the spec nor the component.
             destination = self._section(components, component, section, spec)
             self._require_field(destination, field, spec, spec.dst)
+            current = getattr(destination, field)
+            current_dtype = jnp.result_type(current)
+            if jnp.result_type(value) != current_dtype:
+                # A coupled step must return its carry with exactly the
+                # dtype it received, or `lax.scan` rejects it as a changed
+                # carry type -- and two components built on either side of a
+                # process-wide precision flip (importing Veros sets
+                # `jax_enable_x64`) genuinely disagree on dtype, so a source
+                # and its destination can differ here even though nothing
+                # about the exchange itself is wrong. Casting, not rejecting,
+                # is the right response: unlike a shape mismatch (which this
+                # does not touch, and which still fails downstream exactly as
+                # before -- no silent broadcasting), dtype is not part of
+                # what the exchange table promises to preserve, only the
+                # destination component's own working precision is.
+                value = jnp.asarray(value, dtype=current_dtype)
             updates.setdefault(component, {}).setdefault(section, {})[field] = value
 
         exchanged = dict(components)
@@ -516,7 +555,10 @@ class Exchange:
         components: Mapping[str, Carry], name: str, section: str, spec: ExchangeSpec
     ) -> Any:
         """Return one section of one component's carry, or raise naming the spec."""
-        return _resolve_section(components, name, section, f"Exchange spec {spec}")
+        return _resolve_section(
+            components, name, section, f"Exchange spec {spec}",
+            not_a_mapping_hint="Couple this component with a hand-written exchanger.",
+        )
 
     @staticmethod
     def _require_field(
@@ -840,11 +882,25 @@ def read_field(carry: CoupledCarry | dict[str, Carry], path: str) -> Any:
         If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
         component's carry is not a mapping of sections.
 
+    See Also
+    --------
+    jem.base.coupler.nested_carry :
+        Read a component's carry inside a *nested* coupled model -- one
+        registered as a component of another :class:`~jem.base.coupler.Coupler`
+        -- whose own carry is a whole ``CoupledCarry`` rather than the mapping
+        of sections this function addresses.
+
     """
     component, section, field = _split_field_path(path)
     components = _carry_components(carry, path)
-    resolved = _resolve_section(components, component, section, repr(path))
-    _require_field(resolved, field, repr(path), path)
+    resolved = _resolve_section(
+        components, component, section, repr(path),
+        not_a_mapping_hint=(
+            "This looks like a nested coupled model: read its component's "
+            "carry with jem.nested_carry instead."
+        ),
+    )
+    _require_field(resolved, field, "", path)
     return getattr(resolved, field)
 
 
@@ -884,9 +940,18 @@ def replace_field(
         ``"component.section.field"``, with ``section`` one of
         :data:`SECTIONS`.
     value : Any
-        The new value for the field. Its shape and dtype must match the
-        field it replaces, or the coupled ``lax.scan`` this carry eventually
-        goes through will reject it.
+        The new value for the field. Its pytree structure, and every leaf's
+        shape and dtype, must match the field it replaces exactly --
+        :func:`replace_field` does not broadcast a scalar or cast a dtype, it
+        rejects them (see Raises). This is deliberate: a coupled carry that
+        merely *compiles* after this call is not enough, since a leaf shape
+        or dtype that quietly changed would either broadcast wrongly inside a
+        component's step or -- if it also happened to change the field's
+        pytree structure, as replacing a boundary-condition field built from
+        a file (:class:`jcm.forcing.TimeSeries`, several leaves) with a plain
+        array (one leaf) does -- fail one coupled step later with a bare
+        ``lax.scan`` structure-mismatch error naming neither this field nor
+        this call.
 
     Returns
     -------
@@ -896,22 +961,100 @@ def replace_field(
     Raises
     ------
     ValueError
-        If ``path`` is malformed, or names a section or field the addressed
-        carry does not have.
+        If ``path`` is malformed, names a section or field the addressed
+        carry does not have, or ``value`` does not match the field it would
+        replace: a different pytree structure, or -- structure equal -- a
+        different shape or dtype on any leaf. The message names the path and
+        both structures/shapes/dtypes, and suggests
+        ``jnp.full_like(read_field(carry, path), value)`` for a scalar or a
+        differently-shaped array, since that is what actually broadcasts.
     KeyError
         If ``path`` names a component the carry does not have.
     TypeError
         If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
         component's carry is not a mapping of sections.
 
+    See Also
+    --------
+    jem.base.coupler.with_nested_carry :
+        Replace a component's carry inside a *nested* coupled model -- one
+        registered as a component of another :class:`~jem.base.coupler.Coupler`
+        -- whose own carry is a whole ``CoupledCarry`` rather than the mapping
+        of sections this function addresses.
+
     """
     component, section, field = _split_field_path(path)
     components = _carry_components(carry, path)
-    resolved = _resolve_section(components, component, section, repr(path))
-    _require_field(resolved, field, repr(path), path)
+    resolved = _resolve_section(
+        components, component, section, repr(path),
+        not_a_mapping_hint=(
+            "This looks like a nested coupled model: replace its component's "
+            "carry with jem.with_nested_carry instead."
+        ),
+    )
+    _require_field(resolved, field, "", path)
+    _check_replacement(path, getattr(resolved, field), value)
     new_section = resolved.replace(**{field: value})
     new_component_carry = dict(components[component], **{section: new_section})
     new_components = dict(components, **{component: new_component_carry})
     if isinstance(carry, CoupledCarry):
         return dataclasses.replace(carry, components=new_components)
     return new_components
+
+
+def _check_replacement(path: str, current: Any, value: Any) -> None:
+    """Raise, naming ``path``, if ``value`` cannot cleanly replace ``current``.
+
+    :func:`replace_field` is the one core addition every notebook and driver
+    is meant to use instead of nested-container surgery by hand, and the
+    surgery it replaces was exactly what let a shape, dtype or (as in a field
+    built from a :class:`jcm.forcing.TimeSeries`, several leaves) a whole
+    pytree structure drift silently between what a carry held and what
+    replaced it -- a mismatch ``lax.scan`` only catches one coupled step
+    later, with a message naming neither the field nor this call. Checking it
+    here, against the very value :func:`read_field` would return for the same
+    path, is cheap (:func:`jax.tree_util.tree_structure`, ``jnp.shape`` and
+    ``jnp.result_type`` are all static/abstract -- no value is read, so this
+    is safe to call while tracing) and turns that failure into one that names
+    the path at the point the mistake was made.
+
+    No implicit broadcasting: a Python scalar or a differently shaped array
+    is rejected exactly like any other mismatch, even where NumPy-style
+    broadcasting would have "worked" -- silently changing the field's shape
+    is the failure mode this function exists to catch, not a convenience to
+    preserve. Build a broadcast explicitly with
+    ``jnp.full_like(read_field(carry, path), value)`` if that is genuinely
+    what is wanted.
+    """
+    current_structure: Any = jax.tree_util.tree_structure(current)
+    value_structure: Any = jax.tree_util.tree_structure(value)
+    if current_structure != value_structure:
+        raise ValueError(
+            f"{path!r}: the field's pytree structure is {current_structure}, "
+            f"but the replacement's is {value_structure}. replace_field does "
+            "not restructure a field -- build a replacement with the same "
+            "structure, e.g. jnp.full_like(read_field(carry, "
+            f"{path!r}), <value>) for a plain array field."
+        )
+    mismatches = [
+        (jnp.shape(current_leaf), jnp.result_type(current_leaf),
+         jnp.shape(value_leaf), jnp.result_type(value_leaf))
+        for current_leaf, value_leaf in zip(
+            jax.tree_util.tree_leaves(current), jax.tree_util.tree_leaves(value)
+        )
+        if (
+            jnp.shape(current_leaf) != jnp.shape(value_leaf)
+            or jnp.result_type(current_leaf) != jnp.result_type(value_leaf)
+        )
+    ]
+    if mismatches:
+        described = "; ".join(
+            f"{current_shape}/{current_dtype} -> {value_shape}/{value_dtype}"
+            for current_shape, current_dtype, value_shape, value_dtype in mismatches
+        )
+        raise ValueError(
+            f"{path!r}: the replacement's shape/dtype does not match the "
+            f"field's ({described}). replace_field does not broadcast or "
+            "cast -- build a same-shaped, same-dtype replacement, e.g. "
+            f"jnp.full_like(read_field(carry, {path!r}), <value>)."
+        )

@@ -780,6 +780,15 @@ code this release adds:
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.
+- **`Exchange.__call__` casts a source value to its destination field's own
+  dtype instead of writing it through unchanged.** Importing Veros sets
+  `jax_enable_x64` process-wide, so a Veros ocean's carry is float64 while
+  parts of the atmosphere's carry stay float32; `ocean=veros`
+  (`VEROS_OCEAN_EXCHANGES`) then failed on its first coupled step with
+  `lax.scan`'s "carry input and carry output must have equal types ...
+  float32[96,48] vs float64[96,48]", naming neither the exchange nor the
+  field. A shape mismatch is not touched by this and still fails the same
+  way it always did -- only dtype, never shape, is silently reconciled here.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

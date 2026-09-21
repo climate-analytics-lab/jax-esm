@@ -17,6 +17,7 @@ Because of that, ``jem.plot`` is deliberately not re-exported from
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 from pathlib import Path
 from typing import Any
@@ -129,8 +130,18 @@ def open_output(output_dir: Path | str, component: str = "atm") -> xr.Dataset:
             f"{output_dir}; {found}."
         )
     chunks.sort(key=lambda chunk: chunk[0])
-    datasets = [xr.open_dataset(path) for _, path in chunks]
-    return xr.concat(datasets, dim=TIME_DIMENSION)
+    # `.load()` while each file is still open, inside the ExitStack, so every
+    # handle is closed before this returns -- a bare `xr.open_dataset(path)`
+    # per chunk would otherwise stay open for the concatenated dataset's
+    # whole life (harmless in a one-shot notebook; not in a long-lived
+    # process, on Windows, or in a test harness that reruns into the same
+    # directory while a previous call still holds it open).
+    with contextlib.ExitStack() as opened:
+        datasets = [
+            opened.enter_context(xr.open_dataset(path)).load()
+            for _, path in chunks
+        ]
+        return xr.concat(datasets, dim=TIME_DIMENSION)
 
 
 def area_mean(field: xr.DataArray, *, lat: str = "lat") -> xr.DataArray:
@@ -189,6 +200,7 @@ def map_plot(
     ax: Any = None,
     title: str | None = None,
     coastlines: bool = False,
+    colorbar: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Draw one 2-D horizontal field as a map, and return the axes it used.
@@ -218,6 +230,10 @@ def map_plot(
         Draw coastlines with ``cartopy``. False (the default) needs
         matplotlib alone -- an aquaplanet has no coast, and a user should not
         need cartopy installed to see one.
+    colorbar : bool, default True
+        Draw a colorbar next to the map. Without one every map reads as
+        colour with no key; pass False to add one figure-wide instead (a
+        multi-panel figure sharing one scale) or to manage it yourself.
     **kwargs
         Passed through to ``contourf``/``pcolormesh`` (e.g. ``levels``,
         ``cmap``).
@@ -261,20 +277,22 @@ def map_plot(
         # Separable grid: field dims are (..., lon, lat); transpose to
         # (lat, lon), which is what contourf(x, y, Z) needs of Z.
         data = field.transpose(lat.dims[0], lon.dims[0])
-        ax.contourf(lon.values, lat.values, data.values, **plot_kwargs)
+        mappable = ax.contourf(lon.values, lat.values, data.values, **plot_kwargs)
     else:
         # Curvilinear grid: lat/lon are 2-D over the field's own index
         # dimensions, in the same (lon-like, lat-like) order as the data
         # (see the module docstring); reverse both so lat-like leads.
         order = tuple(reversed(lat.dims))
         data = field.transpose(*order)
-        ax.pcolormesh(
+        mappable = ax.pcolormesh(
             lon.transpose(*order).values, lat.transpose(*order).values,
             data.values, **plot_kwargs,
         )
 
     if coastlines:
         ax.coastlines()
+    if colorbar:
+        ax.figure.colorbar(mappable, ax=ax)
     if title is not None:
         ax.set_title(title)
     return ax
@@ -286,6 +304,7 @@ def animate_map(
     title: str | None = None,
     coastlines: bool = False,
     interval_ms: int = 200,
+    colorbar: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Return a FuncAnimation stepping a (time, ...) field through `map_plot`.
@@ -294,6 +313,12 @@ def animate_map(
     this a thin wrapper rather than a second implementation of the two grid
     layouts -- an animation is a handful of frames in these examples, not a
     performance-sensitive loop.
+
+    The colorbar (if any) is drawn once, from the first frame, rather than
+    letting each per-frame call draw its own: ``ax.clear()`` only clears the
+    map axes, so a colorbar added to its own axes next to it survives every
+    later frame unchanged, whereas drawing a new one on every frame would
+    stack a growing column of colorbars beside the map instead.
 
     Parameters
     ----------
@@ -306,8 +331,14 @@ def animate_map(
         See :func:`map_plot`.
     interval_ms : int, default 200
         Delay between frames, in milliseconds.
+    colorbar : bool, default True
+        Draw one colorbar, from the first frame; see above for why it is not
+        simply :func:`map_plot`'s own ``colorbar`` passed through
+        ``**kwargs``.
     **kwargs
-        Passed through to :func:`map_plot`.
+        Passed through to :func:`map_plot` (e.g. ``levels``, ``cmap`` --
+        fixed ``levels`` keep the one colorbar meaningful for every frame,
+        since the data's own range generally changes between them).
 
     Returns
     -------
@@ -331,13 +362,22 @@ def animate_map(
     else:
         ax = fig.add_subplot()
 
+    drawn_colorbar = False
+
     def draw(step: int) -> None:
+        nonlocal drawn_colorbar
         ax.clear()
         frame = field.isel({TIME_DIMENSION: step})
         frame_title = title
         if title is not None:
             frame_title = f"{title} ({frame[TIME_DIMENSION].values})"
-        map_plot(frame, ax=ax, title=frame_title, coastlines=coastlines, **kwargs)
+        map_plot(
+            frame, ax=ax, title=frame_title, coastlines=coastlines,
+            colorbar=False, **kwargs,
+        )
+        if colorbar and not drawn_colorbar and ax.collections:
+            fig.colorbar(ax.collections[-1], ax=ax)
+            drawn_colorbar = True
 
     draw(0)
     return FuncAnimation(

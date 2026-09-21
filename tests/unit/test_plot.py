@@ -149,3 +149,110 @@ def test_map_plot_refuses_a_field_that_still_has_time():
     with pytest.raises(ValueError, match="time") as excinfo:
         plot.map_plot(field)
     assert "isel(time=-1)" in str(excinfo.value)
+
+
+def test_map_plot_refuses_a_field_that_still_has_level():
+    pytest.importorskip("matplotlib")
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    field = xr.DataArray(
+        np.zeros((3, 8, 4)),
+        dims=("level", "lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+
+    with pytest.raises(ValueError, match="level") as excinfo:
+        plot.map_plot(field)
+    assert "method='nearest'" in str(excinfo.value)
+
+
+def test_map_plot_draws_a_colorbar_by_default():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    field = xr.DataArray(
+        np.arange(8 * 4).reshape(8, 4).astype(float),
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+
+    ax = plot.map_plot(field)
+
+    assert len(ax.figure.axes) == 2  # the map, and the colorbar beside it
+
+
+def test_map_plot_colorbar_false_adds_no_extra_axes():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    field = xr.DataArray(
+        np.arange(8 * 4).reshape(8, 4).astype(float),
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+
+    ax = plot.map_plot(field, colorbar=False)
+
+    assert len(ax.figure.axes) == 1
+
+
+# ---------------------------------------------------------------------------
+# animate_map
+# ---------------------------------------------------------------------------
+
+
+def test_animate_map_writes_a_gif(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.animation import FuncAnimation
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02", "2001-01-03"], dtype="datetime64[ns]")
+    field = xr.DataArray(
+        np.arange(3 * 8 * 4).reshape(3, 8, 4).astype(float),
+        dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat},
+        name="field",
+    )
+
+    animation = plot.animate_map(field)
+
+    assert isinstance(animation, FuncAnimation)
+    gif = tmp_path / "animation.gif"
+    animation.save(gif, writer="pillow")
+    assert gif.exists()
+    assert gif.stat().st_size > 0
+
+
+def test_animate_map_draws_one_colorbar_not_one_per_frame():
+    """`ax.clear()` per frame must not leave a growing stack of colorbars."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02", "2001-01-03"], dtype="datetime64[ns]")
+    field = xr.DataArray(
+        np.arange(3 * 8 * 4).reshape(3, 8, 4).astype(float),
+        dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat},
+        name="field",
+    )
+
+    animation = plot.animate_map(field)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+
+    assert len(fig.axes) == 2  # the map, and the one colorbar beside it
+    plt.close(fig)
