@@ -497,3 +497,47 @@ def test_saturated_cell_gradient_is_finite_not_nan(uniform_grid, ice_clim_file):
     # Every cell is saturated, so the cap -- not the scale -- sets the
     # thickness everywhere: the gradient is exactly zero, not merely finite.
     assert float(gradient) == 0.0
+
+
+def test_a_nan_land_fill_value_does_not_poison_the_gradient(half_land_grid, tmp_path):
+    """Regression: a NaN land fill value must not poison the closure's gradient.
+
+    `__init__` accepts a NaN fill value over land in the ice climatology --
+    only a NaN over *ocean* is refused, since a real file's land cells
+    routinely carry one. `_thickness_from_fraction` used to invert every
+    cell's concentration, land included, only for the caller's own
+    ``jnp.where(ocean, ...)`` to zero the land cells afterwards. That gets the
+    *primal* right, but `jax.grad` still differentiates through
+    `log1p(-nan) = nan` for the land cells first, and multiplying that local
+    gradient by the outer mask's already-zeroed cotangent is `0 * nan = nan`
+    -- the same failure `test_saturated_cell_gradient_is_finite_not_nan`
+    regression-tests for a saturated ocean cell, just reached through a land
+    NaN instead.
+    """
+    from tests.unit.slab_test_utils import write_climatology
+
+    # `half_land_grid`'s land half is the eastern two of its four longitudes
+    # (see the fixture); write the file in its own (time, lat, lon) order and
+    # NaN exactly those columns, leaving the ocean half a plain 0.5 everywhere.
+    land_lat_lon = np.asarray(half_land_grid.binary_mask == 1.0).T
+    values = np.full((12,) + half_land_grid.shape[::-1], 0.5, dtype=np.float32)
+    values[:, land_lat_lon] = np.nan
+    path = write_climatology(tmp_path / "icec_nan_land.nc", "icec", values)
+
+    # Construction succeeds: the NaNs are over land, not ocean.
+    model = _bind(SlabSeaiceModel(half_land_grid, ice_clim_file=path))
+
+    def total_thickness(scale):
+        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
+        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+
+    ocean = np.asarray(half_land_grid.binary_mask == 0.0)
+    thickness = np.asarray(model.initialize()["state"].ice_thickness)
+    gradient = jax.grad(total_thickness)(jnp.float32(0.7))
+
+    # The primal was already correct before the fix: land is exactly zero,
+    # ocean is finite.
+    assert bool(np.all(thickness[~ocean] == 0.0))
+    assert bool(np.all(np.isfinite(thickness[ocean])))
+    assert bool(jnp.isfinite(gradient))
+    assert float(gradient) != 0.0

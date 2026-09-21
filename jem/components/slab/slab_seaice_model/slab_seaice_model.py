@@ -269,6 +269,7 @@ class SlabSeaiceModel(SlabModelBase):
                 evaluate_cyclic_linear(
                     self.start_year_fraction, self.ice_climatology
                 ),
+                ocean,
                 params,
             )
         else:
@@ -402,6 +403,7 @@ def _surface_temperature(
 
 def _thickness_from_fraction(
     ice_fraction: jnp.ndarray,
+    ocean: jnp.ndarray,
     params: SlabSeaiceParameters,
 ) -> jnp.ndarray:
     """Invert the fraction closure: the thickness that diagnoses as ``ice_fraction``.
@@ -422,6 +424,24 @@ def _thickness_from_fraction(
     percentage or a rounding overshoot is refused a negative logarithm rather than
     turned into NaN.
 
+    ``ocean`` masks out land *before* the inversion, not only after it. The
+    constructor accepts (and only checks for) NaN fill values over land in the
+    climatology -- a real file's land cells routinely carry one -- and land
+    cells are zeroed again by the caller's own ``jnp.where(ocean, ...)`` once
+    this returns. That later masking gets the *primal* right regardless, but
+    ``jax.grad`` still differentiates through this function's land cells
+    first: ``log1p(-nan) = nan``, and multiplying that cell's local gradient
+    (`-1 / (1 - fraction)`, itself `nan`) by the caller's already-zeroed
+    cotangent is ``0 * nan = nan`` -- the same failure the saturated branch
+    below guards against, just reached through a land ``nan`` instead of an
+    ocean cell at ``f == 1``. Masking non-ocean *and* non-finite
+    concentrations to ``0.0`` here, before the log, keeps every intermediate
+    finite so both this function's own ``jnp.where`` and the caller's outer
+    one are safe under reverse-mode AD; the outer mask is kept regardless,
+    since a genuinely non-ocean, non-NaN fraction (a stray nonzero value in a
+    file whose land mask does not quite match this grid's) must still read
+    back as no ice.
+
     Used only for the initial condition; nothing in ``step`` runs backwards
     through the closure.
 
@@ -429,6 +449,9 @@ def _thickness_from_fraction(
     ----------
     ice_fraction : jnp.ndarray
         Areal ice concentration, a fraction.
+    ocean : jnp.ndarray
+        Boolean, ``True`` where this grid is ocean. Land and any non-finite
+        concentration are masked to ``0.0`` before the log.
     params : SlabSeaiceParameters
         Read for ``ice_fraction_thickness_scale`` and
         ``max_initial_ice_thickness``; both stay traced, so a gradient with
@@ -440,7 +463,9 @@ def _thickness_from_fraction(
         Ice thickness in metres.
 
     """
-    fraction = jnp.clip(ice_fraction, 0.0, 1.0)
+    fraction = jnp.where(
+        ocean & jnp.isfinite(ice_fraction), jnp.clip(ice_fraction, 0.0, 1.0), 0.0
+    )
     saturated = fraction >= 1.0
     # Feed `log1p` a stand-in (0.0) for a saturated cell rather than
     # `fraction` itself. Capping the *primal* by putting `where` after the

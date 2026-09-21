@@ -1030,6 +1030,20 @@ components these configurations are the first to exercise:
   which the atmosphere's side is correctly still a `jcm.forcing.TimeSeries`
   while the surface component's side is a plain array, raising a structure
   mismatch that can only arise from an exchange that never executes.
+- **The sea-ice fraction closure's inverse masks land before inverting, not
+  only after.** The constructor accepts (and only checks for) a NaN fill
+  value over land in the ice climatology, which a real file's land cells
+  routinely carry, but `_thickness_from_fraction` inverted every cell's
+  concentration, land included, before `initialize`'s own `jnp.where(ocean,
+  ...)` zeroed the land cells' primal. That masking got the forward value
+  right regardless, but `jax.grad` still differentiates through
+  `log1p(-nan) = nan` for those land cells first, and multiplying that local
+  gradient by the outer mask's already-zeroed cotangent gave `0 * nan = nan`
+  -- the same failure mode 722c2d5 fixed for a fully ice-covered ocean cell
+  (`log1p(-1) = -inf`), just reached through a land NaN instead. Non-ocean
+  and non-finite concentrations are now masked to `0.0` before the log, with
+  the outer `ocean` mask kept as well for a stray nonzero value a mismatched
+  land mask might otherwise leave unmasked.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
