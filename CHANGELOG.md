@@ -571,9 +571,59 @@ Breaking changes are marked; everything else is additive.
   a workflow-level `JCM_REV`, which the test asserts equals
   `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
   `dev` so drift stays visible without blocking a pull request.
+- **`jem.fluxes`** (`bulk_wind_stress`, `mask_fluxes_under_ice`,
+  `rotate_vector`, `read_rotation_angles`, `VerosExchange`) — the computed
+  half of a Veros ocean's coupling that
+  `jem.exchangers.VEROS_OCEAN_EXCHANGES` deliberately cannot carry: a bulk
+  drag law turning the atmosphere's near-surface wind into the wind stress
+  Veros integrates (rotated into a rotated ocean grid's own frame first, when
+  one is given), and a "swamp" sea-ice mask on the heat and freshwater
+  fluxes once the surface reaches the freezing point. `VerosExchange` is the
+  `Exchanger` built from them; wiring it in as `coupling.exchanger` is what
+  makes the Veros configurations mechanically, not just thermodynamically,
+  forced — closing the limitation their own WHY comments recorded.
+- **`coupling.exchanger` may be an instantiable node, not only a dotted
+  path.** A bare function (`hydra.utils.get_method`) cannot be handed the
+  regridders a mixed-grid exchange needs; a mapping with a `_target_` is now
+  built with `hydra.utils.instantiate(node, regrid=dict(regridders),
+  _convert_="object")`, the same regridder mapping
+  `default_exchangers(components, regrid=...)` receives, so a hand-written
+  exchange and the default table draw on one vocabulary.
+  `jem/config/coupling/daily.yaml`'s `exchanger:` comment documents both
+  spellings.
+- **`jem.components.veros.setups.double_drake.double_drake_setup` and
+  `.earth.earth_setup`** — the two example drivers' `veros_case_setup.py`
+  (`generateVerosSetup`), moved into the package as importable factories so a
+  configuration can name them without a `PYTHONPATH` trick. Both derive their
+  grid shape (`nx`/`ny`) from their mask file's own shape rather than taking
+  it as an argument. `earth_setup`'s `GridInfo` — the grid-spacing
+  reconstruction that reproduces Veros' own `u_centered_grid` recursion
+  exactly, and the true-latitude Coriolis parameter — moved with every
+  explanatory comment intact.
+- **`jem.tools.idealised_terrain(reference_file, planet_type, output_file)`**
+  — the example drivers' `modify_jcm_terrain.py`, as a pure function (no
+  `argparse`, no `__main__`, no `print`) taking a full `output_file` path
+  rather than a directory plus an implied name, and building a fresh
+  `xarray.Dataset` rather than mutating one it had opened for reading. Its
+  `else` branch's `NameError` (`args.planet_type`, out of scope) is now a
+  `ValueError` naming the bad value and the valid ones.
+- **`jem/data/terrain_double_drake_T31.nc`** (packaged data, 96x48) — the
+  double-drake geography, generated once by
+  `jem.tools.idealised_terrain(jem/data/terrain_JCM_T31.nc, "double_drake",
+  ...)` and committed, rather than regenerated into a cache directory by
+  every run. `test_idealised_terrain.py` regenerates it into a temp file and
+  asserts the two are identical, so the tool and the shipped data cannot
+  silently drift apart.
 
 ### Changed
 
+- **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
+  — the value the examples' `run.sh` validated, not the `1800.0` the copied
+  files carried — and take their layer count as `layer_thicknesses` (a
+  `Sequence[float]`), replacing the old `[:number_of_ocean_layers]` slicing
+  in the caller. `cold_start_ocean_temperature_reference_K` is renamed
+  `cold_start_temperature_celsius`: the value it holds was always degrees
+  Celsius (`vs.temp`'s own units), never Kelvin.
 - **jax-gcm configures no logging of its own, and `jcm.model.Model` takes no
   `log_level` keyword** (jax-gcm#819, at the pinned revision). Nothing under
   `jem/` ever passed it — only the test fixtures did, to silence the
@@ -656,9 +706,57 @@ Breaking changes are marked; everything else is additive.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
   `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
+- **`+configuration=veros-double-drake` and `+configuration=veros-earth` run
+  as one command** (breaking for anyone running the examples they replace):
+  `python -m jem.main +configuration=veros-double-drake` /
+  `...=veros-earth`, with no `PYTHONPATH`, no `???` left to fill in, and
+  nothing to generate first. Both name their setup from
+  `jem.components.veros.setups`, read their terrain from packaged data, and
+  couple through `jem.fluxes.VerosExchange` — closing the "thermodynamically
+  forced but mechanically at rest" limitation their own WHY comments used to
+  record. `tests/examples/test_configurations.py` runs both (and every other
+  named configuration) for two coupled days as its smoke test.
 
 ### Removed
 
+- **The three `examples/02_experimental` Veros directories**
+  (`02_experimental_JCM_Veros`, `02_jcm_veros_double_drake`,
+  `03_jcm_veros_earth`; breaking for anyone running them directly), and the
+  `pyproject.toml` ruff ignore that existed only because of them. Every
+  capability they had is now in the package or the run loop:
+  - `main.py`'s argparse driver, chunk loop, resume, health check and output
+    naming/averaging → `jem.driver.run_chunked` (already true since Phase 2;
+    this removes the last callers of the old pattern).
+  - `run.sh` → the two `configuration/veros-*.yaml` files, run with
+    `python -m jem.main +configuration=...`.
+  - `model_setup.py`'s coupled-model construction → `jem.runners.build_coupler`
+    plus the two configurations; its hand-written wind stress and sea-ice mask
+    closure → `jem.fluxes.VerosExchange`, named as `coupling.exchanger`.
+  - `veros_case_setup.py` → `jem.components.veros.setups.double_drake` /
+    `.earth`.
+  - `modify_jcm_terrain.py` → `jem.tools.idealised_terrain`, with its
+    double-drake output now packaged as `jem/data/terrain_double_drake_T31.nc`
+    instead of regenerated per run.
+  - `model_setup.py`'s `is_pytree_all_finite`/`report_first_nonfinite` debug
+    machinery → `run_chunked`'s health gate, which does the same job at chunk
+    granularity without tracing debug prints into every step.
+  - `veros_helper.py` → nothing; nothing imported it, and `VerosComponent`
+    already publishes `derived.sea_surface_temperature`.
+  - **The `fakelnd` stand-in is gone.** It was a `SlabOceanModel` named
+    `"fakelnd"` whose only job was handing the atmosphere a clipped `stl_am`;
+    both configurations already compose `land=none`, and their WHY comments
+    already documented that the atmosphere's land boundary conditions stay
+    at `jcm.forcing.ForcingData.zeros`. Keeping it would have meant a fourth
+    component with no configuration group. Use `land=slab_speedy` (with its
+    climatology file) for a responding land surface, or
+    `forcing@atmosphere.forcing=from_file` for a prescribed one.
+  - **The `_freeze_season` (perpetual-season) knob is gone.** It
+    monkey-patched a `jcm.model.Model` *instance*'s `date_from_sim_time`; no
+    shipped configuration used it (`freeze_season_at_day` defaulted to
+    `None`), and keeping dead code alive with its own test
+    (`tests/unit/test_examples_model_setup.py`, also removed) was worse than
+    recording the gap. A frozen seasonal cycle needs a supported hook in
+    jax-gcm itself — tracked as jax-esm#120.
 - **`jem.utils.checkpoints`** (whole module, breaking): `save_carry`,
   `load_carry`, `save_component_carries`, `load_component_carries`,
   `save_coupled_carry`, `load_coupled_carry`, `save_veros_carry` and
@@ -679,6 +777,20 @@ code this release adds:
   survives it: jax 0.11.2 removed `jax.experimental.hijax.HiPrimitive`, which
   flax 0.12.9 subclasses at import time, so an environment resolving the two
   latest releases could not import `jcm` at all (#117 tracks lifting it).
+- **`VerosExchange` casts every value it writes to the destination carry's own
+  dtype.** Importing `veros.core` flips `jax.config.jax_enable_x64` to `True`
+  process-wide as a side effect (Veros runs double precision internally), and
+  that flip lands wherever build order happens to put it: the ocean's carry
+  is entirely float64, and the atmosphere's carry is *mixed* — whatever
+  jax-gcm had already allocated at `Model` construction (before Veros was
+  imported) stays float32, while everything allocated afterwards, including
+  `derived.u0` and `derived.total_heat_flux`, is float64 too. `jax.lax.scan`
+  requires a step's output carry to match its input dtype exactly regardless,
+  so an uncast value crossing the atm/ocn boundary broke the *first* coupled
+  step of `+configuration=veros-double-drake` with an opaque dtype-mismatch
+  error from inside `Coupler.generate_trajectory_function`, not a physics
+  one. Found by actually running both Veros configurations end to end, which
+  no earlier phase of this project had done.
 - `run_chunked` validates `subsample` before compiling a trajectory, instead of
   after the first chunk has been integrated.
 - `jem.runners` no longer reads a broken `_target_` lookup as "this component

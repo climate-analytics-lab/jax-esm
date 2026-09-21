@@ -46,6 +46,8 @@ Components
    jem.components.jcm.contract
    jem.components.jcm.exchange_fields
    jem.components.veros_component
+   jem.components.veros.setups.double_drake
+   jem.components.veros.setups.earth
 
    jem.components.slab.slab_ocean_model.SlabOceanModel
    jem.components.slab.slab_ocean_model.SlabOceanParameters
@@ -67,5 +69,7 @@ Constants and utilities
    :recursive:
 
    jem.constants
+   jem.fluxes
+   jem.tools.idealised_terrain
    jem.utils.esmf_regrid.ESMFRegridder
    jem.utils.esmf_regrid.ESMFWeights
