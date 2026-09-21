@@ -689,6 +689,10 @@ Breaking changes are marked; everything else is additive.
   components, its exchanger or its coupler by hand any more, and none writes
   netCDF or an animation by hand either. `examples/README.md` is the new
   index of which command or notebook runs which example.
+- `tests/examples/test_examples.py` runs notebooks only, one test per
+  notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
+  caused it) rather than one test per example group; the `run.sh` driver it
+  used to also execute is gone (see *Removed*).
 
 ### Removed
 
@@ -702,6 +706,12 @@ Breaking changes are marked; everything else is additive.
   functions are now `VerosComponent.save_carry` / `load_carry`, where they
   belong — the HDF5 restart is Veros' business, not the coupler's. Call
   `Coupler.save_carry` / `load_carry` rather than any of them.
+- **`examples/02_experimental/03_long_aquaplanet.py`**, a hand-rolled
+  chunked driver (a T106 aquaplanet, 100 model years in 30-day batches, with
+  its own per-batch netCDF write, time mean and NaN check). Every one of
+  those is now a feature of `run_chunked`/`coupled_run=long_run`; the
+  command that replaces it is the "Long aquaplanet at T106" row of
+  `examples/README.md`.
 
 ### Fixed
 
