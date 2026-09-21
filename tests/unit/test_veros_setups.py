@@ -5,6 +5,25 @@ absent. `jem.components.veros_component` is imported first -- before
 anything that imports `veros.core` -- because importing it is what points
 Veros at its JAX backend (see `test_veros_component.py` for the same
 ordering requirement).
+
+The setup modules themselves (`double_drake`, `earth`) are imported inside
+each test that needs them, **not** at module scope, and deliberately not
+through a shared fixture either. pytest-xdist has every worker *collect*
+this whole file (import it, to discover test names) whether or not a given
+test ends up assigned to that worker or deselected by `-m "not slow"` --
+only *running* a test is filtered by markers, not importing the module that
+defines it. Since importing a setup module imports `veros.core`, which flips
+the process-global `jax_enable_x64` setting to `True` as a side effect
+(Veros runs double precision internally -- see `jem.fluxes.VerosExchange`'s
+docstring), a module-level import here would flip it in *every* worker's
+process at collection time, before any test runs at all -- contaminating
+whichever unrelated tests (`test_accumulate.py`, `test_coupler.py`, ...)
+those workers happen to run afterward with a `jax.lax.scan` carry-dtype
+mismatch that has nothing to do with Veros. A local import inside a test
+function only runs when that specific test is actually selected and
+executed, which confines the flip to the one worker that runs a slow Veros
+test -- already isolated from the rest of the suite by running in a process
+of its own (see `CLAUDE.md`, jax-esm#113).
 """
 
 import jax
@@ -14,39 +33,35 @@ import xarray as xr
 
 pytest.importorskip("veros")
 
-# Captured before the setup modules below are imported: importing
-# `veros.core` (which they do, at module scope) flips
-# `jax.config.jax_enable_x64` to True as a side effect -- see
-# `jem.fluxes.VerosExchange`'s docstring -- and it stays flipped for the
-# rest of the process otherwise, including whichever other test file
-# pytest-xdist schedules onto this same worker afterward. The module-scoped
-# fixture below restores it once every test here has run.
-_JAX_X64_BEFORE_VEROS_IMPORT = jax.config.jax_enable_x64
-
-from jem.components import veros_component  # noqa: E402, F401
-from jem.components.veros.setups._layers import LAYER_THICKNESSES  # noqa: E402
-from jem.components.veros.setups.double_drake import double_drake_setup  # noqa: E402
-from jem.components.veros.setups.earth import earth_setup  # noqa: E402
+from jem.components import veros_component  # noqa: E402
 
 DOUBLE_DRAKE_MASK_FILE = "jem/data/terrain_double_drake_T31.nc"
 ROTATED_SCRIP_FILE = "jem/data/RotatedGaussianLatLon.SCRIP.nc"
 ROTATED_LANDSEA_MASK_FILE = "jem/data/landsea_mask_fraction_RotatedGaussianLatLon.nc"
 
+#: `jax_enable_x64` as it was before this process ever ran a test that
+#: imports a Veros setup module -- i.e. before anything in this file, since
+#: it only imports one inside a test function (see the module docstring).
+_JAX_X64_BEFORE_ANY_VEROS_SETUP_IMPORT = jax.config.read("jax_enable_x64")
+
 
 @pytest.fixture(autouse=True, scope="module")
 def _restore_jax_x64_after_this_module():
-    """Undo the process-global `jax_enable_x64` flip this module's imports cause.
+    """Restore `jax_enable_x64` once every test in this module has run.
 
-    This module's own tests need `jax_enable_x64` on -- Veros is only
-    correct with it -- so this restores the pre-import setting once every
-    test here has finished, rather than trying to avoid the flip: a test
-    elsewhere in the same worker process that shares no relationship with
-    Veros at all should not see a float64 default where it expects jax's
-    normal float32 one (e.g. a `jax.lax.scan` carry-dtype mismatch with no
-    connection to this module).
+    Whichever of this module's tests actually runs -- the one fast test
+    alone under `-m "not slow"`, or all five together (the Veros slow-test
+    gate, jax-esm#113) -- needs `jax_enable_x64` left exactly as Veros wants
+    it (on) for every test *in this module*, so nothing restores it
+    mid-module; restoring after each test individually broke the later slow
+    tests, which then found Veros silently degraded to float32 precision.
+    This restores it only once, in this fixture's teardown, which runs after
+    the *last* selected test in the module finishes, protecting whichever
+    unrelated test file shares this worker afterward without disturbing
+    anything Veros does for the rest of this module's own run.
     """
     yield
-    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_VEROS_IMPORT)
+    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_SETUP_IMPORT)
 
 
 def test_veros_lazy_alias_still_resolves():
@@ -55,7 +70,10 @@ def test_veros_lazy_alias_still_resolves():
     `jem.components.veros` (this setups package) and `jem.components.Veros`
     (the lazy alias for `jem.components.veros_component`) differ only in
     case; this checks that importing the former does not confuse the
-    latter's `__getattr__` resolution.
+    latter's `__getattr__` resolution. Importing `.earth` here (rather than
+    the parent `jem.components.veros` package, which imports nothing) is
+    what actually exercises the case-collision this test is named for, and
+    is what flips `jax_enable_x64` -- see `_restore_jax_x64_after_this_module`.
     """
     import jem.components
     import jem.components.veros.setups.earth  # noqa: F401
@@ -66,6 +84,9 @@ def test_veros_lazy_alias_still_resolves():
 @pytest.mark.slow
 def test_double_drake_setup_takes_its_shape_from_the_mask():
     """`nx`/`ny` come from the mask file's own shape, not an argument."""
+    from jem.components.veros.setups._layers import LAYER_THICKNESSES
+    from jem.components.veros.setups.double_drake import double_drake_setup
+
     setup_cls = double_drake_setup(land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE)
     model = setup_cls()
     model.setup()
@@ -77,6 +98,9 @@ def test_double_drake_setup_takes_its_shape_from_the_mask():
 @pytest.mark.slow
 def test_layer_thicknesses_can_be_shortened():
     """`layer_thicknesses=LAYER_THICKNESSES[:n]` gives an `n`-layer ocean."""
+    from jem.components.veros.setups._layers import LAYER_THICKNESSES
+    from jem.components.veros.setups.double_drake import double_drake_setup
+
     setup_cls = double_drake_setup(
         land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE,
         layer_thicknesses=LAYER_THICKNESSES[:3],
@@ -94,6 +118,8 @@ def test_earth_setup_reproduces_the_native_axes():
     This is the test that protects `GridInfo`'s grid-spacing reconstruction,
     the most easily-lost part of moving this setup into the package.
     """
+    from jem.components.veros.setups.earth import earth_setup
+
     setup_cls = earth_setup(
         scrip_grid_file=ROTATED_SCRIP_FILE,
         landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
@@ -113,6 +139,8 @@ def test_earth_setup_reproduces_the_native_axes():
 @pytest.mark.slow
 def test_earth_setup_coriolis_uses_the_true_latitude():
     """`coriolis_t` follows `grid_center_lat` (true), not `native_lat` (rotated)."""
+    from jem.components.veros.setups.earth import earth_setup
+
     setup_cls = earth_setup(
         scrip_grid_file=ROTATED_SCRIP_FILE,
         landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,

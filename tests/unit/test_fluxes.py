@@ -233,8 +233,8 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
     """A value crossing the atm/ocn precision boundary matches what it lands in.
 
     Regression test for the real failure mode this closes: Veros runs in
-    double precision (importing it flips `jax.config.jax_enable_x64` to
-    True as a side effect of importing `veros.core`), so its carry is
+    double precision (importing `veros.core` flips the process-global
+    `jax_enable_x64` setting to True as a side effect), so its carry is
     float64 while the atmosphere's stays float32 -- and `jax.lax.scan`
     requires a step's *output* carry to match its *input* dtype exactly, so
     an uncast value crossing that boundary breaks the very first coupled
@@ -246,7 +246,7 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
     genuine float64 array can be built here without leaking the setting into
     every other test sharing this process.
     """
-    x64_was_enabled = jax.config.jax_enable_x64
+    x64_was_enabled = jax.config.read("jax_enable_x64")
     jax.config.update("jax_enable_x64", True)
     try:
         shape = (4,)
