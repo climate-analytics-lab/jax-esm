@@ -678,6 +678,17 @@ Breaking changes are marked; everything else is additive.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
   `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
+- **The six example notebooks are rewritten against the configurations Phase
+  2 shipped.** The four ordinary ones (aquaplanet, mixed-grid aquaplanet,
+  Earth-like, and the long-aquaplanet driver retired below) are now one
+  `python -m jem.main +configuration=...` run plus a short plotting section
+  built on `jem.plot`; the two bespoke ones (a customized initial sea surface
+  temperature, the `jax.jvp` response to an SST bump) build their coupler
+  with `jem.runners.build_coupler(compose(...))` and customise only the one
+  thing that is theirs, through `jem.replace_field`. No notebook builds its
+  components, its exchanger or its coupler by hand any more, and none writes
+  netCDF or an animation by hand either. `examples/README.md` is the new
+  index of which command or notebook runs which example.
 
 ### Removed
 

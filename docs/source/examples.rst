@@ -1,6 +1,10 @@
 Examples
 ========
 
+Every example is one ``python -m jem.main +configuration=...`` command,
+listed with the rest in ``examples/README.md``; the pages below show the
+plotting each one adds, through the shared helpers in :mod:`jem.plot`.
+
 JCM with slab models
 --------------------
 
