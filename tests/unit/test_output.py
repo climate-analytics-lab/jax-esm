@@ -115,7 +115,13 @@ def test_postprocess_appends_to_an_existing_cell_methods():
 
 
 def test_postprocess_composes_subsample_then_average():
-    """Both together average the retained records, in that order."""
+    """Both together average the retained records, in that order.
+
+    The label stays the **chunk's** last time even though the stride dropped
+    that record from the mean: it says which interval the mean covers, which
+    is the chunk, so a run that sets both still writes one mean per chunk
+    evenly spaced with the chunks.
+    """
     dataset = simple_dataset(6)
     result = postprocess(dataset, output_averages=True, subsample=2)
 
@@ -124,7 +130,7 @@ def test_postprocess_composes_subsample_then_average():
         result["temperature"].values[0],
         dataset["temperature"].values[::2].mean(axis=0),
     )
-    assert result["time"].values[0] == dataset["time"].values[4]
+    assert result["time"].values[0] == dataset["time"].values[-1]
 
 
 def test_postprocess_stride_counts_coupled_steps_of_the_whole_run():
@@ -190,11 +196,12 @@ def test_postprocess_rejects_a_nonsensical_chunk(kwargs, message):
 
 
 def test_postprocess_keeps_nothing_from_a_chunk_the_stride_skips():
-    """A stride longer than the chunk skips whole chunks rather than bending.
+    """A chunk with no step on the stride is skipped rather than bent.
 
     Keeping a record here anyway -- the chunk's first, say -- is exactly what
-    would break the cadence the stride promises; an empty chunk is the honest
-    answer, and `output_averages` has nothing to average in it.
+    would break the cadence the stride promises; no records is the honest
+    answer, `output_averages` has nothing to average in it, and
+    :func:`~jem.output.write_chunk` writes no file for it.
     """
     dataset = simple_dataset(3)  # coupled steps 6, 7, 8 of the run
 
@@ -382,6 +389,40 @@ def test_write_chunk_refuses_names_that_would_collide(tmp_path):
         write_chunk(
             {"a/b": simple_dataset(2), "a:b": simple_dataset(2)}, tmp_path, 0
         )
+
+
+def test_write_chunk_writes_no_file_for_a_dataset_with_no_records(
+    tmp_path, caplog
+):
+    """A chunk the stride keeps nothing from is skipped, not written empty.
+
+    `xr.open_mfdataset` -- how a run's output is read back -- refuses a
+    zero-length dimension, so one empty file would cost the reader the whole
+    directory; and an empty file is not the chunk's output, it is the absence
+    of any.
+    """
+    empty = postprocess(simple_dataset(3), subsample=5, first_step=6, steps=3)
+    with caplog.at_level(logging.INFO, logger="jem.output"):
+        written = write_chunk({"ocn": empty, "seaice": simple_dataset(2)}, tmp_path, 6)
+
+    assert [path.name for path in written] == ["seaice-00000006.nc"]
+    assert not (tmp_path / "ocn-00000006.nc").exists()
+    assert "kept no record of this chunk" in caplog.text
+
+
+def test_write_chunk_writes_a_dataset_with_no_time_dimension(tmp_path):
+    """"Nothing to write" is an empty time axis, not the absence of one."""
+    timeless = simple_dataset(2).isel(time=0, drop=True)
+    (path,) = write_chunk({"ocn": timeless}, tmp_path, 0)
+    with xr.open_dataset(path) as written:
+        assert "time" not in written.dims
+
+
+def test_write_chunk_still_refuses_colliding_names_when_one_is_empty(tmp_path):
+    """The name check is about names, so an empty dataset does not dodge it."""
+    empty = postprocess(simple_dataset(3), subsample=5, first_step=6, steps=3)
+    with pytest.raises(ValueError, match="rename one of the components"):
+        write_chunk({"a/b": empty, "a:b": simple_dataset(2)}, tmp_path, 0)
 
 
 def test_write_chunk_rejects_a_negative_first_step(tmp_path):

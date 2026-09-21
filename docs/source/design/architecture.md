@@ -936,7 +936,9 @@ for each chunk:
     carry, diagnostics = trajectory(carry)
     datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
     reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…,
-                                    first_step=first_step, steps=steps_per_chunk)
+                                    first_step=first_step, steps=steps)
+                                    # `steps` is THIS batch's length: the last
+                                    # batch of a resume can be a short one
     paths += write_chunk(reduced, output_dir, first_step)
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
     if ok or not bail_on_unhealthy:
@@ -1149,9 +1151,13 @@ step and they are kept or dropped together, so components recording at
 different rates stay on one cadence. `postprocess` reads each component's
 records per step off its own record count (`len(time) // steps`) and refuses a
 count that is not a whole multiple of the chunk's steps, since the step a
-record belongs to would then be undefined. A `subsample` longer than `chunk`
-is legal and means some chunks contain no kept step at all; those chunks' files
-hold no records, rather than a record the run's cadence does not call for.
+record belongs to would then be undefined. A chunk can contain no coupled step
+on the stride at all — a `subsample` longer than `chunk` gives that, and so
+does the short final batch a resume under a different chunk length ends with —
+and such a chunk gets **no file**, rather than a record the run's cadence does
+not call for or an empty one that `xr.open_mfdataset` cannot read back. So
+`RunResult.paths` holds one file per component per chunk *except* for the
+chunks that kept nothing, and the skip is reported at INFO.
 
 `output_averages=True` is defined against jcm's meaning of the same word
 rather than beside it: jcm
@@ -1159,7 +1165,11 @@ replaces each saved record with the mean over its save interval, labelled at the
 interval's end, and the coupler's records are already one per coupling step — so
 the coupler's output interval is the **chunk**, and the flag replaces a chunk's
 records with their time mean, labelled with the chunk's last time and carrying
-the CF `cell_methods = "time: mean"` that says so. The bins are therefore the
+the CF `cell_methods = "time: mean"` that says so. That label is the end of the
+chunk whether or not `subsample` kept the record sitting there, so a run that
+sets both still writes one evenly spaced mean per chunk; what varies is how
+many records went into each one, since the number of a chunk's steps the
+run-global stride keeps depends on where the chunk falls in the stride period. The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
 five days a year against the calendar on a 365-day year, not monthly means —
 those are `jem.accumulate.monthly_mean(coupler)` (twelve bins, a climatology)

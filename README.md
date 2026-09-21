@@ -247,7 +247,9 @@ that blew up at the end of the month as healthy.
 its start, with every record that step produced (a component the workflow runs
 several times per coupled step keeps all of them, or none). So the files hold
 the same records however the run was chunked and wherever it was resumed, and
-`chunk` stays free to be chosen for memory and restart granularity alone.
+`chunk` stays free to be chosen for memory and restart granularity alone. A
+chunk that contains no step on the stride writes no file at all, so with
+`subsample` set there can be fewer files than chunks.
 
 For a reduction that must not cost memory proportional to the run, accumulate
 it *inside* the scan instead of writing every step out:

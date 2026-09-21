@@ -63,6 +63,13 @@ records. :func:`postprocess` therefore takes the chunk's ``first_step`` and
 its number of coupled ``steps``, and reads each component's records per step
 off its own record count.
 
+A chunk can then contain no step on the stride at all -- a ``subsample``
+longer than the chunk gives that, and so does the short final batch a resume
+under a different chunk length ends with. Such a chunk reduces to no records
+and :func:`write_chunk` writes **no file** for it: an empty netCDF file would
+carry nothing and its zero-length dimension would make
+``xr.open_mfdataset(files)`` fail on the whole directory.
+
 What ``output_averages`` means here
 -----------------------------------
 JCM's ``run.output_averages`` switches each saved record from an
@@ -72,7 +79,8 @@ step; ``jcm/config/run/default.yaml``). The coupler's records are already one
 per coupling step, so the same idea one level up: the coupler's output
 interval is the **chunk**, and ``output_averages=True`` replaces a chunk's
 records with their time mean -- one record, labelled with the chunk's last
-time, carrying the CF ``cell_methods = "time: mean"`` that says so.
+time (its own, whether or not ``subsample`` kept the record sitting there),
+carrying the CF ``cell_methods = "time: mean"`` that says so.
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
 labelled at its end") rather than inventing a second meaning for the same
@@ -267,6 +275,28 @@ def _kept_records(
     ).ravel()
 
 
+def _dataset_is_empty(dataset: xr.Dataset) -> bool:
+    """Return whether ``dataset`` has a time dimension holding no record.
+
+    The one definition of "nothing to write", shared by :func:`write_chunk`,
+    which skips such a dataset, and by :func:`postprocess`, which has nothing
+    to average in one. A dataset with **no** time dimension is not empty in
+    this sense: it is a grid or a mask, and it is written and passed through
+    as it always is.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        The dataset to examine.
+
+    Returns
+    -------
+    bool
+
+    """
+    return dataset.sizes.get(TIME_DIMENSION, 1) == 0
+
+
 def postprocess(
     dataset: xr.Dataset,
     *,
@@ -279,14 +309,20 @@ def postprocess(
 
     The two reductions compose in the order they are listed: ``subsample``
     chooses which records are kept, and ``output_averages`` then reduces
-    whatever is left to its mean. Asking for both is legal but unusual --
-    the mean is then over the retained records only, which is a worse
-    estimate of the chunk mean than averaging all of them; normally a run
-    sets one or the other. The order still holds with ``first_step``: the
-    stride is decided from the run's clock and not from the mean's, so
-    averaging cannot move it, and reversing the two would make the stride
-    select among one-record chunk means -- a stride over *chunks*, which is
-    not what ``subsample`` means anywhere else.
+    whatever is left to its mean. That order is what the two words mean --
+    the stride is decided from the run's clock, which averaging cannot move,
+    and reversing them would make the stride select among one-record chunk
+    means, a stride over *chunks* rather than over coupled steps.
+
+    Asking for both is legal but unusual, and a run normally sets one or the
+    other, because the mean is then over the **kept** records only. It is
+    still the mean of one chunk, labelled at that chunk's end, so the series
+    of means stays one record per chunk, evenly spaced with the chunks. What
+    it is not is evenly *weighted*: how many of a chunk's coupled steps the
+    run-global stride keeps depends on where the chunk falls in the stride
+    period, so successive means can average different numbers of records, and
+    a chunk that keeps none yields no mean at all (and, through
+    :func:`write_chunk`, no file).
 
     Variables without a time dimension (grid masks, layer thicknesses) are
     passed through untouched by both reductions.
@@ -297,8 +333,10 @@ def postprocess(
         One component's chunk of output, from ``Coupler.to_xarray``.
     output_averages : bool
         Replace the records with their time mean: one record, labelled with
-        the last time in the chunk, with ``cell_methods = "time: mean"`` on
-        every variable that was averaged. See the module docstring for why
+        the last time in the chunk **as it was given** -- the end of the
+        interval the mean covers, whether or not ``subsample`` dropped that
+        record from the mean itself -- with ``cell_methods = "time: mean"``
+        on every variable that was averaged. See the module docstring for why
         the chunk is the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
@@ -320,8 +358,8 @@ def postprocess(
     -------
     xarray.Dataset
         A chunk none of whose coupled steps the stride keeps comes back with
-        no records -- possible only for a ``subsample`` longer than the chunk
-        -- rather than with a record the run's cadence does not call for.
+        no records, rather than with a record the run's cadence does not call
+        for; :func:`write_chunk` writes no file for such a chunk.
 
     Raises
     ------
@@ -340,6 +378,15 @@ def postprocess(
             f"dimension (it has {sorted(map(str, dataset.dims))!r})."
         )
 
+    # The end of the interval the mean covers is the end of the CHUNK, which
+    # is the whole point of the label: one record per output interval,
+    # labelled at its end. So it is read before the stride removes records --
+    # the stride chooses what goes INTO the mean, not what interval the mean
+    # covers, and labelling with the last kept record instead would make the
+    # chunk-mean series unevenly spaced whenever the stride's phase falls
+    # differently in successive chunks.
+    chunk_end = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: slice(-1, None)})
+
     if subsample > 1:
         n_records = int(dataset.sizes[TIME_DIMENSION])
         dataset = dataset.isel(
@@ -354,23 +401,22 @@ def postprocess(
         )
     if not output_averages:
         return dataset
-    if not dataset.sizes[TIME_DIMENSION]:
+    if _dataset_is_empty(dataset):
         # The stride kept none of this chunk's coupled steps, so there is
-        # nothing to average and no last time to label a mean with. An empty
-        # chunk is the honest answer; inventing a record here would put one in
-        # the output at a cadence the run did not ask for.
+        # nothing to average. An empty chunk is the honest answer -- inventing
+        # a record here would put one in the output at a cadence the run did
+        # not ask for -- and `write_chunk` writes no file for it.
         return dataset
 
     timed = _timed_variables(dataset)
-    # `Dataset.mean` drops the dimension it reduces, so the label has to be
-    # put back by hand: the chunk's last time, which is the end of the
-    # interval the mean covers -- JCM's labelling convention, and the one
-    # `TimeAxis.datetimes` already applied to the records being averaged.
-    last_time = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: slice(-1, None)})
+    # `Dataset.mean` drops the dimension it reduces, so the label -- the
+    # chunk's last time, JCM's convention, and the one `TimeAxis.datetimes`
+    # already applied to the records being averaged -- has to be put back by
+    # hand.
     averaged = (
         dataset[timed]
         .mean(dim=TIME_DIMENSION, keep_attrs=True)
-        .expand_dims({TIME_DIMENSION: last_time.values})
+        .expand_dims({TIME_DIMENSION: chunk_end.values})
     )
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
     for name in timed:
@@ -486,6 +532,16 @@ def write_chunk(
     rather than interleaving one pass's files with another's holding records
     for the same simulated time.
 
+    A dataset with **no records** is not written at all, and is reported at
+    INFO. That is what a chunk holding no coupled step on the ``subsample``
+    stride reduces to, and an empty netCDF file is worse than no file: it
+    carries nothing, and a zero-length dimension makes
+    ``xr.open_mfdataset(files)`` -- how a run's output is read back -- fail
+    outright rather than skip it. The chunk's simulated time is not missing
+    from the output, it is simply not on the cadence the run asked to keep.
+    A dataset with no time dimension at all is a different thing (a grid, a
+    mask) and is written as it always was.
+
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
     normally a plain identifier; anything in one that cannot appear in a file
@@ -507,7 +563,8 @@ def write_chunk(
     -------
     list[pathlib.Path]
         The paths written, sorted by dataset name so a caller's log, and a
-        test, see one order.
+        test, see one order. Shorter than ``datasets`` when one of them had
+        no records to write.
 
     Raises
     ------
@@ -531,6 +588,14 @@ def write_chunk(
                 f"{path.name!r}; rename one of the components."
             )
         paths[path] = name
+        if _dataset_is_empty(datasets[name]):
+            logger.info(
+                "Coupled step %d: %r kept no record of this chunk, so %s was "
+                "not written. The subsample stride keeps none of the chunk's "
+                "coupled steps.",
+                first_step, name, path.name,
+            )
+            continue
         if path.exists():
             logger.warning(
                 "%s already exists and is being overwritten: this directory "

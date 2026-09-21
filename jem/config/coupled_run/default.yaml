@@ -40,7 +40,9 @@ output_dir: null
 output_averages: false
 
 # Keep every n-th coupling step in the output. 1 keeps them all; a long run
-# raises it rather than writing a file it cannot store.
+# raises it rather than writing a file it cannot store. The stride counts
+# coupled steps from the start of the run, so chunking and resume do not
+# change which steps are kept.
 subsample: 1
 
 # Stop at the first chunk whose state fails `jcm.diagnostics.check_health`

@@ -224,7 +224,11 @@ class RunResult:
         it. Empty when ``health_check`` is None.
     paths : list of pathlib.Path
         Every output file written, in the order they were written. Empty for
-        an accumulated run, which writes none.
+        an accumulated run, which writes none. It is one file per component
+        per chunk except where a chunk had nothing to write: with
+        ``subsample`` set, a chunk containing no coupled step on the stride
+        is skipped rather than written as an empty file (see
+        :func:`jem.output.write_chunk`), so ``paths`` is then shorter.
     accumulator : pytree or None
         What the run's ``accumulate`` reduction folded every coupled step
         into, threaded across the chunks; ``None`` when the run was not given
@@ -353,10 +357,11 @@ def run_chunked(
         uninterrupted run keeps, and the first step of the run is always
         kept. A component that records ``n`` times per coupled step keeps all
         ``n`` records of a kept step and none of a dropped one: the stride is
-        in coupled steps, not in records. A ``subsample`` longer than
-        ``chunk`` is legal and means some chunks contain no kept step, whose
-        files then hold no records -- the price of a cadence that belongs to
-        the run rather than to the chunking.
+        in coupled steps, not in records. A chunk that contains no coupled
+        step on the stride -- which a ``subsample`` longer than ``chunk`` can
+        give, and so can the short final batch a resume under a different
+        chunk length ends with -- writes **no file** rather than an empty
+        one, so ``paths`` can hold fewer files than the run ran chunks.
     health_check : callable, optional
         ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run after
         each chunk has been written and **before** it is checkpointed.
@@ -719,8 +724,12 @@ def run_chunked(
                 datasets, output_averages=output_averages, subsample=subsample,
                 first_step=first_step, steps=steps,
             )
-            paths.extend(write_chunk(reduced, output_dir, first_step))
-            written = f"{len(reduced)} file(s) written"
+            # `write_chunk` skips a component whose reduced chunk holds no
+            # record, so what it returns -- not `len(reduced)` -- is what was
+            # written.
+            chunk_paths = write_chunk(reduced, output_dir, first_step)
+            paths.extend(chunk_paths)
+            written = f"{len(chunk_paths)} file(s) written"
         else:
             # The accumulator crosses the chunk boundary untouched, which is
             # what lets one compiled trajectory of whatever length suits the

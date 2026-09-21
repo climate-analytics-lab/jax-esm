@@ -659,10 +659,23 @@ code this release adds:
   so a component the workflow runs `n` times per coupled step is thinned on
   the same cadence as everyone else. A record count that is not a whole
   multiple of the chunk's steps is a `ValueError`, since the step a record
-  belongs to is then undefined, and a chunk containing no kept step (possible
-  only for a `subsample` longer than `chunk`) writes a file with no records.
+  belongs to is then undefined, and a chunk containing no coupled step on the
+  stride — which a `subsample` longer than `chunk` can give, and so can the
+  short final batch a resume under a different chunk length ends with — is now
+  skipped by `write_chunk` instead of being written as a zero-record file,
+  which `xr.open_mfdataset` cannot read back and the resume check cannot place
+  on a chunk grid. `RunResult.paths` therefore holds fewer files than the run
+  ran chunks whenever that happens, and the skip is reported at INFO.
   `postprocess(dataset, subsample=k)` on its own is unchanged: no offset means
   the start of a run.
+- A chunk mean written with `subsample` set is labelled with the **chunk's**
+  last time rather than with the last record the stride kept, so the series of
+  chunk means is one record per chunk, evenly spaced with the chunks, as
+  `output_averages` has always promised (with a phase-aware stride the last
+  kept record falls at a different point in each chunk — measured label
+  spacings of 3, 3, 6, 3 days for `chunk="4 days"`, `subsample=3`). The mean is
+  still over the kept records only, so successive means can average different
+  numbers of records; the two options remain ones a run normally sets one of.
 - A chunk the health gate rejects is no longer checkpointed. The gate now runs
   before the save, so a run stopped by it leaves its single restart directory
   holding the last chunk that *passed*, instead of overwriting it with the

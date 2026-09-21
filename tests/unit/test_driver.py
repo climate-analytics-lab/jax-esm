@@ -1981,9 +1981,61 @@ def test_subsample_survives_a_resume(tmp_path):
     assert uninterrupted.steps_completed == resumed.steps_completed == 6
     assert written_labels(tmp_path / "whole") == step_labels(0, 2, 4)
     assert written_labels(tmp_path / "restarted") == step_labels(0, 2, 4)
-    # Every chunk still wrote its file, so the directory is a complete record
-    # of the run; the chunks whose step the stride drops hold no records.
-    assert len(list((tmp_path / "restarted").glob("ocn-*.nc"))) == 6
+    # A one-day chunk whose step the stride drops has nothing to write, so it
+    # writes no file: three chunks of the six kept a step, across both passes.
+    assert sorted(
+        path.name for path in (tmp_path / "restarted").glob("ocn-*.nc")
+    ) == ["ocn-00000000.nc", "ocn-00000002.nc", "ocn-00000004.nc"]
+    assert sorted(path.name for path in resumed.paths) == [
+        "ocn-00000004.nc", "seaice-00000004.nc"
+    ]
+
+
+def test_a_thinned_run_reads_back_as_one_series(tmp_path):
+    """The directory a thinned run leaves opens with `open_mfdataset`.
+
+    This is what the output is *for*, and it is why a chunk that keeps no
+    step writes no file rather than an empty one: a zero-length time
+    dimension makes the default `combine="by_coords"` fail on the whole
+    directory, so one skipped chunk would cost the run all of its output.
+    """
+    run_chunked(
+        two_slabs(), total_time="6 days", chunk="1 day",
+        output_dir=tmp_path, subsample=2,
+    )
+
+    with xr.open_mfdataset(sorted(tmp_path.glob("ocn-*.nc"))) as combined:
+        assert combined.sizes["time"] == 3
+        np.testing.assert_array_equal(
+            combined["time"].values, np.array(step_labels(0, 2, 4))
+        )
+
+
+def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
+    tmp_path,
+):
+    """`output_averages` with `subsample` keeps one evenly spaced mean a chunk.
+
+    Twenty days in four-day chunks with `subsample=3`: the kept coupled steps
+    are 0, 3, 6, 9, 12, 15 and 18, which fall 2, 1, 1, 2, 1 to a chunk -- so
+    the means are over different numbers of records, but each one still
+    covers its own chunk and is labelled at that chunk's end, four days
+    apart. Labelling with the last record the stride happened to keep would
+    make the series jump about instead.
+    """
+    run_chunked(
+        two_slabs(), total_time="20 days", chunk="4 days",
+        output_dir=tmp_path, output_averages=True, subsample=3,
+    )
+
+    assert written_labels(tmp_path) == step_labels(3, 7, 11, 15, 19)
+    for path in sorted(tmp_path.glob("ocn-*.nc")):
+        with xr.open_dataset(path) as written:
+            assert written.sizes["time"] == 1
+            assert (
+                "time: mean"
+                in written["sea_surface_temperature"].attrs["cell_methods"]
+            )
 
 
 def test_a_sub_stepped_component_is_thinned_by_coupled_step(tmp_path):
