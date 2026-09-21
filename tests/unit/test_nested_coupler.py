@@ -91,13 +91,13 @@ class CheckpointingCounter(Counter):
         self.saved_directories = []
         self.loaded_directories = []
 
-    def save_state(self, carry, directory):
+    def save_carry(self, carry, directory):
         self.saved_directories.append(directory)
         (directory / self.FILENAME).write_text(
             json.dumps({key: float(value) for key, value in carry.items()})
         )
 
-    def load_state(self, directory):
+    def load_carry(self, directory):
         self.loaded_directories.append(directory)
         stored = json.loads((directory / self.FILENAME).read_text())
         return {key: jnp.float32(value) for key, value in stored.items()}
@@ -561,7 +561,7 @@ def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_state_hands_each_component_its_own_directory(tmp_path):
+def test_save_carry_hands_each_component_its_own_directory(tmp_path):
     """A component that writes itself is delegated to, however deeply nested.
 
     The savers are derived from the components, so the driver names none of
@@ -574,7 +574,7 @@ def test_save_state_hands_each_component_its_own_directory(tmp_path):
     carry, _ = outer.generate_trajectory_function(2)(outer.initialize())
 
     root = tmp_path / "checkpoint"
-    outer.save_state(carry, root)
+    outer.save_carry(carry, root)
 
     assert land.saved_directories == [root / "atm_lnd" / "lnd"]
     assert (root / "atm_lnd" / "lnd" / CheckpointingCounter.FILENAME).exists()
@@ -590,15 +590,15 @@ def test_save_state_hands_each_component_its_own_directory(tmp_path):
     assert (root / "atm_lnd" / CARRY_FILENAME).exists()
 
 
-def test_load_state_round_trips_a_nested_checkpoint(tmp_path):
+def test_load_carry_round_trips_a_nested_checkpoint(tmp_path):
     """The loaders are derived the same way, so the carry comes back whole."""
     outer, inner = checkpointing_nested_model()
     land = inner.components["lnd"]
     carry, _ = outer.generate_trajectory_function(2)(outer.initialize())
 
     root = tmp_path / "checkpoint"
-    outer.save_state(carry, root)
-    loaded = outer.load_state(root)
+    outer.save_carry(carry, root)
+    loaded = outer.load_carry(root)
 
     assert land.loaded_directories == [root / "atm_lnd" / "lnd"]
     assert isinstance(loaded, CoupledCarry)
@@ -612,7 +612,7 @@ def test_load_state_round_trips_a_nested_checkpoint(tmp_path):
     assert loaded.components["atm_lnd"].step.dtype == jnp.int32
 
 
-def test_a_nested_run_resumed_from_load_state_continues_identically(tmp_path):
+def test_a_nested_run_resumed_from_load_carry_continues_identically(tmp_path):
     """Four steps, or two then a checkpoint then two, are the same run."""
     outer, _ = checkpointing_nested_model()
     initial = outer.initialize()
@@ -620,9 +620,9 @@ def test_a_nested_run_resumed_from_load_state_continues_identically(tmp_path):
 
     two = outer.generate_trajectory_function(2)
     carry, _ = two(initial)
-    outer.save_state(carry, tmp_path / "checkpoint")
+    outer.save_carry(carry, tmp_path / "checkpoint")
 
-    resumed, diagnostics = two(outer.load_state(tmp_path / "checkpoint"))
+    resumed, diagnostics = two(outer.load_carry(tmp_path / "checkpoint"))
 
     assert_trees_equal(resumed, continuous_carry)
     # The inner clock continues from hour 48, not from zero.
@@ -632,24 +632,24 @@ def test_a_nested_run_resumed_from_load_state_continues_identically(tmp_path):
     )
 
 
-def test_save_state_matches_the_explicit_helpers_for_an_all_pytree_model(tmp_path):
+def test_save_carry_matches_the_explicit_helpers_for_an_all_pytree_model(tmp_path):
     """With nothing to delegate to, the capability writes the same checkpoint.
 
     The flat model has no component with a checkpoint capability of its own,
-    so ``Coupler.save_state`` derives an empty savers mapping and is exactly
+    so ``Coupler.save_carry`` derives an empty savers mapping and is exactly
     the call a driver used to write by hand.
     """
     model = flat_model()
     carry, _ = model.generate_trajectory_function(2)(model.initialize())
 
-    model.save_state(carry, tmp_path / "capability")
+    model.save_carry(carry, tmp_path / "capability")
     save_coupled_carry(carry, tmp_path / "explicit")
 
     assert sorted(path.name for path in (tmp_path / "capability").iterdir()) == sorted(
         path.name for path in (tmp_path / "explicit").iterdir()
     )
     assert_trees_equal(
-        model.load_state(tmp_path / "capability"),
+        model.load_carry(tmp_path / "capability"),
         load_coupled_carry(
             tmp_path / "explicit",
             {

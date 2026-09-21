@@ -36,8 +36,8 @@ from jem.base.component import (
     role_attrs,
 )
 from jem.checkpoint import CARRY_FILENAME
-from jem.checkpoint import load as load_carry
-from jem.checkpoint import save as save_carry
+from jem.checkpoint import load as load_pytree
+from jem.checkpoint import save as save_pytree
 from jem.components.clock import clock_tolerance_seconds
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ REFERENCE_SALINITY = 35.0  # PSU
 # resulting magnitude from below.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
 
-#: Name of the HDF5 restart file :meth:`VerosComponent.save_state` writes
+#: Name of the HDF5 restart file :meth:`VerosComponent.save_carry` writes
 #: inside its checkpoint directory. Veros owns the format; JEM only chooses
 #: where it goes, and fixes the name so that the loader finds it.
 VEROS_RESTART_FILENAME = "veros.restart.h5"
@@ -1033,7 +1033,7 @@ class VerosComponent:
 
         return dataset
 
-    def save_state(self, carry: Carry, directory: Path) -> None:
+    def save_carry(self, carry: Carry, directory: Path) -> None:
         """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         The ``VerosState`` goes through Veros' own HDF5 restart writer
@@ -1071,13 +1071,13 @@ class VerosComponent:
         # The restart file first, the pytree carry file last: the coupled
         # checkpoint treats the carry file as the completion marker, and this
         # component keeps the same promise for its own directory.
-        save_carry(
+        save_pytree(
             {"derived": carry["derived"], "forcing": carry["forcing"]},
             directory / CARRY_FILENAME,
         )
 
-    def load_state(self, directory: Path) -> Carry:
-        """Read back a carry written by :meth:`save_state`.
+    def load_carry(self, directory: Path) -> Carry:
+        """Read back a carry written by :meth:`save_carry`.
 
         Veros' restart reader mutates ``model.state`` in place, so the
         returned carry shares that object -- as :meth:`initialize` does. The
@@ -1088,7 +1088,7 @@ class VerosComponent:
         Parameters
         ----------
         directory : pathlib.Path
-            A directory written by :meth:`save_state`.
+            A directory written by :meth:`save_carry`.
 
         Returns
         -------
@@ -1114,7 +1114,7 @@ class VerosComponent:
             "derived": VerosDerived.zeros(self.horizontal_shape),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
         }
-        stored = load_carry(template, directory / CARRY_FILENAME)
+        stored = load_pytree(template, directory / CARRY_FILENAME)
         return {"state": state, **stored}
 
 

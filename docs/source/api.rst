@@ -19,7 +19,7 @@ Running a model
 ``jem.main`` are the same loop reached from a composed Hydra config.
 ``jem.checkpoint`` and ``jem.accumulate`` are module-level APIs -- they are not
 re-exported from ``jem``, because a run reaches them through
-``Coupler.save_state`` and ``generate_trajectory_function(accumulate=...)``.
+``Coupler.save_carry`` and ``generate_trajectory_function(accumulate=...)``.
 
 .. autosummary::
    :toctree: generated

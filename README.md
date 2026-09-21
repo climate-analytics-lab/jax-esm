@@ -195,7 +195,7 @@ checkpoint the line before says so in as many words: every component is
 starting from its initial state rather than from a restart. That is a WARNING
 when the directory is the wreckage of an interrupted save, and INFO when there
 is simply nothing there — which, with checkpointing on by default, is what
-every first run sees. `load_state` names
+every first run sees. `load_carry` names
 each component's own source in turn. Loading is all-or-nothing: every leaf comes
 from the checkpoint, and a component the checkpoint does not hold is an error,
 never a silent fresh initialization.
@@ -373,7 +373,7 @@ A component is any object satisfying `jem.base.component.Component`:
 
 Three capabilities are optional and detected with `isinstance`:
 `SupportsXarray` (`to_xarray(diagnostics, time)`), `SupportsCheckpoint`
-(`save_state`/`load_state`) and `SupportsBind` (`bind(coupling_timestep=...,
+(`save_carry`/`load_carry`) and `SupportsBind` (`bind(coupling_timestep=...,
 start_date=..., calendar=...)`, called once by the coupler at registration for
 components with an internal timestep, such as JCM and Veros).
 
@@ -417,7 +417,7 @@ it was handed, and never change their pytree structure.
   and the inner datasets come out of `to_xarray` under their own names, on the
   inner clock. The two forms produce identical runs — see
   `docs/source/design/architecture.md`.
-- `model.save_state(carry, directory)` / `model.load_state(directory)`
+- `model.save_carry(carry, directory)` / `model.load_carry(directory)`
   checkpoint the whole coupled model. The coupler derives each component's
   writer from the component itself, so a driver never lists them; a component
   whose carry is not a plain pytree (`VerosComponent`, through Veros' HDF5

@@ -20,8 +20,8 @@ Two layers live here, and a driver normally touches only the second:
 - :func:`save_coupled_carry` / :func:`load_coupled_carry` lay a whole
   :class:`~jem.base.component.CoupledCarry` out in a directory, delegating
   the components that write themselves. They are what
-  :meth:`jem.base.coupler.Coupler.save_state` and
-  :meth:`~jem.base.coupler.Coupler.load_state` are built on; a driver calls
+  :meth:`jem.base.coupler.Coupler.save_carry` and
+  :meth:`~jem.base.coupler.Coupler.load_carry` are built on; a driver calls
   those, because only the coupler knows which of its components are
   :class:`~jem.base.component.SupportsCheckpoint`.
 
@@ -120,7 +120,7 @@ _STRUCTURE_KEY = "tree_structure"
 #: costs the file nothing and only puts the component's *name* into the
 #: recorded structure -- but unlike a bare ``{}`` or ``None`` it cannot be
 #: confused with a plain component that genuinely carries nothing, so a
-#: component that gains (or loses) a ``save_state`` is a mismatch too.
+#: component that gains (or loses) a ``save_carry`` is a mismatch too.
 _DELEGATED_MARKER_KEY = "checkpointed_by_the_component"
 
 #: Below this many characters both structure reprs are shown in full in a
@@ -382,7 +382,7 @@ def _named(components: Mapping[str, Any]) -> str:
     """Return a readable list of component names for a log line.
 
     ``"(none)"`` rather than an empty string, because a log line reading
-    "restored from carry.msgpack, restored by their own load_state" leaves the
+    "restored from carry.msgpack, restored by their own load_carry" leaves the
     reader unable to tell an empty set from a formatting bug.
     """
     return ", ".join(sorted(components)) or "(none)"
@@ -417,9 +417,9 @@ def save_coupled_carry(
         Directory to save into (created if absent).
     component_savers : mapping, optional
         ``{component name: (carry, directory) -> None}`` for the components
-        whose carry is not a plain pytree -- in practice the ``save_state`` of
+        whose carry is not a plain pytree -- in practice the ``save_carry`` of
         every :class:`~jem.base.component.SupportsCheckpoint` component, which
-        :meth:`jem.base.coupler.Coupler.save_state` assembles.
+        :meth:`jem.base.coupler.Coupler.save_carry` assembles.
 
     """
     directory = Path(directory)
@@ -468,7 +468,7 @@ def load_coupled_carry(
         ``component.initialize()`` is the natural source.
     component_loaders : mapping, optional
         ``{component name: directory -> carry}`` for the components that read
-        themselves back, i.e. the ``load_state`` of every
+        themselves back, i.e. the ``load_carry`` of every
         :class:`~jem.base.component.SupportsCheckpoint` component. A name here
         must not also appear in ``component_templates``.
 
@@ -546,7 +546,7 @@ def load_coupled_carry(
     # question the log has to answer without the operator reading this module.
     logger.info(
         "Loaded checkpoint %s at coupled step %d: %s restored from %s, %s "
-        "restored by their own load_state. Every leaf comes from the "
+        "restored by their own load_carry. Every leaf comes from the "
         "checkpoint -- the templates supply structure only.",
         directory,
         int(stored["step"]),

@@ -51,7 +51,7 @@ Three further capabilities are optional and are detected with
 time)`), :class:`~jem.base.component.SupportsBind` (:code:`bind(*,
 coupling_timestep, start_date, calendar)`) and
 :class:`~jem.base.component.SupportsCheckpoint`
-(:code:`save_state`/:code:`load_state`).
+(:code:`save_carry`/:code:`load_carry`).
 
 The :code:`Carry` in JEM refers to the state object that is passed
 from one iteration of a loop to the next, which is the same concept as

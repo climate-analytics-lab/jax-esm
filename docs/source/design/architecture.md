@@ -111,7 +111,7 @@ instead: editing one between runs is overridden, not refused.
 Both the stored leaf and the template go through `jnp.asarray` first: a
 component's parameter default is a Python float in `initialize()` and a float32
 array in the carry `lax.scan` returns, and the two have to compare as one leaf.
-It is also why `load_state` needs a template at all, and takes it from each
+It is also why `load_carry` needs a template at all, and takes it from each
 component's own `initialize()`.
 
 **Loading is all-or-nothing.** The template built from `initialize()` supplies
@@ -122,22 +122,22 @@ quietly left at its initial state — that would continue one part of the model
 from the saved step while another restarted at the start date, a run that is
 neither a resume nor a cold start and that nothing downstream could detect.
 `load_coupled_carry` logs at INFO which components it read from the shared
-carry file, which read themselves back through their own `load_state`, and the
+carry file, which read themselves back through their own `load_carry`, and the
 step it restored, so every component's source is named.
 
 **The coupler is what a driver checkpoints through**, in one call each way:
 
 ```python
-model.save_state(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
-carry = model.load_state(saved)
+model.save_carry(final_carry, checkpoint_dir / f"step_{int(final_carry.step):08d}")
+carry = model.load_carry(saved)
 ```
 
 Which components need writing by hand rather than pickling is a property of the
 *components* — `VerosComponent` has to go through Veros' HDF5 restart writer
 because a `VerosState` is not a pytree — and the coupler is the one object that
-knows them all. `Coupler.save_state` therefore derives the savers itself, as
-`{name: component.save_state for … if isinstance(component, SupportsCheckpoint)}`,
-and `load_state` derives the loaders from the same capability. A driver never
+knows them all. `Coupler.save_carry` therefore derives the savers itself, as
+`{name: component.save_carry for … if isinstance(component, SupportsCheckpoint)}`,
+and `load_carry` derives the loaders from the same capability. A driver never
 enumerates them, so it cannot get the set wrong or forget one when a component
 is swapped.
 
@@ -154,7 +154,7 @@ model containing Veros would silently bypass the restart path.
 `load_coupled_carry(directory, component_templates, component_loaders=…)` are the
 underlying functions and still take the mappings explicitly, for a caller that
 wants to override a saver or supply one for something that is not a component
-capability. `Coupler.save_state` / `load_state` are the answer for every
+capability. `Coupler.save_carry` / `load_carry` are the answer for every
 ordinary case.
 
 **The carry file is the marker**, and it is written last — published by renaming
@@ -267,7 +267,7 @@ at a random call site:
 |---|---|---|
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
-| `SupportsCheckpoint` | `save_state(carry, directory)` / `load_state(directory)` | `VerosComponent`, `Coupler` |
+| `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -566,9 +566,9 @@ model = Coupler(
   diagnostics gain no extra axis, mirroring multiplicity 1.
 - **The carry** of the inner coupler is a `CoupledCarry` living inside the
   outer one's `components`, so there are two step counters: the outer counts
-  outer steps, the inner counts its own. `outer.save_state(carry, directory)`
+  outer steps, the inner counts its own. `outer.save_carry(carry, directory)`
   writes the inner model into `directory / <its registered name>` through the
-  inner coupler's own `save_state`, and `outer.load_state(directory)` reads it
+  inner coupler's own `save_carry`, and `outer.load_carry(directory)` reads it
   back the same way, so a resume continues both clocks — and a component inside
   the inner model that needs its own format (Veros) still gets it.
 - **Exchangers in the outer coupler** see the inner `CoupledCarry` under its
@@ -940,7 +940,7 @@ for each chunk:
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
     if ok or not bail_on_unhealthy:
         if due(int(carry.step)) or last chunk:      # see checkpoint_interval
-            coupler.save_state(carry, checkpoint_path)
+            coupler.save_carry(carry, checkpoint_path)
 ```
 
 It returns a `RunResult`: the `final_carry`, `steps_completed`
@@ -1077,10 +1077,10 @@ loud. A directory an interrupted save left without its carry file is a
 is **INFO**: with checkpointing on by default into a fresh output directory,
 that is what every first run sees, and a warning nobody can avoid is a warning
 nobody reads. Both name the path, so a mistyped one is still visible in the
-line the run always prints. `Coupler.load_state` completes the picture
+line the run always prints. `Coupler.load_carry` completes the picture
 from the other end, naming each component's own source (the shared carry file,
-or its own `load_state`) and the step restored, so no part of a resumed model's
-state is unaccounted for.
+or its own `load_carry`) and the step restored, so no part of a resumed model's
+carry is unaccounted for.
 
 **Checkpoints and resume.** `checkpoint_path` is a **single directory**,
 rewritten after every chunk the health gate accepts, not a directory of dated
@@ -1605,7 +1605,7 @@ the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
    construction is a dead leaf in the carry.
 3. Add `bind(...)` if the model has an internal timestep, and raise `ValueError`
    when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
-   time)` if it produces output, and `save_state`/`load_state` if its carry
+   time)` if it produces output, and `save_carry`/`load_carry` if its carry
    cannot be checkpointed as a plain pytree.
 4. Export it from `jem/components/__init__.py` (lazily, via the module's
    `__getattr__`, if it pulls in an optional dependency — as Veros does).

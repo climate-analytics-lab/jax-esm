@@ -459,7 +459,7 @@ class Coupler:
     registered name and reaches inside it with :func:`nested_carry` and
     :func:`with_nested_carry`.
 
-    :meth:`save_state` / :meth:`load_state` checkpoint the whole coupled
+    :meth:`save_carry` / :meth:`load_carry` checkpoint the whole coupled
     model in one call, deriving each component's writer from the component
     itself; because a coupler implements the capability too, a nested model
     checkpoints by recursion into a subdirectory of its own.
@@ -1462,7 +1462,7 @@ class Coupler:
     # -- checkpointing -----------------------------------------------------
 
     def _component_savers(self) -> dict[str, Callable[[Carry, Path], None]]:
-        """Return the ``save_state`` of every component that has one.
+        """Return the ``save_carry`` of every component that has one.
 
         Which components need writing by hand rather than pickling is a
         property of the components, and the coupler is the one object that
@@ -1472,20 +1472,20 @@ class Coupler:
         have to know it again for every model it builds.
         """
         return {
-            name: component.save_state
+            name: component.save_carry
             for name, component in self.components.items()
             if isinstance(component, SupportsCheckpoint)
         }
 
     def _component_loaders(self) -> dict[str, Callable[[Path], Carry]]:
-        """Return the ``load_state`` of every component that has one.
+        """Return the ``load_carry`` of every component that has one.
 
         The inverse of :meth:`_component_savers`, derived from the same
-        capability, so a carry written by a component's ``save_state`` is
-        always read back by that component's ``load_state``.
+        capability, so a carry written by a component's ``save_carry`` is
+        always read back by that component's ``load_carry``.
         """
         return {
-            name: component.load_state
+            name: component.load_carry
             for name, component in self.components.items()
             if isinstance(component, SupportsCheckpoint)
         }
@@ -1511,7 +1511,7 @@ class Coupler:
             if not isinstance(component, SupportsCheckpoint)
         }
 
-    def save_state(self, carry: CoupledCarry, directory: Path) -> None:
+    def save_carry(self, carry: CoupledCarry, directory: Path) -> None:
         """Write the coupled carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).
 
         This is what a driver calls: one line that checkpoints the whole
@@ -1551,8 +1551,8 @@ class Coupler:
 
         save_coupled_carry(carry, directory, component_savers=self._component_savers())
 
-    def load_state(self, directory: Path) -> CoupledCarry:
-        """Read back a coupled carry written by :meth:`save_state`.
+    def load_carry(self, directory: Path) -> CoupledCarry:
+        """Read back a coupled carry written by :meth:`save_carry`.
 
         The exact inverse: the loaders are derived from the same components,
         so a nested coupler reads its own subdirectory back and a component
@@ -1576,14 +1576,14 @@ class Coupler:
         the saved step and restart another at the start date, a run that is
         neither a resume nor a cold start and that nothing downstream could
         detect. Which component was read from the shared carry file and which
-        through its own ``load_state``, and at what step, is logged at INFO by
+        through its own ``load_carry``, and at what step, is logged at INFO by
         :func:`jem.checkpoint.load_coupled_carry` -- once, from there, so a
         nested model reports each level as it is read rather than twice.
 
         Parameters
         ----------
         directory : pathlib.Path
-            A directory written by :meth:`save_state`.
+            A directory written by :meth:`save_carry`.
 
         Returns
         -------
@@ -1596,7 +1596,7 @@ class Coupler:
             checkpoint, or if what it holds does not match this model.
 
         """
-        # See `save_state` for why this import is not at module scope.
+        # See `save_carry` for why this import is not at module scope.
         from jem.checkpoint import load_coupled_carry
 
         return load_coupled_carry(

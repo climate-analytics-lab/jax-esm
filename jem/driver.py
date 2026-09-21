@@ -129,9 +129,9 @@ The wreckage of an interrupted save is a WARNING, because a run died and its
 last chunk is gone; a path with nothing at it is INFO, because with
 checkpointing on by default that is what every first run sees, and a warning
 nobody can avoid is a warning nobody reads. Both name the path, so a mistyped
-one is visible in the line the run always prints. :meth:`jem.base.coupler.Coupler.load_state` completes the picture
+one is visible in the line the run always prints. :meth:`jem.base.coupler.Coupler.load_carry` completes the picture
 by naming each component's own source -- the shared carry file or its own
-``load_state`` -- so no part of a resumed model's state is unaccounted for.
+``load_carry`` -- so no part of a resumed model's carry is unaccounted for.
 
 ``CoupledCarry.step`` restored from the checkpoint is the only source of truth
 for how far the run has got. Nothing is derived from the chunk index or from a
@@ -762,7 +762,7 @@ def run_chunked(
                 or last_chunk
                 or int(carry.step) % steps_per_checkpoint == 0
             ):
-                coupler.save_state(carry, checkpoint_dir)
+                coupler.save_carry(carry, checkpoint_dir)
                 pending_carry = None
             else:
                 pending_carry = carry
@@ -773,7 +773,7 @@ def run_chunked(
                 # will be: write it now rather than leave the restart point at
                 # an older interval boundary and make the resume re-integrate
                 # healthy chunks it has already paid for.
-                coupler.save_state(pending_carry, checkpoint_dir)
+                coupler.save_carry(pending_carry, checkpoint_dir)
                 logger.info(
                     "Checkpointed the last chunk the health gate accepted, at "
                     "coupled step %d: checkpoint_interval had skipped it, and "
@@ -1183,7 +1183,7 @@ def _load_checkpoint(
     because only :func:`_starting_carry` knows what the run will do
     *instead* -- and a message that named the failure without its consequence,
     or asserted a consequence that the caller's ``initial_carry`` makes false,
-    would be worse than none. :meth:`jem.base.coupler.Coupler.load_state` logs
+    would be worse than none. :meth:`jem.base.coupler.Coupler.load_carry` logs
     which component came from where, so nothing is said here about a load that
     worked.
 
@@ -1197,7 +1197,7 @@ def _load_checkpoint(
     names the path so a mistyped one is still visible.
     """
     if (checkpoint_path / CARRY_FILENAME).exists():
-        return coupler.load_state(checkpoint_path), None, logging.INFO
+        return coupler.load_carry(checkpoint_path), None, logging.INFO
     if checkpoint_path.is_dir():
         return None, (
             f"{checkpoint_path} holds no {CARRY_FILENAME}, so it is not a "

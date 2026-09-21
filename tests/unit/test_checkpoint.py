@@ -423,14 +423,14 @@ def test_a_renamed_delegated_component_is_refused_by_name(tmp_path):
     assert "'ocn'" in str(excinfo.value)
 
 
-def test_a_component_that_gained_a_save_state_is_refused(tmp_path):
+def test_a_component_that_gained_a_save_carry_is_refused(tmp_path):
     """"Delegated" is part of the composition, not just the component's name.
 
     A component that carries nothing at all and one that keeps its state in
     its own subdirectory both contribute no leaf, so the marker
     ``save_coupled_carry`` stores for a delegated component has to be distinguishable
     from an empty carry. Otherwise a stateless component later given a
-    ``save_state`` would load from a checkpoint that never wrote its
+    ``save_carry`` would load from a checkpoint that never wrote its
     directory, and fail inside its own loader instead of here.
     """
     checkpoint_dir = tmp_path / "checkpoint"
@@ -589,7 +589,7 @@ class DriftingCounter:
 def test_a_coupled_run_resumes_from_its_own_checkpoint(tmp_path):
     """Two steps, a checkpoint, two more: the same run as four in one go.
 
-    ``Coupler.load_state`` builds its template from the components'
+    ``Coupler.load_carry`` builds its template from the components'
     ``initialize()``, so this is also the test that a Python-float default and
     the float32 array a scan returns are one leaf.
     """
@@ -610,12 +610,12 @@ def test_a_coupled_run_resumes_from_its_own_checkpoint(tmp_path):
 
     two = model.generate_trajectory_function(2)
     carry, _ = two(initial)
-    model.save_state(carry, tmp_path / "checkpoint")
+    model.save_carry(carry, tmp_path / "checkpoint")
 
     # A fresh model, as a resumed process would build: nothing of the run is
     # carried over except the checkpoint itself.
     resumed_model = build()
-    loaded = resumed_model.load_state(tmp_path / "checkpoint")
+    loaded = resumed_model.load_carry(tmp_path / "checkpoint")
     assert int(loaded.step) == 2
     resumed, _ = resumed_model.generate_trajectory_function(2)(loaded)
 

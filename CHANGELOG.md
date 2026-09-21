@@ -115,10 +115,10 @@ Breaking changes are marked; everything else is additive.
   INFO, because with checkpointing on by default that is what every first run
   sees. Both name the path. A run that finds it has nothing left to integrate
   also warns rather than noting it, since the caller asked for a run and got
-  none. `Coupler.load_state`
+  none. `Coupler.load_carry`
   / `jem.checkpoint.load_coupled_carry` log at INFO which components were
   restored from the shared carry file, which read themselves back through
-  their own `load_state`, and at what step, so every component's source is
+  their own `load_carry`, and at what step, so every component's source is
   named. Loading is **all-or-nothing** and the docs now say so: the template
   built from `initialize()` supplies the pytree structure only, every leaf
   comes from the checkpoint, and a component the checkpoint does not hold is a
@@ -574,7 +574,15 @@ Breaking changes are marked; everything else is additive.
   condition "this checkpoint is loadable". The separate `coupled_step.pkl`
   marker is gone with the pickles. Re-run from the beginning, or from an
   initial carry built in Python.
-- `Coupler.load_state` takes the template it needs from the components' own
+- **`save_state` / `load_state` are now `save_carry` / `load_carry`**
+  (breaking), on the `SupportsCheckpoint` capability and on both its
+  implementations, `Coupler` and `VerosComponent`. What a checkpoint holds is
+  a component's *carry* — its state and its parameters together — so "state"
+  named only half of it, and the pair now reads the same as the
+  `jem.checkpoint.save_coupled_carry` / `load_coupled_carry` it is built on.
+  Rename the calls — `model.save_carry(carry, directory)` /
+  `model.load_carry(directory)`; no alias is kept under the old names.
+- `Coupler.load_carry` takes the template it needs from the components' own
   `initialize()`, so a checkpoint is loaded into the model meant to continue it
   and a component added, removed or rebuilt on another grid since it was written
   is reported — naming the leaf — rather than papered over.
@@ -604,9 +612,9 @@ Breaking changes are marked; everything else is additive.
   `save_coupled_carry` / `load_coupled_carry` under their existing names;
   `latest_complete_checkpoint` and
   `remaining_batches` moved to `jem.checkpoint` unchanged; the two Veros
-  functions are now `VerosComponent.save_state` / `load_state`, where they
+  functions are now `VerosComponent.save_carry` / `load_carry`, where they
   belong — the HDF5 restart is Veros' business, not the coupler's. Call
-  `Coupler.save_state` / `load_state` rather than any of them.
+  `Coupler.save_carry` / `load_carry` rather than any of them.
 
 ### Fixed
 
@@ -625,7 +633,7 @@ code this release adds:
   resolver syntax instead of resolving it to the local machine's paths.
 - A `grid_file` / `land_fraction_file` given to a component that takes no grid
   is refused rather than silently dropped.
-- `VerosComponent.load_state` restores Veros' process-global `force_overwrite`
+- `VerosComponent.load_carry` restores Veros' process-global `force_overwrite`
   even when the restart read fails.
 - The health check is given each chunk **unreduced**, and only the copy that is
   written is thinned or averaged. `output_averages=True` (the shipped

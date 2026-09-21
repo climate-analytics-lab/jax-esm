@@ -998,8 +998,8 @@ def test_checkpoint_round_trip_of_a_run_with_multiplicity(tmp_path):
 
     two = coupler.generate_trajectory_function(2)
     carry, first = two(initial)
-    coupler.save_state(carry, tmp_path / "checkpoint")
-    loaded = coupler.load_state(tmp_path / "checkpoint")
+    coupler.save_carry(carry, tmp_path / "checkpoint")
+    loaded = coupler.load_carry(tmp_path / "checkpoint")
 
     # Two coupled steps, not 48 sub-steps: the counter is the coupled clock.
     assert int(loaded.step) == 2

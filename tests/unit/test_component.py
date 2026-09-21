@@ -67,10 +67,10 @@ class ComponentWithXarray(MinimalComponent):
 class ComponentWithCheckpoint(MinimalComponent):
     """A component whose carry it saves and loads itself (the Veros case)."""
 
-    def save_state(self, carry, directory):
+    def save_carry(self, carry, directory):
         del carry, directory
 
-    def load_state(self, directory):
+    def load_carry(self, directory):
         del directory
 
 

@@ -649,7 +649,7 @@ def test_rebinding_to_a_different_timestep_is_rejected(component):
 
 
 @pytest.mark.slow
-def test_save_state_and_load_state_round_trip(component, grid_shape, tmp_path):
+def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     """The carry survives the split between the HDF5 restart and the carry file.
 
     The ``VerosState`` goes through Veros' own restart writer and the rest of
@@ -670,13 +670,13 @@ def test_save_state_and_load_state_round_trip(component, grid_shape, tmp_path):
     )
 
     directory = tmp_path / "ocn"
-    component.save_state(carry, directory)
+    component.save_carry(carry, directory)
     assert (directory / VEROS_RESTART_FILENAME).exists()
     # The carry file is written last: it is the completion marker of this
     # component's directory as much as of a coupled checkpoint.
     assert (directory / CARRY_FILENAME).exists()
 
-    loaded = component.load_state(directory)
+    loaded = component.load_carry(directory)
 
     assert set(loaded) == {"state", "derived", "forcing"}
     # Veros' reader mutates the model's state in place, so the restored carry
@@ -695,7 +695,7 @@ def test_save_state_and_load_state_round_trip(component, grid_shape, tmp_path):
 def test_a_runtime_setting_is_restored_even_when_the_block_raises():
     """The process-global Veros setting goes back however the block ends.
 
-    `load_state` has to turn `force_overwrite` off to read a restart, and the
+    `load_carry` has to turn `force_overwrite` off to read a restart, and the
     rest of a coupled run needs it on. The settings are process-global, so a
     failed read -- a missing or mismatched HDF5 file -- must not leave the
     flag flipped: the next thing to write an output would then fail for a
@@ -720,7 +720,7 @@ def test_a_runtime_setting_is_restored_even_when_the_block_raises():
 
 
 @pytest.mark.slow
-def test_load_state_restores_force_overwrite_when_the_restart_is_missing(
+def test_load_carry_restores_force_overwrite_when_the_restart_is_missing(
     component, tmp_path
 ):
     """A failed restart read leaves the runtime settings as it found them."""
@@ -728,5 +728,5 @@ def test_load_state_restores_force_overwrite_when_the_restart_is_missing(
 
     before = runtime_settings.force_overwrite
     with pytest.raises(Exception):
-        component.load_state(tmp_path / "not-a-checkpoint")
+        component.load_carry(tmp_path / "not-a-checkpoint")
     assert runtime_settings.force_overwrite is before

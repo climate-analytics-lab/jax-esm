@@ -223,7 +223,7 @@ def test_unhealthy_chunk_can_be_logged_and_ignored(coupler, tmp_path):
     assert result.completed
     assert result.steps_completed == 4
     assert len(result.reports) == 2
-    assert int(two_slabs().load_state(checkpoint).step) == 4
+    assert int(two_slabs().load_carry(checkpoint).step) == 4
 
 
 def test_a_rejected_chunk_does_not_overwrite_the_last_good_checkpoint(
@@ -255,7 +255,7 @@ def test_a_rejected_chunk_does_not_overwrite_the_last_good_checkpoint(
     assert len(result.paths) == 4
     # ... but only the first was checkpointed, so a resume repeats the chunk
     # that failed instead of starting from its state.
-    assert int(two_slabs().load_state(checkpoint).step) == 2
+    assert int(two_slabs().load_carry(checkpoint).step) == 2
 
 
 def test_no_health_check_collects_no_reports(coupler, tmp_path):
@@ -411,7 +411,7 @@ def test_checkpoint_is_one_directory_rewritten_each_chunk(coupler, tmp_path):
     assert (checkpoint / CARRY_FILENAME).exists()
     assert sorted(p.name for p in checkpoint.iterdir()) == [CARRY_FILENAME]
 
-    restored = two_slabs().load_state(checkpoint)
+    restored = two_slabs().load_carry(checkpoint)
     assert int(restored.step) == 4
     assert_carries_agree(restored, result.final_carry, atol=1e-12)
 
@@ -432,7 +432,7 @@ def test_checkpointing_is_on_by_default_inside_the_output_directory(
 
     checkpoint = tmp_path / "checkpoint"
     assert (checkpoint / CARRY_FILENAME).exists()
-    restored = two_slabs().load_state(checkpoint)
+    restored = two_slabs().load_carry(checkpoint)
     assert int(restored.step) == 4
     assert_carries_agree(restored, result.final_carry, atol=1e-12)
 
@@ -573,7 +573,7 @@ def checkpoint_step(checkpoint):
     """Return the coupled step a checkpoint holds, or None if there is none."""
     if not (checkpoint / CARRY_FILENAME).exists():
         return None
-    return int(two_slabs().load_state(checkpoint).step)
+    return int(two_slabs().load_carry(checkpoint).step)
 
 
 def watch_the_checkpoint(checkpoint, seen, rejects=()):
@@ -835,19 +835,19 @@ def test_an_accumulated_run_checkpoints_on_the_interval_too(tmp_path):
     """The interval applies to a run reducing inside the scan.
 
     An accumulated run writes no files and can have no health check, so there
-    is no hook to watch the checkpoint through: `save_state` itself is
+    is no hook to watch the checkpoint through: `save_carry` itself is
     wrapped, and what it records is the saves the interval allowed -- the
     step-2 and step-4 boundaries, and the last chunk of the completed run.
     """
     coupler = two_slabs()
     saved = []
-    save_state = coupler.save_state
+    save_carry = coupler.save_carry
 
     def record(carry, path):
         saved.append(int(carry.step))
-        return save_state(carry, path)
+        return save_carry(carry, path)
 
-    coupler.save_state = record
+    coupler.save_carry = record
     result = run_chunked(
         coupler,
         total_time="5 days",
@@ -1125,7 +1125,7 @@ def test_a_resume_says_the_initial_carry_was_not_used(tmp_path, caplog):
 
 
 def test_the_load_names_every_component_and_where_it_came_from(tmp_path, caplog):
-    """`load_state` reports each component's source and the restored step.
+    """`load_carry` reports each component's source and the restored step.
 
     A coupled checkpoint is a mixture of two storage mechanisms -- the shared
     carry file and the subdirectories components write themselves -- and which
@@ -1140,13 +1140,13 @@ def test_the_load_names_every_component_and_where_it_came_from(tmp_path, caplog)
     )
 
     with caplog.at_level(logging.INFO, logger="jem.checkpoint"):
-        two_slabs().load_state(checkpoint)
+        two_slabs().load_carry(checkpoint)
 
     assert f"Loaded checkpoint {checkpoint} at coupled step 2" in caplog.text
     # Neither slab checkpoints itself, so both are in the shared file and the
     # delegated list is empty -- and says so rather than being blank.
     assert f"ocn, seaice restored from {CARRY_FILENAME}" in caplog.text
-    assert "(none) restored by their own load_state" in caplog.text
+    assert "(none) restored by their own load_carry" in caplog.text
 
 
 def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
@@ -1853,7 +1853,7 @@ def test_an_accumulated_run_says_the_accumulator_is_not_checkpointed(
     # the checkpoint of an accumulated run is loadable by a run that asks for
     # no reduction at all, or for a different one.
     assert sorted(p.name for p in checkpoint.iterdir()) == [CARRY_FILENAME]
-    assert int(two_slabs().load_state(checkpoint).step) == 4
+    assert int(two_slabs().load_carry(checkpoint).step) == 4
 
 
 def test_a_resumed_accumulated_run_warns_that_its_means_are_partial(
