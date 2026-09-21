@@ -49,6 +49,12 @@
 #    weights above: conservatively for the fluxes, bilinearly for the sea
 #    surface temperature) -- so the ocean is mechanically as well as
 #    thermodynamically forced.
+#  - A Veros configuration also runs the atmosphere in double precision:
+#    importing Veros sets `jax_enable_x64` process-wide, and which of the
+#    atmosphere's own fields stay float32 depends on build order (whatever
+#    jax-gcm allocated before Veros was imported); `VerosExchange` reads each
+#    destination field's dtype at trace time rather than assuming one, so the
+#    coupling itself is robust to that.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8

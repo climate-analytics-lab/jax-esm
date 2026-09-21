@@ -49,8 +49,19 @@
 #    fluxes onto the ocean, its sea surface temperature back) -- so the ocean
 #    is mechanically as well as thermodynamically forced. No `regrid` and no
 #    `rotation_grid_file` are given: this case's ocean shares its atmosphere's
-#    grid (`regrid=same_grid`, the default), and its axes are already true
-#    east/north.
+#    longitudes and its shape, and its axes are already true east/north, so
+#    no rotation is needed either. But its latitude axis is uniform
+#    (`double_drake_setup`'s `dyt = 180/ny`) where the atmosphere's is
+#    Gaussian, up to ~0.9 degrees apart near the poles, and the exchange
+#    between them is un-regridded despite that -- see jax-esm#121, and the
+#    WHY comment in `jem.components.veros.setups.double_drake` for the full
+#    reasoning.
+#  - A Veros configuration also runs the atmosphere in double precision:
+#    importing Veros sets `jax_enable_x64` process-wide, and which of the
+#    atmosphere's own fields stay float32 depends on build order (whatever
+#    jax-gcm allocated before Veros was imported); `VerosExchange` reads each
+#    destination field's dtype at trace time rather than assuming one, so the
+#    coupling itself is robust to that.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8
