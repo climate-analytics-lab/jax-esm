@@ -7,11 +7,21 @@ Veros at its JAX backend (see `test_veros_component.py` for the same
 ordering requirement).
 """
 
+import jax
 import numpy as np
 import pytest
 import xarray as xr
 
 pytest.importorskip("veros")
+
+# Captured before the setup modules below are imported: importing
+# `veros.core` (which they do, at module scope) flips
+# `jax.config.jax_enable_x64` to True as a side effect -- see
+# `jem.fluxes.VerosExchange`'s docstring -- and it stays flipped for the
+# rest of the process otherwise, including whichever other test file
+# pytest-xdist schedules onto this same worker afterward. The module-scoped
+# fixture below restores it once every test here has run.
+_JAX_X64_BEFORE_VEROS_IMPORT = jax.config.jax_enable_x64
 
 from jem.components import veros_component  # noqa: E402, F401
 from jem.components.veros.setups._layers import LAYER_THICKNESSES  # noqa: E402
@@ -21,6 +31,22 @@ from jem.components.veros.setups.earth import earth_setup  # noqa: E402
 DOUBLE_DRAKE_MASK_FILE = "jem/data/terrain_double_drake_T31.nc"
 ROTATED_SCRIP_FILE = "jem/data/RotatedGaussianLatLon.SCRIP.nc"
 ROTATED_LANDSEA_MASK_FILE = "jem/data/landsea_mask_fraction_RotatedGaussianLatLon.nc"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_jax_x64_after_this_module():
+    """Undo the process-global `jax_enable_x64` flip this module's imports cause.
+
+    This module's own tests need `jax_enable_x64` on -- Veros is only
+    correct with it -- so this restores the pre-import setting once every
+    test here has finished, rather than trying to avoid the flip: a test
+    elsewhere in the same worker process that shares no relationship with
+    Veros at all should not see a float64 default where it expects jax's
+    normal float32 one (e.g. a `jax.lax.scan` carry-dtype mismatch with no
+    connection to this module).
+    """
+    yield
+    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_VEROS_IMPORT)
 
 
 def test_veros_lazy_alias_still_resolves():
