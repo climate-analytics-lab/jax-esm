@@ -11,10 +11,10 @@ it can join one.
 
 ## A complete coupled run
 
-A runnable aquaplanet: the JCM atmosphere coupled to JEM's slab ocean. This
-block is identical to the README's Quick Start — copy either one — and is
-executed by `tests/unit/test_readme_quickstart.py`, so the two cannot drift
-apart.
+A runnable aquaplanet: the JCM atmosphere coupled to JEM's slab ocean. It
+takes a couple of minutes on a laptop CPU, mostly XLA compilation. This block
+is identical to the README's Quick Start — copy either one — and is executed
+by `tests/unit/test_readme_quickstart.py`, so the two cannot drift apart.
 
 ```python
 import jax_datetime as jdt
@@ -63,17 +63,16 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
 ## The pieces, in the order they appear
 
-- **The wrapper** {class}`~jem.components.jcm.component.JCMComponent` adapts a
-  stock `jcm.model.Model` without touching it — no methods are attached to
-  the model. The coupler calls its `bind()` when it is registered, which is
-  where the model's start date, calendar and timestep are checked against the
-  coupler's.
+- **The wrapper** `JCMComponent` adapts a stock `jcm.model.Model` without
+  touching it — no methods are attached to the model. The coupler calls its
+  `bind()` when it is registered, which is where the model's start date,
+  calendar and timestep are checked against the coupler's.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
   for a land-sea mask; without one every cell is ocean.
 - **The exchanger** is the only place where components exchange anything.
-  {func}`~jem.exchangers.default_exchangers` builds the standard wiring for
+  {func}`~jem.default_exchangers` builds the standard wiring for
   whichever of the standard components (`atm`, `ocn`, `lnd`, `seaice`) are
   present. An exchange it cannot express — one that regrids, computes a flux,
   converts units or blends two fields — is a plain function
@@ -94,7 +93,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   step. The same model can be written as an hourly `Coupler` registered as a
   component of the daily one — a `Coupler` satisfies the component contract.
   See {doc}`design/architecture` for both forms.
-- **The run loop** {func}`~jem.driver.run_chunked` integrates in chunks: per
+- **The run loop** {func}`~jem.run_chunked` integrates in chunks: per
   chunk it writes one file per component, checkpoints if it was given a path,
   and runs a health check on the result, stopping the run if the atmosphere
   has gone unstable. Every run default lives on its signature. `total_time`
@@ -109,7 +108,7 @@ function. The same aquaplanet, with a sea-ice component added and the wiring
 spelled out explicitly beside the one-line form that builds the same thing:
 
 ```python
-from jem import Coupler, Exchange, ExchangeSpec, default_exchangers
+from jem import Coupler, Exchange, ExchangeSpec
 from jem.components import JCMComponent, SlabOceanModel, SlabSeaiceModel
 
 components = {
@@ -151,8 +150,9 @@ names a mistyped component, section, field or regridder rather than letting
 it fail inside a traced step. And the wiring is by *name*:
 `SlabSeaiceModel`'s `name` must be `"seaice"` (its default) for
 `default_exchangers` to route the ocean's freeze/melt potential to it — a
-sea-ice model registered under any other name is left unconnected, with a
-warning.
+sea-ice model registered under any other name is left unconnected, silently
+unless the name is one of the near-misses (`ice`, `sea_ice`, `sic`) the
+default wiring recognises and warns about.
 
 See {doc}`design/architecture` for the full table (including the Veros
 variant), the regridding keys a mixed-grid run uses, and the lag in full.
@@ -164,10 +164,12 @@ reaches them with no special casing — but *how* to vary one depends on when
 the component reads it:
 
 ```python
+ocn = SlabOceanModel(grid)
+
 # A PROCESS parameter is read by step() out of the carry, every step, so it
 # is varied by replacing that leaf:
 carry = ocn.initialize()
-carry["params"] = carry["params"].replace(relaxation_time=tau)
+carry["params"] = carry["params"].replace(mixed_layer_depth_max=depth)
 
 # An INITIAL-CONDITION parameter is read once, by initialize(), and never
 # again -- replacing it in an existing carry does nothing, so it is given to

@@ -61,8 +61,11 @@ simply skipped there, never broken:
      - What it is for
    * - :class:`~jem.base.component.SupportsXarray`
      - ``to_xarray(diagnostics, time)``
-     - Label a step's diagnostics as an ``xarray.Dataset`` on the coupler's
-       time axis, so a component's output can be written and merged.
+     - Label a run's **stacked** diagnostics (every step's output, already
+       given a leading time axis by the coupler) as an ``xarray.Dataset`` on
+       the coupler's :class:`~jem.base.component.TimeAxis` -- not the
+       :class:`~jem.base.component.CouplingTime` the other two rows take --
+       so a component's output can be written and merged.
    * - :class:`~jem.base.component.SupportsCheckpoint`
      - ``save_carry(carry, directory)`` / ``load_carry(directory)``
      - Write and restore a carry that is not a plain pytree -- Veros' restart
@@ -136,9 +139,9 @@ to :code:`step`.
 
 The carried parameters are differentiable, but only the ones :code:`step`
 actually reads from the carry can be varied *there*: replacing
-:code:`relaxation_time` in :code:`carry["params"]` changes the run, while
-replacing :code:`initial_sst` changes nothing, because it was read once by
-:code:`initialize` and has already been copied into the state. An
+:code:`mixed_layer_depth_max` in :code:`carry["params"]` changes the run,
+while replacing :code:`initial_sst` changes nothing, because it was read
+once by :code:`initialize` and has already been copied into the state. An
 initial-condition parameter is varied by passing parameters to
 :code:`initialize` -- :code:`ocn.initialize(params)`, or
 :code:`coupler.initialize({"ocn": params})` for the coupled model -- which

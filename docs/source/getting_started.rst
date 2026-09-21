@@ -44,22 +44,26 @@ Your first coupled run
 
 This composes a coupled model from the shipped ``aquaplanet-slab``
 configuration (the JCM atmosphere and JEM's slab ocean, coupled with
-``default_exchangers`` -- exactly :doc:`python_api`'s worked example) and
-integrates two coupled days -- ``short_run`` is the shortest run that
-exercises the whole path, meant to check a machine can run anything at all
-before committing to a real integration. It writes into a fresh Hydra run
-directory, ``outputs/<date>/<time>/``: one file per component per chunk,
-``atm-00000000.nc`` and ``ocn-00000000.nc``, plus a ``checkpoint/`` directory.
-About 50 seconds on a laptop CPU.
+``default_exchangers`` -- :doc:`python_api`'s worked example plus the
+thermodynamic sea ice that page leaves out) and integrates two coupled days --
+``short_run`` is the shortest run that exercises the whole path, meant to
+check a machine can run anything at all before committing to a real
+integration. It writes into a fresh Hydra run directory,
+``outputs/<date>/<time>/``: one file per component per chunk,
+``atm-00000000.nc``, ``ocn-00000000.nc`` and ``seaice-00000000.nc``, plus a
+``checkpoint/`` directory. About 50 seconds on a laptop CPU, mostly XLA
+compilation.
 
 
 The command line
 -----------------
 
 ``python -m jem.main`` (or the ``jem`` console script) composes the model from
-Hydra config groups: JAX-ESM's own groups at the top level, and **JAX-GCM's
-own groups re-rooted under** ``atmosphere``, so anything that works in
-``python -m jcm.main`` works here with the group's package spelled out.
+Hydra config groups: JAX-ESM's own groups (``ocean``, ``land``, ``seaice``,
+``coupling``, ``regrid``, ``coupled_run``, ``configuration``) sit at the top
+level, and **JAX-GCM's own groups re-rooted under** ``atmosphere``, so
+anything that works in ``python -m jcm.main`` works here with the group's
+package spelled out.
 
 .. code-block:: bash
 
