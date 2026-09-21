@@ -582,6 +582,15 @@ Breaking changes are marked; everything else is additive.
   `Exchanger` built from them; wiring it in as `coupling.exchanger` is what
   makes the Veros configurations mechanically, not just thermodynamically,
   forced — closing the limitation their own WHY comments recorded.
+- **`coupling.exchanger` may be an instantiable node, not only a dotted
+  path.** A bare function (`hydra.utils.get_method`) cannot be handed the
+  regridders a mixed-grid exchange needs; a mapping with a `_target_` is now
+  built with `hydra.utils.instantiate(node, regrid=dict(regridders),
+  _convert_="object")`, the same regridder mapping
+  `default_exchangers(components, regrid=...)` receives, so a hand-written
+  exchange and the default table draw on one vocabulary.
+  `jem/config/coupling/daily.yaml`'s `exchanger:` comment documents both
+  spellings.
 
 ### Changed
 

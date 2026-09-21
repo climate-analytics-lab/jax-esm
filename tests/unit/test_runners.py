@@ -48,6 +48,24 @@ def example_exchanger(components: dict[str, Carry], time: CouplingTime):
     return components
 
 
+class RecordingExchanger:
+    """An exchanger built from a config node, recording the `regrid=` it got.
+
+    Stands in for a hand-written exchanger class (like
+    `jem.fluxes.VerosExchange`) that needs the regridders `build_exchangers`
+    injects -- something a bare dotted-path function cannot be given.
+    """
+
+    def __init__(self, regrid=None):
+        """Record the `regrid` mapping the runner injected."""
+        self.regrid = regrid
+
+    def __call__(self, components: dict[str, Carry], time: CouplingTime):
+        """Return the carries unchanged; only `__init__`'s recording matters."""
+        del time
+        return components
+
+
 class TakesAGrid:
     """A component built *on* a grid, like every slab model. See below."""
 
@@ -366,6 +384,37 @@ def test_exchanger_path_replaces_the_list():
     cfg = composed(["coupling.exchanger=tests.unit.test_runners.example_exchanger"])
     exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
     assert exchangers == {"exchange": example_exchanger}
+
+
+def test_exchanger_dotted_path_still_works():
+    """Widening `coupling.exchanger` to accept a node leaves the dotted-path
+    spelling exactly as `test_exchanger_path_replaces_the_list` above checks:
+    a bare string still resolves through `hydra.utils.get_method`, not
+    `instantiate`.
+    """
+    cfg = composed(["coupling.exchanger=tests.unit.test_runners.example_exchanger"])
+    exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
+    assert exchangers["exchange"] is example_exchanger
+
+
+def test_exchanger_node_is_instantiated_with_the_regridders():
+    """A `coupling.exchanger` mapping (a `_target_` node) is built, not just
+    resolved, with the run's regridders injected as `regrid=`.
+
+    `coupling.exchanger` defaults to `null`, so a CLI override cannot set a
+    key *under* it (`coupling.exchanger._target_=...`) without `+` -- that
+    spelling is refused with "Could not override ... To append to your
+    config use +coupling.exchanger._target_=...", which is the override this
+    test uses.
+    """
+    cfg = composed([
+        "+coupling.exchanger._target_=tests.unit.test_runners.RecordingExchanger",
+    ])
+    regridders = {"a2o_flux": example_exchanger, "o2a_state": example_exchanger}
+    exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, regridders)
+    built = exchangers["exchange"]
+    assert isinstance(built, RecordingExchanger)
+    assert built.regrid == regridders
 
 
 def test_exchanger_and_exchangers_together_are_an_error():

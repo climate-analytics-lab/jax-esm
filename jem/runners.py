@@ -278,12 +278,21 @@ def build_exchangers(
 ) -> dict[str, Any]:
     """Build the exchangers the coupler runs, from ``cfg.coupling``.
 
-    Three spellings, in precedence order:
+    Four spellings, in precedence order:
 
-    - ``coupling.exchanger`` -- an importable dotted path to a single
+    - ``coupling.exchanger`` as a **dotted path** -- an importable single
       exchanger function, used when the coupling is something a table cannot
       express (a wind stress rotated onto another grid, a case-specific
       freshwater budget). It replaces the table entirely.
+    - ``coupling.exchanger`` as a **mapping with a ``_target_``** -- the same
+      replacement, but for an exchanger that is a *class*, needing more than
+      a bare function can be given. A bare dotted path is called with no
+      arguments (``hydra.utils.get_method`` only resolves it), so it cannot
+      be handed the regridders a mixed-grid exchange needs; a node is
+      instead built with :func:`hydra.utils.instantiate`, with
+      ``regrid=dict(regridders)`` injected -- the same regridder mapping
+      :func:`jem.exchangers.default_exchangers` receives below, so a
+      hand-written exchanger and the default table draw on one vocabulary.
     - ``coupling.exchangers`` -- an explicit coupling table in YAML, a list of
       ``{src, dst, regrid}`` mappings.
     - neither (both ``null``, the default) --
@@ -320,6 +329,19 @@ def build_exchangers(
             "table, so setting both leaves it undecided which couples the run; "
             "clear one (coupling.exchanger=null or coupling.exchangers=null)."
         )
+    if isinstance(path, DictConfig):
+        logger.info(
+            "Coupling through the instantiated exchanger %s.", path.get("_target_")
+        )
+        # `_convert_="object"` for the same two reasons `build_component`
+        # gives: a plain Python `regrid` mapping reaches the constructor
+        # rather than an OmegaConf container, and the regridders it holds --
+        # injected objects, not configured ones -- survive as themselves.
+        return {
+            DEFAULT_EXCHANGER_NAME: hydra.utils.instantiate(
+                path, regrid=dict(regridders), _convert_="object"
+            )
+        }
     if path:
         logger.info("Coupling through the exchanger %s.", path)
         return {DEFAULT_EXCHANGER_NAME: hydra.utils.get_method(path)}
