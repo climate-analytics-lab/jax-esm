@@ -1,9 +1,12 @@
 Examples
 ========
 
-Every example is one ``python -m jem.main +configuration=...`` command,
-listed with the rest in ``examples/README.md``; the pages below show the
-plotting each one adds, through the shared helpers in :mod:`jem.plot`.
+Every example is either one ``python -m jem.main +configuration=...``
+command or a notebook that does one thing the command line cannot --
+customise an initial condition, or differentiate through a coupled
+trajectory -- listed with the rest in ``examples/README.md``. The pages
+below show the plotting each one adds, through the shared helpers in
+:mod:`jem.plot`.
 
 JCM with slab models
 --------------------

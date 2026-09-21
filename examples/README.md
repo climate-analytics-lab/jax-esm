@@ -16,17 +16,13 @@ or differentiate through a coupled trajectory.
 | Earth with a Veros ocean | `python -m jem.main +configuration=veros-earth` |
 | Coupled springs (`03_non_geoscience/01_SpringSystem.ipynb`) | notebook: the coupler with no climate in it at all |
 
-The plan this repository followed for the long-aquaplanet row named a
-`grid@atmosphere.grid=speedy_t106_l8` option that does not exist -- jax-gcm
-ships no `speedy_t106_l8` grid (`/home/user/jax-gcm-dev/jcm/config/grid/` has
-only `speedy_t31_l8`, `held_suarez_t31_l8` and the ECHAM grids). The
-resolution is raised by overriding the grid's own keys instead,
-`atmosphere.grid.spectral_truncation=106`, with `atmosphere.run.time_step=10`
-(minutes) as the deleted `03_long_aquaplanet.py` script used. A long run needs
-two things the short examples do not: `coupled_run.total_time=...` must be a
-whole multiple of `coupled_run.chunk` (30 days under `long_run`), and the run
-checkpoints into its Hydra output directory by default, so it can be resumed
-by pointing a second launch at the first's `coupled_run.output_dir`.
+jax-gcm ships no T106 grid option, so the resolution above is raised with the
+grid's own keys, `atmosphere.grid.spectral_truncation=106`, paired with a
+10-minute atmosphere timestep (`atmosphere.run.time_step=10`). A long run
+needs two things the short examples do not: `coupled_run.total_time=...` must
+be a whole multiple of `coupled_run.chunk` (30 days under `long_run`), and the
+run checkpoints into its Hydra output directory by default, so it can be
+resumed by pointing a second launch at the first's `coupled_run.output_dir`.
 
 Every command above writes `outputs/<date>/<time>/<component>-<first coupled
 step>.nc` plus a `checkpoint/` directory into that same run directory, unless
