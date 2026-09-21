@@ -464,3 +464,36 @@ def test_max_initial_ice_thickness_is_validated_and_differentiable(
 
     gradient = float(jax.grad(total_thickness)(3.0))
     assert gradient == pytest.approx(float(np.prod(uniform_grid.shape)))
+
+
+def test_saturated_cell_gradient_is_finite_not_nan(uniform_grid, ice_clim_file):
+    """Regression: a fully-covered cell must not poison the closure's gradient.
+
+    ``_thickness_from_fraction`` inverts ``f = 1 - exp(-h / scale)`` with
+    ``log1p(-f)``. At ``f == 1`` that is ``log1p(-1) = -inf``, and although
+    the outer ``jnp.where`` replaces the *primal* with the cap for such a
+    cell, reverse-mode AD still evaluates the VJP of the unselected branch
+    before zeroing its cotangent -- ``0 * inf = nan``. Every ocean cell of
+    ``ice_clim_file`` is exactly 1.0 in January, so this exercises the bug
+    with real data rather than a hand-built edge case.
+    """
+    model = _bind(
+        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",  # the month the climatology is 1.0 everywhere
+    )
+
+    def total_thickness(scale):
+        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
+        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+
+    thickness = np.asarray(model.initialize()["state"].ice_thickness)
+    gradient = jax.grad(total_thickness)(jnp.float32(0.5))
+
+    # The primal is unchanged by the fix: every cell is still capped.
+    np.testing.assert_allclose(
+        thickness, float(model.params.max_initial_ice_thickness), rtol=1e-6
+    )
+    assert bool(jnp.isfinite(gradient))
+    # Every cell is saturated, so the cap -- not the scale -- sets the
+    # thickness everywhere: the gradient is exactly zero, not merely finite.
+    assert float(gradient) == 0.0

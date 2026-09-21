@@ -441,12 +441,20 @@ def _thickness_from_fraction(
 
     """
     fraction = jnp.clip(ice_fraction, 0.0, 1.0)
-    thickness = -params.ice_fraction_thickness_scale * jnp.log1p(-fraction)
-    # `where` AFTER the log so the cap is applied to a real number; `minimum`
-    # alone would still have evaluated log1p(-1) = -inf and, under `jax.grad`,
-    # propagated a NaN back through the saturated cells.
+    saturated = fraction >= 1.0
+    # Feed `log1p` a stand-in (0.0) for a saturated cell rather than
+    # `fraction` itself. Capping the *primal* by putting `where` after the
+    # log is not enough: `jax.grad` still evaluates the VJP of both branches
+    # and only then zeroes the unwanted one by multiplying its cotangent by
+    # 0, so `log1p(-1) = -inf`'s local gradient (`-1 / (1 - fraction)`)
+    # produces `0 * inf = nan` even though the forward value was correctly
+    # replaced by the cap. With this stand-in every intermediate stays
+    # finite, so both `jnp.where`s -- this one and the outer one below --
+    # are safe under reverse-mode AD.
+    safe_fraction = jnp.where(saturated, 0.0, fraction)
+    thickness = -params.ice_fraction_thickness_scale * jnp.log1p(-safe_fraction)
     return jnp.where(
-        fraction >= 1.0, params.max_initial_ice_thickness,
+        saturated, params.max_initial_ice_thickness,
         jnp.minimum(thickness, params.max_initial_ice_thickness),
     )
 

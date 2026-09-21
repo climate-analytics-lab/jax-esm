@@ -984,6 +984,20 @@ components these configurations are the first to exercise:
   float32[96,48] vs float64[96,48]", naming neither the exchange nor the
   field. A shape mismatch is not touched by this and still fails the same
   way it always did -- only dtype, never shape, is silently reconciled here.
+- **The sea-ice fraction closure's inverse is differentiable at a fully
+  ice-covered cell.** `_thickness_from_fraction` inverts
+  `f = 1 - exp(-h / scale)` with `-scale * log1p(-f)`, applying a
+  `jnp.where` *after* the log so a saturated cell (`f == 1`, where the
+  inverse is genuinely infinite) reads back as `max_initial_ice_thickness`
+  instead of `inf`. That fixed the forward value but not the gradient:
+  `jax.grad` still evaluates the VJP of the unselected branch before
+  zeroing its cotangent, and `log1p(-1) = -inf`'s local derivative
+  (`-1 / (1 - f)`) produced `0 * inf = nan`, so any gradient with respect to
+  `ice_fraction_thickness_scale` (or reaching back through an ice-fraction
+  climatology, as `+configuration=earth-slab`'s January start does) was
+  `nan` the moment a cell was fully covered. `log1p` now reads a stand-in
+  (0.0) for a saturated cell instead of `f` itself, so every intermediate
+  stays finite and the outer `where` still selects the correct primal.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
