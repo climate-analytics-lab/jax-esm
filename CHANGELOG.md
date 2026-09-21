@@ -615,6 +615,28 @@ Breaking changes are marked; everything else is additive.
   asserts the two are identical, so the tool and the shipped data cannot
   silently drift apart.
 
+- **`jem.replace_field(carry, path, value)` / `jem.read_field(carry, path)`**
+  — write or read one `"component.section.field"` of a coupled carry, the
+  same address `jem.exchangers.Exchange` already uses. Every example that
+  customised a single initial condition rebuilt three nested containers by
+  hand to do it (`dict(carry, components=dict(carry.components, ocn=dict(
+  ocean_carry, state=ocean_carry["state"].replace(...))))`), and each did it
+  slightly differently; `replace_field` is that rebuild written once, and
+  works equally on a whole `CoupledCarry` or the bare `dict[str, Carry]`
+  mapping an exchanger is handed. Both live in `jem/exchangers.py`, which
+  already owns the path vocabulary and its error messages, rather than in a
+  new module.
+- **`jem.plot`** — the plotting the example notebooks share:
+  `open_output` glues a chunked run's files for one component back into one
+  dataset, `area_mean` is the cos(latitude)-weighted horizontal mean,
+  `map_plot` draws one 2-D field (handling both a separable lon/lat grid and
+  a curvilinear one, and the `(..., lon, lat)` transpose every JEM field
+  needs), and `animate_map` steps it through time. The four notebooks that
+  produced a map each carried ~90 lines of their own cartopy animation code;
+  this is that written once. Behind the `plot` extra, with matplotlib and
+  cartopy imported inside the functions that need them, so `import jem` (and
+  `import jem.plot`) never requires either.
+
 ### Changed
 
 - **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
@@ -716,6 +738,22 @@ Breaking changes are marked; everything else is additive.
   forced but mechanically at rest" limitation their own WHY comments used to
   record. `tests/examples/test_configurations.py` runs both (and every other
   named configuration) for two coupled days as its smoke test.
+- **Five example notebooks are rewritten against the configurations Phase 2
+  shipped** (`03_non_geoscience/01_SpringSystem.ipynb` is deliberately
+  untouched). The three ordinary ones (aquaplanet, mixed-grid aquaplanet,
+  Earth-like) are now one `python -m jem.main +configuration=...` run plus a
+  short plotting section built on `jem.plot`; the two bespoke ones (a
+  customized initial sea surface temperature, the `jax.jvp` response to an
+  SST bump) build their coupler with `jem.runners.build_coupler(compose(...))`
+  and customise only the one thing that is theirs, through
+  `jem.replace_field`. No notebook builds its components, its exchanger or
+  its coupler by hand any more, and none writes netCDF or an animation by
+  hand either. `examples/README.md` is the new index of which command or
+  notebook runs which example.
+- `tests/examples/test_examples.py` runs notebooks only, one test per
+  notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
+  caused it) rather than one test per example group; the `run.sh` driver it
+  used to also execute is gone (see *Removed*).
 
 ### Removed
 
@@ -767,6 +805,12 @@ Breaking changes are marked; everything else is additive.
   functions are now `VerosComponent.save_carry` / `load_carry`, where they
   belong — the HDF5 restart is Veros' business, not the coupler's. Call
   `Coupler.save_carry` / `load_carry` rather than any of them.
+- **`examples/02_experimental/03_long_aquaplanet.py`**, a hand-rolled
+  chunked driver (a T106 aquaplanet, 100 model years in 30-day batches, with
+  its own per-batch netCDF write, time mean and NaN check). Every one of
+  those is now a feature of `run_chunked`/`coupled_run=long_run`; the
+  command that replaces it is the "Long aquaplanet at T106" row of
+  `examples/README.md`.
 
 ### Fixed
 
@@ -849,6 +893,15 @@ code this release adds:
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.
+- **`Exchange.__call__` casts a source value to its destination field's own
+  dtype instead of writing it through unchanged.** Importing Veros sets
+  `jax_enable_x64` process-wide, so a Veros ocean's carry is float64 while
+  parts of the atmosphere's carry stay float32; `ocean=veros`
+  (`VEROS_OCEAN_EXCHANGES`) then failed on its first coupled step with
+  `lax.scan`'s "carry input and carry output must have equal types ...
+  float32[96,48] vs float64[96,48]", naming neither the exchange nor the
+  field. A shape mismatch is not touched by this and still fails the same
+  way it always did -- only dtype, never shape, is silently reconciled here.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

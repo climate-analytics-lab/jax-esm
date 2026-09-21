@@ -71,5 +71,6 @@ Constants and utilities
    jem.constants
    jem.fluxes
    jem.tools.idealised_terrain
+   jem.plot
    jem.utils.esmf_regrid.ESMFRegridder
    jem.utils.esmf_regrid.ESMFWeights
