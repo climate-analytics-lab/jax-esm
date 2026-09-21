@@ -1,4 +1,4 @@
-Tutorial: Integrate an Existing Model into JEM 
+Tutorial: Integrate an Existing Model into JEM
 ==============================================
 
 In this tutorial, we are going to couple a differentiable global atmosphere
@@ -7,40 +7,61 @@ ocean model provided by JEM (Figure 1).
 
 .. figure:: _static/jcm_som.svg
    :scale: 25 %
-   :alt: Schematic diagram showing the relationshipe between JCM and slab 
+   :alt: Schematic diagram showing the relationshipe between JCM and slab
          ocean model
    :align: center
 
    Figure 1: Schematic diagram showing the relationshipe between JCM and
    the slab ocean model. The atmosphere model needs the sea surface
-   temperature, and the ocean model needs the heat flux. 
+   temperature, and the ocean model needs the heat flux.
 
 
 Step 1: Identifying the Gap to be JEM-compatible
 ------------------------------------------------
 
-A model object will be JEM-compatible if it has two particular member functions:
+A component is any object satisfying the
+:class:`jem.base.component.Component` protocol, which asks for three things:
 
-1. :code:`initialize: Callable[[], ComponentCarry]`:
-   Returns the initial carry value.
-2. :code:`generate_step_function: Callable[[ComponentCarry], tuple[ComponentCarry, Predictions]]`:
-   Returns the new carry value and predictions.
+1. :code:`name: str` — the component's name in the coupler's workflow, in the
+   coupled carry and in its output.
+2. :code:`initialize() -> Carry` — returns the initial carry value. It must
+   **not** integrate the model; building the initial pytrees is all it may do.
+3. :code:`step(carry, time) -> tuple[Carry, Diagnostics]` — advances the
+   component by one coupling timestep.
 
-   - The returned carry value must be consistent with the ones returned
-     from :code:`initialize`. User can test if two Pytrees are equivalent by
-     using `jax.tree_utils.tree_structure`.
-   - The first dimension of leaf nodes in :code:`Predictions` is expected to be
-     time. The coupler will concat multiple predictions along this dimension.
+   - :code:`time` is a :class:`jem.base.component.CouplingTime`: the coupler's
+     clock (step index, simulation time in seconds, and the static calendar
+     facts behind :code:`time.year_fraction`). The component keeps no clock of
+     its own.
+   - The returned carry must have exactly the pytree structure, shapes and
+     dtypes of the one :code:`initialize` produced — that is what
+     :code:`jax.lax.scan` requires. Two pytrees can be compared with
+     :code:`jax.tree_util.tree_structure`.
+   - :code:`Diagnostics` is this step's output pytree. The coupler stacks it
+     over the run, giving every leaf a leading time axis.
 
-The :code:`ComponentCarry` in JEM refers to the the state object that is passed
-from one iteration of a loop to the next, which is the same  concept as 
+The protocol is *runtime-checkable*, which for a :code:`typing.Protocol` means
+"has these attributes": there is no base class to inherit from, and the coupler
+raises :code:`TypeError` naming the missing member if an object does not
+qualify.
+
+Three further capabilities are optional and are detected with
+:code:`isinstance` where they are used:
+:class:`~jem.base.component.SupportsXarray` (:code:`to_xarray(diagnostics,
+time)`), :class:`~jem.base.component.SupportsBind` (:code:`bind(*,
+coupling_timestep, start_date, calendar)`) and
+:class:`~jem.base.component.SupportsCheckpoint`
+(:code:`save_carry`/:code:`load_carry`).
+
+The :code:`Carry` in JEM refers to the state object that is passed
+from one iteration of a loop to the next, which is the same concept as
 elaborated in `jax.lax.scan <https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html>`__
 . In the science field, this corresponds to the "state" of the system, carrying
 necessary information for the system to evolve in time. In JEM, the carry value
-means more than that. Carry values also include (1) any variables that will 
-participate in differentiability of the resulting model, such as forcing or 
+means more than that. Carry values also include (1) any variables that will
+participate in differentiability of the resulting model, such as forcing or
 physical parameters, and (2) convenient variables that can be but hard to
-diagnosed from the state, such as turbulenet heat fluxes.
+diagnosed from the state, such as turbulent heat fluxes.
 
 Therefore, the desired coupling feature determines the structure of carry values
 , which decide how much adaptation one would need to integrate the chosen model
@@ -49,200 +70,209 @@ such that the slab ocean model use it. However, because heat fluxes are not part
 of the model state variables. Also (2) we want to force JCM with the sea surface
 temperature simulated in the slab ocean model, which is the :code:`ForcingData`
 of the native JCM objects. Therefore, we need to encapsulate the heat flux and
-sea surface temperature forcing variable into the :code:`ComponentCarry` JCM. 
-A carry value structure we can adopt is
+sea surface temperature forcing variable into the carry of JCM.
+The carry structure the adapter adopts is
 
 .. code-block:: python
-   
-    # `ComponentCarry` of JCM
+
+    # carry of the JCM component
     {
-        "state": jcm_native_state,
-        "derived": {
-            "total_heat_flux": total_heat_flux,
-        },
-        "forcing": {
-            "sea_surface_temperature": sea_surface_temperature,
-        },
+        "state":   jcm_native_modal_state,
+        "physics": jcm_cross_step_physics_carry,  # threaded back in every step
+        "forcing": jcm_native_forcing_data,       # holds sea_surface_temperature
+        "derived": JCMDerived(
+            physics,                # JCM's own per-step diagnostics, opaque
+            total_heat_flux,        # W/m^2, positive upward
+            total_freshwater_flux,  # kg/m^2/s, positive upward (evap - precip)
+            evaporation, precipitation, u0, v0,
+        ),
     }
 
-For the slab ocean model, the component carry value we adopt is
+For the slab ocean model, the carry is
 
 .. code-block:: python
-   
-    # `ComponentCarry` of the slab ocean model
+
+    # carry of the slab ocean model
     {
-        "state": sea_surface_temperature,
-        "forcing": {
-            "total_heat_flux": total_heat_flux,
-        },
+        "params":  SlabOceanParameters(...),   # differentiable tunables
+        "state":   OceanState(sea_surface_temperature),
+        "forcing": OceanForcing(total_heat_flux, q_flux),
+        "derived": OceanDerived(...),
     }
 
+Neither carries a simulation time: the coupler owns the one clock and hands it
+to :code:`step`.
 
-Step 2: Adapt Component Functions
----------------------------------
+The carried parameters are differentiable, but only the ones :code:`step`
+actually reads from the carry can be varied *there*: replacing
+:code:`relaxation_time` in :code:`carry["params"]` changes the run, while
+replacing :code:`initial_sst` changes nothing, because it was read once by
+:code:`initialize` and has already been copied into the state. An
+initial-condition parameter is varied by passing parameters to
+:code:`initialize` -- :code:`ocn.initialize(params)`, or
+:code:`coupler.initialize({"ocn": params})` for the coupled model -- which
+builds the initial state from them and carries them. See the *Parameters*
+section of :doc:`design/architecture` for the pattern in full.
 
-For the JCM, this is how we adapt initialization for this case:
 
-.. code-block:: python
-    
-    # Predefined variables: model and D2_nodal_shape
-    # Predefined functions: default_forcing
-    def initialize():
-        return {
-            "state" : model._prepare_initial_modal_state(),
-            "derived" : {
-                "total_heat_flux" : jnp.zeros(D2_nodal_shape),
-            },
-            "forcing" : default_forcing(model.coords.horizontal),
-        }
+Step 2: Write the Wrapper
+-------------------------
 
-As for :code:`generate_step_function`, we feed in the
-:code:`sea_surface_temperature` and compute the :code:`total_heat_flux` from
-the predictions generated by JCM's function :code:`run_from_state`.
+JEM ships this wrapper for JCM, so you do not have to write one yourself:
+:class:`jem.components.jcm.component.JCMComponent` holds a
+:code:`jcm.model.Model` and satisfies the protocol on its behalf. It is a
+wrapper *object*, not an in-place adaptation — nothing is attached to the model,
+so the atmosphere you configured is the atmosphere JEM drives.
 
-.. code-block:: python
+:code:`bind` is how the component learns the coupler's clock. The coupler calls
+it once, when the component is registered, and this is the place to refuse a
+configuration that cannot work:
 
-    # Predefined variables: model, save_interval_day, total_time_day,
-    # and coupling_timestep
-    def generate_step_function():
-        def step_function(carry, step):
-            state = carry["state"]
-            forcing = carry["forcing"]
-            new_atm_modal_state, predictions = model.run_from_state(
-                initial_state=state,
-                save_interval=save_interval_day,  
-                total_time=total_time_day,
-                forcing=forcing,
-                output_averages=True,
-            )
-            physics_no_time_dimension = jax.tree.map(lambda x: x[0], predictions.physics)
-            total_heat_flux = jnp.sum(physics_no_time_dimension.surface_flux.hfluxn, axis=2)
-            return (
-                # Important: the structure of the returned carry value must
-                #            match the carry value structure received in the
-                #            first place, which is the same structure returned
-                #            by the function `initialize`
-                {
-                    "state" : new_atm_modal_state,
-                    "derived" : {
-                        "total_heat_flux" : total_heat_flux,
-                    },
-                    "forcing" : forcing,
-                },
-                predictions
-            )
-        return step_function
+.. literalinclude:: ../../jem/components/jcm/component.py
+   :language: python
+   :pyobject: JCMComponent.bind
+   :linenos:
+
+:code:`step` then advances the atmosphere by exactly one coupling interval:
+
+.. literalinclude:: ../../jem/components/jcm/component.py
+   :language: python
+   :pyobject: JCMComponent.step
+   :linenos:
+
+Four things to note:
+
+- :code:`initialize` does not integrate: it builds the initial pytrees from
+  :code:`Model.bootstrap_state()` plus a structural template of the diagnostics
+  dict. An earlier adapter ran a whole throwaway coupling step just to learn
+  that structure, which cost a step per run *and* started the atmosphere one
+  interval ahead of the coupler's clock.
+- The **physics carry is threaded**: JCM keeps cross-step physics state
+  (sub-cycled radiation, prior-step TKE, term-to-term tendencies) in a carry
+  that :code:`run_from_state_with_carry` takes in and hands back. It lives under
+  :code:`carry["physics"]` and goes straight back in; dropping it would reset
+  that memory once per coupling interval.
+- :code:`step` calls :code:`model.run_from_state_with_carry()` with the coupling
+  interval as both :code:`save_interval` and :code:`total_time`, so JCM
+  sub-steps internally at its own timestep and returns one saved record per
+  coupling step.
+- The surface fluxes are converted on the way out, in
+  :mod:`jem.components.jcm.exchange_fields`: JCM publishes :code:`hfluxn`
+  downward positive and its water fluxes in :code:`g m-2 s-1`, and JEM's
+  convention is upward positive in :code:`kg m-2 s-1`. Doing this once, at the
+  component boundary, is what keeps every exchanger downstream sign- and
+  unit-consistent.
 
 
 Step 3: Exchange Variables Between Components
 ---------------------------------------------
 
+An exchanger is a plain function
+:code:`(dict[str, Carry], CouplingTime) -> dict[str, Carry]`. It is traced with
+the rest of the coupled step, so it must build new structs rather than assign
+into the carries it was handed, and must not change their pytree structure:
+
 .. code-block:: python
 
-    def interaction_between_atm_and_ocn(coupled_carry):
-        atm = coupled_carry["atm"]
-        ocn = coupled_carry["ocn"]
+    def interaction_between_atm_and_ocn(components, time):
+        del time  # this exchange does not depend on the date
+        atm, ocn = components["atm"], components["ocn"]
 
-        atm["forcing"]["sea_surface_temperature"] = ocn["state"].sea_surface_temperature
-        ocn["forcing"]["total_heat_flux"] = atm["derived"]["total_heat_flux"]
+        atm = dict(atm, forcing=atm["forcing"].replace(
+            sea_surface_temperature=ocn["state"].sea_surface_temperature,
+        ))
+        ocn = dict(ocn, forcing=ocn["forcing"].replace(
+            total_heat_flux=atm["derived"].total_heat_flux,
+        ))
 
-        return coupled_carry
+        return dict(components, atm=atm, ocn=ocn)
+
+The clock is passed in so a time-dependent coupling (a ramped forcing, a lagged
+exchange) needs no state of its own.
+
+This exchange only *moves* fields, which is what most of a coupled model does,
+so it can be written as a table instead --
+:func:`~jem.exchangers.default_exchangers` builds exactly these two rows (and
+the land and sea-ice ones, when those components are present) for you:
+
+.. code-block:: python
+
+    from jem import default_exchangers
+
+    exchangers = default_exchangers({"atm": atm, "ocn": ocn})
+
+Write the function when the exchange is something a table cannot express: a
+flux computed from two components' states, a unit conversion, a coupling that
+depends on the date. See :doc:`design/architecture` for the table's rows, the
+regridding keys a mixed-grid run uses, and the one-step lag the default
+workflow implies.
 
 Step 4: Couple JCM to the Slab Ocean Model
 ------------------------------------------
 
 .. code-block:: python
 
-    model = Coupler(
-        components=dict(
-            atm=atm_model,
-            ocn=SlabOceanModel(
-                start_datetime=start_datetime,
-                timestep=coupling_timestep / one_second,
-            ),
-        ),
-        mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
+    aquaplanet_grid = SlabGrid.from_coords(atm_model.coords.horizontal)
+
+    coupler = Coupler(
+        {
+            "atm": JCMComponent(atm_model),
+            "ocn": SlabOceanModel(aquaplanet_grid),
+        },
+        {"interaction_between_atm_and_ocn": interaction_between_atm_and_ocn},
+        coupling_timestep=coupling_timestep,
+        start_date=start_date,
     )
 
-    simulation_interval = jdt.to_timedelta(10, "day")
-    initial_state, final_state, predictions = model.run(
-        workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
-        iterations = int(simulation_interval / coupling_timestep),
-    )
+The workflow defaults to every exchanger followed by every component, which for
+this model is :code:`("interaction_between_atm_and_ocn", "atm", "ocn")` — pass
+:code:`workflow=[...]` to the constructor to choose a different coupling scheme.
+The sequence may be nested, and a name may appear more than once: an element
+listed *n* times runs *n* times per coupled step, on a clock *n* times faster.
+:code:`workflow=[["interaction_between_atm_and_ocn", "atm"] * 24, "ocn"]` runs
+the atmosphere hourly inside a daily ocean coupling.
 
-    output_dict = model.predictions_to_xarray(predictions)
+Step 5: Run It
+--------------
+
+:class:`~jem.base.coupler.Coupler` produces *functions*, not runs.
+:func:`~jem.driver.run_chunked` is the loop that turns one into a run --
+integrate a chunk, write one file per component, checkpoint, check the state is
+still healthy, repeat -- and every run default lives on its signature:
+
+.. code-block:: python
+
+    from jem import run_chunked
+
+    result = run_chunked(
+        coupler,
+        total_time="10 days",
+        chunk="5 days",              # a file and a health check every 5 days
+        output_dir="output",
+        checkpoint_path="checkpoint",   # optional; resuming is the same call
+    )
+    print(result.steps_completed, "coupled steps;", len(result.paths), "files")
+
+``total_time`` and ``chunk`` may be ``"10 days"``-style strings or numbers of
+days; both must be whole multiples of the coupling timestep, and ``total_time``
+a whole multiple of ``chunk``. The checkpoint is a single directory rewritten
+after every chunk, so running the same call again continues from the coupled
+step it holds.
+
+Once a model can be built from a config -- a ``_target_`` line in
+``jem/config/<group>/``, naming the class and its required inputs and nothing
+else -- the whole thing is one command:
+
+.. code-block:: bash
+
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
+
+See :doc:`quick_start` for the override spellings and
+:doc:`design/architecture` for what the configuration layer may and may not
+carry.
 
 Full Code
 ---------
 
-A full self-contained example run is as follows. There are a couple of extra
-lines needed because of bugs.
-
-.. literalinclude:: _static/script_jcm_som_example.py
-   :language: python
-   :linenos:
-
-
-Full Code with JEM Support
---------------------------
-
-The example above is to demonstrate how to put things together from scratch.
-Good news is, JEM has already made an adapter function for JCM, so you do 
-not have to make one on your own. Also, the following code use 
-:code:`BasicMapper`, provided by JEM, that constructs
-`interaction_between_atm_and_ocn` with a different flavor. 
-
-.. code-block:: python
-
-    import jcm
-    from jcm.physics.speedy.speedy_coords import get_speedy_coords
-    import jax_datetime as jdt
-
-    from jem import Coupler
-    from jem.components import JCM, SlabOceanModel
-    from jem.mapping import BasicMapper
-
-    start_datetime = jdt.to_datetime("2000-01-01")
-    coupling_timestep = jdt.to_timedelta(1, "day")
-
-    interaction_between_atm_and_ocn = BasicMapper()
-    interaction_between_atm_and_ocn.add_mapping(
-        source = ("atm", "derived.total_heat_flux"),
-        target = ("ocn", "forcing.total_heat_flux"),
-    )
-    interaction_between_atm_and_ocn.add_mapping(
-        source = ("ocn", "state.sea_surface_temperature"),
-        target = ("atm", "forcing.sea_surface_temperature"),
-    )
-
-    atm_model = jcm.model.Model(
-        start_date=start_datetime,
-        coords=get_speedy_coords(),
-    )
-
-    atm_model = JCM.make_jem_compatible(
-        atm_model,
-        coupling_timestep=coupling_timestep,
-    )
-
-    model = Coupler(
-        components=dict(
-            atm=atm_model,
-            ocn=SlabOceanModel(
-                start_datetime=start_datetime,
-                timestep=coupling_timestep / jdt.to_timedelta(1, "second"),
-            ),
-        ),
-        mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
-    )
-
-    simulation_interval = jdt.to_timedelta(30, "day")
-    initial_state, final_state, predictions = model.run(
-        workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
-        iterations = int(simulation_interval / coupling_timestep),
-    )
-
-    output_dict = model.predictions_to_xarray(predictions)
-    print(output_dict["atm"]) # xarray.Dataset
-    print(output_dict["ocn"])
-
+:doc:`quick_start` puts exactly these steps together into one self-contained
+script you can copy and run.

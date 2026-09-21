@@ -6,137 +6,185 @@ Install JEM
 -----------
 
 
-.. code-block::
- 
+.. code-block:: bash
+
+    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install its dev branch from source FIRST
+    git clone https://github.com/climate-analytics-lab/jax-gcm
+    cd jax-gcm
+    git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
+    pip install -e "."
+    cd ..
+
     # Install JEM
     git clone https://github.com/climate-analytics-lab/jax-esm
     cd jax-esm
     pip install -e "."
     cd ..
 
-    # Install jittable Veros (temporary solution)
+    # Optional: the jittable Veros fork, only needed for the JCM-Veros examples
     git clone https://github.com/meteorologytoday/veros-jittable.git
     cd veros-jittable
     pip install -e "."
+
+JAX-ESM is developed and tested against **one** JAX-GCM revision, recorded as
+``JCM_SUPPORTED_REV`` in :mod:`jem.components.jcm.contract` together with every
+JAX-GCM name JAX-ESM calls. Check that revision out if a coupled run fails with
+an ``AttributeError`` inside ``jcm``: ``pytest tests/unit/test_jcm_contract.py``
+reports exactly which name moved.
 
 
 Run the First Coupled Run
 -------------------------
 
-Here is an example to run an aquaplanet simulation.
+A complete, runnable aquaplanet simulation coupling the JCM atmosphere to JEM's
+slab ocean. It takes a couple of minutes on a laptop CPU, and writes
+``atm-00000000.nc``, ``atm-00000005.nc``, ``ocn-00000000.nc`` and
+``ocn-00000005.nc`` into ``output/`` -- one file per component per chunk, named
+after the coupled step its chunk starts at (here 0 and 5, the two five-day
+chunks of a ten-day run).
 
 .. code-block:: python
 
-    from pathlib import Path
+    import jax_datetime as jdt
     import jcm
     from jcm.physics.speedy.speedy_coords import get_speedy_coords
-    import jax_datetime as jdt
 
-    from jem import Coupler
-    from jem.components import JCM, SlabOceanModel
-    from jem.mapping import BasicMapper
+    from jem import Coupler, default_exchangers, run_chunked
+    from jem.components import JCMComponent, SlabOceanModel
+    from jem.components.slab import SlabGrid
 
-    start_datetime = jdt.to_datetime("2000-01-01")
+    start_date = jdt.to_datetime("2000-01-01")
     coupling_timestep = jdt.to_timedelta(1, "day")
 
-    interaction_between_atm_and_ocn = BasicMapper()
-    interaction_between_atm_and_ocn.add_mapping(
-        source = ("atm", "derived.total_heat_flux"),
-        target = ("ocn", "forcing.total_heat_flux"),
-    )
-    interaction_between_atm_and_ocn.add_mapping(
-        source = ("ocn", "state.sea_surface_temperature"),
-        target = ("atm", "forcing.sea_surface_temperature"),
-    )
+    # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
+    atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+    atm = JCMComponent(atm_model)
 
-    atm_model = jcm.model.Model(
-        start_date=start_datetime,
-        coords=get_speedy_coords(),
-    )
+    # Aquaplanet: the slab grid is built from the atmosphere's own horizontal
+    # grid, and with no fractional mask every cell is ocean.
+    grid = SlabGrid.from_coords(atm_model.coords.horizontal)
 
-    atm_model = JCM.make_jem_compatible(
-        atm_model,
+    # `default_exchangers` is the standard coupling written down once: the
+    # atmosphere's surface heat flux drives the ocean, and the ocean's SST comes
+    # back as the atmosphere's boundary condition.
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    coupler = Coupler(
+        components,
+        default_exchangers(components),
         coupling_timestep=coupling_timestep,
+        start_date=start_date,
     )
+    print(repr(coupler))
 
-    model = Coupler(
-        components=dict(
-            atm=atm_model,
-            ocn=SlabOceanModel(
-                start_datetime=start_datetime,
-                timestep=coupling_timestep / jdt.to_timedelta(1, "second"),
-            ),
-        ),
-        mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
+    result = run_chunked(
+        coupler, total_time="10 days", chunk="5 days", output_dir="output"
     )
+    print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
-    simulation_interval = jdt.to_timedelta(60, "day")
-    initial_state, final_state, predictions = model.run(
-        workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
-        iterations = int(simulation_interval / coupling_timestep),
-    )
+The pieces, in the order they appear:
 
-    output_dict = model.predictions_to_xarray(predictions)
-    output_dir = Path("output")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for component_name, ds in output_dict.items():
-        output_file = output_dir / f"{component_name:s}.nc"
-        print(f"Saving: {component_name:s} => {str(output_file)}")
-        ds.to_netcdf(output_file)
+- **The wrapper** :class:`~jem.components.jcm.component.JCMComponent` adapts a
+  stock ``jcm.model.Model`` without touching it -- no methods are attached to
+  the model. The coupler calls its ``bind()`` when it is registered, which is
+  where the model's start date, calendar and timestep are checked against the
+  coupler's.
+- **The grid** comes from the atmosphere's own ``coords.horizontal``, so the
+  ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
+  ``fractional_mask=`` (e.g. ``jcm.terrain.TerrainData.from_file(...).fmask``)
+  for a land-sea mask; without one every cell is ocean.
+- **The exchanger** is the only place where components exchange anything.
+  :func:`~jem.exchangers.default_exchangers` builds the standard wiring for
+  whichever of the standard components (``atm``, ``ocn``, ``lnd``, ``seaice``)
+  are present. An exchange it cannot express -- one that regrids, computes a
+  flux, converts units or blends two fields -- is a plain function
+  ``(dict[str, carry], CouplingTime) -> dict[str, carry]``; :doc:`tutorial`
+  writes one out. Coupling is **lagged**: with the default workflow the
+  exchanger at step *n* moves what each component produced during step *n-1*.
+- **The coupler** owns the clock: the coupling timestep, the start date and the
+  calendar live here and nowhere else, and every component's ``step`` is handed
+  the same ``CouplingTime``.
+- **The workflow** -- printed by ``repr(coupler)`` -- is the coupling scheme.
+  It defaults to every exchanger followed by every component; pass
+  ``workflow=["atm", "exchange", "ocn"]`` to reorder it. It may be nested, and a
+  name may appear more than once: an element listed *n* times runs *n* times per
+  coupled step, on a clock *n* times faster. So
+  ``workflow=[["atm_lnd_exchange", "atm", "lnd"] * 24, "atm_ocn_exchange",
+  "ocn"]`` couples the atmosphere and the land hourly inside a daily ocean
+  coupling, and the hourly components write 24 output records per coupled step.
+  The same model can be written as an hourly ``Coupler`` registered as a
+  component of the daily one -- a ``Coupler`` satisfies the component contract.
+  See :doc:`design/architecture` for both forms.
+- **The run loop** :func:`~jem.driver.run_chunked` integrates in chunks: per
+  chunk it writes one file per component, checkpoints if it was given a path,
+  and runs a health check on the result, stopping the run if the atmosphere has
+  gone unstable. Every run default lives on its signature. ``total_time`` and
+  ``chunk`` must both be whole multiples of the coupling timestep, and
+  ``total_time`` a whole multiple of ``chunk``.
+
+For the same run with a sea-ice component and plotting, see
+:doc:`examples/01_basic/01_aquaplanet`.
 
 
-Here we provide a template code to make an animation of surface specific
-humidity.
+The same run from the command line
+----------------------------------
+
+The configuration layer is a thin wiring layer over exactly those objects, so
+the run above is also one command:
+
+.. code-block:: bash
+
+    python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
+
+JAX-ESM's own config groups (``ocean``, ``land``, ``seaice``, ``coupling``,
+``regrid``, ``coupled_run``, ``configuration``) sit at the top level, and
+**JAX-GCM's own groups are composed under** ``atmosphere``, with their names
+unchanged -- so the group's package is spelled out in an override:
+
+.. code-block:: bash
+
+    # a named coupled configuration, and the run settings
+    python -m jem.main +configuration=earth-slab coupled_run.total_time="90 days"
+
+    # a whole JAX-GCM configuration bundle as the atmosphere, tweaked on top
+    python -m jem.main +configuration@atmosphere=speedy-t31 atmosphere.run.time_step=7
+
+    # single groups and keys
+    python -m jem.main physics@atmosphere.physics=held_suarez \
+        grid@atmosphere.grid=held_suarez_t31_l8 \
+        ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}' \
+        land=none +ocean.params.relaxation_time=1e6
+
+    # every group, option and override spelling
+    python -m jem.main --help
+
+Two things to know. Spell the ``@atmosphere``: ``+configuration=speedy-t31``
+without it composes that JAX-GCM bundle at the *root*, where nothing reads its
+keys. And the coupled run's own settings are ``coupled_run``, not ``run`` --
+``atmosphere.run`` is the atmosphere's own run config, and a ``run`` group here
+would shadow JAX-GCM's.
+
+A long run checkpoints and writes chunk means:
+
+.. code-block:: bash
+
+    python -m jem.main +configuration=earth-slab coupled_run=long_run
+
+Checkpointing is on by default, into ``<output_dir>/checkpoint`` -- a relative
+``checkpoint_path`` resolves against the run's own output directory, which
+Hydra makes fresh each run. Point a second run at the first's output directory
+(``coupled_run.output_dir=outputs/2026-09-16/11-04-02``) and it continues from
+the coupled step the checkpoint holds, saying so in its log; an absolute
+``coupled_run.checkpoint_path`` is used as given, and
+``coupled_run.checkpoint_path=null`` turns checkpointing off. In Python that is
+the same call:
 
 .. code-block:: python
 
-    from matplotlib.animation import FuncAnimation
-    from IPython.display import Image
-    import cartopy.crs as ccrs
-    from cartopy.util import add_cyclic_point
-    import numpy as np
-
-    data = output_dict["atm"]["specific_humidity"]
-
-    fig = plt.figure(figsize=(10, 6))
-    ax = plt.axes(projection=ccrs.PlateCarree())
-
-    ax.gridlines(draw_labels=True)
-    cb = None
-    cf = None
-
-    def update(frame):
-        global cf, cb   
-        _data = data.isel(time=frame, level=0)
-     
-        if cf is not None:
-            for coll in cf.collections:
-                coll.remove()
-       
-        # Plot the humidity field for the current time step
-        lat = _data.coords["lat"]
-        lon = _data.coords["lon"]
-        cyclic_data, cyclic_lon = add_cyclic_point(_data.to_numpy().transpose(), coord=lon)
-        mappable = ax.contourf(
-            cyclic_lon, lat,
-            cyclic_data,
-            levels=1 + np.linspace(0, 1, 21) * 10,
-            transform=ccrs.PlateCarree(), 
-            cmap='GnBu',
-            extend="both",
-        )
-        
-        ax.set_title(f"[{_data['time'].dt.strftime('%Y-%m-%d').to_numpy().item()}] Surface specific humidity")
-        if cb is None:
-            cb = plt.colorbar(ax=ax, mappable=mappable, orientation='vertical', shrink=0.7, pad=0.07)
-            cb.set_label("[g/kg]", fontsize=12)
-        
-        return [cf,]
-        
-    # Generate and save
-    ani = FuncAnimation(fig, update, frames=len(data.coords["time"]), interval=120, blit=False)
-    ani.save('humidity_map.gif', writer='pillow', dpi=200)
-    display(Image('humidity_map.gif'))
-
-
-
+    result = run_chunked(
+        coupler,
+        total_time="6 years",     # 2190 days: a whole number of 30-day chunks
+        chunk="30 days",          # a file, a restart and a health check a chunk
+        output_dir="output",
+        output_averages=True,     # one record per chunk: its 30-day-window mean
+        # checkpoint_path="checkpoint" is the default, relative to output_dir
+    )

@@ -1,0 +1,88 @@
+# Default coupled run: a month of simulated time in one chunk, written once.
+#
+# This file is also the COMPLETE schema of the coupled run: every key the
+# driver reads lives here, with a default and a comment, and the other options
+# in this group (`short_run`, `long_run`) inherit it via `defaults: [default,
+# _self_]` and override only what they change. So every option exposes the
+# same keys, and any of them can be set on the command line without a `+`.
+#
+# The names are this group's own. jax-gcm's `run` group has options called
+# `smoke` and `longrun`, and those stay jax-gcm's: they configure the
+# atmosphere (`atmosphere.run=...`), not the coupled run, and a coupled option
+# sharing a spelling with an atmosphere option is exactly the confusion the
+# group's name already avoids.
+#
+# The keys are the keyword arguments of `jem.driver.run_chunked()`, which is
+# where their defaults live; the values here repeat only what this named
+# option is about. Its two CALLABLE arguments -- `health_check` and
+# `accumulate` -- are the exceptions, and are Python-only: no YAML can name a
+# live function, and both take their defaults (the standard health gate, and
+# no in-scan reduction) when the run is launched from a config.
+#
+# The group composes at `cfg.coupled_run`, not `cfg.run` -- `atmosphere.run`
+# is the atmosphere's own run config, and a group called `run` here would
+# shadow jcm's (see the comment in `config.yaml`). Select an option with
+# `coupled_run=short_run`, set one key with `coupled_run.chunk=...`.
+
+# Total simulated time, as a `jcm.date.parse_duration_days` string.
+total_time: "30 days"
+
+# Simulated time integrated between health checks and output files. One chunk
+# per run by default; a long run splits so a NaN is caught (and a checkpoint
+# written) before weeks of compute are lost.
+chunk: "30 days"
+
+# Where the output netCDFs go. null -> the Hydra run directory, so a run is
+# self-contained and two runs cannot overwrite each other.
+output_dir: null
+
+# Write interval means instead of instantaneous snapshots.
+output_averages: false
+
+# Keep every n-th coupling step in the output. 1 keeps them all; a long run
+# raises it rather than writing a file it cannot store. The stride counts
+# coupled steps from the start of the run, so chunking and resume do not
+# change which steps are kept.
+subsample: 1
+
+# Stop at the first chunk whose state fails `jcm.diagnostics.check_health`
+# instead of integrating an already-broken state. Set false to log and carry
+# on (e.g. when the instability is the thing being studied).
+bail_on_unhealthy: true
+
+# Directory holding the run's restart state. Checkpointing is ON: the coupled
+# carry is written here after every chunk the health gate accepts, and a run
+# started with a complete checkpoint already here resumes from it -- so
+# resuming is the same command as starting. It is ONE directory, rewritten
+# each chunk, not a directory of dated restart points.
+#
+# A RELATIVE path is resolved against `output_dir`, i.e. against the Hydra run
+# directory, which is fresh for every run: so this default gives each run its
+# own restart directory, two runs launched from the same shell cannot write
+# over each other's, and pointing a second run at an earlier run's output
+# directory (`coupled_run.output_dir=...`) is what resumes it -- reported by
+# the provenance line the run logs. An ABSOLUTE path is used as given, for a
+# run that checkpoints to scratch while writing output elsewhere.
+#
+# Disable with `coupled_run.checkpoint_path=null`.
+checkpoint_path: checkpoint
+
+# How often that checkpoint is written, in the same duration forms as `chunk`.
+# null -- the default -- writes one after every chunk the health gate accepts.
+# A value must be a whole multiple of `chunk` (a chunk boundary is the only
+# place the run stops) and is counted in coupled steps from the START OF THE
+# RUN, so a resumed run checkpoints where an uninterrupted one would. It is for
+# a run whose chunks are short for another reason -- a health check every few
+# days, an output file per day -- and which does not want its restart state
+# rewritten that often; the cost is that a run which is KILLED falls back to the
+# last interval boundary and re-integrates (and rewrites the output files of)
+# the chunks after it. A completed run always checkpoints its last chunk, and a
+# run the health gate stops always checkpoints the last chunk that passed.
+# Setting it with `checkpoint_path=null` is an error, not a no-op.
+checkpoint_interval: null
+
+# Logging level of the `jem` logger. Consumed by `jem.main` only -- it is not
+# an argument of `run_chunked()`, but it belongs with the run's other
+# command-line settings. INFO because a coupled run reports each chunk as it
+# completes, and a silent run is not the same as a clean one.
+log_level: INFO

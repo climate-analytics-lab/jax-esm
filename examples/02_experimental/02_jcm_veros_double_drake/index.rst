@@ -9,10 +9,12 @@ JCM-Veros Coupled Run: Double-Drake Configuration
 This example couples JCM and Veros in a double-drake configuration: two
 meridional continents on an otherwise aquaplanet-like Gaussian lat-lon grid.
 Because JCM and Veros share exactly the same grid here, the coupling needs no
-regridding or vector rotation. "Land" is represented with a
-:code:`SlabOceanModel` configured as a shallow, low-heat-capacity slab (a
-stand-in for land until a proper slab land model is wired into this example
-in a future release).
+regridding or vector rotation. "Land" is a :code:`SlabOceanModel` registered
+as :code:`fakelnd` with :code:`ocean_mask_value=1.0`, so it integrates the
+cells the grid marks as land. Its grid carries no fractional mask, so it in
+fact integrates none of them and reports a constant surface temperature: a
+fixed land boundary condition for the atmosphere, and a stand-in until a
+proper slab land model is wired into this example in a future release.
 
 Running the example
 --------------------

@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jax-esm"
-version = "0.1.0"
 description = "A JAX-based Earth System Model coupler for coupling atmospheric, land, and ocean components"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,37 +18,85 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
+dynamic = ["version"]
 
+# Runtime requirements only: everything here is imported by `jem` itself.
+# Plotting, docs and the Veros ocean are opt-in extras below, so that
+# `pip install jax-esm` in a model-running environment pulls no matplotlib,
+# cartopy or sphinx.
 dependencies = [
-    "jax>=0.4.0",
-    "jaxlib>=0.4.0",
+    # The ceiling is flax's, not ours: jax 0.11.2 removed
+    # `jax.experimental.hijax.HiPrimitive`, which every released flax up to
+    # 0.12.9 subclasses at import time, so `import flax.nnx` (and with it
+    # `import jcm`) fails before any model is built. flax main already carries
+    # the compatibility alias; lift the ceiling to a flax floor once that
+    # release is on PyPI (#117).
+    "jax>=0.4.0,<0.11.2",
+    "jaxlib>=0.4.0,<0.11.2",
     "numpy>=1.21.0",
-    "typing-extensions>=4.0.0",
-    "dataclasses-json>=0.5.0",
-    "typeguard",
-    "jax_datetime",
-    "jax_tqdm",
-    "tqdm",
-    "netcdf4",
     "xarray",
+    "netcdf4",
     "tree_math",
-    "coordax",
-    "jcm>=1.1.1",
-    "matplotlib",
-    "cartopy",
-    "sphinx",
-    "shibuya",
+    "jax_datetime",
+    # A floor, not the pin. 3.0.0rc1 is what jax-gcm reports at the supported
+    # revision; it is the first version whose `Model` publishes its resumable
+    # state and its date conversion publicly and takes no `log_level`
+    # (jax-gcm#819, #824), which is what the JCM adapter is written against.
+    # It is not on PyPI, so this is satisfied only by an editable install of a
+    # jax-gcm checkout. Which checkout is recorded once, in
+    # `jem/components/jcm/contract.py` (JCM_SUPPORTED_REV), together with every
+    # jax-gcm name JAX-ESM calls and how to bump the pin; the CI workflow and
+    # the contract test both read from there. jax-gcm bumps its version only at
+    # release, so a version floor cannot express "this sha" -- do not try to
+    # tighten it here. (A release candidate satisfies a floor that names it:
+    # PEP 440 orders 3.0.0rc1 >= 3.0.0rc1, so the requirement is installable.)
+    "jcm>=3.0.0rc1",
+    "flax",
+    # >=1.3 for `hydra.utils.get_object`, which `jem.runners._accepts_grid`
+    # uses to resolve a `_target_` that may be either a class or a
+    # classmethod. On 1.2 it does not exist, and the failure is silent in the
+    # worst way: every component would be told it takes no grid.
+    "hydra-core>=1.3",
+    "omegaconf",
 ]
 
 [project.optional-dependencies]
+plot = [
+    "matplotlib",
+    "cartopy",
+]
+# Intentionally empty: the coupler talks to a *jittable* fork of Veros that is
+# not published on PyPI, so it has to be installed from git. `pip install
+# jax-esm[veros]` therefore only documents the intent; see the README for the
+# git install command.
+veros = []
+docs = [
+    "sphinx",
+    "shibuya",
+    "nbsphinx",
+    "myst-parser",
+]
 dev = [
+    "coordax",  # optional at runtime: only jem.utils.cycles.evaluate_periodic needs it
     "pytest>=7.0",
-    "pytest-cov>=3.0",
-    "mypy>=0.900",
-    "ruff",
+    "pytest-cov",
+    "pytest-xdist",
+    # tests/unit/test_config.py builds a wheel through setuptools' PEP 517
+    # hook to check the config tree ships as package data. Python 3.12 venvs
+    # no longer carry setuptools by default (only 3.11 and earlier do), so it
+    # is a test dependency in its own right.
+    "setuptools>=61.0",
+    "mypy",
+    "ruff==0.15.17",
     "nbformat",
     "nbconvert",
 ]
+
+[project.scripts]
+# The coupled run's command line. `jem <overrides>` and `python -m jem.main
+# <overrides>` are the same entry point; the console script is what makes an
+# installed wheel runnable without knowing the module path.
+jem = "jem.main:main"
 
 [project.urls]
 "Homepage" = "https://github.com/climate-analytics-lab/jax-esm"
@@ -60,15 +107,21 @@ dev = [
 include = ["jem*"]  # Automatically finds jem, jem.base, etc.
 
 [tool.setuptools.package-data]
-jem = ["data/*.nc", "components/slab/winton_seaice_model/NOTICE"]
+# The YAML config groups are part of the package, not just of the source tree:
+# `python -m jem.main` composes them through `pkg://jem.config`, so an
+# installed wheel that lacks them cannot run anything. The Winton sea-ice
+# component ships MITgcm-derived code, so its NOTICE must ship too.
+jem = [
+    "config/**/*.yaml",
+    "data/*.nc",
+    "components/slab/winton_seaice_model/NOTICE",
+]
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
+# Single source of truth for the version: `jem.__version__`. Reading it from
+# the package rather than repeating it here means `jem.__version__` and the
+# installed distribution metadata can never disagree.
+[tool.setuptools.dynamic]
+version = {attr = "jem.__version__"}
 
 [tool.mypy]
 python_version = "3.11"
@@ -80,3 +133,47 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (> 1 min, deselect with '-m \"not slow\"')",
+]
+
+# Lint configuration mirrors jax-gcm's so a developer moving between the two
+# repositories meets one set of rules.
+[tool.ruff]
+# Sibling checkouts that CI (and a developer) may place inside this
+# repository: `ruff check .` must lint this project, not its dependencies,
+# whose moving branches would otherwise turn an unrelated PR red.
+extend-exclude = ["jax-gcm", "veros-jittable"]
+
+[tool.ruff.lint]
+extend-select = ["D"]
+ignore = [
+    "D100", # missing public module docstrings
+    "D101", # missing public class docstrings
+    "D102", # missing public method docstrings
+    "D103", # missing public function docstrings
+    "D104", # missing public package docstrings
+    # One of each mutually-incompatible docstring pair (ruff would
+    # otherwise silently drop one): keep D211 (no blank line before
+    # docstring) and D212 (summary on first line).
+    "D203", # incompatible with D211
+    "D213", # incompatible with D212
+    "D205", # missing blank lines between summary line and description
+    "D400", # first lines missing period
+    "D415", # docstrings missing closing punctuation
+    "D417", # missing argument descriptions
+    "E731"
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebooks legitimately break import/definition rules: names come from
+# earlier cells (F821), cells are re-run and redefine things (F811), imports
+# follow prose (E402), and demo cells import things they only show (F401).
+"*.ipynb" = ["F821", "F811", "E402", "F401", "D107"]
+# The experimental JCM+Veros drivers import in a load-bearing order that E402
+# cannot express: matplotlib's backend is chosen before `pyplot` is imported,
+# JAX config is set before anything touches JAX, and the auto-generated Veros
+# setup header (with its "cannot be executed directly" guard) sits above the
+# imports by construction. Phase 3 (T3.1) rewrites these drivers against the
+# final API; reordering them now would only churn code that is about to go.
+"examples/02_experimental/**" = ["E402"]

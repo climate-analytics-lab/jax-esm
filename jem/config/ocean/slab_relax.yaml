@@ -1,0 +1,13 @@
+# A slab ocean relaxed towards a prescribed SST climatology -- the
+# configuration to use when the ocean must stay near an observed state
+# (a free slab drifts within a few months).
+_target_: jem.components.SlabOceanModel
+# 12-month `sst` climatology on the ocean grid. Required: relaxation without
+# a target is undefined, and the model raises rather than guessing one.
+sst_clim_file: ???
+params:
+  _target_: jem.components.slab.SlabOceanParameters
+  # The choice this configuration is about; the relaxation timescale itself is
+  # a physics parameter and stays at its Python default unless a named
+  # configuration has a reason to move it.
+  forcing_method: relaxation
