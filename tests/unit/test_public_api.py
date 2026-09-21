@@ -38,6 +38,8 @@ CORE_NAMES = (
     "default_exchangers",
     "default_exchanges",
     "default_workflow",
+    # What of a component's carry the table says somebody else supplies.
+    "exchanged_fields",
     # Writing a chunk of a run out: the labelling and the reduction, each on
     # its own (the health gate needs the unreduced chunk) and composed.
     "chunk_datasets",

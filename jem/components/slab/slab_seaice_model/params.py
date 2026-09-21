@@ -23,7 +23,16 @@ class SlabSeaiceParameters:
     ----------
     initial_ice_thickness : jnp.ndarray
         Uniform ice thickness (m) over ocean points at the start of a run.
-        Initial condition; read only by ``initialize``.
+        Initial condition; read only by ``initialize``, and only when the
+        model was built without an ``ice_clim_file`` -- a climatology says
+        where the ice is, which a single number cannot.
+    max_initial_ice_thickness : jnp.ndarray
+        Ceiling (m) on the thickness ``initialize`` infers from an ice
+        *concentration* climatology. The ``1 - exp(-h / scale)`` closure
+        saturates, so a cell the file reports as fully covered is consistent
+        with any thickness from a few metres upwards and inverting it gives
+        an infinite depth; this is the thickness such a cell is given
+        instead. Initial condition, and read only on the climatology path.
     min_ice_thickness : jnp.ndarray
         Thickness (m) above which a cell is *diagnosed* as ice-covered. It has
         no effect on the thickness tendency; it only selects which surface
@@ -39,6 +48,10 @@ class SlabSeaiceParameters:
     """
 
     initial_ice_thickness: float | jnp.ndarray = 0.0
+    # A thick multi-year pack. At the default `ice_fraction_thickness_scale`
+    # it diagnoses back as 99.75% cover, so a cell the file calls fully
+    # ice-covered is handed to the atmosphere as fully ice-covered.
+    max_initial_ice_thickness: float | jnp.ndarray = 3.0
     min_ice_thickness: float | jnp.ndarray = 1e-3
     ice_fraction_thickness_scale: float | jnp.ndarray = 0.5
     ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)

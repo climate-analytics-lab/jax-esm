@@ -4,7 +4,7 @@
 monkey-patching methods onto it, so the atmosphere JEM drives is the same
 object the user configured and nothing in JCM has to know JEM exists.
 
-Two things this wrapper exists to get right:
+Three things this wrapper exists to get right:
 
 **The physics carry is threaded.** JCM's operator-split integration keeps
 cross-step physics state — sub-cycled radiation, prior-step TKE, the
@@ -16,6 +16,20 @@ lives in the component carry under ``"physics"`` and is passed straight
 back in. Its pytree structure is identical before and after a step, which
 is what lets the whole coupled step scan; it contains integer and boolean
 leaves, so it must never be cast wholesale to a float dtype.
+
+**The forcing an exchanger writes is a plain array.** With
+``forcing=from_file`` jax-gcm builds the surface boundary conditions as
+:class:`jcm.forcing.TimeSeries` leaves — three pytree leaves each — which
+the model slices by date on every internal timestep. An exchanger writes a
+single ``(ix, il)`` array into those same fields, so a carry that held a
+time series on the way in holds a bare array on the way out: a change of
+pytree structure that ``lax.scan`` cannot carry, and that the coupler
+refuses. :meth:`set_exchanged_forcing` names the fields the coupled model
+supplies, and :meth:`initialize` collapses exactly those to the
+climatology at the run's start date. The carry's ``"forcing"`` section
+therefore has, from ``initialize()`` onward, the structure an exchange
+preserves; every field no component supplies keeps its time series and
+goes on being sliced by jax-gcm, one step at a time.
 
 **Nothing integrates at initialization.** :meth:`initialize` builds the
 initial pytrees with :meth:`jcm.model.Model.bootstrap_state` and a
@@ -36,7 +50,9 @@ that broke nothing else.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import jax
@@ -44,7 +60,8 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import tree_math
 import xarray as xr
-from jcm.forcing import ForcingData, default_forcing
+from jcm.date import DateData
+from jcm.forcing import ForcingData, TimeSeries, default_forcing
 from jcm.model import Model
 from jcm.predictions import ModelPredictions
 
@@ -71,6 +88,11 @@ SECONDS_PER_DAY = 86400.0
 #: other component's can. The rest of JCM's variables are left untagged:
 #: those names are JCM's, and the roles of its diagnostics are not JEM's to
 #: assert.
+#:
+#: This is the *standard* set, and it is used for output tagging only. Which
+#: of these a given run actually receives depends on which surface components
+#: it was built with, so the set that decides the carry's structure is the one
+#: passed to :meth:`JCMComponent.set_exchanged_forcing`.
 FORCING_VARIABLE_NAMES = (
     "sea_surface_temperature",
     "sice_am",
@@ -187,6 +209,71 @@ def _diagnostics_template(model: Model) -> Any:
     return jax.tree.map(lambda leaf: jnp.zeros_like(leaf, dtype=float), template)
 
 
+def _forcing_field_names() -> frozenset[str]:
+    """Return the field names of :class:`jcm.forcing.ForcingData`.
+
+    Read from the struct rather than listed here, so a jax-gcm release that
+    adds a boundary condition needs no change on this side for it to be
+    nameable as an exchanged field.
+    """
+    return frozenset(field.name for field in dataclasses.fields(ForcingData))
+
+
+def _collapse_exchanged_forcing(
+    forcing: ForcingData,
+    names: tuple[str, ...],
+    date: jdt.Datetime,
+    calendar: str,
+) -> ForcingData:
+    """Return ``forcing`` with the ``names`` fields taken at ``date``.
+
+    The named fields are the ones a coupled run's exchangers overwrite every
+    coupling step. Left as :class:`jcm.forcing.TimeSeries` leaves they would
+    make the atmosphere's carry change pytree structure the first time an
+    exchanger wrote a plain array into one, which ``lax.scan`` cannot carry;
+    collapsed here they are the ``(ix, il)`` arrays an exchange writes, and
+    the structure is the same before and after.
+
+    The value they are collapsed *to* is the climatology at ``date``, which
+    is what the atmosphere would have seen at that date in an uncoupled run.
+    It survives only until the first exchange under the default workflow
+    (``exchange`` runs before ``atm``), and is what the atmosphere integrates
+    its first step on under a workflow that steps the atmosphere first.
+
+    Only the named fields are taken from the slice: everything else --
+    including :attr:`~jcm.forcing.ForcingData.solar`, which
+    :meth:`~jcm.forcing.ForcingData.select` fills in as a by-product -- is
+    left exactly as jax-gcm built it, because jax-gcm slices the forcing
+    again on every internal timestep and is the right place for that to
+    happen.
+
+    Parameters
+    ----------
+    forcing : jcm.forcing.ForcingData
+        The boundary conditions as jax-gcm built them.
+    names : tuple of str
+        Fields of ``ForcingData`` the coupled model supplies.
+    date : jax_datetime.Datetime
+        The run's start date.
+    calendar : str
+        The model's calendar, which decides how a wrap-year climatology is
+        indexed.
+
+    Returns
+    -------
+    jcm.forcing.ForcingData
+
+    """
+    if not names:
+        return forcing
+    at_date = forcing.select(DateData.set_date(date), calendar=calendar)
+    # ``tree_math.struct`` generates ``replace`` at runtime, so mypy cannot
+    # see it on the struct.
+    return forcing.replace(  # type: ignore[no-any-return]
+        **{name: getattr(at_date, name) for name in names}
+    )
+
+
 def _collapse_save_axis(leaf: jnp.ndarray) -> jnp.ndarray:
     """Merge a stacked leaf's ``(coupling step, save)`` axes into one time axis.
 
@@ -217,6 +304,16 @@ class JCMComponent:
         model's grid. It lives in the carry, not on ``self``, because
         exchangers overwrite parts of it (the SST an ocean component
         computes) every coupling step.
+    exchanged_forcing : iterable of str, optional
+        Names of ``forcing`` fields the coupled model supplies -- the ones
+        an exchanger writes into ``atm.forcing`` every coupling step. They
+        are collapsed to plain per-step arrays by :meth:`initialize` so the
+        carry's structure survives the first exchange; see
+        :meth:`set_exchanged_forcing`, which is how
+        :func:`jem.runners.build_coupler` sets them from the coupling table
+        once the exchangers are known. Empty by default: an atmosphere no
+        exchanger writes to keeps every boundary condition exactly as
+        jax-gcm built it.
 
     Attributes
     ----------
@@ -227,11 +324,19 @@ class JCMComponent:
 
     name = "atm"
 
-    def __init__(self, model: Model, *, forcing: ForcingData | None = None) -> None:
+    def __init__(
+        self,
+        model: Model,
+        *,
+        forcing: ForcingData | None = None,
+        exchanged_forcing: Iterable[str] = (),
+    ) -> None:
         """Wrap ``model``; see the class docstring for the parameters."""
         self.model = model
         self.forcing = (forcing if forcing is not None
                         else default_forcing(model.coords.horizontal))
+        self._exchanged_forcing: tuple[str, ...] = ()
+        self.set_exchanged_forcing(exchanged_forcing)
         # Horizontal nodal shape (ix, il); the leading axis of
         # ``coords.nodal_shape`` is the vertical.
         self.nodal_shape = tuple(model.coords.nodal_shape[1:])
@@ -240,6 +345,87 @@ class JCMComponent:
         # ``total_time`` as static arguments of a jit, so they cannot be
         # traced values. ``None`` until bind() has run.
         self._coupling_days: float | None = None
+
+    @property
+    def exchanged_forcing(self) -> tuple[str, ...]:
+        """Forcing fields the coupled model supplies, in the order declared."""
+        return self._exchanged_forcing
+
+    @property
+    def time_varying_forcing(self) -> tuple[str, ...]:
+        """Forcing fields jax-gcm built as time series, in ``ForcingData`` order.
+
+        These are the fields that carry three pytree leaves rather than one,
+        and so the ones that have to be named to
+        :meth:`set_exchanged_forcing` if a coupler is going to write to them.
+        A caller that cannot read its coupling off a table -- a hand-written
+        exchanger -- uses this to check what it has to declare.
+
+        Top-level fields only: a boundary condition jax-gcm keeps inside a
+        mapping (prescribed emissions, oxidants) is not a field an exchange
+        spec can address, so it is not reported here.
+
+        Returns
+        -------
+        tuple[str, ...]
+
+        """
+        return tuple(
+            field.name for field in dataclasses.fields(self.forcing)
+            if isinstance(getattr(self.forcing, field.name), TimeSeries)
+        )
+
+    def set_exchanged_forcing(self, names: Iterable[str]) -> None:
+        """Declare which forcing fields an exchanger writes every coupling step.
+
+        A coupled atmosphere does not prescribe the surface it stands on --
+        the surface components do -- so the fields named here stop being
+        boundary conditions the atmosphere reads from a file and become
+        per-step values it is handed. :meth:`initialize` collapses them to
+        the climatology at the run's start date, which is what gives the
+        carry's ``"forcing"`` section the same pytree structure before and
+        after an exchange. Fields that are *not* named keep whatever jax-gcm
+        built them as: a :class:`jcm.forcing.TimeSeries` stays a time series
+        and goes on being sliced per internal timestep, so an unexchanged
+        climatology -- the land surface in a run without a land model -- still
+        varies through the year.
+
+        Which fields those are is a property of the coupled model, not of the
+        atmosphere, which is why it is set from outside rather than assumed
+        here: an aquaplanet with no land model must keep the file's land
+        climatology, while :func:`jem.runners.build_coupler` derives the set
+        from the coupling table it just built
+        (:func:`jem.exchangers.exchanged_fields`).
+
+        Call it before :meth:`initialize`; the carry is built there, so a
+        later change does not reach a carry already made.
+
+        Parameters
+        ----------
+        names : iterable of str
+            Field names of :class:`jcm.forcing.ForcingData`. Duplicates
+            are collapsed; an empty iterable clears the declaration.
+
+        Raises
+        ------
+        ValueError
+            If a name is not a field of ``ForcingData``. Raised here, while
+            the model is being built, rather than as a ``TypeError`` from
+            ``replace()`` inside the traced coupled step.
+
+        """
+        declared = tuple(dict.fromkeys(names))
+        known = _forcing_field_names()
+        unknown = [name for name in declared if name not in known]
+        if unknown:
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r}: exchanged_forcing names "
+                f"{', '.join(repr(name) for name in unknown)}, which "
+                "jcm.forcing.ForcingData does not have -- so no exchanger can "
+                f"write to '{self.name}.forcing.<that name>' either. "
+                f"ForcingData's fields are {sorted(known)!r}."
+            )
+        self._exchanged_forcing = declared
 
     def bind(
         self,
@@ -313,6 +499,13 @@ class JCMComponent:
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
 
+        The ``"forcing"`` entry is the boundary conditions this component was
+        built with, with the fields :meth:`set_exchanged_forcing` names
+        collapsed to their value at the model's start date. That collapse is
+        what fixes the carry's pytree structure: an exchanger writes a plain
+        ``(ix, il)`` array into each of those fields every coupling step, and
+        a ``lax.scan`` carry may not change structure between steps.
+
         Returns
         -------
         dict
@@ -326,7 +519,12 @@ class JCMComponent:
             "physics": physics_carry,
             "derived": JCMDerived.zeros(
                 self.nodal_shape, _diagnostics_template(self.model)),
-            "forcing": self.forcing,
+            "forcing": _collapse_exchanged_forcing(
+                self.forcing,
+                self._exchanged_forcing,
+                self.model.start_date,
+                self.model.calendar,
+            ),
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:

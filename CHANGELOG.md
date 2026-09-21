@@ -893,6 +893,68 @@ code this release adds:
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.
+- A coupled atmosphere built with `forcing@atmosphere.forcing=from_file` runs.
+  `+configuration=earth-slab` failed at trace time with `Workflow element
+  'exchange' changed the structure of the component carries`: jax-gcm builds
+  each time-varying boundary condition as a `jcm.forcing.TimeSeries` (values,
+  time axis, alignment mode — three pytree leaves) and slices it by date
+  internally, while the standard exchange writes one `(ix, il)` array into the
+  same five fields, so the atmosphere's carry had a different pytree structure
+  after the first exchange than before it. `JCMComponent` now takes the names
+  of the forcing fields the coupling supplies
+  (`set_exchanged_forcing(names)`, also a constructor keyword) and
+  `initialize()` collapses exactly those to the climatology at the run's start
+  date, which is the structure an exchange preserves; every other field keeps
+  its time series and goes on being sliced per internal timestep.
+  `jem.runners.build_coupler` reads the names off the built coupling table
+  with the new `jem.exchangers.exchanged_fields(exchangers, "atm")`, so an
+  unexchanged climatology stays climatological — with `land=none` the land
+  surface still follows the seasonal cycle — and `coupling.exchanged_forcing`
+  lists them for a configuration coupled by a hand-written
+  `coupling.exchanger`, which cannot be read that way. The coupler's
+  structure check is unchanged: it is what caught this.
+- **`+configuration=earth-slab` starts its sea ice from the observed cover.**
+  `SlabSeaiceModel` takes an optional `ice_clim_file` — a 12-month `icec`
+  concentration climatology on the model grid, read the way the slab ocean
+  reads `sst_clim_file` — and `initialize()` samples it at the run's start
+  date and inverts the `1 - exp(-h / scale)` fraction closure to a thickness,
+  capped at the new `max_initial_ice_thickness` (3 m) because the closure
+  saturates and a fully covered cell would otherwise invert to an infinite
+  depth. `earth-slab` wires the packaged file's `icec` in. It matters because
+  the exchange runs before the components and a `derived` field is only
+  rewritten at the end of a step, so `initialize()`'s `ice_fraction` is what
+  the atmosphere is handed for the first *two* coupling steps: the
+  configuration's claim that "the climatological sea-ice cover the atmosphere
+  sees comes from this component" was true only once the slab had grown some.
+  Without a file the behaviour is unchanged — a uniform
+  `initial_ice_thickness`, zero by default.
+- **A slab ocean no longer starts colder than it is allowed to be.**
+  `SlabOceanModel.initialize()` holds the initial sea surface temperature at
+  or above `jem.constants.seawater_freezing_point_K`, the floor `step` has
+  always maintained. An observed "SST" climatology is generally a *surface*
+  temperature, so where the surface is sea ice it reports the ice surface:
+  the packaged T30 file is below freezing on 5902 of 36960 ocean
+  point-months, by up to 31.9 K. Taken verbatim that deficit reached the
+  first step as `deficit * mixed_layer_depth * rho * cp` of freeze/melt
+  potential and the sea ice answered with **25.2 m** of ice in one coupling
+  day; with the floor applied, `earth-slab`'s two-day maximum is 3.7 m. The
+  ice such a cell really carries is the sea-ice component's to hold, which is
+  what the `ice_clim_file` above is for. How much of a climatology the floor
+  touches is logged at INFO when the model is built. Runs with no SST
+  climatology are unaffected: the idealized profile starts near 288 K.
+- `Exchange.validate` compares the pytree **structure** of each row's two
+  ends and raises naming the row, so a destination that is a composite leaf
+  (a `jcm.forcing.TimeSeries` an exchanger would overwrite with one array)
+  is a build-time error naming `atm.forcing.<field>` instead of a trace-time
+  `RuntimeError` naming only the workflow element. Shapes and dtypes are
+  deliberately not compared, because a row that names a regridder changes
+  shape legitimately.
+- `coupling.exchanged_forcing` refuses a bare string, which is an iterable of
+  characters and would otherwise be declared as one-letter field names; the
+  message gives the `[...]` spelling. Its explicit branch now gets the same
+  safety net as the derived one: a declared field that is not time-varying,
+  and a time-varying field that nothing declared while a hand-written
+  exchanger is in play, are both warned about.
 - **`Exchange.__call__` casts a source value to its destination field's own
   dtype instead of writing it through unchanged.** Importing Veros sets
   `jax_enable_x64` process-wide, so a Veros ocean's carry is float64 while

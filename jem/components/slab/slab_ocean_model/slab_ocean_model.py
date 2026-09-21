@@ -140,8 +140,17 @@ class SlabOceanModel(SlabModelBase):
     -----------------
     With an SST climatology, the initial SST is that climatology sampled at
     the month the run starts in (:attr:`SlabModelBase.start_year_fraction`,
-    which the coupler sets through ``bind``). Without one it is an idealized
-    profile,
+    which the coupler sets through ``bind``), held at or above the seawater
+    freezing point. That floor is the same one ``step`` maintains, and it
+    matters because an observed "SST" climatology is generally a *surface*
+    temperature: where the surface is sea ice the file reports the ice
+    surface, tens of kelvin below freezing, which is not a temperature a
+    mixed layer can have. Taken verbatim it would be handed to the first step
+    as a heat deficit and converted, in one coupling interval, into tens of
+    metres of ice. The ice that such a cell really carries is the business of
+    a sea-ice component started from an ice-concentration climatology
+    (``SlabSeaiceModel(..., ice_clim_file=...)``), not of the mixed layer's
+    temperature. Without one it is an idealized profile,
     ``params.initial_sst`` at the poles rising by
     :data:`IDEALIZED_SST_RANGE` towards the equator. ``initial_sst`` is what
     the constructor has always accepted (as
@@ -293,6 +302,33 @@ class SlabOceanModel(SlabModelBase):
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
                     "points of this grid: the file's land mask and the grid's disagree."
                 )
+            # Said out loud at construction, where the arrays are concrete:
+            # `initialize` silently raises these cells to the freezing point,
+            # and how much of the file that touches is something an operator
+            # should be able to read in the log rather than infer from the
+            # output. It is normal for an observed surface-temperature
+            # climatology (see the class docstring), so it is not an error.
+            below_freezing = (
+                (self.sst_climatology < constants.seawater_freezing_point_K)
+                & ocean[..., None]
+            )
+            n_below = int(jnp.sum(below_freezing))
+            if n_below:
+                logger.info(
+                    "%s: the SST climatology is below the seawater freezing point "
+                    "(%.2f K) on %d of %d ocean point-months, by up to %.1f K -- "
+                    "an ice-covered surface temperature. The mixed layer is "
+                    "initialised at the freezing point there; the ice itself is a "
+                    "sea-ice component's to carry.",
+                    self.name, constants.seawater_freezing_point_K, n_below,
+                    int(jnp.sum(jnp.broadcast_to(ocean[..., None],
+                                                 self.sst_climatology.shape))),
+                    float(jnp.max(jnp.where(
+                        below_freezing,
+                        constants.seawater_freezing_point_K - self.sst_climatology,
+                        0.0,
+                    ))),
+                )
 
     def _check_forcing_configuration(self, params: SlabOceanParameters) -> None:
         """Reject parameters whose static configuration this model cannot run.
@@ -369,6 +405,16 @@ class SlabOceanModel(SlabModelBase):
             sea_surface_temperature = params.initial_sst + IDEALIZED_SST_RANGE * (
                 positive_cosine_cubic_latitude_squared(self.grid.latitude_radian)
             )
+        # The run starts inside the state space it is integrated in. `step`
+        # holds the mixed layer at or above the seawater freezing point and
+        # reports the heat that clamp removes as this step's freeze/melt
+        # potential, so a sub-freezing INITIAL temperature is not a cold ocean
+        # -- it is a whole run's worth of frazil energy released in step one.
+        # See the class docstring for what makes an observed climatology
+        # sub-freezing in the first place.
+        sea_surface_temperature = jnp.maximum(
+            sea_surface_temperature, constants.seawater_freezing_point_K
+        )
         sea_surface_temperature = jnp.where(
             ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )

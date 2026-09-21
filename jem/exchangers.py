@@ -13,8 +13,10 @@ sea-ice wiring that every example in this repository writes out by hand
 today. A declarative exchange is not more capable than a hand-written one --
 an exchanger that computes a flux, converts units or blends two fields still
 has to be a function -- but it is checkable: :meth:`Exchange.validate` names
-a mistyped field *before* a run starts, and :meth:`Exchange.__repr__` prints
-the whole coupling as a table.
+a mistyped field *before* a run starts, :meth:`Exchange.__repr__` prints
+the whole coupling as a table, and :func:`exchanged_fields` answers, for one
+component, which of its fields somebody else supplies -- which is what a
+component needs to know before it builds a carry the coupled step can scan.
 
 Carry layout
 ------------
@@ -508,6 +510,24 @@ class Exchange:
         regridder into an error that names the spec, instead of a trace-time
         failure inside the coupled step (or, worse, a silently unused field).
 
+        It also checks that each row's two ends have the **same pytree
+        structure**, because a row is a copy: writing the source's value into
+        the destination gives the destination the source's structure, and a
+        carry whose structure changes mid-step is one ``lax.scan`` cannot
+        carry. The coupler catches that too, but only at trace time and only
+        by naming the workflow element; here the offending row is named. The
+        case this exists for is a destination that is a *composite* leaf --
+        a ``jcm.forcing.TimeSeries`` (values, time axis, alignment mode) that
+        the atmosphere was given from a file and an exchanger overwrites with
+        one array (see
+        :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`,
+        which is how that is arranged).
+
+        Structure only: **shapes and dtypes are deliberately not compared**,
+        because a row that names a regridder legitimately changes shape, and a
+        row between grids of different resolution is the normal case rather
+        than an error.
+
         Parameters
         ----------
         components : Mapping[str, Carry]
@@ -520,7 +540,8 @@ class Exchange:
             If a spec names a component, a carry section or a regridder that
             does not exist.
         ValueError
-            If a spec names a field its section does not have.
+            If a spec names a field its section does not have, or if its two
+            ends have different pytree structures.
         TypeError
             If a component's carry is not a mapping, so it has no sections to
             address.
@@ -528,12 +549,36 @@ class Exchange:
         """
         for spec in self.specs:
             self._regridder(spec)
-            for path, (component, section, field) in (
-                (spec.src, spec.src_parts),
-                (spec.dst, spec.dst_parts),
+            values = {}
+            for end, path, (component, section, field) in (
+                ("src", spec.src, spec.src_parts),
+                ("dst", spec.dst, spec.dst_parts),
             ):
                 resolved = self._section(components, component, section, spec)
                 self._require_field(resolved, field, spec, path)
+                values[end] = getattr(resolved, field)
+            self._require_same_structure(spec, values["src"], values["dst"])
+
+    @staticmethod
+    def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
+        """Raise, naming the spec, if its two ends are different pytrees."""
+        # Typed as Any because `tree_structure` returns an opaque PyTreeDef
+        # that static analysis cannot compare, exactly as in
+        # `Coupler.generate_step_function`.
+        source_structure: Any = jax.tree_util.tree_structure(source)
+        destination_structure: Any = jax.tree_util.tree_structure(destination)
+        if source_structure == destination_structure:
+            return
+        raise ValueError(
+            f"Exchange spec {spec} copies a {source_structure} into a field "
+            f"that currently holds a {destination_structure}, so applying it "
+            "would change the pytree structure of the carries -- which "
+            "`lax.scan` cannot carry, and the coupled step refuses. The two "
+            "ends of a row have to be the same kind of pytree (shapes may "
+            "differ; a regridder changes those).\n"
+            f"  {spec.src}: {source_structure}\n"
+            f"  {spec.dst}: {destination_structure}"
+        )
 
     # -- lookups, shared by __call__ and validate --------------------------
 
@@ -776,6 +821,63 @@ def default_exchangers(
     return {DEFAULT_EXCHANGER_NAME: Exchange(
         default_exchanges(components, names), regridders
     )}
+
+
+def exchanged_fields(
+    exchangers: Mapping[str, Exchanger] | Iterable[Exchanger],
+    component: str,
+    section: str = "forcing",
+) -> tuple[str, ...]:
+    """Return the fields a coupling table writes into one carry section.
+
+    "Which of my fields does somebody else supply?" is a question a component
+    has to be able to answer before it builds its carry: a field an exchanger
+    overwrites every step has to be *shaped* like what the exchanger writes,
+    and the only place that is written down is the coupling table. The
+    atmosphere is the case that needs it -- with ``forcing=from_file`` its
+    boundary conditions are time series until a surface component takes one
+    over (see
+    :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`)
+    -- but the question is not specific to it, so the answer is read off the
+    table here rather than restated anywhere else.
+
+    Only :class:`Exchange` exchangers are read: a hand-written exchanger is an
+    arbitrary function and there is nothing in it to inspect, so it
+    contributes no names. A model coupled by one has to declare what it
+    writes itself; guessing would be worse, because the guess that is wrong
+    silently freezes a climatology instead of failing.
+
+    Parameters
+    ----------
+    exchangers : Mapping[str, Exchanger] or iterable of Exchanger
+        The coupled model's exchangers, as a mapping (its values are read) or
+        as a plain iterable.
+    component : str
+        Destination component name, e.g. ``"atm"``.
+    section : str, optional
+        Destination carry section; ``"forcing"`` by default, which is the
+        section an exchanger writes to by convention.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The destination field names, de-duplicated, in table order.
+
+    """
+    values = (
+        exchangers.values() if isinstance(exchangers, Mapping) else exchangers
+    )
+    # A dict rather than a set: the table's order is the order this reads
+    # best in, and a set would make the result depend on hash ordering.
+    fields: dict[str, None] = {}
+    for exchanger in values:
+        if not isinstance(exchanger, Exchange):
+            continue
+        for spec in exchanger.specs:
+            dst_component, dst_section, field = spec.dst_parts
+            if dst_component == component and dst_section == section:
+                fields[field] = None
+    return tuple(fields)
 
 
 def default_workflow(

@@ -27,6 +27,7 @@ from jem.exchangers import (
     default_exchangers,
     default_exchanges,
     default_workflow,
+    exchanged_fields,
     read_field,
     replace_field,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "default_exchanges",
     "default_health_check",
     "default_workflow",
+    "exchanged_fields",
     "nested_carry",
     "postprocess",
     "postprocess_datasets",

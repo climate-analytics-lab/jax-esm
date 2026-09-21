@@ -682,3 +682,77 @@ def test_initialize_rejects_relaxation_without_a_climatology(uniform_grid):
     # The default, and a method the model can run, still initialize.
     model.initialize()
     model.initialize(SlabOceanParameters(forcing_method="qflux"))
+
+
+# ---------------------------------------------------------------------------
+# The initial mixed layer cannot start colder than it is allowed to be
+# ---------------------------------------------------------------------------
+
+
+def test_initial_sst_is_held_at_the_seawater_freezing_point(tmp_path, uniform_grid):
+    """A sub-freezing climatology starts the mixed layer at freezing, not below.
+
+    An observed "SST" climatology is generally a *surface* temperature: where
+    the surface is sea ice the file reports the ice surface, tens of kelvin
+    below freezing. `step` holds the mixed layer at or above the seawater
+    freezing point and turns the heat that clamp removes into this step's
+    freeze/melt potential, so an initial state below the floor is not a cold
+    ocean -- it is a heat deficit the first step converts into ice.
+    """
+    deficit = 30.0
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - deficit),
+    )
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    sea_surface_temperature = np.asarray(
+        model.initialize()["state"].sea_surface_temperature
+    )
+
+    np.testing.assert_allclose(
+        sea_surface_temperature, constants.seawater_freezing_point_K, rtol=1e-6
+    )
+
+
+def test_a_sub_freezing_start_no_longer_dumps_its_deficit_into_ice(
+    tmp_path, uniform_grid
+):
+    """The first step's freeze/melt potential is a step's worth, not a run's.
+
+    Taken verbatim, a climatology 30 K below freezing would be handed to the
+    first step as `deficit * mixed_layer_depth * rho * cp` of frazil energy --
+    enough for tens of metres of ice in one coupling interval. With the floor
+    applied the first step starts in balance, so whatever potential it reports
+    comes from the heat flux it was actually given.
+    """
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - 30.0),
+    )
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+    carry = model.initialize()
+
+    # No heat flux at all: an ocean already at the floor has nothing to freeze.
+    stepped, _ = model.step(carry, coupling_time(0))
+
+    np.testing.assert_allclose(
+        np.asarray(stepped["derived"].ice_frazil_melt_energy), 0.0, atol=1e-6
+    )
+
+
+def test_a_warm_climatology_is_untouched_by_the_floor(tmp_path, uniform_grid):
+    """The floor is a floor: it may not move an ocean that is above it."""
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    sea_surface_temperature = np.asarray(
+        model.initialize()["state"].sea_surface_temperature
+    )
+
+    np.testing.assert_allclose(
+        sea_surface_temperature,
+        climatology_at(MONTHLY_SST, model.start_year_fraction),
+        rtol=1e-6,
+    )
+    assert sea_surface_temperature.min() > constants.seawater_freezing_point_K
