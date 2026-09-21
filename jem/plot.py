@@ -117,8 +117,26 @@ def open_output(output_dir: Path | str, component: str = "atm") -> xr.Dataset:
     """
     output_dir = Path(output_dir)
     chunks = []
-    for path in sorted(output_dir.glob(f"{component}-*.nc")):
-        step = output_file_step(path, [component])
+    # Enumerate every ``*.nc`` file rather than globbing on the raw
+    # `component`: `write_chunk` sanitises a component's name before it ever
+    # reaches a file name (`jem.output.output_file_name`), so a component
+    # called e.g. "sea ice" writes `sea_ice-00000000.nc`, which
+    # `f"{component}-*.nc"` never matches; a name containing glob
+    # metacharacters (``*``, ``[...]``) could also match unrelated files
+    # under the raw pattern. `output_file_step` applies that same
+    # sanitisation and the writer's exact-reconstruction check, so calling it
+    # per file is the inverse of what wrote them, not a second copy of the
+    # naming rule.
+    for path in output_dir.glob("*.nc"):
+        try:
+            step = output_file_step(path, [component])
+        except ValueError:
+            # `_safe_name` (inside `output_file_step`) raises only when
+            # `component` itself has no character that survives
+            # sanitisation (e.g. an all-punctuation name); such a component
+            # cannot be anyone's file, so this folds into "no chunks found"
+            # below instead of leaking a different exception from here.
+            continue
         if step is not None:
             chunks.append((step, path))
     if not chunks:

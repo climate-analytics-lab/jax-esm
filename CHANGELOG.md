@@ -998,6 +998,20 @@ components these configurations are the first to exercise:
   `nan` the moment a cell was fully covered. `log1p` now reads a stand-in
   (0.0) for a saturated cell instead of `f` itself, so every intermediate
   stays finite and the outer `where` still selects the correct primal.
+- **`jem.plot.open_output` finds a component's files by their sanitised
+  on-disk name.** It globbed `f"{component}-*.nc"` against the raw
+  component name, but `write_chunk` sanitises a name before it ever reaches
+  a file name (`jem.output.output_file_name`), so a component called e.g.
+  `"sea ice"` writes `sea_ice-00000000.nc` and
+  `open_output(output_dir, "sea ice")` raised `FileNotFoundError` even
+  though its files were sitting right there; a component name containing
+  glob metacharacters (`*`, `[...]`) could also silently match unrelated
+  files under the raw pattern. It now lists every `*.nc` in the directory
+  and keeps the ones `jem.output.output_file_step` accepts as this
+  component's -- which applies that same sanitisation and the writer's
+  exact-reconstruction check -- sorted by the step that returns; the
+  `FileNotFoundError` still names the component, the directory and whatever
+  components' files *are* there when nothing matches.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

@@ -54,6 +54,44 @@ def test_open_output_names_what_is_actually_there(tmp_path):
     assert "ocn" in message
 
 
+def test_open_output_finds_a_sanitised_component_name(tmp_path):
+    """A component name containing a space still round-trips.
+
+    `write_chunk` sanitises a dataset's name before it reaches a file name
+    (`output_file_name`): "sea ice" is written as `sea_ice-00000000.nc`.
+    `open_output` must find that file when asked for the *unsanitised* name
+    "sea ice", the way a caller who only knows the component's own name
+    would ask for it -- globbing `f"{component}-*.nc"` on the raw name never
+    matches this file at all.
+    """
+    _dataset(["2001-01-01"]).to_netcdf(tmp_path / output_file_name("sea ice", 0))
+    _dataset(["2001-01-06"]).to_netcdf(tmp_path / output_file_name("sea ice", 5))
+
+    combined = plot.open_output(tmp_path, "sea ice")
+
+    np.testing.assert_array_equal(
+        combined["time"].values,
+        np.array(["2001-01-01", "2001-01-06"], dtype="datetime64[ns]"),
+    )
+
+
+def test_open_output_ignores_a_foreign_component_file(tmp_path):
+    """A file from a different component in the same directory is not it.
+
+    `atm-00000000.nc` is a real, well-formed chunk file -- just not `ocn`'s --
+    so a glob-metacharacter or substring match must not pick it up.
+    """
+    _dataset(["2001-01-01"]).to_netcdf(tmp_path / output_file_name("atm", 0))
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        plot.open_output(tmp_path, "ocn")
+
+    message = str(excinfo.value)
+    assert "ocn" in message
+    assert str(tmp_path) in message
+    assert "atm" in message
+
+
 # ---------------------------------------------------------------------------
 # area_mean
 # ---------------------------------------------------------------------------
