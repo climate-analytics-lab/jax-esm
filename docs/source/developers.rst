@@ -34,14 +34,17 @@ seen, not discover it.
 grabs the same GPU.
 
 Two suites sit behind those gates. ``tests/unit`` is fast and needs no external
-data. ``tests/examples`` executes every notebook under ``examples/`` and runs
-every named configuration under ``jem/config/configuration/`` for two coupled
-days, with a 600 s budget each; CI runs it on pull requests only, because it
-integrates whole coupled models. There are no ``run.sh`` drivers left to run --
-every runnable configuration is a notebook or a ``python -m jem.main
-+configuration=...`` command, listed with the rest in ``examples/README.md``.
-Run it before changing the public API, since the examples are the largest body
-of code that uses it:
+data. ``tests/examples`` has two files: ``test_examples.py`` executes every
+notebook under ``examples/`` end to end (a 1800 s budget each), and
+``test_configurations.py`` composes, builds and runs every named configuration
+under ``jem/config/configuration/`` for two coupled days
+(``coupled_run=short_run``), skipping the ``veros-*`` configurations where the
+optional ``veros`` dependency is not installed. CI runs the suite on pull
+requests only, because it integrates whole coupled models. There are no
+``run.sh`` drivers left to run -- every runnable configuration is a notebook or
+a ``python -m jem.main +configuration=...`` command, listed with the rest in
+``examples/README.md``. Run it before changing the public API, since the
+examples are the largest body of code that uses it:
 
 .. code-block:: bash
 

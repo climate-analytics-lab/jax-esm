@@ -293,10 +293,9 @@ class VerosExchange:
 
     The destination-dtype cast this exchanger applies (see the build-order
     comment in :meth:`__call__`) is not unique to this hand-written class:
-    the declarative :class:`jem.exchangers.Exchange` table is gaining the
-    same cast (in the sibling branch that owns ``jem/exchangers.py``), so an
-    ``ocean=veros`` configuration that composes the default table instead of
-    this exchanger steps through the same fix.
+    the declarative :class:`jem.exchangers.Exchange` table applies the same
+    cast in its own ``__call__``, so an ``ocean=veros`` configuration that
+    composes the default table instead of this exchanger gets the same fix.
 
     """
 

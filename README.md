@@ -50,7 +50,8 @@ cd jax-esm
 pip install -e "."
 cd ..
 
-# Optional: the jittable Veros fork, only needed for the JCM-Veros examples
+# Optional: the jittable Veros fork, only needed for the Veros configurations
+# (+configuration=veros-double-drake / veros-earth)
 git clone https://github.com/meteorologytoday/veros-jittable.git
 cd veros-jittable
 pip install -e "."
