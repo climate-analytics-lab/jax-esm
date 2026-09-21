@@ -930,15 +930,13 @@ the state is still healthy:
 
 ```
 carry = initial_carry or coupler.initialize()          # or the checkpoint's
-trajectory = coupler.generate_trajectory_function(steps_per_chunk)   # compiled ONCE
-for each chunk:
-    first_step = int(carry.step)
+for steps in batches:                # `steps` is the chunk, except that the
+    first_step = int(carry.step)     #   last batch of a resume can be short
+    trajectory = compiled[steps]     # one compiled trajectory per length
     carry, diagnostics = trajectory(carry)
     datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
     reduced  = postprocess_datasets(datasets, output_averages=…, subsample=…,
                                     first_step=first_step, steps=steps)
-                                    # `steps` is THIS batch's length: the last
-                                    # batch of a resume can be a short one
     paths += write_chunk(reduced, output_dir, first_step)
     ok, report = health_check(datasets, chunk_index, elapsed_days)   # UNreduced
     if ok or not bail_on_unhealthy:
@@ -1157,11 +1155,17 @@ does the short final batch a resume under a different chunk length ends with —
 and such a chunk gets **no file**, rather than a record the run's cadence does
 not call for or an empty one that `xr.open_mfdataset` cannot read back. So
 `RunResult.paths` holds one file per component per chunk *except* for the
-chunks that kept nothing, and the skip is reported at INFO.
+chunks that kept nothing, and the skip is reported at INFO. `write_chunk` also
+**removes** a file already at that name: this pass's output for that chunk is
+nothing, the name is this chunk's, and on a rechunked resume an earlier pass's
+file can sit on the new chunk grid — declared rewritable by the resume check
+above — and would otherwise survive holding a record this pass writes under a
+different name. That is the only thing the driver deletes, and it is a name it
+is itself responsible for.
 
 `output_averages=True` is defined against jcm's meaning of the same word
-rather than beside it: jcm
-replaces each saved record with the mean over its save interval, labelled at the
+rather than beside it: jcm replaces each saved record with the mean over its
+save interval, labelled at the
 interval's end, and the coupler's records are already one per coupling step — so
 the coupler's output interval is the **chunk**, and the flag replaces a chunk's
 records with their time mean, labelled with the chunk's last time and carrying
@@ -1169,7 +1173,9 @@ the CF `cell_methods = "time: mean"` that says so. That label is the end of the
 chunk whether or not `subsample` kept the record sitting there, so a run that
 sets both still writes one evenly spaced mean per chunk; what varies is how
 many records went into each one, since the number of a chunk's steps the
-run-global stride keeps depends on where the chunk falls in the stride period. The bins are therefore the
+run-global stride keeps depends on where the chunk falls in the stride period.
+
+The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
 five days a year against the calendar on a 365-day year, not monthly means —
 those are `jem.accumulate.monthly_mean(coupler)` (twelve bins, a climatology)

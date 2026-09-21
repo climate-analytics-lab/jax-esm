@@ -1376,6 +1376,63 @@ def test_a_resume_under_the_same_chunk_rewrites_and_is_allowed(
         )
 
 
+def test_a_rechunked_resume_removes_a_file_it_keeps_no_record_for(
+    tmp_path, caplog
+):
+    """A chunk this pass keeps nothing for takes its name's file with it.
+
+    The one way the skip could leave a duplicate behind. An earlier pass with
+    six-day chunks and `subsample=5` wrote files at steps 0, 6, 12 and 18,
+    the step-12 one holding coupled step 15. Rewound to step 12 and resumed
+    with three-day chunks, this run's grid is 12, 15, 18, 21 -- so the
+    step-12 and step-18 files are on it and the resume check declares them
+    this run's to rewrite. But this run's chunk at step 12 covers steps 12-14
+    and the stride keeps none of them, so it has nothing to put at that name
+    while it writes step 15 into `ocn-00000015.nc`: leaving the old file
+    there would leave step 15 in the directory twice. It is removed instead.
+    """
+    output = tmp_path / "output"
+    checkpoint = tmp_path / "checkpoint"
+    settings = {
+        "chunk": "6 days",
+        "subsample": 5,
+        "output_dir": output,
+        "checkpoint_path": checkpoint,
+    }
+    run_chunked(two_slabs(), total_time="12 days", **settings)
+    at_twelve = tmp_path / "checkpoint-at-step-12"
+    shutil.copytree(checkpoint, at_twelve)
+    run_chunked(two_slabs(), total_time="24 days", **settings)
+    assert output_names(output) == [
+        f"{name}-{step:08d}.nc"
+        for name in ("ocn", "seaice")
+        for step in (0, 6, 12, 18)
+    ]
+    with xr.open_dataset(output / "ocn-00000012.nc") as stale:
+        assert list(stale["time"].values) == step_labels(15)
+
+    shutil.rmtree(checkpoint)
+    shutil.copytree(at_twelve, checkpoint)
+    with caplog.at_level(logging.INFO, logger="jem.output"):
+        run_chunked(
+            two_slabs(), total_time="24 days", chunk="3 days",
+            output_dir=output, checkpoint_path=checkpoint, subsample=5,
+        )
+
+    assert "ocn-00000012.nc was not written and the file already there was " \
+        "removed" in caplog.text
+    assert not (output / "ocn-00000012.nc").exists()
+    with xr.open_dataset(output / "ocn-00000015.nc") as written:
+        assert list(written["time"].values) == step_labels(15)
+
+    # The directory holds each kept step once: steps 0 and 5 from the first
+    # pass's first file, 10 from its second, and 15 and 20 from this one.
+    with xr.open_mfdataset(sorted(output.glob("ocn-*.nc"))) as combined:
+        np.testing.assert_array_equal(
+            combined["time"].values, np.array(step_labels(0, 5, 10, 15, 20))
+        )
+
+
 def test_a_resume_ignores_files_it_did_not_write(tmp_path, caplog):
     """Only this coupler's own output is examined, never anything else.
 
@@ -2018,23 +2075,39 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
 
     Twenty days in four-day chunks with `subsample=3`: the kept coupled steps
     are 0, 3, 6, 9, 12, 15 and 18, which fall 2, 1, 1, 2, 1 to a chunk -- so
-    the means are over different numbers of records, but each one still
-    covers its own chunk and is labelled at that chunk's end, four days
-    apart. Labelling with the last record the stride happened to keep would
-    make the series jump about instead.
+    the means are over different numbers of records, which the same run
+    without the averaging shows file by file. Each mean still covers its own
+    chunk and is labelled at that chunk's end, four days apart; labelling
+    with the last record the stride happened to keep would make the series
+    jump about instead.
     """
-    run_chunked(
-        two_slabs(), total_time="20 days", chunk="4 days",
-        output_dir=tmp_path, output_averages=True, subsample=3,
-    )
+    settings = {"total_time": "20 days", "chunk": "4 days", "subsample": 3}
+    thinned = tmp_path / "thinned"
+    averaged = tmp_path / "averaged"
+    run_chunked(two_slabs(), output_dir=thinned, **settings)
+    run_chunked(two_slabs(), output_dir=averaged, output_averages=True, **settings)
 
-    assert written_labels(tmp_path) == step_labels(3, 7, 11, 15, 19)
-    for path in sorted(tmp_path.glob("ocn-*.nc")):
-        with xr.open_dataset(path) as written:
-            assert written.sizes["time"] == 1
+    # Unequal weighting, from the data: the records that went into each mean.
+    kept = []
+    for path in sorted(thinned.glob("ocn-*.nc")):
+        with xr.open_dataset(path) as records:
+            kept.append(records["sea_surface_temperature"].load())
+    assert [records.sizes["time"] for records in kept] == [2, 1, 1, 2, 1]
+
+    # And each mean is over exactly those records, labelled at its chunk's
+    # end -- five means, four days apart, whatever went into them.
+    assert written_labels(averaged) == step_labels(3, 7, 11, 15, 19)
+    for path, records in zip(sorted(averaged.glob("ocn-*.nc")), kept, strict=True):
+        with xr.open_dataset(path) as mean:
+            assert mean.sizes["time"] == 1
             assert (
                 "time: mean"
-                in written["sea_surface_temperature"].attrs["cell_methods"]
+                in mean["sea_surface_temperature"].attrs["cell_methods"]
+            )
+            np.testing.assert_allclose(
+                mean["sea_surface_temperature"].values[0],
+                records.mean(dim="time").values,
+                rtol=1e-6,
             )
 
 

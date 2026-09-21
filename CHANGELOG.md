@@ -659,13 +659,15 @@ code this release adds:
   so a component the workflow runs `n` times per coupled step is thinned on
   the same cadence as everyone else. A record count that is not a whole
   multiple of the chunk's steps is a `ValueError`, since the step a record
-  belongs to is then undefined, and a chunk containing no coupled step on the
-  stride — which a `subsample` longer than `chunk` can give, and so can the
-  short final batch a resume under a different chunk length ends with — is now
-  skipped by `write_chunk` instead of being written as a zero-record file,
-  which `xr.open_mfdataset` cannot read back and the resume check cannot place
-  on a chunk grid. `RunResult.paths` therefore holds fewer files than the run
-  ran chunks whenever that happens, and the skip is reported at INFO.
+  belongs to is then undefined. A chunk containing no coupled step on the
+  stride — which a `subsample` longer than `chunk` gives, and so does the
+  short final batch a resume under a different chunk length ends with — writes
+  **no file**, and removes a file an earlier pass left at that name, since
+  this pass's output for that chunk is nothing; both are reported at INFO, and
+  `RunResult.paths` is then one file per component per chunk except for the
+  chunks that kept nothing. A thinned run's output directory therefore reads
+  back with `xr.open_mfdataset(sorted(paths))` at its default settings, which
+  a zero-record file would make fail.
   `postprocess(dataset, subsample=k)` on its own is unchanged: no offset means
   the start of a run.
 - A chunk mean written with `subsample` set is labelled with the **chunk's**

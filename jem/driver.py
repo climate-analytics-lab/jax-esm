@@ -95,10 +95,14 @@ resumed run checks, before anything is compiled, that every output file at or
 after the step it restored is one this call really writes over
 (:func:`_check_resumed_output_is_rewritable`): it starts on one of *this*
 run's chunk boundaries **and** before the step this run stops at. Those it
-rewrites, and it says at INFO how many. Anything else -- a file off the chunk
-grid, which would overlap this run's output, or one at or past the end of this
-run, which nothing it writes reaches -- it **refuses** with a ``ValueError``
-naming the files, grouped by which of the two they are, and the ways out:
+rewrites -- or, for a chunk it keeps no record of (a ``subsample`` stride that
+lands on none of that chunk's steps), removes, since this pass's output for
+that name is nothing and leaving the earlier pass's file there would leave a
+record this pass writes elsewhere standing twice. It says at INFO how many.
+Anything else -- a file off the chunk grid, which would overlap this run's
+output, or one at or past the end of this run, which nothing it writes reaches
+-- it **refuses** with a ``ValueError`` naming the files, grouped by which of
+the two they are, and the ways out:
 resume with the chunk they were written under (and, for those past the end,
 a ``total_time`` that reaches them), remove them, or write into another
 ``output_dir``. Deleting them instead would be a driver destroying a
@@ -361,7 +365,9 @@ def run_chunked(
         step on the stride -- which a ``subsample`` longer than ``chunk`` can
         give, and so can the short final batch a resume under a different
         chunk length ends with -- writes **no file** rather than an empty
-        one, so ``paths`` can hold fewer files than the run ran chunks.
+        one, and removes an earlier pass's file at that name if one is there.
+        ``paths`` is then one file per component per chunk except for the
+        chunks that kept nothing.
     health_check : callable, optional
         ``(datasets, chunk_index, elapsed_days) -> (ok, report)``, run after
         each chunk has been written and **before** it is checkpointed.
@@ -1017,8 +1023,16 @@ def _check_resumed_output_is_rewritable(
     -- an overlap in the middle of the run, or output past the end of it --
     since the remedy a modeller reaches for differs. The alternatives are both
     worse: silently writing the overlap is the bug this exists for, and
-    deleting somebody's output on a run's own initiative is not a decision a
-    driver should be taking.
+    deleting a file this run is not going to write is not a decision a driver
+    should be taking.
+
+    The files this call *does* write are another matter, and one of them is
+    written by being removed: a chunk this run keeps no record of (a
+    ``subsample`` stride landing on none of its coupled steps) has nothing to
+    put at its name, so :func:`jem.output.write_chunk` unlinks whatever is
+    there. That is the degenerate case of the rewrite this check has just
+    declared -- a name this pass is responsible for, replaced with this pass's
+    output for it -- and not a run deleting output it is not responsible for.
 
     Files *before* the restart point are the run's history -- this call does
     not integrate that simulated time and nothing about it changes -- and are
@@ -1046,8 +1060,8 @@ def _check_resumed_output_is_rewritable(
     Returns
     -------
     list[pathlib.Path]
-        The existing files this run rewrites, in name order; empty if there
-        are none.
+        The existing files this run rewrites -- or removes, where it keeps no
+        record for that chunk -- in name order; empty if there are none.
 
     Raises
     ------
@@ -1117,7 +1131,8 @@ def _check_resumed_output_is_rewritable(
         logger.info(
             "%d existing output file(s) at or after coupled step %d start on "
             "this run's chunk boundaries and before it ends, so this run "
-            "writes them again from the same state: %s.",
+            "writes them again from the same state -- or removes them, where "
+            "it keeps no record of that chunk: %s.",
             len(rewritten), restored_step,
             ", ".join(path.name for path in rewritten),
         )

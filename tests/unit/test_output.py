@@ -407,7 +407,31 @@ def test_write_chunk_writes_no_file_for_a_dataset_with_no_records(
 
     assert [path.name for path in written] == ["seaice-00000006.nc"]
     assert not (tmp_path / "ocn-00000006.nc").exists()
-    assert "kept no record of this chunk" in caplog.text
+    assert "'ocn' holds no records, so ocn-00000006.nc was not written" in caplog.text
+
+
+def test_write_chunk_removes_a_file_at_the_name_of_an_empty_dataset(
+    tmp_path, caplog
+):
+    """Leave nothing at a name whose chunk this pass keeps no record for.
+
+    The name belongs to this chunk of this run, and an earlier pass's file at
+    it holds records this one has replaced with none -- which a rechunked
+    resume can turn into a duplicate of a record written under another name.
+    Only that one name is touched: a non-empty dataset is overwritten as ever.
+    """
+    write_chunk({"ocn": simple_dataset(2), "seaice": simple_dataset(2)}, tmp_path, 6)
+    empty = postprocess(simple_dataset(3), subsample=5, first_step=6, steps=3)
+
+    with caplog.at_level(logging.INFO, logger="jem.output"):
+        written = write_chunk({"ocn": empty, "seaice": simple_dataset(3)}, tmp_path, 6)
+
+    assert [path.name for path in written] == ["seaice-00000006.nc"]
+    assert not (tmp_path / "ocn-00000006.nc").exists()
+    assert "the file already there was removed" in caplog.text
+    # The component that did have records still simply overwrote its file.
+    with xr.open_dataset(tmp_path / "seaice-00000006.nc") as rewritten:
+        assert rewritten.sizes["time"] == 3
 
 
 def test_write_chunk_writes_a_dataset_with_no_time_dimension(tmp_path):

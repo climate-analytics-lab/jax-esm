@@ -542,6 +542,16 @@ def write_chunk(
     A dataset with no time dimension at all is a different thing (a grid, a
     mask) and is written as it always was.
 
+    A file already at that name is **removed**, because this pass's output
+    for that chunk is nothing and the name is this chunk's. That is the one
+    thing here that deletes, and it deletes only a name this call is itself
+    responsible for: the same name it would otherwise have overwritten. It
+    matters for a rechunked resume, where an earlier pass's file can sit on
+    the new chunk grid -- :func:`jem.driver.run_chunked` has already checked
+    that every file at or after the restart point is one this run writes
+    again -- and would otherwise survive holding a record this pass also
+    writes under a different name.
+
     ``Coupler.to_xarray`` has already flattened a nested coupler's output
     into this mapping under its inner components' own names, so a name is
     normally a plain identifier; anything in one that cannot appear in a file
@@ -589,11 +599,22 @@ def write_chunk(
             )
         paths[path] = name
         if _dataset_is_empty(datasets[name]):
+            # This pass's record of this chunk, for this component, is
+            # nothing -- usually because the `subsample` stride keeps none of
+            # the chunk's coupled steps. Removing any file already at the
+            # name is the degenerate case of rewriting it: the name belongs
+            # to this chunk of this run, so leaving an earlier pass's file
+            # there would leave the directory holding records this pass has
+            # replaced with nothing, which a rechunked resume turns into a
+            # duplicate of a record it writes under another name.
+            removed = path.exists()
+            path.unlink(missing_ok=True)
             logger.info(
-                "Coupled step %d: %r kept no record of this chunk, so %s was "
-                "not written. The subsample stride keeps none of the chunk's "
-                "coupled steps.",
+                "Coupled step %d: %r holds no records, so %s was not "
+                "written%s. The usual cause is a subsample stride that keeps "
+                "none of this chunk's coupled steps.",
                 first_step, name, path.name,
+                " and the file already there was removed" if removed else "",
             )
             continue
         if path.exists():

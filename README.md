@@ -225,17 +225,20 @@ directory; a resume that stops earlier leaves that pass's later files stranded
 beyond its own end. So a resumed run checks, before anything is compiled, that
 every output file at or after the step it resumed from is one it really writes
 over — on one of its own chunk boundaries **and** before the step it stops at —
-and says at INFO how many it will rewrite. Anything else and it **refuses**,
-with a `ValueError` naming the files it would leave behind, grouped by which of
-the two they are (an overlap, or past the end of this run), plus the step, the
-chunk and the ways out (resume with the chunk those files were written under
-and, for those past the end, a `total_time` that reaches them; remove them; or
-write into another `output_dir`). It never deletes them itself:
-which of the two passes to keep is the user's call, not the driver's. Files
-from before the restart point, and files this coupler would never have written,
-are not in question — and the check is skipped entirely for a run that writes
-no files: an accumulated run, or a call whose checkpoint has already reached
-`total_time` and so has nothing left to integrate.
+and says at INFO how many it will rewrite — or, for a chunk it keeps no record
+of, remove. Anything else and it **refuses**, with a `ValueError` naming the
+files it would leave behind, grouped by which of the two they are (an overlap,
+or past the end of this run), plus the step, the chunk and the ways out (resume
+with the chunk those files were written under and, for those past the end, a
+`total_time` that reaches them; remove them; or write into another
+`output_dir`). It never deletes a file it is not going to write: which of the
+two passes to keep is the user's call, not the driver's. The one thing it does
+remove is a name it is itself responsible for and keeps no record for — a chunk
+the `subsample` stride lands on none of, whose output from this pass is
+nothing. Files from before the restart point, and files this coupler would
+never have written, are not in question — and the check is skipped entirely for
+a run that writes no files: an accumulated run, or a call whose checkpoint has
+already reached `total_time` and so has nothing left to integrate.
 
 `output_averages` and `subsample` reduce the *files* only. The health check is
 given each chunk exactly as it was integrated — every record — because it
@@ -248,8 +251,9 @@ its start, with every record that step produced (a component the workflow runs
 several times per coupled step keeps all of them, or none). So the files hold
 the same records however the run was chunked and wherever it was resumed, and
 `chunk` stays free to be chosen for memory and restart granularity alone. A
-chunk that contains no step on the stride writes no file at all, so with
-`subsample` set there can be fewer files than chunks.
+chunk that contains no step on the stride writes no file at all (and removes
+one an earlier pass left at that name), so the output is one file per
+component per chunk except for the chunks that kept nothing.
 
 For a reduction that must not cost memory proportional to the run, accumulate
 it *inside* the scan instead of writing every step out:
