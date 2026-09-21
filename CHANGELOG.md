@@ -662,6 +662,11 @@ Breaking changes are marked; everything else is additive.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
   `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
+- **`docs/source/quick_start.rst` is `docs/source/getting_started.rst`.** The
+  page stopped being a copy-and-paste script once that block moved to
+  `docs/source/python_api.md`, so it now leads with a command-line section
+  that mirrors jax-gcm's own (`--help`, `--cfg job`, the override spellings,
+  `+configuration=`) and hands the Python construction over to the new page.
 
 ### Removed
 

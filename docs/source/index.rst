@@ -6,8 +6,10 @@ system components. It couples independent atmosphere, ocean, land, and sea-ice m
 such as JCM, Veros, and JEM's own slab models — into a single JIT-compilable simulation loop
 built on ``jax.lax.scan``.
 
-- New to JEM? Start with :doc:`quick_start` for a copy-and-paste aquaplanet example.
-- Want to see it in action first? Browse :doc:`examples`.
+- New to JEM? Start with :doc:`getting_started` for install and your first
+  coupled run.
+- Building a coupled model in Python? See :doc:`python_api` for the complete
+  construction.
 - Integrating your own model? Follow :doc:`tutorial`.
 - Looking for a specific class or function? See :doc:`api_superset`.
 
@@ -16,7 +18,7 @@ built on ``jax.lax.scan``.
    :maxdepth: 2
    :caption: Contents:
 
-   quick_start
+   getting_started
    python_api
    examples
    tutorial

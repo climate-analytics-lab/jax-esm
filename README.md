@@ -140,12 +140,16 @@ python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't
 | Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
 | Choose the run settings | `coupled_run=short_run`, or `coupled_run.total_time="90 days"` |
 
-Two things worth knowing:
+Things worth knowing:
 
 - **Spell the `@atmosphere`.** `+configuration=speedy-t31` without it composes
   that jax-gcm bundle at the *root*, where its `physics`, `terrain` and `run`
   keys are nobody's and nothing reads them. The atmosphere's groups always
   carry their package: `<group>@atmosphere.<group>=<option>`.
+- **Single-quote a `${...}` resolver**, as `ocean.sst_clim_file='${jcm_data:...}'`
+  does above: it is a resolver Hydra expands when the config is composed, and
+  an unquoted one is expanded by the shell first — to nothing — so the
+  override arrives empty.
 - **The coupled run's own settings are `coupled_run`, not `run`.**
   `atmosphere.run` is the atmosphere's run config, and a `run` group here would
   shadow jax-gcm's. `coupled_run/default.yaml` is the complete schema, so every
