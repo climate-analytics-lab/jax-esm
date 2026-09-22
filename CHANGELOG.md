@@ -1249,6 +1249,54 @@ components these configurations are the first to exercise:
   rendered colours for identical `levels`/`extend`/`cmap` on identical
   data, for both the reported small `ListedColormap` and the ordinary
   256-entry continuous case.
+- **`jem.plot.map_plot`'s curvilinear `levels` translation rendered
+  different colours from `contourf` on identical data**, not merely
+  different bugs at small colormap sizes (Codex round 19). Two related
+  findings, both on the `BoundaryNorm` the previous fix (`ee6ecb5`) built
+  directly over the resolved colormap's own colour count (`cmap.N`, 256 for
+  the default continuous colormap): (A) that spreads a band's colour index
+  evenly across the *whole* colormap, whereas `contourf` colours band *i* as
+  `cmap(norm(0.5 * (levels[i] + levels[i + 1])))` -- the colormap sampled at
+  each band's own numeric *midpoint* through a continuous `Normalize` (read
+  from matplotlib's source, `ContourSet._process_colors`/`_process_levels`,
+  and confirmed by rendering both paths, not assumed from a one-line
+  description) -- so a nonuniform `levels=[0, 1, 10]` produced disjoint
+  colour sets between the two grid layouts on identical data; and (B)
+  `vmin`/`vmax` given alongside `levels` were popped and never used again,
+  though `contourf` folds them into that same `Normalize` in place of the
+  `min(levels)`/`max(levels)` it would otherwise autoscale to.
+
+  Both are fixed together, in the same construction: `_map_plot` now builds
+  the exact per-band colours `contourf` would (including an extended end's,
+  via the same `+-1e250` sentinel boundary `contourf` inserts before taking
+  its midpoint, which resolves through the colormap's own
+  `get_under()`/`get_over()`), folding an explicit `vmin`/`vmax` into the
+  `Normalize` those colours are sampled through. Those colours become a
+  `ListedColormap` sized to exactly the number of bands `extend` implies,
+  paired with a `BoundaryNorm` over the *un*extended `levels` and `ncolors`
+  equal to that same band count -- which, unlike the reverted attempt the
+  previous fix's own history records, never hits `BoundaryNorm`'s "fewer
+  bins than colours" interpolation, because `ncolors` is now built to match
+  exactly regardless of the caller's own colormap size. This also means
+  `extend` can be passed to `BoundaryNorm` again (its `.norm.extend` now
+  reads the real value, not always `"neither"`), which a
+  `matplotlib.colorbar.Colorbar` given no explicit `extend` of its own
+  picks up automatically -- confirmed, though `map_plot`/`animate_map`
+  still pass `colorbar_extend` explicitly, since the no-`levels` sub-case
+  still has nothing for a colorbar to read it from.
+
+  `pcolormesh` (drawing the mesh's actual cells) is kept rather than
+  switching the curvilinear path to `contourf` (which does accept 2-D
+  `X`/`Y`, but interpolates between cell centres -- a real difference for a
+  curvilinear ocean mesh built from real grid cells) once matching
+  `contourf`'s own colours turned out not to require it. One difference
+  between the layouts remains, and is pre-existing rather than introduced or
+  removed here: for `extend="neither"` (or a side `extend` does not cover),
+  `contourf`'s filled polygons are geometrically bounded by the outermost
+  `levels` and leave a beyond-range value unfilled, while `pcolormesh` still
+  paints every cell, clamping such a value to the nearest edge band's
+  colour. This affects which cells get painted at all, never which colour a
+  cell painted by both layouts gets.
 - **`VerosComponent.initialize()` seeds `derived` from the ocean's own
   initial state, instead of `VerosDerived.zeros()`'s uniform 273.15 K.** Both
   shipped Veros configurations run the default workflow -- every exchanger,

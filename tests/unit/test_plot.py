@@ -422,15 +422,17 @@ def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
     colorbar so the advertised discrete-level behaviour works on this grid
     layout the same as it does on the separable one.
 
-    It must **not** reach the ``BoundaryNorm`` itself, which is this test's
-    one assertion that changed from this fix's first version: passing
-    ``extend`` to ``BoundaryNorm`` inflates the colour count it needs beyond
-    ``cmap.N``, which a small discrete colormap need not have room for (a
-    later, P2 finding on this same fix -- see
+    ``mappable.norm.extend`` now reads the real ``"both"`` (Codex round-19,
+    finding A's fix): the ``BoundaryNorm`` here is paired with a
+    ``ListedColormap`` built to hold exactly one colour per band -- ordinary
+    bins plus the two ``extend="both"`` adds -- so its colour count always
+    matches what ``extend`` requires regardless of the caller's own ``cmap``,
+    unlike the intermediate construction this assertion used to describe (see
     ``test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend``
-    below) -- so the norm here always reads ``extend == "neither"``, and the
-    ``"both"`` this test asks for reaches the colorbar only through
-    ``colorbar_extend``, checked directly on the colorbar actually drawn.
+    for the small-``cmap`` case that intermediate construction got wrong).
+    ``colorbar_extend``, checked directly on the colorbar actually drawn,
+    remains the mechanism ``extend`` reaches a colorbar through either way
+    (see :func:`jem.plot._map_plot`'s docstring).
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -454,7 +456,7 @@ def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
     mappable = ax.collections[-1]
     assert isinstance(mappable.norm, mcolors.BoundaryNorm)
     assert list(mappable.norm.boundaries) == levels
-    assert mappable.norm.extend == "neither"
+    assert mappable.norm.extend == "both"
     assert mappable.colorbar is not None
     assert mappable.colorbar.extend == "both"
 
@@ -1585,3 +1587,151 @@ def test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend():
     assert curv_colors == {
         tuple(np.round(c, 6)) for c in cmap(np.array([0, 1, 2]))
     }
+
+
+def _two_band_column_values():
+    """One value per "lon"/"x" column, split between ``levels=[0, 1, 10]``'s
+    two bins (``[0, 1)`` and ``[1, 10)``).
+
+    Kept strictly inside ``[levels[0], levels[-1]]`` (no column below 0 or
+    above 10) so the comparisons below isolate exactly the question Codex
+    round-19's two findings are about -- do the two grid layouts colour the
+    *same* band the same way -- from the separate, pre-existing difference
+    `map_plot`'s docstring documents on its own: for `extend="neither"`,
+    `contourf` leaves a cell beyond `levels` unfilled while `pcolormesh`
+    still paints it (clamped to the nearest edge band's colour). Mixing that
+    difference in here would make a facecolour-set comparison fail for a
+    reason unrelated to what these two tests check.
+    """
+    return np.array([0.5, 0.5, 0.5, 5.0, 5.0, 5.0])
+
+
+def _curvilinear_and_separable_fields(values):
+    """Build identical-data curvilinear and separable fields from `values`.
+
+    One value per "lon"/"x" column (see `_two_band_column_values`,
+    `_banded_column_values`), broadcast across every "lat"/"y" row -- the
+    same construction `test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend`
+    uses, factored out here since both new tests below need the identical
+    pair of fields, just with different `map_plot` keyword arguments applied
+    to each.
+    """
+    lon = np.linspace(0, 300, 6)
+    lat = np.linspace(-60, 60, 4)
+    lon2d, lat2d = np.meshgrid(lon, lat, indexing="ij")
+    data = np.broadcast_to(values[:, None], (6, 4)).astype(float)
+    curvilinear_field = xr.DataArray(
+        data.copy(),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+    separable_field = xr.DataArray(
+        data.copy(),
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+    return curvilinear_field, separable_field
+
+
+def _facecolor_set(ax):
+    """Return the rounded, deduplicated set of an axes' drawn facecolours."""
+    ax.figure.canvas.draw()
+    return {tuple(np.round(c, 6)) for c in ax.collections[-1].get_facecolor()}
+
+
+def test_map_plot_matches_contourf_colours_for_nonuniform_levels():
+    """Codex round-19 finding A: nonuniform ``levels`` must render the same
+    colours on both grid layouts, not just be accepted on both.
+
+    Before this fix, the curvilinear/``pcolormesh`` translation built a
+    ``BoundaryNorm`` directly over the *resolved* colormap's own colour
+    count (``cmap.N``, 256 for the default continuous colormap), which
+    spreads band indices evenly across the *whole* colormap; ``contourf``
+    instead colours each band at its own numeric midpoint through a
+    continuous ``Normalize`` (see ``_map_plot``'s docstring for the rule,
+    read from matplotlib's source, not assumed from the finding). For
+    ``levels=[0, 1, 10]`` -- a narrow band next to a wide one -- those two
+    rules disagree sharply: reproduced on ee6ecb5 (this fix's parent
+    commit), the curvilinear path's facecolours were the colormap's two
+    *ends*, ``[(0.267, 0.005, 0.329, 1.0), (0.993, 0.906, 0.144, 1.0)]``,
+    against the separable/``contourf`` path's true per-band *midpoints*,
+    ``[(0.119, 0.611, 0.539, 1.0), (0.280, 0.073, 0.397, 1.0)]``, on
+    identical data -- disjoint colour sets, not merely differently-ordered
+    ones. See this fix's PR description for the exact failing run of this
+    test against ee6ecb5.
+
+    Asserting the two layouts' facecolour *sets* are equal (rather than
+    hard-coding either palette) states the invariant the docstring now
+    promises -- the identical set of rendered colours -- without depending
+    on which colormap happens to be the default.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    levels = [0, 1, 10]
+    curvilinear_field, separable_field = _curvilinear_and_separable_fields(
+        _two_band_column_values()
+    )
+
+    curv_ax = plot.map_plot(curvilinear_field, levels=levels, colorbar=False)
+    sep_ax = plot.map_plot(separable_field, levels=levels, colorbar=False)
+
+    curv_colors = _facecolor_set(curv_ax)
+    sep_colors = _facecolor_set(sep_ax)
+    assert curv_colors == sep_colors
+    # Exactly two colours -- one per bin -- not some degenerate subset.
+    assert len(curv_colors) == 2
+
+
+def test_map_plot_honours_vmin_vmax_alongside_levels_on_both_layouts():
+    """Codex round-19 finding B: ``vmin``/``vmax`` given alongside ``levels``
+    must affect the curvilinear colours the same way they affect the
+    separable ones, not be silently dropped.
+
+    Before this fix, ``vmin``/``vmax`` were popped out of the curvilinear
+    path's keywords and never used again once ``levels`` triggered the
+    ``BoundaryNorm`` translation -- ``contourf`` instead folds an explicit
+    ``vmin``/``vmax`` into the ``Normalize`` it samples each band's midpoint
+    through, in place of the ``min(levels)``/``max(levels)`` it would
+    otherwise autoscale to (`Normalize.autoscale_None` only fills in bounds
+    still `None`). Reproduced on ee6ecb5 for ``levels=[0, 1, 10]`` with
+    ``vmin=-20, vmax=40``: the curvilinear mappable's resolved colour limits
+    (``mappable.norm.vmin, mappable.norm.vmax``, standing in for a
+    ``BoundaryNorm`` that otherwise carries no visible clim of its own) read
+    ``(0.0, 10.0)`` -- ``levels``' own range, the dropped ``vmin``/``vmax``
+    never having reached anything -- against the separable path's
+    ``(-20.0, 40.0)``. See this fix's PR description for the exact failing
+    run of this test against ee6ecb5.
+
+    Checked two ways: the facecolour sets drawn on both layouts must match
+    each other, and must *differ* from the no-``vmin``/``vmax`` call above --
+    otherwise a test that only compared the two layouts to each other could
+    not tell "both honour vmin/vmax" from "both silently ignore it".
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    levels = [0, 1, 10]
+    curvilinear_field, separable_field = _curvilinear_and_separable_fields(
+        _two_band_column_values()
+    )
+
+    curv_ax = plot.map_plot(
+        curvilinear_field, levels=levels, vmin=-20.0, vmax=40.0, colorbar=False,
+    )
+    sep_ax = plot.map_plot(
+        separable_field, levels=levels, vmin=-20.0, vmax=40.0, colorbar=False,
+    )
+    curvilinear_field_again, _ = _curvilinear_and_separable_fields(
+        _two_band_column_values()
+    )
+    curv_ax_no_bounds = plot.map_plot(
+        curvilinear_field_again, levels=levels, colorbar=False,
+    )
+
+    curv_colors = _facecolor_set(curv_ax)
+    sep_colors = _facecolor_set(sep_ax)
+    assert curv_colors == sep_colors
+    assert curv_colors != _facecolor_set(curv_ax_no_bounds)
