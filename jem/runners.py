@@ -439,6 +439,22 @@ def declare_exchanged_forcing(
     field it would have written but does not is correctly left as the
     time-varying climatology an uncoupled run needs.
 
+    The explicit branch gets the same treatment when *no* exchanger is
+    active at all (``workflow`` names none of ``exchangers``): a
+    hand-written ``coupling.exchanger`` is exactly the case
+    ``coupling.exchanged_forcing`` exists for (a Python function cannot be
+    read off the way a table can), and the same uncoupled-comparison
+    ``coupling.workflow`` can legally leave it out too. With nothing
+    scheduled to run, nothing can write any declared field regardless of
+    what the exchanger *would* write if it ran, so the declaration collapses
+    nothing and is logged as inert rather than silently freezing every
+    named field's climatology. This is coarser than the derived branch's
+    per-field filtering -- a hand-written exchanger is opaque, so which of
+    several *active* exchangers, if any, actually reaches the atmosphere
+    cannot be read off either -- but "is anything active at all" is a
+    question this function can always answer safely, and is the one the
+    failure mode above turns on.
+
     Raises
     ------
     ValueError
@@ -512,6 +528,18 @@ def declare_exchanged_forcing(
                 "the time-varying field(s) are",
                 ", ".join(atm.time_varying_forcing),
             )
+        if not active:
+            # See the docstring: nothing in `coupling.workflow` runs, so
+            # nothing can write any of `fields` regardless of what was
+            # declared. `fields` is still validated below (an unknown name
+            # is still an error) -- only what actually gets collapsed
+            # changes, from `fields` to nothing.
+            logger.info(
+                "coupling.exchanged_forcing names %s, but coupling.workflow "
+                "runs no exchanger, so nothing can write them: the "
+                "declaration is inert and they stay time-varying.",
+                ", ".join(fields) or "nothing",
+            )
     else:
         fields = exchanged_fields(active, atm.name)
         logger.info(
@@ -549,6 +577,13 @@ def declare_exchanged_forcing(
             "is" if len(undeclared) == 1 else "are",
         )
     atm.set_exchanged_forcing(fields)
+    if declared is not None and not active:
+        # `fields` was just validated (and, above, checked against
+        # `atm.time_varying_forcing`) using the full declared list; this
+        # overrides the actual declaration to nothing, per the docstring and
+        # the `if not active` log above -- nothing active means nothing can
+        # write any of them, so every one of them stays time-varying.
+        atm.set_exchanged_forcing(())
 
 
 def build_coupler(cfg: DictConfig) -> Coupler:

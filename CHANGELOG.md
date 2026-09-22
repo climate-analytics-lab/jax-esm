@@ -1056,6 +1056,18 @@ components these configurations are the first to exercise:
   so any composite row with a genuine dtype mismatch could never be copied.
   It now walks the two same-shaped pytrees with `tree_map`, casting only the
   leaves whose dtypes differ and reassembling the original container.
+- **`declare_exchanged_forcing`'s explicit branch is also inert when nothing
+  is active.** 7f346c5 filtered only the *derived* branch's field set by
+  `active` (the exchangers `coupling.workflow` actually runs), so a
+  configuration that sets `coupling.exchanged_forcing` explicitly (for a
+  hand-written `coupling.exchanger`, which cannot be read off a table) and
+  then leaves that exchanger out of `coupling.workflow` -- the supported way
+  to run every component side by side for an uncoupled comparison -- still
+  had every declared field collapsed to its start-date value, with no
+  exchanger ever actually writing it. With no active exchanger at all, the
+  explicit declaration now collapses nothing and logs an INFO note that it
+  is inert; an unknown declared name is still an error and a declared name
+  that is not time-varying is still warned about, unchanged.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

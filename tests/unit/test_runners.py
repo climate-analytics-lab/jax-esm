@@ -613,6 +613,44 @@ def test_a_workflow_without_the_exchanger_leaves_forcing_unfrozen():
     assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
 
 
+def test_an_explicit_declaration_with_no_active_exchanger_leaves_forcing_unfrozen():
+    """The same uncoupled-comparison workflow, for a hand-written exchanger.
+
+    `coupling.exchanged_forcing` exists so a configuration built around a
+    hand-written `coupling.exchanger` can say what it writes, since a Python
+    function cannot be read off the way `jem.exchangers.Exchange`'s table
+    can (see `declare_exchanged_forcing`'s docstring). Before the fix, only
+    the *derived* branch was filtered by `active` (7f346c5): the explicit
+    branch collapsed every declared field regardless of whether
+    `coupling.workflow` actually runs the exchanger that is supposed to
+    write them, so `coupling.workflow=[atm,ocn,seaice]` -- the supported way
+    to run every component side by side with no coupling at all -- silently
+    froze `sea_surface_temperature` at its start-date value even though
+    nothing ever wrote it.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed([
+        "+configuration=earth-slab",
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+        "+coupling.exchanged_forcing=[sea_surface_temperature]",
+        "coupling.workflow=[atm,ocn,seaice]",
+    ]))
+
+    assert "exchange" not in coupler.workflow
+    # Nothing is active to write it, so the declaration is inert.
+    assert coupler.components["atm"].exchanged_forcing == ()
+
+    forcing = coupler.initialize().components["atm"]["forcing"]
+    assert isinstance(forcing.sea_surface_temperature, TimeSeries)
+
+    # And the trajectory still scans: an uncoupled workflow is exactly as
+    # valid to trace as a coupled one.
+    carry = coupler.initialize()
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
 def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     """The ice the atmosphere is handed on step 0 is the file's, not zero.
 
