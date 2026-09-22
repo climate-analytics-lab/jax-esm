@@ -27,7 +27,9 @@ Install JEM
     cd veros-jittable
     pip install -e "."
 
-Plotting the examples needs the plotting extras: ``pip install -e ".[plot]"``.
+Plotting the examples needs the plotting extras, which are JEM's own, so
+install them from the JEM checkout rather than wherever the block above
+left the shell: ``cd jax-esm && pip install -e ".[plot]"``.
 
 JAX-ESM is developed and tested against **one** JAX-GCM revision, recorded as
 ``JCM_SUPPORTED_REV`` in :mod:`jem.components.jcm.contract` together with every

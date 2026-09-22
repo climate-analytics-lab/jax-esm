@@ -1087,7 +1087,11 @@ components these configurations are the first to exercise:
   Declaring the field under the default forcing (already all plain arrays)
   does not trip the "declared but not time-varying" warning: that warning
   already only fires when something is still a `TimeSeries`.
-
+- The getting-started page told a reader to install the plotting extras with
+  `pip install -e ".[plot]"` directly after an install block whose last step
+  leaves the shell inside the Veros checkout, so the command installed
+  another project's extras or none at all. It now says to run it from the
+  JEM checkout.
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
 Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component
