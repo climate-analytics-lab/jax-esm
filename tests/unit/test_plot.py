@@ -368,3 +368,91 @@ def test_animate_map_draws_one_colorbar_not_one_per_frame():
 
     assert len(fig.axes) == 2  # the map, and the one colorbar beside it
     plt.close(fig)
+
+
+def test_animate_map_shares_one_colour_scale_across_frames():
+    """A field whose range grows between frames must not change colour scale.
+
+    Frame 0 spans roughly 0-31; frame 1 is the same pattern scaled up by 10x
+    (roughly 0-310), so a per-frame autoscale (the bug) would give each frame
+    a different `get_clim()`, while the shared default must give both frames
+    the same one, computed from the whole field.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    animation = plot.animate_map(field)
+    fig = animation._fig
+    clims = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        clims.append(fig.axes[0].collections[-1].get_clim())
+
+    assert clims[0] == clims[1] == (float(data.min()), float(data.max()))
+    plt.close(fig)
+
+
+def test_animate_map_respects_caller_supplied_vmin_vmax():
+    """A caller who already fixed `vmin`/`vmax` keeps exactly that scale."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    animation = plot.animate_map(field, vmin=-100.0, vmax=100.0)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        assert fig.axes[0].collections[-1].get_clim() == (-100.0, 100.0)
+    plt.close(fig)
+
+
+def test_animate_map_respects_caller_supplied_levels():
+    """A caller who already fixed `levels` is left alone -- no vmin/vmax added.
+
+    `levels` alone (no `vmin`/`vmax`) is enough for `contourf` to pick a
+    fixed, shared scale; injecting `vmin`/`vmax` on top would not break
+    anything here, but the point of the opt-out is that this helper does not
+    second-guess a caller who already chose a scale.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+    levels = np.linspace(0, 310, 5)
+
+    animation = plot.animate_map(field, levels=levels)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        assert list(fig.axes[0].collections[-1].levels) == list(levels)
+    plt.close(fig)

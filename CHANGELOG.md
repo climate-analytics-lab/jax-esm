@@ -1101,6 +1101,17 @@ components these configurations are the first to exercise:
   separable-vs-curvilinear reasoning `map_plot` already uses, and takes a new
   `lon` keyword to match the existing `lat`; a field with neither coordinate
   is a `ValueError` naming what was looked for, not a silent no-op.
+- **`jem.plot.animate_map` drew its one colorbar from the first frame only**,
+  while each per-frame `map_plot` call autoscaled its own mappable from that
+  frame's data alone, so a field whose range changed between frames (any
+  field a caller had not already fixed `levels`/`norm`/`vmin`/`vmax` for --
+  the shipped `examples/01_basic/01_aquaplanet.ipynb` animation among them)
+  was drawn on a different colour scale each frame while the legend kept
+  showing the first frame's, misrepresenting the data. `animate_map` now
+  computes `vmin`/`vmax` once from the whole field (NaN-skipping, since a
+  masked ocean/sea-ice field is NaN over land) and passes them into every
+  frame's `map_plot` call by default, unless the caller already fixed the
+  scale via `levels`, `norm`, `vmin` or `vmax`.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
