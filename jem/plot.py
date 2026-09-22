@@ -624,23 +624,37 @@ def animate_map(
     with no explicit levels, so a constant field's appearance is unchanged
     from before this shared scale existed.
 
-    An explicit ``norm`` is passed through untouched, and is the one case
-    where the shared scale stops short of what a caller might hope for.
-    ``contourf`` takes its band boundaries from each frame's own data even
-    with a ``norm`` given, so on the separable path the bands can still
-    differ between frames; the colours do not, since every frame is drawn
-    with the same ``norm``. Deriving shared boundaries for an arbitrary norm
-    is deliberately not attempted here: the boundaries have to come from the
-    norm's own scale, and guessing at it goes wrong in ways that are worse
-    than the gap. A linear locator applied to a ``LogNorm(1, 1000)`` yields
-    ``[0, 150, ..., 1050]`` -- boundaries on the wrong scale, the first of
-    them invalid on a log axis -- and a ``BoundaryNorm``'s own boundaries
-    are the only meaningful bands it can have. A caller who wants fixed
-    bands under a norm passes ``levels`` alongside it, which :func:`map_plot`
-    supports on the separable path; for a ``BoundaryNorm`` that is
-    ``levels=norm.boundaries``. Passing the ``norm`` through also means a
-    string scale name (``norm="log"``, which matplotlib resolves itself)
-    reaches matplotlib intact rather than being inspected here.
+    An explicit ``norm`` is not passed through completely untouched: its
+    *open* bounds (whichever the norm has not already been given) are filled
+    once from the *whole* field, the same way ``vmin``/``vmax`` are above.
+    Left alone, matplotlib would otherwise fill those open bounds itself --
+    but on the *first frame only*, the first time the norm is used to map
+    data, then reuse that result for every later frame while the one
+    colorbar keeps showing frame 0's scale -- exactly the drift this
+    function exists to prevent, just one level down (a norm's bounds instead
+    of ``vmin``/``vmax``). A fully-bounded norm (both bounds already set, e.g.
+    ``Normalize(0, 310)``) has nothing open to fill, so it is used exactly as
+    given. A *string* scale name (``norm="log"``) is resolved once, via
+    ``matplotlib.cm.ScalarMappable(norm="log").norm``, into the same norm
+    object matplotlib would otherwise build fresh -- and autoscale -- on
+    every single frame; resolving it once here is what lets that one object
+    be shared and have its bounds filled from the whole field like any other
+    open norm, instead of drifting frame to frame the way a fresh
+    autoscale-per-frame would.
+
+    Deriving shared *band boundaries* for an arbitrary norm is still
+    deliberately not attempted here, open bounds or not: ``contourf`` takes
+    its band boundaries from each frame's own data even with a ``norm``
+    given, so on the separable path the bands can still differ between
+    frames; the colours do not, since every frame now shares the same norm
+    object. The boundaries would have to come from the norm's own scale, and
+    guessing at it goes wrong in ways that are worse than the gap: a linear
+    locator applied to a ``LogNorm(1, 1000)`` yields ``[0, 150, ..., 1050]``
+    -- boundaries on the wrong scale, the first of them invalid on a log
+    axis -- and a ``BoundaryNorm``'s own boundaries are the only meaningful
+    bands it can have. A caller who wants fixed bands under a norm passes
+    ``levels`` alongside it, which :func:`map_plot` supports on the
+    separable path; for a ``BoundaryNorm`` that is ``levels=norm.boundaries``.
 
     Parameters
     ----------
@@ -660,20 +674,21 @@ def animate_map(
     **kwargs
         Passed through to :func:`map_plot` (e.g. ``levels``, ``cmap``,
         ``vmin``, ``vmax``, ``norm``). ``levels`` as an explicit sequence
-        together with ``norm`` opts out of the automatic shared scale
-        entirely, since the two together already pin it; ``levels`` as an
+        (with no ``norm``) opts out of the automatic shared scale entirely,
+        since it already pins the whole scale on its own; ``levels`` as an
         integer count is expanded into shared boundaries instead of being
         left for each frame to expand on its own; ``vmin`` or ``vmax`` fixes
         that bound and leaves the other -- and the shared ``levels`` --
-        computed from the bounds actually in force, on either grid layout
-        (:func:`map_plot` turns those shared ``levels`` into its own
-        ``norm`` on a curvilinear grid). ``norm`` alone (no explicit
-        ``levels``) has its open bounds, if any, filled from the whole field
-        the same way, and additionally gets shared ``levels`` computed from
-        those bounds on a separable grid only -- on a curvilinear grid the
-        shared ``norm`` is passed straight through instead, since
-        ``pcolormesh`` draws no bands to share and :func:`map_plot` would
-        otherwise reject ``levels`` alongside an explicit ``norm`` there.
+        computed from the bounds actually in force. ``norm`` -- an object, or
+        a string scale name such as ``"log"`` (resolved once into the norm
+        object matplotlib would otherwise build fresh, and autoscale, on
+        every frame) -- has its open bounds, if any, filled once from the
+        whole field the same way ``vmin``/``vmax`` are, so every frame shares
+        one norm with one set of bounds instead of each frame's ``map_plot``
+        call autoscaling a fresh one from just that frame's data; a
+        fully-bounded norm is used exactly as given. No shared ``levels`` are
+        computed in the ``norm`` case -- see the docstring above for why
+        deriving band boundaries for an arbitrary norm is not attempted.
         Whatever is passed is used for every frame.
 
     Returns
@@ -697,10 +712,12 @@ def animate_map(
     # open is filled in from the whole field -- matplotlib would otherwise
     # autoscale that open bound per frame, which is the drift this exists to
     # prevent. An integer `levels` is a band *count*, not a scale, so it is
-    # expanded here for the same reason. Anything that describes the scale
-    # itself -- an explicit sequence of `levels`, or a `norm` in any form --
-    # is passed through untouched: see the docstring for why deriving bands
-    # for a caller's own norm is not this function's job.
+    # expanded here for the same reason. An explicit sequence of `levels`
+    # describes the scale itself and is passed through untouched. A `norm`
+    # is handled separately below -- it needs its *bounds* filled the same
+    # way, but never a hand-derived set of band boundaries (see the
+    # docstring for why guessing at an arbitrary norm's bands is not this
+    # function's job), so it does not fit this branch's `levels`-expansion.
     levels_kwarg = kwargs.get("levels")
     levels_is_count = isinstance(levels_kwarg, int) and not isinstance(levels_kwarg, bool)
     if "norm" not in kwargs and ("levels" not in kwargs or levels_is_count):
@@ -747,6 +764,91 @@ def animate_map(
         # else: every value is NaN -- there is no range to compute, so this
         # leaves `map_plot` to autoscale each (equally NaN) frame on its own,
         # which is exactly today's behaviour for that degenerate case.
+
+    if "norm" in kwargs:
+        # `kwargs` is forwarded straight through to `_map_plot` for every
+        # frame (below), so a `norm` given as a *string* scale name (e.g.
+        # `"log"`) would otherwise have matplotlib itself resolve a fresh
+        # norm object from that string on each frame's own `contourf`/
+        # `pcolormesh` call, and autoscale each fresh object from just that
+        # frame's data -- the exact per-frame drift this function exists to
+        # prevent, just one level down from `vmin`/`vmax`. Resolving the
+        # string once, here, into the object matplotlib would otherwise
+        # build, means every frame instead shares that one object.
+        # `matplotlib.cm.ScalarMappable`'s `norm` property is the public
+        # string -> norm resolver; `matplotlib.colors` has no public one of
+        # its own (`_get_norm_from_scale` is private, and
+        # `make_norm_from_scale` is a class factory, not a resolver). The
+        # resolution happens on assignment (`resolved.norm = norm`), not in
+        # the constructor -- `ScalarMappable.__init__` only ever takes an
+        # already-built `Normalize`, so passing the string there is what
+        # matplotlib's own type stub does not model; assigning through the
+        # property is both the mypy-clean and the more direct route to the
+        # same resolver, since the constructor delegates to this same
+        # setter internally.
+        norm = kwargs["norm"]
+        if isinstance(norm, str):
+            from matplotlib.cm import ScalarMappable
+
+            resolved = ScalarMappable()
+            resolved.norm = norm
+            norm = resolved.norm
+            kwargs = {**kwargs, "norm": norm}
+        # A norm object -- whether the caller passed one directly or it was
+        # just resolved from a string above -- is shared by *identity*
+        # across every frame's `_map_plot` call, since `kwargs` (and so this
+        # same object) is forwarded unchanged on every `draw(step)` call
+        # below. Left alone, matplotlib fills any bounds the norm does not
+        # already have (`vmin`/`vmax`, or `vcenter` for a `TwoSlopeNorm`)
+        # the first time the norm maps data -- i.e. on frame 0 -- and then
+        # reuses that result for every later frame while the one colorbar
+        # keeps showing frame 0's scale: the same drift the `vmin`/`vmax`
+        # branch above exists to prevent, just filled in by matplotlib
+        # instead of computed by us. So the open bounds are filled here
+        # instead, from the *whole* field, before frame 0 is ever drawn.
+        # `autoscale_None` only fills bounds left open and delegates the
+        # rest to the norm's own subclass, so this is safe for every norm
+        # form without this function knowing which one it got (verified in
+        # this environment): a `LogNorm` over data containing non-positive
+        # values ignores them and scales from the positive ones alone; a
+        # `TwoSlopeNorm(vcenter=0)` fills `vmin`/`vmax` around its fixed
+        # centre; a `BoundaryNorm` (whose bounds are its `boundaries`, set
+        # at construction, not autoscaled) is left unchanged; and a
+        # fully-bounded `Normalize` is likewise left unchanged, so this is a
+        # true no-op for the case `test_animate_map_passes_a_caller_supplied_
+        # norm_through_untouched` checks. No band *boundaries* are derived
+        # here for any of them -- see the docstring for why that is
+        # deliberately not this function's job.
+        # `.ravel()` is not optional: a norm whose scale involves a
+        # `Transform` (`LogNorm`, `SymLogNorm`, ...) autoscales by calling
+        # that transform on the data, and `Transform.transform` only
+        # accepts a 0-, 1- or 2-D array (it is written for coordinate
+        # points, not arbitrary N-D data) -- it raises `ValueError` on
+        # `field.values` as-is, which is 3-D for every real animation (at
+        # minimum "time" plus two horizontal dimensions). Verified in this
+        # environment: `LogNorm().autoscale_None` on a 3-D masked array
+        # raises "Input values must have shape (N, 1) or (1,)"; the
+        # identical data raveled to 1-D autoscales correctly, to the same
+        # bounds `Normalize`/`TwoSlopeNorm`/`BoundaryNorm` reach on the
+        # unraveled 3-D array (those do not go through a `Transform`, so
+        # they never hit this, but raveling is a no-op for their statistics
+        # and so is always safe to do).
+        values = np.ma.masked_invalid(field.values).ravel()
+        # `masked_invalid` rather than the raw array: a JEM field routinely
+        # has real NaNs (land under an ocean/sea-ice variable), and an
+        # unmasked NaN poisons `autoscale_None` the way it poisons
+        # `nanmin`/`nanmax` above -- but here there is no `nanmin`/`nanmax`
+        # equivalent to reach for, since the norm (not this function) owns
+        # the scaling logic.
+        if values.count():
+            # `count()` guards the all-missing field: autoscaling a fully
+            # masked array degenerates to `(0.0, 0.0)`, an arbitrary and
+            # misleading bound rather than "no information" (mirroring the
+            # `np.isfinite(vmin)` guard in the `vmin`/`vmax` branch above).
+            # Left unguarded, this would silently overwrite an all-NaN
+            # field's fallback to per-frame autoscaling with that
+            # degenerate, equally-wrong-every-frame bound.
+            norm.autoscale_None(values)
 
     fig = plt.figure()
     if coastlines:

@@ -1109,12 +1109,24 @@ components these configurations are the first to exercise:
   frame's own data rather than from the colour limits. A `vmin` or `vmax` the
   caller fixed is kept and only the open bound is filled in; an integer
   `levels` is a band count, so it is expanded once from the bounds in force
-  rather than per frame. An explicit `levels` sequence or a `norm` describes
-  the scale already and is passed through untouched -- a `norm` fixes the
-  colours for every frame, and a caller who also wants fixed bands under it
-  passes `levels` alongside (`norm.boundaries` for a `BoundaryNorm`), which
-  is deliberate: shared bands would have to come from the norm's own scale,
-  and a linear guess gives a `LogNorm` boundaries on the wrong scale with an
+  rather than per frame. An explicit `levels` sequence already describes the
+  scale on its own and is passed through untouched. A `norm` is shared
+  across every frame by identity, but a *string* scale name
+  (`norm="log"`) previously reached each frame's `map_plot` call as that bare
+  string, which matplotlib resolved into a fresh norm object -- and
+  autoscaled from just that frame's data -- on every single frame, so a
+  field whose range drifted between frames was drawn on a drifting colour
+  scale despite `norm` never changing; it is now resolved once, up front,
+  into the same norm object matplotlib would otherwise have built, so every
+  frame shares it. That shared norm's *open* bounds (an object such as
+  `LogNorm()` given with none, or a string resolving to one) are likewise
+  filled once from the whole field rather than left for matplotlib to fill
+  from frame 0 alone and reuse from then on; a fully-bounded norm
+  (`Normalize(0, 310)`) has nothing open to fill and is used exactly as
+  given. A caller who also wants fixed bands under a norm passes `levels`
+  alongside it (`norm.boundaries` for a `BoundaryNorm`), which is still
+  deliberate: shared bands would have to come from the norm's own scale, and
+  a linear guess gives a `LogNorm` boundaries on the wrong scale with an
   invalid first value. The colorbar is built from the mappable the draw
   returns rather than found through the axes, so it does not depend on how a
   given matplotlib groups contour bands.

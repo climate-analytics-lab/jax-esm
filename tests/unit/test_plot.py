@@ -645,13 +645,17 @@ def test_animate_map_respects_caller_supplied_norm():
 
 
 def test_animate_map_passes_a_caller_supplied_norm_through_untouched():
-    """A `norm` is the caller's own description of the colour scale.
+    """A fully-bounded `norm` is the caller's own, complete description of
+    the colour scale, so it has nothing left open to fill in.
 
     It is forwarded as given, so every frame is drawn with the same mapping
-    and the caller's object comes back unmodified. Deriving shared band
-    boundaries for it is deliberately not attempted: they would have to come
-    from the norm's own scale, and a linear guess is wrong for every
-    non-linear norm (see the log and boundary tests below).
+    and the caller's object comes back unmodified -- unlike an *open*-bounded
+    norm, whose missing bound(s) `animate_map` does fill in from the whole
+    field (see `test_animate_map_open_bounded_norm_spans_the_whole_field`).
+    Deriving shared band boundaries for a norm, bounded or not, is
+    deliberately not attempted: they would have to come from the norm's own
+    scale, and a linear guess is wrong for every non-linear norm (see the
+    log and boundary tests below).
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -679,13 +683,19 @@ def test_animate_map_passes_a_caller_supplied_norm_through_untouched():
 
 
 def test_animate_map_accepts_every_form_matplotlib_accepts_for_a_norm():
-    """Each norm form matplotlib takes reaches it intact, and none raises.
+    """Each norm form matplotlib takes reaches it intact, and every frame --
+    not just frame 0 -- draws without raising.
 
-    A string scale name is resolved by matplotlib itself, so inspecting it
-    here would raise `AttributeError` on a value that works in a plain
-    `contourf` call. A `LogNorm` keeps matplotlib's own log-scale bands,
-    which a linear locator would replace with boundaries on the wrong scale,
-    the first of them invalid on a log axis.
+    Frame 0 alone would miss a bug in the per-frame path entirely: a string
+    scale name is resolved once, up front, precisely so every later frame
+    reuses that one object instead of matplotlib re-resolving (and
+    re-autoscaling) a fresh one from each frame's own data, and a bug in
+    that once-only resolution would still let frame 0 draw fine. A string
+    scale name is resolved by matplotlib itself, so inspecting it here would
+    raise `AttributeError` on a value that works in a plain `contourf` call.
+    A `LogNorm` keeps matplotlib's own log-scale bands, which a linear
+    locator would replace with boundaries on the wrong scale, the first of
+    them invalid on a log axis.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -704,17 +714,108 @@ def test_animate_map_accepts_every_form_matplotlib_accepts_for_a_norm():
     for norm in ("log", mcolors.LogNorm(1.0, 1000.0), mcolors.Normalize()):
         animation = plot.animate_map(field, norm=norm)
         fig = animation._fig
-        animation._draw_frame(0)
+        for step in range(field.sizes["time"]):
+            animation._draw_frame(step)
         plt.close(fig)
 
-    # A LogNorm keeps log-spaced bands, every one of them positive.
+    # A LogNorm keeps log-spaced bands, every one of them positive, on every
+    # frame.
     animation = plot.animate_map(field, norm=mcolors.LogNorm(1.0, 1000.0))
     fig = animation._fig
-    animation._draw_frame(0)
-    levels = list(fig.axes[0].collections[-1].levels)
-    assert all(level > 0.0 for level in levels)
-    assert levels != list(plot._expand_level_count(7, 1.0, 1000.0))
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        levels = list(fig.axes[0].collections[-1].levels)
+        assert all(level > 0.0 for level in levels)
+        assert levels != list(plot._expand_level_count(7, 1.0, 1000.0))
     plt.close(fig)
+
+
+def test_animate_map_string_norm_shares_identical_colour_mapping_across_frames():
+    """A string scale name (``norm="log"``) must resolve to one shared norm.
+
+    `animate_map` forwards `kwargs` straight through to `map_plot` for every
+    frame, so a `norm` given as a bare string previously reached matplotlib
+    unresolved on each frame's own `contourf`/`pcolormesh` call, which builds
+    a *fresh* norm object from that string and autoscales it from *that
+    frame's* data alone -- so a field whose range drifts between frames
+    (frame 1 here spans ten times frame 0's range) drew each frame on a
+    different colour scale while the one colorbar kept showing frame 0's,
+    even though the string never changed. Resolving the string once, up
+    front, into the object matplotlib would otherwise build, and sharing
+    that one object across every frame's call (the same way an
+    already-built `norm` object is shared) closes the gap: every frame's
+    mappable must carry the identical norm object, whose bounds must
+    therefore be identical too.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(1.0, 8 * 4 + 1.0).reshape(8, 4)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    animation = plot.animate_map(field, norm="log")
+    fig = animation._fig
+    norms = []
+    clims = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        mappable = fig.axes[0].collections[-1]
+        norms.append(mappable.norm)
+        clims.append(mappable.get_clim())
+    plt.close(fig)
+
+    assert norms[0] is norms[1]
+    assert clims[0] == clims[1]
+
+
+def test_animate_map_open_bounded_norm_spans_the_whole_field():
+    """An open-bounded `norm` object (no `vmin`/`vmax` given at construction)
+    must have its bounds filled from the *whole* field, not from frame 0's
+    range alone.
+
+    Left to matplotlib, an open norm autoscales its bounds the first time it
+    maps data -- i.e. on frame 0 -- and every later frame reuses that
+    result, so a field whose later frames span a wider range than frame 0
+    (frame 1 here spans ten times frame 0's range) would be clipped to
+    frame 0's narrower bounds for the rest of the animation. Filling the
+    bounds here, before frame 0 is ever drawn, must instead give every frame
+    the whole field's range.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(1.0, 8 * 4 + 1.0).reshape(8, 4)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+    norm = mcolors.LogNorm()  # no vmin/vmax: both bounds are open
+
+    animation = plot.animate_map(field, norm=norm)
+    fig = animation._fig
+    clims = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        mappable = fig.axes[0].collections[-1]
+        assert mappable.norm is norm
+        clims.append(mappable.get_clim())
+    plt.close(fig)
+
+    assert clims[0] == clims[1] == (float(data.min()), float(data.max()))
 
 
 def test_animate_map_curvilinear_shares_a_caller_supplied_norm_with_no_levels():
