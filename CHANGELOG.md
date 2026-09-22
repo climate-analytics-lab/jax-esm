@@ -1129,7 +1129,26 @@ components these configurations are the first to exercise:
   a linear guess gives a `LogNorm` boundaries on the wrong scale with an
   invalid first value. The colorbar is built from the mappable the draw
   returns rather than found through the axes, so it does not depend on how a
-  given matplotlib groups contour bands.
+  given matplotlib groups contour bands. Two regressions the shared-scale
+  work above introduced are now fixed: an explicit `norm=None` -- one of
+  matplotlib's own supported values, meaning "use the default
+  normalization" the same as omitting `norm`, and how plotting options
+  forwarded programmatically routinely carry it -- reached
+  `norm.autoscale_None(...)` on `None` itself and raised `AttributeError`;
+  it is now dropped before any of the `norm` handling runs, so it is
+  indistinguishable from an omitted `norm` for the shared-scale logic here
+  and for `map_plot`'s own `levels`+`norm` curvilinear conflict check (which
+  had the identical `norm=None` latent bug and is fixed the same way). And
+  `vmin`/`vmax` given alongside a *string* `norm` (`animate_map(field,
+  norm="log", vmin=1)`) -- a combination matplotlib itself supports for a
+  string scale name -- broke once the string was resolved into a `Normalize`
+  *instance*, since matplotlib refuses `vmin`/`vmax` alongside a norm
+  instance (raising `ValueError` on the curvilinear `pcolormesh` path); the
+  caller's bound is now applied to the resolved norm directly, and dropped
+  from what is forwarded on, before its other, still-open bound is
+  autoscaled from the whole field -- so the caller's limit is honoured
+  exactly like matplotlib's own string+limits handling, and only what they
+  left open is filled from the whole field.
 - **`jem.plot.map_plot`'s documented `levels` keyword crashed on a
   curvilinear grid**, e.g. the displaced-pole ocean output the shipped
   `aquaplanet-slab-mixed-grid` configuration writes:

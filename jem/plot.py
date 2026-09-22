@@ -23,12 +23,20 @@ import importlib
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
 
 from jem.output import TIME_DIMENSION, output_file_step
+
+if TYPE_CHECKING:
+    # matplotlib is imported lazily inside the functions that need it (see
+    # the module docstring), never at module scope -- this import is under
+    # `TYPE_CHECKING` purely so the `cast(...)` in `animate_map` has a name
+    # to reference; it does not run, and does not make `matplotlib` a hard
+    # dependency of importing `jem.plot`.
+    import matplotlib.colors as mcolors
 
 #: The extra a missing plotting dependency is resolved by. Named once so
 #: :func:`_require`'s message and the module docstring cannot drift apart.
@@ -357,6 +365,18 @@ def _map_plot(
     separable = _is_separable_grid(lat, lon)
 
     plot_kwargs = dict(kwargs)
+    if plot_kwargs.get("norm") is None and "norm" in plot_kwargs:
+        # Matplotlib itself treats an explicit `norm=None` as "use the
+        # default normalization" -- indistinguishable from omitting `norm`
+        # altogether (see `animate_map`'s own norm handling for the same
+        # rule, and why it drops the key rather than adding an `is not None`
+        # check at each call site). Dropping it here, before the curvilinear
+        # conflict check below, means a caller who forwards `norm=None`
+        # programmatically alongside `levels` does not trip the "both given"
+        # `ValueError` for a norm that was never actually supplied.
+        plot_kwargs = {
+            name: value for name, value in plot_kwargs.items() if name != "norm"
+        }
     if not separable and "levels" in plot_kwargs and "norm" in plot_kwargs:
         # Only a genuine conflict on the curvilinear/`pcolormesh` path: there
         # `levels` is realised as a `norm` below (there is no other way to
@@ -497,11 +517,14 @@ def map_plot(
         outside the drawn data's actual range (at most one off each end),
         which this does not, so the outermost band can come out slightly
         different between the two paths -- see :func:`_expand_level_count`.
-        Passing ``levels`` and an explicit ``norm`` together raises
-        ``ValueError`` naming both, but **only on a curvilinear grid**: there
-        ``levels`` becomes a ``norm`` (see above), so the caller's own
-        ``norm`` would be silently overwritten -- a genuine conflict. On a
-        separable grid both are passed through to ``contourf`` unchanged
+        Passing ``levels`` and a ``norm`` that is not ``None`` together
+        raises ``ValueError`` naming both, but **only on a curvilinear
+        grid**: there ``levels`` becomes a ``norm`` (see above), so the
+        caller's own ``norm`` would be silently overwritten -- a genuine
+        conflict. ``norm=None`` means the default normalization, exactly the
+        same as omitting ``norm`` entirely, so it never trips this check --
+        only an actual norm (object or string) does. On a separable grid
+        both are passed through to ``contourf`` unchanged
         (verified: ``contourf(..., levels=[...], norm=Normalize(...))``
         returns a contour set whose ``levels`` are exactly those given,
         drawn under that ``norm``'s colour mapping), which is what
@@ -528,8 +551,9 @@ def map_plot(
     ValueError
         If ``field`` still has a ``"time"`` or ``"level"`` dimension, has no
         ``lat``/``lon`` coordinates to plot against, or ``field`` is on a
-        curvilinear grid and both ``levels`` and ``norm`` are given (on a
-        separable grid the combination is accepted -- see above).
+        curvilinear grid and both ``levels`` and a non-``None`` ``norm`` are
+        given (on a separable grid the combination is accepted, and
+        ``norm=None`` never conflicts on either grid -- see above).
 
     """
     ax, _ = _map_plot(
@@ -624,23 +648,48 @@ def animate_map(
     with no explicit levels, so a constant field's appearance is unchanged
     from before this shared scale existed.
 
-    An explicit ``norm`` is not passed through completely untouched: its
-    *open* bounds (whichever the norm has not already been given) are filled
-    once from the *whole* field, the same way ``vmin``/``vmax`` are above.
-    Left alone, matplotlib would otherwise fill those open bounds itself --
-    but on the *first frame only*, the first time the norm is used to map
-    data, then reuse that result for every later frame while the one
-    colorbar keeps showing frame 0's scale -- exactly the drift this
-    function exists to prevent, just one level down (a norm's bounds instead
-    of ``vmin``/``vmax``). A fully-bounded norm (both bounds already set, e.g.
-    ``Normalize(0, 310)``) has nothing open to fill, so it is used exactly as
-    given. A *string* scale name (``norm="log"``) is resolved once, via
-    ``matplotlib.cm.ScalarMappable(norm="log").norm``, into the same norm
-    object matplotlib would otherwise build fresh -- and autoscale -- on
-    every single frame; resolving it once here is what lets that one object
-    be shared and have its bounds filled from the whole field like any other
-    open norm, instead of drifting frame to frame the way a fresh
-    autoscale-per-frame would.
+    An explicit ``norm=None`` means the default normalization, exactly as if
+    ``norm`` had been left out entirely -- one of matplotlib's own supported
+    values for it, and the one a caller forwarding plotting options
+    programmatically (``**opts`` where ``opts["norm"]`` happens to be
+    ``None``) routinely produces. It is treated as absent before any of the
+    ``norm`` handling below runs, so it gets the same shared ``vmin``/
+    ``vmax``/``levels`` treatment as an omitted ``norm``, not special-cased
+    against a norm object.
+
+    An explicit ``norm`` *object or string* is not passed through completely
+    untouched: its *open* bounds (whichever the norm has not already been
+    given) are filled once from the *whole* field, the same way ``vmin``/
+    ``vmax`` are above. Left alone, matplotlib would otherwise fill those
+    open bounds itself -- but on the *first frame only*, the first time the
+    norm is used to map data, then reuse that result for every later frame
+    while the one colorbar keeps showing frame 0's scale -- exactly the
+    drift this function exists to prevent, just one level down (a norm's
+    bounds instead of ``vmin``/``vmax``). A fully-bounded norm (both bounds
+    already set, e.g. ``Normalize(0, 310)``) has nothing open to fill, so it
+    is used exactly as given. A *string* scale name (``norm="log"``) is
+    resolved once, via ``matplotlib.cm.ScalarMappable(norm="log").norm``,
+    into the same norm object matplotlib would otherwise build fresh -- and
+    autoscale -- on every single frame; resolving it once here is what lets
+    that one object be shared and have its bounds filled from the whole
+    field like any other open norm, instead of drifting frame to frame the
+    way a fresh autoscale-per-frame would. A ``vmin``/``vmax`` given
+    alongside a *string* ``norm`` -- matplotlib's own way of setting that
+    resolved norm's bounds directly, e.g. ``animate_map(field, norm="log",
+    vmin=1)`` -- is applied to the resolved norm object (before its other,
+    still-open bound is autoscaled from the whole field) and removed from
+    what is forwarded on, rather than being left in ``kwargs`` alongside the
+    now-resolved norm *instance*: matplotlib itself refuses a norm instance
+    combined with ``vmin``/``vmax`` (``pcolormesh``'s curvilinear path
+    raises ``ValueError`` for it; ``contourf``'s separable path does not
+    raise, but only because it silently overwrites the shared instance's
+    bounds on every frame instead), so forwarding them unchanged would
+    reintroduce that failure for a combination matplotlib itself supports
+    when given a *string* scale name. A ``vmin``/``vmax`` given alongside a
+    norm *instance* the caller built themselves is left exactly as
+    matplotlib treats it -- rejected on the curvilinear path -- since that
+    combination was never valid and is not this function's regression to
+    paper over.
 
     Deriving shared *band boundaries* for an arbitrary norm is still
     deliberately not attempted here, open bounds or not: ``contourf`` takes
@@ -679,17 +728,27 @@ def animate_map(
         integer count is expanded into shared boundaries instead of being
         left for each frame to expand on its own; ``vmin`` or ``vmax`` fixes
         that bound and leaves the other -- and the shared ``levels`` --
-        computed from the bounds actually in force. ``norm`` -- an object, or
-        a string scale name such as ``"log"`` (resolved once into the norm
-        object matplotlib would otherwise build fresh, and autoscale, on
-        every frame) -- has its open bounds, if any, filled once from the
-        whole field the same way ``vmin``/``vmax`` are, so every frame shares
-        one norm with one set of bounds instead of each frame's ``map_plot``
-        call autoscaling a fresh one from just that frame's data; a
-        fully-bounded norm is used exactly as given. No shared ``levels`` are
-        computed in the ``norm`` case -- see the docstring above for why
-        deriving band boundaries for an arbitrary norm is not attempted.
-        Whatever is passed is used for every frame.
+        computed from the bounds actually in force. ``norm=None`` means the
+        default normalization, exactly the same as omitting ``norm``
+        entirely -- one of matplotlib's own supported values, not a distinct
+        case. A non-``None`` ``norm`` -- an object, or a string scale name
+        such as ``"log"`` (resolved once into the norm object matplotlib
+        would otherwise build fresh, and autoscale, on every frame) -- has
+        its open bounds, if any, filled once from the whole field the same
+        way ``vmin``/``vmax`` are, so every frame shares one norm with one
+        set of bounds instead of each frame's ``map_plot`` call autoscaling
+        a fresh one from just that frame's data; a fully-bounded norm is
+        used exactly as given. ``vmin``/``vmax`` given together with a
+        *string* ``norm`` are applied to the norm resolved from that string
+        -- matching what matplotlib itself does when given a string scale
+        name and limits together -- rather than forwarded alongside the
+        resolved norm *instance*, which matplotlib would refuse (a norm
+        instance combined with ``vmin``/``vmax`` given directly is left
+        exactly as matplotlib treats it: rejected on the curvilinear
+        ``pcolormesh`` path). No shared ``levels`` are computed in the
+        ``norm`` case -- see the docstring above for why deriving band
+        boundaries for an arbitrary norm is not attempted. Whatever is
+        passed is used for every frame.
 
     Returns
     -------
@@ -705,6 +764,23 @@ def animate_map(
             "animate_map needs a field with a `time` dimension to step "
             "through; use map_plot for a single record."
         )
+
+    # `norm=None` is one of matplotlib's own supported values for `norm` --
+    # it means "use the default normalization", exactly like leaving `norm`
+    # out altogether -- and this arises routinely when plotting options are
+    # forwarded programmatically (`**opts` where `opts["norm"]` happens to be
+    # `None`). Dropped here, rather than added as an `is not None` check to
+    # each of the two conditions below, so an explicit `None` is
+    # indistinguishable from an omitted `norm` for *everything* downstream:
+    # this function's own default-levels branch just below (gated on
+    # `"norm" not in kwargs`), the string/instance handling further down, and
+    # `map_plot`'s own `levels`+`norm` curvilinear conflict guard (which
+    # otherwise misfires on a `norm=None` that describes no actual norm).
+    # Left as `"norm" in kwargs`, an explicit `None` reached
+    # `norm.autoscale_None(...)` below and raised `AttributeError` -- that
+    # was this branch's own bug, not a case matplotlib itself ever rejected.
+    if kwargs.get("norm") is None:
+        kwargs = {name: value for name, value in kwargs.items() if name != "norm"}
 
     # A shared scale for every frame, but only when the caller has not
     # described the colour scale themselves. `vmin` and `vmax` are plain
@@ -793,7 +869,45 @@ def animate_map(
             resolved = ScalarMappable()
             resolved.norm = norm
             norm = resolved.norm
-            kwargs = {**kwargs, "norm": norm}
+            # A string scale name is matplotlib's own shorthand for "build a
+            # norm of this kind and let `vmin`/`vmax` set its bounds" --
+            # verified in this environment, `contourf(..., norm="log",
+            # vmin=1)` builds a `LogNorm` and applies `vmin` to it. But
+            # `norm` above is no longer a string past this point; it is the
+            # `Normalize` *instance* just resolved from it, and matplotlib
+            # refuses `vmin`/`vmax` alongside a norm instance -- verified
+            # empirically here too: `pcolormesh(..., norm=LogNorm(),
+            # vmin=1)` raises `ValueError`, while `contourf` merely
+            # overwrites the instance's bounds on every frame instead of
+            # raising, which is not "apply the caller's limit, then
+            # autoscale what is left open" either. So the caller's own
+            # `vmin`/`vmax` are applied to the resolved norm directly, here,
+            # and removed from the kwargs forwarded to `_map_plot`, so that
+            # what reaches matplotlib is a norm instance alone -- exactly
+            # the combination it always accepted -- rather than a norm
+            # instance plus the limits it refuses (or silently overwrites)
+            # when given alongside one. This must happen *before* the
+            # `autoscale_None` call below: it only fills a bound that is
+            # still `None`, so setting a caller-given bound first leaves it
+            # intact and only the bound the caller left open gets filled
+            # from the whole field.
+            # `resolved.norm`'s static type is the abstract `colors.Norm`,
+            # whose `vmin`/`vmax` are read-only in matplotlib's own stubs --
+            # every concrete scale name resolves to a `Normalize` subclass
+            # (never the abstract base, which cannot be instantiated), so
+            # the cast only tells mypy what is already true at runtime.
+            normalize = cast("mcolors.Normalize", norm)
+            caller_vmin = kwargs.get("vmin")
+            caller_vmax = kwargs.get("vmax")
+            if caller_vmin is not None:
+                normalize.vmin = caller_vmin
+            if caller_vmax is not None:
+                normalize.vmax = caller_vmax
+            kwargs = {
+                name: value for name, value in kwargs.items()
+                if name not in ("vmin", "vmax")
+            }
+            kwargs["norm"] = norm
         # A norm object -- whether the caller passed one directly or it was
         # just resolved from a string above -- is shared by *identity*
         # across every frame's `_map_plot` call, since `kwargs` (and so this

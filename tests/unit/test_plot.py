@@ -1133,3 +1133,143 @@ def test_animate_map_constant_field_gets_nondegenerate_levels():
         assert len(levels) >= 2
         assert np.all(np.diff(levels) > 0)
     plt.close(fig)
+
+
+def test_animate_map_explicit_norm_none_behaves_like_an_omitted_norm():
+    """An explicit ``norm=None`` -- one of matplotlib's own supported values,
+    meaning "use the default normalization" -- must be treated exactly like
+    omitting ``norm`` altogether, not as a distinct value to hand to a norm
+    object.
+
+    Before this fix, ``"norm" in kwargs`` was true for an explicit ``None``,
+    so the shared-scale block skipped its own default-levels branch (gated
+    on ``"norm" not in kwargs``) and fell through to
+    ``norm.autoscale_None(...)`` on ``None`` itself, raising
+    ``AttributeError``. This arises routinely when plotting options are
+    forwarded programmatically (``**opts`` where ``opts["norm"]`` happens to
+    be ``None``), not just when a caller writes ``norm=None`` by hand.
+
+    The check here is not merely "does not crash": an explicit ``None`` must
+    reach the *same* shared scale an omitted ``norm`` gets -- identical
+    ``levels`` and identical ``clim`` on every frame -- so this compares the
+    two calls directly rather than just checking `norm=None` draws.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    omitted = plot.animate_map(field)
+    omitted_fig = omitted._fig
+    omitted_levels = []
+    omitted_clims = []
+    for step in range(field.sizes["time"]):
+        omitted._draw_frame(step)
+        mappable = omitted_fig.axes[0].collections[-1]
+        omitted_levels.append(list(mappable.levels))
+        omitted_clims.append(mappable.get_clim())
+    plt.close(omitted_fig)
+
+    explicit_none = plot.animate_map(field, norm=None)
+    none_fig = explicit_none._fig
+    none_levels = []
+    none_clims = []
+    for step in range(field.sizes["time"]):
+        explicit_none._draw_frame(step)
+        mappable = none_fig.axes[0].collections[-1]
+        none_levels.append(list(mappable.levels))
+        none_clims.append(mappable.get_clim())
+    plt.close(none_fig)
+
+    assert none_levels == omitted_levels
+    assert none_clims == omitted_clims
+
+
+def test_animate_map_string_norm_with_vmin_applies_the_caller_bound():
+    """A string scale name combined with ``vmin``/``vmax`` (e.g.
+    ``animate_map(field, norm="log", vmin=1)``) must draw every frame, with
+    the caller's bound honoured on the resolved norm and the other bound
+    filled from the whole field.
+
+    Before this fix, resolving the string into a `Normalize` *instance* left
+    the caller's `vmin` in `kwargs`, forwarded alongside that instance to
+    every frame's draw call. Matplotlib permits limits alongside a *string*
+    scale name but rejects them alongside a norm *instance*
+    (`ScalarMappable._scale_norm`, exercised here through the curvilinear
+    `pcolormesh` path -- see the reproduction note in the PR for why the
+    separable `contourf` path does not itself raise for this combination,
+    which is why this test uses a curvilinear field to catch the regression).
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(1.0, 6 * 4 + 1.0).reshape(6, 4)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "x", "y"),
+        coords={
+            "time": time,
+            "lon": (("x", "y"), lon2d),
+            "lat": (("x", "y"), lat2d),
+        },
+        name="field",
+    )
+
+    animation = plot.animate_map(field, norm="log", vmin=1.0)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)  # must not raise
+        mappable = fig.axes[0].collections[-1]
+        assert mappable.norm.vmin == 1.0
+        assert mappable.norm.vmax == pytest.approx(float(data.max()))
+    plt.close(fig)
+
+
+def test_map_plot_curvilinear_levels_with_explicit_norm_none_does_not_raise():
+    """An explicit ``norm=None`` alongside ``levels`` on a curvilinear grid
+    must not trip the "``levels`` and ``norm`` together" guard: that guard
+    exists because ``levels`` becomes the norm internally there (see
+    `test_map_plot_raises_on_levels_and_norm_together_on_a_curvilinear_grid`),
+    which is a genuine conflict only when the caller actually supplied a
+    norm -- an explicit ``None`` describes no norm at all, and matplotlib
+    itself treats it as "use the default", identical to omitting the
+    argument.
+
+    Before this fix, the guard was `"norm" in plot_kwargs`, true for an
+    explicit `None` too, so this raised the same `ValueError` as the genuine
+    `levels` + `norm` conflict even though no norm was actually given.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    field = xr.DataArray(
+        np.arange(6 * 4).reshape(6, 4).astype(float),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+    levels = [0, 10, 20, 30]
+
+    ax = plot.map_plot(field, levels=levels, norm=None)
+
+    assert isinstance(ax, plt.Axes)
+    mappable = ax.collections[-1]
+    assert list(mappable.norm.boundaries) == levels
