@@ -312,11 +312,43 @@ def test_map_plot_curvilinear_grid_realises_levels_as_boundary_norm():
     assert list(mappable.norm.boundaries) == levels
 
 
-def test_map_plot_raises_on_levels_and_norm_together():
-    """``levels`` and an explicit ``norm`` disagreeing about the scale is
-    refused outright rather than silently picking a winner -- checked on the
-    separable grid, but the check runs before either grid layout is chosen,
-    so it applies the same way to a curvilinear field.
+def test_map_plot_raises_on_levels_and_norm_together_on_a_curvilinear_grid():
+    """``levels`` and an explicit ``norm`` together are refused only on a
+    curvilinear grid: there ``levels`` is realised as a `norm` (translating
+    it would silently overwrite the caller's own), which is a genuine
+    conflict `pcolormesh` cannot avoid. See
+    `test_map_plot_accepts_levels_and_norm_together_on_a_separable_grid` for
+    the separable grid, where matplotlib supports the combination directly
+    and both are passed through unchanged.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    field = xr.DataArray(
+        np.arange(6 * 4).reshape(6, 4).astype(float),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        plot.map_plot(field, levels=[0, 10, 20, 30], norm=mcolors.Normalize(0, 30))
+    message = str(excinfo.value)
+    assert "levels" in message
+    assert "norm" in message
+
+
+def test_map_plot_accepts_levels_and_norm_together_on_a_separable_grid():
+    """On a separable grid, ``levels`` and ``norm`` are passed straight
+    through to ``contourf`` unchanged -- matplotlib supports the combination
+    directly (verified: ``contourf(..., levels=[...], norm=Normalize(...))``
+    returns a contour set with exactly those ``levels``, under that
+    ``norm``'s colour mapping), so there is nothing here to reconcile,
+    unlike on the curvilinear grid where ``levels`` has to become the norm.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -330,12 +362,15 @@ def test_map_plot_raises_on_levels_and_norm_together():
         coords={"lon": lon, "lat": lat},
         name="field",
     )
+    levels = [0, 10, 20, 30]
+    norm = mcolors.Normalize(0, 30)
 
-    with pytest.raises(ValueError) as excinfo:
-        plot.map_plot(field, levels=[0, 10, 20, 30], norm=mcolors.Normalize(0, 30))
-    message = str(excinfo.value)
-    assert "levels" in message
-    assert "norm" in message
+    ax = plot.map_plot(field, levels=levels, norm=norm)
+
+    mappable = ax.collections[-1]
+    assert list(mappable.levels) == levels
+    assert mappable.norm is norm
+    assert mappable.get_clim() == (0.0, 30.0)
 
 
 def test_map_plot_curvilinear_grid_expands_an_integer_levels_count():
@@ -579,8 +614,11 @@ def test_animate_map_respects_caller_supplied_levels():
 
 
 def test_animate_map_respects_caller_supplied_norm():
-    """A caller who already fixed `norm` is left alone, the same as `levels`
-    -- a `norm` already defines the whole scale on its own.
+    """A caller who already fixed a bounded `norm` keeps exactly that colour
+    mapping (`get_clim()`) for every frame -- see
+    `test_animate_map_bounded_norm_shares_identical_bands_across_frames` for
+    the fact that a separable animation also gets shared *bands* out of this
+    same `norm`, which this test does not itself check.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -603,6 +641,126 @@ def test_animate_map_respects_caller_supplied_norm():
     for step in range(field.sizes["time"]):
         animation._draw_frame(step)
         assert fig.axes[0].collections[-1].get_clim() == (-50.0, 500.0)
+    plt.close(fig)
+
+
+def test_animate_map_bounded_norm_shares_identical_bands_across_frames():
+    """A `norm` with both bounds already set still needs the same
+    shared-band fix as `vmin`/`vmax`: this is the finding itself --
+    `contourf` picks its own band boundaries from each frame's own data
+    regardless of `norm` (measured: `[0, 4, ..., 32]` for frame 0 and
+    `[0, 40, ..., 320]` for frame 1 under one colorbar built from the first,
+    despite both frames sharing the same `norm`), so a caller-supplied,
+    already-bounded `norm` must get the same shared `levels` the default and
+    `vmin`/`vmax` paths already do.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+    norm = mcolors.Normalize(vmin=0.0, vmax=310.0)
+
+    animation = plot.animate_map(field, norm=norm)
+    fig = animation._fig
+    levels_per_frame = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        levels_per_frame.append(list(fig.axes[0].collections[-1].levels))
+
+    assert levels_per_frame[0] == levels_per_frame[1]
+    assert levels_per_frame[0][0] <= float(data.min())
+    assert levels_per_frame[0][-1] >= float(data.max())
+    plt.close(fig)
+
+
+def test_animate_map_open_norm_spans_the_whole_field_and_stays_unmodified():
+    """An *open* `norm` (`vmin`/`vmax` left `None`) must not be autoscaled
+    from frame 0's data alone: matplotlib does exactly that on first use
+    (measured, with the caller's own `norm` reused unchanged across frames:
+    both frames came out clamped to frame 0's 0-32 rather than the whole
+    field's 0-320) -- the same per-frame drift the `vmin`/`vmax` path already
+    guards against. And the caller's own `norm` object must come back
+    unmodified: matplotlib's autoscale-on-first-use sets `vmin`/`vmax`
+    directly on the `norm` instance it is given, so leaving the caller's own
+    object in `kwargs` would have mutated it as a side effect, not just
+    drifted per frame.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+    norm = mcolors.Normalize()  # both bounds open
+
+    animation = plot.animate_map(field, norm=norm)
+    fig = animation._fig
+    whole_field_clim = (float(data.min()), float(data.max()))
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        assert fig.axes[0].collections[-1].get_clim() == whole_field_clim
+
+    assert norm.vmin is None
+    assert norm.vmax is None
+    plt.close(fig)
+
+
+def test_animate_map_curvilinear_shares_a_caller_supplied_norm_with_no_levels():
+    """On a curvilinear grid, `pcolormesh` draws no discrete bands at all, so
+    a shared `norm` is enough on its own and no `levels` are added -- adding
+    them would in fact raise, since `map_plot` rejects `levels` alongside an
+    explicit `norm` there (translating `levels` into a `norm` would
+    overwrite this very one); this test passing at all is therefore already
+    evidence that no `levels` were added, and the identity check below
+    confirms the exact same `norm` object (already fully bounded, so no copy
+    is needed) is what every frame draws with.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(6 * 4).reshape(6, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "x", "y"),
+        coords={
+            "time": time,
+            "lat": (("x", "y"), lat2d),
+            "lon": (("x", "y"), lon2d),
+        },
+        name="field",
+    )
+    norm = mcolors.Normalize(vmin=0.0, vmax=320.0)
+
+    animation = plot.animate_map(field, norm=norm)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        mappable = fig.axes[0].collections[-1]
+        assert mappable.norm is norm
     plt.close(fig)
 
 
