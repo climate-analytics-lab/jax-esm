@@ -364,6 +364,20 @@ def _require_field(section: Any, field: str, context: str, path: str) -> None:
         )
 
 
+def _reconcile_leaf_dtype(current_leaf: Any, value_leaf: Any) -> Any:
+    """Cast ``value_leaf`` to ``current_leaf``'s dtype if they differ.
+
+    Used as the per-leaf function of a ``tree_map`` over a destination field
+    and its incoming value (see :meth:`Exchange.__call__`), so it only ever
+    sees actual array leaves, never a whole struct -- the structure walking
+    is ``tree_map``'s job, not this function's.
+    """
+    current_dtype = jnp.result_type(current_leaf)
+    if jnp.result_type(value_leaf) != current_dtype:
+        value_leaf = jnp.asarray(value_leaf, dtype=current_dtype)
+    return value_leaf
+
+
 class Exchange:
     """An :data:`~jem.base.component.Exchanger` built from a table of specs.
 
@@ -477,21 +491,32 @@ class Exchange:
             destination = self._section(components, component, section, spec)
             self._require_field(destination, field, spec, spec.dst)
             current = getattr(destination, field)
-            current_dtype = jnp.result_type(current)
-            if jnp.result_type(value) != current_dtype:
-                # A coupled step must return its carry with exactly the
-                # dtype it received, or `lax.scan` rejects it as a changed
-                # carry type -- and two components built on either side of a
-                # process-wide precision flip (importing Veros sets
-                # `jax_enable_x64`) genuinely disagree on dtype, so a source
-                # and its destination can differ here even though nothing
-                # about the exchange itself is wrong. Casting, not rejecting,
-                # is the right response: unlike a shape mismatch (which this
-                # does not touch, and which still fails downstream exactly as
-                # before -- no silent broadcasting), dtype is not part of
-                # what the exchange table promises to preserve, only the
-                # destination component's own working precision is.
-                value = jnp.asarray(value, dtype=current_dtype)
+            # A coupled step must return its carry with exactly the dtype it
+            # received, or `lax.scan` rejects it as a changed carry type --
+            # and two components built on either side of a process-wide
+            # precision flip (importing Veros sets `jax_enable_x64`)
+            # genuinely disagree on dtype, so a source and its destination
+            # can differ here even though nothing about the exchange itself
+            # is wrong. Casting, not rejecting, is the right response: unlike
+            # a shape mismatch (which this does not touch, and which still
+            # fails downstream exactly as before -- no silent broadcasting),
+            # dtype is not part of what the exchange table promises to
+            # preserve, only the destination component's own working
+            # precision is.
+            #
+            # `value`/`current` are not always a bare array: `validate()`
+            # only requires the two ends to share pytree *structure*, so a
+            # row between two matching composites (e.g. two
+            # `jcm.forcing.TimeSeries`) is legal, and casting has to walk
+            # that structure rather than treat the whole field as one array
+            # (a plain `jnp.result_type`/`jnp.asarray` on a struct raises --
+            # `.dtype` is defined on it for `jnp.result_type` to read, but
+            # `jnp.asarray` has no way to turn the struct itself into an
+            # array). `tree_map` over the two same-shaped pytrees reconciles
+            # dtype leaf by leaf and reassembles the original container, so
+            # a composite row is copied instead of raising, and the plain
+            # -array case (a single leaf) casts exactly as before.
+            value = jax.tree_util.tree_map(_reconcile_leaf_dtype, current, value)
             updates.setdefault(component, {}).setdefault(section, {})[field] = value
 
         exchanged = dict(components)

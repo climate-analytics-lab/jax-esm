@@ -1044,6 +1044,18 @@ components these configurations are the first to exercise:
   and non-finite concentrations are now masked to `0.0` before the log, with
   the outer `ocean` mask kept as well for a stray nonzero value a mismatched
   land mask might otherwise leave unmasked.
+- **`Exchange.__call__` reconciles dtype leaf by leaf, instead of on the whole
+  field value.** `Exchange.validate` accepts a row whose two ends are equal
+  pytree *structures*, not just bare arrays -- a `jcm.forcing.TimeSeries`
+  destination overwritten by another `TimeSeries` is a legal row -- but the
+  cast that keeps a plain-array field's dtype in step with its destination
+  (see the Veros float64/float32 entry above) ran `jnp.result_type`/
+  `jnp.asarray` on the whole value. `jnp.result_type` happens to accept a
+  struct (it reads `.dtype`), so a dtype mismatch was still detected, but
+  `jnp.asarray` cannot turn a struct into an array and raised `TypeError`,
+  so any composite row with a genuine dtype mismatch could never be copied.
+  It now walks the two same-shaped pytrees with `tree_map`, casting only the
+  leaves whose dtypes differ and reassembling the original container.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

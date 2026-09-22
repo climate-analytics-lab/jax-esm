@@ -1076,6 +1076,63 @@ def test_exchange_casts_a_dtype_mismatch_to_the_destination_dtype():
         jax.config.update("jax_enable_x64", previous_x64)
 
 
+def test_exchange_copies_a_composite_field_and_reconciles_its_dtype():
+    """A row between two matching structs (e.g. two ``TimeSeries``) copies.
+
+    ``Exchange.validate`` accepts a row whose two ends are equal pytree
+    *structures* -- not just bare arrays -- since a
+    :class:`jcm.forcing.TimeSeries` destination overwritten by another
+    ``TimeSeries`` is exactly how a Veros/atmosphere boundary condition is
+    exchanged. Before the fix, `Exchange.__call__` ran `jnp.result_type`
+    /`jnp.asarray` on the *whole* field value: `jnp.result_type` happens to
+    accept a struct (it reads `.dtype`), so the mismatch was detected, but
+    `jnp.asarray` cannot turn a struct into an array and raised `TypeError`
+    -- so a composite row with a genuine dtype mismatch (the same
+    process-wide float32/float64 split `VEROS_OCEAN_EXCHANGES` hits) could
+    never be copied at all. The fix walks the two structs leaf by leaf with
+    `tree_map`, reconciling only the dtype and preserving the container.
+    """
+    previous_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+
+        @tree_math.struct
+        class _Composite:
+            values: jnp.ndarray
+            aux: jnp.ndarray
+
+        @tree_math.struct
+        class _Section:
+            x: _Composite
+
+        source_value = _Composite(
+            jnp.full((3, 4), 2.0, dtype=jnp.float64),
+            jnp.zeros((3,), dtype=jnp.float64),
+        )
+        destination_value = _Composite(
+            jnp.zeros((3, 4), dtype=jnp.float32), jnp.zeros((3,), dtype=jnp.float32)
+        )
+        carries = {
+            "a": {"state": _Section(source_value)},
+            "b": {"state": _Section(destination_value)},
+        }
+        before_structure = jax.tree_util.tree_structure(carries)
+        exchange = Exchange([ExchangeSpec("a.state.x", "b.state.x")])
+
+        exchanged = exchange(carries, time=None)
+
+        written = exchanged["b"]["state"].x
+        assert isinstance(written, _Composite)
+        assert written.values.dtype == jnp.float32
+        assert written.aux.dtype == jnp.float32
+        assert jnp.array_equal(written.values, source_value.values.astype(jnp.float32))
+        # The source and the rest of the mapping's structure are untouched.
+        assert exchanged["a"]["state"].x.values.dtype == jnp.float64
+        assert jax.tree_util.tree_structure(exchanged) == before_structure
+    finally:
+        jax.config.update("jax_enable_x64", previous_x64)
+
+
 def test_exchange_still_rejects_a_shape_mismatch():
     """No silent broadcasting: only the dtype is fixed automatically.
 
