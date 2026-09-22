@@ -298,8 +298,34 @@ def map_plot(
         colour with no key; pass False to add one figure-wide instead (a
         multi-panel figure sharing one scale) or to manage it yourself.
     **kwargs
-        Passed through to ``contourf``/``pcolormesh`` (e.g. ``levels``,
-        ``cmap``).
+        Passed through to ``contourf``/``pcolormesh`` (e.g. ``cmap``,
+        ``vmin``, ``vmax``). ``levels`` means the same discrete colour bands
+        on either grid layout, though the two draw functions realise it
+        differently: on the separable/``contourf`` path it is matplotlib's
+        own argument, forwarded as-is; ``pcolormesh`` has no ``levels``
+        argument at all, so on the curvilinear path it is instead turned
+        into a ``matplotlib.colors.BoundaryNorm`` -- built over the resolved
+        colormap's colour count -- and passed on as ``norm``. That
+        translation needs ``levels`` to already be the explicit boundary
+        values (a list/array), not an integer level *count*: only
+        ``contourf``'s own locator can expand a count into boundaries, and
+        replicating that just for the curvilinear path would risk quietly
+        drifting from what ``contourf`` actually does, so an integer
+        ``levels`` raises ``ValueError`` there instead. Passing ``levels``
+        and an explicit ``norm`` together also raises ``ValueError`` naming
+        both, rather than picking a winner silently: on the curvilinear path
+        ``levels`` becomes a ``norm``, so the caller's own ``norm`` would
+        just be discarded, and even on the separable path (where matplotlib
+        would accept both, using ``norm`` to map colours and ``levels`` only
+        for the contour boundaries) the two could disagree about the scale
+        without either function complaining. ``vmin``/``vmax`` alongside
+        ``levels`` is fine on both paths: ``contourf`` stops consulting them
+        once explicit levels fix the boundaries, and on the curvilinear path
+        they are dropped before the call, since handing ``pcolormesh`` both
+        ``vmin``/``vmax`` and the ``norm`` built from ``levels`` is exactly
+        the combination matplotlib itself refuses
+        (``ValueError: Passing a Normalize instance simultaneously with
+        vmin/vmax is not supported``).
 
     Returns
     -------
@@ -311,11 +337,14 @@ def map_plot(
         If matplotlib is missing, or cartopy is missing and
         ``coastlines=True``.
     ValueError
-        If ``field`` still has a ``"time"`` or ``"level"`` dimension, or has
-        no ``lat``/``lon`` coordinates to plot against.
+        If ``field`` still has a ``"time"`` or ``"level"`` dimension, has no
+        ``lat``/``lon`` coordinates to plot against, both ``levels`` and
+        ``norm`` are given, or ``levels`` is an integer count on a
+        curvilinear grid.
 
     """
     _require("matplotlib")
+    import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
 
     _require_single_record(field)
@@ -328,6 +357,22 @@ def map_plot(
     lon = field["lon"]
 
     plot_kwargs = dict(kwargs)
+    if "levels" in plot_kwargs and "norm" in plot_kwargs:
+        # `levels` is realised as a `norm` on the curvilinear/`pcolormesh`
+        # path below (there is no other way to give `pcolormesh` discrete
+        # bands), which would silently discard a `norm` the caller passed
+        # explicitly; and even on the separable/`contourf` path, where
+        # matplotlib tolerates both, they could disagree about the colour
+        # scale without either function raising. Rather than let that
+        # ambiguity depend on which grid layout `field` happens to be (not
+        # always obvious to the caller), both paths refuse the combination
+        # the same way.
+        raise ValueError(
+            "map_plot got both `levels` and `norm`; pass only one -- "
+            "`levels` is realised as a `norm` internally on a curvilinear "
+            "grid, so an explicit `norm` would be overwritten there, and "
+            "the two could otherwise disagree about the colour scale."
+        )
     if coastlines:
         ccrs = _require("cartopy.crs")
         plot_kwargs.setdefault("transform", ccrs.PlateCarree())
@@ -347,6 +392,33 @@ def map_plot(
         # (see the module docstring); reverse both so lat-like leads.
         order = tuple(reversed(lat.dims))
         data = field.transpose(*order)
+        if "levels" in plot_kwargs:
+            # `pcolormesh` has no `levels` argument (see the **kwargs
+            # docstring above); a `BoundaryNorm` over the resolved
+            # colormap's colour count is the direct translation -- it maps
+            # each of `levels`' bins to one colormap entry, the same
+            # discretisation `contourf` gives those bins on the separable
+            # path.
+            levels = plot_kwargs.pop("levels")
+            if isinstance(levels, int):
+                raise ValueError(
+                    "map_plot cannot realise an integer `levels` count as a "
+                    "`BoundaryNorm` on a curvilinear grid -- pass the "
+                    "explicit boundary values instead (only `contourf`'s "
+                    "own locator can expand a count into boundaries, and "
+                    "reimplementing that here risks silently drifting from "
+                    "what `contourf` actually chooses)."
+                )
+            cmap = plt.get_cmap(plot_kwargs.get("cmap"))
+            # `pcolormesh` raises if hidden `vmin`/`vmax` and an explicit
+            # `norm` are given together; the `BoundaryNorm` just built from
+            # `levels` already pins the scale's extent, so -- mirroring
+            # `contourf`, which likewise stops consulting `vmin`/`vmax` once
+            # explicit `levels` fix the boundaries -- they are dropped here
+            # rather than forwarded alongside it.
+            plot_kwargs.pop("vmin", None)
+            plot_kwargs.pop("vmax", None)
+            plot_kwargs["norm"] = mcolors.BoundaryNorm(levels, cmap.N)
         mappable = ax.pcolormesh(
             lon.transpose(*order).values, lat.transpose(*order).values,
             data.values, **plot_kwargs,
@@ -393,19 +465,45 @@ def animate_map(
     *whole* field -- every frame, NaN-skipping since a masked field (an ocean
     or sea-ice variable is NaN over land) has real NaNs to skip -- and passed
     into every frame's :func:`map_plot` call, so every frame and the one
-    colorbar agree. Passing ``levels`` or ``norm`` in ``**kwargs`` opts out
-    entirely, since each of those defines the whole scale; passing ``vmin``
-    or ``vmax`` fixes that one bound and leaves the other to be filled in
-    here, because matplotlib would otherwise autoscale the open bound frame
-    by frame. (These four are exactly what :func:`map_plot` forwards on to
-    ``contourf``/``pcolormesh``.) A field that is NaN everywhere has no
-    range to share,
-    so this falls back to :func:`map_plot`'s own per-frame autoscale in that
+    colorbar agree.
+
+    A shared ``vmin``/``vmax`` alone is not a shared *contourf* scale, though:
+    ``contourf`` (the separable-grid path) chooses its band boundaries from
+    each frame's own data via its default locator, not from ``vmin``/``vmax``
+    or any norm, so two frames with the same clim can still be sliced into
+    different bands (``[0, 4, ..., 32]`` for one frame, ``[0, 40, ..., 320]``
+    for another spanning ten times the range) while the one colorbar keeps
+    showing the first frame's. So whenever ``vmin``/``vmax`` are computed
+    here, shared band boundaries are computed alongside them, from the same
+    (now whole-field) bounds, and passed on as ``levels`` -- matplotlib's own
+    ``contourf`` locator (`matplotlib.ticker.MaxNLocator`, with the ``nbins``
+    and ``min_n_ticks`` `ContourSet` itself hard-codes for its default
+    levels) rather than a hand-rolled ``linspace``, so the default *look*
+    (band count, "nice" round-number edges) is unchanged from a single
+    frame's own autoscale -- just computed once, from the whole field.
+    :func:`map_plot` realises ``levels`` the same way on a curvilinear grid
+    (a `matplotlib.colors.BoundaryNorm`, see its own docstring), so this
+    gives a curvilinear animation shared bands too.
+
+    Passing ``levels`` or ``norm`` in ``**kwargs`` opts out of all of this
+    entirely, since each of those already defines the whole scale; passing
+    ``vmin`` or ``vmax`` fixes that one bound and leaves the other -- and the
+    shared ``levels`` -- computed from the bounds actually in force (the
+    caller's own bound plus the field-derived other one), because matplotlib
+    would otherwise autoscale the open bound frame by frame. (These four are
+    exactly what :func:`map_plot` forwards on to ``contourf``/
+    ``pcolormesh``.) A field that is NaN everywhere has no range to share, so
+    this falls back to :func:`map_plot`'s own per-frame autoscale in that
     case (which sees the same all-NaN data on every frame regardless). A
-    field with a genuine constant value (``vmin == vmax``) is passed through
-    as computed: matplotlib's ``Normalize`` maps every value to the same
-    colour in that case rather than raising, which is the only sane rendering
-    of "the field has no range" and needs no special-casing here.
+    field with a genuine constant value (``vmin == vmax``) still gets levels:
+    ``MaxNLocator.tick_values`` does not degenerate to a single repeated
+    value or an empty list there -- it returns several values perturbed by a
+    tiny, non-zero epsilon, so they are still strictly increasing (as
+    ``contourf`` itself requires of ``levels``) -- and this is in fact the
+    same fallback ``contourf`` reaches internally (`ContourSet._autolev`)
+    when it autoscales a genuinely constant field with no explicit levels,
+    so a constant field's appearance is unchanged from before this shared
+    scale existed.
 
     Parameters
     ----------
@@ -425,9 +523,10 @@ def animate_map(
     **kwargs
         Passed through to :func:`map_plot` (e.g. ``levels``, ``cmap``,
         ``vmin``, ``vmax``, ``norm``). ``levels`` or ``norm`` opts out of the
-        automatic shared scale above; ``vmin`` or ``vmax`` fixes that bound
-        and leaves the other shared. Whatever is passed is used for every
-        frame.
+        automatic shared scale (bounds *and* bands) above; ``vmin`` or
+        ``vmax`` fixes that bound and leaves the other -- and the shared
+        ``levels`` -- computed from the bounds actually in force. Whatever is
+        passed is used for every frame.
 
     Returns
     -------
@@ -437,6 +536,7 @@ def animate_map(
     _require("matplotlib")
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
+    from matplotlib.ticker import MaxNLocator
 
     if TIME_DIMENSION not in field.dims:
         raise ValueError(
@@ -462,9 +562,33 @@ def animate_map(
             vmin = float(np.nanmin(field.values))
             vmax = float(np.nanmax(field.values))
         if np.isfinite(vmin) and np.isfinite(vmax):
-            # The caller's own kwargs come last, so a bound they gave wins
-            # and only the one they left out is filled in from the field.
-            kwargs = {"vmin": vmin, "vmax": vmax, **kwargs}
+            # The bounds actually in force: a bound the caller gave wins
+            # over the field-derived one, exactly like the final merge
+            # below, so the shared `levels` computed from them span what the
+            # frames are actually drawn with, not always the field's own
+            # full range.
+            bound_vmin = kwargs.get("vmin", vmin)
+            bound_vmax = kwargs.get("vmax", vmax)
+            # Shared band boundaries, from the same locator `contourf` uses
+            # to pick its own default `levels`
+            # (`ContourSet._ensure_locator_exists`: `MaxNLocator(N + 1,
+            # min_n_ticks=1)` with matplotlib's hard-coded `N = 7`) --
+            # reused rather than a hand-rolled `linspace` so the *look* of
+            # the default scale (band count, "nice" round-number edges) is
+            # unchanged, just computed once from the whole field instead of
+            # separately, differently, per frame. `tick_values` stays
+            # well-behaved even when `bound_vmin == bound_vmax` (a genuinely
+            # constant field): it returns several values perturbed by a
+            # tiny, non-zero epsilon rather than one repeated value or an
+            # empty list, so `contourf`'s "levels must be increasing"
+            # requirement still holds -- the same fallback `contourf` itself
+            # reaches internally (`ContourSet._autolev`) when it autoscales
+            # a genuinely constant field with no explicit levels.
+            levels = MaxNLocator(7 + 1, min_n_ticks=1).tick_values(bound_vmin, bound_vmax)
+            # The caller's own kwargs come last, so a bound (or `levels`,
+            # though this branch only runs when they gave neither) they gave
+            # wins and only what they left out is filled in from the field.
+            kwargs = {"vmin": vmin, "vmax": vmax, "levels": levels, **kwargs}
         # else: every value is NaN -- there is no range to compute, so this
         # leaves `map_plot` to autoscale each (equally NaN) frame on its own,
         # which is exactly today's behaviour for that degenerate case.
