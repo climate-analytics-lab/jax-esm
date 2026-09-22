@@ -517,9 +517,16 @@ class VerosComponent:
         sea_surface_temperature = (
             variables.temp[interior, interior, -1, tau] + 273.15
         )
-        # Land columns carry a fill value rather than a temperature; replace
-        # them with a plausible constant so downstream components never see
-        # an unphysical SST through the mask.
+        # Intended to replace a land column's fill value with a plausible
+        # constant, so downstream components never read an unphysical SST
+        # through the mask. It does not fire for either shipped setup: both
+        # build their cold start as `... * vs.maskT`, so a land column holds
+        # 0 degC and reaches `273.15` here rather than the large negative
+        # sentinel this threshold assumes, and land is published as 273.15 K.
+        # Left as-is deliberately -- what a land column should publish is a
+        # contract decision for the exchange, not a change to make in passing;
+        # see jax-esm#127. Whatever is decided, `step` and `initialize` share
+        # this helper, so they cannot disagree about it.
         sea_surface_temperature = jnp.where(
             sea_surface_temperature < 100, 288.15, sea_surface_temperature)
         zonal_velocity = variables.u[interior, interior, :, tau]
