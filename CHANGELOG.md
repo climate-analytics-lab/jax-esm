@@ -1190,6 +1190,42 @@ components these configurations are the first to exercise:
   curvilinear grid, where `levels` becomes a `norm` and would silently
   overwrite the caller's own; on a separable grid both are passed through to
   `contourf` unchanged, which is what matplotlib itself supports.
+- **`jem.plot.map_plot`'s `extend` keyword crashed on a curvilinear grid,
+  both combined with `levels` and on its own** -- the same class of bug as
+  the `levels`-on-`pcolormesh` crash just above, one keyword over:
+  `map_plot(ocean_field, levels=[0, 10, 20, 30], extend="both")` and, just
+  as much, `map_plot(ocean_field, extend="both")` with no `levels` at all,
+  both raised `AttributeError: QuadMesh.set() got an unexpected keyword
+  argument 'extend'`, because `extend` was left in `plot_kwargs` -- either
+  after `levels` was translated into a `BoundaryNorm`, or, with no `levels`
+  to force a pop, untouched from the start -- and `pcolormesh` has no
+  `extend` argument any more than it has `levels`. `extend` is now popped
+  unconditionally on the curvilinear path, before either sub-case: with
+  `levels`, it is passed to the constructed `BoundaryNorm`'s own `extend`
+  parameter, which exists for exactly this ("also cover values beyond the
+  outer boundaries" -- the same meaning `contourf`'s `extend` has on the
+  separable path); confirmed against `BoundaryNorm.__init__`'s actual
+  requirement, it needs `ncolors` at least the number of colour bins
+  including the one or two `extend` adds, which the `cmap.N` (256 for every
+  continuous colormap resolved here) already passed easily satisfies.
+  Without `levels`, there is no `BoundaryNorm` for `extend` to attach to --
+  the mappable's `norm` is a plain, continuous one with no `.extend`
+  attribute at all (confirmed: `hasattr(matplotlib.colors.Normalize(0, 10),
+  "extend")` is `False`) -- so it is instead passed explicitly to whichever
+  colorbar is drawn from that mappable, which matplotlib supports against a
+  continuous mapping just as well as a discrete one. Both sub-cases reach
+  **both** colorbar call sites correctly: `map_plot`'s own (`colorbar=True`)
+  and `animate_map`'s single, separately-drawn one, which needed `_map_plot`
+  (a private helper, `animate_map`'s only other caller) extended to hand
+  back the resolved `extend` alongside the axes and the mappable, so
+  `animate_map` can apply it explicitly rather than risk leaving its one
+  colorbar silently un-extended while `map_plot`'s own is. An invalid
+  `extend` value still surfaces as matplotlib's own `ValueError` at
+  colorbar-draw time either way, exactly as `contourf`'s own (undocumented)
+  handling of one does -- confirmed for both the `BoundaryNorm` fallback
+  and the explicit no-`levels` call. The separable/`contourf` path is
+  unchanged throughout -- it accepts `extend` natively regardless of
+  `levels`.
 - **`VerosComponent.initialize()` seeds `derived` from the ocean's own
   initial state, instead of `VerosDerived.zeros()`'s uniform 273.15 K.** Both
   shipped Veros configurations run the default workflow -- every exchanger,

@@ -333,8 +333,9 @@ def _map_plot(
     coastlines: bool = False,
     colorbar: bool = True,
     **kwargs: Any,
-) -> tuple[Any, Any]:
-    """Draw one 2-D horizontal field as a map; return the axes and the mappable.
+) -> tuple[Any, Any, str | None]:
+    """Draw one 2-D horizontal field as a map; return the axes, the mappable
+    and the ``extend`` a colorbar built from that mappable should use.
 
     This is :func:`map_plot`'s whole implementation -- see its docstring for
     the parameters, the grid-layout handling and the ``levels``/``norm``
@@ -349,6 +350,28 @@ def _map_plot(
     the whole mappable). :func:`map_plot` itself is a thin public wrapper
     around this that returns only the axes, so its own signature and return
     value are unchanged by this split.
+
+    The third value, ``extend``, exists for the same reason: on the
+    curvilinear/``pcolormesh`` path with no ``levels``, the mappable's own
+    ``norm`` (whatever the caller gave, or matplotlib's default) has no
+    ``.extend`` attribute for a colorbar to fall back on the way a
+    ``BoundaryNorm`` does (verified in this environment:
+    ``hasattr(matplotlib.colors.Normalize(0, 10), "extend")`` is ``False``),
+    so an ``extend`` the caller passed has to reach whatever colorbar is
+    drawn from this mappable *explicitly*, as ``fig.colorbar(mappable,
+    extend=...)``. This function's own ``colorbar=True`` draw does that
+    below; :func:`animate_map` draws its one colorbar from a different call
+    site entirely (after every frame, from whichever frame drew it), so it
+    needs this value handed back rather than re-deriving it. ``None`` means
+    there is nothing to add explicitly -- the separable/``contourf`` path
+    only, whose ``ContourSet`` already carries its own ``extend`` for a
+    colorbar to read directly with no help needed here. The curvilinear
+    path always resolves a concrete string instead (``"neither"`` if the
+    caller gave no ``extend``), whether or not ``levels`` was also given --
+    with ``levels`` this repeats what the ``BoundaryNorm`` already carries
+    as its own ``.extend`` (redundant with that norm's own fallback, but a
+    single value either sub-case's caller can rely on unconditionally,
+    rather than two mechanisms that happen to agree).
     """
     _require("matplotlib")
     import matplotlib.colors as mcolors
@@ -407,15 +430,32 @@ def _map_plot(
         # (lat, lon), which is what contourf(x, y, Z) needs of Z.
         data = field.transpose(lat.dims[0], lon.dims[0])
         mappable = ax.contourf(lon.values, lat.values, data.values, **plot_kwargs)
+        # `contourf` takes `extend` natively and its `ContourSet` already
+        # carries it as its own `.extend` attribute; a colorbar drawn from a
+        # `ContourSet` mappable reads that directly, no matter which call
+        # site draws it, so there is nothing for this function to add
+        # explicitly -- unlike the curvilinear path below.
+        colorbar_extend = None
     else:
         # Curvilinear grid: lat/lon are 2-D over the field's own index
         # dimensions, in the same (lon-like, lat-like) order as the data
         # (see the module docstring); reverse both so lat-like leads.
         order = tuple(reversed(lat.dims))
         data = field.transpose(*order)
+        # `pcolormesh` has no `extend` argument at all (`QuadMesh.set()`
+        # raises on it, the same class of failure `levels` itself has) --
+        # popped unconditionally, before either sub-case below, rather than
+        # only inside the `levels` branch: a caller can ask for `extend`
+        # without `levels` too (a continuous colorbar can carry extension
+        # triangles just as well as a discrete one; matplotlib just wants
+        # `extend` passed to `fig.colorbar` directly in that case, which is
+        # exactly what `colorbar_extend` below carries it to), and leaving
+        # it in `plot_kwargs` in that case reaches `pcolormesh` and raises
+        # just the same.
+        extend = plot_kwargs.pop("extend", None)
         if "levels" in plot_kwargs:
-            # `pcolormesh` has no `levels` argument (see the **kwargs
-            # docstring above); a `BoundaryNorm` over the resolved
+            # `pcolormesh` has no `levels` argument either (see the
+            # **kwargs docstring above); a `BoundaryNorm` over the resolved
             # colormap's colour count is the direct translation -- it maps
             # each of `levels`' bins to one colormap entry, the same
             # discretisation `contourf` gives those bins on the separable
@@ -443,7 +483,52 @@ def _map_plot(
             # rather than forwarded alongside it.
             plot_kwargs.pop("vmin", None)
             plot_kwargs.pop("vmax", None)
-            plot_kwargs["norm"] = mcolors.BoundaryNorm(levels, cmap.N)
+            # `BoundaryNorm` itself takes an `extend` and is exactly where
+            # `contourf`'s `extend` semantics -- "these bands also cover
+            # values beyond the outer boundaries" -- belong once `levels`
+            # has already become this norm. `BoundaryNorm.__init__` requires
+            # `ncolors >= len(boundaries) - 1`, plus one more for each end
+            # `extend` covers (`min`/`max`: +1, `both`: +2) -- verified in
+            # this environment against its source
+            # (`matplotlib.colors.BoundaryNorm.__init__`): passing `cmap.N`
+            # (256 for every continuous colormap `plt.get_cmap` resolves
+            # here) satisfies that for any realistic band count, so this
+            # does not also need to grow `ncolors` to match. An invalid
+            # `extend` string is not rejected here or by `BoundaryNorm`
+            # itself (verified: `BoundaryNorm(..., extend="bogus")`
+            # constructs without error and just stores it) -- matplotlib
+            # only validates it when a colorbar is actually drawn from the
+            # norm (`fig.colorbar(...)` raises `ValueError` naming the
+            # allowed values), which is character-for-character how
+            # `contourf`'s own `extend` behaves too (verified:
+            # `ax.contourf(..., extend="bogus")` likewise builds a contour
+            # set with `.extend == "bogus"` and only `fig.colorbar` on it
+            # raises) -- so an invalid value surfaces as matplotlib's own
+            # error, at the same point, on either grid layout, rather than
+            # this function inventing an eager check `contourf` does not
+            # have either.
+            plot_kwargs["norm"] = mcolors.BoundaryNorm(
+                levels, cmap.N, extend=extend or "neither"
+            )
+        # Resolved once, for both sub-cases above, into what a colorbar
+        # built from this mappable should use. With `levels`, this repeats
+        # what the `BoundaryNorm` just built already carries as its own
+        # `.extend` (a colorbar would find it there too via
+        # `matplotlib.colorbar.Colorbar`'s `hasattr(norm, "extend")`
+        # fallback) -- but without `levels`, the mappable's `norm` is
+        # whatever the caller gave or matplotlib's own default, and neither
+        # has an `.extend` attribute for that fallback to find (verified in
+        # this environment: `hasattr(matplotlib.colors.Normalize(0, 10),
+        # "extend")` is `False`), so there is nothing for a colorbar to fall
+        # back on in that sub-case and `extend` has to reach it explicitly.
+        # Resolving one value for both sub-cases, rather than only filling
+        # this in for the no-`levels` one, means every caller of this
+        # function -- its own `colorbar=True` draw below, and
+        # `animate_map`'s separate one -- has exactly one thing to check,
+        # instead of two mechanisms (an implicit `norm.extend` fallback for
+        # one sub-case, an explicit value for the other) that happen to
+        # agree.
+        colorbar_extend = extend or "neither"
         mappable = ax.pcolormesh(
             lon.transpose(*order).values, lat.transpose(*order).values,
             data.values, **plot_kwargs,
@@ -452,10 +537,13 @@ def _map_plot(
     if coastlines:
         ax.coastlines()
     if colorbar:
-        ax.figure.colorbar(mappable, ax=ax)
+        if colorbar_extend is not None:
+            ax.figure.colorbar(mappable, ax=ax, extend=colorbar_extend)
+        else:
+            ax.figure.colorbar(mappable, ax=ax)
     if title is not None:
         ax.set_title(title)
-    return ax, mappable
+    return ax, mappable, colorbar_extend
 
 
 def map_plot(
@@ -538,6 +626,37 @@ def map_plot(
         ``levels`` is exactly the combination matplotlib itself refuses
         (``ValueError: Passing a Normalize instance simultaneously with
         vmin/vmax is not supported``).
+        ``extend`` (``"neither"``, ``"both"``, ``"min"`` or ``"max"``) means
+        the same thing on either grid layout, whether or not ``levels`` is
+        also given: the drawn range also covers values beyond its outer
+        boundary/boundaries (discrete ``levels`` bands, or the plain
+        ``[vmin, vmax]``/``norm`` range without them), rather than clipping
+        them. On the separable path it is matplotlib's own ``contourf``
+        argument, forwarded as-is either way. ``pcolormesh`` has no
+        ``extend`` argument at all -- any more than it has ``levels`` -- so
+        on the curvilinear path it is always popped out of what reaches
+        ``pcolormesh`` (regardless of whether ``levels`` is present, since
+        leaving it behind raises the same ``AttributeError`` either way) and
+        reapplied to whatever colorbar is drawn from the mappable instead.
+        With ``levels``, it is passed to the ``BoundaryNorm`` built from
+        them, whose own ``extend`` parameter exists for exactly this, and
+        from there reaches this function's own colorbar (``colorbar=True``)
+        without being passed there explicitly -- ``matplotlib.colorbar.
+        Colorbar`` falls back to ``norm.extend`` whenever its own ``extend``
+        argument is left unset (verified in this environment:
+        ``fig.colorbar(mesh, ax=ax)`` -- no ``extend`` of its own -- ends up
+        with ``cb.extend == "both"`` when ``mesh.norm`` is a ``BoundaryNorm``
+        built with ``extend="both"``). Without ``levels``, the mappable's
+        ``norm`` (the caller's own, or matplotlib's default) has no
+        ``.extend`` attribute for that same fallback to find (verified:
+        ``hasattr(matplotlib.colors.Normalize(0, 10), "extend")`` is
+        ``False``), so it is instead passed to ``fig.colorbar`` explicitly
+        -- matplotlib supports ``extend`` against a plain, continuous
+        colorbar just as well as a discrete one. Either way this function's
+        own colorbar ends up extended correctly, and :func:`animate_map`'s
+        single colorbar (built from a different call site, after whichever
+        frame draws it) does too, from the resolved value :func:`_map_plot`
+        hands back for exactly this.
 
     Returns
     -------
@@ -556,7 +675,7 @@ def map_plot(
         ``norm=None`` never conflicts on either grid -- see above).
 
     """
-    ax, _ = _map_plot(
+    ax, _, _ = _map_plot(
         field, ax=ax, title=title, coastlines=coastlines, colorbar=colorbar,
         **kwargs,
     )
@@ -984,12 +1103,23 @@ def animate_map(
         # mappable it drew, rather than picking one back out of
         # `ax.collections` -- see `_map_plot`'s own docstring for why that
         # would be fragile.
-        _, mappable = _map_plot(
+        _, mappable, colorbar_extend = _map_plot(
             frame, ax=ax, title=frame_title, coastlines=coastlines,
             colorbar=False, **kwargs,
         )
         if colorbar and not drawn_colorbar:
-            fig.colorbar(mappable, ax=ax)
+            # `colorbar_extend` is non-`None` exactly on the curvilinear
+            # path (with or without `levels`) -- see `_map_plot`'s own
+            # docstring for why a `pcolormesh` mappable's `norm` cannot
+            # always be trusted to carry `.extend` itself, unlike a
+            # separable `ContourSet`, whose own `extend` a colorbar already
+            # reads with no help from here (`colorbar_extend` is `None`
+            # there, so this falls through to the plain call below,
+            # unchanged from before this fix).
+            if colorbar_extend is not None:
+                fig.colorbar(mappable, ax=ax, extend=colorbar_extend)
+            else:
+                fig.colorbar(mappable, ax=ax)
             drawn_colorbar = True
 
     draw(0)

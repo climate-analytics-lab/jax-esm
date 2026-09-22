@@ -408,6 +408,200 @@ def test_map_plot_curvilinear_grid_expands_an_integer_levels_count():
     assert mappable.norm.boundaries[-1] >= float(field.max())
 
 
+def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
+    """``extend`` must be consumed before ``pcolormesh``, not left in
+    ``plot_kwargs``.
+
+    Reproduces the finding: the common call
+    ``map_plot(field, levels=[...], extend="both")`` enters the ``levels``
+    -> ``BoundaryNorm`` translation on the curvilinear path, but before this
+    fix left ``extend`` behind in ``plot_kwargs`` -- the following
+    ``pcolormesh`` call does not accept that contour-only keyword and raised
+    ``AttributeError: QuadMesh.set() got an unexpected keyword argument
+    'extend'``. ``extend`` must instead be popped and applied to the
+    constructed ``BoundaryNorm``, whose own ``extend`` parameter exists for
+    exactly this, so the advertised discrete-level behaviour works on this
+    grid layout the same as it does on the separable one.
+
+    The extension must also reach the drawn colorbar: `matplotlib.colorbar.
+    Colorbar` falls back to `norm.extend` whenever its own `extend` is left
+    unset (as `map_plot`'s own colorbar draw leaves it), so a `BoundaryNorm`
+    that carries `extend="both"` is enough on its own -- verified here by
+    checking the colorbar actually drawn, not just the norm.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    field = xr.DataArray(
+        np.arange(6 * 4).reshape(6, 4).astype(float),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+    levels = [0, 10, 20, 30]
+
+    ax = plot.map_plot(field, levels=levels, extend="both")
+
+    assert isinstance(ax, plt.Axes)
+    mappable = ax.collections[-1]
+    assert isinstance(mappable.norm, mcolors.BoundaryNorm)
+    assert list(mappable.norm.boundaries) == levels
+    assert mappable.norm.extend == "both"
+    assert mappable.colorbar is not None
+    assert mappable.colorbar.extend == "both"
+
+
+def test_map_plot_curvilinear_grid_extend_defaults_to_neither():
+    """Omitting ``extend`` alongside ``levels`` on a curvilinear grid must
+    behave exactly as before this fix: a ``BoundaryNorm`` with matplotlib's
+    own default, ``extend="neither"``, and a colorbar with no extension
+    triangles.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    field = xr.DataArray(
+        np.arange(6 * 4).reshape(6, 4).astype(float),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+
+    ax = plot.map_plot(field, levels=[0, 10, 20, 30])
+
+    mappable = ax.collections[-1]
+    assert isinstance(mappable.norm, mcolors.BoundaryNorm)
+    assert mappable.norm.extend == "neither"
+    assert mappable.colorbar.extend == "neither"
+
+
+def test_map_plot_separable_grid_extend_is_unaffected_by_the_curvilinear_fix():
+    """The separable/``contourf`` path must keep its existing ``extend``
+    behaviour exactly: matplotlib accepts ``extend`` there natively, and
+    this fix only touches the curvilinear/``pcolormesh`` translation, not
+    this path.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    field = xr.DataArray(
+        np.arange(8 * 4).reshape(8, 4).astype(float),
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+    levels = [0, 10, 20, 30]
+
+    ax = plot.map_plot(field, levels=levels, extend="both")
+
+    mappable = ax.collections[-1]
+    assert mappable.extend == "both"
+    assert list(mappable.levels) == levels
+    assert mappable.colorbar.extend == "both"
+
+
+def test_map_plot_curvilinear_grid_consumes_extend_without_levels():
+    """``extend`` must be consumed on the curvilinear path even with no
+    ``levels`` at all, not only when it comes paired with them.
+
+    Reproduces the finding: ``levels`` + ``extend`` together already worked
+    (the fix above), but ``extend`` alone still reached ``pcolormesh``
+    unchanged and raised the identical ``AttributeError: QuadMesh.set() got
+    an unexpected keyword argument 'extend'`` -- same function, same
+    failure class, one keyword, just without ``levels`` to have already
+    forced a pop. There is no ``BoundaryNorm`` in this case for ``extend``
+    to attach to (the mappable's ``norm`` is a plain, continuous one, which
+    has no ``.extend`` attribute at all -- verified in this environment:
+    ``hasattr(matplotlib.colors.Normalize(0, 10), "extend")`` is ``False``),
+    so it has to reach the colorbar directly instead, as
+    ``fig.colorbar(mesh, extend=...)`` -- matplotlib supports that against a
+    plain continuous mapping just as well as a discrete one.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    field = xr.DataArray(
+        np.arange(6 * 4).reshape(6, 4).astype(float),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+
+    ax = plot.map_plot(field, extend="both")
+
+    assert isinstance(ax, plt.Axes)
+    mappable = ax.collections[-1]
+    assert not isinstance(mappable.norm, mcolors.BoundaryNorm)
+    assert not hasattr(mappable.norm, "extend")
+    assert mappable.colorbar is not None
+    assert mappable.colorbar.extend == "both"
+
+
+def test_animate_map_curvilinear_extend_without_levels_reaches_the_one_colorbar():
+    """The same no-``levels`` ``extend`` consumption must also reach
+    ``animate_map``'s single, separately-drawn colorbar, not just
+    ``map_plot``'s own.
+
+    This is the wrinkle the ``map_plot`` fix alone does not cover: `_map_plot`
+    is called with ``colorbar=False`` for every frame here, and the one
+    colorbar `animate_map` itself draws afterwards, from the returned
+    mappable, needs the same ``extend`` explicitly -- there is still no
+    ``BoundaryNorm``/`.extend`` for it to fall back on. An explicit `norm`
+    (rather than leaving both `norm` and `levels` out) is used here so that
+    `animate_map`'s own shared-``levels`` convenience -- which fills in
+    `levels` automatically when neither `norm` nor `levels` is given, see
+    `test_animate_map_shares_contour_bands_across_frames` -- does not itself
+    inject `levels` and mask the no-`levels` path this test means to check.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(6 * 4).reshape(6, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "x", "y"),
+        coords={
+            "time": time,
+            "lat": (("x", "y"), lat2d),
+            "lon": (("x", "y"), lon2d),
+        },
+        name="field",
+    )
+    norm = mcolors.Normalize(vmin=0.0, vmax=320.0)
+
+    animation = plot.animate_map(field, norm=norm, extend="both")
+
+    fig = animation._fig
+    mappable = fig.axes[0].collections[-1]
+    assert mappable.norm is norm
+    assert not hasattr(norm, "extend")
+    assert mappable.colorbar is not None
+    assert mappable.colorbar.extend == "both"
+    plt.close(fig)
+
+
 def test_map_plot_draws_a_colorbar_by_default():
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -615,10 +809,19 @@ def test_animate_map_respects_caller_supplied_levels():
 
 def test_animate_map_respects_caller_supplied_norm():
     """A caller who already fixed a bounded `norm` keeps exactly that colour
-    mapping (`get_clim()`) for every frame -- see
-    `test_animate_map_bounded_norm_shares_identical_bands_across_frames` for
-    the fact that a separable animation also gets shared *bands* out of this
-    same `norm`, which this test does not itself check.
+    mapping (`get_clim()`) for every frame, because every frame's
+    `map_plot` call shares the identical `norm` object.
+
+    This does *not* extend to shared contour *bands*: on the separable path
+    `contourf` still picks its own `levels` from each frame's own data even
+    under a shared `norm`, so two frames can still show different bands
+    while their colours agree (see `test_animate_map_passes_a_caller_
+    supplied_norm_through_untouched` for why -- deriving band boundaries
+    from an arbitrary norm was tried and reverted: a linear locator on
+    `LogNorm(1, 1000)` gives boundaries invalid on a log scale, and a
+    `BoundaryNorm`'s own boundaries are the only bands it can meaningfully
+    have). A caller who wants shared bands under a norm passes `levels`
+    alongside it, which `map_plot` supports on the separable path.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
