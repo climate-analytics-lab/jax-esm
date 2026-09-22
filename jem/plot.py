@@ -272,7 +272,14 @@ def _expand_level_count(count: int, vmin: float, vmax: float) -> Sequence[float]
     """
     from matplotlib.ticker import MaxNLocator
 
-    return MaxNLocator(count + 1, min_n_ticks=1).tick_values(vmin, vmax)
+    # Built as a list of `float` rather than returned straight from
+    # `tick_values`: the lint job type-checks without the `plot` extra
+    # installed, where `matplotlib` resolves to `Any` under
+    # `--ignore-missing-imports` and this function's declared return type
+    # would be satisfied by an unchecked `Any`. Converting each level makes
+    # the type concrete whether or not matplotlib is there to be read.
+    locator = MaxNLocator(count + 1, min_n_ticks=1)
+    return [float(level) for level in locator.tick_values(vmin, vmax)]
 
 
 def _require_single_record(field: xr.DataArray) -> None:

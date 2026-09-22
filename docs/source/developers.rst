@@ -33,6 +33,14 @@ seen, not discover it.
 ``JAX_PLATFORMS=cpu`` is required on GPU hosts, otherwise every test process
 grabs the same GPU.
 
+Mypy sees a different world in CI than on a development machine: the lint job
+installs ``.[dev]`` and no more, so an optional dependency such as matplotlib
+is absent there and ``--ignore-missing-imports`` turns everything it exports
+into ``Any``. A function in :mod:`jem.plot` that returns a matplotlib value
+directly therefore passes locally, where the real types resolve, and fails in
+CI under ``warn_return_any``. Convert such a value to the declared type rather
+than returning it straight through, so the annotation holds either way.
+
 Two suites sit behind those gates. ``tests/unit``'s fast gate is
 ``-m "not slow"`` and needs no external data; its ``@pytest.mark.slow`` tests
 (whole-model builds and the Veros setups -- ``test_readme_quickstart.py``,
