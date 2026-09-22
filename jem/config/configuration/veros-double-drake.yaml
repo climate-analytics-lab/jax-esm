@@ -38,9 +38,15 @@
 #    zero snow cover, zero soil water, zero bare-land albedo. That is a
 #    deliberate simplification of THIS experiment, not a land model: over the
 #    continents the surface neither warms, cools nor carries a seasonal
-#    cycle. Add `land=slab_speedy` (with its climatology file) for a
-#    responding land surface, or `forcing@atmosphere.forcing=from_file` for a
-#    prescribed one.
+#    cycle. `forcing@atmosphere.forcing=from_file` gives a PRESCRIBED land
+#    surface instead (declare in `coupling.exchanged_forcing` any field an
+#    exchanger also writes, as this configuration already does for the SST).
+#    A RESPONDING one is not available here: composing `land=slab_speedy`
+#    would build and step a land model, but a hand-written
+#    `coupling.exchanger` replaces the declarative table entirely and
+#    `VerosExchange` carries no `lnd` rows, so that model would receive zero
+#    forcing and its surface temperature would never reach the atmosphere --
+#    an inert component, not a land surface. See jax-esm#128.
 #  - coupling.exchanger names `jem.fluxes.VerosExchange`, which computes the
 #    wind stress from the atmosphere's near-surface wind with a bulk drag
 #    law, masks the heat and freshwater fluxes wherever the surface has

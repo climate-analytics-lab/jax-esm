@@ -253,7 +253,11 @@ class VerosExchange:
     as well as thermodynamically, forced. It does not touch a land or
     sea-ice component -- :data:`VEROS_OCEAN_EXCHANGES`'s ``lnd``/``seaice``
     rows have no counterpart here, because the configurations this exchanger
-    serves compose ``land=none``/``seaice=none``.
+    serves compose ``land=none``/``seaice=none``. Composing a land component
+    into one of them therefore does not couple it -- a hand-written
+    exchanger replaces the declarative table entirely, so the component is
+    stepped with zero forcing and never read back. Adding those rows is
+    tracked in jax-esm#128.
 
     Parameters
     ----------
