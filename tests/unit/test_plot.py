@@ -427,6 +427,33 @@ def test_animate_map_respects_caller_supplied_vmin_vmax():
     plt.close(fig)
 
 
+def test_animate_map_fills_in_only_the_bound_the_caller_left_open():
+    """One supplied bound is kept; the other still comes from the whole field."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+    whole_field_max = float(data.max())
+
+    # Only `vmin` is fixed, so `vmax` would otherwise autoscale per frame --
+    # the very drift the shared scale exists to prevent.
+    animation = plot.animate_map(field, vmin=-100.0)
+    fig = animation._fig
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        assert fig.axes[0].collections[-1].get_clim() == (-100.0, whole_field_max)
+    plt.close(fig)
+
+
 def test_animate_map_respects_caller_supplied_levels():
     """A caller who already fixed `levels` is left alone -- no vmin/vmax added.
 

@@ -1110,8 +1110,10 @@ components these configurations are the first to exercise:
   showing the first frame's, misrepresenting the data. `animate_map` now
   computes `vmin`/`vmax` once from the whole field (NaN-skipping, since a
   masked ocean/sea-ice field is NaN over land) and passes them into every
-  frame's `map_plot` call by default, unless the caller already fixed the
-  scale via `levels`, `norm`, `vmin` or `vmax`.
+  frame's `map_plot` call by default. `levels` or `norm` opts out entirely,
+  each defining the whole scale; `vmin` or `vmax` fixes that one bound and
+  leaves the other shared, since matplotlib would otherwise autoscale the
+  open bound frame by frame.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

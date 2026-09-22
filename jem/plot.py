@@ -389,14 +389,17 @@ def animate_map(
     drawn on a different scale each time while the one colorbar kept showing
     the first frame's -- quantitatively misleading for exactly the kind of
     field (e.g. a diffusing tracer, an SST anomaly growing in time) an
-    animation exists to show. Unless the caller already fixed the scale by
-    passing ``levels``, ``norm``, ``vmin`` or ``vmax`` in ``**kwargs`` (these
-    are exactly what :func:`map_plot` forwards on to
-    ``contourf``/``pcolormesh``), ``vmin``/``vmax`` are computed once from
-    the *whole* field -- every frame, NaN-skipping since a masked field (an
-    ocean or sea-ice variable is NaN over land) has real NaNs to skip -- and
-    passed into every frame's :func:`map_plot` call, so every frame and the
-    one colorbar agree. A field that is NaN everywhere has no range to share,
+    animation exists to show. So ``vmin``/``vmax`` are computed once from the
+    *whole* field -- every frame, NaN-skipping since a masked field (an ocean
+    or sea-ice variable is NaN over land) has real NaNs to skip -- and passed
+    into every frame's :func:`map_plot` call, so every frame and the one
+    colorbar agree. Passing ``levels`` or ``norm`` in ``**kwargs`` opts out
+    entirely, since each of those defines the whole scale; passing ``vmin``
+    or ``vmax`` fixes that one bound and leaves the other to be filled in
+    here, because matplotlib would otherwise autoscale the open bound frame
+    by frame. (These four are exactly what :func:`map_plot` forwards on to
+    ``contourf``/``pcolormesh``.) A field that is NaN everywhere has no
+    range to share,
     so this falls back to :func:`map_plot`'s own per-frame autoscale in that
     case (which sees the same all-NaN data on every frame regardless). A
     field with a genuine constant value (``vmin == vmax``) is passed through
@@ -421,9 +424,10 @@ def animate_map(
         ``**kwargs``.
     **kwargs
         Passed through to :func:`map_plot` (e.g. ``levels``, ``cmap``,
-        ``vmin``, ``vmax``, ``norm``). Passing any of ``levels``/``norm``/
-        ``vmin``/``vmax`` here opts out of the automatic shared scale above
-        and uses exactly what was passed, for every frame.
+        ``vmin``, ``vmax``, ``norm``). ``levels`` or ``norm`` opts out of the
+        automatic shared scale above; ``vmin`` or ``vmax`` fixes that bound
+        and leaves the other shared. Whatever is passed is used for every
+        frame.
 
     Returns
     -------
@@ -440,11 +444,15 @@ def animate_map(
             "through; use map_plot for a single record."
         )
 
-    # A shared scale for every frame, unless the caller already fixed one --
-    # these are exactly the keys `map_plot` forwards on to
-    # `contourf`/`pcolormesh` that control the colour scale (see its own
-    # **kwargs docstring), so this only fills in a scale nobody set.
-    if not kwargs.keys() & {"levels", "norm", "vmin", "vmax"}:
+    # A shared scale for every frame, filling in only the bounds the caller
+    # left open. `levels` and `norm` each define the whole scale, so either
+    # of them opts out entirely; `vmin` and `vmax` are one bound each, and
+    # matplotlib autoscales whichever of them is missing -- per frame, which
+    # is the very drift this exists to prevent -- so a caller who fixes one
+    # still gets the other from the whole field. These are exactly the keys
+    # `map_plot` forwards on to `contourf`/`pcolormesh` (see its own
+    # **kwargs docstring).
+    if not kwargs.keys() & {"levels", "norm"}:
         with warnings.catch_warnings():
             # An all-NaN field (or an all-NaN frame within it) makes
             # `nanmin`/`nanmax` themselves warn about an empty slice; the
@@ -454,7 +462,9 @@ def animate_map(
             vmin = float(np.nanmin(field.values))
             vmax = float(np.nanmax(field.values))
         if np.isfinite(vmin) and np.isfinite(vmax):
-            kwargs = {**kwargs, "vmin": vmin, "vmax": vmax}
+            # The caller's own kwargs come last, so a bound they gave wins
+            # and only the one they left out is filled in from the field.
+            kwargs = {"vmin": vmin, "vmax": vmax, **kwargs}
         # else: every value is NaN -- there is no range to compute, so this
         # leaves `map_plot` to autoscale each (equally NaN) frame on its own,
         # which is exactly today's behaviour for that degenerate case.
