@@ -163,13 +163,22 @@ def open_output(output_dir: Path | str, component: str = "atm") -> xr.Dataset:
         return xr.concat(datasets, dim=TIME_DIMENSION)
 
 
-def area_mean(field: xr.DataArray, *, lat: str = "lat") -> xr.DataArray:
+def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.DataArray:
     """Return the cos(latitude)-weighted mean of a field over its horizontal axes.
 
-    Every dimension of ``field`` other than ``"time"`` is reduced -- so a
-    field already selected down to one level and one horizontal grid
+    Only the dimensions the horizontal coordinates actually span are
+    reduced -- found the same way :func:`map_plot` tells the two grid
+    layouts apart: on a separable lon/lat grid ``lat``/``lon`` are 1-D
+    coordinates over their own dimension each (``("lat",)``, ``("lon",)``);
+    on a curvilinear grid they are 2-D auxiliary coordinates sharing the
+    field's own index dimensions (e.g. ``("x", "y")``). Either way, the
+    union of the dims of whichever of the two coordinates are present is
+    what gets reduced, so a ``"time"`` axis, a ``"level"`` axis, or any other
+    non-horizontal axis a caller has not yet selected down is left alone --
+    a field already selected down to one level and one horizontal grid still
     collapses to a single scalar per time record, which is what a "global
-    mean SST" time series needs.
+    mean SST" time series needs, but a level-resolved field returns an
+    area-mean vertical profile instead of silently losing its ``level`` axis.
 
     The ``cos(latitude)`` weight is the exact area element only on a
     separable lon/lat grid, where a grid cell's area is
@@ -183,21 +192,55 @@ def area_mean(field: xr.DataArray, *, lat: str = "lat") -> xr.DataArray:
     Parameters
     ----------
     field : xarray.DataArray
-        The field to average. May still have a ``"time"`` dimension, which is
-        left alone.
+        The field to average. May still have a ``"time"`` dimension, a
+        ``"level"`` dimension, or any other non-horizontal axis, all of
+        which are left alone.
     lat : str, default "lat"
         Name of the latitude coordinate, in degrees.
+    lon : str, default "lon"
+        Name of the longitude coordinate, in degrees.
 
     Returns
     -------
     xarray.DataArray
-        ``field`` reduced over every dimension except ``"time"``.
+        ``field`` reduced over the dimensions ``lat``/``lon`` span, and left
+        alone on every other dimension.
+
+    Raises
+    ------
+    ValueError
+        If neither ``lat`` nor ``lon`` is a coordinate on ``field``, or the
+        union of their dims is empty; or if ``lon`` is present without
+        ``lat`` -- the cos(latitude) weight cannot be built without it.
 
     """
+    horizontal_coords = [name for name in (lat, lon) if name in field.coords]
+    # `dict.fromkeys` dedupes while keeping first-seen order (`lat`'s dims,
+    # then any of `lon`'s not already in it) -- a plain `set` would do too,
+    # since the reduce order below does not matter, but its element type
+    # (`Hashable`, from xarray's own `Dims`) is not `sorted`-able for mypy.
+    horizontal_dims = list(dict.fromkeys(
+        dim for name in horizontal_coords for dim in field[name].dims
+    ))
+    if not horizontal_dims:
+        raise ValueError(
+            f"area_mean needs a `{lat}`/`{lon}` coordinate to average over; "
+            f"this field has {sorted(str(name) for name in field.coords)!r} "
+            f"over dims {field.dims!r}."
+        )
+    if lat not in field.coords:
+        # `lon` alone (e.g. a field already reduced to a meridional slice)
+        # gives dims to reduce over but no latitude to weight by -- rather
+        # than average those dims unweighted, which would silently be a
+        # different (and for a lon-only reduction, wrong) quantity.
+        raise ValueError(
+            f"area_mean needs a `{lat}` coordinate to weight by "
+            f"cos(latitude); this field has "
+            f"{sorted(str(name) for name in field.coords)!r}."
+        )
     # A ufunc applied to a DataArray returns one (xarray implements
     # __array_ufunc__); numpy's stubs do not know that, hence the ignore.
     weights: xr.DataArray = np.cos(np.deg2rad(field[lat]))  # type: ignore[assignment]
-    horizontal_dims = [dim for dim in field.dims if dim != TIME_DIMENSION]
     return field.weighted(weights).mean(dim=horizontal_dims)
 
 

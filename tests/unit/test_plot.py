@@ -123,6 +123,80 @@ def test_area_mean_weights_by_cosine_latitude():
     assert np.isclose(float(plot.area_mean(field)), expected)
 
 
+def test_area_mean_averages_to_zero_for_a_hemispherically_antisymmetric_field():
+    # A field equal to `lat` itself is antisymmetric about the equator, and
+    # cos(latitude) weighting is itself symmetric, so the weighted mean must
+    # cancel to (approximately) zero -- a check the weighting is genuinely
+    # `cos(latitude)` and not e.g. an unweighted mean, which would also
+    # cancel to zero here by symmetry alone and so not actually distinguish
+    # the two (see `test_area_mean_weights_by_cosine_latitude` for that).
+    lat = np.linspace(-80, 80, 9)
+    lon = np.linspace(0, 350, 10)
+    values = np.broadcast_to(lat, (len(lon), len(lat))).copy()
+    field = xr.DataArray(values, dims=("lon", "lat"), coords={"lon": lon, "lat": lat})
+
+    assert np.isclose(float(plot.area_mean(field)), 0.0, atol=1e-10)
+
+
+def test_area_mean_keeps_a_level_axis_and_reduces_only_lat_lon():
+    # The regression this guards: `area_mean` must reduce only the
+    # dimensions the horizontal coordinates actually span, not every
+    # dimension other than "time" -- a level-resolved field returns an
+    # area-mean vertical profile, never a time series that has silently
+    # averaged the level axis away too.
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    level = np.array([1.0, 0.5, 0.1])
+    lat = np.linspace(-80, 80, 9)
+    lon = np.linspace(0, 350, 10)
+    data = np.full((len(time), len(level), len(lon), len(lat)), 3.0)
+    field = xr.DataArray(
+        data, dims=("time", "level", "lon", "lat"),
+        coords={"time": time, "level": level, "lon": lon, "lat": lat},
+    )
+
+    result = plot.area_mean(field)
+
+    assert result.dims == ("time", "level")
+    assert result.shape == (len(time), len(level))
+    np.testing.assert_allclose(result.values, 3.0)
+
+
+def test_area_mean_reduces_curvilinear_lat_lon_dims_and_keeps_the_rest():
+    # Curvilinear grid: lat/lon are 2-D auxiliary coordinates over ("x", "y")
+    # rather than 1-D coordinates over their own dimension -- the same
+    # layout `map_plot` handles separately from the separable grid.
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    data = np.full((len(time), 6, 4), 3.0)
+    field = xr.DataArray(
+        data, dims=("time", "x", "y"),
+        coords={
+            "time": time,
+            "lat": (("x", "y"), lat2d),
+            "lon": (("x", "y"), lon2d),
+        },
+    )
+
+    result = plot.area_mean(field)
+
+    assert result.dims == ("time",)
+    np.testing.assert_allclose(result.values, 3.0)
+
+
+def test_area_mean_raises_without_a_horizontal_coordinate():
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    field = xr.DataArray(
+        np.zeros((2, 3)),
+        dims=("time", "foo"),
+        coords={"time": time, "foo": [1, 2, 3]},
+    )
+
+    with pytest.raises(ValueError, match="lat"):
+        plot.area_mean(field)
+
+
 # ---------------------------------------------------------------------------
 # map_plot
 # ---------------------------------------------------------------------------

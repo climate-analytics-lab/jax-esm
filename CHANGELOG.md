@@ -1092,6 +1092,16 @@ components these configurations are the first to exercise:
   leaves the shell inside the Veros checkout, so the command installed
   another project's extras or none at all. It now says to run it from the
   JEM checkout.
+- **`jem.plot.area_mean` reduced every dimension of `field` other than
+  `"time"`**, so a level-resolved field (or one with an ensemble or sub-step
+  axis) had that axis silently averaged away along with latitude and
+  longitude -- `area_mean(atm["temperature"])` returned a plain time series
+  instead of an area-mean vertical profile, with no error. It now reduces
+  only the dimensions the `lat`/`lon` coordinates actually span, the same
+  separable-vs-curvilinear reasoning `map_plot` already uses, and takes a new
+  `lon` keyword to match the existing `lat`; a field with neither coordinate
+  is a `ValueError` naming what was looked for, not a silent no-op.
+
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
 Phase 1 of the [API hardening plan][plan]. It replaces the duck-typed component
