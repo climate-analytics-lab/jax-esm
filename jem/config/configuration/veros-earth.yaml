@@ -49,6 +49,23 @@
 #    weights above: conservatively for the fluxes, bilinearly for the sea
 #    surface temperature) -- so the ocean is mechanically as well as
 #    thermodynamically forced.
+#  - coupling.exchanged_forcing = [sea_surface_temperature], the one
+#    atmosphere-facing field `jem.fluxes.VerosExchange` writes (it also
+#    writes the ocean's own `surface_taux`/`surface_tauy`/`heat_flux`/
+#    `freshwater_flux`, but those are the ocean's forcing, not the
+#    atmosphere's, so `declare_exchanged_forcing` does not need them named).
+#    This has to be declared by hand because `VerosExchange` is a
+#    hand-written exchanger, not a `jem.exchangers.Exchange` table --
+#    `declare_exchanged_forcing` can only derive the field set by reading a
+#    table, and a Python function's body cannot be read that way. With the
+#    default `forcing@atmosphere.forcing` (`ForcingData.zeros()`, all plain
+#    arrays already) the declaration changes nothing; it starts to matter
+#    the moment this configuration is composed with
+#    `forcing@atmosphere.forcing=from_file`, which builds
+#    `sea_surface_temperature` as a `jcm.forcing.TimeSeries` -- without the
+#    declaration, `VerosExchange` overwriting it with a plain array on the
+#    first coupled step changes the carry's pytree structure and `lax.scan`
+#    refuses the whole trajectory.
 #  - A Veros configuration also runs the atmosphere in double precision:
 #    importing Veros sets `jax_enable_x64` process-wide, and which of the
 #    atmosphere's own fields stay float32 depends on build order (whatever
@@ -85,3 +102,4 @@ coupling:
   exchanger:
     _target_: jem.fluxes.VerosExchange
     rotation_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
+  exchanged_forcing: [sea_surface_temperature]

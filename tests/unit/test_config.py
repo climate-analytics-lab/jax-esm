@@ -24,6 +24,7 @@ import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 from hydra import compose, initialize_config_module
@@ -466,6 +467,113 @@ def test_atmosphere_subgroup_options_match_jcm(group, option):
     package = _atmosphere_groups()[group]
     cfg = composed([f"{group}@{package}={option}"])
     assert OmegaConf.select(cfg, package) is not None
+
+
+# ---------------------------------------------------------------------------
+# A Veros configuration declares what its hand-written exchanger writes
+# ---------------------------------------------------------------------------
+
+#: `jax_enable_x64` as it was before any test in this module built a real
+#: `VerosComponent`. Read once, at collection time, rather than inside the
+#: fixture below: importing `veros.core` (triggered the first time
+#: `runners.build_coupler` actually instantiates one) flips it to `True`
+#: process-wide as a side effect, and that flip is permanent for the rest of
+#: the process -- reading it fresh inside the fixture's own setup would
+#: capture the *already-flipped* value on the second of these tests to run.
+_JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST = jax.config.read("jax_enable_x64")
+
+
+@pytest.fixture(scope="module")
+def _veros_x64():
+    """Force `jax_enable_x64` on for these tests, and restore it after all of them.
+
+    Only requested by the two Veros tests below (not `autouse`), so it
+    neither forces every other test in this file to run in double precision
+    nor tears down between the two -- see `test_veros_setups.py`'s identical
+    fixture for why restoring *after each* test rather than once at the end
+    is actually the wrong thing here: doing so left the second of two Veros
+    tests silently degraded to float32 (`veros.core` is only imported once
+    per process, so only the *first* build re-triggers the `jax_enable_x64`
+    flip; restoring to `False` after it leaves nothing to flip it back for
+    the second).
+    """
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("configuration", ["veros-double-drake", "veros-earth"])
+def test_veros_configurations_declare_the_atmosphere_field_their_exchanger_writes(
+    configuration, caplog, _veros_x64
+):
+    """``coupling.exchanged_forcing`` is set, and does nothing under the default.
+
+    Both shipped Veros configurations use the hand-written
+    ``jem.fluxes.VerosExchange`` (``coupling.exchanger``), which
+    ``declare_exchanged_forcing`` cannot read a field set off of the way it
+    reads ``jem.exchangers.Exchange``'s table -- so, unlike every other
+    shipped configuration, they have to declare ``coupling.exchanged_forcing``
+    by hand. `VerosExchange` writes exactly one atmosphere-facing field,
+    ``sea_surface_temperature`` (see `jem.fluxes.VerosExchange.__call__`; its
+    other writes are onto the *ocean's* own forcing).
+
+    With the default `forcing@atmosphere.forcing` (`ForcingData.zeros()`,
+    already all plain arrays) the declaration has nothing to collapse, so
+    this also checks that declaring a field the default forcing never makes
+    time-varying does not trip the "declared but not time-varying" warning
+    (`declare_exchanged_forcing`'s `if pinned and atm.time_varying_forcing`
+    guard, which only fires when *something* is still a `TimeSeries`) --
+    that would otherwise fire on every shipped Veros run.
+    """
+    import jem.runners as runners
+
+    with caplog.at_level("WARNING", logger="jem.runners"):
+        coupler = runners.build_coupler(composed([f"+configuration={configuration}"]))
+    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
+    assert "not time-varying" not in caplog.text
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("configuration", ["veros-double-drake", "veros-earth"])
+def test_veros_configurations_couple_a_responding_land_surface(configuration, _veros_x64):
+    """The WHY comment's documented override -- a file-forced atmosphere --
+    actually traces, rather than tripping the carry-structure refusal.
+
+    Both configurations' WHY comments tell the user they can add
+    ``forcing@atmosphere.forcing=from_file`` for a responding land surface
+    instead of the flat `ForcingData.zeros()` boundary conditions `land=none`
+    otherwise leaves in place. That builds every boundary condition,
+    including ``sea_surface_temperature``, as a `jcm.forcing.TimeSeries` --
+    which is exactly what `coupling.exchanged_forcing` above exists to
+    reconcile: without it, `VerosExchange` overwriting
+    ``sea_surface_temperature`` with a plain array on the first coupled step
+    changes the atmosphere's carry structure and `lax.scan` refuses the whole
+    trajectory.
+
+    Traced with `jax.make_jaxpr` rather than `jax.eval_shape`: a real
+    `VerosComponent`'s pytree unflatten calls `.astype`/`asarray` on its
+    variables, which `jax.eval_shape`'s abstract `ShapeDtypeStruct` avals
+    cannot satisfy (`TypeError: ... not 'ShapeDtypeStruct'`) even for the
+    unmodified default configuration -- a pre-existing `eval_shape`/Veros
+    incompatibility this test's fix does not touch, so it is worked around
+    here rather than papered over. `make_jaxpr` traces the same step through
+    real (concrete-shaped) tracers without running any physics, which is
+    exactly as cheap a check that the carry's structure survives the step.
+    """
+    import jem.runners as runners
+
+    coupler = runners.build_coupler(composed([
+        f"+configuration={configuration}",
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+    ]))
+    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
+    carry = coupler.initialize()
+    # Raises (a `RuntimeError` from `lax.scan`, naming the workflow element)
+    # if the carry's structure changes across the step; a clean trace is the
+    # assertion.
+    jax.make_jaxpr(coupler.generate_trajectory_function(1))(carry)
 
 
 # ---------------------------------------------------------------------------

@@ -1068,6 +1068,19 @@ components these configurations are the first to exercise:
   explicit declaration now collapses nothing and logs an INFO note that it
   is inert; an unknown declared name is still an error and a declared name
   that is not time-varying is still warned about, unchanged.
+- **Both shipped Veros configurations (`veros-double-drake`, `veros-earth`)
+  now set `coupling.exchanged_forcing: [sea_surface_temperature]`**, the one
+  atmosphere-facing field `jem.fluxes.VerosExchange` writes. Composing either
+  configuration with `forcing@atmosphere.forcing=from_file` for a responding
+  land surface -- exactly what each configuration's own WHY comment already
+  invited a user to do -- built `sea_surface_temperature` as a
+  `jcm.forcing.TimeSeries`, and `VerosExchange` (a hand-written exchanger, so
+  `declare_exchanged_forcing` has no table to derive its field set from)
+  overwrote it with a plain array on the first coupled step, changing the
+  atmosphere's carry structure and having `lax.scan` refuse the trajectory.
+  Declaring the field under the default forcing (already all plain arrays)
+  does not trip the "declared but not time-varying" warning: that warning
+  already only fires when something is still a `TimeSeries`.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
