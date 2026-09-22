@@ -418,16 +418,19 @@ def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
     fix left ``extend`` behind in ``plot_kwargs`` -- the following
     ``pcolormesh`` call does not accept that contour-only keyword and raised
     ``AttributeError: QuadMesh.set() got an unexpected keyword argument
-    'extend'``. ``extend`` must instead be popped and applied to the
-    constructed ``BoundaryNorm``, whose own ``extend`` parameter exists for
-    exactly this, so the advertised discrete-level behaviour works on this
-    grid layout the same as it does on the separable one.
+    'extend'``. ``extend`` must instead be popped and reach the drawn
+    colorbar so the advertised discrete-level behaviour works on this grid
+    layout the same as it does on the separable one.
 
-    The extension must also reach the drawn colorbar: `matplotlib.colorbar.
-    Colorbar` falls back to `norm.extend` whenever its own `extend` is left
-    unset (as `map_plot`'s own colorbar draw leaves it), so a `BoundaryNorm`
-    that carries `extend="both"` is enough on its own -- verified here by
-    checking the colorbar actually drawn, not just the norm.
+    It must **not** reach the ``BoundaryNorm`` itself, which is this test's
+    one assertion that changed from this fix's first version: passing
+    ``extend`` to ``BoundaryNorm`` inflates the colour count it needs beyond
+    ``cmap.N``, which a small discrete colormap need not have room for (a
+    later, P2 finding on this same fix -- see
+    ``test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend``
+    below) -- so the norm here always reads ``extend == "neither"``, and the
+    ``"both"`` this test asks for reaches the colorbar only through
+    ``colorbar_extend``, checked directly on the colorbar actually drawn.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -451,7 +454,7 @@ def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
     mappable = ax.collections[-1]
     assert isinstance(mappable.norm, mcolors.BoundaryNorm)
     assert list(mappable.norm.boundaries) == levels
-    assert mappable.norm.extend == "both"
+    assert mappable.norm.extend == "neither"
     assert mappable.colorbar is not None
     assert mappable.colorbar.extend == "both"
 
@@ -1476,3 +1479,109 @@ def test_map_plot_curvilinear_levels_with_explicit_norm_none_does_not_raise():
     assert isinstance(ax, plt.Axes)
     mappable = ax.collections[-1]
     assert list(mappable.norm.boundaries) == levels
+
+
+def _banded_column_values():
+    """Return one value per "lon"/"x" column, to broadcast across "lat"/"y".
+
+    One value below ``levels[0]``, one in each of the three bins
+    ``[0, 10, 20, 30]`` makes, and one above ``levels[-1]`` -- with the sixth
+    column repeating the last so a 6-long axis covers "below, bin0, bin1,
+    bin2, above" without a partial band. Broadcasting a single value across
+    every row means every cell in a column falls in the same band, so a
+    filled-contour region and a `pcolormesh` cell disagree only if the two
+    paths actually assign a different *colour* to that band -- not because
+    of contour interpolation blurring a boundary, which this avoids by
+    construction (no cell straddles two bands).
+    """
+    return np.array([-5.0, 5.0, 15.0, 25.0, 35.0, 35.0])
+
+
+def test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend():
+    """A small ``ListedColormap`` -- sized to exactly the number of ordinary
+    ``levels`` bands, no spare entries for ``extend``'s extension colours --
+    combined with explicit ``levels`` and ``extend`` must draw on the
+    curvilinear path, with the same colours ``contourf`` gives the identical
+    call on a separable grid.
+
+    Reproduces the Codex round-18 P2 finding: four boundaries (three bands)
+    plus ``extend="both"`` need `BoundaryNorm` to cover five colour bins, but
+    a `ListedColormap(["red", "green", "blue"])` has only three
+    (`cmap.N == 3`) -- an entirely ordinary combination with explicit,
+    discrete ``levels`` (``contourf`` already supports it on the separable
+    path, see the comparison below), which raised ``ValueError: There are 5
+    color bins including extensions, but ncolors = 3; ncolors must equal or
+    exceed the number of bins`` before this fix. See the comment in
+    `_map_plot` where the `BoundaryNorm` is built for why an *earlier*
+    version of this same c8091a6 fix (passing `extend` to `BoundaryNorm`,
+    inflating its colour count) is not just too small here but the wrong
+    construction at any size -- confirmed by the colour comparison this test
+    makes, not merely by this call no longer raising.
+
+    The assertion is the actual rendered colours, not just that a mappable
+    got created: both grid layouts see the identical banded data (one value
+    below `levels[0]`, one in each of the three bands, one above
+    `levels[-1]`, see `_banded_column_values`) through the identical
+    `cmap`/`levels`/`extend`, and must render to the same *set* of colours --
+    the separable/`contourf` path is what "correct" means here, per the
+    governing criterion that `levels`/`extend` mean the same thing on both
+    grid layouts. Comparing colour *sets* (not per-cell positions) sidesteps
+    `contourf`'s own triangulation/interpolation, which places its band
+    boundaries slightly differently from `pcolormesh`'s cell edges even for
+    identical inputs; the countable, small set of colours actually used is
+    unaffected by that and is what the finding is actually about.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.colors import ListedColormap
+
+    values = _banded_column_values()
+    levels = [0, 10, 20, 30]
+    cmap = ListedColormap(["red", "green", "blue"])
+    assert cmap.N == len(levels) - 1  # exactly enough for the plain bands,
+    # none spare for `extend`'s two extra bins -- the finding's own setup.
+
+    lon = np.linspace(0, 300, 6)
+    lat = np.linspace(-60, 60, 4)
+    lon2d, lat2d = np.meshgrid(lon, lat, indexing="ij")
+    curvilinear_data = np.broadcast_to(values[:, None], (6, 4)).astype(float)
+    curvilinear_field = xr.DataArray(
+        curvilinear_data,
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        name="field",
+    )
+    separable_data = np.broadcast_to(values[:, None], (6, 4)).astype(float)
+    separable_field = xr.DataArray(
+        separable_data,
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+
+    curv_ax = plot.map_plot(
+        curvilinear_field, levels=levels, extend="both", cmap=cmap,
+        colorbar=False,
+    )
+    sep_ax = plot.map_plot(
+        separable_field, levels=levels, extend="both", cmap=cmap,
+        colorbar=False,
+    )
+    curv_ax.figure.canvas.draw()
+    sep_ax.figure.canvas.draw()
+
+    curv_colors = {
+        tuple(np.round(c, 6)) for c in curv_ax.collections[-1].get_facecolor()
+    }
+    sep_colors = {
+        tuple(np.round(c, 6)) for c in sep_ax.collections[-1].get_facecolor()
+    }
+    assert curv_colors == sep_colors
+    # And it is exactly the three listed colours -- not some subset that
+    # would also satisfy `==` on an empty/degenerate render, and not extra
+    # colours a broken index (candidate 1 -- inflating `BoundaryNorm`'s
+    # colour count -- was verified to leak in during this fix's own
+    # investigation) would add.
+    assert curv_colors == {
+        tuple(np.round(c, 6)) for c in cmap(np.array([0, 1, 2]))
+    }

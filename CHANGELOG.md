@@ -1200,32 +1200,55 @@ components these configurations are the first to exercise:
   after `levels` was translated into a `BoundaryNorm`, or, with no `levels`
   to force a pop, untouched from the start -- and `pcolormesh` has no
   `extend` argument any more than it has `levels`. `extend` is now popped
-  unconditionally on the curvilinear path, before either sub-case: with
-  `levels`, it is passed to the constructed `BoundaryNorm`'s own `extend`
-  parameter, which exists for exactly this ("also cover values beyond the
-  outer boundaries" -- the same meaning `contourf`'s `extend` has on the
-  separable path); confirmed against `BoundaryNorm.__init__`'s actual
-  requirement, it needs `ncolors` at least the number of colour bins
-  including the one or two `extend` adds, which the `cmap.N` (256 for every
-  continuous colormap resolved here) already passed easily satisfies.
-  Without `levels`, there is no `BoundaryNorm` for `extend` to attach to --
-  the mappable's `norm` is a plain, continuous one with no `.extend`
-  attribute at all (confirmed: `hasattr(matplotlib.colors.Normalize(0, 10),
-  "extend")` is `False`) -- so it is instead passed explicitly to whichever
-  colorbar is drawn from that mappable, which matplotlib supports against a
-  continuous mapping just as well as a discrete one. Both sub-cases reach
-  **both** colorbar call sites correctly: `map_plot`'s own (`colorbar=True`)
-  and `animate_map`'s single, separately-drawn one, which needed `_map_plot`
-  (a private helper, `animate_map`'s only other caller) extended to hand
-  back the resolved `extend` alongside the axes and the mappable, so
-  `animate_map` can apply it explicitly rather than risk leaving its one
-  colorbar silently un-extended while `map_plot`'s own is. An invalid
-  `extend` value still surfaces as matplotlib's own `ValueError` at
-  colorbar-draw time either way, exactly as `contourf`'s own (undocumented)
-  handling of one does -- confirmed for both the `BoundaryNorm` fallback
-  and the explicit no-`levels` call. The separable/`contourf` path is
-  unchanged throughout -- it accepts `extend` natively regardless of
-  `levels`.
+  unconditionally on the curvilinear path, before either sub-case, and
+  reaches a colorbar via a `colorbar_extend` value `_map_plot` hands back
+  alongside the axes and the mappable (a private helper, `animate_map`'s
+  only other caller, extended for exactly this), so both **`map_plot`'s own
+  (`colorbar=True`) and `animate_map`'s single, separately-drawn colorbar**
+  get it explicitly rather than risk one being silently left un-extended
+  while the other is. Without `levels`, the mappable's `norm` is a plain,
+  continuous one with no `.extend` attribute at all (confirmed:
+  `hasattr(matplotlib.colors.Normalize(0, 10), "extend")` is `False`), so
+  this explicit path is the only way `extend` could ever reach a colorbar
+  here, and matplotlib supports it against a continuous mapping just as
+  well as a discrete one. An invalid `extend` value still surfaces as
+  matplotlib's own `ValueError` at colorbar-draw time either way, exactly
+  as `contourf`'s own (undocumented) handling of one does. The
+  separable/`contourf` path is unchanged throughout -- it accepts `extend`
+  natively regardless of `levels`.
+
+  A follow-up (Codex round 18, P2) found this first version's `levels`
+  handling still wrong, not merely incomplete: it passed `extend` straight
+  through to the constructed `BoundaryNorm`'s own `extend` parameter, which
+  demands a colour count (`ncolors`, given as `cmap.N`) covering the
+  ordinary bands *plus* one more per end `extend` covers. That is
+  comfortably true of the 256-entry continuous colormaps every shipped
+  example resolves here, but not of a caller's own small `ListedColormap`
+  paired with explicit `levels` -- an entirely ordinary combination
+  `contourf` already supports on the separable path -- so e.g. four
+  boundaries and `extend="both"` against a 3-colour `ListedColormap` raised
+  `ValueError: There are 5 color bins including extensions, but ncolors =
+  3; ncolors must equal or exceed the number of bins`. Rendering both grid
+  layouts and comparing the actual drawn colours (not just whether either
+  raises) showed passing `extend` to `BoundaryNorm` is the wrong
+  construction at any colormap size, not only a too-small one: even a
+  `ListedColormap` sized to exactly cover the inflated count renders
+  colours `contourf` never produces for the same call, because
+  `BoundaryNorm`'s own documented fallback for "fewer bins than colours"
+  linearly interpolates across the *inflated* range and pulls in colormap
+  entries that do not belong to any of the caller's bands. The
+  `BoundaryNorm` is now always built over exactly `cmap.N` colours with
+  **no** `extend` of its own -- matplotlib's own documented idiom for a
+  discrete colorbar with extended ends -- so a value beyond `levels` gets a
+  distinct colour via `Colormap.__call__`'s existing under/over fallback to
+  the colormap's own first/last entry, the same "beyond the outer boundary"
+  colour `contourf` itself defaults to; the extension triangles remain
+  purely the colorbar's own decoration, carried by the `colorbar_extend`
+  plumbing above, which already reached both colorbar call sites and needed
+  no change. Verified by comparing the curvilinear and separable paths'
+  rendered colours for identical `levels`/`extend`/`cmap` on identical
+  data, for both the reported small `ListedColormap` and the ordinary
+  256-entry continuous case.
 - **`VerosComponent.initialize()` seeds `derived` from the ocean's own
   initial state, instead of `VerosDerived.zeros()`'s uniform 273.15 K.** Both
   shipped Veros configurations run the default workflow -- every exchanger,
