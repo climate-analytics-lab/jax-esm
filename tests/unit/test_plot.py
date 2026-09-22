@@ -644,15 +644,14 @@ def test_animate_map_respects_caller_supplied_norm():
     plt.close(fig)
 
 
-def test_animate_map_bounded_norm_shares_identical_bands_across_frames():
-    """A `norm` with both bounds already set still needs the same
-    shared-band fix as `vmin`/`vmax`: this is the finding itself --
-    `contourf` picks its own band boundaries from each frame's own data
-    regardless of `norm` (measured: `[0, 4, ..., 32]` for frame 0 and
-    `[0, 40, ..., 320]` for frame 1 under one colorbar built from the first,
-    despite both frames sharing the same `norm`), so a caller-supplied,
-    already-bounded `norm` must get the same shared `levels` the default and
-    `vmin`/`vmax` paths already do.
+def test_animate_map_passes_a_caller_supplied_norm_through_untouched():
+    """A `norm` is the caller's own description of the colour scale.
+
+    It is forwarded as given, so every frame is drawn with the same mapping
+    and the caller's object comes back unmodified. Deriving shared band
+    boundaries for it is deliberately not attempted: they would have to come
+    from the norm's own scale, and a linear guess is wrong for every
+    non-linear norm (see the log and boundary tests below).
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -672,28 +671,21 @@ def test_animate_map_bounded_norm_shares_identical_bands_across_frames():
 
     animation = plot.animate_map(field, norm=norm)
     fig = animation._fig
-    levels_per_frame = []
     for step in range(field.sizes["time"]):
         animation._draw_frame(step)
-        levels_per_frame.append(list(fig.axes[0].collections[-1].levels))
-
-    assert levels_per_frame[0] == levels_per_frame[1]
-    assert levels_per_frame[0][0] <= float(data.min())
-    assert levels_per_frame[0][-1] >= float(data.max())
+        assert fig.axes[0].collections[-1].norm is norm
+    assert (norm.vmin, norm.vmax) == (0.0, 310.0)
     plt.close(fig)
 
 
-def test_animate_map_open_norm_spans_the_whole_field_and_stays_unmodified():
-    """An *open* `norm` (`vmin`/`vmax` left `None`) must not be autoscaled
-    from frame 0's data alone: matplotlib does exactly that on first use
-    (measured, with the caller's own `norm` reused unchanged across frames:
-    both frames came out clamped to frame 0's 0-32 rather than the whole
-    field's 0-320) -- the same per-frame drift the `vmin`/`vmax` path already
-    guards against. And the caller's own `norm` object must come back
-    unmodified: matplotlib's autoscale-on-first-use sets `vmin`/`vmax`
-    directly on the `norm` instance it is given, so leaving the caller's own
-    object in `kwargs` would have mutated it as a side effect, not just
-    drifted per frame.
+def test_animate_map_accepts_every_form_matplotlib_accepts_for_a_norm():
+    """Each norm form matplotlib takes reaches it intact, and none raises.
+
+    A string scale name is resolved by matplotlib itself, so inspecting it
+    here would raise `AttributeError` on a value that works in a plain
+    `contourf` call. A `LogNorm` keeps matplotlib's own log-scale bands,
+    which a linear locator would replace with boundaries on the wrong scale,
+    the first of them invalid on a log axis.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
@@ -703,35 +695,36 @@ def test_animate_map_open_norm_spans_the_whole_field_and_stays_unmodified():
     lon = np.linspace(0, 315, 8)
     lat = np.linspace(-60, 60, 4)
     time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
-    base = np.arange(8 * 4).reshape(8, 4).astype(float)
-    data = np.stack([base, base * 10.0])
+    base = np.arange(1.0, 8 * 4 + 1.0).reshape(8, 4)
     field = xr.DataArray(
-        data, dims=("time", "lon", "lat"),
+        np.stack([base, base * 10.0]), dims=("time", "lon", "lat"),
         coords={"time": time, "lon": lon, "lat": lat}, name="field",
     )
-    norm = mcolors.Normalize()  # both bounds open
 
-    animation = plot.animate_map(field, norm=norm)
+    for norm in ("log", mcolors.LogNorm(1.0, 1000.0), mcolors.Normalize()):
+        animation = plot.animate_map(field, norm=norm)
+        fig = animation._fig
+        animation._draw_frame(0)
+        plt.close(fig)
+
+    # A LogNorm keeps log-spaced bands, every one of them positive.
+    animation = plot.animate_map(field, norm=mcolors.LogNorm(1.0, 1000.0))
     fig = animation._fig
-    whole_field_clim = (float(data.min()), float(data.max()))
-    for step in range(field.sizes["time"]):
-        animation._draw_frame(step)
-        assert fig.axes[0].collections[-1].get_clim() == whole_field_clim
-
-    assert norm.vmin is None
-    assert norm.vmax is None
+    animation._draw_frame(0)
+    levels = list(fig.axes[0].collections[-1].levels)
+    assert all(level > 0.0 for level in levels)
+    assert levels != list(plot._expand_level_count(7, 1.0, 1000.0))
     plt.close(fig)
 
 
 def test_animate_map_curvilinear_shares_a_caller_supplied_norm_with_no_levels():
-    """On a curvilinear grid, `pcolormesh` draws no discrete bands at all, so
-    a shared `norm` is enough on its own and no `levels` are added -- adding
-    them would in fact raise, since `map_plot` rejects `levels` alongside an
-    explicit `norm` there (translating `levels` into a `norm` would
-    overwrite this very one); this test passing at all is therefore already
+    """On a curvilinear grid a `norm` is all a frame needs.
+
+    `pcolormesh` draws no discrete bands, and `map_plot` rejects `levels`
+    alongside an explicit `norm` there, since translating `levels` into a
+    `norm` would overwrite this very one. So this test passing at all is
     evidence that no `levels` were added, and the identity check below
-    confirms the exact same `norm` object (already fully bounded, so no copy
-    is needed) is what every frame draws with.
+    confirms every frame draws with the caller's own object.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")

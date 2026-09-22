@@ -1101,48 +1101,23 @@ components these configurations are the first to exercise:
   separable-vs-curvilinear reasoning `map_plot` already uses, and takes a new
   `lon` keyword to match the existing `lat`; a field with neither coordinate
   is a `ValueError` naming what was looked for, not a silent no-op.
-- **`jem.plot.animate_map` drew its one colorbar from the first frame only**,
-  while each per-frame `map_plot` call autoscaled its own mappable from that
-  frame's data alone, so a field whose range changed between frames (any
-  field a caller had not already fixed `levels`/`norm`/`vmin`/`vmax` for --
-  the shipped `examples/01_basic/01_aquaplanet.ipynb` animation among them)
-  was drawn on a different colour scale each frame while the legend kept
-  showing the first frame's, misrepresenting the data. `animate_map` now
-  computes `vmin`/`vmax` once from the whole field (NaN-skipping, since a
-  masked ocean/sea-ice field is NaN over land) and passes them into every
-  frame's `map_plot` call by default. An explicit `levels` sequence together
-  with `norm` opts out entirely, since the two already pin the whole scale;
-  `vmin` or `vmax` fixes that one bound and leaves the other shared, since
-  matplotlib would otherwise autoscale the open bound frame by frame. A
-  shared `vmin`/`vmax` alone still let `contourf` pick different band
-  boundaries per frame from each frame's own data (e.g. `[0, 4, ..., 32]`
-  for one frame, `[0, 40, ..., 320]` for another spanning ten times the
-  range, despite both reporting the same shared `get_clim()`), and an
-  integer `levels` *count* (e.g. `levels=7`) had the identical problem,
-  since only `contourf`/`pcolormesh` themselves expand a count, separately
-  per frame -- so every frame's one colorbar still showed the first frame's
-  bands either way. `animate_map` now expands the bands once too, from the
-  bounds actually in force, with `_expand_level_count` (the caller's own
-  integer count in place of matplotlib's default of 7, run through the same
-  `matplotlib.ticker.MaxNLocator` `contourf` itself defaults to), so the
-  band edges match across frames whether `levels` was left default or given
-  as a count -- and, via the `map_plot` fix below, on a curvilinear grid as
-  well. A caller-supplied `norm` with no `levels` had both of these gaps
-  too, and a third: `contourf` still picks its bands from each frame's own
-  data regardless of any `norm`, and an *open* `norm` (`vmin`/`vmax` left
-  unset) is autoscaled by matplotlib on first use -- from frame 0's data
-  alone, mutating the caller's own `norm` object as a side effect.
-  `animate_map` now fills an open `norm`'s bounds from the whole field on a
-  copy (the caller's object is left untouched) and, on a separable grid,
-  shares bands computed from those bounds the same way as above; on a
-  curvilinear grid `pcolormesh` draws no bands to share (and `map_plot`,
-  below, would reject `levels` alongside an explicit `norm` there anyway),
-  so the shared `norm` alone is passed through. The one colorbar is now also
-  built directly from the mappable `map_plot`'s internal drawing step
-  returns, rather than picked out of `ax.collections` by position, which
-  only happened to be safe at the matplotlib version this project runs its
-  tests against (`contourf` adds one `PathCollection` per band, not one
-  `QuadContourSet`, on matplotlib older than 3.8).
+- **`jem.plot.animate_map` drew every frame on its own colour scale**, while
+  the one colorbar kept showing the first frame's, so an animation of a field
+  whose range drifts between frames misrepresented the data. It now derives
+  one scale from the whole field: shared `vmin`/`vmax`, and shared band
+  boundaries alongside them, since `contourf` picks its bands from each
+  frame's own data rather than from the colour limits. A `vmin` or `vmax` the
+  caller fixed is kept and only the open bound is filled in; an integer
+  `levels` is a band count, so it is expanded once from the bounds in force
+  rather than per frame. An explicit `levels` sequence or a `norm` describes
+  the scale already and is passed through untouched -- a `norm` fixes the
+  colours for every frame, and a caller who also wants fixed bands under it
+  passes `levels` alongside (`norm.boundaries` for a `BoundaryNorm`), which
+  is deliberate: shared bands would have to come from the norm's own scale,
+  and a linear guess gives a `LogNorm` boundaries on the wrong scale with an
+  invalid first value. The colorbar is built from the mappable the draw
+  returns rather than found through the axes, so it does not depend on how a
+  given matplotlib groups contour bands.
 - **`jem.plot.map_plot`'s documented `levels` keyword crashed on a
   curvilinear grid**, e.g. the displaced-pole ocean output the shipped
   `aquaplanet-slab-mixed-grid` configuration writes:

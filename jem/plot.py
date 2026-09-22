@@ -19,7 +19,6 @@ Because of that, ``jem.plot`` is deliberately not re-exported from
 from __future__ import annotations
 
 import contextlib
-import copy
 import importlib
 import warnings
 from collections.abc import Sequence
@@ -625,35 +624,23 @@ def animate_map(
     with no explicit levels, so a constant field's appearance is unchanged
     from before this shared scale existed.
 
-    An explicit ``norm`` has the mirror-image gap to a bare ``vmin``/``vmax``
-    above, so it is not a simple opt-out either. ``contourf`` still picks its
-    band boundaries from each frame's own data even with a ``norm`` given
-    (measured: ``animate_map(field, norm=Normalize(0, 310))`` on a field
-    spanning 0-32 in frame 0 and 0-320 in frame 1 gave boundaries
-    ``[0, 4, ..., 32]`` then ``[0, 40, ..., 320]``, under one colorbar built
-    from the first) -- a ``norm`` fixes the colour *mapping*, not the
-    contour *bands*. And an *open* ``norm`` (``vmin``/``vmax`` left ``None``
-    for matplotlib to fill in) is autoscaled on first use, from frame 0's
-    data alone rather than the whole field -- the same per-frame drift this
-    whole function exists to prevent, reached a different way. So a
-    caller-supplied ``norm`` with no explicit ``levels`` is filled in the
-    same spirit as ``vmin``/``vmax`` above: the bounds actually in force are
-    the ``norm``'s own ``vmin``/``vmax`` where both are already set, and the
-    whole field's range otherwise; if the ``norm``'s bounds were open, a
-    *copy* of it (``copy.copy`` -- matplotlib's norms copy cleanly, verified
-    -- so the caller's own object is left untouched, since it may be reused
-    for another plot or compared by identity elsewhere) gets those bounds
-    set, and every frame draws with that copy. On the separable/``contourf``
-    path, shared band boundaries are then computed from those bounds exactly
-    as above and passed as ``levels``; on the curvilinear path
-    ``pcolormesh`` draws no discrete bands at all -- :func:`map_plot` turns
-    an explicit ``levels`` into exactly the kind of ``norm`` this already
-    shares -- so the shared ``norm`` alone is enough there and no ``levels``
-    are added. Passing ``norm`` together with an explicit ``levels`` sequence
-    still opts out of this entirely: :func:`map_plot` now accepts both
-    together on a separable grid (matplotlib's own support, see its
-    docstring), so a caller who already gave both has already pinned the
-    whole scale themselves.
+    An explicit ``norm`` is passed through untouched, and is the one case
+    where the shared scale stops short of what a caller might hope for.
+    ``contourf`` takes its band boundaries from each frame's own data even
+    with a ``norm`` given, so on the separable path the bands can still
+    differ between frames; the colours do not, since every frame is drawn
+    with the same ``norm``. Deriving shared boundaries for an arbitrary norm
+    is deliberately not attempted here: the boundaries have to come from the
+    norm's own scale, and guessing at it goes wrong in ways that are worse
+    than the gap. A linear locator applied to a ``LogNorm(1, 1000)`` yields
+    ``[0, 150, ..., 1050]`` -- boundaries on the wrong scale, the first of
+    them invalid on a log axis -- and a ``BoundaryNorm``'s own boundaries
+    are the only meaningful bands it can have. A caller who wants fixed
+    bands under a norm passes ``levels`` alongside it, which :func:`map_plot`
+    supports on the separable path; for a ``BoundaryNorm`` that is
+    ``levels=norm.boundaries``. Passing the ``norm`` through also means a
+    string scale name (``norm="log"``, which matplotlib resolves itself)
+    reaches matplotlib intact rather than being inspected here.
 
     Parameters
     ----------
@@ -704,77 +691,19 @@ def animate_map(
             "through; use map_plot for a single record."
         )
 
-    # A shared scale for every frame, filling in only the bounds the caller
-    # left open. `levels` as an explicit sequence of boundaries defines the
-    # whole scale on its own, so it opts out entirely -- together with
-    # `norm`, once `norm` is given too (see the `norm` branch below for why
-    # `norm` alone does not also opt out); an integer `levels` (a band
-    # *count*) does not, since forwarding it as-is would leave each frame's
-    # own `contourf`/`pcolormesh` call to expand that count against its own
-    # data (a fresh `MaxNLocator` run per frame) -- exactly the drift this
-    # whole block exists to prevent, just for the bands instead of
-    # `vmin`/`vmax`. `vmin` and `vmax` are one bound each, and matplotlib
-    # autoscales whichever of them is missing -- per frame, the same drift
-    # again -- so a caller who fixes one still gets the other from the whole
-    # field. These are exactly the keys `map_plot` forwards on to
-    # `contourf`/`pcolormesh` (see its own **kwargs docstring).
+    # A shared scale for every frame, but only when the caller has not
+    # described the colour scale themselves. `vmin` and `vmax` are plain
+    # numbers, so a bound the caller gave is kept and only the one they left
+    # open is filled in from the whole field -- matplotlib would otherwise
+    # autoscale that open bound per frame, which is the drift this exists to
+    # prevent. An integer `levels` is a band *count*, not a scale, so it is
+    # expanded here for the same reason. Anything that describes the scale
+    # itself -- an explicit sequence of `levels`, or a `norm` in any form --
+    # is passed through untouched: see the docstring for why deriving bands
+    # for a caller's own norm is not this function's job.
     levels_kwarg = kwargs.get("levels")
     levels_is_count = isinstance(levels_kwarg, int) and not isinstance(levels_kwarg, bool)
-    norm_kwarg = kwargs.get("norm")
-    if norm_kwarg is not None and "levels" not in kwargs:
-        # `norm` cannot go through the same "field value the caller's own
-        # bound wins over" merge as `vmin`/`vmax` below: it carries its own
-        # (possibly still-open) bounds rather than being one, and a shared
-        # `norm` alone is not a shared *contourf* scale in the first place --
-        # see `animate_map`'s own docstring for both problems this fixes.
-        bound_vmin = norm_kwarg.vmin
-        bound_vmax = norm_kwarg.vmax
-        if bound_vmin is None or bound_vmax is None:
-            with warnings.catch_warnings():
-                # See the matching comment on the `vmin`/`vmax` branch below.
-                warnings.filterwarnings(
-                    "ignore", r"All-NaN (slice|axis) encountered"
-                )
-                field_vmin = float(np.nanmin(field.values))
-                field_vmax = float(np.nanmax(field.values))
-            if np.isfinite(field_vmin) and np.isfinite(field_vmax):
-                # A *copy*, never the caller's own `norm` mutated in place:
-                # matplotlib's `Normalize`-family norms copy cleanly with
-                # `copy.copy` (verified: the two objects' `vmin`/`vmax` are
-                # independent afterwards), and the caller's object may be
-                # reused for another plot or compared by identity elsewhere,
-                # so it must come back exactly as given -- unlike leaving it
-                # in `kwargs` unchanged, which `contourf`/`pcolormesh` would
-                # autoscale (and so mutate) in place from frame 0's data on
-                # the very first frame.
-                norm_kwarg = copy.copy(norm_kwarg)
-                if bound_vmin is None:
-                    norm_kwarg.vmin = field_vmin
-                if bound_vmax is None:
-                    norm_kwarg.vmax = field_vmax
-                kwargs = {**kwargs, "norm": norm_kwarg}
-                bound_vmin, bound_vmax = norm_kwarg.vmin, norm_kwarg.vmax
-            # else: every value is NaN -- see the matching comment below.
-        if (
-            bound_vmin is not None
-            and bound_vmax is not None
-            and "lat" in field.coords
-            and "lon" in field.coords
-            and _is_separable_grid(field["lat"], field["lon"])
-        ):
-            # Only on the separable/`contourf` path: `pcolormesh` (the
-            # curvilinear path) draws no discrete bands at all, and
-            # `map_plot` itself would reject `levels` alongside an explicit
-            # `norm` there (translating `levels` into a `norm` would
-            # overwrite this very one), so the shared `norm` set above is
-            # already everything a curvilinear frame needs.
-            kwargs = {
-                **kwargs,
-                "levels": _expand_level_count(
-                    7, float(bound_vmin), float(bound_vmax)
-                ),
-            }
-    elif "norm" not in kwargs and ("levels" not in kwargs or levels_is_count):
+    if "norm" not in kwargs and ("levels" not in kwargs or levels_is_count):
         with warnings.catch_warnings():
             # An all-NaN field (or an all-NaN frame within it) makes
             # `nanmin`/`nanmax` themselves warn about an empty slice; the
