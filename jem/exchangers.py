@@ -516,7 +516,31 @@ class Exchange:
             # dtype leaf by leaf and reassembles the original container, so
             # a composite row is copied instead of raising, and the plain
             # -array case (a single leaf) casts exactly as before.
-            value = jax.tree_util.tree_map(_reconcile_leaf_dtype, current, value)
+            #
+            # Structure is only walked this way when it actually matches: an
+            # *illegitimate* row (an exchanger writing a plain array into a
+            # field that is still a `TimeSeries` because it was never
+            # declared exchanged, `jem.runners.declare_exchanged_forcing`)
+            # has `current`/`value` at different structures, and `tree_map`
+            # itself would refuse them with its own generic pytree error
+            # naming neither the spec nor "structure". That check is
+            # `Exchange.validate`'s job (named-spec, build time) with the
+            # coupler's per-workflow-element carry check as the trace-time
+            # backstop when `validate` was skipped -- not this cast's, so an
+            # unequal pair is left exactly as before (no-op unless `value`
+            # is itself a bare array needing a dtype cast, which it always
+            # is here) for one of those two to catch downstream.
+            # Typed as Any because `tree_structure` returns an opaque
+            # PyTreeDef that static analysis cannot compare, exactly as in
+            # `_require_same_structure` above.
+            current_structure: Any = jax.tree_util.tree_structure(current)
+            value_structure: Any = jax.tree_util.tree_structure(value)
+            if current_structure == value_structure:
+                value = jax.tree_util.tree_map(_reconcile_leaf_dtype, current, value)
+            else:
+                current_dtype = jnp.result_type(current)
+                if jnp.result_type(value) != current_dtype:
+                    value = jnp.asarray(value, dtype=current_dtype)
             updates.setdefault(component, {}).setdefault(section, {})[field] = value
 
         exchanged = dict(components)

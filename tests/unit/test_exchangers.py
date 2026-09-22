@@ -1133,6 +1133,51 @@ def test_exchange_copies_a_composite_field_and_reconciles_its_dtype():
         jax.config.update("jax_enable_x64", previous_x64)
 
 
+def test_exchange_leaves_a_structure_mismatch_for_the_coupler_to_catch():
+    """An illegitimate row (a struct overwritten by a plain array) is not
+    ``Exchange.__call__``'s to catch -- it changes the field and lets the
+    mismatch surface downstream, exactly as before this fix.
+
+    Reconciling dtype leaf by leaf with `tree_map` (the composite-field fix
+    above) only works when the two ends actually share structure --
+    `tree_map` itself raises a generic pytree error otherwise, which would
+    name neither the spec nor "structure" the way
+    `Exchange.validate`/the coupler's own carry check do. This is exactly
+    the shape `test_undeclared_file_forcing_is_refused_by_the_structure_check`
+    (`tests/unit/test_jcm_component.py`) exercises through a real coupled
+    step: a field that was never declared exchanged is still a composite
+    (there, a `TimeSeries`) and an exchanger writes a plain array into it.
+    `Exchange.__call__` has to let that through unexamined -- as it always
+    did -- rather than raise its own, differently-worded error first.
+    """
+
+    @tree_math.struct
+    class _Composite:
+        values: jnp.ndarray
+        aux: jnp.ndarray
+
+    @tree_math.struct
+    class _Section:
+        x: object
+
+    carries = {
+        "a": {"state": _Section(jnp.zeros((3,), dtype=jnp.float32))},
+        "b": {"state": _Section(
+            _Composite(jnp.ones((3,), dtype=jnp.float32), jnp.zeros((3,)))
+        )},
+    }
+    exchange = Exchange([ExchangeSpec("a.state.x", "b.state.x")])
+
+    exchanged = exchange(carries, time=None)
+
+    # The plain array replaced the composite outright -- no cast, no error --
+    # which is what changes "b"'s carry structure for the coupler to notice.
+    assert isinstance(exchanged["b"]["state"].x, jnp.ndarray)
+    assert jax.tree_util.tree_structure(exchanged["b"]) != jax.tree_util.tree_structure(
+        carries["b"]
+    )
+
+
 def test_exchange_still_rejects_a_shape_mismatch():
     """No silent broadcasting: only the dtype is fixed automatically.
 

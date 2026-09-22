@@ -1055,7 +1055,13 @@ components these configurations are the first to exercise:
   `jnp.asarray` cannot turn a struct into an array and raised `TypeError`,
   so any composite row with a genuine dtype mismatch could never be copied.
   It now walks the two same-shaped pytrees with `tree_map`, casting only the
-  leaves whose dtypes differ and reassembling the original container.
+  leaves whose dtypes differ and reassembling the original container --
+  gated on the two ends actually sharing structure first, so an
+  *illegitimate* row (a field an exchanger writes that is still a
+  `TimeSeries` because it was never declared exchanged) is left exactly as
+  before for `Exchange.validate` or the coupler's own carry-structure check
+  to catch, instead of `tree_map` raising its own, differently-worded pytree
+  error first.
 - **`declare_exchanged_forcing`'s explicit branch is also inert when nothing
   is active.** 7f346c5 filtered only the *derived* branch's field set by
   `active` (the exchangers `coupling.workflow` actually runs), so a
