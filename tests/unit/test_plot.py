@@ -338,14 +338,18 @@ def test_map_plot_raises_on_levels_and_norm_together():
     assert "norm" in message
 
 
-def test_map_plot_curvilinear_grid_refuses_an_integer_levels_count():
-    """An integer ``levels`` count needs ``contourf``'s own locator to expand
-    it into boundaries; ``map_plot`` does not reimplement that for the
-    curvilinear path (risking silent drift from what ``contourf`` would
-    actually choose), so it raises instead of guessing.
+def test_map_plot_curvilinear_grid_expands_an_integer_levels_count():
+    """An integer ``levels`` count is expanded into a ``BoundaryNorm`` over
+    the field's own range -- the same ``matplotlib.ticker.MaxNLocator``
+    expansion ``contourf`` itself would do for an integer count on the
+    separable path -- rather than raising, so ``levels=N`` means the same
+    thing on either grid layout. ``plot._expand_level_count`` is the shared
+    machinery this and ``animate_map``'s shared bands both use, so the
+    boundaries here are checked against calling it directly.
     """
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
 
     lon2d, lat2d = np.meshgrid(
         np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
@@ -356,9 +360,17 @@ def test_map_plot_curvilinear_grid_refuses_an_integer_levels_count():
         coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
         name="field",
     )
+    expected = list(
+        plot._expand_level_count(5, float(field.min()), float(field.max()))
+    )
 
-    with pytest.raises(ValueError, match="integer"):
-        plot.map_plot(field, levels=5)
+    ax = plot.map_plot(field, levels=5)
+
+    mappable = ax.collections[-1]
+    assert isinstance(mappable.norm, mcolors.BoundaryNorm)
+    assert list(mappable.norm.boundaries) == expected
+    assert mappable.norm.boundaries[0] <= float(field.min())
+    assert mappable.norm.boundaries[-1] >= float(field.max())
 
 
 def test_map_plot_draws_a_colorbar_by_default():
@@ -666,6 +678,120 @@ def test_animate_map_curvilinear_field_shares_bands_across_frames():
         bands_per_frame.append(list(fig.axes[0].collections[-1].norm.boundaries))
 
     assert bands_per_frame[0] == bands_per_frame[1]
+    plt.close(fig)
+
+
+def test_animate_map_shares_boundaries_for_an_integer_levels_count():
+    """An integer ``levels`` count must be expanded once, from the whole
+    field, not forwarded as-is for each frame's own ``contourf`` to expand
+    against just that frame's data.
+
+    Reproduces the finding: frame 0 spans roughly 0-32, frame 1 (the same
+    pattern scaled up 10x) spans roughly 0-320; forwarding ``levels=7``
+    as-is gave boundaries ``[0, 4, ..., 32]`` for frame 0 and
+    ``[0, 40, ..., 320]`` for frame 1, with the one colorbar stuck on frame
+    0's.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    animation = plot.animate_map(field, levels=7)
+    fig = animation._fig
+    levels_per_frame = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        levels_per_frame.append(list(fig.axes[0].collections[-1].levels))
+
+    assert levels_per_frame[0] == levels_per_frame[1]
+    assert levels_per_frame[0][0] <= float(data.min())
+    assert levels_per_frame[0][-1] >= float(data.max())
+    plt.close(fig)
+
+
+def test_animate_map_curvilinear_shares_boundaries_for_an_integer_levels_count():
+    """The same integer-``levels`` sharing applies to a curvilinear field's
+    animation, via ``map_plot``'s ``levels`` -> ``BoundaryNorm`` translation.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon2d, lat2d = np.meshgrid(
+        np.linspace(0, 300, 6), np.linspace(-60, 60, 4), indexing="ij"
+    )
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(6 * 4).reshape(6, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "x", "y"),
+        coords={
+            "time": time,
+            "lat": (("x", "y"), lat2d),
+            "lon": (("x", "y"), lon2d),
+        },
+        name="field",
+    )
+
+    animation = plot.animate_map(field, levels=7)
+    fig = animation._fig
+    boundaries_per_frame = []
+    for step in range(field.sizes["time"]):
+        animation._draw_frame(step)
+        boundaries_per_frame.append(
+            list(fig.axes[0].collections[-1].norm.boundaries)
+        )
+
+    assert boundaries_per_frame[0] == boundaries_per_frame[1]
+    assert boundaries_per_frame[0][0] <= float(data.min())
+    assert boundaries_per_frame[0][-1] >= float(data.max())
+    plt.close(fig)
+
+
+def test_animate_map_colorbar_is_built_from_the_drawn_mappable():
+    """The one colorbar is built from the mappable ``_map_plot`` actually
+    drew, not by picking one back out of ``ax.collections`` by position
+    (finding B): at matplotlib versions before 3.8, ``contourf`` added one
+    ``PathCollection`` per band rather than a single ``QuadContourSet``,
+    which would have made ``ax.collections[-1]`` the topmost band rather
+    than the whole mappable. The observable consequence checked here, true
+    regardless of matplotlib version, is that the colorbar's own boundaries
+    are the *whole* shared ``levels`` -- spanning the whole field, not one
+    band of it -- and are the exact object the frame was drawn with.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
+    base = np.arange(8 * 4).reshape(8, 4).astype(float)
+    data = np.stack([base, base * 10.0])
+    field = xr.DataArray(
+        data, dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": lon, "lat": lat}, name="field",
+    )
+
+    animation = plot.animate_map(field)
+    fig = animation._fig
+    mappable = fig.axes[0].collections[-1]
+
+    assert mappable.colorbar is not None
+    assert mappable.colorbar.mappable is mappable
+    assert list(mappable.colorbar.mappable.levels) == list(mappable.levels)
+    assert mappable.levels[0] <= float(data.min())
+    assert mappable.levels[-1] >= float(data.max())
     plt.close(fig)
 
 

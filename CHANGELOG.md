@@ -1110,19 +1110,29 @@ components these configurations are the first to exercise:
   showing the first frame's, misrepresenting the data. `animate_map` now
   computes `vmin`/`vmax` once from the whole field (NaN-skipping, since a
   masked ocean/sea-ice field is NaN over land) and passes them into every
-  frame's `map_plot` call by default. `levels` or `norm` opts out entirely,
-  each defining the whole scale; `vmin` or `vmax` fixes that one bound and
-  leaves the other shared, since matplotlib would otherwise autoscale the
-  open bound frame by frame. A shared `vmin`/`vmax` alone still let
-  `contourf` pick different band boundaries per frame from each frame's own
-  data (e.g. `[0, 4, ..., 32]` for one frame, `[0, 40, ..., 320]` for another
-  spanning ten times the range, despite both reporting the same shared
-  `get_clim()`), so every frame's one colorbar still showed the first
-  frame's bands. `animate_map` now also computes shared `levels` from those
-  same (whole-field, or caller-supplied) bounds, using the same
-  `matplotlib.ticker.MaxNLocator` `contourf` itself defaults to, so the band
-  edges match across frames too -- and, via the `map_plot` fix below, on a
-  curvilinear grid as well.
+  frame's `map_plot` call by default. An explicit `levels` sequence, or
+  `norm`, opts out entirely, each defining the whole scale; `vmin` or `vmax`
+  fixes that one bound and leaves the other shared, since matplotlib would
+  otherwise autoscale the open bound frame by frame. A shared `vmin`/`vmax`
+  alone still let `contourf` pick different band boundaries per frame from
+  each frame's own data (e.g. `[0, 4, ..., 32]` for one frame, `[0, 40, ...,
+  320]` for another spanning ten times the range, despite both reporting the
+  same shared `get_clim()`), and an integer `levels` *count* (e.g.
+  `levels=7`) had the identical problem, since only `contourf`/`pcolormesh`
+  themselves expand a count, separately per frame -- so every frame's one
+  colorbar still showed the first frame's bands either way. `animate_map`
+  now expands the bands once too, from the bounds actually in force, with
+  `_expand_level_count` (the caller's own integer count in place of
+  matplotlib's default of 7, run through the same
+  `matplotlib.ticker.MaxNLocator` `contourf` itself defaults to), so the
+  band edges match across frames whether `levels` was left default or given
+  as a count -- and, via the `map_plot` fix below, on a curvilinear grid as
+  well. The one colorbar is now also built directly from the mappable
+  `map_plot`'s internal drawing step returns, rather than picked out of
+  `ax.collections` by position, which only happened to be safe at the
+  matplotlib version this project runs its tests against (`contourf` adds
+  one `PathCollection` per band, not one `QuadContourSet`, on matplotlib
+  older than 3.8).
 - **`jem.plot.map_plot`'s documented `levels` keyword crashed on a
   curvilinear grid**, e.g. the displaced-pole ocean output the shipped
   `aquaplanet-slab-mixed-grid` configuration writes:
@@ -1133,9 +1143,15 @@ components these configurations are the first to exercise:
   a separable lon/lat grid and does). `levels` is now realised as a
   `matplotlib.colors.BoundaryNorm`, over the resolved colormap's colour
   count, on the curvilinear path -- the same discrete colour bands `levels`
-  gives a separable grid, reached the way `pcolormesh` actually supports.
-  Passing `levels` together with an explicit `norm` now raises `ValueError`
-  naming both, rather than the two silently disagreeing about the scale.
+  gives a separable grid, reached the way `pcolormesh` actually supports. An
+  integer `levels` *count* (rather than explicit boundaries) is expanded
+  first, with the same `matplotlib.ticker.MaxNLocator` locator `contourf`
+  itself falls back on for a count, so `levels=N` now means the same thing
+  on either grid layout -- differing from `contourf`'s own count handling
+  only in that `contourf` additionally trims a boundary falling outside the
+  data's actual range, which this does not. Passing `levels` together with
+  an explicit `norm` now raises `ValueError` naming both, rather than the
+  two silently disagreeing about the scale.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
