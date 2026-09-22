@@ -1190,6 +1190,26 @@ components these configurations are the first to exercise:
   curvilinear grid, where `levels` becomes a `norm` and would silently
   overwrite the caller's own; on a separable grid both are passed through to
   `contourf` unchanged, which is what matplotlib itself supports.
+- **`VerosComponent.initialize()` seeds `derived` from the ocean's own
+  initial state, instead of `VerosDerived.zeros()`'s uniform 273.15 K.** Both
+  shipped Veros configurations run the default workflow -- every exchanger,
+  then every component -- so the exchanger reads `derived` *before* the
+  ocean has taken a single step, and whatever `initialize()` put there is
+  what the atmosphere integrates its entire first coupling interval over.
+  `VerosDerived.zeros()`'s placeholder made that interval run over a
+  fictitious freezing-point ocean: measured on the packaged setups, the
+  ocean's actual cold start is a uniform 288.03 K over ocean cells (`(1 -
+  zt/zw[0]) * 15 degC` at the surface layer, `double_drake_setup`'s and
+  `earth_setup`'s shared cold-start formula) against the placeholder's
+  273.15 K -- a 15 K day-1 error -- and after the ocean's real first step
+  the published SST is 288.03 K over ocean cells, confirming the seeded
+  value is the right one. The surface-extraction convention (the interior
+  slice, the `tau` time index, the Kelvin offset, the land-column
+  substitution) is now a single private helper,
+  `VerosComponent._derived_fields(state)`, called from both `step()` (after
+  integrating) and `initialize()` (on `self.model.state`, before any step),
+  so the two can no longer drift apart on it the way two separate copies of
+  a coupling convention have before in this project.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 
