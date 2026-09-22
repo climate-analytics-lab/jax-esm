@@ -35,6 +35,7 @@ from jem.components.slab import (
     SlabOceanParameters,
     SlabSeaiceParameters,
 )
+from jem.exchangers import Exchange
 
 CONFIG_MODULE = "jem.config"
 
@@ -649,6 +650,106 @@ def test_an_explicit_declaration_with_no_active_exchanger_leaves_forcing_unfroze
     carry = coupler.initialize()
     final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
     assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
+def test_a_declared_time_varying_field_with_no_writer_is_rejected():
+    """Codex round 20 (P2): a declared field the active table never writes.
+
+    Declaring `sice_am` for an atmosphere/ocean coupling that has no
+    sea-ice component reproduces the reported gap exactly: `sice_am` really
+    is time-varying (with `forcing=from_file`), so the `pinned` warning above
+    cannot catch it -- that check only fires for a declared name that is
+    *not* time-varying. Before the fix this fell through both safety nets
+    and `atm.initialize()` silently collapsed `sice_am` to its start-date
+    value for the rest of the run; only `sea_surface_temperature` is ever
+    written here (the standalone `Exchange` below has no `seaice` row), so
+    this must now be rejected outright rather than warned about.
+    """
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "+coupling.exchanged_forcing=[sea_surface_temperature,sice_am]",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    # A fully inspectable table -- an `Exchange`, not a hand-written function
+    # -- that only ever writes `sea_surface_temperature`, standing in for the
+    # atmosphere/ocean-only coupling (`seaice=none`) the finding names.
+    exchangers = {"exchange": Exchange([
+        {"src": "ocn.state.sea_surface_temperature",
+         "dst": "atm.forcing.sea_surface_temperature"},
+    ])}
+
+    # Deliberately not a bare `pytest.raises` block: if the guard regresses,
+    # the failure here has to show the actual silent freeze (what the
+    # reported bug looked like in practice), not just "no exception raised".
+    from jcm.forcing import TimeSeries
+
+    try:
+        runners.declare_exchanged_forcing(cfg, atm, exchangers)
+    except ValueError as error:
+        assert "sice_am" in str(error)
+        assert "sea_surface_temperature" in str(error)
+        # The rejection has to actually prevent the freeze, not just announce
+        # it: `atm.set_exchanged_forcing` must never have been reached, so
+        # `sice_am` is still the time-varying `TimeSeries` it was built as,
+        # not the array `initialize()` would otherwise have collapsed it to.
+        assert atm.exchanged_forcing == ()
+        assert isinstance(atm.initialize()["forcing"].sice_am, TimeSeries)
+    else:
+        pytest.fail(
+            "declare_exchanged_forcing accepted a declared field "
+            "('sice_am') that the active coupling table never writes; "
+            f"atm.exchanged_forcing = {atm.exchanged_forcing!r} and "
+            "atm.initialize()['forcing'].sice_am is now "
+            f"{type(atm.initialize()['forcing'].sice_am).__name__} instead "
+            f"of {TimeSeries.__name__} -- the exact silent freeze the "
+            "Codex round 20 finding reported."
+        )
+
+
+def test_a_declared_field_with_no_writer_is_accepted_when_an_exchanger_is_opaque():
+    """The negative case: an opaque active exchanger makes the set unprovable.
+
+    `coupling.exchanged_forcing` exists precisely so a hand-written
+    `coupling.exchanger` can say what it writes, since its body cannot be
+    read off (see `declare_exchanged_forcing`'s docstring). So even though
+    this test's only *readable* table -- there is none -- writes nothing,
+    declaring `sice_am` here must stay silent: the hand-written exchanger
+    might be the one writing it, and this function can never know that it
+    is not.
+    """
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+        "+coupling.exchanged_forcing=[sice_am]",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    runners.declare_exchanged_forcing(
+        cfg, atm, {"exchange": example_exchanger}
+    )
+    assert atm.exchanged_forcing == ("sice_am",)
+
+
+def test_a_declared_field_with_a_writer_is_accepted():
+    """The base case: a declared field the active table does write is fine.
+
+    Same shape as the reported-gap test above, but `sea_surface_temperature`
+    is exactly what the standalone `Exchange` writes, so nothing should be
+    rejected or warned about.
+    """
+    cfg = composed([
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+        "+coupling.exchanged_forcing=[sea_surface_temperature]",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    exchangers = {"exchange": Exchange([
+        {"src": "ocn.state.sea_surface_temperature",
+         "dst": "atm.forcing.sea_surface_temperature"},
+    ])}
+    runners.declare_exchanged_forcing(cfg, atm, exchangers)
+    assert atm.exchanged_forcing == ("sea_surface_temperature",)
 
 
 def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():

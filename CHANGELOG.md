@@ -1317,6 +1317,27 @@ components these configurations are the first to exercise:
   integrating) and `initialize()` (on `self.model.state`, before any step),
   so the two can no longer drift apart on it the way two separate copies of
   a coupling convention have before in this project.
+- **`declare_exchanged_forcing` now rejects a declared field that a fully
+  inspectable active table never writes**, instead of silently freezing it.
+  The existing `pinned` warning only fires for a declared name that is *not*
+  time-varying, and the "opaque hand-written exchanger" warning only fires
+  when an active exchanger cannot be read at all -- so a time-varying field
+  declared alongside an active table of nothing but `jem.exchangers.Exchange`
+  instances (e.g. declaring `sice_am` in an atmosphere/ocean run with no
+  sea-ice component) fell through both: `atm.initialize()` collapsed it to
+  its start-date value for the whole run, with no warning at all. When
+  *every* active exchanger is an `Exchange`, `jem.exchangers.exchanged_fields`
+  is a complete list of what the coupling writes, so a declared, time-varying
+  name outside it provably has no writer; this is now a `ValueError`, not a
+  warning, because unlike the `pinned` case the run is not merely
+  misdescribed but actually wrong -- a seasonal cycle silently replaced by a
+  constant for the whole integration -- and the fix is a one-line edit. When
+  any active exchanger is hand-written, nothing can be concluded (that
+  opacity is exactly why the explicit declaration exists), so this check
+  stays silent there, unchanged. Both shipped Veros configurations couple
+  through a hand-written `coupling.exchanger` and are unaffected, including
+  under the `forcing@atmosphere.forcing=from_file` override their own WHY
+  comments document.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

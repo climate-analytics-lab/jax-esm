@@ -423,9 +423,11 @@ def declare_exchanged_forcing(
     loudly at trace time (the coupler refuses the carry), but a field left in
     that nothing writes is a climatology frozen at its start-date value with
     no symptom at all -- so an explicit declaration naming a field that is not
-    time-varying is warned about, and a time-varying field that neither branch
+    time-varying is warned about, a time-varying field that neither branch
     declared is warned about whenever a hand-written exchanger could be the
-    one writing it.
+    one writing it, and (see "Detecting a declared field with no writer"
+    below) an explicit declaration naming a time-varying field that a fully
+    inspectable active table provably does not write is rejected outright.
 
     An exchanger that is registered but that the coupled model's ``workflow``
     never runs writes nothing either -- ``coupling.workflow`` omitting
@@ -455,11 +457,42 @@ def declare_exchanged_forcing(
     question this function can always answer safely, and is the one the
     failure mode above turns on.
 
+    Detecting a declared field with no writer
+    ------------------------------------------
+    ``coupling.exchanged_forcing`` can also name a field that *is*
+    time-varying while nothing active actually writes it -- e.g. declaring
+    ``sice_am`` in an atmosphere/ocean run with no sea-ice component. That
+    field is neither caught by the ``pinned`` warning above (it genuinely is
+    time-varying) nor by the "opaque hand-written exchanger" warning below
+    (there may be no opaque exchanger at all): it simply collapses to its
+    start-date value with nothing to say so.
+
+    This is detectable, and only detectable, when **every** active exchanger
+    is a :class:`~jem.exchangers.Exchange` (built from an inspectable table):
+    :func:`jem.exchangers.exchanged_fields` is then a *complete* list of what
+    the coupling writes, so a declared, time-varying name outside it provably
+    has no writer -- and this function raises. When *any* active exchanger is
+    hand-written (not an ``Exchange``), nothing can be concluded -- that
+    opacity is exactly why the explicit declaration exists in the first
+    place -- so this function stays silent there, same as today, and the
+    hand-written field is the user's to get right.
+
+    This is an error rather than a warning, unlike the sibling checks: a
+    declared field that is not time-varying (``pinned``, above) still leaves
+    the run *correct* -- a plain-array field collapses to itself -- so only
+    the intent might be wrong. Here the run is not correct: a seasonal cycle
+    is silently replaced by a constant for the whole integration, and the fix
+    (removing the name from the list) is a one-line edit.
+
     Raises
     ------
     ValueError
         If ``coupling.exchanged_forcing`` is a bare string. It is a list of
         field names, and a string would be read as its characters.
+    ValueError
+        If ``coupling.exchanged_forcing`` names a time-varying field that no
+        active, fully inspectable coupling table writes (see "Detecting a
+        declared field with no writer" above).
 
     Parameters
     ----------
@@ -490,6 +523,13 @@ def declare_exchanged_forcing(
         exchangers if workflow is None
         else {name: exchanger for name, exchanger in exchangers.items()
               if name in workflow}
+    )
+    # Computed once, ahead of the declared/derived split below, because both
+    # the new "declared but unwritten" check and the existing hand-written
+    # warning need to know which active exchangers are inspectable.
+    opaque = sorted(
+        name for name, exchanger in active.items()
+        if not isinstance(exchanger, Exchange)
     )
     declared = cfg.coupling.get("exchanged_forcing")
     if declared is not None:
@@ -540,6 +580,47 @@ def declare_exchanged_forcing(
                 "declaration is inert and they stay time-varying.",
                 ", ".join(fields) or "nothing",
             )
+        elif not opaque:
+            # Every active exchanger is a table (`Exchange`), so unlike the
+            # opaque case below, what it writes is not a guess:
+            # `exchanged_fields` is a complete list. A declared, time-varying
+            # field outside that list therefore provably has no writer -- not
+            # merely an unproven one -- and this is where the `pinned` warning
+            # above cannot help, because the field genuinely *is*
+            # time-varying; it is simply nobody's job to overwrite it. This is
+            # an error, not a warning, because unlike `pinned` the run is not
+            # correct: `atm.initialize()` collapses a declared name to its
+            # start-date value regardless of whether anything then keeps it
+            # current, so the run silently substitutes a constant for a
+            # seasonal cycle for its whole duration. The fix is one line
+            # (removing the name), so failing loudly costs nothing and a
+            # frozen climatology found after the fact costs a rerun.
+            writable = exchanged_fields(active, atm.name)
+            unwritten = [
+                name for name in fields
+                if name in atm.time_varying_forcing and name not in writable
+            ]
+            if unwritten:
+                one = len(unwritten) == 1
+                raise ValueError(
+                    "coupling.exchanged_forcing names "
+                    f"{', '.join(unwritten)}, which "
+                    f"{'is' if one else 'are'} still time-varying in this "
+                    f"atmosphere's forcing but {'has' if one else 'have'} no "
+                    "writer in the active coupling table. Declaring "
+                    f"{'it' if one else 'them'} without anything to "
+                    f"overwrite {'it' if one else 'them'} every coupling "
+                    f"step would silently freeze {'it' if one else 'them'} "
+                    f"at {'its' if one else 'their'} start-date value for "
+                    "the whole run, instead of following "
+                    f"{'its' if one else 'their'} seasonal cycle. The active "
+                    "table writes "
+                    f"{', '.join(writable) if writable else 'nothing'} into "
+                    f"'{atm.name}.forcing'; remove "
+                    f"{'it' if one else 'them'} from "
+                    "coupling.exchanged_forcing if nothing is meant to "
+                    f"supply {'it' if one else 'them'}."
+                )
     else:
         fields = exchanged_fields(active, atm.name)
         logger.info(
@@ -552,11 +633,8 @@ def declare_exchanged_forcing(
     # exchanger may still write, and the coupled step is then refused for
     # changing the carry's structure. Only a hand-written exchanger can
     # produce that silently -- a declarative table is where `fields` came
-    # from -- so the warning is gated on there being one.
-    opaque = sorted(
-        name for name, exchanger in active.items()
-        if not isinstance(exchanger, Exchange)
-    )
+    # from -- so the warning is gated on there being one (`opaque`, computed
+    # above).
     undeclared = [name for name in atm.time_varying_forcing if name not in fields]
     if opaque and undeclared:
         # A hand-written exchanger is a function, so there is nothing to
