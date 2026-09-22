@@ -962,6 +962,26 @@ components these configurations are the first to exercise:
   what the `ice_clim_file` above is for. How much of a climatology the floor
   touches is logged at INFO when the model is built. Runs with no SST
   climatology are unaffected: the idealized profile starts near 288 K.
+- **The floor above covered the initial state; the relaxation TARGET itself
+  was still the raw, sub-freezing climatology.** `forcing_method="relaxation"`
+  (`earth-slab`'s ocean) reads `_climatology_at()` every step as what the mixed
+  layer relaxes towards, not only at `t=0`; left unfloored, each step computed
+  a large anomaly against that sub-freezing target, relaxed the mixed layer
+  down towards it, clamped the result back to freezing, and reported the same
+  deficit as `ice_frazil_melt_energy` again — so the "one-off" transient the
+  previous fix eliminated from the initial state was regenerating itself every
+  coupling day instead. `SlabOceanModel` now floors `self.sst_climatology`
+  itself, once, right after it is loaded (and after the below-freezing points
+  are logged, since that log needs the raw values) — the initial condition and
+  the relaxation target both read the same, already-valid array, rather than
+  each call site needing to remember to floor it. On `earth-slab`'s two
+  coupled days this drops the maximum sea-ice thickness from 3.7 m to 3.0 m
+  (the seeded `ice_clim_file` maximum: growth beyond it stops entirely) and
+  the ocean's per-step `ice_frazil_melt_energy` from a repeating ~2.3-2.6e8
+  J/m^2 to 0 on the first day and ~1e7 J/m^2 on the second (genuine
+  atmosphere-driven cooling, not the relaxation artifact). A cell whose
+  climatology is already above freezing is untouched: `jnp.maximum` only ever
+  raises a value, never lowers one.
 - `Exchange.validate` compares the pytree **structure** of each row's two
   ends and raises naming the row, so a destination that is a composite leaf
   (a `jcm.forcing.TimeSeries` an exchanger would overwrite with one array)
