@@ -14,8 +14,13 @@ on:
 # tests/unit/test_jcm_contract.py asserts that this value equals it -- change
 # one and the test tells you to change the other. The `canary-jcm-dev` job
 # below still tracks `dev`, so drift is visible without blocking a PR.
+#
+# CURRENTLY A PR HEAD, NOT A `dev` COMMIT: jax-gcm PR 877 (closes jax-gcm#754
+# and #884), not yet merged -- see JCM_SUPPORTED_REV's docstring in
+# contract.py for what this branch needs from it and why this pin must move
+# to the `dev` merge commit once PR 877 lands.
 env:
-  JCM_REV: 9e399ab2840bb02eff3a5ea60a86072ab37da495
+  JCM_REV: 08d3d4b6d9c114530af43208f1a7c0acd4a101ae
 
 jobs:
   lint:
