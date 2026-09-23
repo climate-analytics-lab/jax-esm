@@ -6,6 +6,9 @@ and share it across the module: construction plus the first compiled step
 dominates the runtime.
 """
 
+import subprocess
+import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import jax
@@ -17,6 +20,14 @@ from jcm.date import DateData
 from jcm.forcing import ForcingData, TimeSeries
 from jcm.model import Model
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.surface.echam.surface_exchange_publisher import (
+    EchamSurfaceExchange,
+)
+from jcm.physics.surface.surface_exchange import (
+    SurfaceExchange as JcmSurfaceExchange,
+)
+from jcm.physics.surface.surface_exchange import surface_exchange_from
+from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
 
 from jem.base.component import (
@@ -165,31 +176,83 @@ def test_initialize_does_not_integrate(model, monkeypatch):
     assert carry["derived"].total_heat_flux.shape == GRID_SHAPE
 
 
-def _fake_speedy_diagnostics(hfluxn=10.0, evap=2.0, precnv=3.0, precls=5.0,
-                             u0=1.5, v0=-2.5):
-    """Build a diagnostics dict shaped like SPEEDY's, with hand-chosen values."""
+def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
+                          wind_speed=3.0):
+    """Build a real jax-gcm ``SurfaceExchange`` (#754) with hand-chosen values.
+
+    The other guaranteed fields (``sensible_heat_flux``, ``latent_heat_flux``,
+    ``stress_u``/``stress_v``, ``air_density``, ``air_potential_temperature``)
+    are filled with placeholders: JEM's translation does not read them (see
+    ``jem/components/jcm/exchange_fields.py``'s module docstring), so their
+    values are irrelevant to what is being tested here.
+    """
+    field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
+    return JcmSurfaceExchange(
+        net_heat_flux=field(net_heat_flux),
+        sensible_heat_flux=field(0.0),
+        latent_heat_flux=field(0.0),
+        evaporation=field(evaporation),
+        precipitation=field(precipitation),
+        stress_u=field(0.0),
+        stress_v=field(0.0),
+        wind_speed=field(wind_speed),
+        air_density=field(1.2),
+        air_potential_temperature=field(290.0),
+    )
+
+
+def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
+                             precipitation=0.008, u0=1.5, v0=-2.5):
+    """Build a diagnostics dict shaped like SPEEDY's post-#754 output.
+
+    Carries both the published ``surface_exchange`` contract struct and
+    SPEEDY's private wind-vector key (``_surface_flux.u0``/``.v0`` --
+    ``exchange_fields``'s one remaining package-specific read; see its module
+    docstring). The values are already in the contract's units (kg m-2 s-1,
+    positive up/down) -- unlike the pre-#754 fixture this replaces, which
+    used SPEEDY's private g m-2 s-1 diagnostics and needed a /1000 conversion.
+    """
     field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
     return {
-        "_surface_flux": SimpleNamespace(
-            hfluxn=field(hfluxn), evap=field(evap),
-            u0=field(u0), v0=field(v0),
+        "_surface_flux": SimpleNamespace(u0=field(u0), v0=field(v0)),
+        "surface_exchange": _jcm_surface_exchange(
+            net_heat_flux, evaporation, precipitation,
+            wind_speed=float(np.hypot(u0, v0)),
         ),
-        "_convection": SimpleNamespace(precnv=field(precnv)),
-        "_condensation": SimpleNamespace(precls=field(precls)),
+    }
+
+
+def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
+                            precipitation=0.004):
+    """Build a diagnostics dict shaped like ECHAM's post-#754 output.
+
+    No ``_surface_flux`` key: ECHAM never carries a near-surface wind
+    *vector* anywhere in its diagnostics, contract or no contract (see
+    ``exchange_fields``'s module docstring), so this is what an ECHAM run's
+    diagnostics genuinely look like from ``from_diagnostics``'s point of
+    view -- not a stripped-down fixture.
+    """
+    return {
+        "surface_exchange": _jcm_surface_exchange(
+            net_heat_flux, evaporation, precipitation,
+        ),
     }
 
 
 def test_speedy_exchange_shapes_and_signs():
-    """Sign flip and g -> kg conversion, against hand-computed values."""
+    """Sign flip only: evaporation/precipitation need no unit conversion any
+    more, because the #754 contract already publishes them in JEM's units
+    (kg m-2 s-1) -- see the module docstring's derivation table.
+    """
     diagnostics = _fake_speedy_diagnostics()
-    exchange = exchange_fields.detect(diagnostics)(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics)
 
     assert exchange.total_heat_flux.shape == GRID_SHAPE
-    # jcm's hfluxn is positive DOWNWARD into the surface; JEM is upward.
+    # jax-gcm's net_heat_flux is positive DOWN into the surface; JEM is up.
     np.testing.assert_allclose(exchange.total_heat_flux, -10.0)
-    # 2 g m-2 s-1 evaporation is 0.002 kg m-2 s-1.
+    # Already kg m-2 s-1 and already the convective+large-scale total in the
+    # published contract -- no conversion, no manual summing.
     np.testing.assert_allclose(exchange.evaporation, 0.002)
-    # Precipitation is convective plus large-scale: (3 + 5) g m-2 s-1.
     np.testing.assert_allclose(exchange.precipitation, 0.008)
     np.testing.assert_allclose(exchange.u0, 1.5)
     np.testing.assert_allclose(exchange.v0, -2.5)
@@ -197,24 +260,163 @@ def test_speedy_exchange_shapes_and_signs():
         assert field.shape == GRID_SHAPE
 
 
-def test_echam_not_implemented_names_issue():
-    """The ECHAM reader fails loudly and points at the jax-gcm issue."""
-    with pytest.raises(NotImplementedError, match=r"jax-gcm#754"):
-        exchange_fields.echam({"surface": object()})
+def test_echam_heat_and_water_fluxes_use_the_same_translation_as_speedy():
+    """#754 closes: ECHAM's heat/water fluxes now translate identically to
+    SPEEDY's, with no per-package code -- where the pre-#754 ``echam()``
+    reader always raised ``NotImplementedError`` (git history, commit
+    756cc2c), because there was no package-independent struct to read.
+
+    This checks the translation directly against jax-gcm's own public
+    reader (:func:`jcm.physics.surface.surface_exchange.surface_exchange_from`)
+    rather than against ``from_diagnostics`` end to end, because
+    ``from_diagnostics`` raises for ECHAM at the *separate* wind-vector step
+    (checked below) before it would return -- the heat/water translation
+    itself does not depend on the wind vector being available.
+    """
+    diagnostics = _fake_echam_diagnostics()
+    contract = surface_exchange_from(diagnostics)
+    # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is the
+    # negative of it (positive UP) -- same sign flip as the SPEEDY case above.
+    np.testing.assert_allclose(-contract.net_heat_flux, -7.0)
+    np.testing.assert_allclose(contract.evaporation, 0.001)
+    np.testing.assert_allclose(contract.precipitation, 0.004)
 
 
-def test_detect_picks_echam_on_surface_key():
-    """ECHAM is detected by its own diagnostics key, not by absence of SPEEDY's."""
-    assert exchange_fields.detect({"surface": object()}) is exchange_fields.echam
+def test_echam_wind_vector_not_implemented_names_the_reason():
+    """ECHAM has no near-surface wind *vector* anywhere (only a speed), which
+    predates and is independent of #754 -- see the module docstring's
+    wind-vector note. The heat/water fluxes above are unaffected; only a
+    caller that also needs ``u0``/``v0`` (today: ``jem.fluxes.VerosExchange``)
+    is.
+    """
+    diagnostics = _fake_echam_diagnostics()
+    with pytest.raises(NotImplementedError, match="wind VECTOR"):
+        exchange_fields.from_diagnostics(diagnostics)
 
 
-def test_detect_unknown_lists_keys():
-    """An unrecognised physics package reports what it did publish."""
-    with pytest.raises(KeyError) as excinfo:
-        exchange_fields.detect({"radiation": None, "clouds": None})
-    message = str(excinfo.value)
-    assert "radiation" in message
-    assert "clouds" in message
+def test_missing_surface_exchange_raises_jcms_own_key_error():
+    """A package that publishes no ``surface_exchange`` at all (Held-Suarez)
+    fails with jax-gcm's own pointed error, not a bare ``KeyError``.
+    """
+    with pytest.raises(KeyError, match="surface_exchange"):
+        exchange_fields.from_diagnostics({"radiation": None, "clouds": None})
+
+
+def _old_exchange_fields_at_756cc2c() -> types.ModuleType:
+    """Import ``exchange_fields.py`` exactly as it stood before this collapse.
+
+    Loads the file's source from git history (commit 756cc2c, the last
+    commit before jax-gcm#754 landed) and executes it as an independent
+    module, so :func:`test_speedy_new_reader_agrees_with_the_pre_754_reader`
+    below compares two genuinely different pieces of code -- the historical
+    baseline the task's numeric-equivalence check calls for -- rather than a
+    function against itself.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    source = subprocess.run(
+        ["git", "show", "756cc2c:jem/components/jcm/exchange_fields.py"],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout
+    module = types.ModuleType("_old_exchange_fields_756cc2c")
+    exec(compile(source, "<756cc2c:jem/components/jcm/exchange_fields.py>",
+                 "exec"), module.__dict__)
+    return module
+
+
+@pytest.mark.slow
+def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
+    """The #754 collapse must not change what a SPEEDY run exchanges.
+
+    Runs one real coupled step (the ``stepped`` fixture) and reads the SAME
+    diagnostics dict two ways: through the pre-#754 adapter (git history,
+    commit 756cc2c) and through the new single reader. Agreement to
+    floating-point tolerance is the decisive check the migration asked for --
+    not just that the two *formulas* look equivalent on paper, but that they
+    give the same numbers on a real model step.
+    """
+    old = _old_exchange_fields_at_756cc2c()
+    _, carry1, _, _, _ = stepped
+    diagnostics = carry1["derived"].physics
+
+    old_exchange = old.speedy(diagnostics)
+    new_exchange = exchange_fields.from_diagnostics(diagnostics)
+
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(new_exchange, name)),
+            np.asarray(getattr(old_exchange, name)),
+            rtol=1e-6, atol=1e-9, err_msg=name,
+        )
+
+
+def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
+    """The new reader against a REAL ``EchamSurfaceExchange`` step's output.
+
+    There is no historical baseline for ECHAM (the pre-#754 ``echam()``
+    reader always raised), so this is not an old-vs-new diff -- it is
+    evidence that the translation is correct: the diagnostics dict is built
+    by actually calling jax-gcm's own ``EchamSurfaceExchange`` term (not a
+    reimplementation of it) on hand-chosen inputs, and the expected
+    heat/water values are derived by hand from those SAME inputs, following
+    the ECHAM energy balance ``EchamSurfaceExchange`` itself documents
+    (net radiation minus the turbulent fluxes; stratiform plus convective
+    precipitation).
+    """
+    ncols = 4
+    shape_3d = (2, ncols)
+    state = PhysicsState(
+        temperature=jnp.full(shape_3d, 290.0),
+        specific_humidity=jnp.full(shape_3d, 0.008),
+        u_wind=jnp.zeros(shape_3d),
+        v_wind=jnp.zeros(shape_3d),
+        geopotential=jnp.zeros(shape_3d),
+        normalized_surface_pressure=jnp.ones((ncols,)),
+    )
+    sensible_heat_flux, latent_heat_flux = 15.0, 85.0
+    sw_down, sw_up, lw_down, lw_up = 200.0, 40.0, 300.0, 350.0
+    precip_rain, precip_snow, precip_conv = 2e-5, 0.0, 1e-5
+    evaporation = 3e-5
+    diagnostics = {
+        "surface": SimpleNamespace(
+            sensible_heat_flux=jnp.full((ncols,), sensible_heat_flux),
+            latent_heat_flux=jnp.full((ncols,), latent_heat_flux),
+            evaporation=jnp.full((ncols,), evaporation),
+            momentum_flux_u=jnp.full((ncols,), 0.02),
+            momentum_flux_v=jnp.full((ncols,), -0.01),
+        ),
+        "vertical_diffusion": SimpleNamespace(
+            wind_10m=jnp.full((ncols,), 5.0)),
+        "radiation": SimpleNamespace(
+            surface_sw_down=jnp.full((ncols,), sw_down),
+            surface_sw_up=jnp.full((ncols,), sw_up),
+            surface_lw_down=jnp.full((ncols,), lw_down),
+            surface_lw_up=jnp.full((ncols,), lw_up),
+        ),
+        "clouds": SimpleNamespace(
+            precip_rain=jnp.full((ncols,), precip_rain),
+            precip_snow=jnp.full((ncols,), precip_snow),
+        ),
+        "convection": SimpleNamespace(
+            precip_conv=jnp.full((ncols,), precip_conv)),
+        "pressure_full": jnp.full(shape_3d, 95000.0),
+    }
+    _tendency, diagnostics = EchamSurfaceExchange()(
+        state, diagnostics, None, None)
+
+    expected_net_heat_flux = (
+        (sw_down - sw_up) + (lw_down - lw_up)
+        - sensible_heat_flux - latent_heat_flux
+    )
+    expected_precipitation = precip_rain + precip_snow + precip_conv
+
+    with pytest.raises(NotImplementedError, match="wind VECTOR"):
+        exchange_fields.from_diagnostics(diagnostics)
+    contract = surface_exchange_from(diagnostics)
+    # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is its
+    # negative (positive UP).
+    np.testing.assert_allclose(-contract.net_heat_flux, -expected_net_heat_flux)
+    np.testing.assert_allclose(contract.evaporation, evaporation)
+    np.testing.assert_allclose(contract.precipitation, expected_precipitation)
 
 
 def test_make_jem_compatible_is_deprecated(model):

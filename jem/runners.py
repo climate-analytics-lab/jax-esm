@@ -114,6 +114,16 @@ def build_atmosphere(cfg: DictConfig) -> JCMComponent:
     atmosphere's ``run`` group governs only what it governs in an uncoupled
     run -- above all its timestep.
 
+    Calls ``model.physics.require_surface_exchange()`` right after the model
+    is built (jax-gcm#754 / #301): a physics package that cannot publish the
+    ``SurfaceExchange`` coupling struct (Held-Suarez, which resolves no
+    surface fluxes at all) would otherwise only be discovered at the first
+    coupled step, inside ``JCMComponent.step``'s call to
+    ``jem.components.jcm.exchange_fields.from_diagnostics`` -- a composition-
+    time failure here, naming the composed terms, is far more useful than a
+    ``KeyError`` deep in the first coupled step of what might be an hours-long
+    queued run.
+
     Parameters
     ----------
     cfg : omegaconf.DictConfig
@@ -134,6 +144,7 @@ def build_atmosphere(cfg: DictConfig) -> JCMComponent:
     atmosphere = cfg.atmosphere
     apply_constants_overrides(atmosphere)
     model = build_model(atmosphere)
+    model.physics.require_surface_exchange()
     dycore = getattr(model, "dycore", None)
     forcing = build_forcing(atmosphere, model.coords, dycore=dycore)
     # jax-gcm's own cross-validation of combinations that run but mislead. It

@@ -191,11 +191,14 @@ Four things to note:
   JCM sub-steps internally at its own timestep and returns one saved record
   per coupling step.
 - The surface fluxes are converted on the way out, in
-  :mod:`jem.components.jcm.exchange_fields`: JCM publishes :code:`hfluxn`
-  downward positive and its water fluxes in :code:`g m-2 s-1`, and JEM's
-  convention is upward positive in :code:`kg m-2 s-1`. Doing this once, at
-  the component boundary, is what keeps every exchanger downstream sign- and
-  unit-consistent.
+  :mod:`jem.components.jcm.exchange_fields`: JCM publishes its
+  package-independent :code:`SurfaceExchange` contract (jax-gcm#754) with
+  :code:`net_heat_flux` positive *down* and the water fluxes already in
+  :code:`kg m-2 s-1`, and JEM's convention is heat flux positive *up*, so the
+  sign is flipped exactly once, at the component boundary -- no unit
+  conversion is needed any more. That single translation is what keeps every
+  exchanger downstream sign- and unit-consistent, for either physics package:
+  see the module's docstring for the full derivation.
 
 
 Exchanging with other components
