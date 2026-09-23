@@ -131,9 +131,14 @@ key was present in the diagnostics dict. All three -- ``speedy()``,
 ``echam()``, ``detect()`` -- are gone: the heat and water fluxes both
 packages deliver are now read identically, off the one contract, so ECHAM's
 surface exchange (net heat flux, evaporation, precipitation) now works for
-the first time. The old readers' source is preserved in git history
-(commit ``756cc2c``) and used directly, as the historical baseline, by the
-numeric old-vs-new equivalence test in ``tests/unit/test_jcm_component.py``.
+the first time. The old ``speedy()`` reader's source (commit ``756cc2c``, the
+last commit before this collapse) is vendored, frozen, as
+``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
+historical baseline, by the numeric old-vs-new equivalence test in
+``tests/unit/test_jcm_component.py`` -- vendored rather than loaded from git
+history at test time (as an earlier version of that test did) because CI's
+shallow ``actions/checkout`` does not have commit ``756cc2c`` in its object
+store.
 """
 
 from __future__ import annotations

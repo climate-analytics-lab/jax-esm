@@ -6,9 +6,6 @@ and share it across the module: construction plus the first compiled step
 dominates the runtime.
 """
 
-import subprocess
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import jax
@@ -39,6 +36,7 @@ from jem.base.component import (
 )
 from jem import constants
 from jem.components.jcm import JCMComponent, exchange_fields
+from tests.unit import _pre754_exchange_reader
 
 START_DATE = jdt.to_datetime("2000-01-01")
 CALENDAR = "365_day"
@@ -302,43 +300,33 @@ def test_missing_surface_exchange_raises_jcms_own_key_error():
         exchange_fields.from_diagnostics({"radiation": None, "clouds": None})
 
 
-def _old_exchange_fields_at_756cc2c() -> types.ModuleType:
-    """Import ``exchange_fields.py`` exactly as it stood before this collapse.
-
-    Loads the file's source from git history (commit 756cc2c, the last
-    commit before jax-gcm#754 landed) and executes it as an independent
-    module, so :func:`test_speedy_new_reader_agrees_with_the_pre_754_reader`
-    below compares two genuinely different pieces of code -- the historical
-    baseline the task's numeric-equivalence check calls for -- rather than a
-    function against itself.
-    """
-    repo_root = Path(__file__).resolve().parents[2]
-    source = subprocess.run(
-        ["git", "show", "756cc2c:jem/components/jcm/exchange_fields.py"],
-        cwd=repo_root, capture_output=True, text=True, check=True,
-    ).stdout
-    module = types.ModuleType("_old_exchange_fields_756cc2c")
-    exec(compile(source, "<756cc2c:jem/components/jcm/exchange_fields.py>",
-                 "exec"), module.__dict__)
-    return module
-
-
 @pytest.mark.slow
 def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
     """The #754 collapse must not change what a SPEEDY run exchanges.
 
     Runs one real coupled step (the ``stepped`` fixture) and reads the SAME
-    diagnostics dict two ways: through the pre-#754 adapter (git history,
-    commit 756cc2c) and through the new single reader. Agreement to
-    floating-point tolerance is the decisive check the migration asked for --
-    not just that the two *formulas* look equivalent on paper, but that they
-    give the same numbers on a real model step.
+    diagnostics dict two ways: through the pre-#754 adapter and through the
+    new single reader. Agreement to floating-point tolerance is the decisive
+    check the migration asked for -- not just that the two *formulas* look
+    equivalent on paper, but that they give the same numbers on a real model
+    step.
+
+    The pre-#754 adapter is ``tests/unit/_pre754_exchange_reader.py``, a
+    frozen vendored copy of ``jem/components/jcm/exchange_fields.py`` as it
+    stood at commit 756cc2c (the last commit before the #754 migration) --
+    see that module's docstring. It is vendored rather than loaded from git
+    history (as this test used to do, with ``git show 756cc2c:...``) because
+    CI's ``actions/checkout`` is a shallow clone: commit 756cc2c is not in
+    the runner's object store, so ``git show`` failed there with exit status
+    128 even though the test passed locally, where a full-history
+    development checkout hid the problem. Vendoring the old reader once
+    makes this test hermetic -- no dependency on git history, checkout
+    depth, or the repository at all.
     """
-    old = _old_exchange_fields_at_756cc2c()
     _, carry1, _, _, _ = stepped
     diagnostics = carry1["derived"].physics
 
-    old_exchange = old.speedy(diagnostics)
+    old_exchange = _pre754_exchange_reader.speedy(diagnostics)
     new_exchange = exchange_fields.from_diagnostics(diagnostics)
 
     for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
