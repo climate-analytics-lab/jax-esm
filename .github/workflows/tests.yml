@@ -21,12 +21,13 @@ on:
 # one and the test tells you to change the other. The `canary-jcm-dev` job
 # below still tracks `dev`, so drift is visible without blocking a PR.
 #
-# CURRENTLY A PR HEAD, NOT A `dev` COMMIT: jax-gcm PR 877 (closes jax-gcm#754
-# and #884), not yet merged -- see JCM_SUPPORTED_REV's docstring in
-# contract.py for what this branch needs from it and why this pin must move
-# to the `dev` merge commit once PR 877 lands.
+# This is the `dev` merge commit of jax-gcm PR 877 (closes jax-gcm#754, #301
+# and #884) -- the revision that first carries the package-independent
+# `SurfaceExchange` struct and the declared forcing-alignment rule this
+# repository is written against. See JCM_SUPPORTED_REV's docstring in
+# contract.py.
 env:
-  JCM_REV: 08d3d4b6d9c114530af43208f1a7c0acd4a101ae
+  JCM_REV: 46eb3fc1efc3d16fde5458736d80a3491698f3ed
 
 jobs:
   lint:

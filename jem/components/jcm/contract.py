@@ -21,31 +21,26 @@ removed X" rather than as a mid-run crash. It also asserts that the revision
 the CI workflow checks out is this one, so the pin and the workflow cannot
 drift apart.
 
-Why a PR head rather than a ``dev`` commit or a release
----------------------------------------------------------
-``JCM_SUPPORTED_REV`` is currently jax-gcm PR **877**'s head commit,
-``08d3d4b6d9c114530af43208f1a7c0acd4a101ae`` -- **not yet on ``dev``**. PR 877
-closes jax-gcm#754 (the package-independent ``SurfaceExchange`` coupling
-struct every physics package now publishes identically) and adds the
-declared forcing-alignment rule (jax-gcm#884, ``jcm.forcing.resolve_align``),
-both of which this revision of JAX-ESM is written against
-(``jem/components/jcm/exchange_fields.py`` and the ``forcing.align`` knobs in
-``jem/config/configuration/*.yaml``).
+Why a ``dev`` revision rather than a release
+-------------------------------------------
+``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **877**,
+``46eb3fc1efc3d16fde5458736d80a3491698f3ed``. jax-gcm has no 3.x tag yet --
+``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
+``dev`` sha is the most precise thing there is to name. It is the merge
+commit itself rather than whatever ``dev`` happened to be at bump time,
+because later, unrelated ``dev`` commits are not revisions this branch has
+been checked against.
 
-**This is a stopgap, not a policy change**, and it carries a real
-constraint: *this branch cannot merge while the pin points at a PR head*.
-``JCM_SUPPORTED_REV`` MUST be re-pinned to the ``dev`` merge commit that
-actually contains PR 877 once it lands (and to ``main`` at the next tagged
-release after that), following "How to bump the pin" below. A PR head is
-mutable in a way a merged commit is not -- the PR can be force-pushed,
-rebased or changed under review -- so this pin is only ever meant to be
-read alongside the branch it was made for, and must not be treated as a
-stable long-term reference the way a ``dev``/``main`` pin is.
+PR 877 closes jax-gcm#754 (the package-independent ``SurfaceExchange``
+coupling struct every physics package now publishes identically), #301
+(prescribed surface fluxes) and #884 (the declared forcing-alignment rule,
+``jcm.forcing.resolve_align``) -- the first and last of which this revision
+of JAX-ESM is written against (``jem/components/jcm/exchange_fields.py`` and
+the ``forcing.align`` knobs in ``jem/config/configuration/*.yaml``).
 
-Before PR 877, ``JCM_SUPPORTED_REV`` was jax-gcm ``dev`` as it stood on
+The revision this pin replaced was jax-gcm ``dev`` as it stood on
 2026-09-21, and carried four things JAX-ESM was written against (all still
-true at PR 877's head, which is built on top of that ``dev`` commit --
-verified with ``git merge-base --is-ancestor``):
+true here, since PR 877 was merged on top of that ``dev`` commit):
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
@@ -74,8 +69,8 @@ verified with ``git merge-base --is-ancestor``):
   the public name internally, not the alias. JEM ships no such override
   today; a perpetual-season (frozen seasonal cycle) hook, which would be
   exactly this pattern, is tracked as jax-esm#120;
-* **#754/#301 (PR 877 itself)** -- the package-independent ``SurfaceExchange``
-  coupling struct, published identically under
+* **#754/#301/#884 (PR 877 itself)** -- the package-independent
+  ``SurfaceExchange`` coupling struct, published identically under
   ``diagnostics["surface_exchange"]`` by every physics package that resolves
   a surface (SPEEDY, ECHAM; Held-Suarez opts out), replacing the per-package
   private-diagnostics readers ``jem/components/jcm/exchange_fields.py`` used
@@ -108,14 +103,9 @@ How to bump the pin
 When a tagged jax-gcm release finally contains all of the above, replace the
 sha with the tag and raise the ``pyproject.toml`` floor to match.
 
-**Re-pinning off PR 877's head** follows the same three steps, but with one
-extra: once jax-gcm PR 877 is merged, ``JCM_SUPPORTED_REV`` must move from
-this PR-head sha to the ``dev`` commit that actually contains the merge (not
-simply to the current ``dev`` tip at the time of the bump, in case other,
-unrelated commits landed on ``dev`` first that this branch has not yet been
-checked against) -- and this module's "Why a PR head..." section above should
-be folded back into an ordinary "Why a ``dev`` revision" section once that is
-done, since the stopgap will no longer apply.
+Always pin to the ``dev`` commit that *contains* the change JAX-ESM needs,
+not to whatever ``dev`` happens to be at the time of the bump: the tip may
+carry unrelated commits this branch has never been run against.
 """
 
 from __future__ import annotations
@@ -127,14 +117,11 @@ from typing import NamedTuple
 #: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
 #: can be compared against directly.
 #:
-#: THIS IS CURRENTLY A PR HEAD, NOT A ``dev`` COMMIT -- see "Why a PR head
-#: rather than a ``dev`` commit or a release" above. It is jax-gcm PR 877's
-#: head as of 2026-09-23 (``fix(forcing): resolve emissions alignment only
-#: for a timed product (Codex #877)``), which closes jax-gcm#754 and #884.
-#: PR 877 is not merged, so there is no ``dev`` commit containing it yet.
-#: **This branch cannot merge with the pin in this state**: re-pin to the
-#: ``dev`` merge commit the moment PR 877 lands (see "How to bump the pin").
-JCM_SUPPORTED_REV = "08d3d4b6d9c114530af43208f1a7c0acd4a101ae"
+#: This is jax-gcm ``dev`` at the merge of PR 877 on 2026-09-23
+#: (``feat(coupling): surface-exchange contract + forced-flux mode``), which
+#: closes jax-gcm#754, #301 and #884 -- see "Why a ``dev`` revision rather
+#: than a release" above.
+JCM_SUPPORTED_REV = "46eb3fc1efc3d16fde5458736d80a3491698f3ed"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha

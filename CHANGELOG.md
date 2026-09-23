@@ -648,12 +648,14 @@ Breaking changes are marked; everything else is additive.
 
 ### Changed
 
-- **`JCM_SUPPORTED_REV` is pinned to jax-gcm PR 877's head**
-  (`08d3d4b6d9c114530af43208f1a7c0acd4a101ae`), not a `dev` commit — PR 877 is
-  not merged yet, so no `dev` commit contains it. **This branch cannot merge
-  while the pin is in this state**; see `jem/components/jcm/contract.py`'s
-  docstring for the re-pin procedure once PR 877 lands. `JCM_SUPPORTED_VERSION`
-  is unchanged (`jcm.__version__` still reports `3.0.0rc1` at PR 877's head).
+- **`JCM_SUPPORTED_REV` moves to jax-gcm `dev` at the PR 877 merge commit**
+  (`46eb3fc1efc3d16fde5458736d80a3491698f3ed`) — the first `dev` revision
+  carrying the package-independent `SurfaceExchange` struct (jax-gcm#754), the
+  prescribed-flux door (#301) and the declared forcing-alignment rule (#884).
+  The merge commit is pinned rather than the `dev` tip, since later unrelated
+  `dev` commits have not been checked against this branch.
+  `JCM_SUPPORTED_VERSION` is unchanged (`jcm.__version__` still reports
+  `3.0.0rc1`).
 - **`jem/components/jcm/exchange_fields.py` collapses to a single reader**
   (jax-gcm#754, closed by PR 877): `from_diagnostics()` reads jax-gcm's new
   package-independent `SurfaceExchange` struct
