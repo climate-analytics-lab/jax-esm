@@ -648,6 +648,51 @@ Breaking changes are marked; everything else is additive.
 
 ### Changed
 
+- **`JCM_SUPPORTED_REV` is pinned to jax-gcm PR 877's head**
+  (`08d3d4b6d9c114530af43208f1a7c0acd4a101ae`), not a `dev` commit — PR 877 is
+  not merged yet, so no `dev` commit contains it. **This branch cannot merge
+  while the pin is in this state**; see `jem/components/jcm/contract.py`'s
+  docstring for the re-pin procedure once PR 877 lands. `JCM_SUPPORTED_VERSION`
+  is unchanged (`jcm.__version__` still reports `3.0.0rc1` at PR 877's head).
+- **`jem/components/jcm/exchange_fields.py` collapses to a single reader**
+  (jax-gcm#754, closed by PR 877): `from_diagnostics()` reads jax-gcm's new
+  package-independent `SurfaceExchange` struct
+  (`diagnostics["surface_exchange"]`, published identically by every physics
+  package that resolves a surface), replacing the old per-package
+  `speedy()`/`echam()`/`detect()` readers. **ECHAM's surface exchange now
+  works** — the old `echam()` reader always raised `NotImplementedError` for
+  lack of a package-independent struct to read; SPEEDY's translated values are
+  numerically unchanged (verified against the pre-#754 adapter on a real
+  model step: the sign flip on the net heat flux is the same transform, and
+  the evaporation/precipitation unit conversion the old adapter applied is
+  simply no longer needed, because the published contract is already in
+  JEM's units). One package-specific read remains and is **not** expected to
+  disappear with a future jax-gcm update: the published contract has no
+  near-surface wind *vector* (only the scalar `wind_speed`), so
+  `jem.fluxes.bulk_wind_stress` (used only by `jem.fluxes.VerosExchange`)
+  still reads SPEEDY's private `_surface_flux.u0`/`.v0` directly — ECHAM has
+  no wind vector anywhere in its own diagnostics either, so this is not a
+  regression from the collapse. See the module's docstring for the full
+  field-by-field derivation.
+- **`jem.runners.build_atmosphere` calls
+  `model.physics.require_surface_exchange()`** right after building the
+  atmosphere Model, so a physics package that cannot publish the
+  surface-exchange struct (Held-Suarez, which resolves no surface fluxes at
+  all) fails at composition, naming the composed terms, rather than at the
+  first coupled step.
+- **`forcing.align` may now be required for a from-file atmosphere forcing**
+  (jax-gcm#884, PR 877's v3 breaking change): `auto` no longer infers
+  climatology-vs-transient from a file's time axis — it resolves only a
+  jax-gcm data-mirror or packaged product (from the kind its manifest
+  records) and raises for any other file, naming the knob. Checked
+  empirically against all three from-file atmosphere-forcing configurations:
+  `earth-slab`'s forcing file is jax-gcm's own packaged T30 climatology,
+  which the manifest records, so it still resolves under `auto` with no
+  config change; `veros-double-drake`/`veros-earth` do not set
+  `forcing@atmosphere.forcing` by default (an idle knob until a user
+  overrides it), so neither is affected as shipped — but their comments
+  documenting that override now say a user who points it at their own file
+  also needs `atmosphere.forcing.align` set explicitly.
 - **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
   — the value the examples' `run.sh` validated, not the `1800.0` the copied
   files carried — and take their layer count as `layer_thicknesses` (a
