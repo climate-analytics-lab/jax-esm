@@ -251,8 +251,15 @@ def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
     NotImplementedError
         If the composed physics package publishes no near-surface wind
         *vector* -- see :func:`_near_surface_wind_vector` and the module
-        docstring's wind-vector note. The heat and water fluxes are valid
-        regardless; this only affects a caller that also needs ``u0``/``v0``.
+        docstring's wind-vector note. The wind is read eagerly, so this
+        raises for such a package even when the caller wants only the heat
+        and water fluxes, which #754 now does publish for it. That is not a
+        regression (the pre-#754 ``echam()`` reader raised unconditionally),
+        but it does leave a capability #754 unlocked unclaimed: making the
+        wind optional means making it optional all the way through
+        :class:`~jem.components.jcm.component.JCMDerived`, the coupled carry
+        and the output, which is a design change rather than part of this
+        migration. Tracked in jax-esm#129.
 
     """
     exchange = surface_exchange_from(diagnostics)
