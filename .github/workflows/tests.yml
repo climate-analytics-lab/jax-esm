@@ -4,7 +4,13 @@ on:
   push:
     branches: [ main, dev/** ]
   pull_request:
-    branches: [ main ]
+    # `main` plus the `claude/**` development branches, so a PR STACKED on
+    # another branch is still tested. Without the second pattern a stacked
+    # PR silently gets no checks at all: the filter matches the base branch,
+    # not the head, so only PRs targeting `main` ran. A stacked PR is how a
+    # change that depends on an unmerged one stays reviewable on its own
+    # diff, and it is worth exactly as much as its verification.
+    branches: [ main, 'claude/**' ]
 
 # The jax-gcm revision every required job builds against. JAX-ESM is developed
 # against a source checkout of jax-gcm rather than a PyPI release, so `dev`
