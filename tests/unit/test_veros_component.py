@@ -26,6 +26,7 @@ from jem.base.component import (  # noqa: E402
     CouplingTime,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsInternalStepping,
     SupportsXarray,
     TimeAxis,
     forcing_variable,
@@ -235,7 +236,22 @@ def test_component_satisfies_protocols(component):
     assert isinstance(component, SupportsBind)
     assert isinstance(component, SupportsXarray)
     assert isinstance(component, SupportsCheckpoint)
+    assert isinstance(component, SupportsInternalStepping)
     assert component.name == "ocn"
+
+
+def test_internal_steps_per_call_matches_steps_per_coupling_step(component):
+    """2026-09 review, round 3 follow-up (finding 7, extended to Veros).
+
+    ``internal_steps_per_call`` is what lets ``jem.driver._max_element_rate``
+    see Veros' own ``itt`` sub-cycling (see ``VerosComponent
+    .internal_steps_per_call``'s own docstring for why ``itt`` is a real,
+    at-risk int32 counter); it must report exactly
+    ``self._steps_per_coupling_step``. For this module's ``acc_basic``
+    fixture -- a 1 day coupling timestep over a 12-hour (``dt_tracer=43200``
+    s) tracer timestep -- that is 2.
+    """
+    assert component.internal_steps_per_call() == component._steps_per_coupling_step == 2
 
 
 def test_construction_disables_the_setups_own_forcing(veros_model):

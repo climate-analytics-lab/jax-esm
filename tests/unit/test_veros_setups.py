@@ -143,6 +143,67 @@ def test_layer_thicknesses_can_be_shortened():
 
 
 @pytest.mark.slow
+def test_double_drake_veros_component_declares_its_internal_stepping_rate():
+    """2026-09 review, round 3 follow-up (finding 7, extended to Veros).
+
+    Veros' own ``itt`` iteration counter (``state.variables.itt``) is
+    declared ``dtype="int32"`` in ``veros.variables`` and is a genuine
+    ``jax.lax.fori_loop``-carried pytree leaf (``veros_variables_pytree
+    _flatten`` flattens every one of ``VerosVariables``' fields, ``itt``
+    included -- confirmed directly: ``model.state.variables.itt.dtype ==
+    jnp.int32`` below), incremented once per internal Veros step
+    (``veros.veros.py``'s own ``vs.itt = vs.itt + 1``) --
+    ``self._steps_per_coupling_step`` times per coupled step. That is
+    exactly the same shape of raw-counter risk as JCM's ``RunState.step``,
+    on a real double-drake configuration (the shipped coupled ocean setup,
+    not the smaller ``acc_basic`` test fixture): with the default
+    ``dt_tracer=3600`` s and a 1 day coupling timestep,
+    ``self._steps_per_coupling_step == 24``, so ``itt`` wraps at a coupled
+    step count of about ``2**31 / 24``, roughly 245,000 simulated years for
+    daily coupling.
+
+    ``VerosComponent.internal_steps_per_call`` reports that rate, so
+    ``jem.driver._max_element_rate``/``_check_step_counters_fit_int32``
+    cover it the same way they cover JCM's own, and this checks the
+    boundary directly (not the whole of ``run_chunked``, which would then
+    have to build and run a many-million-step trajectory).
+    """
+    import jax.numpy as jnp
+    import jax_datetime as jdt
+
+    from jem.base.coupler import Coupler
+    from jem.components.veros.setups.double_drake import double_drake_setup
+    from jem.components.veros_component import VerosComponent
+    from jem.driver import (
+        _check_step_counters_fit_int32,
+        _max_element_rate,
+        _max_safe_coupled_steps,
+    )
+
+    setup_cls = double_drake_setup(land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE)
+    model = setup_cls()
+    model.setup()
+    # The premise this test exists to cover: a real, traced int32 counter.
+    assert model.state.variables.itt.dtype == jnp.int32
+    assert float(model.state.settings.dt_tracer) == 3600.0
+
+    component = VerosComponent(model)
+    coupling_timestep = jdt.to_timedelta(1, "day")
+    coupler = Coupler(
+        {"ocn": component}, {}, coupling_timestep=coupling_timestep,
+        start_date=jdt.to_datetime("2000-01-01"), calendar="365_day",
+    )
+    assert component.internal_steps_per_call() == 24  # 86400 s / 3600 s
+    assert _max_element_rate(coupler) == 24
+
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit < 2**31 - 2  # sanity: strictly tighter than the rate-1 floor
+    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+
+
+@pytest.mark.slow
 def test_earth_setup_reproduces_the_native_axes():
     """The `_calibrate_origin` reasoning: `vs.yt`/`vs.xt` reproduce the SCRIP
     file's own native (pre-rotation) axis exactly.
