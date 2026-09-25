@@ -433,15 +433,17 @@ def test_to_xarray_flattens_the_inner_datasets_onto_the_inner_axis():
     # The nested coupler's own registered name does not appear; its
     # components' names do.
     assert set(datasets) == {"atm", "lnd", "ocn"}
-    hourly = np.datetime64("2001-01-01", "ns") + np.arange(1, 49) * np.timedelta64(
-        1, "h"
+    # Midpoints, not ends (jax-gcm PR 878; see TimeAxis.datetimes).
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(1, 49) * np.timedelta64(1, "h") - np.timedelta64(30, "m")
     )
     assert datasets["atm"].sizes["time"] == 48
     np.testing.assert_array_equal(datasets["atm"].time.values, hourly)
     np.testing.assert_array_equal(datasets["lnd"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["ocn"].time.values,
-        np.array(["2001-01-02", "2001-01-03"], dtype="datetime64[ns]"),
+        np.array(["2001-01-01T12:00:00", "2001-01-02T12:00:00"],
+                 dtype="datetime64[ms]"),
     )
 
 
@@ -451,13 +453,14 @@ def test_to_xarray_of_a_chunk_labels_the_inner_axis_from_the_outer_step():
 
     datasets = model.to_xarray(diagnostics, first_step=2)
 
-    hourly = np.datetime64("2001-01-01", "ns") + np.arange(49, 97) * np.timedelta64(
-        1, "h"
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(49, 97) * np.timedelta64(1, "h") - np.timedelta64(30, "m")
     )
     np.testing.assert_array_equal(datasets["atm"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["ocn"].time.values,
-        np.array(["2001-01-04", "2001-01-05"], dtype="datetime64[ns]"),
+        np.array(["2001-01-03T12:00:00", "2001-01-04T12:00:00"],
+                 dtype="datetime64[ms]"),
     )
 
 

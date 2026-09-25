@@ -249,15 +249,20 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
-#: The calendar every shipped configuration runs on -- JCM's default, and the
-#: one the driver parses a run's durations against. It is what makes "1 year"
-#: 365 days here, and so what decides which durations divide which.
-CALENDAR = "365_day"
+#: The calendar every shipped configuration runs on -- jax-gcm v3's atmosphere
+#: clock is unconditionally Gregorian (PR 878), so this is the calendar every
+#: coupled configuration in this repo now builds its ``Coupler`` on
+#: (``jem.runners.ATMOSPHERE_CALENDAR``), and so what the driver parses a
+#: run's durations against. It is what makes "1 year" 365.2425 days here, and
+#: so what decides which durations divide which -- though every shipped
+#: ``coupled_run`` option is spelled in fixed units (days, weeks), never
+#: months or years, so this only matters if that ever changes.
+CALENDAR = "gregorian"
 
 
 def _seconds(duration: str | float) -> int:
     """Return a config duration in whole seconds, as the driver reads it."""
-    from jcm.date import parse_duration_days
+    from jem.base.component import parse_duration_days
 
     return int(round(float(parse_duration_days(duration, CALENDAR)) * 86400))
 

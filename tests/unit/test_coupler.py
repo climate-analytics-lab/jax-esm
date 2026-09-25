@@ -873,14 +873,19 @@ def test_repr_collapses_a_repeated_block():
 
 
 def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
-    """24 hourly records per coupled step, stamped at the end of each hour."""
+    """24 hourly records per coupled step, stamped at the MIDPOINT of each hour.
+
+    jax-gcm PR 878 labels an averaged record at its interval's midpoint, not
+    its end (``docs/source/v2_to_v3.rst``, "One real datetime clock"), and
+    ``TimeAxis.datetimes`` follows suit.
+    """
     coupler = _hourly_coupler()
     _, diagnostics = coupler.generate_trajectory_function(2)(coupler.initialize())
 
     datasets = coupler.to_xarray(diagnostics)
 
-    hourly = np.datetime64("2001-01-01", "ns") + (
-        np.arange(1, 49) * np.timedelta64(1, "h")
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(1, 49) * np.timedelta64(1, "h") - np.timedelta64(30, "m")
     )
     assert datasets["fast"].sizes["time"] == 48
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
@@ -892,7 +897,8 @@ def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
     assert datasets["slow"].sizes["time"] == 2
     np.testing.assert_array_equal(
         datasets["slow"].time.values,
-        np.array(["2001-01-02", "2001-01-03"], dtype="datetime64[ns]"),
+        np.array(["2001-01-01T12:00:00", "2001-01-02T12:00:00"],
+                 dtype="datetime64[ms]"),
     )
 
     axis = coupler.components["fast"].time_axes[-1]
@@ -907,13 +913,14 @@ def test_to_xarray_first_step_is_in_coupled_steps_for_every_component():
 
     datasets = coupler.to_xarray(diagnostics, first_step=2)
 
-    hourly = np.datetime64("2001-01-01", "ns") + (
-        np.arange(49, 97) * np.timedelta64(1, "h")
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(49, 97) * np.timedelta64(1, "h") - np.timedelta64(30, "m")
     )
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["slow"].time.values,
-        np.array(["2001-01-04", "2001-01-05"], dtype="datetime64[ns]"),
+        np.array(["2001-01-03T12:00:00", "2001-01-04T12:00:00"],
+                 dtype="datetime64[ms]"),
     )
 
 

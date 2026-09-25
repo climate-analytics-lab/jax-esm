@@ -600,11 +600,15 @@ def test_datasets_for_chunk_carries_the_chunk_through_to_the_stride(
         datasets_for_chunk(two_slab_coupler, second, first_step=3, steps=3,
                            subsample=2)["ocn"],
     ]
-    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
-    start = np.datetime64("2001-01-01", "ns")
+    # Midpoints, not ends (jax-gcm PR 878; see TimeAxis.datetimes): record
+    # `step` covers `[start + step*day, start + (step+1)*day)` and is
+    # labelled at `start + (step + 1/2)*day`.
+    half_day = np.timedelta64(12, "h").astype("timedelta64[ms]")
+    day = np.timedelta64(1, "D").astype("timedelta64[ms]")
+    start = np.datetime64("2001-01-01", "ms")
     np.testing.assert_array_equal(
         np.concatenate([dataset["time"].values for dataset in kept]),
-        np.array([start + (step + 1) * day for step in (0, 2, 4)]),
+        np.array([start + step * day + half_day for step in (0, 2, 4)]),
     )
 
 

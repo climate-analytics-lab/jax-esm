@@ -176,8 +176,16 @@ def test_registered_component_is_the_object_passed_in():
 # ---------------------------------------------------------------------------
 
 
-def test_datetimes_label_the_end_of_each_interval():
-    """Record ``k`` holds the interval that ENDS at ``start + (k+1) dt``."""
+def test_datetimes_label_the_midpoint_of_each_interval():
+    """Record ``k`` holds the interval ``[start + k dt, start + (k+1) dt)``,
+    labelled at its MIDPOINT, ``start + (k + 1/2) dt``.
+
+    jax-gcm PR 878 moved an averaged record's label from the end of its
+    interval to its midpoint (``docs/source/v2_to_v3.rst``, "One real
+    datetime clock"), and ``TimeAxis.datetimes`` follows suit so a coupled
+    run's other components merge with the atmosphere's output on one time
+    axis (see the class docstring).
+    """
     axis = TimeAxis(
         start_date=jdt.to_datetime("2001-01-01"),
         steps=np.arange(3),
@@ -186,28 +194,74 @@ def test_datetimes_label_the_end_of_each_interval():
     )
     np.testing.assert_array_equal(
         axis.datetimes(),
-        np.array(["2001-01-02", "2001-01-03", "2001-01-04"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-01T12:00:00", "2001-01-02T12:00:00", "2001-01-03T12:00:00"],
+            dtype="datetime64[ms]",
+        ),
     )
-    assert axis.datetimes().dtype == np.dtype("datetime64[ns]")
+    assert axis.datetimes().dtype == np.dtype("datetime64[ms]")
 
 
-def test_datetimes_reproduce_jcm_arithmetic_bit_for_bit():
-    """The labels are JCM's float64-days product, not an exact ns count.
+def test_datetimes_call_jcms_own_output_time_labels():
+    """The labels are ``jcm.predictions.output_time_labels``'s, exactly.
 
-    Both models have to be inexact in the SAME way for ``xr.merge`` to align
-    them, so this pins the arithmetic and not just the answer.
+    Both models have to compute the SAME conversion for ``xr.merge`` to align
+    them, so this pins that ``TimeAxis.datetimes`` calls jax-gcm's own public
+    conversion (closing jax-gcm#862) rather than reimplementing it -- and, in
+    particular, that an odd-length interval's midpoint lands on the exact
+    half second ``output_time_labels`` promises, which a naive
+    ``jax_datetime.Timedelta`` (whole-seconds-only) computation could not
+    represent.
     """
+    from jcm.predictions import output_time_labels
+
     start = jdt.to_datetime("2001-03-01")
     steps = np.arange(5)
-    axis = TimeAxis(start, steps, jdt.to_timedelta(6, "hour"), "365_day")
+    dt = jdt.to_timedelta(6, "hour")
+    axis = TimeAxis(start, steps, dt, "365_day")
 
-    nanoseconds_per_day = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
-    start_days = float(np.asarray(start.delta.days))
-    expected = (
-        (start_days + 0.25 * (steps.astype(np.float64) + 1.0)) * nanoseconds_per_day
-    ).astype("datetime64[ns]")
+    dt_seconds = 6 * 3600
+    start_seconds = steps.astype(np.int64) * dt_seconds
+    end_seconds = start_seconds + dt_seconds
+
+    def _exact(seconds):
+        days, secs = np.divmod(seconds, 86_400)
+        return start + jdt.Timedelta(
+            days=jnp.asarray(days, dtype=jnp.int32),
+            seconds=jnp.asarray(secs, dtype=jnp.int32),
+        )
+
+    bounds_start = output_time_labels(_exact(start_seconds))
+    bounds_end = output_time_labels(_exact(end_seconds))
+    expected = bounds_start + (bounds_end - bounds_start) // 2
 
     np.testing.assert_array_equal(axis.datetimes(), expected)
+    assert axis.datetimes().dtype == np.dtype("datetime64[ms]")
+
+
+def test_datetimes_gives_an_exact_half_second_midpoint():
+    """An odd-length interval's midpoint is exact to the millisecond.
+
+    A 1-second coupling step covers an odd number of seconds only through its
+    ``multiplicity`` (sub-timestep) form -- here, three coupled steps of a
+    single second each, checked as a length-3 sub-axis -- and the middle one,
+    ``[1, 2)`` seconds after the start, must land exactly on the half second
+    (``docs/source/v2_to_v3.rst``: "the millisecond output unit only serves
+    external half-second midpoints").
+    """
+    start = jdt.to_datetime("2001-01-01")
+    axis = TimeAxis(start, np.arange(3), jdt.to_timedelta(1, "second"), "365_day")
+
+    labels = axis.datetimes()
+    assert labels.dtype == np.dtype("datetime64[ms]")
+    np.testing.assert_array_equal(
+        labels,
+        np.array(
+            ["2001-01-01T00:00:00.500", "2001-01-01T00:00:01.500",
+             "2001-01-01T00:00:02.500"],
+            dtype="datetime64[ms]",
+        ),
+    )
 
 
 def test_time_axis_attrs_is_a_fresh_dict_per_access():

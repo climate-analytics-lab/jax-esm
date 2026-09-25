@@ -39,7 +39,12 @@ from jem.components.jcm import JCMComponent, exchange_fields
 from tests.unit import _pre754_exchange_reader
 
 START_DATE = jdt.to_datetime("2000-01-01")
-CALENDAR = "365_day"
+# jax-gcm v3 (PR 878) made the atmosphere's own clock unconditionally
+# proleptic Gregorian -- Model has no `calendar` parameter or attribute any
+# more -- so `"gregorian"` is the only value a coupler bound to a real
+# `jcm.model.Model` may use; `JCMComponent.bind` refuses anything else (see
+# `test_bind_rejects_a_non_gregorian_calendar` below).
+CALENDAR = "gregorian"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 # T21 on jcm's matching (64, 32) nodal grid; 5 levels is the fewest SPEEDY
@@ -54,8 +59,7 @@ def _build_model() -> Model:
     return Model(
         coords=coords,
         terrain=TerrainData.aquaplanet(coords),
-        start_date=START_DATE,
-        calendar=CALENDAR,
+        start_time=START_DATE,
     )
 
 
@@ -130,13 +134,23 @@ def test_bind_rejects_mismatched_start_date(model):
         )
 
 
-def test_bind_rejects_mismatched_calendar(model):
+def test_bind_rejects_a_non_gregorian_calendar(model):
+    """jax-gcm v3 is unconditionally Gregorian; any other coupler calendar is refused.
+
+    Pre-878, this checked the coupler's calendar against ``model.calendar``,
+    which no longer exists. Post-878 there is nothing on ``Model`` left to
+    disagree with the coupler about -- the atmosphere's clock is Gregorian
+    regardless of what is passed -- so the check runs the other way: the
+    coupler itself must declare ``"gregorian"``, or every other component's
+    seasonal cycle would silently run on a different calendar than the
+    atmosphere's.
+    """
     component = JCMComponent(model)
-    with pytest.raises(ValueError, match="Calendar mismatch"):
+    with pytest.raises(ValueError, match="gregorian"):
         component.bind(
             coupling_timestep=COUPLING_TIMESTEP,
             start_date=START_DATE,
-            calendar="gregorian",
+            calendar="365_day",
         )
 
 
@@ -170,7 +184,12 @@ def test_initialize_does_not_integrate(model, monkeypatch):
     carry = component.initialize()
 
     assert calls == []
-    assert set(carry) == {"state", "physics", "derived", "forcing"}
+    # "time"/"step" are jax-gcm's own exact RunState clock (PR 878), threaded
+    # through the carry exactly like "physics" -- see JCMComponent's module
+    # docstring.
+    assert set(carry) == {"state", "physics", "time", "step", "derived", "forcing"}
+    assert carry["time"] == model.start_time
+    assert carry["step"] == 0
     assert carry["derived"].total_heat_flux.shape == GRID_SHAPE
 
 
@@ -490,9 +509,13 @@ def test_derived_fields_are_finite_and_consistent(stepped):
 def test_to_xarray_has_time_axis_of_length_n(component, stepped):
     """Stacked diagnostics serialize through jcm with one record per step.
 
-    Also pins how jcm labels that axis: absolute ``datetime64[ns]`` at the
-    END of each averaging interval. Any component whose output is merged
-    with the atmosphere's has to write the same representation.
+    Also pins how jcm v3 labels that axis: exact ``datetime64[ms]`` at the
+    MIDPOINT of each averaging interval (``jcm.predictions.output_time_labels``,
+    jax-gcm PR 878 -- pre-878 this was an approximate ``datetime64[ns]`` at
+    the interval's END). Any component whose output is merged with the
+    atmosphere's has to write the same representation, which is exactly what
+    ``jem.base.component.TimeAxis.datetimes`` now does by calling the same
+    conversion.
     """
     _, _, _, diagnostics1, diagnostics2 = stepped
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), diagnostics1, diagnostics2)
@@ -501,10 +524,13 @@ def test_to_xarray_has_time_axis_of_length_n(component, stepped):
     dataset = component.to_xarray(stacked, time_axis)
 
     assert dataset.sizes["time"] == 2
-    assert dataset.time.dtype == np.dtype("datetime64[ns]")
+    assert dataset.time.dtype == np.dtype("datetime64[ms]")
+    # Record k covers [start + k*1day, start + (k+1)*1day) and is labelled at
+    # its midpoint: noon of the day it covers.
     np.testing.assert_array_equal(
         dataset.time.values,
-        np.array(["2000-01-02", "2000-01-03"], dtype="datetime64[ns]"),
+        np.array(["2000-01-01T12:00:00", "2000-01-02T12:00:00"],
+                 dtype="datetime64[ms]"),
     )
     assert dataset.sizes["lon"], dataset.sizes["lat"] == GRID_SHAPE
 
@@ -622,7 +648,7 @@ def test_collapsed_forcing_is_the_climatology_at_the_start_date(
         model, forcing=file_forcing, exchanged_forcing=("sea_surface_temperature",),
     )
     expected = file_forcing.select(
-        DateData.set_date(START_DATE), calendar=CALENDAR
+        DateData.set_date(START_DATE)
     ).sea_surface_temperature
 
     collapsed = np.asarray(
@@ -632,7 +658,7 @@ def test_collapsed_forcing_is_the_climatology_at_the_start_date(
     # And it is that date's slice rather than any date's: a mid-year one
     # differs, so the start date is doing real work here.
     midyear = np.asarray(file_forcing.select(
-        DateData.set_date(jdt.to_datetime("2000-07-01")), calendar=CALENDAR
+        DateData.set_date(jdt.to_datetime("2000-07-01"))
     ).sea_surface_temperature)
     assert not np.allclose(collapsed, midyear)
 

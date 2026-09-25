@@ -134,19 +134,51 @@ def coupler(climatology_file):
     return build_coupler(climatology_file)
 
 
+def _half_interval(dt: jdt.Timedelta) -> np.timedelta64:
+    """Return half of a ``jdt.Timedelta`` as an exact ``timedelta64[ms]``."""
+    total_ms = (
+        int(np.asarray(dt.days)) * 86_400_000 + int(np.asarray(dt.seconds)) * 1000
+    )
+    return np.timedelta64(total_ms // 2, "ms")
+
+
+def end_of_interval_labels(axis) -> np.ndarray:
+    """Return a :class:`TimeAxis`'s labels shifted back to the END of each interval.
+
+    jax-gcm PR 878 moved an averaged record's label from the end of its
+    interval to its **midpoint** (``docs/source/v2_to_v3.rst``, "One real
+    datetime clock"), and :meth:`TimeAxis.datetimes` -- which every non-JCM
+    component's output is labelled with, so it merges with the atmosphere's
+    on one time axis -- follows suit (see its docstring). ``jem.accumulate``'s
+    own bin math is untouched by that jax-gcm change: it still bins a record
+    by the calendar month its interval's **end** falls in
+    (``jem.accumulate._variable_window_rule``'s ``inclusive="left"``), which
+    is what keeps the accumulator's actual numbers bit-for-bit unchanged
+    across this migration. So a WRITTEN dataset's own labels (or
+    ``TimeAxis.datetimes()``) no longer equal what ``monthly_mean`` bins by --
+    for every month boundary now, not only across a Gregorian 29 February --
+    and this is the one-line fix to compare them: add back the half-interval
+    jax-gcm's midpoint convention subtracted.
+    """
+    return axis.datetimes() + _half_interval(axis.dt)
+
+
 @pytest.fixture(scope="module")
 def record_months(coupler):
     """Return the 0-based calendar month of each of the year's output records.
 
-    Taken from the ``datetime64`` labels ``Coupler.to_xarray`` puts on the
-    records -- the end of each coupling interval -- so this is the binning a
-    user reading the written output would do, and what the accumulator has to
-    agree with. It is the same binning as the model calendar's because this
-    run starts in 2001 and so crosses no Gregorian 29 February; where the two
-    calendars part company the accumulator follows the model's, which is what
-    the leap-year tests below pin.
+    Taken from the END of each coupling interval -- :func:`end_of_interval_labels`
+    of the ``datetime64`` labels ``Coupler.to_xarray`` puts on the records --
+    which is what ``monthly_mean``'s own bin math bins by (see that function's
+    docstring), not the labels themselves (jax-gcm PR 878 moved those to each
+    interval's midpoint; see :func:`end_of_interval_labels`). It is the same
+    binning as the model calendar's because this run starts in 2001 and so
+    crosses no Gregorian 29 February; where the two calendars part company the
+    accumulator follows the model's, which is what the leap-year tests below
+    pin.
     """
-    labels = coupler.time_axis(0, STEPS_PER_YEAR).datetimes()
+    axis = coupler.time_axis(0, STEPS_PER_YEAR)
+    labels = end_of_interval_labels(axis)
     return labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
 
 
@@ -263,19 +295,29 @@ def test_monthly_means_match_the_host_side_binning(
 def test_monthly_means_match_an_xarray_groupby(coupler, stacked_year, accumulated_year):
     """And they match what a user would compute from the netCDF output.
 
-    The tie to ``xarray`` matters because the labelling convention lives in
-    ``TimeAxis.datetimes``, not in this module: if the two ever drifted apart,
-    an accumulated monthly mean and a ``groupby("time.month")`` of the same
-    run would quietly disagree. They agree here because a 2001 run's labels
-    cross no Gregorian 29 February; the one year in which the labels and the
-    model calendar disagree by construction is covered below.
+    Not a plain ``groupby("time.month")`` of the raw written time coordinate
+    any more: jax-gcm PR 878 labels an averaged record at its interval's
+    **midpoint**, while ``monthly_mean`` still bins by the interval's *end*
+    (unchanged -- see ``jem.accumulate``'s "Which month a step counts in").
+    Grouping by :func:`end_of_interval_labels`'s corrected month is the fix,
+    written down once so a user hitting this does not have to rediscover it;
+    they agree here because a 2001 run's labels cross no Gregorian 29
+    February -- the one year in which the labels and the model calendar
+    disagree *as well* is covered below.
     """
     _, diagnostics = stacked_year
     monthly, _, accumulator = accumulated_year
 
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    from_output = ocean.sea_surface_temperature.groupby("time.month").mean("time")
-    np.testing.assert_array_equal(from_output.month.values, np.arange(1, 13))
+    month = (
+        end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
+        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
+    )
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(month=("time", month))
+        .groupby("month").mean("time")
+    )
+    np.testing.assert_array_equal(from_output.month.values, np.arange(MONTHS_PER_YEAR))
 
     accumulated = monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
     np.testing.assert_allclose(
@@ -393,10 +435,14 @@ def test_sequential_months_bin_the_run_month_by_month(sequential_months):
     The counts are the assertion that matters: they are the number of output
     records the calendar puts in each month, so a bin that had drifted (a
     fixed 30-day window) or that had been phased to January rather than to the
-    run's own start date would show up immediately.
+    run's own start date would show up immediately. Binned on the END of each
+    interval (:func:`end_of_interval_labels`), which is what ``monthly_mean``
+    itself bins by (jax-gcm PR 878 labels the WRITTEN output at each
+    interval's midpoint instead; see that function's docstring).
     """
     coupler, _, (_, counts), diagnostics = sequential_months
-    labels = coupler.to_xarray(diagnostics)["ocn"]["time"].values
+    del diagnostics
+    labels = end_of_interval_labels(coupler.time_axis(0, SEQUENTIAL_STEPS))
 
     bins = year_month_bins(labels)
     assert counts.shape == (int(bins.max()) + 1,)
@@ -420,14 +466,18 @@ def test_sequential_months_match_a_year_month_groupby(sequential_months):
 
     The same contract `monthly_mean`'s twelve bins are held to, for the bins
     that do not composite the years: the reduction and a `groupby` of the
-    output are the same number, month by month of the run.
+    output are the same number, month by month of the run -- once the output's
+    labels are put back on the interval END `monthly_mean` bins by
+    (:func:`end_of_interval_labels`; jax-gcm PR 878 labels them at the
+    midpoint instead).
     """
     coupler, monthly, accumulator, diagnostics = sequential_months
     ocean = coupler.to_xarray(diagnostics)["ocn"]
+    labels = end_of_interval_labels(coupler.time_axis(0, SEQUENTIAL_STEPS))
 
     from_output = (
         ocean.sea_surface_temperature.assign_coords(
-            year_month=("time", year_month_bins(ocean["time"].values))
+            year_month=("time", year_month_bins(labels))
         )
         .groupby("year_month")
         .mean("time")
@@ -566,7 +616,8 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
     )
 
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    bins = year_month_bins(ocean["time"].values)
+    labels = end_of_interval_labels(coupler.time_axis(0, steps))
+    bins = year_month_bins(labels)
     # Thirteen months: the last record is labelled 00:00 on 1 January of the
     # next year, which is that January's.
     assert accumulator[1].shape == (MONTHS_PER_YEAR + 1,)
@@ -608,7 +659,10 @@ def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
         coupler.initialize()
     )
 
-    labels = coupler.time_axis(0, steps).datetimes()
+    # Binned on the END of each interval, matching `monthly_mean`'s own bin
+    # math (jax-gcm PR 878 labels the WRITTEN output at the midpoint instead;
+    # see `end_of_interval_labels`).
+    labels = end_of_interval_labels(coupler.time_axis(0, steps))
     elapsed = (labels - np.datetime64("2001-01-01")) / np.timedelta64(1, "D")
     span = np.cumsum(month_lengths(coupler)[:6])
     # A month is closed at its start, so the bin of a label is the number of
@@ -709,7 +763,10 @@ def test_a_leap_year_start_bins_by_the_model_calendar_not_the_label(leap_year):
     coupler, monthly, accumulator, diagnostics = leap_year
     _, counts = accumulator
 
-    labels = coupler.time_axis(0, STEPS_PER_YEAR).datetimes()
+    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
+    # PR 878 labels the WRITTEN output at the midpoint instead; see
+    # `end_of_interval_labels`).
+    labels = end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
     assert labels[LEAP_DAY_RECORD] == np.datetime64("2000-02-29T00:00")
     np.testing.assert_array_equal(np.asarray(counts), MONTH_LENGTHS_365)
 
@@ -762,7 +819,10 @@ def test_leap_year_labels_run_a_day_behind_the_model_calendar(leap_year):
     Gregorian year.
     """
     coupler, _, _, _ = leap_year
-    labels = coupler.time_axis(0, STEPS_PER_YEAR).datetimes()
+    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
+    # PR 878 labels the WRITTEN output at the midpoint instead; see
+    # `end_of_interval_labels`).
+    labels = end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
 
     # Up to the leap day the two calendars still agree.
     assert labels[LEAP_DAY_RECORD - 1] == np.datetime64("2000-02-28T00:00")
@@ -787,12 +847,22 @@ def test_a_leap_year_groupby_of_the_written_output_differs_as_documented(leap_ye
     coupler, monthly, accumulator, diagnostics = leap_year
     _, counts = accumulator
 
+    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
+    # PR 878 labels the WRITTEN output at the midpoint instead; see
+    # `end_of_interval_labels`). Applying that correction isolates the
+    # divergence this test is actually about (the model's 365-day calendar
+    # against the labels' real Gregorian one) from the unrelated
+    # midpoint-vs-end shift jax-gcm PR 878 also introduced.
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    from_output = ocean.sea_surface_temperature.groupby("time.month").mean("time")
-    from_labels = np.bincount(
-        ocean["time"].values.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR,
-        minlength=MONTHS_PER_YEAR,
+    month = (
+        end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
+        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
     )
+    from_output = (
+        ocean.sea_surface_temperature.assign_coords(month=("time", month))
+        .groupby("month").mean("time")
+    )
+    from_labels = np.bincount(month, minlength=MONTHS_PER_YEAR)
 
     np.testing.assert_array_equal(np.asarray(counts)[:2], [31, 28])
     np.testing.assert_array_equal(from_labels[:2], [30, 29])
@@ -1146,7 +1216,10 @@ def test_a_month_long_window_and_a_month_close_on_opposite_sides(coupler):
     calendar months come from `monthly_mean`, which phases itself to the run's
     start date, and not from a pattern handed to `windowed_mean`, which cannot.
     """
-    labels = coupler.time_axis(0, MONTH_WINDOW_STEPS).datetimes()
+    # The END of each interval -- what both `windowed_mean` and `monthly_mean`
+    # bin by (jax-gcm PR 878 labels the WRITTEN output at the midpoint
+    # instead; see `end_of_interval_labels`).
+    labels = end_of_interval_labels(coupler.time_axis(0, MONTH_WINDOW_STEPS))
     boundary = np.flatnonzero(labels == np.datetime64("2001-02-01"))
     window = window_of_label(
         cycled_boundaries(month_lengths(coupler), MONTHS_PER_YEAR + 2), labels
@@ -1291,17 +1364,28 @@ def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
 
     The same contract the un-weaved run is held to, at the resolution the
     records are actually written at: the hourly stream is binned by hour and
-    the daily stream by day, and both come out of one accumulator.
+    the daily stream by day, and both come out of one accumulator. Each
+    stream's own labels are put back on the END of its own interval before
+    grouping -- half an hour for the sub-stepped atmosphere, half a day for
+    the ocean -- because jax-gcm PR 878 labels WRITTEN output at each
+    interval's midpoint while ``monthly_mean`` itself still bins by the end
+    (see :func:`end_of_interval_labels`).
     """
     coupler, diagnostics, monthly, accumulator = weaved
     _, counts = accumulator
     means = monthly.finalize(accumulator)
     datasets = coupler.to_xarray(diagnostics)
 
-    hourly = (
-        datasets["atm"].mean_air_temperature.groupby("time.month").mean("time")
+    hourly_month = (
+        (datasets["atm"]["time"].values + np.timedelta64(30, "m"))
+        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
     )
-    np.testing.assert_array_equal(hourly.month.values, [1, 2])
+    hourly = (
+        datasets["atm"].mean_air_temperature
+        .assign_coords(month=("time", hourly_month))
+        .groupby("month").mean("time")
+    )
+    np.testing.assert_array_equal(hourly.month.values, [0, 1])
     folded = fold_sub_steps(
         means["atm"]["state"].mean_air_temperature, counts["atm"]
     )
@@ -1309,8 +1393,14 @@ def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
     # Every other month is empty, and empty means NaN rather than zero.
     assert np.all(np.isnan(folded[2:]))
 
+    daily_month = (
+        (datasets["ocn"]["time"].values + np.timedelta64(12, "h"))
+        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
+    )
     daily = (
-        datasets["ocn"].sea_surface_temperature.groupby("time.month").mean("time")
+        datasets["ocn"].sea_surface_temperature
+        .assign_coords(month=("time", daily_month))
+        .groupby("month").mean("time")
     )
     np.testing.assert_allclose(
         np.asarray(means["ocn"]["state"].sea_surface_temperature)[:2],

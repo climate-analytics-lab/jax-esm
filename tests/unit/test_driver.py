@@ -1982,11 +1982,18 @@ def written_labels(output_dir, name="ocn"):
 
 
 def step_labels(*steps):
-    """Return the output label of each coupled step, as a record carries it."""
+    """Return the output label of each coupled step, as a record carries it.
+
+    jax-gcm PR 878 labels an averaged record at its interval's MIDPOINT, not
+    its end (``docs/source/v2_to_v3.rst``, "One real datetime clock"), and
+    ``TimeAxis.datetimes`` follows suit: record ``k`` covers
+    ``[start + k day, start + (k+1) day)`` and is labelled at
+    ``start + k day + 12h``.
+    """
     day = np.timedelta64(1, "D").astype("timedelta64[ns]")
+    half_day = np.timedelta64(12, "h").astype("timedelta64[ns]")
     start = np.datetime64("2001-01-01", "ns")
-    # Record k covers step k and is labelled at the END of it.
-    return [start + (step + 1) * day for step in steps]
+    return [start + step * day + half_day for step in steps]
 
 
 def test_subsample_keeps_the_same_records_however_the_run_is_chunked(tmp_path):
@@ -2131,11 +2138,17 @@ def test_a_sub_stepped_component_is_thinned_by_coupled_step(tmp_path):
         output_dir=tmp_path, subsample=2,
     )
 
-    half_day = np.timedelta64(12, "h").astype("timedelta64[ns]")
-    # Coupled steps 0 and 2: the ocean's two half-day records for each of
-    # them, the sea ice's one.
+    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
+    start = np.datetime64("2001-01-01", "ns")
+    quarter_day = np.timedelta64(6, "h").astype("timedelta64[ns]")
+    # Coupled steps 0 and 2: the ocean's two half-day (12h) sub-step records
+    # for each of them, each labelled at ITS OWN midpoint -- 6h and 18h into
+    # the coupled day -- not derived from the daily `step_labels` (jax-gcm PR
+    # 878; see that function's docstring). The sea ice records once a day, so
+    # it uses `step_labels` unchanged.
     assert written_labels(tmp_path, "ocn") == sorted(
-        step_labels(0, 2) + [label - half_day for label in step_labels(0, 2)]
+        [start + step * day + quarter_day for step in (0, 2)]
+        + [start + step * day + 3 * quarter_day for step in (0, 2)]
     )
     assert written_labels(tmp_path, "seaice") == step_labels(0, 2)
 
@@ -2184,7 +2197,7 @@ def test_continuous_chunked_resumed_agree_with_jcm(tmp_path):
         model = jcm.model.Model(
             coords=coords,
             terrain=TerrainData.aquaplanet(coords),
-            start_date=START_DATE,
+            start_time=START_DATE,
         )
         atm = JCMComponent(model)
         components = {
@@ -2196,6 +2209,7 @@ def test_continuous_chunked_resumed_agree_with_jcm(tmp_path):
             default_exchangers(components),
             coupling_timestep=COUPLING_TIMESTEP,
             start_date=START_DATE,
+            calendar="gregorian",
         )
 
     continuous = run_chunked(

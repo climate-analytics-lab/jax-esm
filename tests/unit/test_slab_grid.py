@@ -25,9 +25,6 @@ T31_SCRIP = DATA / "JCM_T31.SCRIP.nc"
 T31_TERRAIN = DATA / "terrain_JCM_T31.nc"
 DISPLACED_POLE_SCRIP = DATA / "DisplacedPoleGrid.SCRIP.nc"
 
-#: Nanoseconds in a day, as JCM computes the factor.
-NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
-
 
 @pytest.fixture(scope="module")
 def t31_coords():
@@ -157,12 +154,35 @@ def test_mismatched_shapes_are_rejected():
 def _jcm_like_dataset(coords, start_days, n_records):
     """Build a dataset with JCM's own coordinate construction, for merging.
 
-    The values come from ``jcm.utils.data_to_xarray`` and the time axis from
-    the same expression ``jcm.predictions.ModelPredictions`` uses, so this is
-    the coordinate layout a real JCM run writes. The integration pass merges
-    against genuine JCM output; this keeps the contract under test here.
+    The values come from ``jcm.utils.data_to_xarray``, and the time axis is
+    the same exact conversion ``ModelPredictions.to_xarray`` now uses for an
+    averaged trajectory (jax-gcm PR 878): each one-day record is labelled at
+    its interval's MIDPOINT via ``jcm.predictions.output_time_labels``, not
+    the pre-878 end-of-interval float64-days-times-nanoseconds-per-day
+    product. The integration pass merges against genuine JCM output; this
+    keeps the contract under test here current.
     """
-    times = start_days + 1.0 * (np.arange(n_records) + 1)
+    import jax_datetime as jdt
+    from jcm.predictions import output_time_labels
+
+    day_seconds = 86_400
+    start = jdt.to_datetime("1970-01-01") + jdt.Timedelta(
+        days=jnp.asarray(int(start_days), dtype=jnp.int32))
+    record = np.arange(n_records, dtype=np.int64)
+    interval_start_seconds = record * day_seconds
+    interval_end_seconds = interval_start_seconds + day_seconds
+
+    def _exact_datetime(seconds_since_start):
+        days, seconds = np.divmod(seconds_since_start, day_seconds)
+        return start + jdt.Timedelta(
+            days=jnp.asarray(days, dtype=jnp.int32),
+            seconds=jnp.asarray(seconds, dtype=jnp.int32),
+        )
+
+    bounds_start = output_time_labels(_exact_datetime(interval_start_seconds))
+    bounds_end = output_time_labels(_exact_datetime(interval_end_seconds))
+    midpoints_ms = bounds_start + (bounds_end - bounds_start) // 2
+
     dataset = data_to_xarray(
         {
             "surface_pressure": np.zeros(
@@ -170,10 +190,10 @@ def _jcm_like_dataset(coords, start_days, n_records):
             )
         },
         coords=coords,
-        times=times - times[0],
+        times=record.astype(np.float64),
         serialize_coords_to_attrs=False,
     )
-    dataset["time"] = (times * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
+    dataset["time"] = midpoints_ms
     return dataset
 
 
@@ -188,10 +208,10 @@ def test_to_xarray_dims_and_merge(t31_coords):
     assert dataset["sea_surface_temperature"].dims == ("time", "lon", "lat")
     assert dataset["lon"].dims == ("lon",) and dataset["lat"].dims == ("lat",)
     assert dataset["lon"].attrs["units"] == "degrees_east"
-    assert dataset["time"].dtype == np.dtype("datetime64[ns]")
-    # Record k covers step k and is stamped at its END, as JCM stamps its own
-    # saved frames.
-    assert str(dataset["time"].values[0]) == "2001-01-02T00:00:00.000000000"
+    assert dataset["time"].dtype == np.dtype("datetime64[ms]")
+    # Record k covers step k and is stamped at its MIDPOINT, as JCM v3 stamps
+    # its own saved averaged frames (jax-gcm PR 878).
+    assert str(dataset["time"].values[0]) == "2001-01-01T12:00:00.000"
 
     # 2001-01-01 is 11323 days after the epoch; JCM's own axis starts there.
     merged = xr.merge([dataset, _jcm_like_dataset(t31_coords, 11323.0, 3)], join="exact")

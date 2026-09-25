@@ -181,8 +181,11 @@ def test_build_coupler_default():
     assert set(coupler.components) == {"atm", "ocn", "seaice"}
     assert coupler.workflow == ("exchange", "atm", "ocn", "seaice")
     assert coupler.coupling_timestep == jdt.to_timedelta(1, "day")
-    assert coupler.calendar == coupler.components["atm"].model.calendar
-    assert coupler.start_date == coupler.components["atm"].model.start_date
+    # jax-gcm v3's atmosphere clock is unconditionally Gregorian and has no
+    # `Model.calendar` of its own any more; `runners.ATMOSPHERE_CALENDAR` is
+    # the one value that agrees with it (see that constant's docstring).
+    assert coupler.calendar == runners.ATMOSPHERE_CALENDAR == "gregorian"
+    assert coupler.start_date == coupler.components["atm"].model.start_time
     # The slabs were built on the atmosphere's grid, which is what
     # `regrid=same_grid` (no regridders) assumes.
     horizontal = coupler.components["atm"].model.coords.horizontal
@@ -208,7 +211,7 @@ def test_cli_and_python_construction_agree():
     from jem.components.slab import SlabGrid
 
     start_date = jdt.to_datetime("2000-01-01")
-    model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+    model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
     atm = JCMComponent(model)
     components = {
         "atm": atm,
@@ -219,6 +222,7 @@ def test_cli_and_python_construction_agree():
         default_exchangers(components),
         coupling_timestep=jdt.to_timedelta(1, "day"),
         start_date=start_date,
+        calendar="gregorian",
     )
 
     # The same model as a config: an aquaplanet slab ocean, no sea ice, no land.
