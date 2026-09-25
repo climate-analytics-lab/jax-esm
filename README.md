@@ -74,8 +74,10 @@ from jem.components.slab import SlabGrid
 start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 
-# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
-atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component. jax-gcm
+# v3's clock is unconditionally proleptic Gregorian, so the coupler below must
+# share that calendar.
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
 atm = JCMComponent(atm_model)
 
 # Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
@@ -93,6 +95,7 @@ coupler = Coupler(
     default_exchangers(components),
     coupling_timestep=coupling_timestep,
     start_date=start_date,
+    calendar="gregorian",
 )
 print(repr(coupler))
 

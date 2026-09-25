@@ -42,9 +42,9 @@ Breaking changes are marked; everything else is additive.
   )
   ```
 
-  `total_time` and `chunk` are `jcm.date.parse_duration_days` strings or
-  numbers of days, parsed on the *coupler's* calendar. Both must be whole
-  multiples of the coupling timestep, and `total_time` a whole multiple of
+  `total_time` and `chunk` are `jem.base.component.parse_duration_days`
+  strings or numbers of days, parsed on the *coupler's* calendar. Both must be
+  whole multiples of the coupling timestep, and `total_time` a whole multiple of
   `chunk`; all three are checked before anything is compiled, with a message
   naming both quantities. A final partial chunk is refused rather than
   silently compiled a second time. The trajectory is compiled once, for a
@@ -485,8 +485,8 @@ Breaking changes are marked; everything else is additive.
                           total_time="30 days")
   ```
 
-  Each length is a `jcm.date.parse_duration_days` string or a number of days
-  and must be a whole number of coupling steps; the accumulator's size is
+  Each length is a `jem.base.component.parse_duration_days` string or a
+  number of days and must be a whole number of coupling steps; the accumulator's size is
   given directly as `n_windows` or counted from `total_time` (rounded up, so a
   run that does not divide into whole windows still has a bin for the one it
   ends inside), and a sequence given neither is used once through. Both
@@ -648,7 +648,78 @@ Breaking changes are marked; everything else is additive.
 
 ### Changed
 
-- **`JCM_SUPPORTED_REV` moves to jax-gcm `dev` at the PR 877 merge commit**
+- **`JCM_SUPPORTED_REV` moves to jax-gcm `dev` at the PR 878 merge commit**
+  (`808412a5dc9e5a6de86d02a3e4f054249a7572fe`, "v3: unify the real datetime
+  clock and bounded monthly output"), which replaced jax-gcm's float
+  `sim_time` clock and configurable `Model.calendar` with one exact,
+  unconditionally proleptic-Gregorian `RunState` clock, and published
+  `jcm.predictions.output_time_labels` as the one conversion from it to an
+  output label (closing jax-gcm#862). `JCM_SUPPORTED_VERSION` is unchanged
+  (`jcm.__version__` still reports `3.0.0rc1`). This is a **breaking**
+  release for anything built directly against `jcm.model.Model`:
+  - `Model(..., start_date=..., calendar=...)` is now
+    `Model(..., start_time=...)`; there is no calendar argument or attribute
+    any more. `JCMComponent.bind` checks the coupler's start date against
+    `model.start_time`, and now refuses any coupler `calendar` but
+    `"gregorian"` (`jem.runners.ATMOSPHERE_CALENDAR`) instead of checking a
+    `Model.calendar` that no longer exists — jax-gcm's atmosphere physics,
+    forcing alignment and output labelling are all unconditionally Gregorian,
+    with no configuration knob left to disagree with.
+  - `Model.run_from_state_with_carry` now *requires* `initial_time` /
+    `initial_step` and returns `(RunState, ModelPredictions)` in place of the
+    old `(dycore_state, physics_carry, predictions)` triple. `JCMComponent`'s
+    carry gains two keys, `"time"` / `"step"` (jax-gcm's exact `RunState`
+    clock), threaded exactly like the existing `"physics"` key — recomputing
+    them from the coupler's own step counter instead would eventually overflow
+    a whole-seconds product that jax-gcm's own incremental clock never forms.
+  - **An averaged output record is now labelled at its interval's MIDPOINT**,
+    not its end (jax-gcm's own convention change). `TimeAxis.datetimes` — which
+    labels every non-JCM component's output so it merges with the
+    atmosphere's — now calls `jcm.predictions.output_time_labels` directly
+    instead of reimplementing an approximate (float64-days, `datetime64[ns]`)
+    version of jax-gcm's old labelling; the result is exact `datetime64[ms]`
+    for *any* coupling step, not only one that happens to be a power-of-two
+    fraction of a day. A consequence worth knowing: `jem.accumulate
+    .monthly_mean`'s bin math is unchanged (it still bins by each interval's
+    end, to stay bit-for-bit identical), so a plain
+    `groupby("time.month")` of written output no longer equals
+    `monthly_mean`'s own bins at *any* month boundary, not only across a
+    Gregorian 29 February as before — add back the half-interval the new
+    label subtracts before comparing (see `monthly_mean`'s docstring).
+  - `jcm.date` dropped `days_per_year` and the `calendar` argument of
+    `parse_duration_days` / `DateData.set_date` / `ForcingData.select`, along
+    with the calendar concept itself. JEM's own annual-cycle bookkeeping
+    (`CouplingTime.year_fraction`, the slab models' climatology sampling,
+    `jem.accumulate.monthly_mean`) still needs both, independent of whatever
+    clock the atmosphere runs on, so `jem.base.component.days_per_year` and
+    `jem.base.component.parse_duration_days` now hold that table and that
+    parser themselves — unchanged in value from jax-gcm's pre-878 copies —
+    rather than delegating to a jax-gcm that no longer offers them.
+  - Every jax-gcm-coupled `Coupler` must now be built with
+    `calendar="gregorian"`; `calendar="365_day"` (jax-gcm's old default, and
+    what every shipped configuration used) is refused by `JCMComponent.bind`.
+    One consequence: `jem.accumulate.monthly_mean`'s in-scan calendar-month
+    accumulator (both the twelve-bin climatology and the sequential
+    `total_time`/`n_months` forms) needs a calendar whose year is a fixed
+    number of days, which Gregorian is not — it already refused
+    `calendar="gregorian"` before this migration (a corner case, since nobody
+    built one), and now refuses on **every** jax-gcm-coupled model, since
+    Gregorian is no longer a corner case. There is no in-scan fix for this;
+    bin calendar months on the host instead
+    (`ds.groupby("time.year").groupby("time.month")`) for a jax-gcm-coupled
+    run. `windowed_mean` is unaffected (a window has no calendar-month table).
+  - `Model.date_from_sim_time` is no longer resolved anywhere in jax-gcm's own
+    integration path (the exact clock is threaded incrementally, never
+    recomputed from elapsed seconds), so the perpetual-season override hook
+    jax-esm#120 tracked (overriding this method on a `Model` instance) would
+    be a silent no-op today and needs a different mechanism if still wanted.
+  - No jem test's numeric expectations changed because of jax-gcm's
+    documented Gregorian seasonal-phase change (the SPEEDY forcing shift PR
+    878 itself isolated) — jem's own test suite has no golden-value SPEEDY
+    physics regression, only the clock/labelling-convention changes above
+    needed test updates, all of which are exact (dtype and instant
+    corrections, not tolerance changes).
+- **`JCM_SUPPORTED_REV` moved to jax-gcm `dev` at the PR 877 merge commit**
   (`46eb3fc1efc3d16fde5458736d80a3491698f3ed`) — the first `dev` revision
   carrying the package-independent `SurfaceExchange` struct (jax-gcm#754), the
   prescribed-flux door (#301) and the declared forcing-alignment rule (#884).

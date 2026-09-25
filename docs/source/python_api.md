@@ -28,8 +28,10 @@ from jem.components.slab import SlabGrid
 start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 
-# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
-atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component. jax-gcm
+# v3's clock is unconditionally proleptic Gregorian, so the coupler below must
+# share that calendar.
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
 atm = JCMComponent(atm_model)
 
 # Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
@@ -47,6 +49,7 @@ coupler = Coupler(
     default_exchangers(components),
     coupling_timestep=coupling_timestep,
     start_date=start_date,
+    calendar="gregorian",
 )
 print(repr(coupler))
 
@@ -65,8 +68,10 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
 - **The wrapper** `JCMComponent` adapts a stock `jcm.model.Model` without
   touching it — no methods are attached to the model. The coupler calls its
-  `bind()` when it is registered, which is where the model's start date,
-  calendar and timestep are checked against the coupler's.
+  `bind()` when it is registered, which is where the model's start time and
+  timestep are checked against the coupler's, and where the coupler's own
+  calendar is checked against jax-gcm's — `"gregorian"` is the only value
+  that agrees with jax-gcm's own (unconditional) clock.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
@@ -133,6 +138,7 @@ coupler = Coupler(
     {"exchange": table},                 # or: default_exchangers(components)
     coupling_timestep=coupling_timestep,
     start_date=start_date,
+    calendar="gregorian",
 )
 ```
 

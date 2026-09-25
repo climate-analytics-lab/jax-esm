@@ -43,13 +43,21 @@ keep but expensive to rediagnose:
   say, `SlabOceanParameters.relaxation_time` works with no special casing in the
   coupler. Which of them can be varied *through the carry* is the subject of
   the next section.
-- `JCMComponent`'s carry has a fourth key, `"physics"`: JCM's cross-step physics
-  carry (sub-cycled radiation, prior-step TKE, the tendencies one term hands to
-  the next). It is threaded straight back into
-  `Model.run_from_state_with_carry`, because dropping it between coupling steps
-  would reset that memory once per coupling interval — a silent, systematic
-  error. It contains integer and boolean leaves, so it must never be cast
-  wholesale to a float dtype.
+- `JCMComponent`'s carry has three keys beyond the three every packaged
+  component shares (`"state"`, `"derived"`, `"forcing"`): `"physics"`, JCM's
+  cross-step physics carry (sub-cycled radiation, prior-step TKE, the
+  tendencies one term hands to the next), and `"time"` / `"step"`, jax-gcm's
+  own exact `RunState` clock (jax-gcm PR 878 — an absolute
+  `jax_datetime.Datetime` and an integer JCM-timestep count). All three are
+  threaded straight back into `Model.run_from_state_with_carry`, which now
+  *requires* `initial_time` / `initial_step` explicitly rather than inferring
+  them from the incoming dycore state: dropping any of the three between
+  coupling steps would reset physics memory or lose the exact clock, both
+  silent and systematic. `"physics"` contains integer and boolean leaves, so
+  it must never be cast wholesale to a float dtype; recomputing `"time"` /
+  `"step"` from the coupler's own step counter instead of threading them would
+  eventually overflow a whole-seconds product that JCM's own incremental
+  clock never forms (see `jem.components.jcm.component`'s module docstring).
 - `JCMComponent`'s `carry["derived"]` is a `JCMDerived` struct holding the
   surface exchange (`total_heat_flux`, `total_freshwater_flux`, `evaporation`,
   `precipitation`, `u0`, `v0`) plus `physics`, JCM's own per-step diagnostics
@@ -308,7 +316,13 @@ to the number of days it passes to JCM as `save_interval`/`total_time`,
 `VerosComponent` to a count of tracer timesteps — and it is where a disagreement
 about the clock is refused: both wrappers raise `ValueError` if the coupling
 timestep is not a whole multiple of the model's own, and `JCMComponent`
-additionally refuses a `start_date` or `calendar` that differs from the model's.
+additionally refuses a `start_date` that differs from `model.start_time`. jax-gcm
+v3 (PR 878) removed `Model.calendar` — the atmosphere's clock is unconditionally
+proleptic Gregorian now, with no calendar of its own to check against — so
+`JCMComponent.bind` instead refuses any coupler calendar but `"gregorian"`
+(`jem.runners.ATMOSPHERE_CALENDAR`): any other choice would silently run the
+atmosphere's seasonal cycle out of phase with every other component's, which
+reads its own calendar from the coupler.
 The slab models use it for the start date alone: `initialize()` takes no
 argument, so `bind` is how a run starting on 1 July samples the July record of
 its climatology rather than the January one. It reaches them as
@@ -344,7 +358,7 @@ class CouplingTime:
     sim_time: jax.Array      # seconds since start_date; equals step * dt
     dt: float                       # static: coupling timestep in seconds
     year_offset_seconds: float      # static: 1 Jan of the start year -> start_date
-    days_per_year: float            # static: jcm.date.days_per_year(calendar)
+    days_per_year: float            # static: jem.base.component.days_per_year(calendar)
 ```
 
 - `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
@@ -683,7 +697,7 @@ leading axes are folded into one — they are already in time order, record
 `TimeAxis` spaced at `coupling_timestep / n` and starting at sub-step
 `first_step * n`. So `first_step` is always given in *coupled* steps, whatever
 rate a component runs at, and an hourly component in a daily coupler writes 24
-records per coupled step stamped at the end of each hour. Components with
+records per coupled step stamped at the midpoint of each hour. Components with
 `n == 1` are unchanged, and the datasets of a fast and a slow component are
 deliberately *not* on one time axis: they are different sampling rates of one
 run, and `xr.merge` of the two is an outer join by design.
@@ -698,20 +712,34 @@ The conventions, which are JCM's:
   float64, which is character for character what `jcm.utils.data_to_xarray`
   does. A last-bit difference would be enough for `xr.merge` to treat two
   96-point longitude axes as different axes and produce a 119-point union.
-- **The time label is the END of the interval a record covers**, as an absolute
-  `datetime64[ns]`: record *k* holds the average over
+- **The time label is the MIDPOINT of the interval a record covers**, as an
+  exact `datetime64[ms]`: record *k* holds the average over
   `[start_date + k dt, start_date + (k+1) dt)` and is stamped
-  `start_date + (k+1) dt`. This is JCM's convention, and `TimeAxis.datetimes()`
-  is the one place it is written down — including the arithmetic, a float64
-  count of days since the epoch multiplied into nanoseconds at the end, which
-  is inexact but *identically* inexact for every component that goes through
-  it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
-  xarray. The dates are proleptic Gregorian whatever the model calendar is;
-  the calendar governs the seasonal cycle and forcing selection, not the
-  labels. The consequence is a leap day: a `365_day` year is a day shorter
-  than a Gregorian leap year, so the labels fall a day further behind the
-  model calendar at every Gregorian 29 February — a run started on 1 January
-  2000 labels the instant the model calls 1 March 00:00 as `2000-02-29`, and
+  `start_date + (k + 1/2) dt`. This is jax-gcm v3's convention (PR 878,
+  `docs/source/v2_to_v3.rst`, "One real datetime clock" — pre-878 it was the
+  interval's *end*, as a float64 days-since-epoch product that was inexact
+  past a 128 ns ulp), and `TimeAxis.datetimes()` is the one place it is
+  written down: it computes each record's exact interval bounds with
+  `jax_datetime` (whole-second arithmetic, so the bounds themselves are always
+  exact), converts them to `datetime64[ms]` with jax-gcm's own
+  `jcm.predictions.output_time_labels` (the published conversion that closed
+  jax-gcm#862, so this calls it rather than reimplementing it), and takes the
+  midpoint by plain NumPy arithmetic on the millisecond values — the same
+  two-step recipe `ModelPredictions.to_xarray` uses for its own averaged
+  output. This is exact for *any* coupling step, not merely one whose step is
+  a power-of-two fraction of a day, and lets a midpoint fall on a half second
+  for an odd-length interval without `jax_datetime.Timedelta`
+  (whole-seconds-only) ever having to represent one. Each `to_xarray` hands
+  those values, plus `TimeAxis.attrs`, straight to xarray. The dates are
+  proleptic Gregorian whatever the coupler's own calendar is; that calendar
+  governs the seasonal cycle and forcing selection, not the labels — and a
+  `Coupler` bound to a real `jcm.model.Model` must use `"gregorian"` for it
+  regardless, since jax-gcm's own clock is unconditionally Gregorian now (see
+  *The clock*, and `JCMComponent.bind`). The leap-day consequence the midpoint
+  change did **not** remove: a `365_day` coupler's year is a day shorter than
+  a Gregorian leap year, so its labels fall a day further behind the model
+  calendar at every Gregorian 29 February — a run started on 1 January 2000
+  labels the instant the model calls 1 March 00:00 as `2000-02-29T12:00`, and
   everything downstream that bins by the *label* parts company there from
   everything that bins by the *model calendar* (see the `accumulate` section
   below). The inconsistency is JCM's, recorded upstream as jax-gcm#449; JEM
@@ -989,7 +1017,7 @@ a checkpoint restored, not the number of steps this call integrated),
 `completed`, one `report` per chunk, every `path` written, and the
 `accumulator` if the run was given a reduction.
 
-**Chunking rules.** `total_time` and `chunk` are `jcm.date.parse_duration_days`
+**Chunking rules.** `total_time` and `chunk` are `jem.base.component.parse_duration_days`
 strings or numbers of days, parsed on the *coupler's* calendar, so `"1 year"` is
 as long as the atmosphere's year. Both must be whole multiples of the coupling
 timestep — a coupled step is the smallest thing the loop can integrate — and
@@ -1290,20 +1318,33 @@ three consequences are chosen rather than inherited:
 in a static table of month boundaries, reached from the record counter reduced
 modulo the records in a year — exact integer arithmetic, and one compiled
 trajectory for a whole year. Which month a record counts in follows the *end*
-of the interval it covers — the instant JEM labels it with — read on the model
-calendar, so `monthly.finalize(...)` and
-`to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers for a run whose output labels cross no Gregorian 29 February — for a
+of the interval it covers, read on the model calendar — an internal
+elapsed-seconds convention this reduction's own code carries
+(`jem.accumulate._variable_window_rule`), unrelated to and unchanged by
+whatever `TimeAxis` writes as the output's own label. Before jax-gcm PR 878
+that instant *was* the one JEM labelled a record with, so
+`monthly.finalize(...)` and `to_xarray(...).groupby("time.month").mean()` of
+the same run were the same numbers for a run whose output labels crossed no
+Gregorian 29 February. PR 878 moved JCM's own (and so `TimeAxis`'s) label to
+each interval's *midpoint*, so that equality no longer holds for **any** month
+boundary, leap day or not: a plain `groupby("time.month")` of the written
+output now puts the record covering 31 January into January, where the
+accumulator (unchanged) still counts it in February. The fix, when a
+comparison against written output is wanted, is to add back the half-interval
+the label subtracts before grouping (`jem.accumulate.end_of_interval_labels` in
+the test suite is exactly this correction, kept there because production code
+has no need to reconstruct the label `monthly_mean` never uses) — for a
 component that records once per coupled step directly, and for one that records
 more often after its kept sub-step axis is folded with `fold_records` (below).
 
-That condition is the labels' calendar, not the binning: the labels are
-proleptic Gregorian whatever the model calendar is (above, and jax-gcm#449),
-while the bins are the model calendar's months. On a `365_day` run started on
-1 January 2000 — where the shipped examples start — the record the model calls
-1 March 00:00 is labelled `2000-02-29` and is accumulated into March, the one
-the model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest
-of the Gregorian year. `groupby("time.month")` of the written output therefore
+Separately, the labels' *calendar* can also disagree with the bins' regardless
+of the midpoint shift: the labels are proleptic Gregorian whatever the
+coupler's own calendar is (above, and jax-gcm#449), while the bins are that
+calendar's months. On a `365_day` run started on 1 January 2000 — where the
+shipped examples start — the record the model calls 1 March 00:00 is labelled
+(pre-878 convention) `2000-02-29` and is accumulated into March, the one the
+model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest of
+the Gregorian year. `groupby("time.month")` of the written output therefore
 moves the first record of every month from March on into the month before it,
 gives February the record the model calls 1 March (29 records where the
 accumulator's February holds 28), and hands December the year's wrap record —
@@ -1312,8 +1353,19 @@ counts in January, while the accumulated bin stays the model's month, which is
 the month the forcing and the seasonal cycle follow. Reproducing `finalize`
 from the written output across a leap day means binning on model day-of-year
 (each label's offset from the start date in whole days) rather than on
-`time.month`. On `gregorian` the question does not arise, because
-`monthly_mean` refuses that calendar. Nothing in the reduction depends on
+`time.month`. On `gregorian` the question of a leap-day mismatch does not
+arise, because `monthly_mean` refuses that calendar outright — and jax-gcm PR
+878 made this the *common* case rather than a corner one: jax-gcm's own
+atmosphere clock is unconditionally Gregorian now, so **every** `Coupler`
+built with a real `jcm.model.Model` must itself use `calendar="gregorian"`
+(`JCMComponent.bind` enforces it), and this in-scan accumulator — both the
+twelve-bin and the sequential form, since both need `month_lengths` — cannot
+represent calendar months on a calendar whose year is not a fixed number of
+days. A jax-gcm-coupled run that wants monthly means therefore bins them on
+the host, from the labelled output (`groupby("time.year").groupby("time.month")`,
+correct leap years included), which is slower and costs the whole trajectory in
+memory — the tradeoff this accumulator exists to avoid only when it can stay
+in-scan. Nothing in the reduction depends on
 whether #118 (calendar-consistent labels on JEM's side) or jax-gcm#449 (the
 same inconsistency in JCM's own output, recorded there as tracking only) is
 ever taken up. A calendar with no fixed
@@ -1364,7 +1416,7 @@ leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cy
                         total_time="30 days")
 ```
 
-`window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
+`window` is a `jem.base.component.parse_duration_days` string or a number of days, parsed
 on the coupler's calendar, and must be a whole number of coupling steps — a
 window ending part-way through a step could only be filled by splitting that
 step between two windows. The accumulator's size is `n_windows`, given directly
@@ -1625,6 +1677,8 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
 {
     "state":   <jcm modal (spectral) dycore state>,
     "physics": <jcm's cross-step physics carry, threaded, opaque>,
+    "time":    <jax_datetime.Datetime; jcm's exact RunState.time, threaded>,
+    "step":    <jax.Array int32; jcm's exact RunState.step, threaded>,
     "forcing": <jcm ForcingData; holds sea_surface_temperature, sice_am, ...>,
     "derived": JCMDerived(physics, total_heat_flux, total_freshwater_flux,
                           evaporation, precipitation, u0, v0),
@@ -1632,12 +1686,21 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
 ```
 
 `initialize()` builds those pytrees from the `(dycore_state, physics_carry)`
-pair `Model.bootstrap_state()` returns, plus a structural template of the
-diagnostics dict; it does **not** integrate. Each
-`step` calls `model.run_from_state_with_carry()` with the coupling interval as
-both `save_interval` and `total_time`, so JCM sub-steps internally at its own
-timestep and returns exactly one saved record per coupling step, then reads the
-surface exchange out of the returned physics diagnostics.
+pair `Model.bootstrap_state()` returns (seeding `"time"`/`"step"` at
+`model.start_time` / `0`), plus a structural template of the diagnostics dict;
+it does **not** integrate. Each `step` calls `model.run_from_state_with_carry()`
+with the coupling interval as both `save_interval` and `total_time` and the
+carry's `"time"`/`"step"` as `initial_time`/`initial_step` — required
+explicitly since jax-gcm PR 878 (the exact `RunState` clock; earlier revisions
+inferred them from the incoming dycore state) — so JCM sub-steps internally at
+its own timestep and returns exactly one saved record per coupling step, along
+with the `RunState` to carry into the next call. `step` then reads the surface
+exchange out of the returned physics diagnostics. Threading `"time"`/`"step"`
+rather than recomputing them from the coupler's own step counter each call is
+deliberate: the coupler's step times however many JCM timesteps make one
+coupling step would eventually overflow a whole-seconds product that JCM's own
+incremental clock (`time = time + dt`, every internal timestep) never forms at
+all — see `jem.components.jcm.component`'s module docstring.
 
 That read is isolated in `jem/components/jcm/exchange_fields.py`, which since
 jax-gcm#754 (PR 877) is a single reader,
@@ -1687,22 +1750,30 @@ note, which is the truthful record for a coupled run: the trajectory is traced
 once and scanned, so those parameter values are read from the live physics
 afterwards rather than captured at trace time.
 
-The atmosphere's output still keeps JCM's own `time` labelling, and
-`TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic rather than
-calling JCM. That is now a decision, not a gap. jax-gcm#824 also made
-`Model.date_from_sim_time` public, but it is the **model clock** conversion —
-exact integer day/second arithmetic on the model calendar, returning a
-`DateData` for forcing and physics — whereas the labels have to match the
-float64 days-since-epoch product in `ModelPredictions._trajectory_dataset`,
-which is what JCM's own output files carry and is still internal. Adopting the
-clock conversion would give the exact nanosecond count where that product has
-a 128 ns ulp. The two agree for a coupling step that is a power-of-two
-fraction of a day — every configuration JAX-ESM ships — and disagree for one
-that is not: a 10- or 20-minute step puts about half the labels 128 ns off, at
-which point a slab dataset and the atmosphere's no longer share a time axis and
-`xr.merge` returns a 2N-long union. Sharing one computation needs JCM to
-publish its *output* labelling, which is jax-gcm#862 — jax-gcm#824 published
-the clock, not the labelling; the reasoning is recorded on `TimeAxis`.
+The atmosphere's output keeps JCM's own `time` labelling (`JCMComponent.to_xarray`
+hands the stacked predictions straight to jax-gcm's own `ModelPredictions.to_xarray`),
+and `TimeAxis.datetimes()` — which labels every *other* component's output, so
+it merges with the atmosphere's — now **calls** jax-gcm's own labelling
+conversion instead of reimplementing it. Through jax-gcm PR 877 this was a
+decision rather than a gap: the only public conversion at the time,
+`Model.date_from_sim_time` (jax-gcm#824), was the **model clock** conversion —
+exact integer day/second arithmetic, returning a `DateData` for forcing and
+physics — not what JCM's own output files were labelled with (a float64
+days-since-epoch product, inexact past a 128 ns ulp, internal to
+`ModelPredictions._trajectory_dataset`), so adopting it would have merged with
+JCM's own output only when the coupling step happened to be a power-of-two
+fraction of a day. jax-gcm PR 878 published the labelling conversion itself,
+`jcm.predictions.output_time_labels` (closing jax-gcm#862), and moved JCM's own
+averaged output from an end-of-interval label to a midpoint-of-interval one (see
+the time-label bullet above); `TimeAxis.datetimes()` uses that function
+directly, which is exact for *any* coupling step and picks up the midpoint
+convention automatically. `Model.date_from_sim_time` itself is now a
+compatibility adapter only — jax-gcm's own exact clock is threaded
+incrementally (`time = time + dt`) rather than recomputed from elapsed
+seconds, so nothing in JCM's own integration path calls it any more; a
+perpetual-season (frozen seasonal cycle) override hook built on it, once
+tracked as jax-esm#120, would be a silent no-op today and needs a different
+mechanism if it is still wanted.
 
 Each `step` also compares the dycore state's own `sim_time` with the coupler's
 and logs at ERROR if they have parted, which can only happen if the carry came
