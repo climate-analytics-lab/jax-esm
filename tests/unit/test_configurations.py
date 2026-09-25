@@ -358,15 +358,17 @@ class TestOverrideStr(unittest.TestCase):
             configurations._override_str("ocean.params", (1, 2))
         self.assertNotIn("dotted override per field", str(ctx.exception))
 
-    def test_list_containing_none_raises_type_error(self):
-        with self.assertRaisesRegex(TypeError, "ocean.params"):
-            configurations._override_str("ocean.params", [None])
+    def test_list_containing_none_composes_to_null_at_any_depth(self):
+        # jem spells a list itself (_hydra_list_literal), so None becomes
+        # Hydra's `null` and composes back to the value None -- not the
+        # STRING "None" that str(list) would have produced.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
 
-    def test_list_containing_none_nested_raises_type_error(self):
-        # The same silent str()->'None' mis-compose applies at any nesting
-        # depth, not just the top level of the list.
-        with self.assertRaisesRegex(TypeError, "ocean.params"):
-            configurations._override_str("ocean.params", [[1, None], 2])
+        parser = OverridesParser.create()
+        for value in ([None], [[1, None], 2], [1, None, "x"]):
+            with self.subTest(value=value):
+                tok = configurations._override_str("ocean.params", value)
+                self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
 
     def test_list_containing_a_dict_raises_type_error(self):
         # A dict nested in a list is unrepresentable for the same reason a
@@ -412,13 +414,39 @@ class TestOverrideStr(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, r"ocean\.params.*float\(\)"):
                     configurations._override_str("ocean.params", value)
 
+    def test_list_subclass_raises_type_error_at_any_depth(self):
+        # A list subclass controls its own repr, so a token built from it
+        # could differ from the elements validated: a subclass holding [1]
+        # whose repr is "[2]" would compose to 2, silently. Containers are
+        # therefore accepted only as exact `list`, top level included.
+        class Sneaky(list):
+            def __repr__(self):
+                return "[2]"
+
+        for value in (Sneaky([1]), [Sneaky([1])], [[Sneaky([1])]]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, r"ocean\.params.*Sneaky"):
+                    configurations._override_str("ocean.params", value)
+
+    def test_list_strings_round_trip_through_hydras_own_quoting(self):
+        # List elements are serialized by jem, not by Python's repr, so a
+        # string needing escapes -- quotes of both kinds, a backslash, a
+        # comma or an equals sign -- composes back to exactly itself.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        value = ["it's", 'say "hi"', "both ' and \"", "back\\slash", "a,b=c"]
+        tok = configurations._override_str("ocean.params", value)
+        self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
+
     def test_every_accepted_list_element_type_round_trips(self):
         # The accepted set must be exactly what composes faithfully: each
         # element type, alone and nested, parses back to the same value.
         from hydra.core.override_parser.overrides_parser import OverridesParser
 
         parser = OverridesParser.create()
-        value = [True, 1, 2.5, "a,b", ["x", [3, False]]]
+        value = [True, 1, 2.5, -0.5, 1e-10, float("inf"), -float("inf"),
+                 "a,b", None, ["x", [3, False]], []]
         tok = configurations._override_str("ocean.params", value)
         self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
 

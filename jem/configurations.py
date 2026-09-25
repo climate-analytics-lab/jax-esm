@@ -189,38 +189,64 @@ def _compose(name: str, overrides: list[str]):
         Singleton.set_state(saved)
 
 
-#: The only element types ``str(list)`` spells as a faithful Hydra list
-#: literal: Hydra reads back ``True``/``1``/``2.5``/``'a,b'`` and nested lists
-#: exactly (pinned by ``test_every_accepted_list_element_type_round_trips``).
-#: Matched by EXACT type, never ``isinstance``: ``str(list)`` spells each
-#: element by its ``repr``, and a subclass of one of these can carry a repr
-#: that is no Hydra literal at all -- an ``IntEnum``'s ``<Level.LOW: 1>``, a
-#: ``StrEnum``'s, or numpy 2's ``np.float64(1.5)`` (``np.float64`` subclasses
-#: ``float``).
-_LIST_ELEMENT_TYPES = (bool, int, float, str)
+def _hydra_list_literal(value: list, key: str) -> str:
+    """Spell ``value`` as a Hydra list literal, or raise ``TypeError``.
 
+    jem builds the token itself rather than using ``str(value)``, because
+    ``str(list)`` spells each element by that object's own ``repr``. An
+    object that controls its repr could then compose to something other than
+    what was checked: an ``IntEnum`` (``<Level.LOW: 1>``), numpy 2's
+    ``np.float64(1.5)`` (``np.float64`` subclasses ``float``), or a ``list``
+    subclass whose repr differs from its contents. So only EXACT built-in
+    types are accepted, at any depth, and each is spelled here, never by its
+    own repr:
 
-def _unrepresentable_list_element(value: list) -> str | None:
-    """Name the first element of ``value`` a Hydra list token cannot carry.
+    - ``None`` -> ``null``;
+    - ``bool`` -> ``true`` / ``false``;
+    - ``int`` -> its decimal digits;
+    - ``float`` -> the shortest round-trip form (``2.5``, ``1e-10``, ``inf``);
+    - ``str`` -> Hydra's own ``QuotedString`` serializer, the one a top-level
+      string uses, so quotes, backslashes, commas and ``=`` survive;
+    - ``list`` (exactly ``list``) -> recursively.
 
-    Recurses into nested lists, since Hydra list values may nest and the
-    problem is the same at any depth. Returns ``"None"`` for a ``None``
-    element (Python's ``str`` spells it ``None``, which Hydra reads back as
-    the STRING ``"None"``), the type name for anything outside
-    :data:`_LIST_ELEMENT_TYPES` (a ``dict``, a ``tuple``, a ``Path``, ...,
-    whose ``str`` Hydra's parser either rejects or reads as something else),
-    or ``None`` when every element is representable.
+    ``test_every_accepted_list_element_type_round_trips`` pins that each of
+    these parses back to the same value.
     """
+    from hydra.core.override_parser.types import Quote, QuotedString
+
+    if type(value) is not list:
+        raise TypeError(_unrepresentable_list_message(key, type(value)))
+    parts = []
     for item in value:
-        if isinstance(item, list):
-            found = _unrepresentable_list_element(item)
-            if found is not None:
-                return found
-        elif item is None:
-            return "None"
-        elif type(item) not in _LIST_ELEMENT_TYPES:
-            return type(item).__name__
-    return None
+        kind = type(item)
+        if item is None:
+            parts.append("null")
+        elif kind is bool:
+            parts.append("true" if item else "false")
+        elif kind is int:
+            parts.append(str(item))
+        elif kind is float:
+            parts.append(repr(item))
+        elif kind is str:
+            parts.append(QuotedString(text=item, quote=Quote.single).with_quotes())
+        elif kind is list:
+            parts.append(_hydra_list_literal(item, key))
+        else:
+            raise TypeError(_unrepresentable_list_message(key, kind))
+    return "[" + ", ".join(parts) + "]"
+
+
+def _unrepresentable_list_message(key: str, kind: type) -> str:
+    """Return the ``TypeError`` message for a list override holding ``kind``."""
+    return (
+        f"load() override {key!r} is a list containing a {kind.__name__} (at "
+        "some nesting depth), which jem cannot spell as a faithful Hydra list "
+        "literal. A list override may contain only None and plain bool, int, "
+        "float and str values -- exactly those types, so convert a numpy "
+        "scalar or an enum member with float(), int() or str() first -- and "
+        "nested lists (exactly `list`, not a subclass); give one dotted "
+        "override per field for a structured value instead."
+    )
 
 
 def _override_str(key: str, value: Any) -> str:
@@ -256,24 +282,14 @@ def _override_str(key: str, value: Any) -> str:
     fine, see below), since "one dotted override per field" is meaningless
     for a tuple that is not naming nested config keys.
 
-    A ``list`` composes to a Hydra list value token by the same unquoted
-    ``str(value)`` path as any other non-string scalar, which is faithful
-    only when every element, at any nesting depth, is exactly a ``bool``,
-    ``int``, ``float`` or ``str`` -- not a subclass, see
-    :data:`_LIST_ELEMENT_TYPES` -- or a nested list. Any other element is
-    refused with a ``TypeError`` naming it:
-
-    - ``None``: Python's ``str`` spells it ``None``, not Hydra's ``null``, so
-      Hydra's parser reads it back as the STRING ``"None"``. That is a silent
-      mis-compose, one nesting level down where a caller is unlikely to
-      notice.
-    - A ``dict`` or ``tuple``: unrepresentable for the same reasons as at the
-      top level.
-    - Anything else, e.g. a ``Path``, a numpy scalar or an enum member: each
-      is spelled by a Python repr that Hydra's parser rejects or misreads.
-
-    Hydra would reject most of these loudly anyway, but with an opaque parser
-    error far from the call; refusing them here names the key and the cause.
+    A ``list`` is spelled by :func:`_hydra_list_literal`, which builds the
+    Hydra token itself from exact built-in types (``None``, ``bool``,
+    ``int``, ``float``, ``str``, nested ``list``) rather than by ``str()``, so
+    a list's elements compose to exactly the values given -- ``None`` to
+    ``null``, strings through Hydra's own quoting. Any other element, and any
+    ``list`` subclass, is refused with a ``TypeError`` naming it: a ``dict``
+    or ``tuple`` for the reasons above, and anything else (a ``Path``, a numpy
+    scalar, an enum member) because nothing guarantees its spelling.
 
     Parameters
     ----------
@@ -290,9 +306,9 @@ def _override_str(key: str, value: Any) -> str:
     Raises
     ------
     TypeError
-        If ``value`` is a ``dict`` or a ``tuple``, or a ``list`` containing,
-        at any nesting depth, anything but ``bool``/``int``/``float``/``str``
-        and nested lists.
+        If ``value`` is a ``dict`` or a ``tuple``, a ``list`` subclass, or a
+        ``list`` containing, at any nesting depth, anything but ``None``,
+        ``bool``/``int``/``float``/``str`` (exact types) and nested lists.
 
     """
     from hydra.core.override_parser.types import Quote, QuotedString
@@ -313,33 +329,8 @@ def _override_str(key: str, value: Any) -> str:
             "override token that reproduces it faithfully; pass a list "
             f"instead, e.g. **{{{key!r}: [<value>, ...]}}."
         )
-    bad_element = (
-        _unrepresentable_list_element(value) if isinstance(value, list) else None
-    )
-    if bad_element is not None and bad_element != "None":
-        raise TypeError(
-            f"load() override {key!r} is a list containing a {bad_element} "
-            "(at some nesting depth), which str() cannot spell as a Hydra list "
-            "literal: Hydra's parser would reject it or read back something "
-            "else. A list override may contain only plain bool, int, float "
-            "and str values (exactly those types, so convert a numpy scalar "
-            "or an enum member with float(), int() or str() first) and nested "
-            "lists; give one dotted override per field for a structured value "
-            "instead."
-        )
-    if bad_element == "None":
-        raise TypeError(
-            f"load() override {key!r} is a list containing None (at some "
-            "nesting depth); Hydra's grammar spells that element `null`, not "
-            "Python's `None`, so composing this list with str() would "
-            "silently read back as the STRING 'None' rather than the value "
-            "None. There is no faithful way to pass this through "
-            "load()'s **overrides for a list with a None element; compose "
-            "it through jem.configurations._compose(name, [...]) directly "
-            "with the literal override string (e.g. "
-            f"f'{key}=[1, null, 2]'), or restructure the recipe so the "
-            "field does not need a None entry."
-        )
+    if isinstance(value, list):
+        return f"{key}={_hydra_list_literal(value, key)}"
     if isinstance(value, str):
         return f"{key}={QuotedString(text=value, quote=Quote.single).with_quotes()}"
     return f"{key}={value}"
