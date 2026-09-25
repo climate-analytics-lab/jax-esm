@@ -811,7 +811,48 @@ Breaking changes are marked; everything else is additive.
   `jem.replace_field`. No notebook builds its components, its exchanger or
   its coupler by hand any more, and none writes netCDF or an animation by
   hand either. `examples/README.md` is the new index of which command or
-  notebook runs which example.
+  notebook runs which example. **Superseded within this same release by
+  `jem.configurations` below** — Hydra composition inside a notebook turned
+  out to hide exactly what a "light weight and transparent" example is meant
+  to show, so every notebook was moved off it a second time; the paragraph
+  above is kept as the record of what changed and why, not as the current
+  state.
+- **`jem.configurations` — the recipe door onto a validated configuration
+  (issue #131).** `jem.configurations.load(name, **overrides)` composes a
+  named `jem/config/configuration/*.yaml` through Hydra INTERNALLY and hands
+  back a frozen `LoadedConfiguration(coupler, run_kwargs, config)` — no
+  `DictConfig`/`omegaconf` object ever reaches the caller:
+
+  ```python
+  from jem import configurations, run_chunked
+
+  configurations.available()          # {name: one-line summary}
+  exp = configurations.load("earth-slab")
+  result = run_chunked(exp.coupler, **exp.run_kwargs)   # == the CLI's run
+  ```
+
+  `load` builds through the exact same `jem.runners` builders
+  `python -m jem.main` does (`build_coupler`, and the new
+  `jem.runners.build_run_kwargs`, factored out of `jem.runners.run` so the two
+  callers cannot duplicate — and so drift — that assembly), so a recipe means
+  one thing whether it is composed from the shell or loaded from a notebook.
+  `**overrides` reaches both a dotted value (`load("earth-slab",
+  **{"coupled_run.total_time": 10})`) and a config-group selection
+  (`load("aquaplanet-slab", seaice="none")`), the latter verified to compose
+  identically to the CLI's bare `seaice=none` despite the escape hatch's own
+  Hydra-grammar quoting. An unknown name raises `ValueError` listing what is
+  available, and a host application's own Hydra context (if any) survives a
+  call unharmed. This replaces every notebook's remaining
+  `initialize_config_module`/`compose` pair from the entry above:
+  `01_aquaplanet.ipynb` and `04_jcm_slabs_mixed_grid_aqua_planet.ipynb` (which
+  TEACH how a coupled model is assembled) now build directly in Python
+  instead, matching `docs/source/python_api.md`'s own construction (pinned by
+  `tests/unit/test_notebook_construction.py`, so the two cannot drift); the
+  three notebooks that RUN a validated configuration to demonstrate something
+  else (`02_...ipynb`, `03_...ipynb`, `02_experimental/01_earth.ipynb`) load it
+  through this door instead. `docs/source/python_api.md` and
+  `docs/source/getting_started.rst` document the door as the Python
+  equivalent of `+configuration=`.
 - `tests/examples/test_examples.py` runs notebooks only, one test per
   notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
   caused it) rather than one test per example group; the `run.sh` driver it

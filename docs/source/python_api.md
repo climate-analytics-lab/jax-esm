@@ -195,6 +195,43 @@ see the README's *Long runs* section for the worked examples and
 {doc}`design/architecture` for the checkpoint format and the accumulator's
 binning rules.
 
+## Validated configurations from Python
+
+The construction above builds a coupled model by hand -- the thing to do
+when writing a new experiment. To instead run one of the *validated*
+configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
+`earth-slab`, the mixed-grid and Veros recipes -- without composing Hydra,
+`jem.configurations` is the recipe door onto them (issue #131):
+
+```python
+from jem import configurations
+
+configurations.available()          # {name: one-line summary}, read off the yaml
+
+exp = configurations.load("aquaplanet-slab")
+exp.coupler                         # the built jem.base.coupler.Coupler
+exp.config["ocean"]                 # a plain dict -- what the recipe resolved to
+run_chunked(exp.coupler, **exp.run_kwargs)   # reproduces the CLI's own run
+```
+
+`load` composes the named yaml through Hydra internally, builds it through
+the SAME `jem.runners` builders `python -m jem.main` uses
+(`jem.runners.build_coupler`, `jem.runners.build_run_kwargs`), and hands back
+a Hydra-free `LoadedConfiguration` -- `omegaconf`/`hydra` never appear in a
+caller's own code. `**overrides` is the escape hatch onto both a dotted
+value (`load("earth-slab", **{"coupled_run.total_time": 10})`) and a
+config-group selection (`load("aquaplanet-slab", seaice="none")`, the
+Python spelling of the CLI's `seaice=none`).
+
+A notebook that *runs* a validated configuration to demonstrate something
+else -- perturbing an initial condition, differentiating through a
+trajectory -- loads it through this door rather than copying its settings
+into Python by hand, which is exactly the drift a parallel Python
+description of a YAML recipe invites (`examples/01_basic/02_...ipynb` and
+`03_...ipynb`, `examples/02_experimental/01_earth.ipynb`). A notebook that
+*teaches* how a coupled model is put together, like the construction at the
+top of this page, still builds directly.
+
 ## The same run from the command line
 
 ```bash
