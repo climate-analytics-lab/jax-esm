@@ -37,11 +37,11 @@ notice its absence rather than compute a stress from ``None``:
 it again, defensively, for a coupler built by hand that skips that step. Both
 raise the same ``ValueError``, naming the composed physics terms (the way
 ``ComposablePhysics.require_surface_exchange`` names them) and jax-esm#132 --
-not jax-esm#129, which closes only the eager-read failure that used to make
-*any* ECHAM-composed coupled step fail outright; choosing this exchanger's
-wind-stress source for a windless atmosphere is a separate decision #132
-tracks -- rather than letting :func:`bulk_wind_stress` fail on ``None**2``
-deep inside a traced step.
+not jax-esm#129, which closes only the eager-read failure that otherwise
+makes *any* ECHAM-composed coupled step fail outright; choosing this
+exchanger's wind-stress source for a windless atmosphere is a separate
+decision #132 tracks -- rather than letting :func:`bulk_wind_stress` fail
+on ``None**2`` deep inside a traced step.
 """
 
 from __future__ import annotations

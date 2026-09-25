@@ -454,7 +454,7 @@ def echam_atmosphere_ocean(echam_model) -> Coupler:
 def test_echam_coupled_to_a_slab_ocean_completes_several_steps(echam_atmosphere_ocean):
     """jax-esm#129: an ECHAM-composed coupled model must complete coupled steps.
 
-    Checks, on a real ECHAM model, everything the fix promises:
+    Checks, on a real ECHAM model, that a coupled step actually completes:
 
     - the initial and the post-step carry both have ``derived.u0``/``.v0`` as
       ``None`` (the static absence design), and the carry's overall pytree

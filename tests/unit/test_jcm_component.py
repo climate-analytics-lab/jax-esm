@@ -79,19 +79,19 @@ def _speedy_legacy_physics_without_wind() -> ComposablePhysics:
     """Build a real, if unusual, hybrid composition: a SPEEDY-legacy term
     (``SpeedyHumidity``) with NO ``SpeedySurfaceFlux`` composed.
 
-    This is the jax-esm#129-review defect's own regression fixture: every
-    ``SpeedyTermBase`` term (``SpeedyHumidity`` included) round-trips
-    SPEEDY's whole ``PhysicsData`` struct through the diagnostics dict
-    (``_data_from_diagnostics``/``_diagnostics_from_data``), so a real step
-    of THIS composition would still carry a ``_surface_flux`` diagnostics
-    key -- zeroed, because nothing here ever computed a real wind. A
-    predicate that read the diagnostics dict's keys (the pre-review
-    ``has_wind_vector``) would misreport a wind vector for it; the composed-
-    terms predicate must not. No shipped jem/jcm configuration composes
-    SPEEDY terms this way (23fba9e's commit message records the gap this
-    closes), but nothing stops a hand-built ``ComposablePhysics`` from it,
-    which is exactly why the predicate has to be faithful rather than
-    incidentally correct for the shipped cases alone.
+    This is the regression fixture for ``has_wind_vector``'s hybrid-
+    composition case: every ``SpeedyTermBase`` term (``SpeedyHumidity``
+    included) round-trips SPEEDY's whole ``PhysicsData`` struct through the
+    diagnostics dict (``_data_from_diagnostics``/``_diagnostics_from_data``),
+    so a real step of THIS composition would still carry a
+    ``_surface_flux`` diagnostics key -- zeroed, because nothing here ever
+    computed a real wind. A predicate that reads the diagnostics dict's
+    keys instead of the composed physics's terms would misreport a wind
+    vector for it; ``has_wind_vector`` must not. No shipped jem/jcm
+    configuration composes SPEEDY terms this way, but nothing stops a
+    hand-built ``ComposablePhysics`` from it, which is exactly why the
+    predicate has to be faithful rather than incidentally correct for the
+    shipped cases alone.
     """
     return ComposablePhysics([SpeedyHumidity()], checkpoint_terms=False)
 
@@ -394,9 +394,9 @@ def _fake_column_vectorized_echam_diagnostics_with_precipitation():
     nonzero, rather than sharing one code (``evaporation``) with a
     permanently-zero ``precipitation``.
 
-    jax-esm#129-review nit: ECHAM's precipitation is exactly ``0.0`` in the
-    two-day slow coupled regression run (``tests/unit/test_coupled.py``), so
-    nothing there would ever catch a placement or sign bug specific to
+    ECHAM's precipitation is exactly ``0.0`` in the two-day slow coupled
+    regression run (``tests/unit/test_coupled.py``), so nothing there ever
+    catches a placement or sign bug specific to
     precipitation -- unlike ``total_heat_flux``, whose placement and sign
     flip are already exercised, with a genuinely nonzero, position-encoded
     value, by :func:`_fake_column_vectorized_echam_diagnostics` /
@@ -531,16 +531,16 @@ def test_has_wind_vector_is_true_for_prescribed_flux_speedy():
 
 
 def test_has_wind_vector_is_false_for_a_hybrid_composition_without_speedy_surface_flux():
-    """The jax-esm#129-review defect, fixed here: a hybrid composition with a
-    SPEEDY-legacy term (``SpeedyHumidity``) but no ``SpeedySurfaceFlux`` must
-    report no wind vector -- even though its diagnostics dict, exactly like a
-    real SPEEDY step's (``_fake_speedy_diagnostics``, which carries the
-    ``_surface_flux`` key), looks structurally identical to one. Every
-    ``SpeedyTermBase`` term writes that key (zeroed here, since nothing in
-    this composition ever computed a real wind), which is precisely why a
-    diagnostics-dict-key check used to get this wrong (recorded, not fixed,
-    in 23fba9e's commit message; fixed here by asking the composed TERMS
-    instead -- see ``exchange_fields.has_wind_vector``'s docstring).
+    """A hybrid composition with a SPEEDY-legacy term (``SpeedyHumidity``)
+    but no ``SpeedySurfaceFlux`` must report no wind vector -- even though
+    its diagnostics dict, exactly like a real SPEEDY step's
+    (``_fake_speedy_diagnostics``, which carries the ``_surface_flux``
+    key), looks structurally identical to one. Every ``SpeedyTermBase``
+    term writes that key (zeroed here, since nothing in this composition
+    ever computed a real wind), which is precisely why
+    ``has_wind_vector`` asks the composed physics's TERMS rather than the
+    diagnostics dict's keys -- see ``exchange_fields.has_wind_vector``'s
+    docstring.
     """
     physics = _speedy_legacy_physics_without_wind()
     diagnostics = _fake_speedy_diagnostics()  # has the misleading `_surface_flux` key
@@ -619,13 +619,13 @@ def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call(
     -- whichever of the ordinary ways a caller might spell a shape: a
     ``tuple``, ``list``, ``numpy.ndarray`` or ``jax.Array``.
 
-    ``zeros()``'s argument order was ``(shape, physics, **overrides)`` before
-    jax-esm#129; it is now ``(diagnostics_template, nodal_shape, physics,
-    **overrides)`` -- #129 swapped the first two, and this review added the
-    required third. Passing the pre-#129 order with the new argument simply
-    appended -- a shape where ``diagnostics_template`` now goes -- used to
-    fail as an opaque error several calls deep (``TypeError: tuple indices
-    must be integers or slices, not str`` out of
+    ``zeros()``'s argument order is ``(diagnostics_template, nodal_shape,
+    physics, **overrides)``, changed by jax-esm#129 from ``(shape, physics,
+    **overrides)`` -- the first two arguments reordered and a required
+    third added. Passing the pre-#129 order with the new argument simply
+    appended -- a shape where ``diagnostics_template`` now goes -- would
+    otherwise fail as an opaque error several calls deep (``TypeError:
+    tuple indices must be integers or slices, not str`` out of
     ``exchange_fields.from_diagnostics``'s ``dict.get``, for the ``tuple``
     case) rather than naming this method or the argument that changed.
     """
@@ -637,8 +637,8 @@ def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call(
 def test_jcm_derived_zeros_missing_the_physics_argument_names_it():
     """A 2-positional-argument call (the exact pre-#129 spelling) is refused
     by Python's own signature check, naming the missing argument, since
-    jax-esm#129's review made ``physics`` a required third argument rather
-    than something ``zeros()`` could default or infer.
+    jax-esm#129 made ``physics`` a required third argument rather than
+    something ``zeros()`` could default or infer.
     """
     with pytest.raises(TypeError, match="physics"):
         JCMDerived.zeros(_fake_speedy_diagnostics(), GRID_SHAPE)
@@ -660,11 +660,11 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     Shape and the windless decision only: ``zeros()`` canonicalises every
     value to zero regardless of what the template carries (see
     ``test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key``'s
-    docstring on ``-0.0``/``+0.0``), so it cannot be
-    used to check *placement* -- ``test_unflatten_places_each_cell_correctly``
-    and ``test_unflatten_agrees_with_a_real_jax_gcm_column_flatten`` below,
+    docstring on ``-0.0``/``+0.0``), so *placement* is not checkable here --
+    ``test_unflatten_places_each_cell_correctly`` and
+    ``test_unflatten_agrees_with_a_real_jax_gcm_column_flatten`` below,
     which read the reshape directly off ``_surface_exchange_on_nodal_grid``,
-    do that.
+    check that.
     """
     template, _ = _fake_column_vectorized_echam_diagnostics()
     derived = JCMDerived.zeros(template, GRID_SHAPE, _echam_style_physics())
@@ -704,9 +704,9 @@ def test_unflatten_places_each_cell_correctly():
 
 
 def test_unflatten_places_precipitation_and_evaporation_correctly():
-    """jax-esm#129-review nit: ECHAM's precipitation is exactly ``0.0`` in
-    the two-day slow coupled regression run, so nothing exercises a
-    placement or sign bug specific to it. Feeds independently
+    """ECHAM's precipitation is exactly ``0.0`` in the two-day slow coupled
+    regression run, so nothing there exercises a placement or sign bug
+    specific to it. Feeds independently
     position-encoded, nonzero precipitation and evaporation through the same
     column-vectorized-ECHAM unflatten path
     (:func:`_fake_column_vectorized_echam_diagnostics_with_precipitation`)
@@ -921,11 +921,12 @@ def test_collapse_save_axis_handles_a_zero_sized_diagnostic():
     ECHAM's aerosol diagnostics carry a per-species axis of length 0 with no
     aerosol species configured (jax-gcm's own uncoupled ``to_xarray`` drops
     these entirely -- see ``ComposablePhysics.data_struct_to_dict``'s "Zero-
-    size entries ... are skipped" comment), but JEM's own
-    ``_collapse_save_axis`` used to reshape with a ``-1`` placeholder, which
-    JAX resolves by dividing the leaf's size by the product of its other
-    axes -- and a zero-sized leaf makes that product zero too, raising
-    ``ZeroDivisionError`` before jax-gcm's own skip logic ever runs. No
+    size entries ... are skipped" comment), but reshaping with a ``-1``
+    placeholder here resolves by dividing the leaf's size by the product
+    of its other axes -- and a zero-sized leaf makes that product zero
+    too, raising ``ZeroDivisionError`` before jax-gcm's own skip logic
+    ever runs. ``_collapse_save_axis`` therefore computes the merged size
+    explicitly (``shape[0] * shape[1]``) instead. No
     per-package fixture reproduces this without building a real ECHAM
     model, so this test reaches for the private helper directly with a
     fabricated zero-sized leaf, shaped like the real one

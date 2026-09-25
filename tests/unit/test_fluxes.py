@@ -438,21 +438,20 @@ def test_veros_exchange_call_also_rejects_a_windless_atmosphere():
 
 
 def test_veros_exchange_validate_rejects_a_hybrid_composition_without_speedy_surface_flux():
-    """The jax-esm#129-review defect: a hybrid composition with a SPEEDY-
-    legacy term but no `SpeedySurfaceFlux` must be refused here too, not only
-    for ECHAM.
+    """A hybrid composition with a SPEEDY-legacy term but no
+    `SpeedySurfaceFlux` must be refused here too, not only for ECHAM.
 
-    Built through the REAL, fixed pipeline rather than a `u0=None` set by
-    hand: a genuine `ComposablePhysics([SpeedyHumidity()])` (no
-    `SpeedySurfaceFlux`) and a diagnostics dict shaped exactly like a real
-    SPEEDY step's -- carrying the `_surface_flux` key every `SpeedyTermBase`
-    term writes, zeroed here because nothing in this composition ever
-    computed a real wind -- fed through `exchange_fields.from_diagnostics`.
-    The point is that `has_wind_vector` must say False for this composition
-    even though its diagnostics dict has the very key a pre-review predicate
-    mistook for "has a wind vector" (23fba9e's commit message records the
-    gap; fixed here), and that `VerosExchange.validate` refuses it exactly
-    as it already does for ECHAM.
+    Built through the REAL pipeline rather than a `u0=None` set by hand: a
+    genuine `ComposablePhysics([SpeedyHumidity()])` (no `SpeedySurfaceFlux`)
+    and a diagnostics dict shaped exactly like a real SPEEDY step's --
+    carrying the `_surface_flux` key every `SpeedyTermBase` term writes,
+    zeroed here because nothing in this composition ever computed a real
+    wind -- fed through `exchange_fields.from_diagnostics`. The point is
+    that `has_wind_vector` must say False for this composition even though
+    its diagnostics dict has the very key a predicate that reads only the
+    dict's keys, rather than the composed physics's terms, would mistake
+    for "has a wind vector", and that `VerosExchange.validate` refuses it
+    exactly as it already does for ECHAM.
     """
     from types import SimpleNamespace
 

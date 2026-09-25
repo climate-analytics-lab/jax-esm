@@ -703,98 +703,109 @@ Breaking changes are marked; everything else is additive.
   atmosphere, not #129, which closes only the eager-read failure), rather
   than mid-run or with a silently wrong stress; `__call__` repeats the same
   check for a hand-built `Coupler` that skips `_validate_exchangers`.
-  **What breaks**: `JCMDerived.zeros()`'s two positional arguments are
-  swapped, `(shape, physics)` → `(physics, nodal_shape)` (a legacy call now
-  raises `TypeError` naming the new order, rather than failing opaquely
-  several calls deep) — `JCMDerived` is exported from
-  `jem.components.jcm`, so this is public API, not a private helper;
-  `JCMDerived.u0`/`.v0` and `SurfaceExchange.u0`/`.v0` are now
-  `jax.Array | None` rather than always an array; and `from_diagnostics()`
-  no longer raises `NotImplementedError` for a windless package — a caller
-  that relied on that raise to detect "no wind vector" must check
-  `is None` instead.
+  **What breaks**: `JCMDerived.zeros()` now takes three required positional
+  arguments, `zeros(diagnostics_template, nodal_shape, physics, **overrides)` —
+  the former `shape` argument is renamed `diagnostics_template`, `nodal_shape`
+  (the atmosphere's horizontal grid) is now a separate required argument, and a
+  new `physics` argument (the composed atmosphere physics package) is required
+  so `zeros()` can decide `u0`/`v0`'s presence from it. A legacy call whose
+  first argument still looks like a shape (a `tuple`, `list`, `numpy.ndarray`
+  or `jax.Array`) raises `TypeError` naming the new signature, rather than
+  failing opaquely several calls deep — `JCMDerived` is exported from
+  `jem.components.jcm`, so this is public API, not a private helper. Migration:
+  call `zeros(diagnostics_template, nodal_shape, physics)`, passing a
+  structural diagnostics template (e.g. `Physics.get_empty_data(coords)`) in
+  place of the old bare `shape`. `from_diagnostics()` gains a required second
+  argument, `from_diagnostics(diagnostics, physics)`. Migration: pass the
+  composed physics package alongside the diagnostics dict at every call site.
+  `has_wind_vector()` now takes the composed physics package rather than the
+  diagnostics dict, `has_wind_vector(physics)` — whether a wind vector exists
+  is a fact of which terms are composed, not something the diagnostics dict's
+  keys can answer faithfully for a hybrid composition (see below). Migration:
+  pass `model.physics` (or the composed `ComposablePhysics`) in place of the
+  diagnostics dict. Separately, `JCMDerived.u0`/`.v0` and
+  `SurfaceExchange.u0`/`.v0` are now `jax.Array | None` rather than always an
+  array, and `from_diagnostics()` no longer raises `NotImplementedError` for a
+  windless package — a caller that relied on that raise to detect "no wind
+  vector" must check `is None` instead.
   Fixing #129 surfaced a second, independent bug that no fabricated-diagnostics
-  test caught, only a real ECHAM model run: `ComposablePhysics(
-  vectorize_columns=True)` (ECHAM) flattens the horizontal `(ix, il)` grid to
-  a single `ncols` axis before iterating its terms, and every diagnostic it
-  writes — including the published `surface_exchange` struct — stays
-  flattened; jax-gcm only reshapes a column-vectorized diagnostic back to the
-  grid inside its own xarray serialization, never before. `JCMDerived.zeros()`
-  and `JCMComponent.step()` used to assume every field of the translated
-  exchange was already on the atmosphere's `(ix, il)` nodal grid (true for
-  SPEEDY, which never vectorizes columns), so a coupled step that copied
-  `derived.total_heat_flux` into a plain `(ix, il)` component (a slab ocean,
-  in the default exchange table) failed with an opaque `ValueError:
-  Incompatible shapes for broadcasting` deep inside that component's own
-  step. Both now put the translated exchange on `nodal_shape` through a new
-  `_unflatten_to_nodal_shape` helper — the exact inverse of jax-gcm's own
-  flatten, mirroring the reshape `ComposablePhysics.data_struct_to_dict`
-  already applies for xarray output — which is a no-op for SPEEDY and fixes
-  ECHAM (see `JCMDerived.zeros()`'s new signature under "What breaks" above).
-  It raises `ValueError`, naming the field and its shape, for anything that
-  is neither the flattened nor the gridded case, rather than passing an
-  unrecognised shape through silently to fail later as an opaque broadcast
-  error.
+  test caught, only a real ECHAM model run:
+  `ComposablePhysics(vectorize_columns=True)` (ECHAM) flattens the horizontal
+  `(ix, il)` grid to a single `ncols` axis before iterating its terms, and
+  every diagnostic it writes — including the published `surface_exchange`
+  struct — stays flattened; jax-gcm only reshapes a column-vectorized
+  diagnostic back to the grid inside its own xarray serialization, never
+  before. Neither `JCMDerived.zeros()` nor `JCMComponent.step()` accounted for
+  this: both treated every field of the translated exchange as already on the
+  atmosphere's `(ix, il)` nodal grid (true for SPEEDY, which never vectorizes
+  columns), so a coupled step that copied `derived.total_heat_flux` into a
+  plain `(ix, il)` component (a slab ocean, in the default exchange table)
+  failed with an opaque `ValueError: Incompatible shapes for broadcasting` deep
+  inside that component's own step. Both now put the translated exchange on
+  `nodal_shape` through a new `_unflatten_to_nodal_shape` helper — the exact
+  inverse of jax-gcm's own flatten, mirroring the reshape
+  `ComposablePhysics.data_struct_to_dict` already applies for xarray output —
+  which is a no-op for SPEEDY and fixes ECHAM (see `JCMDerived.zeros()`'s
+  signature under "What breaks" above). It raises `ValueError`, naming the
+  field and its shape, for anything that is neither the flattened nor the
+  gridded case, rather than passing an unrecognised shape through silently to
+  fail later as an opaque broadcast error.
   A third, again real-model-only bug surfaced serializing that same run's
-  output: ECHAM's aerosol diagnostics carry a per-species axis of length 0
-  with no aerosol species configured (jax-gcm's own uncoupled `to_xarray`
-  drops these entirely), but `JCMComponent`'s own `_collapse_save_axis`
-  merged the stacked `(coupling step, save)` axes with a `-1` reshape
-  placeholder, which JAX resolves by dividing the leaf's size by the product
-  of its other axes — and a zero-sized leaf makes that product zero too,
-  raising `ZeroDivisionError` before jax-gcm's own xarray conversion (which
-  skips zero-sized fields) ever ran. The merged size is now computed
-  explicitly (`leaf.shape[0] * leaf.shape[1]`, the coupled-step count times
-  the save axis, which is always exactly 1) instead of inferred by `-1`,
-  which needs no division and reshapes every non-zero-sized leaf (SPEEDY's
-  included) exactly as before.
-  Code review also caught `JCMDerived.zeros()` giving `-0.0` (a distinct
-  float bit pattern from `+0.0`, invisible to `==`/`allclose`) wherever it
-  negates a template's `total_heat_flux`: it now canonicalises every field
-  to positive zero, restoring "SPEEDY's `zeros()` is bit-for-bit unchanged"
-  literally rather than only up to sign.
-  A second round of review found `exchange_fields.has_wind_vector()` itself
-  unfaithful (breaking, and recorded as a known, deliberately unfixed gap in
-  the commit that found it): it asked whether the diagnostics dict carried
-  SPEEDY's private `_surface_flux` key, but every `SpeedyTermBase` term —
-  not only `SpeedySurfaceFlux`, the one that fills `u0`/`v0` with a real
-  bulk-formula wind — round-trips that key through the diagnostics dict, so
-  a hybrid composition with some other SPEEDY-legacy term but no
-  `SpeedySurfaceFlux` had a *zeroed* `_surface_flux` and was reported as
-  having a wind vector anyway; `VerosExchange.validate` then passed it, and
-  Veros would have silently received a zero wind stress. `has_wind_vector()`
-  now asks the composed physics package's own **terms**
-  (`any(isinstance(term, SpeedySurfaceFlux) for term in physics.terms)`) —
-  a static, jit-safe check identical for a whole-grid or column-vectorized
-  composition — and both `from_diagnostics()` and `JCMDerived.zeros()` gain
-  a required `physics` argument (`from_diagnostics(diagnostics, physics)`;
-  `JCMDerived.zeros(diagnostics_template, nodal_shape, physics, **overrides)`
-  — its first argument is also renamed `diagnostics_template`, matching what
-  it always was) so the one place this decision is made has the composed
-  physics object in hand. `VerosExchange.validate`/`_require_wind_vector`
-  still only check `u0`/`v0`'s `None`-ness (the carry holds no reference to
-  `model.physics` for them to call `has_wind_vector()` directly), which is
-  not a second predicate — it is that one decision's effect, observed
-  downstream of the only place it is made. No shipped configuration composes
-  physics this way, so nothing that ran before this fix produces a different
-  answer today; the review closes an unfaithful predicate discovered by
-  reasoning about `ComposablePhysics`, not by a failing run.
-  `_require_wind_vector`'s error message also used to call its list of
-  top-level diagnostics-dict keys "composed terms", which they are not (a
-  term's *name* and the keys it publishes are different things); it now says
-  "diagnostics published by the composed physics". And `JCMDerived.zeros()`'s
-  legacy-call guard, which only ever caught a `tuple` first argument, now
-  catches a `list`, a `numpy.ndarray` or a `jax.Array` of ints too — each an
-  equally ordinary way a caller migrating a pre-#129 call site by hand might
-  have spelled the old `shape` argument.
-  Finally, two coverage gaps the review found but that needed no code change:
-  `_unflatten_to_nodal_shape`'s `ValueError` branch (added in the first
-  review round) had no direct test, so a mutation that made it return the
-  unexpected shape unchanged instead of raising went unnoticed by the
-  existing suite; and ECHAM's precipitation is exactly `0.0` in the slow
-  two-day coupled regression run, so nothing there would have caught a
-  placement or sign bug specific to it. Both now have direct unit tests
-  (`tests/unit/test_jcm_component.py`).
+  output: ECHAM's aerosol diagnostics carry a per-species axis of length 0 with
+  no aerosol species configured (jax-gcm's own uncoupled `to_xarray` drops
+  these entirely), but `JCMComponent`'s own `_collapse_save_axis` merged the
+  stacked `(coupling step, save)` axes with a `-1` reshape placeholder, which
+  JAX resolves by dividing the leaf's size by the product of its other axes —
+  and a zero-sized leaf makes that product zero too, raising
+  `ZeroDivisionError` before jax-gcm's own xarray conversion (which skips
+  zero-sized fields) ever ran. The merged size is now computed explicitly
+  (`leaf.shape[0] * leaf.shape[1]`, the coupled-step count times the save axis,
+  which is always exactly 1) instead of inferred by `-1`, which needs no
+  division and reshapes every non-zero-sized leaf (SPEEDY's included) exactly
+  as before.
+  `JCMDerived.zeros()` also canonicalises every field to positive zero:
+  negating a template's `total_heat_flux` produces `-0.0` (a distinct float bit
+  pattern from `+0.0`, invisible to `==`/`allclose`) wherever the template's
+  corresponding field is exactly zero, so `zeros_like` resets the sign after
+  the negation — restoring "SPEEDY's `zeros()` is bit-for-bit unchanged"
+  literally, not only up to sign.
+  `exchange_fields.has_wind_vector()` is itself unfaithful for a hybrid
+  composition (breaking): it asked whether the diagnostics dict carried
+  SPEEDY's private `_surface_flux` key, but every `SpeedyTermBase` term — not
+  only `SpeedySurfaceFlux`, the one that fills `u0`/`v0` with a real
+  bulk-formula wind — round-trips that key through the diagnostics dict, so a
+  composition with some other SPEEDY-legacy term but no `SpeedySurfaceFlux` has
+  a *zeroed* `_surface_flux` and was reported as having a wind vector anyway;
+  `VerosExchange.validate` would then pass it, and Veros would silently receive
+  a zero wind stress. No shipped configuration composes physics this way, so
+  this has not produced a wrong answer in any run to date. `has_wind_vector()`
+  now asks the composed physics package's own **terms** (`any(isinstance(term,
+  SpeedySurfaceFlux) for term in physics.terms)`) — a static, jit-safe check
+  identical for a whole-grid or column-vectorized composition — and both
+  `from_diagnostics()` and `JCMDerived.zeros()` require a `physics` argument
+  (`from_diagnostics(diagnostics, physics)`;
+  `JCMDerived.zeros(diagnostics_template, nodal_shape, physics, **overrides)`,
+  its first argument also renamed `diagnostics_template`, matching what it
+  always was) so the one place this decision is made has the composed physics
+  object in hand. `VerosExchange.validate`/`_require_wind_vector` still only
+  check `u0`/`v0`'s `None`-ness (the carry holds no reference to
+  `model.physics` for them to call `has_wind_vector()` directly), which is not
+  a second predicate — it is that one decision's effect, observed downstream of
+  the only place it is made.
+  `_require_wind_vector`'s error message names its list of top-level
+  diagnostics-dict keys "diagnostics published by the composed physics" rather
+  than "composed terms", since a term's *name* and the keys it publishes are
+  different things. `JCMDerived.zeros()`'s legacy-call guard catches a `list`,
+  a `numpy.ndarray` or a `jax.Array` of ints, as well as a `tuple`, for its
+  first argument — each an equally ordinary way a caller migrating a pre-#129
+  call site by hand might spell the old `shape` argument.
+  `_unflatten_to_nodal_shape`'s `ValueError` branch and ECHAM's exactly-`0.0`
+  precipitation in the slow two-day coupled regression run both gain direct
+  unit tests (`tests/unit/test_jcm_component.py`): the former had no test that
+  a mutation returning the unexpected shape unchanged, instead of raising,
+  would be caught; the latter means the regression run's own precipitation is
+  always exactly zero, so it could never have caught a placement or sign bug
+  specific to ECHAM's precipitation.
 - **`jem.runners.build_atmosphere` calls
   `model.physics.require_surface_exchange()`** right after building the
   atmosphere Model, so a physics package that cannot publish the

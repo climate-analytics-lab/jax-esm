@@ -107,9 +107,9 @@ collapse.
 
 **jax-esm#129 made that absence explicit and static, rather than a raise.**
 :func:`from_diagnostics` still keeps exactly one package-specific read after
-the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- but where
-it used to raise ``NotImplementedError`` for any other package, it now
-returns ``u0=None``/``v0=None``: whether a composed physics package publishes
+the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- but for
+any other package it returns ``u0=None``/``v0=None`` rather than raising
+``NotImplementedError``: whether a composed physics package publishes
 a wind vector is a fact fixed at composition (it never changes step to step
 for a given model), so the absence is a **static** property of the carry --
 ``None`` is an empty JAX pytree node, so it survives ``jit``, the coupled
@@ -127,10 +127,10 @@ the field is ``None`` in the carry from step 0 onward for a windless package
 ``lax.scan`` carry structure forbids.
 
 **What decides the presence is the composed TERM, not a diagnostics-dict
-key (the jax-esm#129-review fix).** The first version of :func:`has_wind_vector`
-asked whether ``diagnostics`` had SPEEDY's private ``_surface_flux`` entry --
-a diagnostics-dict question, not a physics one. That is wrong for a *hybrid*
-composition: every :class:`~jcm.physics.speedy.speedy_terms.SpeedyTermBase`
+key.** Asking whether ``diagnostics`` has SPEEDY's private ``_surface_flux``
+entry is a diagnostics-dict question, not a physics one, and is wrong for
+a *hybrid* composition: every
+:class:`~jcm.physics.speedy.speedy_terms.SpeedyTermBase`
 term (not only :class:`~jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux`)
 round-trips SPEEDY's whole ``PhysicsData`` struct through the diagnostics dict
 (``_data_from_diagnostics``/``_diagnostics_from_data`` in

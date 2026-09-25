@@ -51,10 +51,10 @@ model was actually run (jax-esm#129): every named field of
 flattened field copied into a plain ``(ix, il)`` component (a slab ocean, in
 the default exchange table) fails that component's own step with an opaque
 shape-mismatch error. :func:`_unflatten_to_nodal_shape` reshapes it back --
-a no-op for SPEEDY, the fix for ECHAM -- and both :meth:`JCMDerived.zeros`
-(the initial carry) and :meth:`JCMComponent.step` go through it via the one
-shared :func:`_surface_exchange_on_nodal_grid`, so the two agree on shape
-from the first step onward.
+a no-op for SPEEDY, the reshape ECHAM needs -- and both
+:meth:`JCMDerived.zeros` (the initial carry) and :meth:`JCMComponent.step`
+go through it via the one shared :func:`_surface_exchange_on_nodal_grid`,
+so the two agree on shape from the first step onward.
 
 Every JCM *attribute* this wrapper touches is public at the pinned revision
 (``jem.components.jcm.contract``), apart from one underscore-prefixed
@@ -202,9 +202,9 @@ def _unflatten_to_nodal_shape(
         case this function exists to fix) nor already ``nodal_shape`` (the
         SPEEDY case, a no-op) -- e.g. a future package publishing a
         per-column field with an extra trailing axis, such as ``(ncols, 1)``.
-        Silently passing such a shape through, as the pre-review version of
-        this function did, would leave it to fail downstream as an opaque
-        broadcast error naming neither this field nor why it is malformed.
+        Silently passing such a shape through would leave it to fail
+        downstream as an opaque broadcast error naming neither this field
+        nor why it is malformed.
 
     """
     if value is None:
@@ -337,8 +337,10 @@ class JCMDerived:
         through :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
         -- the same reader a real step's diagnostics go through -- and then
         put on ``nodal_shape`` by :func:`_unflatten_to_nodal_shape`, rather
-        than this method assuming zeros of ``nodal_shape`` directly the way
-        it used to. Composed physics that keeps its state on the
+        than assuming zeros of ``nodal_shape`` directly: that assumption
+        would be wrong for a column-vectorized composition (see below), a
+        fact this method cannot know just from ``nodal_shape`` itself.
+        Composed physics that keeps its state on the
         atmosphere's own grid (SPEEDY) already agrees with ``nodal_shape``,
         so this is a no-op for it; one that vectorizes columns
         (``ComposablePhysics(vectorize_columns=True)``, e.g. ECHAM) publishes
@@ -381,14 +383,15 @@ class JCMDerived:
             If ``diagnostics_template`` looks like a shape -- a `tuple`,
             `list`, `numpy.ndarray` or `jax.Array` of ints (see
             :func:`_looks_like_a_shape`) -- rather than a diagnostics dict.
-            The signature was ``zeros(shape, physics, **overrides)`` before
-            jax-esm#129 swapped the first two arguments' order and meaning,
-            and this review added the required third ``physics`` argument; a
-            caller updating a pre-#129 call site by simply appending the new
-            argument (rather than also reordering the first two) still puts
-            a shape first, which otherwise fails several calls deep as an
-            opaque error naming neither this method nor the argument that
-            actually changed.
+            jax-esm#129 changed the signature from
+            ``zeros(shape, physics, **overrides)`` to
+            ``zeros(diagnostics_template, nodal_shape, physics,
+            **overrides)``, reordering the first two arguments and adding
+            the required third; a caller updating a pre-#129 call site by
+            simply appending the new argument (rather than also reordering
+            the first two) still puts a shape first, which otherwise fails
+            several calls deep as an opaque error naming neither this
+            method nor the argument that actually changed.
 
         """
         if _looks_like_a_shape(diagnostics_template):
@@ -397,12 +400,12 @@ class JCMDerived:
                 "physics, **overrides) takes the diagnostics template "
                 "first and the atmosphere's nodal shape second; got "
                 f"{diagnostics_template!r}, which looks like a shape, as "
-                "the first argument. jax-esm#129 swapped both the order "
-                "and the meaning of zeros()'s first two arguments (it used "
-                "to be zeros(shape, physics, **overrides)), and this "
-                "review added the required third `physics` argument (the "
-                "composed atmosphere physics package) -- update this call "
-                "site to zeros(diagnostics_template, nodal_shape, physics)."
+                "the first argument. jax-esm#129 changed the signature "
+                "from zeros(shape, physics, **overrides): the first two "
+                "arguments are reordered and a required third `physics` "
+                "argument (the composed atmosphere physics package) is "
+                "added -- update this call site to "
+                "zeros(diagnostics_template, nodal_shape, physics)."
             )
         exchange = _surface_exchange_on_nodal_grid(
             diagnostics_template, nodal_shape, physics)
