@@ -271,14 +271,21 @@ def _override_str(key: str, value: Any) -> str:
 
     Quoting protects a string from Hydra's *override* grammar only: a
     ``${...}`` inside it is still an OmegaConf interpolation, resolved when
-    the configuration is composed, exactly as the CLI's
-    ``key='${...}'`` is. That is deliberate. It keeps ``load()`` equivalent to
-    the command line, and it is how a caller names packaged data:
-    ``load(name, ocean="slab_relax",
-    **{"ocean.sst_clim_file": "${jcm_data:bc/t30/clim/forcing.nc}"})``, the
-    Python spelling of the documented CLI override. A string that must
-    arrive holding a literal ``${`` escapes it as ``\${``, as it would on
-    the CLI. The same holds for strings inside a list.
+    the composed configuration is read at build time, exactly as the CLI's
+    ``key='${...}'`` is. The same holds for strings inside a list. That is
+    deliberate. It keeps ``load()`` equivalent to the command line, and it
+    is how a config names packaged data: ``load(name, ocean="slab_relax",
+    **{"ocean.sst_clim_file": "${jcm_data:bc/t30/clim/forcing.nc}"})`` is
+    the Python spelling of the documented CLI override. (A caller holding
+    arbitrary runtime strings can pass
+    :func:`jem.config.package_data_path` results instead and never write
+    ``${``.) ``\${`` escapes a literal ``${`` in a value that is read
+    straight off the config (``coupled_run.*``, ``exp.config``), and a
+    literal backslash directly before ``${`` must be doubled. A component
+    or exchanger field cannot hold a literal ``${`` through config at all,
+    on the CLI or here: ``hydra.utils.instantiate`` resolves its node a
+    second time, so the escaped text is read as an interpolation again.
+    Construct that component in Python instead.
 
     Non-string scalars pass through unquoted so ``coupled_run.total_time=10``
     stays the number ``10``. A ``dict`` is refused outright with a

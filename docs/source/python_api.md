@@ -236,7 +236,11 @@ seaice="none")`, the Python spelling of the CLI's `seaice=none`). A string
 override is carried literally except for a `${...}` interpolation, which
 resolves just as it does on the CLI, so
 `**{"ocean.sst_clim_file": "${jcm_data:bc/t30/clim/forcing.nc}"}` names the
-packaged file; write `\${` for a literal `${`. `load`'s own
+packaged file (`jem.config.package_data_path("jcm.data", ...)` is the
+interpolation-free alternative). `\${` escapes a literal `${` only in a
+value read straight off the config, such as `coupled_run.*`: Hydra
+re-resolves a component's node when it instantiates it, so a component
+field cannot hold a literal `${` through config, on the CLI or here. `load`'s own
 docstring lists the small, specific things `run_chunked(exp.coupler,
 **exp.run_kwargs)` does NOT reproduce of the CLI (a fresh `output_dir` of the
 door's own rather than the CLI's Hydra-managed one, no logger-level change)

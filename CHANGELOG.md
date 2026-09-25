@@ -696,7 +696,13 @@ Breaking changes are marked; everything else is additive.
   (`load("aquaplanet-slab", seaice="none")`), the latter verified to compose
   identically to the CLI's bare `seaice=none` despite the escape hatch's own
   Hydra-grammar quoting (a dict or tuple value now raises `TypeError` naming
-  the key, rather than emitting a token Hydra's parser would reject). An
+  the key, rather than emitting a token Hydra's parser would reject). A list
+  value is spelled element by element from exact built-in types (`None`,
+  `bool`, `int`, `float`, `str`, nested plain lists), and any other element
+  or a `list` subclass raises `TypeError`, so a list composes to exactly the
+  values given. Quoting guards the override grammar only: a `${...}` in a
+  string override still resolves as an interpolation, as on the CLI, which
+  is how `${jcm_data:...}` names packaged data. An
   unknown name raises `ValueError` listing what is available, and a host
   application's own Hydra context (if any) survives a call unharmed.
 

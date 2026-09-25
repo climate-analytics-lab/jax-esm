@@ -470,11 +470,11 @@ class TestOverrideStr(unittest.TestCase):
 
     def test_interpolation_resolves_as_on_the_cli_and_escapes_to_literal(self):
         # A `${...}` in a string override -- top level or inside a list --
-        # resolves at composition exactly as the CLI's `key='${...}'` does,
-        # which is how a caller names packaged data; `\${` keeps it literal.
+        # resolves when the composed config is read, exactly as the CLI's
+        # `key='${...}'` does, which is how a caller names packaged data;
+        # `\${` keeps it literal in a value read straight off the config.
+        # (The module-level `runners` import registers `${jcm_data:}`.)
         from omegaconf import OmegaConf
-
-        import jem.runners  # noqa: F401  (registers the ${jcm_data:} resolver)
 
         resolver = "${jcm_data:bc/t30/clim/forcing.nc}"
         overrides = {
@@ -493,6 +493,25 @@ class TestOverrideStr(unittest.TestCase):
         self.assertEqual(resolved["probe"]["listed"], [path, [path]])
         self.assertEqual(resolved["probe"]["literal"], "${not.a.key}")
         self.assertEqual(resolved["probe"]["literal_list"], ["${not.a.key}"])
+
+    def test_escaped_interpolation_is_literal_only_off_the_config(self):
+        # End to end through `load()`: `\${` survives as a literal `${` in a
+        # value read straight off the config (`coupled_run.output_dir`), but
+        # not in a component field, because `hydra.utils.instantiate`
+        # resolves the node again. The docstring of `_override_str` and
+        # python_api.md state that limitation; this pins it, so a change in
+        # Hydra's behaviour shows up here and the docs get updated.
+        from omegaconf.errors import InterpolationKeyError
+
+        exp = configurations.load(
+            "aquaplanet-slab",
+            **{"coupled_run.output_dir": "/tmp/\\${not.a.key}",
+               "coupled_run.total_time": "2 days", "coupled_run.chunk": "2 days"})
+        self.assertEqual(exp.run_kwargs["output_dir"], "/tmp/${not.a.key}")
+        with self.assertRaises(InterpolationKeyError):
+            configurations.load(
+                "aquaplanet-slab", ocean="slab_relax",
+                **{"ocean.sst_clim_file": "\\${not.a.key}"})
 
 
 def test_module_imports_no_hydra_or_omegaconf_at_top_level():
