@@ -368,6 +368,39 @@ class TestOverrideStr(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "ocean.params"):
             configurations._override_str("ocean.params", [[1, None], 2])
 
+    def test_list_containing_a_dict_raises_type_error(self):
+        # A dict nested in a list is unrepresentable for the same reason a
+        # top-level dict is. Before, it slipped past the top-level check and
+        # reached Hydra's parser as a raw str() token, failing there with an
+        # opaque HydraException rather than this clear TypeError.
+        for value in ([{"value": None}], [{"value": 1}], [[{"a": 1}]]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, r"ocean\.params.*dict"):
+                    configurations._override_str("ocean.params", value)
+
+    def test_list_containing_a_tuple_raises_type_error(self):
+        with self.assertRaisesRegex(TypeError, r"ocean\.params.*tuple"):
+            configurations._override_str("ocean.params", [(1, 2)])
+
+    def test_list_containing_any_non_literal_raises_type_error(self):
+        # Only bool/int/float/str and nested lists round-trip through str()
+        # to a Hydra list token; anything else (e.g. a Path, whose str() is a
+        # PosixPath(...) repr) must be refused, not handed to the parser.
+        from pathlib import Path
+
+        with self.assertRaisesRegex(TypeError, r"ocean\.params.*PosixPath"):
+            configurations._override_str("ocean.params", [Path("/tmp/x")])
+
+    def test_every_accepted_list_element_type_round_trips(self):
+        # The accepted set must be exactly what composes faithfully: each
+        # element type, alone and nested, parses back to the same value.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        value = [True, 1, 2.5, "a,b", ["x", [3, False]]]
+        tok = configurations._override_str("ocean.params", value)
+        self.assertEqual(parser.parse_overrides([tok])[0].value(), value)
+
     def test_list_without_none_still_composes(self):
         # A plain list -- no None anywhere -- is unaffected by the new check.
         from hydra.core.override_parser.overrides_parser import OverridesParser
