@@ -19,6 +19,7 @@ import pytest
 
 from jem.base.calendar import (
     SECONDS_PER_DAY,
+    _digit_tables,
     gregorian_day_of_year,
     gregorian_instant,
     gregorian_ymd_from_days,
@@ -375,6 +376,30 @@ def test_max_safe_record_raises_rather_than_silently_return_zero_when_even_recor
     # too strict.
     days, _ = gregorian_instant(jnp.int32(0), 1, 2**31 - 6, 0, offset_seconds=400 * 86400)
     assert int(days) < 0  # wrapped: the true day count is past int32's range
+
+
+def test_digit_tables_are_read_only():
+    """The cached lookup tables must not be mutable by a caller.
+
+    ``_digit_tables`` is ``functools.lru_cache``d, so every caller for a
+    given ``record_seconds`` shares the exact same two arrays; a caller that
+    mutated one in place would corrupt ``gregorian_instant``'s results for
+    every later date this process computes with that ``record_seconds``, not
+    just its own. Both returned arrays must therefore refuse an in-place
+    write rather than merely rely on every caller behaving.
+    """
+    days, seconds = _digit_tables(86400)
+    assert days.flags.writeable is False
+    assert seconds.flags.writeable is False
+    with pytest.raises(ValueError):
+        days[0] = 1
+    with pytest.raises(ValueError):
+        seconds[0] = 1
+
+    # The read-only flag must not have broken the function it protects.
+    got_days, got_seconds = gregorian_instant(jnp.int32(5), 86400, 0, 0)
+    assert int(got_days) == 5
+    assert int(got_seconds) == 0
 
 
 def test_gregorian_instant_midpoint_never_crosses_a_month_boundary():

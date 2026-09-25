@@ -168,9 +168,14 @@ def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
     identical ``_LIMB_BASE``-entry arrays from scratch. The cache is
     unbounded because the realistic key space is tiny -- a handful of
     coupling timesteps a single process ever actually uses, not an unbounded
-    stream -- and the two returned arrays are read-only from every caller
-    (immediately wrapped with :func:`jax.numpy.asarray`, never mutated in
-    place), so sharing them across calls is safe.
+    stream -- and the two returned arrays **are read-only**
+    (``ndarray.setflags(write=False)``, below), so every caller shares the
+    same two cached arrays safely: a caller that tried to mutate one in
+    place would raise ``ValueError`` immediately rather than silently
+    corrupt every later date this process computes with that
+    ``record_seconds``. Every caller today only ever reads them (each is
+    wrapped with :func:`jax.numpy.asarray`, never assigned into), but the
+    read-only flag is what makes that a guarantee rather than a convention.
 
     Parameters
     ----------
@@ -180,7 +185,7 @@ def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
     Returns
     -------
     days, seconds : numpy.ndarray
-        ``int32`` arrays of length ``_LIMB_BASE``.
+        Read-only ``int32`` arrays of length ``_LIMB_BASE``.
 
     Raises
     ------
@@ -208,7 +213,17 @@ def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
             "digit's own contribution to gregorian_instant's limb reduction "
             "would not fit an int32 day count."
         )
-    return days.astype(np.int32), seconds.astype(np.int32)
+    days = days.astype(np.int32)
+    seconds = seconds.astype(np.int32)
+    # Read-only because these two arrays are cached and shared by every
+    # caller for a given `record_seconds` (the `@functools.lru_cache` above):
+    # without this, a caller that mutated one in place -- accidentally or
+    # otherwise -- would corrupt `gregorian_instant`'s results for every
+    # later date this process computes with that `record_seconds`, not just
+    # its own.
+    days.setflags(write=False)
+    seconds.setflags(write=False)
+    return days, seconds
 
 
 def gregorian_instant(
