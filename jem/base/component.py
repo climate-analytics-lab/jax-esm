@@ -397,7 +397,7 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
     in-jit via :func:`jem.base.calendar.gregorian_instant` -- so this function
     still gives the same value ``year_fraction`` gives at step 0, up to the
     float32-vs-float64 rounding between a host Python float and a traced JAX
-    array (the same precision gap that existed before this fix), which is the
+    array, which is the
     property this function exists to keep. ``"365_day"`` is unchanged: its
     year has no leap day, so the fixed-average division was already exact.
     (``"360_day"`` is not a calendar this function, or any other part of

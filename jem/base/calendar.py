@@ -376,10 +376,12 @@ def gregorian_instant(
         ``start_days`` may be negative; ``start_seconds`` must not be.
     offset_seconds : int, optional
         Seconds into record ``record`` at which to evaluate the instant.
-        Static; both callers pass ``0`` or ``record_seconds // 2``, but
-        nothing here requires ``offset_seconds <= record_seconds`` --
-        :func:`jem.accumulate._midpoint_month_rule` also adds a pattern
-        phase that is typically much larger than one record. Non-negative.
+        Static and non-negative. It is added to the traced seconds component
+        as an int32 constant (``seconds + offset_seconds + start_seconds``),
+        so that sum must stay below ``2**31``: a caller with a larger offset
+        folds its whole days into ``start_days`` and passes only the sub-day
+        remainder here, as :func:`jem.accumulate._midpoint_month_rule`
+        does.
 
     Returns
     -------

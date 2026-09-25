@@ -778,13 +778,13 @@ def test_midpoint_month_rule_is_int32_safe_for_a_multi_decade_period(offset_seco
 def test_monthly_mean_n_months_1200_does_not_overflow_and_bins_correctly(start_date):
     """A 100-year, 365_day sequential accumulator must build and run without overflowing.
 
-    Before the fix, building this accumulator succeeded (the overflow is in
-    the traced call, not construction), but running even a handful of steps
-    through it raised ``OverflowError`` from ``gregorian_instant``'s own
-    constant-folding of the phase, for BOTH start dates -- the bug is in the
-    period's own size (1200 months, ~100 years), not specific to the
-    December-31 phase-wrap case those start dates otherwise probe (see
-    ``test_a_sequential_n_months_run_starting_late_in_a_month_...``).
+    The period (1200 months, ~100 years) is past ``2**31`` seconds, so a
+    phase reduced into it can be too; passed to ``gregorian_instant`` as a
+    single seconds offset it would overflow the int32 constant it is folded
+    into. Both start dates are checked, since the size of the period, not
+    the December-31 phase wrap those start dates otherwise probe (see
+    ``test_a_sequential_n_months_run_starting_late_in_a_month_...``), is what
+    matters here.
     Verified against an independent, pure-Python reference on the model's
     own fixed calendar (never real Gregorian dates, which would conflate
     this with the unrelated, documented leap-day drift a run this long is
@@ -878,9 +878,11 @@ def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve(
     # One bin, deliberately sized to need ten more records per cycle than
     # `gregorian_instant` can resolve for this record length.
     period = record_seconds * (bound + 11)
-    rule = _midpoint_month_rule(np.array([period], dtype=np.int64), 0)
-
+    # A period this long also rounds up to more than an int32 day count, so
+    # the refusal can come from building the rule as well as from calling it;
+    # either way it is refused before any bin is computed.
     with pytest.raises(ValueError, match="too long"):
+        rule = _midpoint_month_rule(np.array([period], dtype=np.int64), 0)
         rule(jnp.int32(0), record_seconds)
 
 
@@ -892,9 +894,8 @@ def test_midpoint_month_rule_refuses_records_per_period_reaching_2_31_exactly():
     above -- ranges over), so `records_per_period - 1 <= bound` alone is not
     enough: at that exact boundary `records_per_period` is `bound + 1`, which
     reaches `2**31` when `bound` is `max_safe_record`'s own maximum clamp,
-    `2**31 - 1` -- one past what an int32 constant can hold, the same
-    ``OverflowError`` a too-large phase raised before ``offset_seconds`` was
-    split into day/second limbs. `bound` here is fixed at its own maximum
+    `2**31 - 1` -- one past what an int32 constant can hold, which JAX
+    refuses with an ``OverflowError``. `bound` here is fixed at its own maximum
     clamp by an ``offset_seconds`` of 0, so `records_per_period == bound + 1`
     is reachable with a period only one record above `bound` records, not one
     spanning millions of years.
@@ -903,8 +904,8 @@ def test_midpoint_month_rule_refuses_records_per_period_reaching_2_31_exactly():
     bound = max_safe_record(record_seconds, offset_seconds=0)
     assert bound == 2**31 - 1  # sanity: this is genuinely at the clamp
 
-    # `records_per_period - 1 == bound`: accepted before this fix, refused
-    # now, since `records_per_period` itself would be `2**31`.
+    # `records_per_period - 1 == bound`: refused, since `records_per_period`
+    # itself would be `2**31`.
     period_at_the_old_boundary = record_seconds * (bound + 1)
     rule = _midpoint_month_rule(np.array([period_at_the_old_boundary], dtype=np.int64), 0)
     with pytest.raises(ValueError, match="too long"):
@@ -2374,10 +2375,11 @@ def test_a_sequential_total_time_run_starting_late_in_a_month_sizes_correctly(
 ):
     """`total_time`'s bin COUNT, not just membership, must account for the same wrap.
 
-    Before the fix this raised the accumulator to about thirteen bins for a
-    run whose midpoints never leave the month they start in, because sizing
-    it (`_months_covering` on ``"365_day"``, the host's own `datetime` on
-    ``"gregorian"``) used the same wrongly-phased offset the binning did.
+    Sizing the accumulator (`_months_covering` on ``"365_day"``, the host's
+    own `datetime` on ``"gregorian"``) uses the same phase as the binning, so
+    a run whose midpoints never leave their first month gets exactly one bin,
+    not one per month of the year the phase would otherwise be measured
+    from.
     """
     grid = make_grid()
     coupler = Coupler(
@@ -2472,11 +2474,9 @@ def test_monthly_mean_refuses_a_total_time_that_is_not_whole_coupling_steps(
 ):
     """A ``total_time`` shorter than a whole number of coupling steps is refused.
 
-    Before this fix, ``total_time=`` was silently floor-divided by the
-    coupling timestep (``n_steps = total_seconds // dt_seconds``), with no
-    check that the division was exact -- so ``"36.5 hours"`` on this coupler's
-    daily coupling built a one-bin accumulator as if it had been asked for
-    exactly one day, discarding the extra 12.5 hours with no warning.
+    Floor-dividing ``total_time`` by the coupling timestep would silently
+    drop the remainder -- ``"36.5 hours"`` on this coupler's daily coupling
+    would build a one-bin accumulator as if asked for exactly one day.
     ``jem.driver.run_chunked`` already refuses the same durations for its own
     ``total_time``/``chunk`` (:func:`jem.driver._whole_steps`); an
     accumulator sized by ``total_time`` is bound by the same coupled-step
@@ -2522,3 +2522,17 @@ def test_midpoint_month_rule_refuses_a_phase_outside_one_period():
             _midpoint_month_rule(boundaries, offset)
     _midpoint_month_rule(boundaries, 0)
     _midpoint_month_rule(boundaries, 31 * 86400 - 1)
+
+
+def test_midpoint_month_rule_refuses_a_last_boundary_past_the_int32_day_count():
+    """A period whose last boundary rounds up to ``2**31`` days is refused.
+
+    ``boundary_days`` is an int32 array, and a ceiling of ``2**31`` would wrap
+    to ``-2**31`` silently, dropping every record into an out-of-range bin.
+    """
+    from jem.accumulate import _midpoint_month_rule
+
+    period = 86402 * 2147433938  # ceil(period / 86400) == 2**31
+    assert -(-period // 86400) == 2**31
+    with pytest.raises(ValueError, match="more days than an int32 can count"):
+        _midpoint_month_rule(np.array([86400, period]), 0)

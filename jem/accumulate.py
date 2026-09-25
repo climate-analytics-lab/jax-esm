@@ -431,8 +431,9 @@ def _midpoint_month_rule(
     about 5.87 million years (``2**31`` DAYS) rather than 68 (``2**31``
     SECONDS). The record's own day is computed with
     :func:`~jem.base.calendar.gregorian_instant`'s own int32-safe block
-    decomposition (``start_days=0``, ``start_seconds=0``, since only "days
-    since the pattern's own start" is wanted here, not since the epoch) --
+    decomposition (``start_seconds=0`` and ``start_days`` holding only the
+    whole days of the pattern phase, since only "days since the pattern's own
+    start" is wanted here, not since the epoch) --
     still necessary, and not merely a seconds-vs-days relabelling, because
     ``record_mod * record_seconds`` alone can overflow int32 for a long
     enough pattern exactly as it can in :func:`gregorian_instant`'s own
@@ -540,11 +541,20 @@ def _midpoint_month_rule(
             "phase, past that point."
         )
     # Ceiling, not floor -- see the Notes above for why the pattern's last
-    # boundary specifically needs it. `boundary_days` stays int32-safe for
-    # any period a real run's pattern spans (millions of years), unlike the
-    # `boundaries_int32` (SECONDS) array this replaces, which is what
-    # overflowed for a multi-decade sequential accumulator.
-    boundary_days = jnp.asarray(-(-boundaries // _SECONDS_PER_DAY), dtype=jnp.int32)
+    # boundary specifically needs it. The boundaries are compared in DAYS
+    # because a day count stays within int32 for millions of years, where a
+    # seconds count overflows after 68. The ceiling of the last boundary
+    # can still reach `2**31` for a period just past `86400 * (2**31 - 1)`
+    # seconds, and `jnp.asarray(..., dtype=int32)` would wrap it silently,
+    # so it is checked here rather than relied on.
+    boundary_days_np = -(-boundaries // _SECONDS_PER_DAY)
+    if int(boundary_days_np[-1]) > 2**31 - 1:
+        raise ValueError(
+            f"This monthly_mean's pattern spans {period} s, whose last "
+            "boundary rounds up to more days than an int32 can count; it is "
+            "too long to bin exactly."
+        )
+    boundary_days = jnp.asarray(boundary_days_np, dtype=jnp.int32)
     # The period's own exact length as a (whole days, remaining seconds)
     # pair -- unlike `boundary_days[-1]` (`period` rounded UP to a whole
     # day), this is `period` itself, unrounded, and is what an instant is
@@ -600,8 +610,9 @@ def _midpoint_month_rule(
                 "long, or its records too long, to bin exactly."
             )
         record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
-        # `offset_seconds + record_seconds // 2` is bounded by `period` (the
-        # `[0, period)` guard above), which for a long enough sequential
+        # `offset_seconds + record_seconds // 2` is below
+        # `period + record_seconds // 2` (the `[0, period)` guard above),
+        # which for a long enough sequential
         # pattern -- a 1200-month, 100-year accumulator's is already past
         # 3.1e9 s -- exceeds what an int32 can hold. Passed directly as
         # `gregorian_instant`'s own `offset_seconds`, a PLAIN PYTHON int, that
@@ -615,7 +626,7 @@ def _midpoint_month_rule(
         # to the TRACED `days` component instead -- always small, since a
         # period long enough for this to matter is measured in tens of
         # thousands of days, not billions of seconds) and a sub-day remainder
-        # (comfortably under `record_seconds // 2`'s own contribution) keeps
+        # (in `[0, 86400)`) keeps
         # every value ever embedded as a JAX constant here small regardless
         # of how long the pattern is, while computing exactly the same
         # `(day, second)` -- `gregorian_instant` sums the two parts back

@@ -349,15 +349,13 @@ def test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels(
     Every component's *record* is already labelled at its own interval's
     midpoint (:class:`~jem.base.component.TimeAxis`, shared across
     components -- see :func:`test_component_datasets_merge_on_one_time_and_grid`),
-    but before this fix only a dataset carrying ``time_bounds`` (JCM's) had its
-    *chunk mean* labelled at the chunk's own true midpoint; every other
-    component (the slab ocean here) kept the chunk's last record's own label
-    instead -- which, being itself a midpoint under jax-gcm PR 878, is not the
-    chunk's midpoint, and the two disagreed. A JCM plus slab-ocean 2-day chunk
-    starting 2000-01-01 used to give atm ``2000-01-02T00`` (the true midpoint,
-    computed from ``time_bounds``) against ocn ``2000-01-02T12`` (its last
-    record's own midpoint label) -- see jem/output.py's module docstring,
-    "What ``output_averages`` means here", and probe p9.
+    and a *chunk mean* must be labelled at the chunk's own true midpoint for
+    every component alike. JCM's is computed from its ``time_bounds``; a
+    component without bounds (the slab ocean here) cannot use its last
+    record's own label, which is that record's midpoint, not the chunk's. For
+    a JCM plus slab-ocean 2-day chunk starting 2000-01-01 both must read
+    ``2000-01-02T00`` -- see jem/output.py's module docstring, "What
+    ``output_averages`` means here".
     """
     _, _, diagnostics = two_steps
     datasets = atmosphere_ocean.to_xarray(diagnostics)
