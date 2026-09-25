@@ -1187,7 +1187,11 @@ def monthly_mean(
     corresponding "one more bin" adjustment either.)
 
     Every calendar a :class:`~jem.base.coupler.Coupler` supports is handled
-    **exactly** and **in-scan**: ``"365_day"`` and ``"360_day"`` bin against
+    **exactly** and **in-scan**: ``"365_day"`` (the only fixed-length
+    calendar a ``Coupler`` actually accepts -- ``"360_day"`` is a table
+    :func:`month_lengths` can build, but not a calendar name any part of jem
+    accepts; see that function's own docstring and
+    :class:`~jem.base.coupler.Coupler`'s ``calendar`` parameter) bins against
     a fixed table of month lengths (:func:`month_lengths`), and
     ``"gregorian"`` -- since 2026-09, no longer a
     :class:`NotImplementedError` here -- bins against the real proleptic

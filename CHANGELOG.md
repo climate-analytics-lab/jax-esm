@@ -805,8 +805,17 @@ Breaking changes are marked; everything else is additive.
   cause a real, confirmed seasonal-phase drift of up to +1.48 days over 400
   years — see the next bullet) and is the only calendar a real
   `jcm.model.Model` component ever accepts, so it is also the only sensible
-  default. `"365_day"` and `"360_day"` remain available as explicit choices
-  for a coupled model with no atmosphere. Every documented example that
+  default. `"365_day"` remains available as an explicit choice for a coupled
+  model with no atmosphere. (`"360_day"` is **not** — it never has been, on
+  this or any earlier jem revision: `jem.base.component.days_per_year`, the
+  one table every calendar-aware part of jem reads, has never had a
+  `"360_day"` entry, matching the pre-878 `jcm.date.days_per_year` it was
+  copied from. A previous version of this entry, and several other
+  docstrings, wrongly said otherwise — see the jax-gcm-878 clock migration
+  review that caught it. A 360-day fixed-length year is still a table
+  `jem.accumulate.month_lengths` can build, given the bare number `360`
+  directly, but there is no calendar *name* that reaches it through a
+  `Coupler`.) Every documented example that
   omitted `calendar=` and built a jax-gcm-coupled model used to fail at
   `bind()` against the old default; those examples (and every jem-only test
   that relied on the old default specifically to exercise 365-day arithmetic)
@@ -832,9 +841,11 @@ Breaking changes are marked; everything else is additive.
   calibrates a climatology's day-of-year per the actual length of the current
   year, so day 60 always means 1 March even in a leap year) — see
   `CouplingTime.year_fraction`'s own docstring for why that is a separate,
-  deliberately out-of-scope science choice rather than a bug. `"365_day"` and
-  `"360_day"` are unaffected (their year has no leap day, so the fixed-average
-  division was already exact).
+  deliberately out-of-scope science choice rather than a bug. `"365_day"` is
+  unaffected (its year has no leap day, so the fixed-average division was
+  already exact); `"360_day"` is not a calendar any part of jem accepts (see
+  the previous bullet's correction), so it was never a consumer of this
+  property to begin with.
 - **Fixed — `jem.output.postprocess` mishandled jax-gcm 878's new
   `time_bounds` variable on a multi-record averaged chunk.** It was averaged
   like any other data variable and stamped with the chunk's `cell_methods`,

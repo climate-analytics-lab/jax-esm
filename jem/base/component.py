@@ -398,16 +398,17 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
     still gives the same value ``year_fraction`` gives at step 0, up to the
     float32-vs-float64 rounding between a host Python float and a traced JAX
     array (the same precision gap that existed before this fix), which is the
-    property this function exists to keep. ``"365_day"`` and
-    ``"360_day"`` are unchanged: their year has no leap day, so the
-    fixed-average division was already exact.
+    property this function exists to keep. ``"365_day"`` is unchanged: its
+    year has no leap day, so the fixed-average division was already exact.
+    (``"360_day"`` is not a calendar this function, or any other part of
+    jem, accepts by name -- see :func:`days_per_year`.)
 
     Parameters
     ----------
     start_date : jax_datetime.Datetime
         The run's start date.
     calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
+        Calendar name as JCM spells it: ``"gregorian"`` or ``"365_day"``.
 
     Returns
     -------
@@ -551,12 +552,14 @@ class CouplingTime:
         (separate, and much smaller) day-of-climatology convention
         difference from jax-gcm's own scheme.
 
-        **On ``"365_day"``/``"360_day"``** this is unchanged from before the
-        2026-09 review: those calendars have no leap day, so a fixed
-        average-year-length division was already exact, and the modular
-        integer-step reduction below (kept for its float32-precision benefit
-        over many decades of simulated time -- see the note in its own
-        branch) still applies.
+        **On ``"365_day"``** (the only other calendar name a
+        :class:`~jem.base.coupler.Coupler` accepts -- ``"360_day"`` is not,
+        and never has been, a calendar any part of jem supports by name; see
+        :func:`days_per_year`) this is unchanged from before the 2026-09
+        review: that calendar has no leap day, so a fixed average-year-length
+        division was already exact, and the modular integer-step reduction
+        below (kept for its float32-precision benefit over many decades of
+        simulated time -- see the note in its own branch) still applies.
         """
         if self.days_per_year == 365.2425:
             return self._gregorian_year_fraction()

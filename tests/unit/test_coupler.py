@@ -251,6 +251,27 @@ def test_workflow_revalidated_when_a_component_is_removed():
         coupler.generate_step_function()
 
 
+def test_a_360_day_calendar_is_refused():
+    """`"360_day"` is not, and never has been, an accepted calendar name.
+
+    Checked against ``origin/claude/jcm-877-surface-exchange`` (the base
+    branch this migration built on): its own ``Coupler.__init__`` called
+    ``jcm.date.days_per_year(calendar)`` directly, whose table
+    (``jcm.date._DAYS_PER_YEAR_BY_CALENDAR`` /
+    ``SUPPORTED_CALENDARS = ("gregorian", "365_day")`` on the pre-878 jcm)
+    never had a ``"360_day"`` entry either -- so this was never a supported
+    calendar to begin with, on this branch or the one before it, despite
+    several docstrings (the ``Coupler`` docstring, the CHANGELOG, the
+    README, ``monthly_mean``'s and ``CouplingTime.year_fraction``'s own
+    docstrings) having said otherwise. This pins the actual, and correct,
+    behaviour so a future change cannot silently start accepting -- or
+    silently keep refusing with a worse message -- a calendar name that was
+    never meant to reach a real ``Coupler``.
+    """
+    with pytest.raises(ValueError, match="Unknown calendar '360_day'"):
+        _coupler(calendar="360_day")
+
+
 def test_repr_names_the_model():
     # Explicit calendar: this test is about what `repr` shows for whatever
     # calendar the coupler was given, not about the coupler's own default

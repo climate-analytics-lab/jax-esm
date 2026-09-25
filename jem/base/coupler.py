@@ -385,7 +385,8 @@ class Coupler:
     start_date : jdt.Datetime
         Date of coupled step 0.
     calendar : str
-        Calendar name as JCM used to spell it (``"gregorian"``, ``"365_day"``);
+        Calendar name as JCM used to spell it, one of ``"gregorian"`` or
+        ``"365_day"`` (**not** ``"360_day"`` -- see the note below);
         determines the length of the year used for the annual cycle
         (:func:`jem.base.component.days_per_year`). Defaults to
         ``"gregorian"`` -- the calendar every jem component actually
@@ -396,13 +397,27 @@ class Coupler:
         ``jcm.model.Model`` component: jax-gcm v3's atmosphere clock is
         unconditionally Gregorian, and
         :meth:`~jem.components.jcm.component.JCMComponent.bind` refuses
-        anything else. ``"365_day"`` and ``"360_day"`` remain available as
-        explicit choices for a coupled model with no atmosphere. (Before the
-        2026-09 jax-gcm-878 migration this default was ``"365_day"``, which
-        every documented example that omitted ``calendar=`` then relied on;
-        it changed because that default silently failed
+        anything else. ``"365_day"`` remains available as an explicit choice
+        for a coupled model with no atmosphere. (Before the 2026-09
+        jax-gcm-878 migration this default was ``"365_day"``, which every
+        documented example that omitted ``calendar=`` then relied on; it
+        changed because that default silently failed
         :meth:`~jem.components.jcm.component.JCMComponent.bind` for any
         atmosphere-coupled example -- see the CHANGELOG's Breaking Changes.)
+
+        ``"360_day"`` is **not** an accepted value here (it never has been,
+        on this or any earlier jem revision):
+        :func:`jem.base.component.days_per_year` -- the one table every
+        calendar-aware part of jem reads, including this constructor -- has
+        never had a ``"360_day"`` entry, so ``Coupler(...,
+        calendar="360_day")`` has always raised
+        ``ValueError("Unknown calendar '360_day'...")``. A 360-day
+        *fixed-length year* is nonetheless a table
+        :func:`jem.accumulate.month_lengths` can return -- reachable by
+        passing it the bare number ``360`` directly, which it accepts in
+        place of a calendar name or a ``Coupler`` -- but there is no calendar
+        *name* that selects it, here or anywhere else in jem, so it cannot be
+        reached through a ``Coupler``'s own ``calendar=`` at all.
     name : str
         The coupler's own name, as the :class:`Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see

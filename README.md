@@ -285,7 +285,9 @@ written with — so `monthly.finalize(...)` and
 numbers **by construction**, on every calendar this works on: `"gregorian"`
 (the coupler's default, and the only calendar a real atmosphere accepts) bins
 against the exact, real Gregorian calendar, real leap years included, entirely
-in-scan; `"365_day"`/`"360_day"` bin against a fixed table of month lengths.
+in-scan; `"365_day"` (the only other calendar name a `Coupler` accepts —
+`"360_day"` is not a calendar jem has ever supported by name) bins against a
+fixed table of month lengths.
 On the fixed calendars only, the *labels* are still proleptic Gregorian
 whatever the model calendar is (JCM's convention, jax-gcm#449;
 calendar-consistent labels there are tracked as #118), so a `365_day` run
