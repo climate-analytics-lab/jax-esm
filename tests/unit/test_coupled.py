@@ -37,6 +37,7 @@ from jem.components.slab import (
     SlabSeaiceModel,
 )
 from jem.components.slab.grid import to_degrees
+from jem.output import postprocess
 
 START_DATE = jdt.to_datetime("2000-01-01")
 # jax-gcm v3's atmosphere clock is unconditionally Gregorian and has no
@@ -338,6 +339,45 @@ def test_component_datasets_merge_on_one_time_and_grid(atmosphere_ocean, two_ste
     assert merged.sizes["time"] == 2
     assert (merged.sizes["lon"], merged.sizes["lat"]) == GRID_SHAPE
     assert "sea_surface_temperature" in merged
+
+
+def test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels(
+    atmosphere_ocean, two_steps
+):
+    """``output_averages`` must label every component's chunk mean identically.
+
+    Every component's *record* is already labelled at its own interval's
+    midpoint (:class:`~jem.base.component.TimeAxis`, shared across
+    components -- see :func:`test_component_datasets_merge_on_one_time_and_grid`),
+    but before this fix only a dataset carrying ``time_bounds`` (JCM's) had its
+    *chunk mean* labelled at the chunk's own true midpoint; every other
+    component (the slab ocean here) kept the chunk's last record's own label
+    instead -- which, being itself a midpoint under jax-gcm PR 878, is not the
+    chunk's midpoint, and the two disagreed. A JCM plus slab-ocean 2-day chunk
+    starting 2000-01-01 used to give atm ``2000-01-02T00`` (the true midpoint,
+    computed from ``time_bounds``) against ocn ``2000-01-02T12`` (its last
+    record's own midpoint label) -- see jem/output.py's module docstring,
+    "What ``output_averages`` means here", and probe p9.
+    """
+    _, _, diagnostics = two_steps
+    datasets = atmosphere_ocean.to_xarray(diagnostics)
+    assert "time_bounds" in datasets["atm"].data_vars
+    assert "time_bounds" not in datasets["ocn"].data_vars
+
+    averaged = {
+        name: postprocess(dataset, output_averages=True)
+        for name, dataset in datasets.items()
+    }
+
+    for dataset in averaged.values():
+        assert dataset.sizes["time"] == 1
+    np.testing.assert_array_equal(
+        averaged["atm"].time.values, averaged["ocn"].time.values
+    )
+    assert averaged["atm"].time.values[0] == np.datetime64("2000-01-02T00:00", "ms")
+
+    merged = xr.merge(averaged.values(), join="exact", compat="no_conflicts")
+    assert merged.sizes["time"] == 1
 
 
 @pytest.mark.slow

@@ -121,15 +121,16 @@ def test_postprocess_subsample_keeps_every_kth_record():
     assert thinned.attrs == {"title": "a chunk"}
 
 
-def test_postprocess_averages_the_chunk_and_labels_it_at_the_end():
+def test_postprocess_averages_the_chunk_and_labels_it_at_its_midpoint():
     dataset = simple_dataset(4)
     averaged = postprocess(dataset, output_averages=True)
 
     assert averaged.sizes["time"] == 1
     # This dataset carries no `time_bounds` (see `simple_dataset`), so there
-    # is no exact chunk interval to compute a true midpoint from; the
-    # approximation is the chunk's own last record's label.
-    assert averaged["time"].values[0] == dataset["time"].values[-1]
+    # is no bound to read the chunk's own interval from directly -- but its
+    # midpoint is still exact, as the average of the chunk's first and last
+    # record's own labels (days 0 and 3 here, so day 1.5 at noon).
+    assert averaged["time"].values[0] == np.datetime64("1970-01-02T12:00", "ms")
     np.testing.assert_allclose(
         averaged["temperature"].values[0],
         dataset["temperature"].values.mean(axis=0),
@@ -207,21 +208,43 @@ def test_postprocess_time_bounds_survive_a_subsample_then_average():
     )
 
 
-def test_postprocess_with_no_time_bounds_is_unaffected():
-    """A dataset with no `time_bounds` at all keeps the pre-existing behaviour."""
-    dataset = simple_dataset(4)
+def test_postprocess_with_no_time_bounds_still_finds_the_chunk_midpoint():
+    """A dataset with no `time_bounds` gets the chunk's true midpoint too.
+
+    This replaces a test that used to pin the *inconsistent* pre-fix
+    behaviour (labelling with the chunk's last record's own label, an
+    approximation that was silently wrong once every record's own label
+    became a midpoint rather than an end-of-interval instant -- jax-gcm PR
+    878). The chunk's true midpoint is exact here too: it is the average of
+    the first and last record's own midpoint labels, which equals the
+    chunk's midpoint for any equal-length, contiguous run of records (see
+    :func:`~jem.output.postprocess`'s body for the derivation) -- it does not
+    depend on `dt`, so it is checked here with records at *uneven* spacing
+    (day 0 and day 10) to show the formula does not assume one.
+
+    The end-to-end version of this -- two real components, one with
+    `time_bounds` and one without, whose averaged chunks must carry the
+    *same* label so `xr.merge(..., join="exact")` succeeds -- is
+    `test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels` in
+    `tests/unit/test_coupled.py`, which is where a real JCM model lives.
+    """
+    dataset = simple_dataset(2)
+    dataset = dataset.assign_coords(
+        time=("time", np.array(["1970-01-01", "1970-01-11"], dtype="datetime64[ns]"))
+    )
     assert "time_bounds" not in dataset.variables
     averaged = postprocess(dataset, output_averages=True)
-    assert averaged["time"].values[0] == dataset["time"].values[-1]
+    assert averaged["time"].values[0] == np.datetime64("1970-01-06", "ms")
 
 
 def test_postprocess_composes_subsample_then_average():
     """Both together average the retained records, in that order.
 
-    The label stays the **chunk's** last time even though the stride dropped
-    that record from the mean: it says which interval the mean covers, which
-    is the chunk, so a run that sets both still writes one mean per chunk
-    evenly spaced with the chunks.
+    The label stays the **chunk's** own midpoint (days 0 through 5, so day
+    2.5) even though the stride dropped some of those records from the mean:
+    it says which interval the mean covers, which is the whole chunk, so a
+    run that sets both still writes one mean per chunk evenly spaced with the
+    chunks.
     """
     dataset = simple_dataset(6)
     result = postprocess(dataset, output_averages=True, subsample=2)
@@ -231,7 +254,7 @@ def test_postprocess_composes_subsample_then_average():
         result["temperature"].values[0],
         dataset["temperature"].values[::2].mean(axis=0),
     )
-    assert result["time"].values[0] == dataset["time"].values[-1]
+    assert result["time"].values[0] == np.datetime64("1970-01-03T12:00", "ms")
 
 
 def test_postprocess_stride_counts_coupled_steps_of_the_whole_run():
@@ -629,7 +652,15 @@ def test_datasets_for_chunk_labels_and_postprocesses(two_slab_coupler, tmp_path)
     )
     for name, dataset in averaged.items():
         assert dataset.sizes["time"] == 1, name
-        assert dataset["time"].values[0] == datasets[name]["time"].values[-1]
+        # The chunk's own true midpoint: the average of its first and last
+        # record's own midpoint labels (no `time_bounds` on a slab dataset,
+        # so this is the exact-but-bound-free branch of `postprocess`).
+        first_ms = datasets[name]["time"].values[0].astype("datetime64[ms]").astype("int64")
+        last_ms = datasets[name]["time"].values[-1].astype("datetime64[ms]").astype("int64")
+        expected = np.asarray(
+            first_ms + (last_ms - first_ms) // 2, dtype="datetime64[ms]"
+        )
+        assert dataset["time"].values[0] == expected
         np.testing.assert_allclose(
             dataset["sea_surface_temperature"].values[0]
             if name == "ocn"

@@ -93,9 +93,20 @@ like a sampled quantity (:func:`postprocess`, 2026-09 migration review, item
 naively treating `time_bounds` as an ordinary variable to average and
 labelling the mean with the chunk's *last* record's own midpoint, neither the
 chunk's true midpoint nor its end). A dataset with no such bounds (every
-non-JCM component today) has no exact chunk interval to read, so it keeps the
-long-standing approximation: the chunk's last (pre-``subsample``) record's own
-label.
+non-JCM component today) has no bound to read, but its records are still
+labelled at their own interval's midpoint by the same shared ``TimeAxis``
+JCM's are, so the chunk's own midpoint is still computed exactly -- as the
+average of the first and last (pre-``subsample``) record's own midpoint
+labels, which equals the chunk's true midpoint for any equal-length,
+contiguous run of records regardless of the per-record interval length (see
+:func:`postprocess`'s body for the derivation). Every component's averaged
+record is therefore labelled identically for the same chunk, which is what
+lets ``xr.merge(..., join="exact")`` of two components' averaged output
+succeed at all (2026-09 migration review, item 1's second half -- a real bug
+this fixed: a chunk's non-``time_bounds`` label used to be the chunk's *last*
+record's own label, which was an end-of-interval label before jax-gcm PR 878
+but a midpoint label after it, so it no longer approximated either the
+chunk's end or its midpoint, and two components' averaged chunks disagreed).
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
 labelled at its midpoint") rather than inventing a second meaning for the same
@@ -379,10 +390,11 @@ def postprocess(
         One component's chunk of output, from ``Coupler.to_xarray``.
     output_averages : bool
         Replace the records with their time mean: one record, labelled at the
-        chunk's own midpoint (exactly, from ``time_bounds``, when the dataset
-        carries one; otherwise approximated by the chunk's last record's own
-        label -- see the module docstring), whether or not ``subsample``
-        dropped a record from the mean itself, with ``cell_methods =
+        chunk's own midpoint exactly -- from ``time_bounds`` when the dataset
+        carries one, otherwise from the average of its first and last
+        record's own midpoint labels (see the module docstring) -- whether or
+        not ``subsample`` dropped a record from the mean itself, with
+        ``cell_methods =
         "time: mean"`` on every variable that was averaged. See the module
         docstring for why the chunk is the averaging interval.
     subsample : int
@@ -470,13 +482,35 @@ def postprocess(
         ).astype(dataset[bounds_name].dtype)
     else:
         # No `time_bounds`: every non-JCM component's dataset today. There is
-        # no exact chunk interval to read here, so this keeps the
-        # pre-existing approximation -- the chunk's own last (pre-stride)
-        # record's own label -- rather than inventing bounds this dataset
-        # does not carry the information to compute exactly.
-        chunk_label = dataset[TIME_DIMENSION].isel(
-            {TIME_DIMENSION: slice(-1, None)}
-        ).values
+        # no bound to read, but there is still an exact chunk midpoint to
+        # compute, because every record -- on every component, `time_bounds`
+        # or not -- is labelled at its OWN interval's midpoint by the one
+        # shared `TimeAxis` (see that class's docstring): the records are
+        # equal-length and contiguous, so the chunk's own interval is
+        # `[first record's start, last record's end]` and its midpoint is,
+        # by that symmetry, exactly the average of the first and last
+        # record's own midpoint labels -- the per-record interval length
+        # cancels (`first_start = first_label - dt/2`,
+        # `last_end = last_label + dt/2`, so their mean is
+        # `(first_label + last_label) / 2` whatever `dt` is). This used to
+        # instead take the chunk's last record's own label, which was the
+        # pre-878 convention's END-of-interval label and so approximated the
+        # chunk's own end -- but is a MIDPOINT under jax-gcm PR 878, so it
+        # approximated neither the chunk's end nor (except for a one-record
+        # chunk) its midpoint. That mismatch is what broke `xr.merge(...,
+        # join="exact")` across components after an average: a JCM (which
+        # carries `time_bounds`, so takes the branch above) plus slab-ocean
+        # (this branch) chunk disagreed on the shared record's label (2026-09
+        # migration review, item 1's second half; see also this function's
+        # docstring and `test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels`
+        # in `tests/unit/test_coupled.py`).
+        first_label = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: 0}).values
+        last_label = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: -1}).values
+        first_ms = first_label.astype("datetime64[ms]").astype("int64")
+        last_ms = last_label.astype("datetime64[ms]").astype("int64")
+        chunk_label = np.atleast_1d(
+            np.asarray(first_ms + (last_ms - first_ms) // 2, dtype="datetime64[ms]")
+        )
         chunk_bounds = None
 
     if subsample > 1:
@@ -502,9 +536,8 @@ def postprocess(
 
     timed = _timed_variables(dataset)  # excludes `bounds_name`, if any
     # `Dataset.mean` drops the dimension it reduces, so the label -- the
-    # chunk's own true midpoint (or, with no `time_bounds` to compute one
-    # from, the chunk's last record's own label -- see above) -- has to be
-    # put back by hand.
+    # chunk's own true midpoint, computed exactly either way (see above) --
+    # has to be put back by hand.
     averaged = (
         dataset[timed]
         .mean(dim=TIME_DIMENSION, keep_attrs=True)
