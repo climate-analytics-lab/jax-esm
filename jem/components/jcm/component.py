@@ -75,6 +75,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -82,6 +83,7 @@ from jcm.forcing import ForcingData, TimeSeries, default_forcing
 from jcm.model import Model
 from jcm.predictions import ModelPredictions
 
+from jem.base.calendar import gregorian_instant
 from jem.base.component import (
     Carry,
     CouplingTime,
@@ -344,7 +346,10 @@ def _collapse_time_cell_method(predictions: ModelPredictions) -> ModelPrediction
     reimplementing the read; ``jem/components/jcm/contract.py`` pins it as a
     private, watched integration point so a future rename is caught by
     ``test_jcm_contract.py``, not by this function returning silently wrong
-    output.
+    output. Tracked upstream as jax-gcm#907, "A stacked ModelPredictions
+    can't be labelled or serialised: time_cell_method has no public
+    accessor" -- a public way to rebuild a stacked trajectory's scalar
+    metadata (or a setter) would let this function go away.
     """
     raw = getattr(predictions, "_predictions", None)
     cell_method = getattr(raw, "time_cell_method", None) if raw is not None else None
@@ -660,6 +665,7 @@ class JCMComponent:
                 " before stepping it."
             )
         self._report_clock_drift(carry["state"], time)
+        self._report_authoritative_clock_drift(carry["time"], carry["step"], time)
 
         run_state, predictions = self.model.run_from_state_with_carry(
             initial_state=carry["state"],
@@ -799,3 +805,91 @@ class JCMComponent:
                 )
 
         jax.debug.callback(_report, state_sim_time, time.sim_time)
+
+    def _report_authoritative_clock_drift(
+        self, carry_time: jdt.Datetime, carry_step: Any, time: CouplingTime
+    ) -> None:
+        """Log at ERROR if the carry's own exact clock has left the coupler's.
+
+        :meth:`_report_clock_drift` checks the dycore state's own ``sim_time``
+        -- a *derived* quantity JCM keeps for its own physics -- against the
+        coupler's; it does not touch ``carry["time"]``/``carry["step"]``,
+        which are the **authoritative** clock since jax-gcm v3 (PR 878):
+        every call to :meth:`step` reads them from the carry and threads back
+        exactly the ``RunState`` the call returns (see :meth:`initialize`),
+        and nothing else in this class recomputes them. A checkpoint restored
+        into a coupler with a different start date silently mismatches
+        ``carry["time"]`` against what the coupler's own clock says this step
+        should be -- and nothing before this check ever looked, so such a
+        mismatch would go undetected all the way to wrong forcing dates and
+        wrong output labels.
+
+        The exact expected time is computed the same int32-safe way item
+        A/B's calendar arithmetic is (:func:`jem.base.calendar
+        .gregorian_instant`, reducing the traced step counter modulo a small
+        static period before ever multiplying it), from the coupler's own
+        step count and coupling timestep rather than from anything JCM
+        derives -- so this check does not depend on the very clock it is
+        checking. Both quantities being compared are exact integers (whole
+        days and seconds, and a step count), so unlike
+        :meth:`_report_clock_drift` this needs no float32 tolerance: any
+        difference at all is a real one.
+
+        Reported rather than raised, and through ``jax.debug.callback`` for
+        the same reason as :meth:`_report_clock_drift` -- this runs inside
+        the coupled ``lax.scan``.
+        """
+        expected_step = time.step * self._inner_steps()
+        record_seconds = round(time.dt)
+        start_days = int(np.asarray(self.model.start_time.delta.days))
+        start_seconds = int(np.asarray(self.model.start_time.delta.seconds))
+        expected_days, expected_seconds = gregorian_instant(
+            time.step, record_seconds, start_days, start_seconds
+        )
+        name = self.name
+
+        def _report(
+            carry_days, carry_seconds, exp_days, exp_seconds, carry_step_, exp_step
+        ) -> None:
+            if (
+                int(carry_days) != int(exp_days)
+                or int(carry_seconds) != int(exp_seconds)
+                or int(carry_step_) != int(exp_step)
+            ):
+                logger.error(
+                    "%s: the carry's own clock (time=%s+%ss, step=%d) does not "
+                    "match the coupler's (time=%s+%ss, step=%d) -- a checkpoint "
+                    "restored into a coupler with a different start date, "
+                    "calendar or coupling timestep, or a carry threaded into "
+                    "the wrong component. The atmosphere will date its forcing "
+                    "and output differently from the rest of the coupled "
+                    "model.",
+                    name, int(carry_days), int(carry_seconds), int(carry_step_),
+                    int(exp_days), int(exp_seconds), int(exp_step),
+                )
+
+        jax.debug.callback(
+            _report,
+            carry_time.delta.days, carry_time.delta.seconds,
+            expected_days, expected_seconds,
+            carry_step, expected_step,
+        )
+
+    def _inner_steps(self) -> int:
+        """Return how many of the model's own timesteps make one coupled step.
+
+        Static (Python int, never traced): resolved once from the facts
+        :meth:`bind` already validated (the coupling timestep is a whole
+        multiple of the model's own), not stored separately at bind time
+        because :attr:`_coupling_days` (days) and the model's own timestep are
+        already enough to recompute it exactly.
+        """
+        # Only called from `step`, which already refuses to run at all
+        # (`RuntimeError`, before this) when the component has not been
+        # bound -- the same condition that leaves `_coupling_days` `None`.
+        assert self._coupling_days is not None
+        model_timestep_seconds = int(
+            self.model.dt_si.to_timedelta().total_seconds()
+        )
+        coupling_seconds = round(self._coupling_days * 86400.0)
+        return coupling_seconds // model_timestep_seconds

@@ -452,11 +452,10 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     # ------------------------------------------------------------------
     # Private names. An entry that has a jax-gcm issue behind it names that
     # issue in `access` ("private, TODO(jax-gcm#123)"), and so does the code
-    # that reads it; one below has none yet because this revision is the one
-    # that found the gap (see its own note).
+    # that reads it.
     # ------------------------------------------------------------------
     IntegrationPoint(
-        "jcm.dycore.base.Predictions", "time_cell_method", "private",
+        "jcm.dycore.base.Predictions", "time_cell_method", "private, TODO(jax-gcm#907)",
         "jax-gcm PR 878's single per-trajectory interval-mean flag, read by"
         " ModelPredictions.time_labels/.to_xarray as `bool(...)` -- which"
         " raises on more than one element. JCMComponent.step calls"
@@ -469,10 +468,11 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " jax-gcm#824, restores context but not this), so"
         " `jem.components.jcm.component._collapse_time_cell_method` reaches"
         " `ModelPredictions._predictions.time_cell_method` directly, exactly"
-        " where jax-gcm's own readers get it. No jax-gcm issue exists for"
-        " this gap yet -- worth filing (a way to rebuild a stacked"
-        " ModelPredictions' scalar metadata after external stacking, or a"
-        " public setter) -- so this entry has no TODO() to point at.",
+        " where jax-gcm's own readers get it. Filed as jax-gcm#907, \"A"
+        " stacked ModelPredictions can't be labelled or serialised:"
+        " time_cell_method has no public accessor\" (a way to rebuild a"
+        " stacked ModelPredictions' scalar metadata after external stacking,"
+        " or a public setter, would close it).",
     ),
     IntegrationPoint(
         "jcm.cf_metadata", "_COORD_ATTRS", "private",

@@ -193,6 +193,65 @@ def test_initialize_does_not_integrate(model, monkeypatch):
     assert carry["derived"].total_heat_flux.shape == GRID_SHAPE
 
 
+@pytest.mark.slow
+def test_the_threaded_clock_advances_across_steps(stepped, model):
+    """``carry["time"]``/``carry["step"]`` are not just present -- they move.
+
+    ``test_initialize_does_not_integrate`` only pins the carry's clock at
+    step 0; nothing before this test ever checked that it actually advances,
+    which is the one thing that matters about a *threaded* clock (2026-09
+    migration review, item 6). One coupled day must move ``carry["time"]``
+    by exactly one day and ``carry["step"]`` by exactly one JCM timestep's
+    worth of coupling -- the same fact :meth:`JCMComponent
+    ._report_authoritative_clock_drift` now checks on every step, so a bug
+    here would already be caught at ERROR in the log; this pins the healthy
+    case explicitly.
+    """
+    carry0, carry1, carry2, _, _ = stepped
+    one_day = jdt.to_timedelta(1, "day")
+
+    assert carry0["time"] == model.start_time
+    assert carry1["time"] == model.start_time + one_day
+    assert carry2["time"] == model.start_time + one_day * 2
+
+    model_timestep = jdt.to_timedelta(
+        int(model.dt_si.to_timedelta().total_seconds()), "second"
+    )
+    steps_per_day = int(one_day / model_timestep)
+    assert int(carry0["step"]) == 0
+    assert int(carry1["step"]) == steps_per_day
+    assert int(carry2["step"]) == 2 * steps_per_day
+
+
+@pytest.mark.slow
+def test_authoritative_clock_drift_is_reported(model, caplog):
+    """A carry whose own clock disagrees with the coupler's is caught.
+
+    Confirms :meth:`JCMComponent._report_authoritative_clock_drift` (2026-09
+    migration review, item 6) fires when ``carry["time"]``/``carry["step"]``
+    do not match what the coupler's own step count and start date say they
+    should be -- the case ``_report_clock_drift`` (which only ever compared
+    the dycore's own derived ``sim_time``) could not catch: a checkpoint's
+    carry restored as-is into a coupler bound to a different start date.
+    """
+    import logging
+
+    component = _bound_component(model)
+    carry = component.initialize()
+    # A carry whose clock is a day ahead of what the coupler's step 0 says --
+    # exactly what restoring a checkpoint under the wrong start date would
+    # produce, without touching the dycore state itself (so
+    # `_report_clock_drift`'s own dycore-`sim_time` check has nothing to say).
+    wrong_carry = dict(carry, time=carry["time"] + jdt.to_timedelta(1, "day"))
+
+    with caplog.at_level(logging.ERROR):
+        component.step(wrong_carry, _coupling_time(0))
+
+    assert any(
+        "carry's own clock" in record.message for record in caplog.records
+    ), "the authoritative-clock mismatch was not reported at ERROR"
+
+
 def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
                           wind_speed=3.0):
     """Build a real jax-gcm ``SurfaceExchange`` (#754) with hand-chosen values.
