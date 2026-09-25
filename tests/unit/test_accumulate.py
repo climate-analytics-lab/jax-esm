@@ -2316,3 +2316,18 @@ def test_gregorian_monthly_mean_refuses_a_total_time_that_is_not_whole_coupling_
     # A duration that IS a whole number of this coupler's (daily) steps is
     # unaffected -- this is a stricter check, not a more restrictive one.
     monthly_mean(gregorian_coupler, total_time="10 days")
+
+
+def test_midpoint_month_rule_refuses_a_phase_outside_one_period():
+    """The single-period reduction is exact only for a phase in ``[0, period)``.
+
+    The guard is an explicit raise, so it holds under ``python -O`` too.
+    """
+    from jem.accumulate import _midpoint_month_rule
+
+    boundaries = np.array([31 * 86400])
+    for offset in (-5, 31 * 86400, 40 * 86400):
+        with pytest.raises(ValueError, match=r"is not in \[0, 2678400\)"):
+            _midpoint_month_rule(boundaries, offset)
+    _midpoint_month_rule(boundaries, 0)
+    _midpoint_month_rule(boundaries, 31 * 86400 - 1)

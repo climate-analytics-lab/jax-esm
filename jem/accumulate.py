@@ -294,13 +294,15 @@ def _variable_window_rule(
         # that the bins' period is a whole number of coupling steps, and the
         # coupler refuses a workflow whose sub-timestep is not a whole
         # division of one (`Coupler._element_timestep`, re-checked in
-        # `_record_seconds`), so this division is exact. It is asserted rather
-        # than assumed because a silent rounding here would drift every bin
+        # `_record_seconds`), so this division is exact. It is checked rather
+        # than assumed -- with an explicit raise, which `python -O` cannot
+        # strip -- because a silent rounding here would drift every bin
         # boundary by a fraction of a record.
-        assert remainder == 0, (
-            f"a period of {period} s is not a whole number of "
-            f"{record_seconds} s records"
-        )
+        if remainder != 0:
+            raise ValueError(
+                f"a period of {period} s is not a whole number of "
+                f"{record_seconds} s records"
+            )
         # Where the boundaries sit on this component's record grid. The run's
         # offset into the pattern need not be a whole number of records, so it
         # is split into whole records (`shifted`, folded into the counter) and
@@ -485,11 +487,11 @@ def _midpoint_month_rule(
     unreduced instant is bounded to less than two periods: ``record_mod``'s
     own contribution is already strictly less than one period (the reduction
     above guarantees it), and every caller reduces ``offset_seconds`` into
-    ``[0, period)`` before calling this (asserted below; the twelve-bin form
+    ``[0, period)`` before calling this (checked below; the twelve-bin form
     by construction, the sequential form explicitly, since a run starting
     late enough in a month -- or, on ``"365_day"``, in the year -- that the
     first record's own midpoint falls in a later month than its start can
-    make the raw phase negative or larger than one period --
+    make the raw phase negative --
     :func:`monthly_mean`'s own construction of both forms), so their sum is
     bounded by ``2 * period`` regardless of how long the run's pattern spans
     or how far into it the run starts.
@@ -502,16 +504,18 @@ def _midpoint_month_rule(
     # `offset_seconds` sits in `[0, period)` -- `monthly_mean`'s twelve-bin
     # form by construction (`year_offset_seconds` is the start date's offset
     # into the year, and that period *is* the year), and its sequential form
-    # by reducing an otherwise possibly negative or multi-period phase modulo
-    # its own `period` before ever calling this. An invariant of the callers,
-    # not a user error -- exactly like the `records_per_period` assertion
-    # inside `bin_of_record` below.
-    assert 0 <= offset_seconds < period, (
-        f"offset_seconds={offset_seconds} is not in [0, {period}) -- every "
-        "caller must reduce the phase into one period before calling "
-        "_midpoint_month_rule, which only ever wraps the RECORD, not the "
-        "phase, past that point."
-    )
+    # by reducing an otherwise possibly negative phase modulo its own
+    # `period` before ever calling this. An invariant of the callers,
+    # not a user error -- exactly like the `records_per_period` check inside
+    # `bin_of_record` below. An explicit raise, not an `assert`, so that
+    # `python -O` cannot strip the one guard this exactness rests on.
+    if not 0 <= offset_seconds < period:
+        raise ValueError(
+            f"offset_seconds={offset_seconds} is not in [0, {period}) -- every "
+            "caller must reduce the phase into one period before calling "
+            "_midpoint_month_rule, which only ever wraps the RECORD, not the "
+            "phase, past that point."
+        )
     # Ceiling, not floor -- see the Notes above for why the pattern's last
     # boundary specifically needs it. `boundary_days` stays int32-safe for
     # any period a real run's pattern spans (millions of years), unlike the
@@ -531,10 +535,11 @@ def _midpoint_month_rule(
         # See `_variable_window_rule`'s identical assertion: an invariant of
         # the callers (the coupler only ever builds a sub-timestep that is a
         # whole division of the coupled one), not a user error.
-        assert remainder == 0, (
-            f"a period of {period} s is not a whole number of "
-            f"{record_seconds} s records"
-        )
+        if remainder != 0:
+            raise ValueError(
+                f"a period of {period} s is not a whole number of "
+                f"{record_seconds} s records"
+            )
         # `record_mod` ranges over `[0, records_per_period)`, and both that
         # bound and `record_seconds` are plain Python ints here (not
         # traced), so -- unlike `gregorian_instant`'s own `record` argument,
@@ -796,24 +801,23 @@ def _months_covering(
 
     ``rotated_months_seconds`` are the month lengths starting with the month
     the run's *first record's own midpoint* falls in, and ``offset_seconds``
-    is that midpoint's own month-0-relative position, minus half a record --
-    ordinarily how far into that month the start date itself lies, but this
-    can be negative (the start date can fall *before* that month's own start,
-    when the coupling step is long enough that the first record's midpoint
-    lands a whole record later than its start; see
-    :func:`monthly_mean`'s own sequential-form construction). The run's
-    labels run from ``offset + dt`` to ``offset + total_seconds`` either way,
-    both measured from that same month's own start.
+    is the start date's position relative to that month's start: the
+    midpoint's own position in the month, minus half a record. It is negative
+    whenever the start date lies within half a record before a month
+    boundary, so that the first midpoint falls in the next month (see
+    :func:`monthly_mean`'s own sequential-form construction).
+    ``total_seconds`` is the elapsed time from the start date to the run's
+    *last* record's midpoint, so the run's labels -- its record midpoints --
+    run from ``offset + dt/2`` to ``offset + total_seconds``, both measured
+    from that same month's start.
 
-    The count is of the months those labels fall in, under the same
+    The count is of the months those midpoint labels fall in, under the same
     closed-at-the-start convention the binning uses: a last label lying
-    exactly on a month boundary belongs to the month it *opens*, which is why
-    the boundary at that instant does not end the count. A one-month run from
-    1 January therefore gets two bins, the second holding the single record
-    at 00:00 on 1 February -- the same record ``groupby("time.month")`` of the
-    output puts in February, whenever label and model calendar agree (see
-    :func:`monthly_mean`'s **Leap days**), which is the whole reason the
-    convention is what it is.
+    exactly on a month boundary belongs to the month it *opens*. A one-month
+    daily run from 1 January 00:00 has its last midpoint at 31 January 12:00,
+    so it gets exactly one bin -- the months ``groupby("time.month")`` of the
+    output finds, whenever label and model calendar agree (see
+    :func:`monthly_mean`'s **Leap days**).
     """
     last_label = offset_seconds + total_seconds
     months, covered, cycle = 1, 0, len(rotated_months_seconds)
@@ -1716,10 +1720,10 @@ def monthly_mean(
         # The elapsed time, from the start date, of the LAST record's own
         # midpoint -- `_months_covering` counts the calendar months from the
         # start date to this instant, inclusive, which is the accumulator
-        # size the run needs. (`total_seconds` itself, the pre-878 argument,
-        # was the elapsed time to the last record's END; using it here would
-        # under- or over-count by a fraction of a step at the boundary,
-        # exactly the mismatch the midpoint rebinding exists to remove.)
+        # size the run needs. (`total_seconds` is the elapsed time to the
+        # last record's END; counting to it would add a month whenever the
+        # run ends exactly on a month boundary, a month no record's midpoint
+        # label is in.)
         last_record_midpoint = (n_steps - 1) * dt_seconds + dt_seconds // 2
         bins = _months_covering(rotated, offset_seconds, last_record_midpoint)
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
@@ -1750,8 +1754,10 @@ def monthly_mean(
     # `_midpoint_month_rule`'s own single reduction is exact only for an
     # `offset_seconds` already in `[0, period)` (see its own docstring's
     # "Reducing the phase" Notes); `offset_seconds` above can be negative (see
-    # its own comment) or, for a coupling step long enough relative to a
-    # month, larger than one period. Adding a whole (Python, exact, unbounded)
+    # its own comment), though never below `-period` or at or above `period`
+    # (it is the first midpoint's position in its month, which is less than
+    # that month's length and so less than `period`, minus half a coupling
+    # step, which is at most half of `period`). Adding a whole (Python, exact, unbounded)
     # multiple of `period` does not change any record's bin -- every record's
     # own position is `offset_seconds` plus a multiple of `record_seconds`,
     # reduced modulo the same `period` -- so reducing it here, once, in plain
