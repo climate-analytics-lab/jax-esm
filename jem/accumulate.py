@@ -303,6 +303,29 @@ def _variable_window_rule(
                 f"a period of {period} s is not a whole number of "
                 f"{record_seconds} s records"
             )
+        # `records_per_period` is both `jnp.mod`'s own modulus below and (via
+        # `in_records`, whose own docstring note says the last entry lands
+        # exactly on it) the largest value `boundary_records` ever holds; both
+        # are int32 JAX values a `records_per_period` past `2**31 - 1` leaves
+        # wrong -- `jnp.mod`'s own modulus raises an uncontrolled
+        # `OverflowError` rather than the clear refusal below, and a
+        # `jnp.asarray(..., dtype=jnp.int32)` cast of a NumPy array past that
+        # range (`boundary_records`, were `jnp.mod` not the first of the two
+        # to fail) wraps silently instead -- see `_midpoint_month_rule`'s own
+        # analogous check and its docstring's "Reducing the phase" Notes for
+        # the sibling bug this class of check exists to catch. Reachable only
+        # by a period-to-record-length ratio in the billions (for daily
+        # records, a pattern spanning millions of years), the same magnitude
+        # :func:`~jem.base.calendar.max_safe_record` is itself an inherent
+        # int32 limit for, not something specific to this accumulator.
+        if records_per_period > 2**31 - 1:
+            raise ValueError(
+                f"This accumulator's pattern needs {records_per_period} "
+                f"{record_seconds} s records per cycle ({period} s total), "
+                "which is past the largest number of records an int32 index "
+                "can distinguish -- this pattern is too long, or its "
+                "records too short, to bin exactly."
+            )
         # Where the boundaries sit on this component's record grid. The run's
         # offset into the pattern need not be a whole number of records, so it
         # is split into whole records (`shifted`, folded into the counter) and
@@ -553,7 +576,21 @@ def _midpoint_month_rule(
         bound = max_safe_record(
             record_seconds, offset_seconds=offset_seconds + record_seconds // 2
         )
-        if records_per_period - 1 > bound:
+        # `records_per_period - 1` is the largest `record_mod` this pattern
+        # will ever hand `gregorian_instant` (`record_mod` ranges over
+        # `[0, records_per_period)`), which is what `bound` -- clamped to
+        # `2**31 - 1`, `max_safe_record`'s own docstring -- has to cover. But
+        # `records_per_period` ITSELF is also embedded as a JAX int32
+        # constant just below (`jnp.mod`'s own modulus), a second, distinct
+        # requirement `records_per_period - 1 <= bound` alone does not cover:
+        # at `records_per_period - 1 == bound == 2**31 - 1` exactly --
+        # reachable only by a pattern spanning millions of years, but not
+        # provably impossible -- `records_per_period` itself would be
+        # `2**31`, one past what an int32 can represent. Comparing
+        # `records_per_period` (not `records_per_period - 1`) against
+        # `bound` reserves that one unit, so neither quantity this function
+        # ever hands JAX can reach `2**31`.
+        if records_per_period > bound:
             raise ValueError(
                 f"This monthly_mean's pattern needs {records_per_period} "
                 f"{record_seconds} s records per cycle ({period} s total), "
@@ -563,9 +600,33 @@ def _midpoint_month_rule(
                 "long, or its records too long, to bin exactly."
             )
         record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
+        # `offset_seconds + record_seconds // 2` is bounded by `period` (the
+        # `[0, period)` guard above), which for a long enough sequential
+        # pattern -- a 1200-month, 100-year accumulator's is already past
+        # 3.1e9 s -- exceeds what an int32 can hold. Passed directly as
+        # `gregorian_instant`'s own `offset_seconds`, a PLAIN PYTHON int, that
+        # would be fine on its own (the function's day/second split is
+        # exactly what makes it int32-safe for an arbitrarily large record
+        # count) -- but `offset_seconds` there is added to the TRACED
+        # `seconds` component as a JAX constant (`final_seconds = seconds +
+        # offset_seconds + start_seconds`), which must itself fit int32,
+        # unlike a Python-only argument. Splitting it here, in plain Python,
+        # into whole days (folded into `start_days`, which the function adds
+        # to the TRACED `days` component instead -- always small, since a
+        # period long enough for this to matter is measured in tens of
+        # thousands of days, not billions of seconds) and a sub-day remainder
+        # (comfortably under `record_seconds // 2`'s own contribution) keeps
+        # every value ever embedded as a JAX constant here small regardless
+        # of how long the pattern is, while computing exactly the same
+        # `(day, second)` -- `gregorian_instant` sums the two parts back
+        # together internally, so this is a different path to the same
+        # total, not a different total.
+        offset_days, offset_extra_seconds = divmod(
+            offset_seconds + record_seconds // 2, _SECONDS_PER_DAY
+        )
         day, second = gregorian_instant(
-            record_mod, record_seconds, 0, 0,
-            offset_seconds=offset_seconds + record_seconds // 2,
+            record_mod, record_seconds, offset_days, 0,
+            offset_seconds=offset_extra_seconds,
         )
         # `record_mod` alone wraps the RECORD index into one period, but
         # `offset_seconds` (where the run's start date sits in the pattern)

@@ -728,6 +728,136 @@ def test_midpoint_month_rule_matches_an_exact_seconds_reference_when_the_period_
     np.testing.assert_array_equal(got, expected)
 
 
+@pytest.mark.parametrize("offset_seconds", [86400 - 3600, 0, 43200])
+def test_midpoint_month_rule_is_int32_safe_for_a_multi_decade_period(offset_seconds):
+    """A period past ~68 years must not embed an over-int32 phase as a JAX constant.
+
+    A 1200-month (100-year) sequential accumulator's own period, in seconds,
+    is already past `2**31` -- exactly the magnitude `_midpoint_month_rule`'s
+    own day-based boundary comparison exists to tolerate (see its "Int32
+    safety" Notes), but `offset_seconds` (reduced into `[0, period)` by
+    `monthly_mean`'s own construction, per the "Reducing the phase" Notes) is
+    just as capable of reaching that magnitude, and was passed straight into
+    `gregorian_instant`'s own `offset_seconds` -- added there to a TRACED
+    array as a JAX constant, unlike `gregorian_instant`'s own `record`
+    argument, which its day/second split protects. `offset_seconds` here
+    stands in for what `monthly_mean` would compute for a run starting a
+    matter of hours before or after a year boundary (see the end-to-end test
+    below) -- deliberately small on its own, so the fixture demonstrates the
+    period's own size is what matters, not the offset's.
+    """
+    seconds_per_day = 86400
+    n_months = 1200
+    record_seconds = seconds_per_day  # daily
+    month_seconds = np.asarray(month_lengths("365_day"), dtype=np.int64) * seconds_per_day
+    boundaries = np.cumsum([month_seconds[i % 12] for i in range(n_months)])
+    period = int(boundaries[-1])
+    assert period > 2**31  # sanity: this is genuinely past int32, ~100 years of seconds
+
+    rule = _midpoint_month_rule(boundaries, offset_seconds)
+    records_per_period = period // record_seconds
+    # Densely sampled near the start, near the far end of the span, and a
+    # coarse scattering across the whole period -- not every one of the
+    # ~36500 possible records, which would make this test slow for no more
+    # confidence than a representative sample already gives.
+    records = np.unique(np.concatenate([
+        np.arange(0, 200),
+        np.arange(records_per_period - 200, records_per_period),
+        np.arange(0, records_per_period, 977),
+    ]))
+    got = np.asarray(
+        jax.jit(lambda r: rule(r, record_seconds))(jnp.asarray(records, dtype=jnp.int32))
+    )
+
+    midpoints = records * record_seconds + offset_seconds + record_seconds // 2
+    expected = np.searchsorted(boundaries, midpoints % period, side="right")
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("start_date", ["2001-12-31T18:00:00", "2002-01-01T00:00:00"])
+def test_monthly_mean_n_months_1200_does_not_overflow_and_bins_correctly(start_date):
+    """A 100-year, 365_day sequential accumulator must build and run without overflowing.
+
+    Before the fix, building this accumulator succeeded (the overflow is in
+    the traced call, not construction), but running even a handful of steps
+    through it raised ``OverflowError`` from ``gregorian_instant``'s own
+    constant-folding of the phase, for BOTH start dates -- the bug is in the
+    period's own size (1200 months, ~100 years), not specific to the
+    December-31 phase-wrap case those start dates otherwise probe (see
+    ``test_a_sequential_n_months_run_starting_late_in_a_month_...``).
+    Verified against an independent, pure-Python reference on the model's
+    own fixed calendar (never real Gregorian dates, which would conflate
+    this with the unrelated, documented leap-day drift a run this long is
+    certain to cross -- see ``monthly_mean``'s own **Leap days on the fixed
+    calendar**).
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=jdt.to_datetime(start_date),
+        calendar=CALENDAR,
+    )
+    n_months = 1200
+    steps = 5
+    monthly = monthly_mean(coupler, n_months=n_months)
+    trajectory = coupler.generate_trajectory_function(steps, accumulate=monthly)
+    _, (_, counts) = trajectory(coupler.initialize())  # must not raise OverflowError
+    counts = np.asarray(counts)
+    assert int(counts.sum()) == steps
+
+    # The exact fixed-calendar reference: which (year, month) each record's
+    # own midpoint falls in, computed directly from the coupler's own
+    # `year_offset_seconds` with arbitrary-precision Python arithmetic, never
+    # via `datetime64`/real Gregorian dates.
+    seconds_per_day = 86400
+    seconds_per_year = STEPS_PER_YEAR * seconds_per_day
+    month_seconds = np.asarray(month_lengths(CALENDAR), dtype=np.int64) * seconds_per_day
+    month_starts = np.concatenate([[0], np.cumsum(month_seconds)[:-1]])
+    dt_seconds = int(round(coupler.dt_seconds))
+    year_offset_seconds = int(round(coupler.year_offset_seconds))
+
+    def year_month(record):
+        total = year_offset_seconds + record * dt_seconds + dt_seconds // 2
+        years, remainder = divmod(total, seconds_per_year)
+        month = int(np.searchsorted(month_starts, remainder, side="right") - 1)
+        return int(years), month
+
+    first_year, first_month = year_month(0)
+    expected_bins = np.array(
+        [
+            ((y - first_year) * 12 + (m - first_month)) % n_months
+            for y, m in (year_month(k) for k in range(steps))
+        ]
+    )
+    expected = np.bincount(expected_bins, minlength=n_months)
+    np.testing.assert_array_equal(counts, expected)
+
+
+@pytest.mark.parametrize("start_date", ["2001-12-31T18:00:00", "2002-01-01T00:00:00"])
+def test_monthly_mean_a_century_total_time_does_not_overflow(start_date):
+    """The `total_time` sequential form must also build for a ~100-year span.
+
+    `_months_covering` sizes this accumulator using the same (now correctly
+    wrap-aware, correctly int32-safe) phase `n_months` uses, so it is exposed
+    to the identical overflow the test above exercises via the explicit
+    ``n_months`` form -- construction alone (no trajectory) is enough to
+    show it, since sizing the accumulator is itself where the period first
+    gets built.
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=jdt.to_datetime(start_date),
+        calendar=CALENDAR,
+    )
+    monthly = monthly_mean(coupler, total_time="36500 days")  # ~100 years, daily
+    trajectory = coupler.generate_trajectory_function(5, accumulate=monthly)
+    _, (_, counts) = trajectory(coupler.initialize())  # must not raise OverflowError
+    assert int(np.asarray(counts).sum()) == 5
+
+
 def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve():
     """A pattern too long for its own record length is refused, not silently wrong.
 
@@ -752,6 +882,38 @@ def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve(
 
     with pytest.raises(ValueError, match="too long"):
         rule(jnp.int32(0), record_seconds)
+
+
+def test_midpoint_month_rule_refuses_records_per_period_reaching_2_31_exactly():
+    """`records_per_period` itself, not just the largest `record_mod`, must stay under `2**31`.
+
+    `records_per_period` is also `jnp.mod`'s own modulus (embedded as a JAX
+    int32 constant, not merely the range `record_mod` -- checked by the test
+    above -- ranges over), so `records_per_period - 1 <= bound` alone is not
+    enough: at that exact boundary `records_per_period` is `bound + 1`, which
+    reaches `2**31` when `bound` is `max_safe_record`'s own maximum clamp,
+    `2**31 - 1` -- one past what an int32 constant can hold, the same
+    ``OverflowError`` a too-large phase raised before ``offset_seconds`` was
+    split into day/second limbs. `bound` here is fixed at its own maximum
+    clamp by an ``offset_seconds`` of 0, so `records_per_period == bound + 1`
+    is reachable with a period only one record above `bound` records, not one
+    spanning millions of years.
+    """
+    record_seconds = 1
+    bound = max_safe_record(record_seconds, offset_seconds=0)
+    assert bound == 2**31 - 1  # sanity: this is genuinely at the clamp
+
+    # `records_per_period - 1 == bound`: accepted before this fix, refused
+    # now, since `records_per_period` itself would be `2**31`.
+    period_at_the_old_boundary = record_seconds * (bound + 1)
+    rule = _midpoint_month_rule(np.array([period_at_the_old_boundary], dtype=np.int64), 0)
+    with pytest.raises(ValueError, match="too long"):
+        rule(jnp.int32(0), record_seconds)
+
+    # One record shorter -- `records_per_period == bound` -- is still fine.
+    period_one_record_shorter = record_seconds * bound
+    rule = _midpoint_month_rule(np.array([period_one_record_shorter], dtype=np.int64), 0)
+    rule(jnp.int32(0), record_seconds)  # must not raise
 
 
 def test_gregorian_monthly_mean_refuses_a_total_time_gregorian_instant_cannot_resolve(
@@ -2251,6 +2413,35 @@ def test_a_misspelled_inclusive_is_refused():
 
     with pytest.raises(ValueError, match="left.*right.*rigth"):
         _variable_window_rule(np.array([5 * 86400]), 0, "rigth")  # type: ignore[arg-type]
+
+
+def test_variable_window_rule_refuses_records_per_period_past_int32():
+    """`records_per_period` embedded as a JAX array/modulus must also stay under `2**31`.
+
+    `records_per_period` reaches JAX twice past this construction-time check:
+    as `jnp.mod`'s own modulus (an uncontrolled `OverflowError` past
+    `2**31 - 1`, the same failure `_midpoint_month_rule`'s own analogous
+    check exists to turn into a clear refusal) and, via `boundary_records`, a
+    `jnp.asarray(..., dtype=jnp.int32)` cast of a NumPy array (which would
+    instead wrap silently, the worse failure mode, were `jnp.mod` not the
+    first of the two to run). A period one record longer than `2**31 - 1`
+    one-second records is refused with a clear error instead of either.
+    """
+    from jem.accumulate import _variable_window_rule
+
+    record_seconds = 1
+    period_at_the_limit = record_seconds * (2**31 - 1)
+    rule = _variable_window_rule(
+        np.array([period_at_the_limit], dtype=np.int64), 0, "right"
+    )
+    rule(jnp.int32(0), record_seconds)  # must not raise: exactly at the limit
+
+    period_one_record_too_long = record_seconds * (2**31)
+    rule = _variable_window_rule(
+        np.array([period_one_record_too_long], dtype=np.int64), 0, "right"
+    )
+    with pytest.raises(ValueError, match="too long"):
+        rule(jnp.int32(0), record_seconds)
 
 
 def test_a_duration_that_is_not_whole_seconds_is_refused(coupler):
