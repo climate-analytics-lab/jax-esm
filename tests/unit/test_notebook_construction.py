@@ -40,8 +40,8 @@ notebook's construction" is defined precisely as:
      with no configuration to match, so it is not wrong to leave this
      implicit there; this notebook explicitly claims to run the same model
      as ``+configuration=aquaplanet-slab``, and that claim would be false at
-     the physics level (a different, faster-diffusing time step) without
-     this substitution -- ``tests/unit/test_notebook_equivalence.py``
+     the physics level (a materially different time step) without this
+     substitution -- ``tests/unit/test_notebook_equivalence.py``
      verifies the claim holds, ``dt`` included.
 
 The notebook's own code cell that builds ``coupler`` (identified as the one
@@ -86,8 +86,8 @@ _NEW_MODEL = (
     "# actually runs at -- jax-gcm's `run/default.yaml`, composed at\n"
     "# `atmosphere.run.time_step` -- and has to be given explicitly: with no\n"
     "# `time_step`, `Model` instead picks the physics' own stable step (30\n"
-    "# minutes for SPEEDY T31L8), a materially different, faster-diffusing\n"
-    "# model than the one this notebook claims to reproduce.\n"
+    "# minutes for SPEEDY T31L8), a materially different model than the one\n"
+    "# this notebook claims to reproduce.\n"
     "atm_model = jcm.model.Model(\n"
     "    coords=get_speedy_coords(), start_date=start_date, time_step=12\n"
     ")\n"

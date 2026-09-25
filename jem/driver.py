@@ -529,15 +529,7 @@ def run_chunked(
     coupling_days = coupler.dt_seconds / SECONDS_PER_DAY
     steps_per_chunk = _whole_steps(chunk, coupling_days, coupler, "chunk")
     total_steps = _whole_steps(total_time, coupling_days, coupler, "total_time")
-    if total_steps % steps_per_chunk:
-        raise ValueError(
-            f"total_time ({total_time!r}, {total_steps} coupled steps) is not a "
-            f"whole number of chunks of {chunk!r} ({steps_per_chunk} coupled "
-            "steps): a final partial chunk is not supported, because it would "
-            "need a second compiled trajectory for a single call. Choose a "
-            "chunk that divides the run, or a run length that is a multiple of "
-            "the chunk."
-        )
+    _require_whole_number_of_chunks(total_time, chunk, total_steps, steps_per_chunk)
     steps_per_checkpoint = _checkpoint_steps(
         checkpoint_interval, checkpoint_path, chunk, steps_per_chunk,
         coupling_days, coupler,
@@ -858,6 +850,28 @@ def _whole_steps(
             "positive number of them."
         )
     return int(rounded)
+
+
+def _require_whole_number_of_chunks(
+    total_time: str | float, chunk: str | float,
+    total_steps: int, steps_per_chunk: int,
+) -> None:
+    """Raise unless ``total_steps`` is a whole number of ``steps_per_chunk``.
+
+    Factored out of :func:`run_chunked` (rather than left as an inline ``if``)
+    so a test can call the actual rule ``run_chunked`` enforces instead of
+    reimplementing the modulo check itself and silently drifting from it; no
+    behaviour change from when this was inline.
+    """
+    if total_steps % steps_per_chunk:
+        raise ValueError(
+            f"total_time ({total_time!r}, {total_steps} coupled steps) is not a "
+            f"whole number of chunks of {chunk!r} ({steps_per_chunk} coupled "
+            "steps): a final partial chunk is not supported, because it would "
+            "need a second compiled trajectory for a single call. Choose a "
+            "chunk that divides the run, or a run length that is a multiple of "
+            "the chunk."
+        )
 
 
 def _checkpoint_steps(

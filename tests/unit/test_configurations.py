@@ -162,29 +162,54 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(exp.run_kwargs["chunk"], "2 days")
 
     def test_documented_total_time_override_is_a_whole_number_of_chunks(self):
-        """The override example in this module's docstring/docs/CHANGELOG runs.
+        """The override example ``python_api.md`` documents actually runs.
 
         A local review of #131 found the ORIGINAL example
         (``load("earth-slab", **{"coupled_run.total_time": 10})``) actually
-        raises from ``run_chunked``, because every shipped recipe's own
+        raised from ``run_chunked``, because every shipped recipe's own
         ``coupled_run.chunk`` stays its 30-day default and 10 is not a
-        multiple of it. This composes the CORRECTED example ("60 days") and
-        validates it against ``run_chunked``'s own whole-number-of-chunks
-        rule (:func:`jem.driver._whole_steps`) -- the same check
-        ``run_chunked`` itself makes before compiling -- rather than
-        actually integrating 60 days, so a future change to the default
-        chunk length is still caught without this test itself becoming slow.
+        multiple of it. The corrected value is read straight out of
+        ``docs/source/python_api.md``'s door section -- not copied into this
+        test as a second literal -- so a future edit to the docs is what this
+        test exercises, and a value that regresses back to something
+        non-divisible fails here rather than only at a user's own
+        ``run_chunked`` call. It is validated against the same rule
+        ``run_chunked`` itself enforces
+        (:func:`jem.driver._require_whole_number_of_chunks`, factored out of
+        ``run_chunked`` so this calls the real rule rather than a
+        reimplementation of it) rather than actually integrating the run, so
+        this test stays fast.
         """
+        import re
+
         from jem import driver
+        from tests.unit.test_readme_quickstart import PYTHON_API
+
+        text = PYTHON_API.read_text()
+        section = text.split("## Validated configurations from Python", 1)[1]
+        section = section.split("\n## ", 1)[0]
+        match = re.search(
+            r'"coupled_run\.total_time":\s*"((?:[^"\\]|\\.)*)"',
+            " ".join(section.split()),  # collapse the example's own line wrap
+        )
+        assert match, (
+            f"no `coupled_run.total_time` override example found in "
+            f"{PYTHON_API}'s door section"
+        )
+        documented_total_time = match.group(1)
 
         exp = configurations.load(
-            "earth-slab", **{"coupled_run.total_time": "60 days"})
+            "earth-slab", **{"coupled_run.total_time": documented_total_time})
         coupling_days = exp.coupler.dt_seconds / 86400
         steps_per_chunk = driver._whole_steps(
             exp.run_kwargs["chunk"], coupling_days, exp.coupler, "chunk")
         total_steps = driver._whole_steps(
             exp.run_kwargs["total_time"], coupling_days, exp.coupler, "total_time")
-        self.assertEqual(total_steps % steps_per_chunk, 0)
+        # Raises if not a whole number of chunks -- the actual rule
+        # `run_chunked` enforces, not a reimplementation of it.
+        driver._require_whole_number_of_chunks(
+            exp.run_kwargs["total_time"], exp.run_kwargs["chunk"],
+            total_steps, steps_per_chunk)
 
     def test_output_dir_defaults_to_a_fresh_directory_per_call(self):
         """Two successive ``load()`` calls with no ``output_dir`` do not collide.
@@ -324,6 +349,33 @@ class TestOverrideStr(unittest.TestCase):
     def test_tuple_value_raises_type_error(self):
         with self.assertRaisesRegex(TypeError, "ocean.params"):
             configurations._override_str("ocean.params", (1, 2))
+
+    def test_tuple_error_suggests_a_list_not_a_dotted_override(self):
+        # "one dotted override per field" is meaningless for a tuple (it
+        # names no nested config keys the way a dict's do), so its message
+        # must say something else -- a plain list, which composes fine.
+        with self.assertRaisesRegex(TypeError, r"\blist\b") as ctx:
+            configurations._override_str("ocean.params", (1, 2))
+        self.assertNotIn("dotted override per field", str(ctx.exception))
+
+    def test_list_containing_none_raises_type_error(self):
+        with self.assertRaisesRegex(TypeError, "ocean.params"):
+            configurations._override_str("ocean.params", [None])
+
+    def test_list_containing_none_nested_raises_type_error(self):
+        # The same silent str()->'None' mis-compose applies at any nesting
+        # depth, not just the top level of the list.
+        with self.assertRaisesRegex(TypeError, "ocean.params"):
+            configurations._override_str("ocean.params", [[1, None], 2])
+
+    def test_list_without_none_still_composes(self):
+        # A plain list -- no None anywhere -- is unaffected by the new check.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        tok = configurations._override_str("ocean.params", [1, 2, [3, 4]])
+        self.assertEqual(
+            parser.parse_overrides([tok])[0].value(), [1, 2, [3, 4]])
 
     def test_quoted_path_composes_through_load(self):
         # F2 end to end: a grammar-carrying path survives a real compose via

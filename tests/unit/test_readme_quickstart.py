@@ -56,16 +56,18 @@ def test_configurations_door_example_compiles_and_names_resolve():
 
     The ``## Validated configurations from Python`` section's fenced block
     builds a real coupler and would integrate `earth-slab`'s default 30-day
-    run -- too expensive for this fast test -- so
-    ``jem.configurations.load`` and ``jem.run_chunked`` are patched to
-    lightweight stand-ins carrying the same attributes the real objects have
-    (``.coupler``/``.config``/``.run_kwargs``), and the block is genuinely
-    executed (not merely ``compile()``-d, which only checks syntax) against
-    them. This is exactly the gap an earlier draft of the block fell into: it
-    called ``run_chunked`` without importing it, a ``NameError`` that
-    ``compile()`` alone would not have caught either.
+    run -- too expensive for this fast test -- so ``jem.configurations.load``
+    and ``jem.run_chunked`` are patched. The stand-in ``load`` returns a REAL
+    ``jem.configurations.LoadedConfiguration`` (not a bare ``SimpleNamespace``
+    imitating its shape), built from cheap values, so a rename of one of its
+    fields breaks this test the same way it would break the real door -- a
+    ``SimpleNamespace`` would silently keep matching whatever attribute name
+    the block happens to spell. The block is genuinely executed (not merely
+    ``compile()``-d, which only checks syntax) against these stand-ins. This
+    is exactly the gap an earlier draft of the block fell into: it called
+    ``run_chunked`` without importing it, a ``NameError`` that ``compile()``
+    alone would not have caught either.
     """
-    from types import SimpleNamespace
     from unittest import mock
 
     import jem
@@ -79,7 +81,14 @@ def test_configurations_door_example_compiles_and_names_resolve():
     )
     code = matches[0]
 
-    fake_loaded = SimpleNamespace(coupler="<coupler>", config={"ocean": {}}, run_kwargs={})
+    # `coupler` is a bare stand-in object: the block only holds onto it and
+    # passes it straight to the (also patched) `run_chunked`, never calling
+    # anything on it, so it needs no shape of its own -- unlike `config` and
+    # `run_kwargs`, which the block actually indexes/unpacks.
+    fake_loaded = configurations_module.LoadedConfiguration(
+        name="aquaplanet-slab", coupler=object(),
+        run_kwargs={}, config={"ocean": {}},
+    )
     run_chunked_calls = []
     with mock.patch.object(configurations_module, "load",
                            return_value=fake_loaded) as fake_load, \
