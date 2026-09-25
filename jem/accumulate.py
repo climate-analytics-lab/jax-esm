@@ -484,15 +484,34 @@ def _midpoint_month_rule(
     reconstruct ``second`` too. A single such reduction is exact because the
     unreduced instant is bounded to less than two periods: ``record_mod``'s
     own contribution is already strictly less than one period (the reduction
-    above guarantees it), and every caller's ``offset_seconds`` is itself
-    less than one period (:func:`monthly_mean`'s own construction of both the
-    climatology and the sequential forms), so their sum is bounded by ``2 *
-    period`` regardless of how long the run's pattern spans or how far into
-    it the run starts.
+    above guarantees it), and every caller reduces ``offset_seconds`` into
+    ``[0, period)`` before calling this (asserted below; the twelve-bin form
+    by construction, the sequential form explicitly, since a run starting
+    late enough in a month -- or, on ``"365_day"``, in the year -- that the
+    first record's own midpoint falls in a later month than its start can
+    make the raw phase negative or larger than one period --
+    :func:`monthly_mean`'s own construction of both forms), so their sum is
+    bounded by ``2 * period`` regardless of how long the run's pattern spans
+    or how far into it the run starts.
 
     """
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1])
+    # The single reduction this function does (see "Reducing the phase" in
+    # the Notes above) is exact only because every caller already guarantees
+    # `offset_seconds` sits in `[0, period)` -- `monthly_mean`'s twelve-bin
+    # form by construction (`year_offset_seconds` is the start date's offset
+    # into the year, and that period *is* the year), and its sequential form
+    # by reducing an otherwise possibly negative or multi-period phase modulo
+    # its own `period` before ever calling this. An invariant of the callers,
+    # not a user error -- exactly like the `records_per_period` assertion
+    # inside `bin_of_record` below.
+    assert 0 <= offset_seconds < period, (
+        f"offset_seconds={offset_seconds} is not in [0, {period}) -- every "
+        "caller must reduce the phase into one period before calling "
+        "_midpoint_month_rule, which only ever wraps the RECORD, not the "
+        "phase, past that point."
+    )
     # Ceiling, not floor -- see the Notes above for why the pattern's last
     # boundary specifically needs it. `boundary_days` stays int32-safe for
     # any period a real run's pattern spans (millions of years), unlike the
@@ -776,9 +795,15 @@ def _months_covering(
     """Return how many months a run of ``total_seconds`` puts a record in.
 
     ``rotated_months_seconds`` are the month lengths starting with the month
-    the run starts in, and ``offset_seconds`` is how far into that month the
-    start date lies, so the run's labels run from ``offset + dt`` to
-    ``offset + total_seconds``.
+    the run's *first record's own midpoint* falls in, and ``offset_seconds``
+    is that midpoint's own month-0-relative position, minus half a record --
+    ordinarily how far into that month the start date itself lies, but this
+    can be negative (the start date can fall *before* that month's own start,
+    when the coupling step is long enough that the first record's midpoint
+    lands a whole record later than its start; see
+    :func:`monthly_mean`'s own sequential-form construction). The run's
+    labels run from ``offset + dt`` to ``offset + total_seconds`` either way,
+    both measured from that same month's own start.
 
     The count is of the months those labels fall in, under the same
     closed-at-the-start convention the binning uses: a last label lying
@@ -1560,9 +1585,15 @@ def monthly_mean(
     where ``start_date`` sits within ``dt/2`` of a month's end and the first
     record's midpoint therefore falls in the *next* calendar month from
     ``start_date``'s own -- using ``start_date``'s month there would leave
-    bin 0 permanently empty. The two agree for every ordinary case (any run
-    whose coupling step is not itself comparable to a month in length), which
-    is every shipped configuration.
+    bin 0 permanently empty. On ``"365_day"``, a ``start_date`` within
+    ``dt/2`` of 31 December crosses into January of the *following* year, not
+    only the next month, which the phase this bin is measured from
+    (:func:`_midpoint_month_rule`'s ``offset_seconds``) accounts for
+    explicitly -- see the construction code's own comments for why measuring
+    it from ``start_date``'s offset into the current year, unadjusted, is not
+    the same thing. The two agree for every ordinary case (any run whose
+    coupling step is not itself comparable to a month in length), which is
+    every shipped configuration.
 
     Returns
     -------
@@ -1652,7 +1683,29 @@ def monthly_mean(
     start_month = int(
         np.searchsorted(month_starts, first_record_midpoint, side="right") - 1
     )
-    offset_seconds = year_offset_seconds - int(month_starts[start_month])
+    # `first_record_midpoint - month_starts[start_month]` is `start_month`'s
+    # own OCCURRENCE that actually contains the first record's midpoint --
+    # both are already reduced into the same wrapped year (the `% ...` above,
+    # and `start_month` found from that same wrapped value), so this is
+    # always in `[0, rotated[0])`, whether or not the run starts late enough
+    # in December that the wrap crosses into the following year. Subtracting
+    # `dt_seconds // 2` converts that into an offset from the *record's own
+    # start* (`_midpoint_month_rule` adds the midpoint shift back for every
+    # record, including this one) rather than from its midpoint, which is
+    # what `offset_seconds` has always meant here -- and can legitimately
+    # come out negative (a coupling step longer than the time from the true
+    # month start to the first midpoint, e.g. a run starting 31 December
+    # 18:00 whose first midpoint, 1 January 06:00, is only 6 hours into
+    # January while the record itself started 6 hours *before* it): reduced
+    # into `[0, period)` below, once `period` is known, this is exact
+    # regardless of how far outside one period the raw value sits, unlike
+    # measuring from `year_offset_seconds` (the start date's offset into the
+    # CURRENT year) directly, which silently assumes `start_month`'s
+    # occurrence is in that same year -- false whenever the wrap above
+    # crossed into the next one, and off by a whole year with no fixed
+    # relationship to the pattern's own period, not merely off by whole
+    # periods of it.
+    offset_seconds = int(first_record_midpoint) - dt_seconds // 2 - int(month_starts[start_month])
     rotated = np.concatenate(
         [month_seconds[start_month:], month_seconds[:start_month]]
     )
@@ -1693,6 +1746,19 @@ def monthly_mean(
     # run always gives 12N+1 of them, whose span is never a whole number of
     # years.
     boundaries[-1] = _ceil_div(int(boundaries[-1]), dt_seconds) * dt_seconds
+
+    # `_midpoint_month_rule`'s own single reduction is exact only for an
+    # `offset_seconds` already in `[0, period)` (see its own docstring's
+    # "Reducing the phase" Notes); `offset_seconds` above can be negative (see
+    # its own comment) or, for a coupling step long enough relative to a
+    # month, larger than one period. Adding a whole (Python, exact, unbounded)
+    # multiple of `period` does not change any record's bin -- every record's
+    # own position is `offset_seconds` plus a multiple of `record_seconds`,
+    # reduced modulo the same `period` -- so reducing it here, once, in plain
+    # Python before it is ever traced, is exact regardless of how many whole
+    # periods away the raw value started.
+    period = int(boundaries[-1])
+    offset_seconds %= period
 
     return _build_binned_mean(
         coupler,

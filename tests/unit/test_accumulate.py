@@ -2138,6 +2138,108 @@ def test_a_climatology_bins_every_record_across_several_years():
     np.testing.assert_array_equal(counts, expected)
 
 
+#: Start dates whose first record's own midpoint falls in a LATER calendar
+#: month than the start date itself -- a coupling step long enough (relative
+#: to how close the start date sits to a month's end) that
+#: ``start_date + dt/2`` crosses the boundary: 31 December crosses into the
+#: next YEAR too, not just the next month.
+_LATE_IN_MONTH_STARTS = (
+    "2001-12-31T18:00:00",
+    "2001-01-31T23:00:00",
+    "2001-02-28T20:00:00",
+)
+
+
+def _sequential_counts_by_groupby(coupler, days, n_months):
+    """Return `monthly_mean(coupler, n_months=n_months)`'s bin counts for `days` steps.
+
+    An independent count of the same run's own written labels, wrapped into
+    `n_months` bins the same way the sequential form's own docstring says a
+    run longer than its accumulator wraps: by the calendar months since the
+    run's own first record, modulo `n_months`.
+    """
+    monthly = monthly_mean(coupler, n_months=n_months)
+    trajectory = coupler.generate_trajectory_function(days, accumulate=monthly)
+    _, (_, counts) = trajectory(coupler.initialize())
+    labels = pd.PeriodIndex(coupler.time_axis(0, days).datetimes(), freq="M")
+    first = labels[0]
+    months_since_first = np.array(
+        [(label.year - first.year) * 12 + (label.month - first.month) for label in labels]
+    )
+    expected = np.bincount(months_since_first % n_months, minlength=n_months)
+    return np.asarray(counts), expected
+
+
+@pytest.mark.parametrize("calendar", ["365_day", "gregorian"])
+@pytest.mark.parametrize("dt_hours", [24, 12])
+@pytest.mark.parametrize("start_date", _LATE_IN_MONTH_STARTS)
+@pytest.mark.parametrize("n_months", [1, 2, 13])
+def test_a_sequential_n_months_run_starting_late_in_a_month_still_lands_every_record(
+    n_months, start_date, dt_hours, calendar,
+):
+    """A run whose first midpoint crosses a month (or year) boundary still bins every record.
+
+    `monthly_mean`'s sequential form measures its phase from `start_month`'s
+    own OCCURRENCE containing the first record's midpoint -- not from
+    `start_date`'s own calendar month -- specifically so that the first
+    record always lands in bin 0 (see the docstring's **Sequential-form bin
+    0**). A start date within `dt/2` of 31 December is the sharpest case:
+    the first midpoint's month is not just later, but in the *following
+    year*, which the phase computation must account for or the pattern's own
+    single-period reduction (`_midpoint_month_rule`) is handed a phase many
+    periods away from the one it actually needs.
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=jdt.to_timedelta(dt_hours, "hour"),
+        start_date=jdt.to_datetime(start_date),
+        calendar=calendar,
+    )
+    days = 40  # long enough to cross a couple of calendar months
+    steps = days * 24 // dt_hours
+    counts, expected = _sequential_counts_by_groupby(coupler, steps, n_months)
+
+    assert int(counts.sum()) == steps  # every record landed in exactly one bin
+    np.testing.assert_array_equal(counts, expected)
+
+
+@pytest.mark.parametrize("calendar", ["365_day", "gregorian"])
+@pytest.mark.parametrize("dt_hours", [24, 12])
+@pytest.mark.parametrize("start_date", _LATE_IN_MONTH_STARTS)
+def test_a_sequential_total_time_run_starting_late_in_a_month_sizes_correctly(
+    start_date, dt_hours, calendar,
+):
+    """`total_time`'s bin COUNT, not just membership, must account for the same wrap.
+
+    Before the fix this raised the accumulator to about thirteen bins for a
+    run whose midpoints never leave the month they start in, because sizing
+    it (`_months_covering` on ``"365_day"``, the host's own `datetime` on
+    ``"gregorian"``) used the same wrongly-phased offset the binning did.
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=jdt.to_timedelta(dt_hours, "hour"),
+        start_date=jdt.to_datetime(start_date),
+        calendar=calendar,
+    )
+    for total_time_days in (1, 2, 3):
+        steps = total_time_days * 24 // dt_hours
+        monthly = monthly_mean(coupler, total_time=f"{total_time_days} days")
+        trajectory = coupler.generate_trajectory_function(steps, accumulate=monthly)
+        _, (_, counts) = trajectory(coupler.initialize())
+        labels = coupler.time_axis(0, steps).datetimes()
+
+        assert int(np.asarray(counts).sum()) == steps  # every record landed somewhere
+        # The accumulator's own size is the number of distinct calendar
+        # months the run's record midpoints actually touch -- not, as the
+        # bug left it, a count inflated by measuring the phase from the
+        # wrong occurrence of the start month.
+        n_calendar_months = len(np.unique(labels.astype("datetime64[M]")))
+        assert len(counts) == n_calendar_months
+
+
 def test_a_misspelled_inclusive_is_refused():
     """``Literal`` does not check at runtime, so the rule builder must.
 
