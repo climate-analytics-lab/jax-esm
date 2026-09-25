@@ -59,6 +59,8 @@ that limit, including the ``start_days`` offset it did not reserve before).
 
 from __future__ import annotations
 
+import functools
+
 import jax.numpy as jnp
 import numpy as np
 
@@ -143,6 +145,7 @@ def gregorian_day_of_year(year: jnp.ndarray, month: jnp.ndarray, day: jnp.ndarra
     return cum_no_leap[month - 1] + leap_offset + (day - 1)
 
 
+@functools.lru_cache(maxsize=None)
 def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
     """Return the per-digit ``(days, seconds)`` lookup tables ``gregorian_instant`` reduces through.
 
@@ -157,6 +160,19 @@ def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
     ever formed: :func:`gregorian_instant` looks a digit's contribution up
     here instead of multiplying it live, which is what lets the traced
     computation stay in ``int32`` however large ``record_seconds`` is.
+
+    ``@functools.lru_cache``d (2026-09 review, round 3, finding 10, optional
+    but trivial): a pure function of one small, static Python ``int`` --
+    ``record_seconds`` is never traced (see :func:`gregorian_instant`'s own
+    docstring) -- so every call for the same coupling timestep (which
+    ``gregorian_instant`` makes at least once per distinct trace: every new
+    chunk length, every resumed run, every test) would otherwise rebuild two
+    identical ``_LIMB_BASE``-entry arrays from scratch. The cache is
+    unbounded because the realistic key space is tiny -- a handful of
+    coupling timesteps a single process ever actually uses, not an unbounded
+    stream -- and the two returned arrays are read-only from every caller
+    (immediately wrapped with :func:`jax.numpy.asarray`, never mutated in
+    place), so sharing them across calls is safe.
 
     Parameters
     ----------
