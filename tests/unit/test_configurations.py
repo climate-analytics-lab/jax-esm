@@ -438,11 +438,49 @@ class TestOverrideStr(unittest.TestCase):
             RED = "red"
 
         for value in (Lying(1), Level.LOW, Color.RED, np.float64(1.5),
-                      np.int64(3), Path("/tmp/x")):
+                      np.int64(3), np.bool_(True), Path("/tmp/x")):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
                         TypeError, r"coupled_run\.subsample.*float\(\)"):
                     configurations._override_str("coupled_run.subsample", value)
+
+    def test_refusal_message_names_the_type_and_where_it_is(self):
+        # numpy 2's boolean scalar is named `bool`, so the message qualifies
+        # the type with its module rather than contradicting itself ("a bool
+        # ... may be only ... a plain bool"), and it offers bool() among the
+        # conversions. A top-level value "is" the type; a nested one is in a
+        # list.
+        import numpy as np
+
+        with self.assertRaises(TypeError) as top:
+            configurations._override_str("coupled_run.subsample", np.bool_(True))
+        self.assertIn("'coupled_run.subsample' is a value of type numpy.bool",
+                      str(top.exception))
+        self.assertIn("bool()", str(top.exception))
+        with self.assertRaises(TypeError) as nested:
+            configurations._override_str("ocean.params", [[np.float64(1.0)]])
+        self.assertIn("is a list containing (at some nesting depth) a value "
+                      "of type numpy.float64", str(nested.exception))
+
+    def test_accepted_scalars_keep_value_and_type_through_compose(self):
+        # Parsing is not composing: check through Hydra's real compose that
+        # the edge values of each accepted type arrive exactly -- the sign of
+        # -0.0, a NaN, an int beyond 64 bits, an empty string.
+        import math
+
+        cases = {"neg_zero": -0.0, "nan": float("nan"), "big": 10**30,
+                 "empty": "", "flag": False, "tiny": 5e-324}
+        cfg = configurations._compose(
+            "aquaplanet-slab",
+            [configurations._override_str(f"+probe.{k}", v)
+             for k, v in cases.items()])
+        probe = cfg.probe
+        self.assertEqual(math.copysign(1.0, probe.neg_zero), -1.0)
+        self.assertTrue(math.isnan(probe.nan))
+        for key in ("big", "empty", "flag", "tiny"):
+            with self.subTest(key=key):
+                self.assertEqual(probe[key], cases[key])
+                self.assertIs(type(probe[key]), type(cases[key]))
 
     def test_every_accepted_top_level_type_round_trips(self):
         # The positive control for the rule above: each accepted top-level

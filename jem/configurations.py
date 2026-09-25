@@ -189,7 +189,7 @@ def _compose(name: str, overrides: list[str]):
         Singleton.set_state(saved)
 
 
-def _hydra_literal(value: Any, key: str) -> str:
+def _hydra_literal(value: Any, key: str, nested: bool = False) -> str:
     """Spell one override value as a Hydra token, or raise ``TypeError``.
 
     jem builds the token itself rather than using ``str(value)`` or
@@ -229,20 +229,28 @@ def _hydra_literal(value: Any, key: str) -> str:
     if kind is str:
         return QuotedString(text=value, quote=Quote.single).with_quotes()
     if kind is list:
-        return "[" + ", ".join(_hydra_literal(item, key) for item in value) + "]"
-    raise TypeError(_unrepresentable_message(key, kind))
+        return "[" + ", ".join(
+            _hydra_literal(item, key, nested=True) for item in value) + "]"
+    raise TypeError(_unrepresentable_message(key, kind, nested))
 
 
-def _unrepresentable_message(key: str, kind: type) -> str:
-    """Return the ``TypeError`` message for an override that is or holds ``kind``."""
+def _unrepresentable_message(key: str, kind: type, nested: bool) -> str:
+    """Return the ``TypeError`` message for an override that is or holds ``kind``.
+
+    The type is named with its module (``numpy.bool``, ``pathlib.PosixPath``)
+    because a bare ``__name__`` can collide with the built-in it is being
+    refused in favour of: numpy 2's boolean scalar is named ``bool``.
+    """
+    name = (kind.__qualname__ if kind.__module__ == "builtins"
+            else f"{kind.__module__}.{kind.__qualname__}")
+    where = "is a list containing (at some nesting depth)" if nested else "is"
     return (
-        f"load() override {key!r} is, or is a list containing (at some "
-        f"nesting depth), a {kind.__name__}, which jem cannot spell as a "
-        "faithful Hydra override value. An override value may be only None, "
-        "a plain bool, int, float or str, or a list of those (exactly `list`, "
-        "not a subclass) -- exactly those types, so convert a numpy scalar, "
-        "an enum member or a Path with float(), int() or str() first; give "
-        "one dotted override per field for a structured value instead."
+        f"load() override {key!r} {where} a value of type {name}, which jem "
+        "cannot spell as a faithful Hydra override value. An override value "
+        "may be only None, an exact bool, int, float or str, or an exact "
+        "list of those; convert a numpy scalar, an enum member or a Path to "
+        "the matching built-in first -- bool(), int(), float() or str() -- "
+        "and give one dotted override per field for a structured value."
     )
 
 
@@ -302,6 +310,10 @@ def _override_str(key: str, value: Any) -> str:
     -- but its message suggests a plain ``list`` instead (which composes
     fine, see below), since "one dotted override per field" is meaningless
     for a tuple that is not naming nested config keys.
+
+    ``None`` spells ``null``, which is also how ``**overrides`` writes a
+    bare deletion: ``**{"~coupled_run.subsample": None}`` is the CLI's
+    ``~coupled_run.subsample``.
 
     A ``list`` follows the same rule at every depth: its elements compose to
     exactly the values given -- ``None`` to ``null``, strings through Hydra's

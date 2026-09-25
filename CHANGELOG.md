@@ -702,10 +702,10 @@ Breaking changes are marked; everything else is additive.
   lists), never by the object's own `str`/`repr`; anything else (a subclass
   such as a numpy scalar or an enum member, a `Path`, a `list` subclass)
   raises `TypeError` saying how to convert it, so an override composes to
-  exactly the value given. Quoting guards the override grammar only: a `${...}` in a
-  string override still resolves as an interpolation, as on the CLI, which
-  is how `${jcm_data:...}` names packaged data. An
-  unknown name raises `ValueError` listing what is available, and a host
+  exactly the value given. Quoting guards the override grammar only: a
+  `${...}` in a string override still resolves as an interpolation, as on
+  the CLI, which is how `${jcm_data:...}` names packaged data. An unknown
+  name raises `ValueError` listing what is available, and a host
   application's own Hydra context (if any) survives a call unharmed.
 
   `run_chunked(exp.coupler, **exp.run_kwargs)` reproduces the CLI's build and
