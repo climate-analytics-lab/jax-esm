@@ -21,19 +21,19 @@ chunk: "30 days"
 #
 # These are 30-day-WINDOW means, NOT calendar monthly means: the window is the
 # chunk, so its boundaries drift against the real Gregorian calendar (about
-# five days a year) and a bin spans parts of two months. `jem.accumulate
-# .monthly_mean`'s in-scan calendar-month form is NOT an alternative here: it
-# needs a calendar whose year is a fixed number of days (`month_lengths`), and
-# jax-gcm's atmosphere clock no longer has one -- it raises `NotImplementedError`
-# naming the reason on any jax-gcm-coupled coupler, this one included. For true
-# calendar months (correct leap years), bin the WRITTEN output on the host
-# instead, after the run:
-#
-#   ds.groupby("time.year").groupby("time.month").mean()
-#
-# which costs the whole trajectory in memory and pandas/xarray's own time to
-# group, rather than one compiled in-scan reduction -- the tradeoff
-# `monthly_mean` exists to avoid only where a fixed-length calendar lets it.
+# five days a year) and a bin spans parts of two months. For true calendar
+# months instead, use `jem.accumulate.monthly_mean(coupler, total_time=...)`
+# with `run_chunked(..., accumulate=monthly)` -- since the 2026-09 migration
+# review it works exactly and in-scan on `calendar="gregorian"` (real leap
+# years, no fixed month-length table needed), which is the calendar this
+# coupled run's atmosphere always uses. (An earlier version of this comment
+# said monthly_mean could not do this and pointed at
+# `ds.groupby("time.year").groupby("time.month")` as the host-side fallback --
+# that recipe does not even run (`AttributeError`: a `DataArray`/`Dataset` has
+# no `.groupby` on the *result* of a `groupby`); the working host-side
+# equivalent, if the whole trajectory in memory is preferred anyway, is
+# `ds.resample(time="MS").mean()` or `ds.groupby(["time.year", "time.month"])`
+# in one call.)
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the

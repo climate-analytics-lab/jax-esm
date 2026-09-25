@@ -479,7 +479,7 @@ class SlabModelBase(ABC):
 
         Coordinates follow JCM's, so ``xr.merge`` of an atmosphere dataset and
         a slab dataset from the same run aligns instead of producing an outer
-        join: ``time`` is the absolute ``datetime64[ns]`` axis built by
+        join: ``time`` is the absolute ``datetime64[ms]`` axis built by
         :meth:`jem.base.component.TimeAxis.datetimes`, and a separable grid
         writes 1-D ``lon``/``lat`` in degrees with the same values JCM writes
         for the same coordinate system. A curvilinear grid cannot: it writes

@@ -605,8 +605,10 @@ model = Coupler(
   carry's own `step` counter exactly as in a standalone run, so it is
   continuous across outer steps and survives a checkpoint; the outer `time` is
   only checked against it — the static fields of a `CouplingTime` (`dt`,
-  `days_per_year`, `year_offset_seconds`) are comparable at trace time, the
-  step counter is a traced array. Calling `step` before `bind` is a
+  `days_per_year`, `year_offset_seconds`, and, since the 2026-09 migration
+  review's exact Gregorian `year_fraction`, `start_day`/`start_second`) are
+  comparable at trace time, the step counter is a traced array. Calling `step`
+  before `bind` is a
   `RuntimeError`. For `r == 1` the inner step is run directly and the
   diagnostics gain no extra axis, mirroring multiplicity 1.
 - **The carry** of the inner coupler is a `CoupledCarry` living inside the
@@ -984,7 +986,7 @@ from jem import run_chunked
 
 result = run_chunked(
     coupler,
-    total_time="6 years",        # 2190 days: a whole number of chunks
+    total_time="2190 days",      # a whole number of chunks
     chunk="30 days",
     output_dir="output",
     output_averages=True,        # one record per chunk: its 30-day-window mean
@@ -1283,7 +1285,7 @@ a chunk of diagnostics:
 ```python
 monthly = monthly_mean(coupler)
 result = run_chunked(
-    coupler, total_time="6 years", chunk="30 days",     # 73 whole chunks
+    coupler, total_time="2190 days", chunk="30 days",   # 73 whole chunks
     health_check=None,                 # required: see below
     accumulate=monthly,
 )
@@ -1314,89 +1316,93 @@ three consequences are chosen rather than inherited:
   in one call.
 
 `monthly_mean` takes only the coupler: the accumulator's shapes come from
-`jax.eval_shape` of one coupled step, and a record's month is a `searchsorted`
-in a static table of month boundaries, reached from the record counter reduced
-modulo the records in a year — exact integer arithmetic, and one compiled
-trajectory for a whole year. Which month a record counts in follows the *end*
-of the interval it covers, read on the model calendar — an internal
-elapsed-seconds convention this reduction's own code carries
-(`jem.accumulate._variable_window_rule`), unrelated to and unchanged by
-whatever `TimeAxis` writes as the output's own label. Before jax-gcm PR 878
-that instant *was* the one JEM labelled a record with, so
-`monthly.finalize(...)` and `to_xarray(...).groupby("time.month").mean()` of
-the same run were the same numbers for a run whose output labels crossed no
-Gregorian 29 February. PR 878 moved JCM's own (and so `TimeAxis`'s) label to
-each interval's *midpoint*, so that equality no longer holds for **any** month
-boundary, leap day or not: a plain `groupby("time.month")` of the written
-output now puts the record covering 31 January into January, where the
-accumulator (unchanged) still counts it in February. The fix, when a
-comparison against written output is wanted, is to add back the half-interval
-the label subtracts before grouping (`jem.accumulate.end_of_interval_labels` in
-the test suite is exactly this correction, kept there because production code
-has no need to reconstruct the label `monthly_mean` never uses) — for a
-component that records once per coupled step directly, and for one that records
-more often after its kept sub-step axis is folded with `fold_records` (below).
+`jax.eval_shape` of one coupled step, and a record's month is read directly off
+its own **midpoint** — the same instant `TimeAxis` labels the record with —
+which is what makes `monthly.finalize(...)` equal
+`to_xarray(...).groupby("time.month").mean()` of the same run **by
+construction**, for every calendar, rather than only for a run whose labels
+happen to agree with a fixed table (2026-09 jax-gcm-878 migration review, item
+A). This was **not** always true: before that review, this reduction bound a
+record by its interval's *end*, which was the pre-878 label too, but jax-gcm
+PR 878 moved `TimeAxis`'s own label to the midpoint without this reduction's
+bin rule following — so for one migration round the two genuinely disagreed at
+every month boundary, which the review caught and fixed rather than leaving as
+a documented gotcha. Two implementations share the underlying arithmetic:
+`jem.accumulate._midpoint_month_rule` for the fixed-length calendars
+(`365_day`/`360_day`, a static table of month boundaries, compared in seconds
+against a record's own midpoint after the same int32-safe
+reduce-before-multiply `_variable_window_rule` uses) and
+`_gregorian_month_rule` for `gregorian` (below). Without `accumulate`, the
+generated function is what it always was.
 
-Separately, the labels' *calendar* can also disagree with the bins' regardless
-of the midpoint shift: the labels are proleptic Gregorian whatever the
-coupler's own calendar is (above, and jax-gcm#449), while the bins are that
-calendar's months. On a `365_day` run started on 1 January 2000 — where the
-shipped examples start — the record the model calls 1 March 00:00 is labelled
-(pre-878 convention) `2000-02-29` and is accumulated into March, the one the
-model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest of
-the Gregorian year. `groupby("time.month")` of the written output therefore
-moves the first record of every month from March on into the month before it,
-gives February the record the model calls 1 March (29 records where the
-accumulator's February holds 28), and hands December the year's wrap record —
-the one the model calls 1 January of the next year — that the twelve-bin form
-counts in January, while the accumulated bin stays the model's month, which is
-the month the forcing and the seasonal cycle follow. Reproducing `finalize`
-from the written output across a leap day means binning on model day-of-year
-(each label's offset from the start date in whole days) rather than on
-`time.month`. On `gregorian` the question of a leap-day mismatch does not
-arise, because `monthly_mean` refuses that calendar outright — and jax-gcm PR
-878 made this the *common* case rather than a corner one: jax-gcm's own
-atmosphere clock is unconditionally Gregorian now, so **every** `Coupler`
-built with a real `jcm.model.Model` must itself use `calendar="gregorian"`
-(`JCMComponent.bind` enforces it), and this in-scan accumulator — both the
-twelve-bin and the sequential form, since both need `month_lengths` — cannot
-represent calendar months on a calendar whose year is not a fixed number of
-days. A jax-gcm-coupled run that wants monthly means therefore bins them on
-the host, from the labelled output (`groupby("time.year").groupby("time.month")`,
-correct leap years included), which is slower and costs the whole trajectory in
-memory — the tradeoff this accumulator exists to avoid only when it can stay
-in-scan. Nothing in the reduction depends on
-whether #118 (calendar-consistent labels on JEM's side) or jax-gcm#449 (the
-same inconsistency in JCM's own output, recorded there as tracking only) is
-ever taken up. A calendar with no fixed
-table of month lengths (gregorian, with its leap years) and a coupling step
-that does not divide the year are refused with a message saying why, rather
-than binned approximately. Without `accumulate`, the generated function is what
-it always was.
+**`gregorian` now works in-scan, exactly, real leap years included** — no
+fixed table, no "coupling step divides the year" restriction. This closes what
+used to be this reduction's sharpest limit: a `NotImplementedError` on *any*
+`gregorian`-calendar coupler, which jax-gcm PR 878 made the common case rather
+than a corner one (jax-gcm's own atmosphere clock is unconditionally Gregorian,
+so every `Coupler` built with a real `jcm.model.Model` must itself use
+`calendar="gregorian"`, and it is now `Coupler`'s own default too). The fix
+(the migration review's item A) was to stop trying to build a *table* of month
+lengths for a calendar whose year is not a fixed number of days, and instead
+read a record's real Gregorian `(year, month)` directly off its own midpoint,
+via `jem.base.calendar.gregorian_instant` (an int32-safe
+reduce-before-multiply, vendored from jax-gcm's own `jcm.date` algorithm so
+`jem.base` and `jem.accumulate` need no jax-gcm import to do it) and
+`gregorian_ymd_from_days` (the Fliegel & Van Flandern (1968) integer
+algorithm). The twelve-bin climatology needs nothing further — every record's
+own real calendar month *is* its bin, 0-indexed January first. The sequential
+form's bin **count**, for `total_time=`, is computed on the **host**, with
+Python's own `datetime` (exact, and a bin count is static, so there is no
+reason to do calendar arithmetic in jit for it): the calendar month of the
+run's first and last records' own midpoints,
+`(last.year - first.year) * 12 + (last.month - first.month) + 1`.
+
+Separately, on the fixed calendars (`365_day`/`360_day`) only, the *bins'*
+calendar can still disagree with the *labels'*: the labels are always
+proleptic Gregorian (above, and jax-gcm#449), while these two calendars' bins
+are their own fixed table's months. On a `365_day` run started on 1 January
+2000 — where the shipped examples start — the record whose midpoint is the
+real Gregorian leap day, `2000-02-29T12:00`, is one the model's own fixed
+calendar (no 29 February) calls 1 March and bins into March. `groupby
+("time.month")` of the written output and this reduction's own bins therefore
+part company only at February (29 records under the real labels' calendar
+against the model's 28) and, if the run is exactly one model year long,
+December (short one real day, since the real year is 366 days and the model's
+is 365) — a much narrower residual than before the midpoint rebinding, which
+used to cascade the mismatch through every month from March on. Reproducing
+`finalize` from the written output across a leap day still means binning by
+model day-of-year rather than by `time.month`. `gregorian` has no such
+mismatch at all: the bins and the labels are the same real calendar. Nothing
+here depends on whether #118 (calendar-consistent labels on JEM's own fixed
+calendars) or jax-gcm#449 (the same inconsistency in JCM's own output, tracked
+there only) is ever taken up.
 
 **Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
 the twelve calendar months, so a ten-year run composites its ten Januaries into
 bin 0 — a climatology, and what a fixed `(12, …)` accumulator is for.
 `monthly_mean(coupler, total_time="10 years")` (or `n_months=`) instead gives
-the months the run passes through, in order, each with a bin of its own: the
-same month table rotated to the month the run starts in and phased to the start
-date, so it is calendar months whatever day the run begins on. It is sized by
-counting the months the run's labels touch, which is why ten years gives 121
-bins and not 120 — the last record is labelled 00:00 on 1 January of the
-eleventh year, which is that January's record, and without a bin for it the
-accumulator would wrap it into bin 0 and quietly spoil the first January. A run
-longer than the accumulator wraps at the **span** of its bins, exactly as a
-windowed mean wraps at the span of its windows — so a wrapped bin lines up with
-a calendar month only when `n_months` is a multiple of twelve, and otherwise
-holds parts of two (six bins from 1 January span 181 days, and the second
-August of the run splits 28 records into the February bin and 3 into March's).
-`total_time`, which sizes the accumulator so that it is never wrapped into, is
-the form to prefer. That span is rounded up to the next whole coupled step,
-because the record counter is reduced modulo it and a whole number of calendar
-months need not be a whole number of steps (a 5-day coupling divides the
-365-day year but not 59 days of January and February); the wrap moves by less
-than one step, every bin boundary stays exact, and nothing that is meaningful
-in the first place can see it.
+the months the run passes through, in order, each with a bin of its own,
+starting with the month of the run's own first record (its midpoint, to be
+precise — see `monthly_mean`'s **Sequential-form bin 0**). It is sized by
+counting the calendar months the run's record midpoints touch, which is why
+ten years gives exactly **120** bins, not 121: the run's last record's own
+midpoint is `total_time - dt/2`, half a coupling step *short* of the ten-year
+boundary, so it never spills into an eleventh year the way the pre-migration
+end-of-interval convention's boundary record used to. A run longer than the
+accumulator wraps at the **span** of its bins, exactly as a windowed mean wraps
+at the span of its windows — so a wrapped bin lines up with a calendar month
+only when `n_months` is a multiple of twelve, and otherwise holds parts of two
+(six bins from 1 January span 181 days, and the second August of the run
+splits 28 records into the February bin and 3 into March's). `total_time`,
+which sizes the accumulator so that it is never wrapped into, is the form to
+prefer. On the fixed calendars, that span is rounded up to the next whole
+coupled step, because the record counter is reduced modulo it and a whole
+number of calendar months need not be a whole number of steps (a 5-day
+coupling divides the 365-day year but not 59 days of January and February);
+the wrap moves by less than one step, every bin boundary stays exact, and
+nothing that is meaningful in the first place can see it. `gregorian`'s
+sequential form needs no such rounding: a wrapped bin there is `jnp.mod` of a
+month *count*, not of an elapsed-time span.
 
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
@@ -1409,7 +1415,7 @@ same `finalize`:
 from jem.accumulate import month_lengths, monthly_mean, windowed_mean
 
 monthly = monthly_mean(coupler)                                  # 12 bins
-months  = monthly_mean(coupler, total_time="10 years")           # 121: every month
+months  = monthly_mean(coupler, total_time="10 years")           # 120: every month
 pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
 weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
 leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cycled
@@ -1440,50 +1446,73 @@ January; from 1 July they would bin the first 31 days together, then 28. That
 is why the per-month reduction is `monthly_mean(coupler, total_time=…)` and not
 a pattern handed to `windowed_mean`, and why `windowed_mean` has no `offset=`
 knob to fix it with: the builder that knows where in the calendar a run starts
-is the one that should own the phase. The two also close on opposite sides —
-a window at its end, a calendar month at its start (below) — so even from 1
-January a 31-day window and January differ by the record labelled 00:00 on 1
-February. No `inclusive=` knob is offered to mix them either: each convention is
-what makes its own builder agree with the thing it has to agree with (a
-forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
-of the written output, for a run whose labels cross no Gregorian 29 February).
+is the one that should own the phase.
 
-Both binnings follow the **label** of the record a step produces — the end of
-the coupling interval — rather than where the interval starts. The boundaries
-close in opposite directions because the bins are defined by different things:
-window *w* is the labels in `(w·window, (w+1)·window]`, closed at the end
-because a window is itself an interval and JEM labels an interval at its end
-(so the first 5-day window with daily coupling is the records labelled day 1 to
-day 5, which is what a forecast means by the first pentad), while a calendar
-month is closed at its start because that is what `groupby("time.month")` does
-and a monthly mean has to agree with the written output — up to the leap-day
-difference above, which is a property of the labels' calendar rather than of
-which side a boundary closes on.
+**The two bin rules are genuinely different arithmetic, on purpose, since the
+2026-09 migration review.** `windowed_mean` bins a record against its
+interval's **end**, in elapsed run-time — unrelated to, and independent of,
+whatever instant `TimeAxis` happens to write the record's label as (see that
+class's docstring: since jax-gcm v3, PR 878, that label is the interval's
+midpoint, not its end). `monthly_mean` bins a record by its own **midpoint**
+instead, because a monthly mean is required to equal `groupby("time.month")`
+of the *same* written output, which moved to the midpoint too — keeping
+`monthly_mean` on the old end-of-interval rule after `TimeAxis` moved would
+have made the two disagree at every month boundary rather than only across a
+Gregorian 29 February. A useful consequence: at any boundary both a window
+and a calendar month actually land on (a month-length window pattern from a 1
+January start, say), the two now agree exactly — a record ending precisely on
+the boundary has its midpoint half a record *before* it and the next record's
+midpoint half a record *after*, so "ends at or before" and "midpoint is
+before" give the same answer on both sides. Before this migration the two
+rules shared one convention (both bound by the interval's end) but closed a
+shared boundary in *opposite* directions, so a 31-day window and January
+differed by exactly the record on their shared boundary; that historical
+difference is what `windowed_mean`'s own `test_a_month_long_window_and_a_month
+_now_agree_at_their_shared_boundary` test used to pin, under its old name.
 
-Both rules are therefore one private
-`_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins laid
-end to end as a cumulative sum of lengths, a phase (0 for windows the run
-defines; the run's offset into the calendar year for the twelve-month
-climatology, and into its own first month for the sequential form) and which
-side a boundary closes on. Inside the scan it is a `searchsorted` in a static table,
-after the record counter is reduced modulo the records in one period of the
-bins — which is both what wraps a long run and what keeps the arithmetic
-inside int32. The boundaries themselves are converted from seconds to record
-counts on the host, in int64, so nothing in the traced code multiplies a
-counter that grows with the run: a table of seconds would pass 2³¹ after 68
-simulated years and wrap to nonsense.
+`windowed_mean` is the private
+`_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins
+laid end to end as a cumulative sum of lengths, a phase (0, since a window is
+measured from the run's own start) and which side a boundary closes on
+(`"right"`, the only mode this function is exercised with in production now).
+Inside the scan it is a `searchsorted` in a static table, after the record
+counter is reduced modulo the records in one period of the bins — which is
+both what wraps a long run and what keeps the arithmetic inside int32. The
+boundaries themselves are converted from seconds to record counts on the host,
+in int64, so nothing in the traced code multiplies a counter that grows with
+the run: a table of seconds would pass 2³¹ after 68 simulated years and wrap
+to nonsense. `monthly_mean` used this same function (`inclusive="left"`)
+before the 2026-09 migration review; it now uses two different rules instead
+(below), because a record's midpoint is a *half*-record shift from its end,
+which the record-count conversion above cannot express (it only supports a
+whole-record shift).
+
+**`monthly_mean`'s own bin rules.** `_midpoint_month_rule` (the fixed
+calendars, `365_day`/`360_day`) compares a record's midpoint directly in
+**seconds** rather than record counts — `record_mod * record_seconds +
+record_seconds // 2 + offset_seconds`, reduced modulo the period, then a
+`searchsorted` against the same seconds-boundary table — which needs no
+record-count conversion and stays int32-safe because `record_mod` is already
+bounded to one period before it is ever multiplied. `_gregorian_month_rule`
+(`gregorian`) needs no period or table at all: `jem.base.calendar
+.gregorian_instant` reduces the traced record counter modulo a small static
+period (the same `gcd`/`P`/`D` decomposition item B's exact `year_fraction`
+uses) to get the record's midpoint as an exact (days, seconds) pair, and
+`gregorian_ymd_from_days` reads its real calendar month directly off that.
 
 **A coupled step is not always one record.** A component the workflow runs
-*n* times per coupled step emits *n* records, each labelled at the end of its
-own sub-interval, and a nested coupler's inner steps are records in the same
-way — so a coupled step's records need not all fall in the same bin. The 24
-hourly records of the daily step covering 31 January are labelled 01:00 on the
-31st through 00:00 on 1 February: 23 in January, one in February, exactly as
-`to_xarray` writes them. Each record is therefore binned by **its own** label,
-from the coupler's own sub-step clock (`coupling_time_at_substep`), and the
-sub-step axis is kept rather than folded: that component accumulates into
-`(n_bins, n, …)`, bin *b* slot *j* holding the records of call *j* that fell in
-*b* — a monthly-mean diurnal cycle, which folding would destroy and which
+*n* times per coupled step emits *n* records, each with its own sub-interval,
+and a nested coupler's inner steps are records in the same way — so a coupled
+step's records need not all fall in the same bin. The 24 hourly records of the
+daily step covering 31 January have midpoints half an hour past each hour: 23
+of them (through `22:00-23:00`) fall before midnight and one
+(`23:00-00:00`) after, exactly as `to_xarray` labels them (their own
+midpoints). Each record is therefore binned by **its own** interval (its
+midpoint, for `monthly_mean`; its end, for `windowed_mean`), from the
+coupler's own sub-step clock (`coupling_time_at_substep`), and the sub-step
+axis is kept rather than folded: that component accumulates into `(n_bins, n,
+…)`, bin *b* slot *j* holding the records of call *j* that fell in *b* — a
+monthly-mean diurnal cycle, which folding would destroy and which
 `fold_records(means["atm"], counts["atm"])` recovers by weighting each slot
 with its own count (a straight mean over the slots is the same number only
 where every slot holds the same number of records, which is exactly what a

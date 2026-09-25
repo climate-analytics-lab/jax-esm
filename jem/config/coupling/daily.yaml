@@ -6,9 +6,11 @@
 # in Python, for the set of components that were actually built.
 
 # Interval between exchanges, as a `jem.base.component.parse_duration_days` string
-# ("1 day", "12 hours", "1 month"). It is also the step the atmosphere is
-# integrated over between exchanges, so it must be a whole number of the
-# atmosphere's own timesteps.
+# ("1 day", "12 hours"). It is also the step the atmosphere is integrated over
+# between exchanges, so it must be a whole number of the atmosphere's own
+# timesteps -- which rules out a calendar-averaged unit like "1 month" in
+# practice: on the default "gregorian" calendar that is 2,629,746 seconds
+# (365.2425/12 days), which no whole-second atmosphere timestep divides.
 timestep: "1 day"
 
 # Order in which exchangers and components are stepped, as `Coupler` takes it.

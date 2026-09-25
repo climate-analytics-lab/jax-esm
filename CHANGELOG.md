@@ -34,7 +34,7 @@ Breaking changes are marked; everything else is additive.
 
   result = run_chunked(
       coupler,
-      total_time="6 years",        # 2190 days: a whole number of chunks
+      total_time="2190 days",      # a whole number of chunks (73 x 30 days)
       chunk="30 days",             # a file, a restart and a health check a chunk
       output_dir="output",
       output_averages=True,        # one record per chunk: its 30-day-window mean
@@ -229,13 +229,16 @@ Breaking changes are marked; everything else is additive.
   exists to avoid. `long_run` is ~10 years in 30-day chunks with one averaged
   record per chunk; its `total_time` is spelled in days (3600) because
   `total_time` must be a whole multiple of `chunk` and 30 days does not divide
-  a 365-day year, so `coupled_run=long_run coupled_run.total_time="1 year"` is
-  refused — override it with a multiple of 30 days ("6 years" = 2190). Those
-  averaged records are 30-day *window* means, whose boundaries drift about five
-  days a year against the calendar, not calendar-month means: those are
-  `jem.accumulate.monthly_mean`, which bins each record by its own label. A
-  test composes every shipped option and fails if its `total_time`/`chunk`
-  pair does not divide.
+  a calendar year on any calendar this coupler supports (Gregorian or
+  365-day), so `coupled_run=long_run coupled_run.total_time="1 year"` is
+  refused — override it with a whole multiple of 30 days, spelled in days
+  (e.g. `"2190 days"`, not `"6 years"`, whose length itself depends on the
+  calendar). Those averaged records are 30-day *window* means, whose
+  boundaries drift about five days a year against the calendar, not
+  calendar-month means: those are `jem.accumulate.monthly_mean`, which bins
+  each record against its own interval, not by whatever it happens to be
+  labelled. A test composes every shipped option and fails if its
+  `total_time`/`chunk` pair does not divide.
 - **The YAML is wiring only**, and a test says so: a key earns its place by
   being `_target_`, a required input (`???`) or the non-default value that
   makes a named configuration what it is.
@@ -669,9 +672,16 @@ Breaking changes are marked; everything else is additive.
     `initial_step` and returns `(RunState, ModelPredictions)` in place of the
     old `(dycore_state, physics_carry, predictions)` triple. `JCMComponent`'s
     carry gains two keys, `"time"` / `"step"` (jax-gcm's exact `RunState`
-    clock), threaded exactly like the existing `"physics"` key — recomputing
-    them from the coupler's own step counter instead would eventually overflow
-    a whole-seconds product that jax-gcm's own incremental clock never forms.
+    clock), threaded exactly like the existing `"physics"` key — following
+    jax-gcm's own v3 migration guide, which is explicit that a caller should
+    continue threading all four fields of `RunState` rather than deriving
+    `time`/`step` from a step counter kept elsewhere. (An earlier draft of
+    this note justified the threading by an unavoidable int32 overflow in a
+    step-counter product; that was overstated — a `gcd`/period reduction
+    avoids the overflow entirely for any coupling down to sub-daily, the same
+    trick `jem.base.calendar.gregorian_instant` now uses for
+    `monthly_mean`/`year_fraction` below. Threading is still the right design,
+    just for the migration-guide reason, not an unavoidable one.)
   - **An averaged output record is now labelled at its interval's MIDPOINT**,
     not its end (jax-gcm's own convention change). `TimeAxis.datetimes` — which
     labels every non-JCM component's output so it merges with the
@@ -679,13 +689,12 @@ Breaking changes are marked; everything else is additive.
     instead of reimplementing an approximate (float64-days, `datetime64[ns]`)
     version of jax-gcm's old labelling; the result is exact `datetime64[ms]`
     for *any* coupling step, not only one that happens to be a power-of-two
-    fraction of a day. A consequence worth knowing: `jem.accumulate
-    .monthly_mean`'s bin math is unchanged (it still bins by each interval's
-    end, to stay bit-for-bit identical), so a plain
-    `groupby("time.month")` of written output no longer equals
-    `monthly_mean`'s own bins at *any* month boundary, not only across a
-    Gregorian 29 February as before — add back the half-interval the new
-    label subtracts before comparing (see `monthly_mean`'s docstring).
+    fraction of a day. See the standalone Breaking-change bullet below for
+    this change's full user-facing impact (it is not scoped to
+    `jcm.model.Model` users only — every jem output changes, slab-only runs
+    included) and for what happened to `jem.accumulate.monthly_mean`'s own
+    bin math, which an earlier draft of this entry said was left unchanged —
+    it was not; see that bullet and `monthly_mean`'s own docstring.
   - `jcm.date` dropped `days_per_year` and the `calendar` argument of
     `parse_duration_days` / `DateData.set_date` / `ForcingData.select`, along
     with the calendar concept itself. JEM's own annual-cycle bookkeeping
@@ -698,16 +707,22 @@ Breaking changes are marked; everything else is additive.
   - Every jax-gcm-coupled `Coupler` must now be built with
     `calendar="gregorian"`; `calendar="365_day"` (jax-gcm's old default, and
     what every shipped configuration used) is refused by `JCMComponent.bind`.
-    One consequence: `jem.accumulate.monthly_mean`'s in-scan calendar-month
-    accumulator (both the twelve-bin climatology and the sequential
-    `total_time`/`n_months` forms) needs a calendar whose year is a fixed
-    number of days, which Gregorian is not — it already refused
-    `calendar="gregorian"` before this migration (a corner case, since nobody
-    built one), and now refuses on **every** jax-gcm-coupled model, since
-    Gregorian is no longer a corner case. There is no in-scan fix for this;
-    bin calendar months on the host instead
-    (`ds.groupby("time.year").groupby("time.month")`) for a jax-gcm-coupled
-    run. `windowed_mean` is unaffected (a window has no calendar-month table).
+    **`Coupler`'s own default `calendar` is now `"gregorian"` too** (it was
+    `"365_day"`) — see the standalone Breaking-change bullet below.
+    `jem.accumulate.monthly_mean`'s in-scan calendar-month accumulator (both
+    the twelve-bin climatology and the sequential `total_time`/`n_months`
+    forms) **now works exactly on `"gregorian"`, in-scan, real leap years
+    included** — an earlier draft of this entry said this needed a calendar
+    whose year is a fixed number of days and so could never work on Gregorian
+    in-scan; that was wrong (refuted by a review: a twelve-bin accumulator is
+    sum/count per bin and never needs a fixed year length if each record's own
+    bin is read off its real Gregorian date, which
+    `jem.base.calendar.gregorian_instant` now does, int32-safely, without ever
+    forming a step-count-sized product). See `monthly_mean`'s own docstring
+    and the **binning-convention breaking change** bullet below for the full
+    story, including how this interacts with the midpoint-label change.
+    `windowed_mean` is unaffected either way (a window has no calendar-month
+    table and needs no divide-the-year check on any calendar).
   - `Model.date_from_sim_time` is no longer resolved anywhere in jax-gcm's own
     integration path (the exact clock is threaded incrementally, never
     recomputed from elapsed seconds), so the perpetual-season override hook
@@ -719,6 +734,109 @@ Breaking changes are marked; everything else is additive.
     physics regression, only the clock/labelling-convention changes above
     needed test updates, all of which are exact (dtype and instant
     corrections, not tolerance changes).
+  - **Pre-878 checkpoints cannot resume.** A checkpoint saved by a jem built
+    against jax-gcm PR 877 (or earlier) has no `"time"`/`"step"` entry in the
+    atmosphere's carry, so `jem.checkpoint.load_carry` refuses it with a leaf
+    count mismatch — currently a generic "holds N leaves but the model expects
+    M" rather than one that names the cause; there is no migration path for
+    such a checkpoint today. Start a new run (or re-run from an earlier,
+    pre-878 jem to produce fresh output, then switch) rather than attempting
+    to resume one across this boundary.
+- **BREAKING — every written record's time axis moves, including
+  slab-only runs with no atmosphere.** This is deliberately its own bullet,
+  not folded into the `jcm.model.Model`-scoped one above: it changes
+  `TimeAxis.datetimes()`, which every packaged component's `to_xarray` calls
+  (`jem.base.coupler.Coupler`, `SlabOceanModel`, `SlabLandModel`,
+  `SlabSeaiceModel`, `VerosComponent`), so a coupled run built entirely from
+  jem's own slab models — no `jcm.model.Model`, no jax-gcm import at all
+  beyond the one `TimeAxis.datetimes()` itself makes at *call* time (import of
+  `jem` alone still needs no jax-gcm) — writes a different time axis than it
+  did before this migration too:
+  - the dtype is `datetime64[ms]`, not `datetime64[ns]` (jax-gcm's own exact
+    conversion's native precision; `jem/components/slab/base.py` and
+    `jem/components/veros_component.py`'s docstrings, which still said
+    `[ns]`, are corrected to say so);
+  - the label is each interval's **midpoint**, not its end.
+
+  Any downstream code that parses `ds.time` at nanosecond precision, or that
+  assumes a record is labelled at the end of the interval it covers (a custom
+  `groupby`, a join against another dataset by exact timestamp), needs
+  updating together with this release.
+- **BREAKING — `jem.accumulate.monthly_mean` now bins every record by its
+  interval's MIDPOINT, not its end, on every calendar.** Once
+  `TimeAxis.datetimes()` moved the *label* to the midpoint (above), keeping
+  the old end-of-interval *bin* rule would have made `monthly_mean` disagree
+  with a plain `groupby("time.month")` of its own coupler's written output at
+  **every** month boundary, which is exactly the disagreement this reduction
+  exists to prevent (the whole point of computing it in-scan rather than
+  telling users to `groupby` the written output themselves). The bin rule
+  therefore moved to match, for `"365_day"`/`"360_day"` (`jem.accumulate
+  ._midpoint_month_rule`, replacing `_variable_window_rule` for this caller)
+  as well as for the newly-supported `"gregorian"` (`_gregorian_month_rule`).
+  Consequences, all documented in `monthly_mean`'s own docstring:
+  - bin *membership* near a month boundary differs from a pre-migration run,
+    on every calendar the function ever ran on, not only `"gregorian"`;
+  - `monthly_mean(coupler, total_time=...)`'s bin *count* also changes for a
+    `total_time` landing exactly on a month boundary: a ten-year run is now
+    exactly `120` bins, not `121` — the pre-migration boundary record (the
+    run's last, whose interval-*end* sat exactly on the boundary) no longer
+    exists, because that record's *midpoint* is half a step short of it;
+  - a test proves the equality this exists for:
+    `tests/unit/test_accumulate.py::test_monthly_means_match_an_xarray_groupby`
+    and its `"gregorian"` counterpart,
+    `test_gregorian_monthly_means_match_a_pandas_groupby_across_a_leap_day`,
+    compare `monthly_mean`'s bins against a **plain, uncorrected**
+    `groupby("time.month")` of the written output (the latter against an
+    independent `pandas` computation, so a bug shared between jem's own bin
+    rule and its own labelling function could not hide a disagreement).
+- **BREAKING — `Coupler`'s default `calendar` is now `"gregorian"`**, not
+  `"365_day"`. After the two changes above, `"gregorian"` is exact (real
+  per-year leap-day arithmetic, not the 365.2425-day average that used to
+  cause a real, confirmed seasonal-phase drift of up to +1.48 days over 400
+  years — see the next bullet) and is the only calendar a real
+  `jcm.model.Model` component ever accepts, so it is also the only sensible
+  default. `"365_day"` and `"360_day"` remain available as explicit choices
+  for a coupled model with no atmosphere. Every documented example that
+  omitted `calendar=` and built a jax-gcm-coupled model used to fail at
+  `bind()` against the old default; those examples (and every jem-only test
+  that relied on the old default specifically to exercise 365-day arithmetic)
+  are updated to pass `calendar="365_day"` explicitly where that arithmetic is
+  what the example or test is about.
+- **Fixed — the atmosphere/slab seasonal-phase drift from a fixed
+  365.2425-day year.** `CouplingTime.year_fraction` (and
+  `jem.base.component.start_year_fraction`) now compute the **exact**
+  Gregorian day-of-year and leap-year status of the current step, via
+  `jem.base.calendar.gregorian_instant`, rather than dividing elapsed seconds
+  by the fixed average `365.2425`-day year every calendar here used to use.
+  The drift this removes was confirmed larger than an earlier estimate: up to
+  **+1.48 days over 400 years** (peaking 2097-01-01), **+0.757 days within the
+  single leap year 2000**, in a sawtooth pattern peaking at every year
+  boundary (the atmosphere's real calendar and the fixed-average one fall on
+  opposite sides of 31 December for most of the year). Every `"gregorian"`
+  consumer of `year_fraction` is fixed by this change with no code of its own
+  changing: the slab ocean's `sst_climatology` restoring target and `q_flux`,
+  the sea-ice model's `ice_climatology`, and the slab land model's surface
+  temperature, snow and soil water at both ends of a step. This
+  intentionally does **not** change the slabs' climatology-sampling
+  *convention* to match jax-gcm's own `wrap_year` step function (which
+  calibrates a climatology's day-of-year per the actual length of the current
+  year, so day 60 always means 1 March even in a leap year) — see
+  `CouplingTime.year_fraction`'s own docstring for why that is a separate,
+  deliberately out-of-scope science choice rather than a bug. `"365_day"` and
+  `"360_day"` are unaffected (their year has no leap day, so the fixed-average
+  division was already exact).
+- **Fixed — `jem.output.postprocess` mishandled jax-gcm 878's new
+  `time_bounds` variable on a multi-record averaged chunk.** It was averaged
+  like any other data variable and stamped with the chunk's `cell_methods`,
+  so a genuine 3-day chunk starting 2000-02-02 produced a `time_bounds` of
+  `[2000-02-03, 2000-02-04]` — a false one-day interval for what was actually
+  a 3-day mean — under a label (`02-04T12:00`) that was itself neither the
+  correct midpoint (`02-03T12:00`) nor the interval's end. `time_bounds` is
+  now set to `[the first interval's start, the last interval's end]`, the
+  record is labelled at their midpoint, and `time_bounds` is excluded from
+  both the mean and from `cell_methods` (it is a bound, not a sampled
+  quantity). This affects the shipped `coupled_run=long_run` configuration,
+  whose `output_averages: true` is exactly this code path.
 - **`JCM_SUPPORTED_REV` moved to jax-gcm `dev` at the PR 877 merge commit**
   (`46eb3fc1efc3d16fde5458736d80a3491698f3ed`) — the first `dev` revision
   carrying the package-independent `SurfaceExchange` struct (jax-gcm#754), the

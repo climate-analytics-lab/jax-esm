@@ -179,7 +179,7 @@ default** — and resuming is the same call:
 ```python
 result = run_chunked(
     coupler,
-    total_time="6 years",        # 2190 days: a whole number of 30-day chunks
+    total_time="2190 days",      # a whole number of 30-day chunks
     chunk="30 days",             # a health check, a file and a restart per chunk
     output_dir="output",
     output_averages=True,        # one record per chunk: its 30-day-window mean
@@ -279,23 +279,22 @@ carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
 
-The bins are the **model** calendar's months, so `monthly.finalize(...)` and
+Every record is binned by its own **midpoint** — the same instant it is
+written with — so `monthly.finalize(...)` and
 `to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers for a run whose output labels cross no Gregorian 29 February. The
-labels are proleptic Gregorian whatever the model calendar is (JCM's
-convention, jax-gcm#449; calendar-consistent labels are tracked as #118), so a
-`365_day` run started on 1 January 2000 — where the shipped examples start —
-labels the record the model calls 1 March 00:00 as `2000-02-29` and
-accumulates it into March. `groupby("time.month")` of the written output
-therefore moves the first record of every month from March on into the month
-before it, gives February the record the model calls 1 March, and hands
-December the year's wrap record — the one the model calls 1 January of the
-next year — that the twelve bins count in January; the accumulated bin stays
-the model's month, which is the month the forcing and the seasonal cycle
-follow. To reproduce `finalize` from the written output across a leap day, bin
-on model day-of-year — each label's offset from the start date in whole days —
-rather than on `time.month`. A `gregorian` calendar is refused outright, since
-it has no fixed table of month lengths.
+numbers **by construction**, on every calendar this works on: `"gregorian"`
+(the coupler's default, and the only calendar a real atmosphere accepts) bins
+against the exact, real Gregorian calendar, real leap years included, entirely
+in-scan; `"365_day"`/`"360_day"` bin against a fixed table of month lengths.
+On the fixed calendars only, the *labels* are still proleptic Gregorian
+whatever the model calendar is (JCM's convention, jax-gcm#449;
+calendar-consistent labels there are tracked as #118), so a `365_day` run
+started on 1 January 2000 differs from `groupby("time.month")` of its own
+written output at exactly the real leap day (February holds 29 real days
+against the model's 28) and, if the run is exactly one model year long, at
+December (short one real day, since the real Gregorian year that year is 366
+days). To reproduce `finalize` from the written output exactly across a leap
+day, bin on model day-of-year instead of `time.month`.
 
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on
@@ -308,9 +307,10 @@ integrates.
 
 A component the workflow runs *n* times per coupled step keeps that axis —
 `(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
-records is binned by the end of its own sub-interval, so the hourly records of
-31 January count in January even though the coupled step containing them ends
-on 1 February. A nested coupler's inner steps are treated the same way. Fold that
+records is binned by its own sub-interval's midpoint, so the 23 hourly records
+of 31 January whose midpoints fall before midnight count in January and the
+one covering `23:00-00:00` counts in February. A nested coupler's inner steps
+are treated the same way. Fold that
 axis away with `fold_records`, which weights each slot by its own count (a
 straight mean over the slots is right only where every slot holds the same
 number of records, which is what a month boundary breaks):
@@ -329,18 +329,19 @@ a climatology. Give it a size and it bins into the months the run passes
 through instead, in order, each with a bin of its own:
 
 ```python
-months = monthly_mean(coupler, total_time="10 years")   # or n_months=121
-means = months.finalize(accumulator)   # 121 bins: Jul 2001, Aug 2001, …
+months = monthly_mean(coupler, total_time="10 years")   # or n_months=120
+means = months.finalize(accumulator)   # 120 bins: Jul 2001, Aug 2001, …
 ```
 
-These are calendar months whatever day the run starts on — the month table is
-rotated to the month of the start date and phased to it — and they do not
-drift the way a fixed 30-day window does. Ten years gives 121 bins, not 120:
-the run's last record is labelled 00:00 on 1 January of the eleventh year,
-which belongs to that January, and a bin has to exist for it rather than have
-it wrap into the first. `total_time` is the spelling to prefer for that
-reason — a run longer than the accumulator wraps at the *span* of its bins, so
-a wrapped bin is a calendar month only when `n_months` is a multiple of twelve
+These are calendar months whatever day the run starts on — phased to the
+month the run itself begins in — and they do not drift the way a fixed 30-day
+window does. Ten years gives exactly 120 bins, not 121: every record is binned
+by its own **midpoint** (the same instant it is written with), so the run's
+last record's midpoint is half a coupling step short of the ten-year boundary
+and stays inside December of year 10 rather than spilling into an eleventh
+year. `total_time` is the spelling to prefer regardless of the exact count —
+a run longer than the accumulator wraps at the *span* of its bins, so a
+wrapped bin is a calendar month only when `n_months` is a multiple of twelve
 and otherwise holds parts of two.
 
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
@@ -353,13 +354,14 @@ through (daily leads for a forecast's first week, then pentads).
 
 A window is **not** a calendar month, whatever its length: every window is
 measured from the run's own start date, with no reference to the calendar, and
-closes at its **end** (JEM labels a record at the end of the interval it
-covers, and a window is one such interval) while a calendar month closes at
-its **start** (which is what `groupby("time.month")` does). So a 31-day window
-started on 1 January takes the record labelled 00:00 on 1 February, which is
-February's month; and from a 1 July start a pattern of month lengths is not
-months at all. Calendar months come from `monthly_mean`, which knows where in
-the calendar the run began.
+closes at its **end** — a record's own interval, not the (now midpoint)
+instant it happens to be written with — while a calendar month closes at its
+**start** (which is what `groupby("time.month")` does). The two conventions
+happen to agree at any boundary both actually land on (a month-length window
+pattern from a 1 January start, say), but a window is still not a month: from
+a 1 July start, a pattern of calendar-month lengths bins the first 31 days
+together, then 28, and so on — not months at all. Calendar months come from
+`monthly_mean`, which knows where in the calendar the run began.
 
 The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`

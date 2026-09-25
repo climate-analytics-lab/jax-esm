@@ -549,19 +549,26 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
 def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler):
     """The long-run snippet the docs show is one `run_chunked` accepts.
 
-    `total_time` must be a whole multiple of `chunk`, and on a 365-day
-    calendar "10 years" is 3650 days, which 30-day chunks do not divide -- so
-    the recipe every document repeated would have raised if anyone had run
-    it. Six years does divide, and this is what keeps the snippets honest
-    without integrating six years to find out.
+    `total_time` must be a whole multiple of `chunk`. The docs spell the
+    duration in days (`"2190 days"`), not `"6 years"`: on the coupler's
+    default `"gregorian"` calendar (the 2026-09 migration review) a
+    calendar-averaged year is 365.2425 days, so `"6 years"` is 2191.455 days
+    -- not even a whole number of days, let alone a whole multiple of a
+    30-day chunk -- which is exactly why the docs were fixed to spell this
+    duration in days instead of relying on a duration whose length depends on
+    the calendar. This pins both facts: the day-count example the docs use
+    now works, and the `"6 years"` spelling they used to use does not.
     """
     from jem.driver import _whole_steps
 
     coupling_days = coupler.dt_seconds / 86400.0
-    total = _whole_steps("6 years", coupling_days, coupler, "total_time")
+    total = _whole_steps("2190 days", coupling_days, coupler, "total_time")
     per_chunk = _whole_steps("30 days", coupling_days, coupler, "chunk")
     assert total == 2190
     assert total % per_chunk == 0
+
+    with pytest.raises(ValueError, match="total_time='6 years'"):
+        _whole_steps("6 years", coupling_days, coupler, "total_time")
 
 
 # ---------------------------------------------------------------------------

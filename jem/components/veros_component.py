@@ -906,7 +906,7 @@ class VerosComponent:
             ``u`` and for the depth integral behind ``psi``, and
             ``mask_surface_Z`` for the zeta points ``psi`` itself sits on,
             where its values over land are an artefact of the integration.
-            The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
+            The ``time`` coordinate is the absolute ``datetime64[ms]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
             ``xr.merge`` joins the records instead of unioning two axes -- or,
