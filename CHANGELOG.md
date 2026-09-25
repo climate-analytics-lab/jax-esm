@@ -335,9 +335,11 @@ Breaking changes are marked; everything else is additive.
   records the stride kept while the label still spans the whole chunk.
   Integer and boolean time series are categorical, so, as in jcm's own
   interval means, they are left out of a chunk mean and listed in the
-  `omitted_interval_mean_variables` attribute; with `earth-slab` that is
-  jcm's `convection.iptop`, `shortwave_rad.compute_shortwave`,
-  `shortwave_rad.icltop` and `shortwave_rad.step`. Files
+  `omitted_interval_mean_variables` attribute. JCM's output already arrives
+  without them (jem always steps JCM with averaging on, and JCM drops them
+  and lists them itself, e.g. `convection.iptop` and `shortwave_rad.step`
+  with `earth-slab`); the chunk mean keeps that list, and applies the same
+  rule to any other component's categorical series. Files
   are `<component>-<first step:08d>.nc`: the component first so a listing groups
   a component's files, and the **coupled step the chunk starts at** second,
   zero-padded so the listing sorts in run order. The step rather than a chunk

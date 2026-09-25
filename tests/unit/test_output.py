@@ -933,3 +933,17 @@ def test_postprocess_omits_categorical_variables_from_a_chunk_mean():
     # A snapshot chunk, not averaged, keeps them unchanged.
     kept = postprocess(dataset, output_averages=False)
     assert kept["inner_step"].dtype == np.int32
+
+
+def test_postprocess_chunk_mean_of_only_categorical_series_is_one_empty_record():
+    """A chunk whose every time series is categorical still gets its one label."""
+    dataset = simple_dataset(4).drop_vars("temperature")
+    dataset["inner_step"] = (("time",), np.arange(4, dtype=np.int32))
+    dataset["flag"] = (("time", "lon"), np.array([[True, False]] * 4))
+
+    averaged = postprocess(dataset, output_averages=True)
+
+    assert averaged.sizes["time"] == 1
+    assert averaged["time"].values[0] == np.datetime64("1970-01-02T12:00", "ms")
+    assert averaged.attrs["omitted_interval_mean_variables"] == "flag,inner_step"
+    assert set(averaged.data_vars) == {"mask"}

@@ -85,8 +85,12 @@ midpoint, carrying the CF ``cell_methods = "time: mean"`` that says so.
 As in JCM's own interval means, an integer or boolean time series (a step
 counter, a convection type, a flag) is categorical and has no meaningful
 mean, so it is left out of the chunk mean and named in the dataset's
-``omitted_interval_mean_variables`` attribute alongside any names JCM itself
-already put there; snapshot output keeps it.
+``omitted_interval_mean_variables`` attribute, alongside any names already
+listed there. JCM's own output never reaches this point with one:
+``JCMComponent`` always steps JCM with averaging on, so JCM drops them
+itself and its list is carried through. The rule is for any other
+component that records one; with ``output_averages`` off, such a component
+keeps it.
 
 For a dataset that itself carries ``time_bounds`` (JCM's, read off its
 ``time`` coordinate's CF ``bounds`` attribute rather than assumed by name),
@@ -713,11 +717,16 @@ def postprocess(
     # `Dataset.mean` drops the dimension it reduces, so the label -- the
     # chunk's own true midpoint, computed exactly either way (see above) --
     # has to be put back by hand.
-    averaged = (
-        dataset[timed]
-        .mean(dim=TIME_DIMENSION, keep_attrs=True)
-        .expand_dims({TIME_DIMENSION: chunk_label})
-    )
+    if timed:
+        averaged = (
+            dataset[timed]
+            .mean(dim=TIME_DIMENSION, keep_attrs=True)
+            .expand_dims({TIME_DIMENSION: chunk_label})
+        )
+    else:
+        # Every time series was categorical: `dataset[[]]` keeps no `time`
+        # dimension to reduce, so the one-record time axis is built directly.
+        averaged = xr.Dataset(coords={TIME_DIMENSION: chunk_label})
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
     if subsample > 1:
         # The label and, for a `time_bounds`-carrying dataset, the bound
