@@ -662,26 +662,150 @@ Breaking changes are marked; everything else is additive.
   (`diagnostics["surface_exchange"]`, published identically by every physics
   package that resolves a surface), replacing the old per-package
   `speedy()`/`echam()`/`detect()` readers. ECHAM now *publishes* the same
-  grid-mean heat and water fluxes, but **an ECHAM-composed coupled run still
-  cannot complete a step**: `from_diagnostics()` also reads the near-surface
-  wind vector, eagerly, and ECHAM has none (see below), so
-  `JCMComponent.step()` raises `NotImplementedError` on the first coupled step
-  for every ECHAM configuration, not only Veros ones. That is unchanged from
-  before the collapse (the old `echam()` reader raised unconditionally);
-  making the wind optional through `JCMDerived`, the carry and the output is
-  jax-esm#129. SPEEDY's translated values are
-  numerically unchanged (verified against the pre-#754 adapter on a real
-  model step: the sign flip on the net heat flux is the same transform, and
-  the evaporation/precipitation unit conversion the old adapter applied is
-  simply no longer needed, because the published contract is already in
-  JEM's units). One package-specific read remains and is **not** expected to
-  disappear with a future jax-gcm update: the published contract has no
-  near-surface wind *vector* (only the scalar `wind_speed`), so
-  `jem.fluxes.bulk_wind_stress` (used only by `jem.fluxes.VerosExchange`)
-  still reads SPEEDY's private `_surface_flux.u0`/`.v0` directly — ECHAM has
-  no wind vector anywhere in its own diagnostics either, so this is not a
-  regression from the collapse. See the module's docstring for the full
-  field-by-field derivation.
+  grid-mean heat and water fluxes as SPEEDY, translated the same way.
+  SPEEDY's translated values are numerically unchanged (verified against the
+  pre-#754 adapter on a real model step: the sign flip on the net heat flux
+  is the same transform, and the evaporation/precipitation unit conversion
+  the old adapter applied is simply no longer needed, because the published
+  contract is already in JEM's units). One package-specific read remains and
+  is **not** expected to disappear with a future jax-gcm update: the
+  published contract has no near-surface wind *vector* (only the scalar
+  `wind_speed`), so `jem.fluxes.bulk_wind_stress` (used only by
+  `jem.fluxes.VerosExchange`) still reads SPEEDY's private
+  `_surface_flux.u0`/`.v0` directly — ECHAM has no wind vector anywhere in
+  its own diagnostics either, so this is not a regression from the
+  collapse. See the module's docstring for the full field-by-field
+  derivation, and the jax-esm#129 entry below for what changed since about
+  the wind vector's absence.
+- **jax-esm#129: an ECHAM-composed coupled model can now complete a step**
+  (breaking). Immediately after the #754 collapse above, `from_diagnostics()`
+  still read the near-surface wind vector *eagerly*, and since ECHAM has
+  none, `JCMComponent.step()` raised `NotImplementedError` on the very first
+  coupled step of every ECHAM configuration, whatever the exchanger — even
+  one that never touches the wind at all. `from_diagnostics()` now returns
+  `u0=None`/`v0=None` for such a package instead of raising, and
+  `JCMDerived`'s `zeros()` (the initial carry) makes the same decision from a
+  structural template of the diagnostics dict, so the field is `None` from
+  step 0 onward — never an array on one step and `None` on another, which is
+  exactly the *static*, composition-time property a `lax.scan` carry
+  requires: `None` is an empty JAX pytree node, so it survives `jit`, the
+  coupled scan, a checkpoint round trip and output serialization the same
+  way any other absent field of a delegated component's carry already does,
+  with no zero, NaN or `wind_speed`-derived value standing in for the
+  missing vector. The one production consumer of that vector,
+  `jem.fluxes.VerosExchange` (via `bulk_wind_stress`), is unaffected by the
+  absence turning silent: it gained a `validate()` method that
+  `jem.runners._validate_exchangers` now calls at **composition time** — the
+  same slot `ComposablePhysics.require_surface_exchange` already fills for
+  the surface struct itself — so building a Veros-coupled model on a
+  windless atmosphere fails immediately, naming the composed physics and
+  jax-esm#132 (choosing this exchanger's wind-stress source for a windless
+  atmosphere, not #129, which closes only the eager-read failure), rather
+  than mid-run or with a silently wrong stress; `__call__` repeats the same
+  check for a hand-built `Coupler` that skips `_validate_exchangers`.
+  **What breaks**: `JCMDerived.zeros()` now takes three required positional
+  arguments, `zeros(diagnostics_template, nodal_shape, physics, **overrides)`,
+  in place of `zeros(shape, physics, **overrides)`. The structural diagnostics
+  template (formerly the second argument, confusingly named `physics`) now
+  comes first as `diagnostics_template`; the horizontal grid shape (formerly
+  first, `shape`) comes second as `nodal_shape`; and a new third argument,
+  `physics`, is the composed atmosphere physics package itself, which `zeros()`
+  needs to decide `u0`/`v0`'s presence. A legacy call whose first argument
+  still looks like a shape (a `tuple`, `list`, `numpy.ndarray` or `jax.Array`)
+  raises `TypeError` naming the new signature, rather than failing opaquely
+  several calls deep — `JCMDerived` is exported from `jem.components.jcm`, so
+  this is public API, not a private helper. Migration: `zeros(shape, template)`
+  becomes `zeros(template, shape, model.physics)`. `from_diagnostics()` gains a
+  required second argument, `from_diagnostics(diagnostics, physics)`. Migration: pass the
+  composed physics package alongside the diagnostics dict at every call site.
+  `has_wind_vector()` now takes the composed physics package rather than the
+  diagnostics dict, `has_wind_vector(physics)` — whether a wind vector exists
+  is a fact of which terms are composed, not something the diagnostics dict's
+  keys can answer faithfully for a hybrid composition (see below). Migration:
+  pass `model.physics` (or the composed `ComposablePhysics`) in place of the
+  diagnostics dict. Separately, `JCMDerived.u0`/`.v0` and
+  `SurfaceExchange.u0`/`.v0` are now `jax.Array | None` rather than always an
+  array, and `from_diagnostics()` no longer raises `NotImplementedError` for a
+  windless package — a caller that relied on that raise to detect "no wind
+  vector" must check `is None` instead.
+  Fixing #129 surfaced a second, independent bug that no fabricated-diagnostics
+  test caught, only a real ECHAM model run:
+  `ComposablePhysics(vectorize_columns=True)` (ECHAM) flattens the horizontal
+  `(ix, il)` grid to a single `ncols` axis before iterating its terms, and
+  every diagnostic it writes — including the published `surface_exchange`
+  struct — stays flattened; jax-gcm only reshapes a column-vectorized
+  diagnostic back to the grid inside its own xarray serialization, never
+  before. Neither `JCMDerived.zeros()` nor `JCMComponent.step()` accounted for
+  this: both treated every field of the translated exchange as already on the
+  atmosphere's `(ix, il)` nodal grid (true for SPEEDY, which never vectorizes
+  columns), so a coupled step that copied `derived.total_heat_flux` into a
+  plain `(ix, il)` component (a slab ocean, in the default exchange table)
+  failed with an opaque `ValueError: Incompatible shapes for broadcasting` deep
+  inside that component's own step. Both now put the translated exchange on
+  `nodal_shape` through a new `_unflatten_to_nodal_shape` helper — the exact
+  inverse of jax-gcm's own flatten, mirroring the reshape
+  `ComposablePhysics.data_struct_to_dict` already applies for xarray output —
+  which is a no-op for SPEEDY and fixes ECHAM (see `JCMDerived.zeros()`'s
+  signature under "What breaks" above). It raises `ValueError`, naming the
+  field and its shape, for anything that is neither the flattened nor the
+  gridded case, rather than passing an unrecognised shape through silently to
+  fail later as an opaque broadcast error.
+  A third, again real-model-only bug surfaced serializing that same run's
+  output: ECHAM's aerosol diagnostics carry a per-species axis of length 0 with
+  no aerosol species configured (jax-gcm's own uncoupled `to_xarray` drops
+  these entirely), but `JCMComponent`'s own `_collapse_save_axis` merged the
+  stacked `(coupling step, save)` axes with a `-1` reshape placeholder, which
+  JAX resolves by dividing the leaf's size by the product of its other axes —
+  and a zero-sized leaf makes that product zero too, raising
+  `ZeroDivisionError` before jax-gcm's own xarray conversion (which skips
+  zero-sized fields) ever ran. The merged size is now computed explicitly
+  (`leaf.shape[0] * leaf.shape[1]`, the coupled-step count times the save axis,
+  which is always exactly 1) instead of inferred by `-1`, which needs no
+  division and reshapes every non-zero-sized leaf (SPEEDY's included) exactly
+  as before.
+  `JCMDerived.zeros()` also canonicalises every field to positive zero:
+  negating a template's `total_heat_flux` produces `-0.0` (a distinct float bit
+  pattern from `+0.0`, invisible to `==`/`allclose`) wherever the template's
+  corresponding field is exactly zero, so `zeros_like` resets the sign after
+  the negation — restoring "SPEEDY's `zeros()` is bit-for-bit unchanged"
+  literally, not only up to sign.
+  `exchange_fields.has_wind_vector()` is itself unfaithful for a hybrid
+  composition (breaking): it asked whether the diagnostics dict carried
+  SPEEDY's private `_surface_flux` key, but every `SpeedyTermBase` term — not
+  only `SpeedySurfaceFlux`, the one that fills `u0`/`v0` with a real
+  bulk-formula wind — round-trips that key through the diagnostics dict, so a
+  composition with some other SPEEDY-legacy term but no `SpeedySurfaceFlux` has
+  a *zeroed* `_surface_flux` and was reported as having a wind vector anyway;
+  `VerosExchange.validate` would then pass it, and Veros would silently receive
+  a zero wind stress. No shipped configuration composes physics this way, so
+  this has not produced a wrong answer in any run to date. `has_wind_vector()`
+  now asks the composed physics package's own **terms** (`any(isinstance(term,
+  SpeedySurfaceFlux) for term in physics.terms)`) — a static, jit-safe check
+  identical for a whole-grid or column-vectorized composition — and both
+  `from_diagnostics()` and `JCMDerived.zeros()` require a `physics` argument
+  (`from_diagnostics(diagnostics, physics)`;
+  `JCMDerived.zeros(diagnostics_template, nodal_shape, physics, **overrides)`,
+  its first argument also renamed `diagnostics_template`, matching what it
+  always was) so the one place this decision is made has the composed physics
+  object in hand. `VerosExchange.validate`/`_require_wind_vector` still only
+  check `u0`/`v0`'s `None`-ness (the carry holds no reference to
+  `model.physics` for them to call `has_wind_vector()` directly), which is not
+  a second predicate — it is that one decision's effect, observed downstream of
+  the only place it is made.
+  `_require_wind_vector`'s error message names its list of top-level
+  diagnostics-dict keys "diagnostics published by the composed physics" rather
+  than "composed terms", since a term's *name* and the keys it publishes are
+  different things. `JCMDerived.zeros()`'s legacy-call guard catches a `list`,
+  a `numpy.ndarray` or a `jax.Array` of ints, as well as a `tuple`, for its
+  first argument — each an equally ordinary way a caller migrating a pre-#129
+  call site by hand might spell the old `shape` argument.
+  `_unflatten_to_nodal_shape`'s `ValueError` branch and ECHAM's exactly-`0.0`
+  precipitation in the slow two-day coupled regression run both gain direct
+  unit tests (`tests/unit/test_jcm_component.py`): the former had no test that
+  a mutation returning the unexpected shape unchanged, instead of raising,
+  would be caught; the latter means the regression run's own precipitation is
+  always exactly zero, so it could never have caught a placement or sign bug
+  specific to ECHAM's precipitation.
 - **`jem.runners.build_atmosphere` calls
   `model.physics.require_surface_exchange()`** right after building the
   atmosphere Model, so a physics package that cannot publish the
@@ -1952,13 +2076,13 @@ otherwise**; the code that has to change is named in each one.
 
 ### Known gaps
 
+- The ECHAM surface exchange is not implemented: `exchange_fields.echam()`
+  raises `NotImplementedError` naming jax-gcm#754. Coupled runs need SPEEDY
+  physics until that lands.
 - The land model's ice-sheet branch is never reached in practice: nothing wires
   a real surface albedo into `SlabLandModel`, so `params.surface_albedo = 0.2`
   applies everywhere and every land cell is soil. Tracked as jax-esm#109 and
   cross-referenced from the model's docstring.
-- The ECHAM surface exchange is not implemented: `exchange_fields.echam()`
-  raises `NotImplementedError` naming jax-gcm#754. Coupled runs need SPEEDY
-  physics until that lands.
 - `coupling_timestep` cannot be shorter than one second: it is a
   `jax_datetime.Timedelta`, which holds whole seconds, even though only
   `Coupler.dt_seconds` is used downstream. Immaterial for a geoscience run; the

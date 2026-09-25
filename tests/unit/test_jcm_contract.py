@@ -88,6 +88,10 @@ _INSTANCE_FACTORIES = {
     "jcm.predictions.ModelPredictions": lambda model: ModelPredictions(
         None, None, None
     ),
+    # ``ComposablePhysics.terms`` is set in ``__init__``, not on the class,
+    # so the model's own (real SPEEDY) physics package is the instance to
+    # check it against -- no extra construction needed.
+    "jcm.physics.composable_physics.ComposablePhysics": lambda model: model.physics,
 }
 
 

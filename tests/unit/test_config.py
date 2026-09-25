@@ -576,6 +576,49 @@ def test_veros_configurations_couple_a_responding_land_surface(configuration, _v
     jax.make_jaxpr(coupler.generate_trajectory_function(1))(carry)
 
 
+@pytest.mark.slow
+def test_veros_atmosphere_with_no_wind_vector_is_refused_at_build_time(_veros_x64):
+    """jax-esm#132: a Veros ocean coupled to an atmosphere with no
+    near-surface wind vector (any package but SPEEDY -- ECHAM, here) is
+    refused at ``build_coupler``, not mid-run.
+
+    This is the exact CLI path a user would hit, not a hand-built `Coupler`:
+    ``python -m jem.main +configuration=veros-double-drake
+    physics@atmosphere.physics=echam`` reaches `build_coupler`, because JEM
+    reuses jax-gcm's own `physics` config group re-rooted under
+    `atmosphere`, and jax-gcm ships `echam.yaml` there -- nothing about a
+    shipped Veros configuration stops a user overriding the atmosphere's
+    physics package on the command line
+    (`test_config_has_no_python_defaults`'s own parametrization already
+    composes every `physics` option against every `configuration`, which is
+    what makes this combination "shipped-reachable" rather than exotic).
+    This test is what shows the combination is reachable through the
+    ordinary CLI, not only through a hand-built coupler.
+
+    ``grid@atmosphere.grid=echam_t42_l8_sigma`` (the coarsest packaged ECHAM
+    grid) keeps this cheap: `_validate_exchangers` only needs
+    `Coupler.initialize()`'s carries built, which builds the real
+    atmosphere and ocean `Model`/`VerosComponent` objects but neither traces
+    nor integrates a step.
+    """
+    import jem.runners as runners
+
+    with pytest.raises(ValueError, match="jax-esm#132") as excinfo:
+        runners.build_coupler(composed([
+            "+configuration=veros-double-drake",
+            "physics@atmosphere.physics=echam",
+            "grid@atmosphere.grid=echam_t42_l8_sigma",
+        ]))
+    # Names the diagnostics published by the composed physics (an ECHAM-only
+    # one, "aerosol", among them), not just "this atmosphere's composed
+    # physics" -- issue #129 asked for this explicitly, in the same spirit as
+    # `ComposablePhysics.require_surface_exchange`, which names its `terms`
+    # list for the surface struct itself. The listed names are published
+    # diagnostics, not term names -- see `jem.fluxes._require_wind_vector`'s
+    # docstring.
+    assert "aerosol" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # Packaging
 # ---------------------------------------------------------------------------

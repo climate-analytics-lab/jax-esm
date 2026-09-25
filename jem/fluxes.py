@@ -22,6 +22,26 @@ and :func:`rotate_vector` are pure functions with no notion of a carry, and
 :class:`VerosExchange` is the thin :class:`~jem.base.component.Exchanger`
 that reads the atmosphere and ocean carries, calls them, and writes the
 result back with ``.replace(...)``.
+
+The wind vector this needs is not guaranteed
+---------------------------------------------
+``derived.u0``/``.v0`` are ``None``, not an array, for a composed atmosphere
+physics package that publishes no near-surface wind *vector* -- today,
+everything but SPEEDY (jax-esm#129; see
+:mod:`jem.components.jcm.exchange_fields`'s module docstring). Since this is
+the one production consumer of that vector, it is the one place that has to
+notice its absence rather than compute a stress from ``None``:
+:meth:`VerosExchange.validate` checks it at **composition time** (called from
+:func:`jem.runners._validate_exchangers`, inside
+:func:`jem.runners.build_coupler`), and :meth:`VerosExchange.__call__` checks
+it again, defensively, for a coupler built by hand that skips that step. Both
+raise the same ``ValueError``, naming the composed physics terms (the way
+``ComposablePhysics.require_surface_exchange`` names them) and jax-esm#132 --
+not jax-esm#129, which closes only the eager-read failure that otherwise
+makes *any* ECHAM-composed coupled step fail outright; choosing this
+exchanger's wind-stress source for a windless atmosphere is a separate
+decision #132 tracks -- rather than letting :func:`bulk_wind_stress` fail
+on ``None**2`` deep inside a traced step.
 """
 
 from __future__ import annotations
@@ -138,6 +158,80 @@ def bulk_wind_stress(
     speed = jnp.sqrt(jnp.maximum(u**2 + v**2, min_speed**2))
     scale = drag_coefficient * air_density * speed
     return scale * u, scale * v
+
+
+def _require_wind_vector(
+    u0: Any, v0: Any, diagnostics: Mapping[str, Any]
+) -> None:
+    """Raise, naming the composed physics and jax-esm#132, if ``u0``/``v0`` are absent.
+
+    Shared by :meth:`VerosExchange.validate` (the build-time check) and
+    :meth:`VerosExchange.__call__` (a defensive repeat for a coupler built by
+    hand, bypassing :func:`jem.runners.build_coupler`'s
+    ``_validate_exchangers``): whether the composed atmosphere physics
+    publishes a near-surface wind *vector* is fixed at composition and never
+    varies mid-run (:mod:`jem.components.jcm.exchange_fields`'s module
+    docstring), so ``u0``/``v0`` are either both real arrays or both ``None``
+    on every carry this exchanger will ever see, and one check run once,
+    wherever the carry is first in hand, is enough -- there is no "maybe
+    windless this step" case to keep re-checking for.
+
+    This function does not re-decide presence itself -- it only checks the
+    ``None``-ness of ``u0``/``v0``, which :func:`~jem.components.jcm.
+    exchange_fields.has_wind_vector` already decided, once, off the composed
+    physics's actual terms, when the carry's ``derived`` was built (see that
+    function's docstring). Neither this function nor :meth:`VerosExchange.
+    validate` has the composed ``ComposablePhysics`` object in hand to call
+    ``has_wind_vector`` directly -- the carry holds only the atmosphere's
+    diagnostics dict, not a reference to the ``Model`` or its physics package
+    -- so checking ``u0``/``v0`` here is not a second, independent predicate
+    that could disagree with ``has_wind_vector``; it is the one place that
+    predicate's decision is *observed*, downstream of the only place it is
+    *made*.
+
+    Parameters
+    ----------
+    u0, v0 : jax.Array or None
+        ``atm["derived"].u0`` / ``.v0``.
+    diagnostics : Mapping[str, Any]
+        ``atm["derived"].physics`` -- the composed atmosphere's own per-step
+        diagnostics dict (or, at composition time, the structural template
+        :meth:`~jem.components.jcm.component.JCMComponent.initialize` seeds
+        it with, which has the same keys). Used only to build the error
+        message below: its top-level keys are what each composed term
+        *published* to the diagnostics dict, which is not the same thing as
+        the composed physics's *term names* (``ComposablePhysics.
+        require_surface_exchange`` names those instead, from ``term.name``),
+        so the message calls them diagnostics, not terms.
+
+    Raises
+    ------
+    ValueError
+        If either is ``None``.
+
+    """
+    if u0 is not None and v0 is not None:
+        return
+    published_diagnostics = sorted(
+        key for key in diagnostics if not str(key).startswith("_")
+    )
+    raise ValueError(
+        "VerosExchange needs the atmosphere's near-surface wind VECTOR "
+        "(derived.u0/.v0) to compute a wind stress (bulk_wind_stress), but "
+        "this atmosphere's composed physics publishes none (diagnostics "
+        f"published by the composed physics: {published_diagnostics}). Only "
+        "an atmosphere composing a "
+        "jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux term actually "
+        "computes a near-surface wind vector -- see "
+        "jem.components.jcm.exchange_fields.has_wind_vector and that "
+        "module's docstring ('Why the near-surface wind is still a narrow "
+        "exception'). Choosing VerosExchange's wind-stress source for a "
+        "windless atmosphere (e.g. ECHAM, or a SPEEDY-legacy composition "
+        "built without SpeedySurfaceFlux) is tracked as jax-esm#132 -- "
+        "couple a SPEEDY atmosphere (with SpeedySurfaceFlux composed) to "
+        "Veros instead, or write a wind-free wind-stress exchanger, until "
+        "that lands."
+    )
 
 
 def mask_fluxes_under_ice(
@@ -301,6 +395,10 @@ class VerosExchange:
     cast in its own ``__call__``, so an ``ocean=veros`` configuration that
     composes the default table instead of this exchanger gets the same fix.
 
+    This exchanger needs the atmosphere's near-surface wind *vector*
+    (``derived.u0``/``.v0``), which not every composed physics package
+    publishes (jax-esm#132) -- see :meth:`validate`.
+
     """
 
     def __init__(
@@ -384,6 +482,14 @@ class VerosExchange:
         # what makes the coupling robust to that ordering.
         u0 = atm["derived"].u0
         v0 = atm["derived"].v0
+        # Defence in depth: `validate()` is the intended build-time gate (run
+        # by `jem.runners._validate_exchangers` inside `build_coupler`), but a
+        # `Coupler` built by hand and never validated must still fail here,
+        # on the very first step, rather than compute a stress from `None`
+        # (jax-esm#132). `u0`/`v0` are Python `None` or real arrays, decided
+        # at composition and never traced, so this is a plain Python check,
+        # not a value the trace has to branch on.
+        _require_wind_vector(u0, v0, atm["derived"].physics)
         total_heat_flux = atm["derived"].total_heat_flux
         total_freshwater_flux = atm["derived"].total_freshwater_flux
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
@@ -450,6 +556,56 @@ class VerosExchange:
             sea_surface_temperature=sea_surface_temperature_on_atm,
         ))
         return dict(components, atm=atm, ocn=ocn)
+
+    def validate(self, components: Mapping[str, Carry]) -> None:
+        """Raise, naming the composed physics and jax-esm#132, if the
+        atmosphere publishes no wind vector.
+
+        The build-time pre-flight: :func:`jem.runners._validate_exchangers`
+        calls this, right after ``Coupler.initialize()`` and before a coupled
+        run is ever compiled, for every exchanger that has a ``validate``
+        method -- the same slot :meth:`jem.exchangers.Exchange.validate` fills
+        for a declarative table, and, one step earlier still,
+        ``ComposablePhysics.require_surface_exchange`` fills for the surface
+        struct itself (:func:`jem.runners.build_atmosphere`). Without this, a
+        coupler built with ``coupling.exchanger`` naming
+        :class:`VerosExchange` on an atmosphere with no near-surface wind
+        vector (any ECHAM composition; this is reachable through a shipped
+        command, not only a hand-built coupler -- ``python -m jem.main
+        +configuration=veros-earth physics@atmosphere.physics=echam``
+        reaches ``build_coupler`` too) would only discover that the first
+        time :meth:`__call__` actually traced, which also checks (see the
+        comment there), but only at the coupled step, not at composition.
+
+        This checks the wind vector only. It deliberately does **not**
+        replicate :meth:`jem.exchangers.Exchange.validate`'s general
+        component/section/field/regridder/structure checks for every field
+        this exchanger reads (the ocean's ``forcing.surface_taux`` and
+        friends): those still fail with jax-gcm's or JEM's own ``KeyError``/
+        ``AttributeError`` at the first traced step, exactly as before this
+        change, since this check is about the wind vector specifically.
+
+        Parameters
+        ----------
+        components : Mapping[str, Carry]
+            The initial carries, as ``Coupler.initialize()`` builds them
+            (``CoupledCarry.components``). Only ``"atm"`` is read.
+
+        Raises
+        ------
+        KeyError
+            If ``components`` has no ``"atm"`` entry.
+        ValueError
+            If ``components["atm"]["derived"].u0``/``.v0`` is ``None``.
+
+        """
+        if "atm" not in components:
+            raise KeyError(
+                f"VerosExchange.validate: this coupled model has no 'atm' "
+                f"component (it has {sorted(components)!r})."
+            )
+        derived = components["atm"]["derived"]
+        _require_wind_vector(derived.u0, derived.v0, derived.physics)
 
     def __repr__(self) -> str:
         """Name the regridders this exchange holds and whether it rotates."""

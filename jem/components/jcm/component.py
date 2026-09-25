@@ -4,7 +4,7 @@
 monkey-patching methods onto it, so the atmosphere JEM drives is the same
 object the user configured and nothing in JCM has to know JEM exists.
 
-Three things this wrapper exists to get right:
+Four things this wrapper exists to get right:
 
 **The physics carry is threaded.** JCM's operator-split integration keeps
 cross-step physics state — sub-cycled radiation, prior-step TKE, the
@@ -38,6 +38,24 @@ whole coupling interval just to discover the shape of the diagnostics it
 would later store, which both cost a full model step per run and started
 the atmosphere one interval ahead of the coupler's clock.
 
+**The published surface exchange is put on the atmosphere's own grid.**
+A physics package built with ``ComposablePhysics(vectorize_columns=True)``
+(ECHAM) flattens the horizontal ``(ix, il)`` grid to a single ``ncols`` axis
+before iterating its terms, and every diagnostic it writes -- including the
+published surface exchange -- stays flattened; jax-gcm reshapes a
+column-vectorized diagnostic back to the grid only inside its own xarray
+serialization, never before. SPEEDY (``vectorize_columns=False``) never
+flattens anything, so this went unnoticed until an ECHAM-composed coupled
+model was actually run (jax-esm#129): every named field of
+:class:`JCMDerived` is documented and consumed as an ``(ix, il)`` map, and a
+flattened field copied into a plain ``(ix, il)`` component (a slab ocean, in
+the default exchange table) fails that component's own step with an opaque
+shape-mismatch error. :func:`_unflatten_to_nodal_shape` reshapes it back --
+a no-op for SPEEDY, the reshape ECHAM needs -- and both
+:meth:`JCMDerived.zeros` (the initial carry) and :meth:`JCMComponent.step`
+go through it via the one shared :func:`_surface_exchange_on_nodal_grid`,
+so the two agree on shape from the first step onward.
+
 Every JCM *attribute* this wrapper touches is public at the pinned revision
 (``jem.components.jcm.contract``), apart from one underscore-prefixed
 diagnostics key: SPEEDY's private ``_surface_flux.u0``/``.v0``, which
@@ -56,11 +74,12 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, overload
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -105,6 +124,167 @@ FORCING_VARIABLE_NAMES = (
 )
 
 
+@overload
+def _unflatten_to_nodal_shape(
+    value: jnp.ndarray, nodal_shape: tuple[int, int], field_name: str
+) -> jnp.ndarray: ...
+@overload
+def _unflatten_to_nodal_shape(
+    value: None, nodal_shape: tuple[int, int], field_name: str
+) -> None: ...
+def _unflatten_to_nodal_shape(
+    value: jnp.ndarray | None, nodal_shape: tuple[int, int], field_name: str
+) -> jnp.ndarray | None:
+    """Reshape a column-vectorized ``(ncols,)`` field back to ``(ix, il)``.
+
+    A physics package built with ``ComposablePhysics(vectorize_columns=True)``
+    (ECHAM) flattens the horizontal ``(ix, il)`` grid to a single ``ncols``
+    axis before iterating its terms (jax-gcm's
+    ``jcm/physics/composable_physics.py``, ``_compute_tendencies_columns``),
+    and every diagnostic it writes -- including the published
+    ``surface_exchange`` struct :mod:`~jem.components.jcm.exchange_fields`
+    reads -- stays on that flattened axis: jax-gcm only reshapes a
+    column-vectorized diagnostic back to the grid inside its own xarray
+    serialization (``ComposablePhysics.data_struct_to_dict``, used by
+    ``ModelPredictions.to_xarray``), never before. A physics package built
+    with ``vectorize_columns=False`` (SPEEDY) keeps every diagnostic on
+    ``(ix, il)`` throughout, so nothing here ever needs reshaping for it.
+
+    Not reshaping here was a real, if narrow, bug this function closes:
+    every named field of :class:`JCMDerived` is documented and consumed as an
+    ``(ix, il)`` map (see :class:`~jem.components.jcm.exchange_fields.
+    SurfaceExchange`'s own docstring), which every exchanger and every other
+    component's grid assumes -- and a coupled step that copied a flattened
+    ``(ncols,)`` field into a component built on the real ``(ix, il)`` grid
+    (:func:`jem.exchangers.default_exchanges`'s ``atm`` -> ``ocn`` heat-flux
+    row, applied by a plain slab ocean) failed with an opaque
+    ``ValueError: Incompatible shapes for broadcasting`` deep inside that
+    component's own step, not a message naming the field or the package that
+    caused it. Discovered running the jax-esm#129 regression test
+    (``tests/unit/test_coupled.py::
+    test_echam_coupled_to_a_slab_ocean_completes_several_steps``) against a
+    real ECHAM model -- no fabricated diagnostics fixture reproduces it,
+    because a fixture built with already-gridded arrays never exercises the
+    flattened case a real column-vectorized step actually produces.
+
+    Reshaping with a plain ``.reshape(nodal_shape)`` (default, row-major
+    order) is not a guess: it is the exact inverse of jax-gcm's own flatten,
+    which merges ``(ix, il)`` into ``ncols`` the same way (a plain
+    ``.reshape``, lon-major -- ``_flattened_column_sharding``'s "lon-major
+    flatten" comment), and it is character-for-character the same reshape
+    jax-gcm's own ``data_struct_to_dict`` applies before xarray ever sees a
+    column-vectorized diagnostic. So this mirrors an existing, validated
+    jax-gcm convention rather than inventing a new one.
+
+    Parameters
+    ----------
+    value : jax.Array or None
+        One field of a translated :class:`~jem.components.jcm.
+        exchange_fields.SurfaceExchange`. ``None`` (no wind vector, see that
+        module's docstring) passes through unchanged.
+    nodal_shape : tuple of int
+        The atmosphere's horizontal nodal shape, ``(ix, il)``
+        (:attr:`JCMComponent.nodal_shape`).
+    field_name : str
+        The field's name, used only to name it in the error message below.
+
+    Returns
+    -------
+    jax.Array or None
+        ``value`` reshaped to ``nodal_shape`` if it was a flattened
+        ``(ncols,)`` array, else ``value`` unchanged (already ``(ix, il)``,
+        as every SPEEDY field already is).
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is neither shape ``(ncols,)`` (the column-vectorized
+        case this function exists to fix) nor already ``nodal_shape`` (the
+        SPEEDY case, a no-op) -- e.g. a future package publishing a
+        per-column field with an extra trailing axis, such as ``(ncols, 1)``.
+        Silently passing such a shape through would leave it to fail
+        downstream as an opaque broadcast error naming neither this field
+        nor why it is malformed.
+
+    """
+    if value is None:
+        return None
+    ncols = nodal_shape[0] * nodal_shape[1]
+    if value.shape == nodal_shape:
+        return value
+    if value.ndim == 1 and value.shape[0] == ncols:
+        return value.reshape(nodal_shape)
+    raise ValueError(
+        f"{field_name!r} has shape {value.shape}, which is neither the "
+        f"atmosphere's nodal shape {nodal_shape!r} nor a flattened "
+        f"(ncols,) = ({ncols},) column-vectorized field. "
+        "_unflatten_to_nodal_shape only knows how to reshape those two "
+        "cases (jax-esm#129); a physics package publishing surface exchange "
+        "on some other layout needs this function taught the new shape "
+        "explicitly, not a silent pass-through that fails later as an "
+        "opaque broadcast error."
+    )
+
+
+def _surface_exchange_on_nodal_grid(
+    diagnostics: dict[str, Any], nodal_shape: tuple[int, int], physics: Any
+) -> exchange_fields.SurfaceExchange:
+    """:func:`~jem.components.jcm.exchange_fields.from_diagnostics`, gridded.
+
+    The single seam :meth:`JCMDerived.zeros` and
+    :meth:`JCMComponent.step` both go through, so the exchange a coupled
+    model's initial (all-zero) carry is built from and the one a real step
+    later produces are put on the same grid the same way -- see
+    :func:`_unflatten_to_nodal_shape`. ``physics`` (``model.physics``) is
+    forwarded to :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
+    unchanged: whether a near-surface wind vector is present is a fact of
+    which terms are composed (:func:`~jem.components.jcm.exchange_fields.
+    has_wind_vector`), not something ``diagnostics`` alone can answer
+    faithfully (a hybrid composition's diagnostics dict can carry a *zeroed*
+    wind-vector key with no term that ever computed a real one).
+    """
+    exchange = exchange_fields.from_diagnostics(diagnostics, physics)
+    return exchange_fields.SurfaceExchange(
+        total_heat_flux=_unflatten_to_nodal_shape(
+            exchange.total_heat_flux, nodal_shape, "total_heat_flux"),
+        evaporation=_unflatten_to_nodal_shape(
+            exchange.evaporation, nodal_shape, "evaporation"),
+        precipitation=_unflatten_to_nodal_shape(
+            exchange.precipitation, nodal_shape, "precipitation"),
+        u0=_unflatten_to_nodal_shape(exchange.u0, nodal_shape, "u0"),
+        v0=_unflatten_to_nodal_shape(exchange.v0, nodal_shape, "v0"),
+    )
+
+
+def _looks_like_a_shape(value: Any) -> bool:
+    """Whether ``value`` looks like the pre-#129 ``shape`` positional argument.
+
+    ``JCMDerived.zeros``'s first argument was a shape before jax-esm#129,
+    which changed both its order and its meaning and added the required
+    ``physics`` argument. A caller migrating a call site by hand may spell
+    that shape as a `tuple`, a `list`, a `numpy.ndarray` or a `jax.Array` of
+    a couple of ints, none of which is a diagnostics-dict template (a
+    `dict`). Any of those spellings would otherwise fail several calls deep as an
+    opaque, unrelated error (e.g. a plain array read as if it were a
+    diagnostics dict inside ``exchange_fields.from_diagnostics``) rather
+    than naming this method or the argument that actually changed, so the
+    check covers all four.
+
+    A 1-D array of a couple of small integers is treated as a shape; a
+    multi-dimensional or non-integer array is not one JCMDerived.zeros has
+    ever accepted as `diagnostics_template` either, but it is also not what
+    a legacy caller would have passed as `shape`, so it is left to fail on
+    its own terms rather than be folded into this specific, named guard.
+    """
+    if isinstance(value, (tuple, list)):
+        return True
+    if isinstance(value, np.ndarray):
+        return value.ndim == 1 and np.issubdtype(value.dtype, np.integer)
+    if isinstance(value, jax.Array):
+        return value.ndim == 1 and jnp.issubdtype(value.dtype, jnp.integer)
+    return False
+
+
 @tree_math.struct
 class JCMDerived:
     """What the atmosphere publishes for the other components to read.
@@ -120,6 +300,25 @@ class JCMDerived:
     upward, ``kg m-2 s-1``. It is stored rather than recomputed by each
     exchanger because that is the quantity an ocean or land surface takes,
     and one definition of the sign is safer than several.
+
+    ``u0``/``v0`` (the near-surface wind's true-east/true-north components)
+    are ``None`` for a composed physics package that publishes no wind
+    *vector* -- today, everything but SPEEDY (see
+    :mod:`jem.components.jcm.exchange_fields`'s module docstring). This is a
+    **static** property of the composed physics, decided once by
+    :meth:`zeros` from a structural template and never revisited by
+    :meth:`~jem.components.jcm.component.JCMComponent.step` (jax-esm#129):
+    ``None`` is an empty JAX pytree node, contributing no leaf, so a
+    ``JCMDerived`` whose ``u0``/``v0`` are ``None`` on step 0 has exactly the
+    same pytree structure on every later step, which is what lets it be
+    carried through ``jit`` and the coupled ``lax.scan``, saved and restored
+    by a checkpoint (``jem/checkpoint.py``), and merged into a coupled
+    model's output the same way any other absent field of a carry already
+    is. Absence is never faked as a zero, a NaN, or a value derived from
+    ``wind_speed`` or the published stress (see the module docstring cited
+    above for why) -- a consumer that actually needs the wind vector
+    (:class:`jem.fluxes.VerosExchange`) is instead refused at composition
+    time, before this ever reaches a coupled step.
     """
 
     physics: Any
@@ -127,38 +326,109 @@ class JCMDerived:
     total_freshwater_flux: jnp.ndarray
     evaporation: jnp.ndarray
     precipitation: jnp.ndarray
-    u0: jnp.ndarray
-    v0: jnp.ndarray
+    u0: jnp.ndarray | None
+    v0: jnp.ndarray | None
 
     @classmethod
-    def zeros(cls, shape, physics, **overrides):
-        """Zero-filled derived fields on a ``shape`` horizontal grid.
+    def zeros(cls, diagnostics_template, nodal_shape, physics, **overrides):
+        """Zero-filled derived fields shaped like a real step's, off a template.
+
+        Every named field's shape is read off ``diagnostics_template``,
+        through :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
+        -- the same reader a real step's diagnostics go through -- and then
+        put on ``nodal_shape`` by :func:`_unflatten_to_nodal_shape`, rather
+        than assuming zeros of ``nodal_shape`` directly: that assumption
+        would be wrong for a column-vectorized composition (see below), a
+        fact this method cannot know just from ``nodal_shape`` itself.
+        Composed physics that keeps its state on the
+        atmosphere's own grid (SPEEDY) already agrees with ``nodal_shape``,
+        so this is a no-op for it; one that vectorizes columns
+        (``ComposablePhysics(vectorize_columns=True)``, e.g. ECHAM) publishes
+        the surface exchange on a flattened ``(ncols,)`` axis instead, and a
+        template built with the wrong shape here would only be discovered
+        wrong on step 1, as a ``lax.scan`` shape-mismatch error naming a flat
+        pytree index rather than a field name.
 
         Parameters
         ----------
-        shape : tuple of int
-            Horizontal nodal shape ``(ix, il)``.
-        physics : Any
-            Structural template for the opaque ``physics`` passthrough; it
-            must have the pytree structure, shapes and dtypes a real step
-            produces, or the coupled ``lax.scan`` rejects the carry after
-            the first step.
+        diagnostics_template : Any
+            Structural (all-zero) template of one step's diagnostics dict,
+            e.g. ``Physics.get_empty_data(coords)`` (as
+            :meth:`JCMComponent.initialize` builds it) -- it must have the
+            pytree structure, shapes and dtypes a real step produces, or the
+            coupled ``lax.scan`` rejects the carry after the first step.
+            Stored unchanged as this instance's own ``physics`` field (the
+            class docstring: "JCM's own per-step diagnostics dict, carried
+            through opaquely").
+        nodal_shape : tuple of int
+            The atmosphere's horizontal nodal shape, ``(ix, il)``
+            (:attr:`JCMComponent.nodal_shape`) -- the grid every named field
+            is put on, whatever grid the composed physics happened to
+            publish it on.
+        physics : jcm.physics_interface.Physics
+            The composed atmosphere physics package (``model.physics``) that
+            ``diagnostics_template`` was built from. Passed to
+            :func:`~jem.components.jcm.exchange_fields.has_wind_vector` (via
+            ``from_diagnostics``) to decide ``u0``/``v0``'s presence -- a
+            fact of which terms are composed, not something
+            ``diagnostics_template`` can answer faithfully by itself for a
+            hybrid composition (see that module's docstring's "What decides
+            the presence is the composed TERM" section).
         **overrides
-            Named fields to use instead of zeros.
+            Named fields to use instead of the template-derived defaults.
+
+        Raises
+        ------
+        TypeError
+            If ``diagnostics_template`` looks like a shape -- a `tuple`,
+            `list`, `numpy.ndarray` or `jax.Array` of ints (see
+            :func:`_looks_like_a_shape`) -- rather than a diagnostics dict.
+            jax-esm#129 changed the signature from
+            ``zeros(shape, physics, **overrides)`` to
+            ``zeros(diagnostics_template, nodal_shape, physics,
+            **overrides)``, reordering the first two arguments and adding
+            the required third; a caller updating a pre-#129 call site by
+            simply appending the new argument (rather than also reordering
+            the first two) still puts a shape first, which otherwise fails
+            several calls deep as an opaque error naming neither this
+            method nor the argument that actually changed.
 
         """
-        fields = {
-            name: overrides.get(name, jnp.zeros(shape))
-            for name in (
-                "total_heat_flux",
-                "total_freshwater_flux",
-                "evaporation",
-                "precipitation",
-                "u0",
-                "v0",
+        if _looks_like_a_shape(diagnostics_template):
+            raise TypeError(
+                "JCMDerived.zeros(diagnostics_template, nodal_shape, "
+                "physics, **overrides) takes the diagnostics template "
+                "first and the atmosphere's nodal shape second; got "
+                f"{diagnostics_template!r}, which looks like a shape, as "
+                "the first argument. jax-esm#129 changed the signature "
+                "from zeros(shape, physics, **overrides): the first two "
+                "arguments are reordered and a required third `physics` "
+                "argument (the composed atmosphere physics package) is "
+                "added -- update this call site to "
+                "zeros(diagnostics_template, nodal_shape, physics)."
             )
+        exchange = _surface_exchange_on_nodal_grid(
+            diagnostics_template, nodal_shape, physics)
+        # `zeros_like`, not the exchange's own values: `diagnostics_template`
+        # is an all-zero template, so every field below is already
+        # mathematically zero, but `total_heat_flux = -net_heat_flux`'s
+        # negation turns a template's `+0.0` into `-0.0` (a distinct float
+        # bit pattern) -- and a SPEEDY run's `zeros()` must give `+0.0`, as
+        # `jnp.zeros(shape)` does, so a signed zero here would be a real, if
+        # invisible, break of the "SPEEDY bit-for-bit unchanged"
+        # guarantee. `zeros_like` keeps every field's shape (already put on
+        # `nodal_shape` above) and dtype while canonicalising the value to
+        # positive zero.
+        defaults = {
+            "total_heat_flux": jnp.zeros_like(exchange.total_heat_flux),
+            "total_freshwater_flux": jnp.zeros_like(exchange.evaporation),
+            "evaporation": jnp.zeros_like(exchange.evaporation),
+            "precipitation": jnp.zeros_like(exchange.precipitation),
+            "u0": None if exchange.u0 is None else jnp.zeros_like(exchange.u0),
+            "v0": None if exchange.v0 is None else jnp.zeros_like(exchange.v0),
         }
-        return cls(physics, **fields)
+        fields = {name: overrides.get(name, value) for name, value in defaults.items()}
+        return cls(diagnostics_template, **fields)
 
 
 def _with_model_context(predictions: ModelPredictions,
@@ -283,10 +553,27 @@ def _collapse_save_axis(leaf: jnp.ndarray) -> jnp.ndarray:
     Each coupled step runs JCM for exactly one save interval, so every leaf
     the coupler stacks is ``(iterations, 1, ...)``; JCM's own serialization
     wants a single leading time axis.
+
+    The merged size is computed explicitly (``leaf.shape[0] * leaf.shape[1]``)
+    rather than left for a ``-1`` placeholder to infer, because some composed
+    physics diagnostics are legitimately zero-sized in their default
+    configuration -- ECHAM's aerosol struct carries a per-species axis of
+    length 0 with no aerosol species configured (jax-gcm's own uncoupled
+    ``to_xarray`` drops these; jax-esm#129's regression test is what
+    surfaced one going through this collapse first, in a coupled run). A
+    ``-1`` placeholder asks JAX to divide the leaf's total size by the
+    product of the other axes to recover it, and a zero-sized leaf makes that
+    product zero too, raising ``ZeroDivisionError`` before jax-gcm's own
+    xarray conversion ever gets a chance to skip the field. Multiplying the
+    two known axis lengths directly needs no division and gives the identical
+    result whenever ``-1`` would have resolved cleanly (the save axis is
+    always exactly 1), so this is a strict generalisation, not a special case
+    -- SPEEDY runs, whose diagnostics never happen to include a zero-sized
+    array, reshape exactly as before.
     """
     if getattr(leaf, "ndim", 0) < 2:
         return leaf
-    return leaf.reshape((-1, *leaf.shape[2:]))
+    return leaf.reshape((leaf.shape[0] * leaf.shape[1], *leaf.shape[2:]))
 
 
 class JCMComponent:
@@ -521,7 +808,8 @@ class JCMComponent:
             "state": dycore_state,
             "physics": physics_carry,
             "derived": JCMDerived.zeros(
-                self.nodal_shape, _diagnostics_template(self.model)),
+                _diagnostics_template(self.model), self.nodal_shape,
+                self.model.physics),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
@@ -574,7 +862,8 @@ class JCMComponent:
         # trajectory has a length-1 leading axis; the derived fields are
         # per-step maps, not trajectories.
         diagnostics = jax.tree.map(lambda leaf: leaf[0], predictions.physics)
-        exchange = exchange_fields.from_diagnostics(diagnostics)
+        exchange = _surface_exchange_on_nodal_grid(
+            diagnostics, self.nodal_shape, self.model.physics)
         # ``tree_math.struct`` builds the dataclass at runtime, so mypy
         # cannot see the generated __init__ signature.
         derived = JCMDerived(  # type: ignore[call-arg]

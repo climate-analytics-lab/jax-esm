@@ -85,7 +85,11 @@ near-surface wind's true-east/true-north *components*, needed by
 **not** reusing jax-gcm's own delivered stress -- see that module's
 docstring). jax-gcm's #754 contract does **not** publish a wind vector, only
 the scalar ``wind_speed`` -- a direction cannot be recovered from a
-magnitude, so ``wind_speed`` cannot stand in for ``u0``/``v0`` here.
+magnitude, so ``wind_speed`` cannot stand in for ``u0``/``v0`` here, and
+JAX-ESM does **not** synthesise one from it, or from the contract's
+``stress_u``/``stress_v`` (a separate physics decision -- see
+:mod:`jem.fluxes`'s docstring on why ``bulk_wind_stress`` is an independent
+drag law rather than a reuse of jax-gcm's own delivered stress).
 
 This is not a gap #754 could have closed and didn't: SPEEDY happens to still
 carry a true wind vector internally, as an artefact of its bulk-formula
@@ -99,25 +103,86 @@ boundary-layer scheme diagnoses only a wind *speed*
 (``vertical_diffusion.wind_10m``, ``jcm/physics/vertical_diffusion/tte_tke/
 vertical_diffusion_types.py``: ``|U(10 m)|``, a scalar). So this asymmetry
 between the two packages predates #754 and is not introduced by this
-collapse: the pre-#754 ``echam()`` reader could not have supplied a wind
-vector either, which is one of the two reasons (the other being the missing
-grid-mean heat/water fluxes) it always raised ``NotImplementedError``.
+collapse.
 
-:func:`from_diagnostics` therefore keeps exactly one package-specific read
-after the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- and
-raises when no physics package's diagnostics publish a wind vector
-(currently: anything other than SPEEDY). It reads the wind *eagerly*, so it
-raises for such a package even though the heat and water fluxes above are
-available from the published contract. And because
-:meth:`jem.components.jcm.component.JCMComponent.step` calls it on every
-coupled step to fill ``JCMDerived`` (whose ``u0``/``v0`` this feeds), **no
-ECHAM-composed coupled model can complete a step** -- whatever the exchanger,
-not only :class:`jem.fluxes.VerosExchange`. No shipped JAX-ESM configuration
-composes ECHAM, so nothing shipped is affected. This is an unchanged
-limitation, not a new one: the pre-#754 ``echam()`` reader raised
-unconditionally. Making the wind optional -- through ``JCMDerived``, the
-coupled carry and the output -- is a design change tracked in jax-esm#129;
-publishing a wind vector from every package upstream would remove the need.
+**jax-esm#129 made that absence explicit and static, rather than a raise.**
+:func:`from_diagnostics` still keeps exactly one package-specific read after
+the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- but for
+any other package it returns ``u0=None``/``v0=None`` rather than raising
+``NotImplementedError``: whether a composed physics package publishes
+a wind vector is a fact fixed at composition (it never changes step to step
+for a given model), so the absence is a **static** property of the carry --
+``None`` is an empty JAX pytree node, so it survives ``jit``, the coupled
+``lax.scan``, a checkpoint round trip and output serialization the same way
+an entirely-absent field of a delegated component's carry already does (see
+``jem/checkpoint.py``'s own docstring on that point) -- rather than a value
+guessed at (zero, NaN, or something derived from ``wind_speed``/the
+contract's stress). :meth:`jem.components.jcm.component.JCMComponent.step`
+fills :class:`~jem.components.jcm.component.JCMDerived`'s ``u0``/``v0`` from
+exactly this, and
+:meth:`~jem.components.jcm.component.JCMDerived.zeros` (the initial carry)
+decides the *same* way from a structural template of the diagnostics dict, so
+the field is ``None`` in the carry from step 0 onward for a windless package
+-- never an array on one step and ``None`` on another, which is what a
+``lax.scan`` carry structure forbids.
+
+**What decides the presence is the composed TERM, not a diagnostics-dict
+key.** Asking whether ``diagnostics`` has SPEEDY's private ``_surface_flux``
+entry is a diagnostics-dict question, not a physics one, and is wrong for
+a *hybrid* composition: every
+:class:`~jcm.physics.speedy.speedy_terms.SpeedyTermBase`
+term (not only :class:`~jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux`)
+round-trips SPEEDY's whole ``PhysicsData`` struct through the diagnostics dict
+(``_data_from_diagnostics``/``_diagnostics_from_data`` in
+``jcm/physics/speedy/speedy_terms.py``), so ``_surface_flux`` -- and its
+``u0``/``v0`` sub-fields -- is present in the diagnostics dict whenever *any*
+``SpeedyTermBase`` term ran, whether or not ``SpeedySurfaceFlux`` -- the only
+term that fills ``u0``/``v0`` with SPEEDY's real bulk-formula wind rather than
+``PhysicsData.zeros``'s default zero -- was among the composed terms. A
+composition with, say, ``SpeedyHumidity`` but no ``SpeedySurfaceFlux`` (no
+shipped configuration does this, but nothing stops a hand-built
+``ComposablePhysics`` from it) therefore has a ``_surface_flux`` key whose
+``u0``/``v0`` are zero, and a key's mere *presence* cannot tell that apart
+from SPEEDY's real wind -- structurally, in the diagnostics dict, the two look
+identical. :func:`has_wind_vector` therefore asks the composed physics
+package's *terms* directly (``any(isinstance(term, SpeedySurfaceFlux) for
+term in physics.terms)``) rather than the diagnostics dict's keys -- the
+faithful question ("does this atmosphere actually compute a wind vector")
+instead of a proxy for it ("does its diagnostics dict have a key shaped like
+one"). This is also what keeps the check **static** and jit-safe: a composed
+``ComposablePhysics``'s ``terms`` list is an ordinary Python list, fixed once
+at construction and never touched at trace time, so this is a plain Python
+check, identical whether the composition vectorizes columns
+(``vectorize_columns=True``, e.g. ECHAM) or not (SPEEDY) -- vectorizing
+columns changes how a term computes, never which terms are composed.
+:func:`_near_surface_wind_vector`, :meth:`~jem.components.jcm.component.
+JCMDerived.zeros` (via :func:`from_diagnostics`) and :meth:`jem.fluxes.
+VerosExchange.validate` (via :func:`jem.fluxes._require_wind_vector`, which
+checks the ``u0``/``v0`` this predicate already decided rather than
+re-deciding it) all key off this one predicate, so there is exactly one place
+that ever asks "is a wind vector actually computed" -- never two predicates
+that could in principle disagree.
+
+So an ECHAM-composed coupled model now completes a step, whatever the
+exchanger, exactly as a SPEEDY one does, as long as nothing it runs actually
+*needs* the wind vector. Today the one thing that does is
+:class:`jem.fluxes.VerosExchange` (via :func:`jem.fluxes.bulk_wind_stress`),
+and it is checked at **composition time**: :meth:`jem.fluxes.VerosExchange.
+validate` (invoked by :func:`jem.runners._validate_exchangers`, inside
+:func:`jem.runners.build_coupler`, in the same slot
+``ComposablePhysics.require_surface_exchange`` fills for the surface struct
+itself -- see :func:`jem.runners.build_atmosphere`) raises, naming the
+composed atmosphere's physics and jax-esm#132, if the atmosphere it is
+coupled to publishes no wind vector -- so an ECHAM/Veros combination is
+**refused at build time**, before a coupled run is even compiled, rather
+than mid-run or with a value that quietly means nothing. This is reachable
+through a shipped command, not only a hand-built coupler: ``python -m
+jem.main +configuration=veros-earth physics@atmosphere.physics=echam``
+reaches ``build_coupler`` too, since JAX-ESM reuses jax-gcm's own ``physics``
+config group and jax-gcm ships ``echam.yaml``. Choosing this exchanger's
+wind-stress source for a windless atmosphere is the decision jax-esm#132
+tracks; jax-esm#129 (this collapse) closes only the eager-read failure
+above.
 
 What this replaces
 -------------------
@@ -132,8 +197,9 @@ key was present in the diagnostics dict. All three -- ``speedy()``,
 ``echam()``, ``detect()`` -- are gone: the heat and water fluxes both
 packages deliver are now read identically, off the one contract. ECHAM's
 grid-mean heat and water fluxes are therefore published and translatable for
-the first time -- but an ECHAM coupled step still fails on the wind vector,
-as described above (jax-esm#129). The old ``speedy()`` reader's source
+the first time, and -- since jax-esm#129 made the absent wind vector a static
+``None`` rather than a raise, as described above -- an ECHAM coupled step now
+completes on them like any other package's. The old ``speedy()`` reader's source
 (commit ``756cc2c``, the last commit before this collapse) is vendored,
 frozen, as
 ``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
@@ -151,13 +217,15 @@ from typing import Any, NamedTuple
 import jax.numpy as jnp
 from jcm.physics.surface.surface_exchange import surface_exchange_from
 
-#: SPEEDY's private, non-contract diagnostics key that still carries the
-#: near-surface wind *vector* (see the module docstring's wind-vector note).
-#: Not a "physics package marker" in the old ``detect()`` sense -- the
-#: heat/water fluxes above never look at this key, and a package that does
-#: not write it (ECHAM, or any future package) still gets a valid
-#: :class:`SurfaceExchange` from :func:`from_diagnostics`, just without
-#: ``u0``/``v0``.
+#: SPEEDY's private, non-contract diagnostics key that carries the
+#: near-surface wind *vector* -- but only meaningfully so when
+#: :class:`~jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux` is among the
+#: composed terms (see :func:`has_wind_vector` and the module docstring's
+#: wind-vector note). Every ``SpeedyTermBase`` term round-trips this key
+#: through the diagnostics dict, zeroed or not, so its mere *presence* is
+#: NOT what decides whether a real wind vector was computed -- that decision
+#: is :func:`has_wind_vector`'s, off the composed physics's terms, not off
+#: this key.
 _SPEEDY_WIND_VECTOR_KEY = "_surface_flux"
 
 
@@ -178,11 +246,15 @@ class SurfaceExchange(NamedTuple):
     precipitation : jax.Array
         Total precipitation (convective plus large-scale/stratiform)
         reaching the surface, ``kg m-2 s-1``, positive downward.
-    u0 : jax.Array
-        Near-surface zonal wind, ``m s-1``. Only available where the
-        composed physics package publishes a wind *vector* -- today, SPEEDY
-        only; see the module docstring.
-    v0 : jax.Array
+    u0 : jax.Array or None
+        Near-surface zonal wind, ``m s-1``, or ``None`` where the composed
+        physics does not include a
+        :class:`~jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux` term --
+        today, every shipped configuration but SPEEDY's (see the module
+        docstring). Whether this is ``None`` is a **static** fact of the
+        composed physics, fixed once at model construction and identical on
+        every step, never a per-step decision -- see :func:`has_wind_vector`.
+    v0 : jax.Array or None
         Near-surface meridional wind, ``m s-1``. Same caveat as ``u0``.
 
     """
@@ -190,60 +262,137 @@ class SurfaceExchange(NamedTuple):
     total_heat_flux: jnp.ndarray
     evaporation: jnp.ndarray
     precipitation: jnp.ndarray
-    u0: jnp.ndarray
-    v0: jnp.ndarray
+    u0: jnp.ndarray | None
+    v0: jnp.ndarray | None
 
 
-def _near_surface_wind_vector(diagnostics: dict[str, Any]) -> tuple[Any, Any]:
-    """Return ``(u0, v0)``, or raise if this physics package has none.
+def has_wind_vector(physics: Any) -> bool:
+    """Whether the composed atmosphere PHYSICS package computes a near-surface
+    wind *vector*, not merely a diagnostics-dict key shaped like one.
+
+    True only when a :class:`~jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux`
+    term is actually among ``physics``'s composed terms -- the one term that
+    fills SPEEDY's private ``_surface_flux.u0``/``.v0`` with a real
+    bulk-formula wind rather than ``PhysicsData.zeros``'s default zero (see
+    the module docstring's "What decides the presence is the composed TERM,
+    not a diagnostics-dict key" section for the hybrid-composition bug this
+    replaces).
+
+    This is a **structural**, composition-time question, decided once from
+    ``physics.terms`` -- a plain Python list, fixed at
+    ``ComposablePhysics.__init__`` and never touched at trace time -- so it
+    is safe to call under ``jax.jit`` (it never inspects a traced value) and
+    gives the identical answer whether the composition vectorizes columns
+    (``vectorize_columns=True``, e.g. ECHAM) or not (SPEEDY): vectorizing
+    columns changes how a term computes, never which terms are composed. It
+    is the single tested predicate the absence decision is made from:
+    :func:`_near_surface_wind_vector` calls it directly, so both
+    :meth:`~jem.components.jcm.component.JCMComponent.step` (a real step) and
+    :meth:`~jem.components.jcm.component.JCMDerived.zeros` (a structural
+    template, through the same :func:`from_diagnostics` call) decide
+    ``u0``/``v0``'s presence the exact same way, off the exact same physics
+    object, once each -- and :meth:`jem.fluxes.VerosExchange.validate` (via
+    :func:`jem.fluxes._require_wind_vector`) checks the ``u0``/``v0`` that
+    decision already produced, rather than re-deciding it from a second,
+    potentially-disagreeing predicate.
+
+    Parameters
+    ----------
+    physics : jcm.physics_interface.Physics
+        The composed atmosphere physics package, e.g. ``model.physics``.
+        Duck-typed on ``.terms`` (an iterable of ``PhysicsTerm`` instances --
+        what ``jcm.physics.composable_physics.ComposablePhysics`` exposes)
+        rather than typed as ``ComposablePhysics`` itself, so a ``Physics``
+        implementation with no ``terms`` at all (there is no such
+        implementation in jax-gcm today, but the ``Physics`` protocol does
+        not require one) reports no wind vector rather than raising.
+
+    Returns
+    -------
+    bool
+
+    """
+    from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
+
+    return any(
+        isinstance(term, SpeedySurfaceFlux)
+        for term in getattr(physics, "terms", ())
+    )
+
+
+def _near_surface_wind_vector(
+    diagnostics: dict[str, Any], physics: Any
+) -> tuple[Any, Any] | tuple[None, None]:
+    """Return ``(u0, v0)``, or ``(None, None)`` if this physics package has none.
 
     See the module docstring's "Why the near-surface wind is still a narrow
     exception" section: jax-gcm's #754 contract has no wind vector, only the
     scalar ``wind_speed``, so this is the one read left that is not off the
     published struct.
+
+    Before jax-esm#129 this raised ``NotImplementedError`` for any package
+    other than SPEEDY, which made ``JCMComponent.step`` fail on *every*
+    ECHAM-composed coupled step (it calls :func:`from_diagnostics`, which
+    calls this, unconditionally). The absence is now a value instead, and
+    that value is correct for a hybrid composition too: :func:`has_wind_vector` decides from ``physics``'s
+    composed terms, not from whether ``diagnostics`` happens to carry
+    SPEEDY's private :data:`_SPEEDY_WIND_VECTOR_KEY` (present whenever any
+    ``SpeedyTermBase`` term ran, real ``SpeedySurfaceFlux`` or not -- see that
+    function's docstring). When it says a wind vector is present,
+    :data:`_SPEEDY_WIND_VECTOR_KEY` is guaranteed to be in ``diagnostics``,
+    filled with SPEEDY's real wind, because ``SpeedySurfaceFlux`` is itself a
+    ``SpeedyTermBase`` and so writes that key like every other one.
+    Returning ``(None, None)`` when it is absent lets a caller that does not
+    need the wind (the heat/water fluxes above, or any exchanger that never
+    reads ``u0``/``v0``) keep going. A caller that does need it --
+    :class:`jem.fluxes.VerosExchange` -- is instead responsible for checking
+    at composition time (:meth:`~jem.fluxes.VerosExchange.validate`) and
+    again, defensively, wherever it is actually used.
     """
-    speedy_flux = diagnostics.get(_SPEEDY_WIND_VECTOR_KEY)
-    if speedy_flux is not None:
-        return speedy_flux.u0, speedy_flux.v0
-    raise NotImplementedError(
-        "No near-surface wind VECTOR in this physics package's diagnostics "
-        f"(no {_SPEEDY_WIND_VECTOR_KEY!r} entry). jax-gcm's package-"
-        "independent surface-exchange contract (jax-gcm#754) publishes only "
-        "the scalar 'wind_speed', from which a direction cannot be "
-        "recovered; SPEEDY carries a true wind vector internally as an "
-        "artefact of its bulk-formula surface extrapolation "
-        "(jcm/physics/surface/speedy_surface_flux.py), which is what this "
-        f"key is. ECHAM has none anywhere in its diagnostics (its vdiff "
-        "diagnoses only |U(10m)|), so this is not a regression from the "
-        "#754 collapse -- the pre-#754 echam() reader could not have "
-        "supplied a wind vector either. JCMComponent needs it on every "
-        "coupled step (it fills JCMDerived.u0/v0), so any coupled run on "
-        "this physics package fails here, whatever the exchanger: use "
-        "SPEEDY physics for coupled runs until the wind is made optional "
-        "(jax-esm#129) or jax-gcm publishes one from every package."
-    )
+    if not has_wind_vector(physics):
+        return None, None
+    speedy_flux = diagnostics[_SPEEDY_WIND_VECTOR_KEY]
+    return speedy_flux.u0, speedy_flux.v0
 
 
-def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
+def from_diagnostics(diagnostics: dict[str, Any], physics: Any) -> SurfaceExchange:
     """Read the surface exchange out of one step's physics diagnostics.
 
     The single reader jax-gcm#754 (jax-gcm PR 877) makes possible: every
     guaranteed field of :class:`jcm.physics.surface.surface_exchange.
     SurfaceExchange` is filled identically by every physics package that
     resolves a surface, so this function no longer needs to know which
-    package produced ``diagnostics``. See the module docstring for the
-    field-by-field sign/unit mapping.
+    package produced ``diagnostics`` for the heat/water fluxes. It still
+    needs ``physics`` itself -- not only ``diagnostics`` -- for the one
+    reader that remains package-specific: whether a near-surface wind
+    *vector* was actually computed is a fact of which terms are composed
+    (see :func:`has_wind_vector`), not something reliably recoverable from
+    the diagnostics dict alone (a hybrid composition's diagnostics dict can
+    carry a *zeroed* wind-vector key even with no term that ever computed a
+    real one -- see the module docstring).
 
     Parameters
     ----------
     diagnostics : dict
         One coupling step's physics diagnostics dict, with the length-1
         save axis already stripped.
+    physics : jcm.physics_interface.Physics
+        The composed atmosphere physics package that produced (or, for a
+        structural template, will produce) ``diagnostics`` -- passed to
+        :func:`has_wind_vector` to decide ``u0``/``v0``'s presence.
 
     Returns
     -------
     SurfaceExchange
         The fluxes translated to JEM's sign and unit conventions.
+        ``u0``/``v0`` are ``None`` when ``physics`` publishes no near-surface
+        wind vector (see :func:`has_wind_vector` and the module docstring's
+        wind-vector note) -- never raised, since jax-esm#129: whether the
+        wind is available is a static fact of the composed physics, not a
+        per-call failure, so a caller that does not need it (the heat/water
+        fluxes above) is unaffected, and a caller that does
+        (:class:`jem.fluxes.VerosExchange`) is checked at composition time
+        instead of here.
 
     Raises
     ------
@@ -257,22 +406,10 @@ def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
         :meth:`~jcm.physics.composable_physics.ComposablePhysics.require_surface_exchange`
         at composition time (see ``jem.runners.build_atmosphere``) so this
         is caught before the first coupled step rather than during it.
-    NotImplementedError
-        If the composed physics package publishes no near-surface wind
-        *vector* -- see :func:`_near_surface_wind_vector` and the module
-        docstring's wind-vector note. The wind is read eagerly, so this
-        raises for such a package even when the caller wants only the heat
-        and water fluxes, which #754 now does publish for it. That is not a
-        regression (the pre-#754 ``echam()`` reader raised unconditionally),
-        but it does leave a capability #754 unlocked unclaimed: making the
-        wind optional means making it optional all the way through
-        :class:`~jem.components.jcm.component.JCMDerived`, the coupled carry
-        and the output, which is a design change rather than part of this
-        migration. Tracked in jax-esm#129.
 
     """
     exchange = surface_exchange_from(diagnostics)
-    u0, v0 = _near_surface_wind_vector(diagnostics)
+    u0, v0 = _near_surface_wind_vector(diagnostics, physics)
     return SurfaceExchange(
         total_heat_flux=-exchange.net_heat_flux,
         evaporation=exchange.evaporation,

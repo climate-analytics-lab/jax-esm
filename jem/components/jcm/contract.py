@@ -413,11 +413,16 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " revision, so its disappearance must be noticed here.",
     ),
     # ------------------------------------------------------------------
-    # Physics diagnostics. jax-gcm has no package-independent surface
-    # exchange contract yet (jax-gcm#754), so jem/components/jcm/
-    # exchange_fields.py reads each package's own struct. `target` is the
-    # physics package; `attribute` is the dotted path into one step's
-    # diagnostics dict.
+    # Physics diagnostics. jax-gcm#754 (closed by PR 877, this pin) publishes
+    # a package-independent SurfaceExchange contract every physics package
+    # that resolves a surface fills identically, which jem/components/jcm/
+    # exchange_fields.py's from_diagnostics() reads generically -- entered
+    # below as the "surface_exchange" IntegrationPoints further down. The one
+    # read that is still package-specific is the near-surface wind *vector*
+    # (the contract publishes only the scalar wind_speed): SPEEDY's private
+    # `_surface_flux.u0`/`.v0`, entered here. `target` is the physics
+    # package; `attribute` is the dotted path into one step's diagnostics
+    # dict.
     # ------------------------------------------------------------------
     IntegrationPoint(
         "speedy", "_surface_flux.u0", "diagnostics",
@@ -427,7 +432,9 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " reads directly because jax-gcm's #754 surface-exchange contract"
         " publishes only the scalar wind_speed, not a vector -- see that"
         " module's docstring. Feeds jem.fluxes.bulk_wind_stress via"
-        " JCMDerived.u0.",
+        " JCMDerived.u0, which is None (a static absence, not a per-step"
+        " failure -- jax-esm#129) for any package that does not write this"
+        " key, e.g. ECHAM.",
     ),
     IntegrationPoint(
         "speedy", "_surface_flux.v0", "diagnostics",
@@ -473,6 +480,31 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " so a package that cannot publish (Held-Suarez, which resolves no"
         " surface fluxes) fails at composition with a named error, not at"
         " the first coupled step.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.composable_physics.ComposablePhysics",
+        "terms", "public",
+        "The ordered list of composed PhysicsTerm instances -- what"
+        " jem.components.jcm.exchange_fields.has_wind_vector walks (with"
+        " isinstance(term, SpeedySurfaceFlux)) to decide, faithfully,"
+        " whether the composed physics actually computes a near-surface"
+        " wind vector, rather than merely whether a diagnostics-dict key"
+        " shaped like one happens to be present (a hybrid composition with"
+        " some other SPEEDY-legacy term but no SpeedySurfaceFlux still"
+        " carries a zeroed '_surface_flux' diagnostics key). Already read this way inside"
+        " jax-gcm itself (jcm.model.Model, e.g. `getattr(self.physics,"
+        " \"terms\", ())`), so this is a stable, public attribute of"
+        " ComposablePhysics, not an implementation detail.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.speedy_terms", "SpeedySurfaceFlux", "public",
+        "The one SPEEDY term that fills the private"
+        " '_surface_flux.u0'/'.v0' diagnostics with a real bulk-formula"
+        " wind rather than PhysicsData.zeros's default zero (see the"
+        " '_surface_flux.u0'/'.v0' entries above); jem.components.jcm."
+        " exchange_fields.has_wind_vector checks a composed physics"
+        " package's terms for an instance of this class -- see the"
+        " ComposablePhysics.terms entry above.",
     ),
     # ------------------------------------------------------------------
     # Package data. Shipped inside the `jcm` wheel, so it is reachable with

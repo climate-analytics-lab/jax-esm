@@ -1631,6 +1631,30 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
 }
 ```
 
+`u0`/`v0` are `None`, not zero, for a composed physics package that publishes
+no near-surface wind *vector* — today, everything but SPEEDY (jax-esm#129;
+see further down this section for the full story). This is a **static** fact
+of the composed physics, decided once when the initial carry is built and
+never revisited per step, which is what lets `None` — an empty JAX pytree
+node — survive `jit`, the coupled `lax.scan`, a checkpoint round trip and
+output serialization exactly as an entirely-absent field already does
+elsewhere in this carry layout.
+
+Every named field of `JCMDerived` is also put on the atmosphere's own
+`(ix, il)` nodal grid before it reaches the carry, whatever grid the composed
+physics happened to publish it on: a package built with
+`ComposablePhysics(vectorize_columns=True)` (ECHAM) flattens the horizontal
+grid to a single `ncols` axis before iterating its terms, and its published
+surface exchange stays flattened — jax-gcm reshapes a column-vectorized
+diagnostic back to the grid only inside its own xarray serialization, never
+before. `component.py`'s `_unflatten_to_nodal_shape` (a no-op for SPEEDY,
+which never vectorizes columns) is what closes that gap, discovered only by
+actually running an ECHAM-composed coupled model (jax-esm#129): without it, a
+coupled step that copied a flattened field into a plain `(ix, il)` component
+(a slab ocean, in the default exchange table) failed that component's own
+step with an opaque shape-mismatch error naming neither the field nor the
+package responsible.
+
 `initialize()` builds those pytrees from the `(dycore_state, physics_carry)`
 pair `Model.bootstrap_state()` returns, plus a structural template of the
 diagnostics dict; it does **not** integrate. Each
@@ -1669,14 +1693,60 @@ speed), so this is not a regression from the #754 collapse — it predates it,
 and is the reason the pre-#754 `echam()` reader could never have supplied a
 wind vector either, even if it had had a heat/water struct to read.
 
-The consequence is wider than the Veros exchanger, though. `from_diagnostics`
-reads the wind *eagerly*, and `JCMComponent.step()` calls it on every coupled
-step to fill `JCMDerived.u0`/`.v0`. So **no ECHAM-composed coupled model can
-complete a step, whatever it is coupled to** — a slab ocean as much as Veros.
-ECHAM *publishes* the grid-mean heat and water fluxes; it is the wind read
-that fails. Every shipped JAX-ESM configuration composes SPEEDY, so nothing
-shipped is affected. Making the wind optional — through `JCMDerived`, the
-coupled carry and the output — is tracked in jax-esm#129.
+**What decides the presence is the composed TERM, not a diagnostics-dict
+key.** `has_wind_vector()` (in `exchange_fields.py`) is the single predicate
+`from_diagnostics()`, `JCMDerived.zeros()` and `VerosExchange.validate()` all
+key off. It does **not** ask whether the diagnostics dict happens to carry
+SPEEDY's private `_surface_flux` entry — every `SpeedyTermBase` term (not
+only `SpeedySurfaceFlux`) round-trips SPEEDY's whole `PhysicsData` struct
+through the diagnostics dict, so `_surface_flux` (and its `u0`/`v0`) is
+present whenever *any* `SpeedyTermBase` term ran, real wind or not. A
+hybrid composition with, say, `SpeedyHumidity` but no `SpeedySurfaceFlux`
+(no shipped configuration does this) therefore has a `_surface_flux` key
+whose `u0`/`v0` are SPEEDY's default zero, not a real wind — a diagnostics-
+dict-key check cannot tell the two apart, and would report a wind vector
+there that is never actually computed. `has_wind_vector()` therefore
+asks the composed physics package's own **terms**,
+`any(isinstance(term, SpeedySurfaceFlux) for term in physics.terms)` —
+`SpeedySurfaceFlux` is the one term that fills `u0`/`v0` with a real
+bulk-formula wind. This is still a static, composition-time, jit-safe
+check (`physics.terms` is a plain Python list, fixed at
+`ComposablePhysics.__init__`), identical whether the composition vectorizes
+columns or not, and it is what `from_diagnostics()` now takes a `physics`
+argument for, alongside `diagnostics`, so `JCMComponent.step()` and
+`JCMComponent.initialize()` both pass `model.physics` through explicitly.
+`VerosExchange.validate()`/`_require_wind_vector()` do not call
+`has_wind_vector()` directly — the carry they see holds the atmosphere's
+diagnostics dict, not a reference to `model.physics` — but they check the
+`u0`/`v0` presence `has_wind_vector()` already decided when the carry's
+`derived` was built, so there is still exactly one place the decision is
+*made*, never two predicates that could disagree.
+
+Before jax-esm#129, `from_diagnostics()` read that wind *eagerly* and raised
+`NotImplementedError` for any package other than SPEEDY, which meant no
+ECHAM-composed coupled model could complete even a single step — whatever the
+exchanger, not only a Veros one, since `JCMComponent.step()` calls
+`from_diagnostics()` unconditionally to fill `JCMDerived`. #129 made the
+absence a value (`u0=None`/`v0=None`, described above) instead of a raise, so
+an ECHAM-composed model now completes a step like any other, as long as
+nothing it runs actually needs the wind. The one thing that does,
+`VerosExchange`, is checked at **composition time** instead:
+`VerosExchange.validate()` (called by `jem.runners._validate_exchangers`
+inside `build_coupler`, the same slot `ComposablePhysics.
+require_surface_exchange` fills for the surface struct itself) raises,
+naming the composed atmosphere's physics package and jax-esm#132, if the
+atmosphere it is coupled to has no wind vector. This is reachable through a
+shipped command, not only a hand-built coupler — `python -m jem.main
++configuration=veros-earth physics@atmosphere.physics=echam` reaches
+`build_coupler` too, since JAX-ESM reuses jax-gcm's own `physics` group and
+jax-gcm ships `echam.yaml` — so an ECHAM/Veros combination is **refused at
+build time**, before a run is ever compiled, rather than mid-run or with a
+silently wrong stress. Choosing `VerosExchange`'s wind-stress source for a
+windless atmosphere (reusing the published `stress_u`/`stress_v`, deriving a
+direction some other way, or a different bulk law entirely) is the decision
+jax-esm#132 tracks; #129 closes only the eager-read failure above.
+`VerosExchange.__call__` repeats the same check, naming the same issue, for a
+`Coupler` built by hand that skips `_validate_exchangers`.
 
 Every JCM *attribute* the wrapper touches is public at the pinned revision,
 apart from that one underscore-prefixed diagnostics key

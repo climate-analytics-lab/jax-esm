@@ -156,6 +156,12 @@ class _AtmDerived:
     v0: jnp.ndarray
     total_heat_flux: jnp.ndarray
     total_freshwater_flux: jnp.ndarray
+    # Static (not a pytree leaf): stands in for the real `JCMDerived.physics`
+    # passthrough -- the composed atmosphere's own per-step diagnostics dict
+    # -- which `VerosExchange`'s wind-vector check reads to name the composed
+    # physics in its error message (jax-esm#132) the way
+    # `ComposablePhysics.require_surface_exchange` names its `terms`.
+    physics: dict = struct.field(pytree_node=False, default_factory=dict)
 
 
 @struct.dataclass
@@ -176,14 +182,26 @@ class _OcnDerived:
     sea_surface_temperature: jnp.ndarray
 
 
-def _fake_components():
+def _fake_components(windless: bool = False):
+    """Build fake ``atm``/``ocn`` carries.
+
+    ``windless=True`` gives ``derived.u0``/``.v0`` as ``None`` -- what
+    ``jem.components.jcm.exchange_fields.from_diagnostics`` now returns for a
+    composed physics package with no near-surface wind *vector* (jax-esm#129,
+    e.g. ECHAM) -- rather than a value that only a real ``jcm`` model could
+    produce, since nothing here needs one built. ``derived.physics`` is a
+    stand-in diagnostics dict naming a plausible composed term either way,
+    for ``VerosExchange``'s wind-vector error message (jax-esm#132) to read.
+    """
     shape = (4,)
     atm = {
         "derived": _AtmDerived(
-            u0=jnp.full(shape, 5.0),
-            v0=jnp.full(shape, -3.0),
+            u0=None if windless else jnp.full(shape, 5.0),
+            v0=None if windless else jnp.full(shape, -3.0),
             total_heat_flux=jnp.full(shape, 20.0),
             total_freshwater_flux=jnp.full(shape, 1e-6),
+            physics={"echam_surface_exchange": True} if windless
+            else {"speedy_surface_flux": True},
         ),
         "forcing": _AtmForcing(sea_surface_temperature=jnp.full(shape, 290.0)),
     }
@@ -360,3 +378,124 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
     assert "a2o_flux=identity" in text  # no regrid was given to this instance
     assert "o2a_state=identity" in text
     assert "rotates=yes" in text
+
+
+# ---------------------------------------------------------------------------
+# jax-esm#132: no wind vector -- build-time failure, not a silent bad stress
+# ---------------------------------------------------------------------------
+#
+# `jem.components.jcm.exchange_fields.from_diagnostics` returns
+# `derived.u0`/`.v0` as `None`, not a value, for a composed atmosphere physics
+# package that publishes no near-surface wind vector (today: everything but
+# SPEEDY, e.g. ECHAM) -- jax-esm#129. `VerosExchange` is the one production
+# consumer of that vector (`bulk_wind_stress`), so it -- not
+# `bulk_wind_stress` itself, which has no carry to inspect -- is where the
+# absence has to be caught, and it must be caught before a coupled run
+# starts, not by computing a stress from `None` mid-step. Choosing this
+# exchanger's wind-stress source for a windless atmosphere is jax-esm#132,
+# not #129 (which only made the absence a value instead of an unconditional
+# raise for every ECHAM-composed step, wind-consuming or not).
+
+
+def test_veros_exchange_validate_rejects_a_windless_atmosphere():
+    """Build-time failure: `validate()` names jax-esm#132 and the composed
+    physics for a windless atmosphere.
+
+    This is the check `jem.runners._validate_exchangers` runs, right after
+    `Coupler.initialize()` and before a coupled run is ever compiled, for
+    every exchanger with a `validate` method -- the same slot
+    `jem.exchangers.Exchange.validate` fills for a declarative table.
+    """
+    components = _fake_components(windless=True)
+
+    with pytest.raises(ValueError, match="jax-esm#132") as excinfo:
+        VerosExchange().validate(components)
+    assert "echam_surface_exchange" in str(excinfo.value)
+
+
+def test_veros_exchange_validate_passes_for_a_windy_atmosphere():
+    """The happy path: `validate()` is silent when the wind vector is present."""
+    VerosExchange().validate(_fake_components())
+
+
+def test_veros_exchange_validate_names_a_missing_atm_component():
+    """A coupled model with no `atm` at all is named, not a bare `KeyError`."""
+    with pytest.raises(KeyError, match="atm"):
+        VerosExchange().validate({"ocn": _fake_components()["ocn"]})
+
+
+def test_veros_exchange_call_also_rejects_a_windless_atmosphere():
+    """Defence in depth: `__call__` refuses too, not only `validate`.
+
+    A `Coupler` built by hand, bypassing `jem.runners.build_coupler` (the
+    only caller of `validate` today), must still fail on its very first step
+    rather than silently computing a stress from an absent wind.
+    """
+    components = _fake_components(windless=True)
+
+    with pytest.raises(ValueError, match="jax-esm#132"):
+        VerosExchange()(components, TIME)
+
+
+def test_veros_exchange_validate_rejects_a_hybrid_composition_without_speedy_surface_flux():
+    """A hybrid composition with a SPEEDY-legacy term but no
+    `SpeedySurfaceFlux` must be refused here too, not only for ECHAM.
+
+    Built through the REAL pipeline rather than a `u0=None` set by hand: a
+    genuine `ComposablePhysics([SpeedyHumidity()])` (no `SpeedySurfaceFlux`)
+    and a diagnostics dict shaped exactly like a real SPEEDY step's --
+    carrying the `_surface_flux` key every `SpeedyTermBase` term writes,
+    zeroed here because nothing in this composition ever computed a real
+    wind -- fed through `exchange_fields.from_diagnostics`. The point is
+    that `has_wind_vector` must say False for this composition even though
+    its diagnostics dict has the very key a predicate that reads only the
+    dict's keys, rather than the composed physics's terms, would mistake
+    for "has a wind vector", and that `VerosExchange.validate` refuses it
+    exactly as it already does for ECHAM.
+    """
+    from types import SimpleNamespace
+
+    from jcm.physics.composable_physics import ComposablePhysics
+    from jcm.physics.speedy.speedy_terms import SpeedyHumidity
+    from jcm.physics.surface.surface_exchange import (
+        SurfaceExchange as JcmSurfaceExchange,
+    )
+
+    from jem.components.jcm import exchange_fields
+
+    shape = (4,)
+    field = lambda value: jnp.full(shape, value)  # noqa: E731
+    # A minimal SPEEDY-shaped diagnostics dict: `_surface_flux` (zeroed
+    # `u0`/`v0` -- exactly what a `SpeedyTermBase` term leaves behind with no
+    # `SpeedySurfaceFlux` composed) plus a real jax-gcm `SurfaceExchange`
+    # contract struct (published, in a real hybrid model, by some other
+    # composed term -- see `exchange_fields`'s module docstring).
+    diagnostics = {
+        "_surface_flux": SimpleNamespace(u0=field(0.0), v0=field(0.0)),
+        "surface_exchange": JcmSurfaceExchange(
+            net_heat_flux=field(10.0),
+            sensible_heat_flux=field(0.0),
+            latent_heat_flux=field(0.0),
+            evaporation=field(0.002),
+            precipitation=field(0.008),
+            stress_u=field(0.0),
+            stress_v=field(0.0),
+            wind_speed=field(0.0),
+            air_density=field(1.2),
+            air_potential_temperature=field(290.0),
+        ),
+    }
+    physics = ComposablePhysics([SpeedyHumidity()], checkpoint_terms=False)
+    assert not exchange_fields.has_wind_vector(physics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, physics)
+    assert exchange.u0 is None
+    assert exchange.v0 is None
+
+    components = _fake_components()
+    atm_derived = components["atm"]["derived"].replace(
+        u0=exchange.u0, v0=exchange.v0, physics={"speedy_humidity": True},
+    )
+    components["atm"] = {**components["atm"], "derived": atm_derived}
+
+    with pytest.raises(ValueError, match="jax-esm#132"):
+        VerosExchange().validate(components)
