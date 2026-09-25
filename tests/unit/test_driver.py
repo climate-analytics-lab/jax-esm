@@ -11,6 +11,7 @@ atmosphere is the slow test at the bottom, which is what proves the toy is
 not the only thing this works on.
 """
 
+import dataclasses
 import logging
 import pathlib
 import shutil
@@ -671,7 +672,7 @@ def test_check_step_counters_refuses_a_run_that_wraps_a_nested_couplers_own_step
     )
 
     _check_step_counters_fit_int32(coupler, 0, 10, carries)  # counter reaches 2**31 - 1: fine
-    with pytest.raises(ValueError, match="own internal counter"):
+    with pytest.raises(ValueError, match="own step counter \\(this is itself a nested Coupler\\)"):
         _check_step_counters_fit_int32(coupler, 0, 11, carries)  # one step past
 
 
@@ -698,6 +699,117 @@ def test_check_step_counters_accepts_an_ordinary_resume_of_a_nested_couplers_own
     )
 
     _check_step_counters_fit_int32(coupler, first_step, first_step + 10, carries)
+
+
+def test_check_step_counters_refuses_a_run_that_overflows_a_nested_elements_derived_substep():
+    """An element run several times inside a nested coupler is handed a DERIVED clock, not the coupler's own step.
+
+    `mid/atm_lnd`'s own step counter (checked by the test above) is a
+    counter in its own right, but `atm_lnd`'s own workflow also runs `atm`
+    five times per ONE of `atm_lnd`'s own coupled steps
+    (`Coupler.coupling_time_at_substep`: ``substep = step * multiplicity +
+    call``, computed fresh every call, never persisted). That DERIVED
+    substep can overflow even when `atm_lnd.step` itself, checked on its
+    own, still fits comfortably: multiplying an out-of-lockstep starting
+    `atm_lnd.step` by 5 reaches int32's own range five times sooner than
+    `atm_lnd.step` alone does.
+    """
+    from jem.driver import _STEP_INT32_MAX, _check_step_counters_fit_int32
+
+    coupler = doubly_nested_coupler()
+    rate = 144  # `atm_lnd`'s own rate relative to the outer daily coupler (24 mid * 6).
+    multiplicity = 5  # `atm` runs 5 times per `atm_lnd`'s own (10-minute) coupled step.
+    total_steps = 3
+    # Chosen so the boundary is exact: `starting_counter * multiplicity +
+    # total_steps * (rate * multiplicity) == 2**31 - 1` precisely -- the same
+    # "counter + steps_this_call * rate" form every other counter here is
+    # checked with, applied to `(starting_counter * multiplicity, rate *
+    # multiplicity)` (see `_component_internal_counters`'s own docstring on
+    # why this margin is exact, not merely conservative, for this counter).
+    starting_counter = (_STEP_INT32_MAX - total_steps * rate * multiplicity) // multiplicity
+
+    def carries_with_atm_lnd_step(value):
+        carry = coupler.initialize()
+        mid_carry = carry.components["mid"]
+        atm_lnd_carry = mid_carry.components["atm_lnd"]
+        mid_carry = mid_carry.replace(
+            components=dict(
+                mid_carry.components, atm_lnd=atm_lnd_carry.replace(step=jnp.int32(value)),
+            )
+        )
+        return dict(carry.components, mid=mid_carry)
+
+    # `starting_counter * multiplicity + total_steps * rate * multiplicity ==
+    # 2**31 - 1` exactly: fine.
+    _check_step_counters_fit_int32(
+        coupler, 0, total_steps, carries_with_atm_lnd_step(starting_counter)
+    )
+    with pytest.raises(ValueError, match="own per-call sub-step counter"):
+        # One step past: refused, even though `atm_lnd.step` on its own
+        # (checked by the test above) would still be nowhere near overflow.
+        _check_step_counters_fit_int32(
+            coupler, 0, total_steps, carries_with_atm_lnd_step(starting_counter + 1)
+        )
+
+
+def test_check_step_counters_accepted_boundary_does_not_wrap_a_derived_substep_in_a_real_trajectory(
+    monkeypatch,
+):
+    """The accepted boundary above is genuinely safe when a real trajectory runs it.
+
+    `_check_step_counters_fit_int32` is exact, not merely a conservative
+    estimate: patching `Counter.step` to also report the raw int32 clock
+    `atm` was actually handed lets this compare the real, traced arithmetic
+    against the exact value Python computes with unbounded integers, and
+    also shows that one step past the accepted boundary -- refused above,
+    forced through here on purpose -- really does wrap, which is why the
+    boundary is refused exactly where it is.
+    """
+    import tests.unit.test_nested_coupler as nested_coupler_module
+
+    from jem.driver import _STEP_INT32_MAX
+
+    original_step = nested_coupler_module.Counter.step
+
+    def step_reporting_its_own_clock(self, carry, time):
+        new_carry, diagnostics = original_step(self, carry, time)
+        return new_carry, dict(diagnostics, step=jnp.asarray(time.step))
+
+    monkeypatch.setattr(nested_coupler_module.Counter, "step", step_reporting_its_own_clock)
+
+    coupler = doubly_nested_coupler()
+    rate = 144
+    multiplicity = 5
+    total_steps = 3
+    starting_counter = (_STEP_INT32_MAX - total_steps * rate * multiplicity) // multiplicity
+
+    def carry_with_atm_lnd_step(value):
+        carry = coupler.initialize()
+        mid_carry = carry.components["mid"]
+        atm_lnd_carry = mid_carry.components["atm_lnd"]
+        mid_carry = mid_carry.replace(
+            components=dict(
+                mid_carry.components, atm_lnd=atm_lnd_carry.replace(step=jnp.int32(value)),
+            )
+        )
+        return dataclasses.replace(carry, components=dict(carry.components, mid=mid_carry))
+
+    accepted_carry = carry_with_atm_lnd_step(starting_counter)
+    _, diagnostics = coupler.generate_trajectory_function(total_steps)(accepted_carry)
+    atm_substep = np.asarray(diagnostics["mid"]["atm_lnd"]["atm"]["step"])
+    # `atm_lnd`'s own step ranges over `starting_counter .. starting_counter +
+    # total_steps * rate - 1` while this trajectory runs; the largest
+    # substep any of those reaches is that top value, times the multiplicity,
+    # plus the largest call offset.
+    max_atm_lnd_step = starting_counter + total_steps * rate - 1
+    expected_max = max_atm_lnd_step * multiplicity + (multiplicity - 1)
+    assert int(atm_substep.max()) == expected_max
+    assert not (atm_substep < 0).any()  # no wrap anywhere in the accepted run
+
+    refused_carry = carry_with_atm_lnd_step(starting_counter + 1)
+    _, diagnostics_over = coupler.generate_trajectory_function(total_steps)(refused_carry)
+    atm_substep_over = np.asarray(diagnostics_over["mid"]["atm_lnd"]["atm"]["step"])
+    assert (atm_substep_over < 0).any()  # the refused carry really does wrap
 
 
 def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment():
