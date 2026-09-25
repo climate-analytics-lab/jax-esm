@@ -1091,26 +1091,34 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
 def _component_internal_counters(
     coupler: Any, carries: dict[str, Any], outer_rate: int = 1, path: str = "",
 ) -> list[tuple[str, int, int]]:
-    """Return ``(path, rate, counter)`` for every component with its own internal stepping.
+    """Return ``(path, rate, counter)`` for every counter whose starting value is not assumed.
 
     ``_max_element_rate`` finds the single fastest RATE anywhere in
-    ``coupler``, which is enough to bound the coupler hierarchy's own
-    counters (a workflow multiplicity, a nested coupler's own step field):
-    those always start at zero and advance in lockstep with the coupled step
-    that owns them, so their rate alone determines every value they will
-    ever hold. A component's own internal counter
-    (:class:`~jem.base.component.SupportsInternalStepping`) is not like
-    that: a ``VerosComponent`` may wrap a model that was already integrated
-    before it was bound, or ``JCMComponent``'s carry may hold a
-    ``RunState.step`` from wherever this run's own starting carry came from
-    -- either way, the counter's *current* value can differ from what
-    ``coupled_step * rate`` alone would predict, and only reading it
-    directly, from the concrete carry this run is about to start from,
-    answers what it actually is. This walks the same workflow multiplicities
-    and nested-coupler ratios ``_max_element_rate`` composes into its single
-    maximum, but keeps one ``(rate, counter)`` entry *per* component that
-    implements the capability, rather than only the largest rate, since each
-    one's own starting counter has to be checked against its own rate.
+    ``coupler``, which is enough to bound a counter that always starts at
+    zero and advances in lockstep with the coupled step that owns it -- the
+    *outermost* coupler's own step, since ``run_chunked`` reads its starting
+    value directly as ``first_step`` (:func:`_check_step_counters_fit_int32`
+    checks it against that, not against an assumed zero). Every OTHER
+    counter this hierarchy carries is not guaranteed to start in lockstep,
+    so its own current value has to be read from the concrete carry and
+    checked against its own rate individually. Two kinds:
+
+    - A component's own internal counter
+      (:class:`~jem.base.component.SupportsInternalStepping`): a
+      ``VerosComponent`` may wrap a model that was already integrated before
+      it was bound, or ``JCMComponent``'s carry may hold a ``RunState.step``
+      from wherever this run's own starting carry came from.
+    - A nested coupler's own ``CoupledCarry.step``: the same kind of
+      persisted, incrementing counter as the outermost coupler's, but
+      nothing analogous to ``run_chunked``'s own ``first_step`` reads it up
+      front -- a hand-built or otherwise out-of-lockstep initial carry can
+      hold it anywhere relative to ``first_step * rate``.
+
+    This walks the same workflow multiplicities and nested-coupler ratios
+    ``_max_element_rate`` composes into its single maximum, but keeps one
+    ``(rate, counter)`` entry *per* counter found, rather than only the
+    largest rate, since each one's own starting value has to be checked
+    against its own rate.
 
     Parameters
     ----------
@@ -1118,8 +1126,8 @@ def _component_internal_counters(
         The (possibly nested) coupled model.
     carries : dict[str, Any]
         ``coupler``'s own carries mapping at this level of the recursion --
-        the concrete, starting carry a component's counter is read from, not
-        a traced one.
+        the concrete, starting carry a counter is read from, not a traced
+        one.
     outer_rate : int
         How many times ``coupler``'s own coupled step advances per the
         outermost coupler's coupled step: 1 at the top of the recursion,
@@ -1132,11 +1140,11 @@ def _component_internal_counters(
     Returns
     -------
     list of (str, int, int)
-        One ``(path, rate, counter)`` triple per component anywhere in the
-        hierarchy that implements
-        :class:`~jem.base.component.SupportsInternalStepping`: ``rate`` is
-        that component's own advance per outermost coupled step, and
-        ``counter`` is its own internal counter's value in ``carries``.
+        One ``(path, rate, counter)`` triple per counter found: either a
+        component anywhere in the hierarchy that implements
+        :class:`~jem.base.component.SupportsInternalStepping`, or a nested
+        coupler's own step field. ``rate`` is that counter's own advance per
+        outermost coupled step, and ``counter`` is its value in ``carries``.
 
     """
     from jem.base.coupler import _inner_carries
@@ -1150,10 +1158,21 @@ def _component_internal_counters(
         component_rate = outer_rate * multiplicity
         inner_ratio = getattr(component, "outer_ratio", None)
         if inner_ratio and hasattr(component, "multiplicities"):
+            nested_rate = component_rate * inner_ratio
+            # The nested coupler's OWN `CoupledCarry.step` is a counter in
+            # exactly the same sense as a leaf's `SupportsInternalStepping`
+            # one: persisted, incremented once per its own coupled step
+            # (`step=carry.step + 1`), and not guaranteed to already equal
+            # `first_step * nested_rate` -- a hand-built or otherwise
+            # out-of-lockstep initial carry can hold it anywhere. Recursing
+            # below finds every counter *inside* this nested coupler; this
+            # records the nested coupler's own step alongside them, at the
+            # same rate its own recursion is scaled by.
+            found.append((component_path, nested_rate, int(carries[name].step)))
             found.extend(
                 _component_internal_counters(
                     component, _inner_carries(carries, name),
-                    component_rate * inner_ratio, component_path,
+                    nested_rate, component_path,
                 )
             )
         elif isinstance(component, SupportsInternalStepping):
@@ -1191,18 +1210,20 @@ def _check_step_counters_fit_int32(
 
     Two checks, against two different kinds of counter:
 
-    - The coupler hierarchy's own counters (:func:`_max_element_rate`, a
-      workflow multiplicity, a nested coupler's own step field), which
-      always start at zero and stay in lockstep with the coupled step that
-      owns them, so ``total_steps`` alone -- via :func:`_max_safe_coupled_steps`
-      -- is enough to bound them.
-    - Each component's own internal counter
-      (:class:`~jem.base.component.SupportsInternalStepping`,
-      :func:`_component_internal_counters`), read from ``carries`` -- the
-      concrete carry this run is about to start from -- because such a
-      counter's current value is not guaranteed to be ``first_step * rate``:
-      a ``VerosComponent`` may wrap a model integrated before it was bound,
-      and any component's carry may come from a resumed run.
+    - The OUTERMOST coupler's own step (:func:`_max_element_rate` composes
+      the fastest rate anywhere under it, including a workflow multiplicity
+      or a nested coupler's own ratio), read from the carry as ``first_step``
+      and checked against ``total_steps`` via
+      :func:`_max_safe_coupled_steps`.
+    - Every OTHER counter in the hierarchy (:func:`_component_internal_counters`):
+      a component's own internal counter
+      (:class:`~jem.base.component.SupportsInternalStepping`), and a nested
+      coupler's own step field, each read from ``carries`` -- the concrete
+      carry this run is about to start from -- because such a counter's
+      current value is not guaranteed to be ``first_step * rate``: a
+      ``VerosComponent`` may wrap a model integrated before it was bound, a
+      component's carry may come from a resumed run, and a nested coupler's
+      own step has nothing analogous to ``first_step`` reading it up front.
 
     Parameters
     ----------

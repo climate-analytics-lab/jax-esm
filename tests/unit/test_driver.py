@@ -639,6 +639,67 @@ def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupl
         _check_step_counters_fit_int32(coupler, 1_000_000, limit + 2, carries)
 
 
+def test_check_step_counters_refuses_a_run_that_wraps_a_nested_couplers_own_step():
+    """A nested coupler's own step counter is one more counter to check, not just its components'.
+
+    `_component_internal_counters` recurses into a nested coupler (`mid`,
+    here) to find its OWN components' internal counters, but `mid`'s own
+    `CoupledCarry.step` is exactly the same kind of persisted, incrementing
+    int32 counter as any leaf's -- advancing 24x faster than the outer
+    (daily) coupled step that owns it, since `mid`'s own coupling timestep is
+    hourly -- and, like a leaf's, its *current* value is read from the
+    starting carry rather than assumed to equal `first_step * rate`: nothing
+    stops a hand-built (or otherwise out-of-lockstep) initial carry from
+    holding a nested step already close to int32's own range. Left
+    unrecorded, a short run near that boundary is accepted and `mid`'s own
+    `step=carry.step + 1` wraps during integration.
+    """
+    from jem.driver import _check_step_counters_fit_int32
+
+    coupler = doubly_nested_coupler()
+    rate = 24  # `mid` is hourly under an outer daily coupler: 24 of its own steps per outer one.
+    # Chosen so the boundary is exact: `starting_counter + 10 * rate ==
+    # 2**31 - 1` precisely, with no remainder to obscure the "one step past
+    # is refused" edge -- the same construction the leaf-counter version of
+    # this test uses.
+    starting_counter = 2**31 - 1 - 10 * rate
+
+    carry = coupler.initialize()
+    mid_carry = carry.components["mid"]
+    carries = dict(
+        carry.components, mid=mid_carry.replace(step=jnp.int32(starting_counter)),
+    )
+
+    _check_step_counters_fit_int32(coupler, 0, 10, carries)  # counter reaches 2**31 - 1: fine
+    with pytest.raises(ValueError, match="own internal counter"):
+        _check_step_counters_fit_int32(coupler, 0, 11, carries)  # one step past
+
+
+def test_check_step_counters_accepts_an_ordinary_resume_of_a_nested_couplers_own_step():
+    """An ordinary resume, where the nested step matches `first_step * rate`, is still accepted.
+
+    The counterpart of the refusal above: a nested coupler resumed in
+    lockstep with the outer one it is inside (exactly what an uninterrupted
+    run would have left `mid.step` at by the time the outer coupler reached
+    `first_step`) must not be refused just because its own counter is now
+    checked.
+    """
+    from jem.driver import _check_step_counters_fit_int32
+
+    coupler = doubly_nested_coupler()
+    rate = 24  # `mid` is hourly under an outer daily coupler: 24 of its own steps per outer one.
+    first_step = 1_000
+
+    carry = coupler.initialize()
+    mid_carry = carry.components["mid"]
+    carries = dict(
+        carry.components,
+        mid=mid_carry.replace(step=jnp.int32(first_step * rate)),
+    )
+
+    _check_step_counters_fit_int32(coupler, first_step, first_step + 10, carries)
+
+
 def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment():
     """`carry.step` itself must survive its own +1.
 
