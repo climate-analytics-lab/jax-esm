@@ -221,8 +221,8 @@ def test_double_drake_veros_component_refuses_a_run_that_would_wrap_a_pre_steppe
     coupled-step-count-only rate (``_max_element_rate``'s own) cannot bound
     it -- only reading ``itt`` off the concrete starting carry can. Built on
     a real double-drake ``VerosComponent`` (the shipped coupled ocean setup),
-    with its own ``itt`` set to a large value before ``bind`` -- the
-    reproduction the review's own probe used -- and checked at the exact
+    with its own ``itt`` set to a large value before ``bind``, and checked
+    at the exact
     boundary where advancing it further would silently wrap.
     """
     import jax.numpy as jnp

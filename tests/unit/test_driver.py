@@ -317,8 +317,8 @@ def test_max_element_rate_multiplies_internal_stepping_by_workflow_multiplicity(
 def test_max_element_rate_defaults_to_one_for_a_component_with_no_internal_stepping():
     """A component that does not implement the capability is assumed rate 1.
 
-    The same as every component before this capability existed (e.g.
-    ``SlabOceanModel``, which has no internal timestep of its own to report).
+    That is right for a component with no internal timestep of its own to
+    report, such as ``SlabOceanModel``.
     """
     from jem.driver import _max_element_rate
 
@@ -387,8 +387,8 @@ def test_check_step_counters_refuses_a_run_that_wraps_a_components_own_starting_
     range before this run even starts (standing in for a `VerosComponent`
     wrapping a model that was integrated before it was bound -- see
     `VerosComponent.bind`'s own docstring -- or any component's carry coming
-    from elsewhere), so the OLD, rate-only check would have accepted a run
-    this one refuses.
+    from elsewhere), so a check based on the rate alone would accept a run
+    that wraps it.
     """
     from jem.driver import _check_step_counters_fit_int32
 
@@ -410,15 +410,15 @@ def test_check_step_counters_refuses_a_run_that_wraps_a_components_own_starting_
 
 
 def test_check_step_counters_accepts_a_resume_whose_counter_matches_first_step_times_rate():
-    """An ordinary resume's counter is exactly what its own rate predicts.
+    """A resume whose counter equals ``first_step * rate`` is not double-counted.
 
-    A resumed run's carry already holds an advanced internal counter -- the
-    normal case, not the pre-stepped-before-binding one above -- and the new
-    per-component check must accept it exactly as the old, rate-only check
-    did: this is `total_steps` being absolute, not relative to `first_step`
-    (the same distinction the coupler-level check already makes), now
-    checked for a component's own counter too, so it must not be
-    double-counted here either.
+    That is what a JCM carry holds on resume: its ``RunState.step`` advances
+    by its rate every coupled step. (A Veros carry need not: Veros does not
+    write ``itt`` to its restart, so after a checkpoint load the counter is
+    whatever the live model holds, and the check reads that instead.) The
+    check treats ``total_steps`` as absolute, not relative to
+    ``first_step`` -- the same distinction the coupler-level check makes --
+    so such a resume is accepted up to exactly the coupler-level limit.
     """
     from jem.driver import _check_step_counters_fit_int32
 

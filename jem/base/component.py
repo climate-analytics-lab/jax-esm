@@ -899,8 +899,8 @@ class SupportsInternalStepping(Protocol):
     is refused before anything is compiled -- the same protection a workflow
     multiplicity or a nested ``Coupler`` already gets. A component that does
     not implement this capability is assumed to advance no faster than the
-    calls it receives, from zero (rate 1, counter 0) -- the same as every
-    component before this capability existed; a component that *does* keep
+    calls it receives, from zero (rate 1, counter 0), which is right for a
+    component with no internal timestep of its own; a component that *does* keep
     such counters but does not report them here is simply not protected, the
     same way an unbound component's own clock mismatch is only ever caught
     if it implements :class:`SupportsBind`.

@@ -972,11 +972,12 @@ class JCMComponent:
 
         Implements :class:`~jem.base.component.SupportsInternalStepping`'s
         other half: ``jem.driver.run_chunked``'s int32 check reads this off
-        the concrete carry a run is about to start from, rather than
-        assuming it equals ``coupled_step * self._inner_steps()`` -- a carry
-        built from a model that was already run
-        (:meth:`~jcm.model.Model.run_from_state_with_carry`) before this
-        wrapper was ever registered with a coupler starts with a nonzero
-        ``RunState.step`` that no coupled-step count would predict.
+        the concrete carry a run is about to start from. ``initialize()``
+        seeds it at 0, and each coupled step advances it by
+        ``self._inner_steps()``, so for a JCM carry it equals
+        ``coupled_step * self._inner_steps()`` -- a carry for which it does
+        not is what ``_report_authoritative_clock_drift`` warns about. Reading
+        it rather than assuming it keeps the check exact whatever carry a run
+        starts from.
         """
         return int(carry["step"])

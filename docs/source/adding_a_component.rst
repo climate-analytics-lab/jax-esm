@@ -94,7 +94,8 @@ simply skipped there, never broken:
        refused whether it starts fresh, resumes, or wraps an
        already-advanced model -- a component that omits this capability is
        simply assumed to advance no faster than the calls it receives, from
-       zero (rate 1, counter 0), the same as before this capability existed.
+       zero (rate 1, counter 0), which is right for a component with no
+       internal timestep of its own.
 
 
 Designing the carry
