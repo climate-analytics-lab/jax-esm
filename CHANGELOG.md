@@ -677,15 +677,15 @@ Breaking changes are marked; everything else is additive.
     continue threading all four fields of `RunState` rather than deriving
     `time`/`step` from a step counter kept elsewhere. (An earlier draft of
     this note justified the threading by an unavoidable int32 overflow in a
-    step-counter product; that was overstated — an int32-safe
-    reduce-before-multiply decomposition (the one
-    `jem.base.calendar.gregorian_instant` uses for
-    `monthly_mean`/`year_fraction` below, and see that function's own
-    docstring for the exact, tested bound — a 2026-09 fix replaced this
-    module's first version of it, which silently broke far short of its
-    claimed range) avoids the overflow for any coupling this codebase
-    actually builds. Threading is still the right design, just for the
-    migration-guide reason, not an unavoidable one.)
+    step-counter product; that was overstated — `jem.base.calendar
+    .gregorian_instant` (used for `monthly_mean`/`year_fraction` below) is a
+    limb multiply-then-divide, exact for any step counter an int32 can hold
+    up to the exact int32 day-count limit its own docstring derives (about
+    5.87 million simulated years — two earlier decompositions shipped and
+    were superseded before this one, each silently breaking far short of its
+    own claimed range; see that function's **History** note), so there is no
+    overflow to avoid by threading. Threading is still the right design,
+    just for the migration-guide reason, not an unavoidable one.)
   - **An averaged output record is now labelled at its interval's MIDPOINT**,
     not its end (jax-gcm's own convention change). `TimeAxis.datetimes` — which
     labels every non-JCM component's output so it merges with the

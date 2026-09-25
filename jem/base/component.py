@@ -624,10 +624,13 @@ class CouplingTime:
         seconds -- the coupler only ever builds whole-second clocks
         (``Coupler._element_timestep`` refuses a sub-timestep that is not) --
         so ``record_seconds`` below is exact. ``step`` is the only traced
-        quantity, and :func:`~jem.base.calendar.gregorian_instant` reduces it
-        modulo a small static period before ever multiplying it, so this is
-        int32-safe for a run of any length (see that function's docstring for
-        the bound).
+        quantity, and :func:`~jem.base.calendar.gregorian_instant` is a limb
+        multiply-then-divide, exact for any ``step`` an int32 can hold, up to
+        the exact int32 day-count limit its own docstring derives (about 5.87
+        million simulated years) -- ``jem.driver.run_chunked`` refuses a run
+        past that limit before it ever reaches here (2026-09 migration
+        review, round 2, finding B1); this property itself has no run length
+        to check against, since ``step`` is traced.
         """
         from jem.base.calendar import (
             gregorian_day_of_year,

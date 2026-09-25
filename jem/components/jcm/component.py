@@ -844,11 +844,12 @@ class JCMComponent:
 
         The exact expected time is computed the same int32-safe way item
         A/B's calendar arithmetic is (:func:`jem.base.calendar
-        .gregorian_instant`, reducing the traced step counter modulo a small
-        static period before ever multiplying it), from the coupler's own
-        step count and coupling timestep rather than from anything JCM
-        derives -- so this check does not depend on the very clock it is
-        checking. Both quantities being compared are exact integers (whole
+        .gregorian_instant`, a limb multiply-then-divide exact for any
+        traced step counter an int32 can hold -- see that function's own
+        docstring), from the coupler's own step count and coupling timestep
+        rather than from anything JCM derives -- so this check does not
+        depend on the very clock it is checking. Both quantities being
+        compared are exact integers (whole
         days and seconds, and a step count), so unlike
         :meth:`_report_clock_drift` this needs no float32 tolerance: any
         difference at all is a real one.
