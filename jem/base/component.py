@@ -7,11 +7,11 @@ the things it couples. It is deliberately small:
   with a ``name``, an ``initialize()`` and a ``step(carry, time)``. There is
   no base class to inherit from, so an external model (JCM, Veros) is adapted
   by a thin wrapper class rather than by monkey-patching methods onto it.
-- :class:`SupportsXarray`, :class:`SupportsCheckpoint` and
-  :class:`SupportsBind` are *optional* capabilities. The coupler tests for
-  them with ``isinstance`` (the protocols are runtime-checkable, which for a
-  Protocol means "has these attributes"), never with ``hasattr`` at random
-  call sites.
+- :class:`SupportsXarray`, :class:`SupportsCheckpoint`, :class:`SupportsBind`
+  and :class:`SupportsInternalStepping` are *optional* capabilities. The
+  coupler tests for them with ``isinstance`` (the protocols are
+  runtime-checkable, which for a Protocol means "has these attributes"),
+  never with ``hasattr`` at random call sites.
 - :class:`CoupledCarry` is the scanned state of the coupled model: one carry
   per component plus the authoritative step counter. The counter lives in the
   carry, not in the ``lax.scan`` index, so the clock survives chunked runs and
@@ -856,6 +856,41 @@ class SupportsBind(Protocol):
         start_date: jdt.Datetime,
         calendar: str,
     ) -> None: ...
+
+
+@runtime_checkable
+class SupportsInternalStepping(Protocol):
+    """Optional: report how many of a component's own internal steps one ``step()`` call makes.
+
+    A component with its own inner timestep (JCM, Veros) may keep raw
+    counters of its own -- an internal step count, or a clock like JCM's own
+    ``RunState`` -- that advance faster than the coupled step calling it,
+    entirely inside that component's own implementation and invisible to the
+    coupler's workflow structure (a multiplicity, a nested :class:`Coupler`).
+    If such a counter is itself an ``int32``, or feeds a product that is
+    (JCM's ``expected_step = time.step * self._inner_steps()`` in
+    ``JCMComponent._report_authoritative_clock_drift``), it needs the same
+    int32-overflow protection the coupler's own counters get -- but nothing
+    outside that component can know the rate to protect it at without being
+    told.
+
+    ``internal_steps_per_call`` is that rate: how many of *this* component's
+    own internal timesteps happen inside one call to :meth:`Component.step`.
+    :func:`jem.driver._max_element_rate` multiplies it in for every element
+    clock that calls this component (a workflow multiplicity, or -- via the
+    recursion -- a nested coupler's own substep rate), so
+    :func:`jem.driver.run_chunked`'s up-front int32 check
+    (``_check_step_counters_fit_int32``) covers it too, the same way it
+    covers a plain workflow multiplicity (2026-09 review, round 3 follow-up,
+    finding 7). A component that does not implement this capability is
+    assumed to advance no faster than the calls it receives (rate 1) -- the
+    same as every component before this capability existed; a component that
+    *does* keep such counters but does not report them here is simply not
+    protected, the same way an unbound component's own clock mismatch is
+    only ever caught if it implements :class:`SupportsBind`.
+    """
+
+    def internal_steps_per_call(self) -> int: ...
 
 
 # An exchanger moves information between components. It receives the mapping

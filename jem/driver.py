@@ -161,7 +161,12 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from jem.base.component import CoupledCarry, SupportsXarray, parse_duration_days
+from jem.base.component import (
+    CoupledCarry,
+    SupportsInternalStepping,
+    SupportsXarray,
+    parse_duration_days,
+)
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
 from jem.output import (
     check_subsample,
@@ -902,22 +907,28 @@ def _max_element_rate(coupler: Any) -> int:
     that grows ``n`` times faster than the outermost coupled step, so ``n``
     times fewer outer steps are safe.
 
-    **Scope: the coupler hierarchy, not a component's own internals.** This
-    walks ``coupler.multiplicities()`` and nested ``Coupler``s -- the
-    workflow structure JEM itself builds and owns. A component can keep raw
-    counters of its own that this function has no way to see: a private
-    step field in its carry, sub-cycled some number of times per coupled
-    step for reasons internal to that component (not expressed as a JEM
-    workflow multiplicity or a nested ``Coupler``). Such a counter is not
-    covered by this rate, by :func:`_max_safe_coupled_steps`, or by
-    :func:`_check_step_counters_fit_int32` -- keeping its own raw counters
-    int32-safe is that component's own responsibility, the same way keeping
-    its own physics numerically stable is. (2026-09 review, round 3, finding
-    7: an earlier version of this docstring read as if this rate bounded
-    *every* counter anywhere in a run, which is not true of a component's
-    private ones -- see e.g. ``jem.components.jcm.component
-    ._report_authoritative_clock_drift``'s own docstring for a concrete
-    example this module intentionally does not know about.)
+    **Now also covers a component's own internal counters, if it reports
+    them.** A plain (non-nested) element additionally contributes its own
+    :meth:`~jem.base.component.SupportsInternalStepping.internal_steps_per_call`
+    (optional; a component that does not implement it is rate 1, as before
+    this capability existed), multiplied by its workflow multiplicity the
+    same way a nested coupler's own rate is multiplied by ``ratio`` -- so a
+    component that keeps a raw counter of its own faster than the coupled
+    step calling it (JCM's ``RunState.step``, or the ``time.step *
+    self._inner_steps()`` product ``JCMComponent
+    ._report_authoritative_clock_drift`` computes from it) is covered by this
+    rate, by :func:`_max_safe_coupled_steps` and by
+    :func:`_check_step_counters_fit_int32`, exactly like a workflow
+    multiplicity or a nested ``Coupler`` is (2026-09 review, round 3
+    follow-up, finding 7: an earlier version of this docstring said such a
+    counter could never be covered at all; ``jem.driver`` still carries no
+    jcm-specific knowledge -- ``SupportsInternalStepping`` is a generic,
+    optional capability any component may implement, the same way
+    :class:`~jem.base.component.SupportsBind` is). A component that keeps
+    such a counter but does not implement the capability is still not
+    covered -- reporting it accurately is that component's own
+    responsibility, the same way agreeing to :class:`SupportsBind`'s clock
+    contract is.
 
     Parameters
     ----------
@@ -949,7 +960,18 @@ def _max_element_rate(coupler: Any) -> int:
         if inner_ratio and hasattr(component, "multiplicities"):
             rate = max(rate, multiplicity * inner_ratio * _max_element_rate(component))
         else:
-            rate = max(rate, multiplicity)
+            # A nested coupler is tested for with `getattr`/`hasattr` above
+            # (see the Parameters note on why, not `isinstance`), but this is
+            # an ordinary optional *capability* a leaf component opts into,
+            # with no import-cycle reason to avoid `isinstance` -- and this
+            # module's own convention (`jem.base.component`'s docstring) is
+            # to test capabilities that way.
+            internal_rate = (
+                component.internal_steps_per_call()
+                if isinstance(component, SupportsInternalStepping)
+                else 1
+            )
+            rate = max(rate, multiplicity * internal_rate)
     return rate
 
 

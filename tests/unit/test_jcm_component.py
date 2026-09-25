@@ -31,6 +31,7 @@ from jem.base.component import (
     Component,
     CouplingTime,
     SupportsBind,
+    SupportsInternalStepping,
     SupportsXarray,
     TimeAxis,
 )
@@ -112,7 +113,70 @@ def test_component_satisfies_protocols(component):
     assert isinstance(component, Component)
     assert isinstance(component, SupportsBind)
     assert isinstance(component, SupportsXarray)
+    assert isinstance(component, SupportsInternalStepping)
     assert component.name == "atm"
+
+
+def test_internal_steps_per_call_matches_inner_steps(component):
+    """2026-09 review, round 3 follow-up (finding 7): the capability is wired up.
+
+    ``internal_steps_per_call`` is what lets ``jem.driver._max_element_rate``
+    see JCM's own internal sub-cycling; it must report exactly
+    ``self._inner_steps()``, not a stand-in or a stale cached value. For this
+    module's T21/5-layer aquaplanet config -- a 1 day coupling timestep over
+    JCM's own 30-minute physics timestep -- that is 48, the same figure the
+    2026-09 review's own reproduction used.
+    """
+    assert component.internal_steps_per_call() == component._inner_steps() == 48
+
+
+def test_run_chunked_accepts_a_10000_year_earth_slab_style_run(model):
+    """2026-09 review, round 3 follow-up (finding 7): a realistic configuration.
+
+    An otherwise ordinary earth-slab-style coupler (atm+ocn+seaice, no
+    workflow multiplicity, no nesting) has JCM's own
+    ``internal_steps_per_call`` (48, this module's 30-minute-physics/
+    daily-coupling config) as its fastest raw counter -- exactly the number
+    ``jem.driver._max_element_rate`` now finds, with no jcm-specific
+    knowledge added to ``jem.driver`` itself (:class:`SupportsInternalStepping`
+    is generic). A 10,000-year run (about 3,652,425 daily coupled steps,
+    ``rr/c3.py``'s own sanity figure) is comfortably inside the resulting
+    limit, and one that overflows the (now much smaller) limit is refused.
+    Checked directly against ``_check_step_counters_fit_int32`` /
+    ``_max_safe_coupled_steps`` rather than the whole of ``run_chunked``,
+    which would then have to build and run a multi-million-step trajectory
+    for a check that is itself pure Python arithmetic.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel, SlabSeaiceModel
+    from jem.components.slab import SlabGrid
+    from jem.driver import (
+        _check_step_counters_fit_int32,
+        _max_element_rate,
+        _max_safe_coupled_steps,
+    )
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model),
+        "ocn": SlabOceanModel(grid),
+        "seaice": SlabSeaiceModel(grid, name="seaice"),
+    }
+    coupler = Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+    assert _max_element_rate(coupler) == 48  # JCM's own internal_steps_per_call
+
+    ten_thousand_years = 3_652_425  # ~10,000 proleptic-Gregorian years, daily steps
+    _check_step_counters_fit_int32(coupler, 0, ten_thousand_years)  # must not raise
+
+    limit = _max_safe_coupled_steps(coupler)
+    assert ten_thousand_years < limit  # sanity: comfortably inside, not at the edge
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        _check_step_counters_fit_int32(coupler, 0, limit + 2)
 
 
 def test_step_before_bind_raises(model):

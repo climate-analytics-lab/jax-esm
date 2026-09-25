@@ -46,10 +46,10 @@ The coupler raises :code:`TypeError` naming the missing member if an object
 does not satisfy the protocol.
 
 
-The three optional capabilities
+The four optional capabilities
 ---------------------------------
 
-Three further capabilities are optional, and each is detected with
+Four further capabilities are optional, and each is detected with
 :code:`isinstance` at the point it is used -- a component that omits one is
 simply skipped there, never broken:
 
@@ -76,6 +76,17 @@ simply skipped there, never broken:
        coupler's clock against the model's own and **refuse**, with
        ``ValueError``, a configuration that cannot work (a coupling timestep
        that does not divide the model's own).
+   * - :class:`~jem.base.component.SupportsInternalStepping`
+     - ``internal_steps_per_call() -> int``
+     - Report how many of the component's own internal timesteps happen
+       inside one ``step()`` call, for a component that keeps a raw counter
+       of its own faster than the coupled step calling it (JCM's own
+       ``RunState.step``). ``jem.driver._max_element_rate`` multiplies this
+       in the same way it does a workflow multiplicity, so
+       ``jem.driver.run_chunked``'s int32 safety check covers this
+       component's own counter too -- a component that omits it is simply
+       assumed to advance no faster than the calls it receives (rate 1),
+       the same as before this capability existed.
 
 
 Designing the carry
@@ -189,7 +200,13 @@ Four things to note:
 - :code:`step` calls :code:`model.run_from_state_with_carry()` with the
   coupling interval as both :code:`save_interval` and :code:`total_time`, so
   JCM sub-steps internally at its own timestep and returns one saved record
-  per coupling step.
+  per coupling step. That internal sub-stepping is exactly what
+  :code:`internal_steps_per_call` (:code:`self._inner_steps()`, how many of
+  JCM's own timesteps make one coupling step) reports to
+  :code:`jem.driver._max_element_rate`, so a run long enough to overflow
+  JCM's own internal step counter is refused by
+  :code:`jem.driver.run_chunked` up front, the same as one long enough to
+  overflow the coupler's own.
 - The surface fluxes are converted on the way out, in
   :mod:`jem.components.jcm.exchange_fields`: JCM publishes its
   package-independent :code:`SurfaceExchange` contract (jax-gcm#754) with

@@ -227,6 +227,136 @@ def test_max_element_rate_follows_a_sub_stepped_element():
     assert _max_element_rate(coupler) == 24
 
 
+class _FakeJCMLikeComponent:
+    """A minimal component with its own internal, sub-cycled counter.
+
+    Stands in for JCM's real ``JCMComponent`` (``self._inner_steps()``,
+    ``RunState.step``): a component with an internal timestep of its own,
+    faster than the coupled step calling it, entirely invisible to
+    ``jem.driver`` unless it reports it via ``internal_steps_per_call``
+    (:class:`~jem.base.component.SupportsInternalStepping`). Used here rather
+    than a real ``JCMComponent`` so the boundary tests below stay fast and
+    exact -- they are about the arithmetic ``jem.driver`` does with the rate
+    a component reports, not about jax-gcm itself (that is
+    ``tests/unit/test_jcm_component.py``'s job).
+    """
+
+    def __init__(self, internal_rate: int, name: str = "atm"):
+        """Name the component and fix the internal rate it reports."""
+        self.name = name
+        self._internal_rate = internal_rate
+
+    def initialize(self):
+        return {"value": jnp.float32(0.0)}
+
+    def step(self, carry, time):
+        del time
+        return {"value": carry["value"] + 1.0}, {"value": carry["value"]}
+
+    def internal_steps_per_call(self) -> int:
+        """Report the internal rate, exactly as ``JCMComponent._inner_steps`` does."""
+        return self._internal_rate
+
+
+def test_max_element_rate_includes_a_components_own_internal_stepping_rate():
+    """2026-09 review, round 3 follow-up (finding 7): a component may opt in.
+
+    A component that implements ``SupportsInternalStepping`` reports how many
+    of its own internal timesteps happen inside one ``step()`` call; a plain
+    (non-nested, multiplicity-1) component contributing that rate directly is
+    the base case nesting and multiplicity build on.
+    """
+    from jem.driver import _max_element_rate
+
+    component = _FakeJCMLikeComponent(48)
+    coupler = Coupler(
+        {"atm": component}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    assert _max_element_rate(coupler) == 48
+
+
+def test_max_element_rate_multiplies_internal_stepping_by_workflow_multiplicity():
+    """A component sub-stepped by the workflow AND internally is both, multiplied.
+
+    An element called ``m`` times by the workflow, each call itself making
+    ``k`` internal steps, advances its own internal counter ``m * k`` times
+    per outer coupled step -- the same composition multiplicity and nesting
+    already get, just with a component's own reported rate as one more
+    factor.
+    """
+    from jem.driver import _max_element_rate
+
+    component = _FakeJCMLikeComponent(48)
+    coupler = Coupler(
+        {"atm": component}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE, workflow=["atm"] * 3,
+    )
+    assert _max_element_rate(coupler) == 3 * 48
+
+
+def test_max_element_rate_defaults_to_one_for_a_component_with_no_internal_stepping():
+    """A component that does not implement the capability is assumed rate 1.
+
+    The same as every component before this capability existed (e.g.
+    ``SlabOceanModel``, which has no internal timestep of its own to report).
+    """
+    from jem.driver import _max_element_rate
+
+    coupler = Coupler(
+        {"atm": _FakeJCMLikeComponent(48, name="atm"), "ocn": SlabOceanModel(make_grid())},
+        {}, coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+    # Dominated by "atm"'s internal rate, but "ocn" (no `internal_steps_per_call`)
+    # must not raise or silently count as anything other than 1.
+    assert _max_element_rate(coupler) == 48
+
+
+def test_check_step_counters_accepts_exactly_at_and_refuses_one_past_a_components_internal_limit(
+    tmp_path,
+):
+    """A JCM-like component's own internal rate is refused exactly at its boundary.
+
+    2026-09 review, round 3 follow-up: before this fix, `_max_element_rate`
+    had no way to see a component's own internal counter at all, so a run
+    long enough to overflow ``time.step * internal_rate`` (JCM's own
+    ``expected_step``, computed in ``_report_authoritative_clock_drift``) was
+    never refused by `run_chunked`. This is checked directly against
+    `_check_step_counters_fit_int32` (not the whole of `run_chunked`, which
+    would then have to build and run a multi-million-step trajectory) --
+    exactly the pattern `test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit`
+    already uses for the coupler-hierarchy-only case.
+    """
+    from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
+
+    # A large internal rate, like the sub-stepped-element test above, so the
+    # limit is small enough to name in this test's own assertions.
+    component = _FakeJCMLikeComponent(2880)
+    coupler = Coupler(
+        {"atm": component}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit < 10**7  # sanity: the internal-rate limit, not the day one
+
+    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+
+    def must_not_be_called(iterations, **kwargs):
+        raise AssertionError(
+            f"a {iterations}-step trajectory was built for a run past a "
+            "component's own internal-stepping limit"
+        )
+
+    coupler.generate_trajectory_function = must_not_be_called
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        run_chunked(
+            coupler, total_time=f"{limit + 2} days", chunk=f"{limit + 2} days",
+            output_dir=tmp_path,
+        )
+
+
 def test_run_chunked_refuses_a_run_past_a_sub_stepped_elements_own_counter(
     tmp_path,
 ):

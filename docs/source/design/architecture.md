@@ -307,7 +307,7 @@ parameter is varied (see *Parameters*); the slab models and `Coupler` itself do,
 `JCMComponent` and `VerosComponent` do not, because they initialize from the
 wrapped model's own state.
 
-Three capabilities are **optional**, and are tested for with `isinstance`
+Four capabilities are **optional**, and are tested for with `isinstance`
 against their protocols at the one place that uses them — never with `hasattr`
 at a random call site:
 
@@ -316,6 +316,7 @@ at a random call site:
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
+| `SupportsInternalStepping` | `internal_steps_per_call() -> int` | `JCMComponent` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -341,6 +342,26 @@ function behind `CouplingTime.year_fraction`, so a climatology sampled in
 `initialize()` and one sampled in `step()` cannot disagree about where the run
 starts. A model that was never registered with a coupler reads 1 January, which
 is what a bare `model.initialize()` in a test or a notebook gets.
+
+`internal_steps_per_call()` reports how many of a component's own internal
+timesteps happen inside one `step()` call — for a component with an internal
+clock faster than the coupled step calling it (`JCMComponent`'s
+`self._inner_steps()`, JCM's own physics timestep count per coupling step),
+which may keep raw counters of its own that overflow before the coupler
+hierarchy's own do (JCM's `RunState.step`, and the `time.step *
+self._inner_steps()` product `JCMComponent
+._report_authoritative_clock_drift` computes from it — see that method's own
+docstring). `jem.driver._max_element_rate` multiplies this rate in for every
+element clock that calls the component (a workflow multiplicity, or a nested
+`Coupler`'s own substep rate), so `jem.driver.run_chunked`'s up-front int32
+check covers a component's own internal counter the same way it covers a
+workflow multiplicity or a nested coupler — with no jcm-specific knowledge
+added to `jem.driver` itself: the capability is generic, and any component
+with a faster internal clock of its own may implement it the same way
+`JCMComponent` does. A component that does not implement it is assumed to
+advance no faster than the calls it receives (rate 1), and one that keeps
+such counters without reporting them is simply not protected — the same as a
+component that skips `SupportsBind`'s clock-agreement check.
 
 `step` must be a pure function of `(carry, time)` and must return a carry with
 exactly the pytree structure, shapes and dtypes it received, or `lax.scan`
@@ -1897,7 +1918,12 @@ worked through end to end for JCM; keep the two in sync when either changes.
 3. Add `bind(...)` if the model has an internal timestep, and raise `ValueError`
    when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
    time)` if it produces output, and `save_carry`/`load_carry` if its carry
-   cannot be checkpointed as a plain pytree.
+   cannot be checkpointed as a plain pytree. Add `internal_steps_per_call()`
+   (`SupportsInternalStepping`) if the component keeps a raw counter of its
+   own that advances faster than the coupled step calling it (an internal
+   step count, a threaded clock like JCM's `RunState`) — otherwise
+   `jem.driver.run_chunked`'s int32 safety check cannot see it and cannot
+   refuse a run before it silently overflows.
 4. Export it from `jem/components/__init__.py` (lazily, via the module's
    `__getattr__`, if it pulls in an optional dependency — as Veros does).
 5. Register it: `Coupler({"mycomp": MyComponent(...)}, ...)`. If it is one of
