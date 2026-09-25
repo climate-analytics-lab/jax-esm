@@ -1675,15 +1675,16 @@ which is what makes it possible to decide whether an entry may be deleted.
 so a jax-gcm rename fails as "jax-gcm renamed or removed X, which JAX-ESM used
 for Y, at revision Z" — at the cheapest possible moment, rather than mid-run.
 The pin is a `dev` sha because no tagged jax-gcm release carries the changes
-JAX-ESM is written against. It is the `dev` commit that merged jax-gcm PR 877
-(`46eb3fc1`) — the merge commit itself rather than whatever `dev` was at bump
+JAX-ESM is written against. It is the `dev` commit that merged jax-gcm PR 878
+(`808412a5`) — the merge commit itself rather than whatever `dev` was at bump
 time, since later unrelated `dev` commits have not been checked against this
 code. That revision carries #750's one run schema and `configuration` group,
 #763's input-resolution engine, #819's removal of jax-gcm's own logging
-configuration and #824's public resumable state and date conversion, plus PR
-877's own two changes: jax-gcm#754, the package-independent `SurfaceExchange`
-struct (see "The JCM adapter" below), and #884's declared forcing-alignment
-rule. Under that rule, `jcm.forcing.resolve_align`'s `auto` no longer infers
+configuration and #824's public resumable state and date conversion; PR 877's
+two changes, jax-gcm#754's package-independent `SurfaceExchange` struct (see
+"The JCM adapter" below) and #884's declared forcing-alignment rule; and PR
+878's exact Gregorian `RunState` clock, `Model(start_time=)` and midpoint
+output labels (see "The JCM adapter" and the output-time conventions). Under that rule, `jcm.forcing.resolve_align`'s `auto` no longer infers
 climatology-vs-transient from a file's time axis, and raises for any file it
 cannot resolve from jax-gcm's own data-mirror manifest — see the
 `forcing.align` comments in `jem/config/configuration/{earth-slab,
