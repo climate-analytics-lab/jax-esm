@@ -1684,7 +1684,29 @@ def _gregorian_monthly_mean(
                 "jem.base.calendar.max_safe_record) -- this run is too long "
                 "to bin exactly."
             )
-        last_midpoint = start + step * (n_steps - 1) + step / 2
+        # `datetime` itself cannot represent a date past year 9999 -- an
+        # ordinary Python limitation, and a far smaller one than
+        # `gregorian_instant`'s own int32 day-count bound just checked above
+        # (thousands of years away from binding for any realistic coupling,
+        # vs. `max_safe_record`'s millions): a `total_time` whose last
+        # record's midpoint falls past it (`"3000000 days"` from 2000-01-01,
+        # about 8219 years, does) used to raise a raw `OverflowError: date
+        # value out of range` from this line instead of a clear refusal
+        # (2026-09 review, round 3, finding 6).
+        try:
+            last_midpoint = start + step * (n_steps - 1) + step / 2
+        except OverflowError as error:
+            raise ValueError(
+                f"total_time={total_time!r} needs {n_steps} {dt_seconds} s "
+                "records, whose last one's own midpoint falls on a date "
+                "Python's own `datetime` cannot represent (year 9999 is its "
+                "own maximum) while counting this run's calendar months on "
+                "the host -- long before gregorian_instant's own, far larger "
+                "int32 day-count limit (see jem.base.calendar.max_safe_record) "
+                "is anywhere close to binding. This run is too long for "
+                "monthly_mean's sequential form to bin by calendar month at "
+                "all."
+            ) from error
         n_bins = (last_midpoint.year - y0) * 12 + (last_midpoint.month - m0) + 1
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
         raise ValueError(f"n_months must be a positive integer; got {n_months!r}.")

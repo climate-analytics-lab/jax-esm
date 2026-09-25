@@ -735,6 +735,27 @@ def test_gregorian_monthly_mean_refuses_a_total_time_gregorian_instant_cannot_re
         monthly_mean(gregorian_coupler, total_time=f"{too_many_days} days")
 
 
+def test_gregorian_monthly_mean_refuses_cleanly_past_datetime_year_9999(
+    gregorian_coupler,
+):
+    """2026-09 review, round 3, finding 6: a raw ``OverflowError`` is not a refusal.
+
+    ``_gregorian_monthly_mean``'s ``total_time`` path counts the run's own
+    span of calendar months on the host with Python's ``datetime`` (see the
+    test above for the ``gregorian_instant`` int32 bound this is separate
+    from, and astronomically larger than): ``datetime`` itself cannot
+    represent a year past 9999, an ordinary Python limitation that binds
+    thousands of years before ``max_safe_record``'s own int32 bound ever
+    would. Before this fix, a ``total_time`` whose last record's midpoint
+    fell past year 9999 -- ``"3000000 days"`` from 2000-01-01 is about 8219
+    years, well past it -- raised a raw ``OverflowError: date value out of
+    range`` from ``datetime`` arithmetic instead of a clear ``ValueError``
+    naming the actual limit.
+    """
+    with pytest.raises(ValueError, match="datetime"):
+        monthly_mean(gregorian_coupler, total_time="3000000 days")
+
+
 def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
     """What wrapping an `n_months` accumulator really does, said honestly.
 
