@@ -632,6 +632,51 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
     assert decade_counts.shape == (10 * MONTHS_PER_YEAR,)
 
 
+def test_a_century_sequential_monthly_mean_is_exact_past_68_years(climatology_file):
+    """A 100-year sequential ``monthly_mean`` must still work on the 365_day calendar.
+
+    ``_midpoint_month_rule``'s bin rule used to compare in raw SECONDS
+    against a boundary table built from the pattern's own whole span; for a
+    sequential accumulator that span is ``n_months`` months of the run, which
+    for 100 years on this calendar is about 3.15e9 s -- already past
+    ``2**31`` -- so building the accumulator's bin boundaries raised
+    ``OverflowError`` calling ``update`` at all (2026-09 migration review,
+    item 2; the daily-coupling threshold is ``2**31 / 86400 / 365`` years,
+    about 68). The fix compares in DAYS instead (see that function's own
+    docstring), which stays int32-safe for millions of years. This is jitted,
+    as a real trajectory would call it, and checked at the run's very last
+    step -- the one a sequential accumulator sized exactly to the run
+    actually reaches -- against the plain month arithmetic
+    :func:`year_month_bins` also relies on.
+    """
+    years = 100
+    coupler = build_coupler(climatology_file)
+    monthly = monthly_mean(coupler, total_time=f"{years} years")
+    sums, counts = monthly.init()
+    assert counts.shape == (years * MONTHS_PER_YEAR,)
+
+    # One real step gives the diagnostics' exact structure, shape and dtype
+    # without integrating 36500 of them.
+    _, diagnostics = jax.jit(coupler.generate_step_function())(coupler.initialize())
+
+    late_step = years * STEPS_PER_YEAR - 1  # the run's very last coupled step
+    time = coupler.coupling_time(jnp.int32(late_step))
+    new_sums, new_counts = jax.jit(monthly.update)((sums, counts), diagnostics, time)
+
+    label = coupler.time_axis(late_step, 1).datetimes()[0]
+    start = np.datetime64(coupler.start_date.to_pydatetime())
+    expected_bin = int(
+        label.astype("datetime64[M]").astype(np.int64)
+        - start.astype("datetime64[M]").astype(np.int64)
+    )
+    assert 0 <= expected_bin < years * MONTHS_PER_YEAR
+
+    got_counts = np.asarray(new_counts)
+    np.testing.assert_array_equal(np.flatnonzero(got_counts), [expected_bin])
+    assert got_counts[expected_bin] == 1
+    del new_sums  # only the bin placement is under test here
+
+
 def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
     """What wrapping an `n_months` accumulator really does, said honestly.
 

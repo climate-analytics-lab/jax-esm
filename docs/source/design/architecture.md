@@ -1329,11 +1329,15 @@ bin rule following — so for one migration round the two genuinely disagreed at
 every month boundary, which the review caught and fixed rather than leaving as
 a documented gotcha. Two implementations share the underlying arithmetic:
 `jem.accumulate._midpoint_month_rule` for the fixed-length calendars
-(`365_day`/`360_day`, a static table of month boundaries, compared in seconds
-against a record's own midpoint after the same int32-safe
-reduce-before-multiply `_variable_window_rule` uses) and
-`_gregorian_month_rule` for `gregorian` (below). Without `accumulate`, the
-generated function is what it always was.
+(`365_day`/`360_day`, a static table of month boundaries, compared in **days**
+— not seconds, since a sequential accumulator's own boundary-seconds period
+can itself run well past `2**31` for a multi-decade run — against a record's
+own midpoint via `jem.base.calendar.gregorian_instant`'s int32-safe block
+decomposition) and `_gregorian_month_rule` for `gregorian` (below), which uses
+`gregorian_instant` directly. (This replaced a genuinely different,
+smaller-range decomposition in a 2026-09 fix — see `gregorian_instant`'s own
+docstring's **History** note and `max_safe_record` for the current, tested
+bound.) Without `accumulate`, the generated function is what it always was.
 
 **`gregorian` now works in-scan, exactly, real leap years included** — no
 fixed table, no "coupling step divides the year" restriction. This closes what

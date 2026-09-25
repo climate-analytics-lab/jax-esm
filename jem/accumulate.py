@@ -381,17 +381,49 @@ def _midpoint_month_rule(
 
     Notes
     -----
-    **Int32 safety.** ``record`` is reduced modulo ``records_per_period``
-    (the whole-record count of one period, e.g. one year) *before* being
-    multiplied by ``record_seconds``, exactly as
-    :func:`_variable_window_rule` reduces it before its own (record-count)
-    comparison -- the difference is only what the reduced counter is then
-    used for. The product is therefore bounded by ``records_per_period *
-    record_seconds == period`` (a whole year or ``n_months``' span in
-    seconds, well under 2**31 for any realistic calendar), regardless of how
-    long the run itself is; adding ``record_seconds // 2`` and
-    ``offset_seconds`` (each themselves bounded by ``period``) before the
-    final ``% period`` keeps every intermediate value bounded the same way.
+    **Int32 safety.** Comparing directly in seconds -- as this function did
+    before the 2026-09 migration review's item 2 -- bounds the traced
+    arithmetic by ``period`` (the pattern's own span: a year for the
+    twelve-bin form, or the whole ``n_months``/``total_time`` span for the
+    sequential one), which is fine for a year but **not** for a sequential
+    accumulator spanning decades: a 100-year, 365-day-calendar
+    ``monthly_mean`` has ``period`` around 3.15e9 s, already past ``2**31``,
+    so building ``boundaries_int32`` at all raised ``OverflowError`` past
+    about 68 years of sequential bins. The fix compares in **days** instead:
+    every month boundary but (possibly) the pattern's very last -- see
+    below -- falls exactly at midnight, so a boundary comparison needs no
+    finer resolution than a day, and a day count stays int32-safe up to
+    about 5.87 million years (``2**31`` DAYS) rather than 68 (``2**31``
+    SECONDS). The record's own day is computed with
+    :func:`~jem.base.calendar.gregorian_instant`'s own int32-safe block
+    decomposition (``start_days=0``, ``start_seconds=0``, since only "days
+    since the pattern's own start" is wanted here, not since the epoch) --
+    still necessary, and not merely a seconds-vs-days relabelling, because
+    ``record_mod * record_seconds`` alone can overflow int32 for a long
+    enough pattern exactly as it can in :func:`gregorian_instant`'s own
+    docstring; ``record`` is reduced modulo ``records_per_period`` (an
+    ordinary Python ``divmod``, so this itself never overflows regardless of
+    how long the run is) before either function ever sees it, which is what
+    keeps the elapsed time within one call ``gregorian_instant`` is asked to
+    resolve bounded by one *pattern*, not by the run.
+
+    ``boundary_days`` rounds every boundary **up** (``-(-boundaries //
+    86400)``, exact integer ceiling division, the same idiom
+    :func:`_ceil_div` in this module uses) rather than down. Every boundary
+    but the last is already an exact day multiple, for which ceiling and
+    floor agree, so this changes nothing for them; the pattern's very last
+    boundary, however, is sometimes **not** a whole number of days (see
+    :func:`monthly_mean`'s own construction of a sequential-form
+    accumulator's ``boundaries``, which extends the last one to the next
+    whole coupled step, "by less than one step" -- a coupling step that does
+    not itself divide a day exactly leaves a fractional day there). A
+    record's own midpoint is always *strictly* before ``period`` seconds (the
+    reduction above guarantees it), so its day can equal
+    ``floor(period / 86400)`` when the last boundary has a fractional day
+    left over -- rounding that boundary *up* instead keeps the record's day
+    strictly less than it, so ``searchsorted`` can never place a record past
+    the last valid bin (an off-by-one this function would otherwise commit
+    only in that specific edge case).
 
     **The half-second floor.** ``record_seconds // 2`` truncates a
     midpoint's fractional half-second down for a record of odd length. Every
@@ -400,11 +432,19 @@ def _midpoint_month_rule(
     can only move it a half-second *away* from a boundary it has not yet
     reached, never across one it would otherwise have crossed -- the floored
     midpoint and the true one are always on the same side of every boundary.
+    Comparing by day rather than by second does not change this: the
+    half-second truncation can only move an instant within the same second,
+    let alone the same day.
 
     """
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1])
-    boundaries_int32 = jnp.asarray(boundaries, dtype=jnp.int32)
+    # Ceiling, not floor -- see the Notes above for why the pattern's last
+    # boundary specifically needs it. `boundary_days` stays int32-safe for
+    # any period a real run's pattern spans (millions of years), unlike the
+    # `boundaries_int32` (SECONDS) array this replaces, which is what
+    # overflowed for a multi-decade sequential accumulator.
+    boundary_days = jnp.asarray(-(-boundaries // _SECONDS_PER_DAY), dtype=jnp.int32)
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         records_per_period, remainder = divmod(period, record_seconds)
@@ -416,13 +456,11 @@ def _midpoint_month_rule(
             f"{record_seconds} s records"
         )
         record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
-        midpoint_seconds = jnp.mod(
-            record_mod * record_seconds + record_seconds // 2 + offset_seconds,
-            period,
+        day, _ = gregorian_instant(
+            record_mod, record_seconds, 0, 0,
+            offset_seconds=offset_seconds + record_seconds // 2,
         )
-        return jnp.searchsorted(
-            boundaries_int32, midpoint_seconds, side="right"
-        ).astype(jnp.int32)
+        return jnp.searchsorted(boundary_days, day, side="right").astype(jnp.int32)
 
     return bin_of_record
 

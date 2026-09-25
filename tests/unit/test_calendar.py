@@ -22,6 +22,7 @@ from jem.base.calendar import (
     gregorian_instant,
     gregorian_ymd_from_days,
     is_leap_year,
+    max_safe_record,
 )
 
 # 400 Gregorian years is one full leap-cycle: it contains every one of the
@@ -102,6 +103,130 @@ def test_gregorian_instant_matches_pandas_at_record_start(record_seconds):
     )
     np.testing.assert_array_equal(np.asarray(days), want_days)
     np.testing.assert_array_equal(np.asarray(seconds), want_seconds)
+
+
+def _exact_instant(record, record_seconds, offset_seconds=0, start_seconds=0, start_days=0):
+    """Return the (days, seconds) `gregorian_instant` computes, in plain Python.
+
+    Arbitrary-precision Python ``int`` arithmetic -- no ``int32``, no
+    overflow, ever -- so this is the ground truth every property test in this
+    section checks the traced, ``int32``-only implementation against.
+    """
+    total = record * record_seconds + offset_seconds + start_seconds
+    days, seconds = divmod(total, 86400)
+    return start_days + days, seconds
+
+
+@pytest.mark.parametrize(
+    ("record_seconds", "offset_seconds", "start_seconds"),
+    [
+        (1, 0, 0),  # the finest possible record: sub-second resolution.
+        (3600, 1800, 43200),  # hourly, midpoint offset, an arbitrary start.
+        (86400, 0, 0),  # exactly a day: the fixed-calendar record length.
+        (2_629_746, 2_629_746 // 2, 21_600),  # a "1 month" Gregorian step,
+        #  with the midpoint offset `_gregorian_month_rule` actually uses.
+        (31_556_952, 0, 0),  # a "1 year" Gregorian step.
+        (604_800, 0, 0),  # a week -- an exact multiple of a day.
+    ],
+)
+def test_gregorian_instant_matches_python_ints_up_to_max_safe_record(
+    record_seconds, offset_seconds, start_seconds
+):
+    """Cross-check against exact Python ``int`` arithmetic at and below the bound.
+
+    ``max_safe_record`` is a *guaranteed-safe* bound, proven exact in its own
+    docstring; this checks that proof empirically, at the bound itself, just
+    below it, at 0 and 1, and at a dense band around it (where a
+    reduce-before-multiply bug is most likely to show up first -- see the
+    2026-09 migration review, item 2, whose "1 month" case broke as early as
+    record 817).
+    """
+    bound = max_safe_record(
+        record_seconds, offset_seconds=offset_seconds, start_seconds=start_seconds
+    )
+    assert bound > 0
+    records = sorted(
+        {0, 1, 2, bound}
+        | set(range(max(0, bound - 200), bound + 1))
+        | {min(bound, r) for r in (1_000, 10_000, 1_000_000, 10_000_000)}
+    )
+    days, seconds = gregorian_instant(
+        jnp.asarray(records, dtype=jnp.int32),
+        record_seconds,
+        0,
+        start_seconds,
+        offset_seconds=offset_seconds,
+    )
+    for record, day, second in zip(records, np.asarray(days), np.asarray(seconds), strict=True):
+        want_day, want_second = _exact_instant(
+            record, record_seconds, offset_seconds, start_seconds
+        )
+        assert (int(day), int(second)) == (want_day, want_second), record
+
+
+def test_gregorian_instant_is_exact_near_2_31_records_for_a_fine_timestep():
+    """The full int32 record range, for a coupling step fine enough to allow it.
+
+    A ``record_seconds`` that divides a day exactly has no leftover seconds
+    per block (:func:`max_safe_record`'s docstring), so it is exact for
+    *every* record an int32 counter can hold. This checks the literal top of
+    that range, ``2**31 - 1`` records of an hourly step -- about 245,000
+    years past the epoch, past even Python's own ``datetime`` range, so the
+    exact (days, seconds) claim is cross-checked against plain Python ``int``
+    arithmetic (:func:`_exact_instant`) here, and against ``datetime``
+    separately, at a still-enormous but ``datetime``-representable 1e7
+    records (about 1,140 years), below.
+    """
+    record_seconds = 3600
+    record = 2**31 - 1
+    assert max_safe_record(record_seconds) >= record
+
+    days, seconds = gregorian_instant(jnp.int32(record), record_seconds, 0, 0)
+    exact_days, exact_seconds = _exact_instant(record, record_seconds)
+    assert int(days) == exact_days
+    assert int(seconds) == exact_seconds
+
+    # `gregorian_ymd_from_days` itself only needs to not raise here -- it is
+    # exercised against real `datetime`s over 400 years in the tests above --
+    # so this only pins that it still runs, without wrapping, on a day count
+    # this large.
+    year, month, day = gregorian_ymd_from_days(days)
+    assert int(year) > 1970
+
+    record = 10_000_000
+    assert max_safe_record(record_seconds) >= record
+    days, seconds = gregorian_instant(jnp.int32(record), record_seconds, 0, 0)
+    exact_days, exact_seconds = _exact_instant(record, record_seconds)
+    assert int(days) == exact_days
+    assert int(seconds) == exact_seconds
+    year, month, day = gregorian_ymd_from_days(days)
+    expected = pydt.date(1970, 1, 1) + pydt.timedelta(days=exact_days)
+    assert (int(year), int(month), int(day)) == (
+        expected.year, expected.month, expected.day,
+    )
+
+
+def test_gregorian_instant_one_month_step_survives_far_past_its_old_817_break(
+):
+    """The "1 month" Gregorian coupling step: exact for tens of thousands of years.
+
+    Before the fix, ``gregorian_instant`` silently wrapped past record 817 of
+    a 2629746 s ("1 month") coupling step -- about 68 records short of even a
+    century (2026-09 migration review, item 2; ``jem/base/calendar.py``'s own
+    History note). This checks a record count far beyond that break --
+    50,000 records is over 4,100 years of monthly output -- against exact
+    Python ``int`` arithmetic.
+    """
+    record_seconds = 2_629_746
+    record = 50_000
+    assert max_safe_record(record_seconds) > record  # comfortably past it
+    days, seconds = gregorian_instant(
+        jnp.int32(record), record_seconds, 0, 0, offset_seconds=record_seconds // 2
+    )
+    want_days, want_seconds = _exact_instant(
+        record, record_seconds, record_seconds // 2
+    )
+    assert (int(days), int(seconds)) == (want_days, want_seconds)
 
 
 def test_gregorian_instant_midpoint_never_crosses_a_month_boundary():
