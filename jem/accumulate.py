@@ -579,6 +579,68 @@ def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int
     return seconds
 
 
+def _whole_coupling_steps(total_seconds: int, dt_seconds: int, total_time: str | float) -> int:
+    """Return ``total_seconds`` as a whole, positive number of ``dt_seconds`` steps.
+
+    ``monthly_mean(coupler, total_time=...)`` sizes a sequential accumulator
+    to a run of this length, and that run -- were it actually integrated --
+    would be refused by :func:`jem.driver.run_chunked`'s own
+    ``total_time``/``chunk`` validation (``jem.driver._whole_steps``) unless
+    it is a whole number of coupling steps: a run is only ever integrated in
+    whole coupled steps, so a duration that is not one names no run for the
+    accumulator to be sized to. Before this check existed, ``total_time=``
+    was silently floor-divided by the coupling timestep on both calendar
+    paths (this function's caller and :func:`_gregorian_monthly_mean`), so
+    ``"36.5 hours"`` on a daily coupling built a one-bin accumulator as if it
+    had been asked for exactly one day, and ``"10 years"`` on the default
+    ``"gregorian"`` calendar -- whose duration parser uses the fixed-average
+    365.2425-day year, so ``"10 years"`` is ``3652.425`` days, never a whole
+    number of days -- silently discarded the leftover 0.425 of a day with no
+    warning either.
+
+    Unlike :func:`jem.driver._whole_steps`, which compares *days* as floats
+    (a duration and a coupling timestep that need not themselves be whole
+    seconds until parsed) and so needs a relative tolerance, this compares
+    *seconds* that are already exact integers by the time either caller
+    calls it (:func:`_duration_to_seconds` and ``_exact_seconds`` on the
+    fixed-calendar path, ``_exact_seconds`` alone on the Gregorian one), so
+    the check is an exact modulo -- no tolerance needed or wanted.
+
+    Parameters
+    ----------
+    total_seconds : int
+        ``total_time``, already converted to exact whole seconds.
+    dt_seconds : int
+        The coupling timestep, in exact whole seconds.
+    total_time : str or float
+        The original argument, for the error message only.
+
+    Returns
+    -------
+    int
+        ``total_seconds // dt_seconds``.
+
+    Raises
+    ------
+    ValueError
+        If ``total_seconds`` is not a whole, positive multiple of
+        ``dt_seconds``.
+
+    """
+    n_steps, remainder = divmod(total_seconds, dt_seconds)
+    if remainder or n_steps < 1:
+        raise ValueError(
+            f"total_time={total_time!r} is {total_seconds} s, which is "
+            f"{total_seconds / dt_seconds:g} coupling steps of {dt_seconds} s "
+            "-- not a whole number of them (or shorter than one). An "
+            "accumulator is sized in whole coupled steps, exactly like a run "
+            "itself (jem.driver.run_chunked's own total_time/chunk validates "
+            "the same way), so there would be no well-defined record for a "
+            "fractional step to hold."
+        )
+    return int(n_steps)
+
+
 def _exact_seconds(value: float, what: str) -> int:
     """Return ``value`` as an ``int``, refusing a fractional second.
 
@@ -1165,9 +1227,9 @@ def monthly_mean(
     the coupler -- and, if the run's months are each to have a bin of their
     own, how many::
 
-        monthly_mean(coupler)                          # (12, ...): a climatology
-        monthly_mean(coupler, total_time="10 years")   # (120, ...): every month
-        monthly_mean(coupler, n_months=120)            # sized directly instead
+        monthly_mean(coupler)                           # (12, ...): a climatology
+        monthly_mean(coupler, total_time="3650 days")   # (120, ...): every month
+        monthly_mean(coupler, n_months=120)             # sized directly instead
 
     The two forms bin by the same rule and the same convention; they differ in
     what the accumulator *is*. Twelve bins are the calendar months, so a
@@ -1484,13 +1546,7 @@ def monthly_mean(
 
     if total_time is not None:
         total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
-        n_steps = total_seconds // dt_seconds
-        if n_steps < 1:
-            raise ValueError(
-                f"total_time={total_time!r} is {total_seconds} s, shorter "
-                f"than one coupling step ({dt_seconds} s); there is no "
-                "record for the accumulator to hold."
-            )
+        n_steps = _whole_coupling_steps(total_seconds, dt_seconds, total_time)
         # The elapsed time, from the start date, of the LAST record's own
         # midpoint -- `_months_covering` counts the calendar months from the
         # start date to this instant, inclusive, which is the accumulator
@@ -1585,13 +1641,7 @@ def _gregorian_monthly_mean(
 
     if total_time is not None:
         total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
-        n_steps = total_seconds // dt_seconds
-        if n_steps < 1:
-            raise ValueError(
-                f"total_time={total_time!r} is {total_seconds} s, shorter "
-                f"than one coupling step ({dt_seconds} s); there is no "
-                "record for the accumulator to hold."
-            )
+        n_steps = _whole_coupling_steps(total_seconds, dt_seconds, total_time)
         last_midpoint = start + step * (n_steps - 1) + step / 2
         n_bins = (last_midpoint.year - y0) * 12 + (last_midpoint.month - m0) + 1
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:

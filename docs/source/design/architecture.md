@@ -1393,14 +1393,19 @@ there only) is ever taken up.
 **Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
 the twelve calendar months, so a ten-year run composites its ten Januaries into
 bin 0 — a climatology, and what a fixed `(12, …)` accumulator is for.
-`monthly_mean(coupler, total_time="10 years")` (or `n_months=`) instead gives
+`monthly_mean(coupler, total_time="3650 days")` (or `n_months=`) instead gives
 the months the run passes through, in order, each with a bin of its own,
 starting with the month of the run's own first record (its midpoint, to be
-precise — see `monthly_mean`'s **Sequential-form bin 0**). It is sized by
-counting the calendar months the run's record midpoints touch, which is why
-ten years gives exactly **120** bins, not 121: the run's last record's own
-midpoint is `total_time - dt/2`, half a coupling step *short* of the ten-year
-boundary, so it never spills into an eleventh year the way the pre-migration
+precise — see `monthly_mean`'s **Sequential-form bin 0**). (`"3650 days"`, not
+the more readable `"10 years"`: `total_time` must be a whole number of
+coupling steps — `monthly_mean` refuses one that is not, exactly as
+`run_chunked` refuses the same duration for its own `total_time`/`chunk` — and
+on `"gregorian"`, JEM's own duration parser's fixed-average year makes `"10
+years"` `3652.425` days, never a whole number of daily coupling steps.) It is
+sized by counting the calendar months the run's record midpoints touch, which
+is why 3650 days gives exactly **120** bins, not 121: the run's last record's
+own midpoint is `total_time - dt/2`, half a coupling step *short* of the
+3650-day boundary, so it never spills into an eleventh year the way the pre-migration
 end-of-interval convention's boundary record used to. A run longer than the
 accumulator wraps at the **span** of its bins, exactly as a windowed mean wraps
 at the span of its windows — so a wrapped bin lines up with a calendar month
@@ -1428,7 +1433,7 @@ same `finalize`:
 from jem.accumulate import month_lengths, monthly_mean, windowed_mean
 
 monthly = monthly_mean(coupler)                                  # 12 bins
-months  = monthly_mean(coupler, total_time="10 years")           # 120: every month
+months  = monthly_mean(coupler, total_time="3650 days")          # 120: every month
 pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
 weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
 leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cycled

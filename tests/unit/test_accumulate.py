@@ -1800,9 +1800,20 @@ def test_gregorian_no_longer_needs_a_fixed_table_or_a_divides_the_year_check(
     "coupling timestep divides the year" check at all -- unlike the fixed
     calendars, ``gregorian`` reads a record's real calendar month directly off
     its exact date rather than reducing a step counter modulo a table.
+
+    ``"3650 days"``, not ``"10 years"``: a *literal* ``"10 years"`` is JEM's
+    own duration parser's fixed-average-year approximation
+    (``days_per_year("gregorian") == 365.2425``), so it is ``3652.425`` days
+    -- never a whole number of this coupler's daily coupling steps, whatever
+    the real (leap or non-leap) Gregorian years the run's actual dates would
+    cross -- and ``monthly_mean`` now refuses a ``total_time`` that is not a
+    whole number of coupling steps, exactly as ``jem.driver.run_chunked``
+    already refuses the same duration for its own ``total_time``/``chunk``
+    (2026-09 migration review). ``"3650 days"`` is a plain, exact duration
+    that this daily-coupling ``gregorian_coupler`` can actually be run for.
     """
     monthly_mean(gregorian_coupler)  # twelve-bin form: does not raise
-    monthly_mean(gregorian_coupler, total_time="10 years")  # sequential: does not raise
+    monthly_mean(gregorian_coupler, total_time="3650 days")  # sequential: does not raise
     assert gregorian_coupler.calendar == "gregorian"
 
 
@@ -1980,3 +1991,52 @@ def test_a_float_representation_of_whole_seconds_is_accepted():
     assert _exact_seconds(3600.0, "window") == 3600
     with pytest.raises(ValueError, match="not a whole number of seconds"):
         _exact_seconds(10.5, "window")
+
+
+# ---------------------------------------------------------------------------
+# monthly_mean(total_time=...) must be a whole number of coupling steps,
+# exactly like run_chunked's own total_time/chunk (jem.driver._whole_steps)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("total_time", ["36.5 hours", "1.5 days"])
+def test_monthly_mean_refuses_a_total_time_that_is_not_whole_coupling_steps(
+    coupler, total_time
+):
+    """A ``total_time`` shorter than a whole number of coupling steps is refused.
+
+    Before this fix, ``total_time=`` was silently floor-divided by the
+    coupling timestep (``n_steps = total_seconds // dt_seconds``), with no
+    check that the division was exact -- so ``"36.5 hours"`` on this coupler's
+    daily coupling built a one-bin accumulator as if it had been asked for
+    exactly one day, discarding the extra 12.5 hours with no warning.
+    ``jem.driver.run_chunked`` already refuses the same durations for its own
+    ``total_time``/``chunk`` (:func:`jem.driver._whole_steps`); an
+    accumulator sized by ``total_time`` is bound by the same coupled-step
+    granularity a run is, so it is refused here the same way.
+    """
+    with pytest.raises(ValueError, match="whole"):
+        monthly_mean(coupler, total_time=total_time)
+
+
+def test_gregorian_monthly_mean_refuses_a_total_time_that_is_not_whole_coupling_steps(
+    gregorian_coupler,
+):
+    """The same refusal, on the ``"gregorian"`` path (a separate code path).
+
+    ``"10 years"`` is JEM's own duration parser's fixed-average-year
+    approximation (``jem.base.component.days_per_year("gregorian") ==
+    365.2425``), so it is ``3652.425`` days -- not a whole number of this
+    coupler's daily coupling steps -- regardless of how many real (leap or
+    non-leap) Gregorian years the run's actual dates would cross. Before this
+    fix, ``_gregorian_monthly_mean`` silently floor-divided this to 3652
+    steps and built a 120-bin accumulator as if the run were exactly that
+    long.
+    """
+    with pytest.raises(ValueError, match="whole"):
+        monthly_mean(gregorian_coupler, total_time="10 years")
+    with pytest.raises(ValueError, match="whole"):
+        monthly_mean(gregorian_coupler, total_time="36.5 hours")
+    # A duration that IS a whole number of this coupler's (daily) steps is
+    # unaffected -- this is a stricter check, not a more restrictive one.
+    monthly_mean(gregorian_coupler, total_time="10 days")

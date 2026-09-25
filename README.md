@@ -331,15 +331,20 @@ a climatology. Give it a size and it bins into the months the run passes
 through instead, in order, each with a bin of its own:
 
 ```python
-months = monthly_mean(coupler, total_time="10 years")   # or n_months=120
+months = monthly_mean(coupler, total_time="3650 days")   # or n_months=120
 means = months.finalize(accumulator)   # 120 bins: Jul 2001, Aug 2001, …
 ```
 
 These are calendar months whatever day the run starts on — phased to the
 month the run itself begins in — and they do not drift the way a fixed 30-day
-window does. Ten years gives exactly 120 bins, not 121: every record is binned
-by its own **midpoint** (the same instant it is written with), so the run's
-last record's midpoint is half a coupling step short of the ten-year boundary
+window does. `total_time` must be a whole number of coupling steps, exactly
+like `run_chunked`'s own `total_time`/`chunk` — which is why this reads
+`"3650 days"` rather than the more readable `"10 years"`: on `"gregorian"`
+(this coupler's calendar), `"10 years"` is JEM's own duration parser's
+fixed-average year, `3652.425` days, never a whole number of daily coupling
+steps. 3650 days gives exactly 120 bins, not 121: every record is binned by
+its own **midpoint** (the same instant it is written with), so the run's
+last record's midpoint is half a coupling step short of the 3650-day boundary
 and stays inside December of year 10 rather than spilling into an eleventh
 year. `total_time` is the spelling to prefer regardless of the exact count —
 a run longer than the accumulator wraps at the *span* of its bins, so a
