@@ -48,12 +48,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal, NamedTuple
 
+import datetime
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jem.base.calendar import gregorian_instant, gregorian_ymd_from_days
 from jem.base.component import (
     CouplingTime,
     Diagnostics,
@@ -135,7 +137,14 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
     NotImplementedError
         If the calendar's year is not a fixed whole number of days with fixed
         month lengths -- ``gregorian``, whose leap years change the table from
-        year to year.
+        year to year, so no *table* of twelve lengths can describe it (this
+        function only ever returns one fixed table). This is not a limit on
+        binning calendar months on ``gregorian`` in general:
+        :func:`monthly_mean` computes them directly from the exact Gregorian
+        calendar instead of from a table, entirely in-scan, and does not call
+        this function to do it -- see that function's own documentation. This
+        function stays table-only because its whole purpose is a table other
+        code (the weighting example above, :func:`windowed_mean`) can read.
 
     """
     # A coupler carries its year length; a bare number is one already.
@@ -150,8 +159,10 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
             f"them is a constant; this year is {days_per_year} days. "
             f"Supported: {sorted(_MONTH_LENGTHS)} days. A Gregorian "
             "calendar's leap years change the table from year to year, which "
-            "a static table cannot express -- bin such a run on the host, by "
-            "the datetime64 labels of `Coupler.to_xarray`."
+            "a static table cannot express -- but `monthly_mean(coupler, ...)` "
+            "itself handles `calendar='gregorian'` directly (exactly, in-scan, "
+            "real leap years included), without going through this table at "
+            "all; call it directly rather than trying to build one here."
         )
     return _MONTH_LENGTHS[length]
 
@@ -163,10 +174,19 @@ def _variable_window_rule(
 ) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
     """Return the ``bin_of_record`` rule for bins of the given lengths.
 
-    The one piece of bin arithmetic in this module: both :func:`monthly_mean`
-    and :func:`windowed_mean` are bins laid end to end, cycling for as long as
-    the run lasts, and a record belongs to the bin its own label falls in.
-    They differ only in the arguments here.
+    :func:`windowed_mean`'s bin arithmetic: bins laid end to end, cycling for
+    as long as the run lasts, a record belonging to the bin its interval's
+    *end* falls in (in elapsed run-time, independent of what instant the
+    record is actually labelled with -- see :func:`windowed_mean`'s own
+    docstring for why the two are kept independent). This was also
+    :func:`monthly_mean`'s bin rule before the 2026-09 migration review moved
+    that function to bin by a record's **midpoint** instead
+    (:func:`_midpoint_month_rule`, :func:`_gregorian_month_rule`), to keep
+    pace with :class:`~jem.base.component.TimeAxis`'s own move to a
+    midpoint output label -- a half-record shift this function's own
+    boundaries-to-record-counts conversion (see the Notes below) cannot
+    express, which is why that rebinding needed a new function rather than a
+    third ``inclusive`` mode here.
 
     Parameters
     ----------
@@ -195,17 +215,14 @@ def _variable_window_rule(
         the first bin ``(day 0, day 5]`` and the second ``(day 5, day 10]``,
         so a label of exactly day 5 closes the first bin.
 
-        The same thing in calendar months, for a run starting 1 January
-        00:00 with daily records: with ``inclusive="left"`` the record
-        labelled 1 February 00:00 is the first of February's bin, which is
-        what ``groupby("time.month")`` of the written output does (under the
-        leap-year condition :func:`monthly_mean` states) and why
-        :func:`monthly_mean` uses it. With ``inclusive="right"`` a label of
-        1 January 00:00 would be the last record of the bin *before* January
-        and 1 February 00:00 the last record of January's bin; that is what
-        :func:`windowed_mean` uses, because JEM labels a record at the end
-        of the interval it covers, so the first 5-day window is the records
-        labelled day 1 to day 5.
+        Only ``inclusive="right"`` is exercised in production now (by
+        :func:`windowed_mean`): a record's interval-end position of exactly
+        day 5 closes the first 5-day window rather than opening the second,
+        so the first window is the records covering days 0-5. ``"left"``
+        remains supported as the general case (and is what
+        :func:`monthly_mean` used, on this same function, before the
+        2026-09 migration moved it to :func:`_midpoint_month_rule` /
+        :func:`_gregorian_month_rule` instead).
 
     Returns
     -------
@@ -317,6 +334,171 @@ def _ceil_div(numerator: Any, denominator: int) -> Any:
     return -((-numerator) // denominator)
 
 
+def _midpoint_month_rule(
+    boundaries_seconds: np.ndarray, offset_seconds: int
+) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
+    """Return :func:`monthly_mean`'s ``bin_of_record`` rule, binning by MIDPOINT.
+
+    This is the fixed-calendar (``365_day``/``360_day``) counterpart of
+    :func:`_gregorian_month_rule`, and exists as a separate function from
+    :func:`_variable_window_rule` -- rather than a third mode of that one --
+    because the two do genuinely different arithmetic. A record's *label* is
+    now its interval's midpoint (:class:`~jem.base.component.TimeAxis`'s
+    convention since jax-gcm v3, PR 878), which sits half a record off every
+    boundary; :func:`_variable_window_rule` converts the bin boundaries to
+    **record counts** up front specifically so the traced arithmetic is a
+    cheap integer comparison, and that conversion is only exact for a
+    whole-record shift (the end or the start of a record), not a half-record
+    one. Reworking it to carry a fractional record shift would give up the
+    one thing it is for; comparing in **seconds** instead, after the same
+    reduce-before-multiply step that keeps :func:`_variable_window_rule`
+    int32-safe, keeps the exactness and needs no record-count conversion at
+    all -- see the Notes below for why that reduction is still int32-safe.
+    :func:`windowed_mean` still uses :func:`_variable_window_rule` unchanged:
+    its own bins are measured from the run's start with no phase, and its
+    docstring's own convention (closed at the window's end) is independent of
+    what label :class:`~jem.base.component.TimeAxis` happens to write on a
+    record -- see that function's docstring.
+
+    Parameters
+    ----------
+    boundaries_seconds : numpy.ndarray
+        The **ends** of the months, in whole seconds from the start of the
+        pattern (the cumulative month lengths); see
+        :func:`_variable_window_rule`'s identically-named parameter, which
+        this mirrors exactly.
+    offset_seconds : int
+        Where the run's start date sits in that pattern.
+
+    Returns
+    -------
+    callable
+        ``(record, record_seconds) -> int32 bin index``, closed at the start
+        of a month: a midpoint falling exactly on a month boundary counts in
+        the month it opens, matching ``groupby("time.month")``'s own
+        ``pandas`` convention for a timestamp falling exactly at midnight on
+        the 1st.
+
+    Notes
+    -----
+    **Int32 safety.** ``record`` is reduced modulo ``records_per_period``
+    (the whole-record count of one period, e.g. one year) *before* being
+    multiplied by ``record_seconds``, exactly as
+    :func:`_variable_window_rule` reduces it before its own (record-count)
+    comparison -- the difference is only what the reduced counter is then
+    used for. The product is therefore bounded by ``records_per_period *
+    record_seconds == period`` (a whole year or ``n_months``' span in
+    seconds, well under 2**31 for any realistic calendar), regardless of how
+    long the run itself is; adding ``record_seconds // 2`` and
+    ``offset_seconds`` (each themselves bounded by ``period``) before the
+    final ``% period`` keeps every intermediate value bounded the same way.
+
+    **The half-second floor.** ``record_seconds // 2`` truncates a
+    midpoint's fractional half-second down for a record of odd length. Every
+    month boundary is a whole number of seconds (there is no such thing as
+    half past midnight on the 1st in this calendar), so flooring a midpoint
+    can only move it a half-second *away* from a boundary it has not yet
+    reached, never across one it would otherwise have crossed -- the floored
+    midpoint and the true one are always on the same side of every boundary.
+
+    """
+    boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
+    period = int(boundaries[-1])
+    boundaries_int32 = jnp.asarray(boundaries, dtype=jnp.int32)
+
+    def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
+        records_per_period, remainder = divmod(period, record_seconds)
+        # See `_variable_window_rule`'s identical assertion: an invariant of
+        # the callers (the coupler only ever builds a sub-timestep that is a
+        # whole division of the coupled one), not a user error.
+        assert remainder == 0, (
+            f"a period of {period} s is not a whole number of "
+            f"{record_seconds} s records"
+        )
+        record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
+        midpoint_seconds = jnp.mod(
+            record_mod * record_seconds + record_seconds // 2 + offset_seconds,
+            period,
+        )
+        return jnp.searchsorted(
+            boundaries_int32, midpoint_seconds, side="right"
+        ).astype(jnp.int32)
+
+    return bin_of_record
+
+
+def _gregorian_month_rule(
+    start_days: int,
+    start_seconds: int,
+    *,
+    sequential: bool,
+    y0: int = 0,
+    m0: int = 0,
+    n_bins: int = 12,
+) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
+    """Return :func:`monthly_mean`'s ``bin_of_record`` rule on the Gregorian calendar.
+
+    Unlike :func:`_midpoint_month_rule` and :func:`_variable_window_rule`,
+    this needs no fixed table of month lengths and no "period" to reduce a
+    record counter modulo: :func:`jem.base.calendar.gregorian_instant`
+    already reduces the traced record counter int32-safely (see its
+    docstring), and the record's real Gregorian month is then read directly
+    off the *exact* calendar date of its own midpoint via
+    :func:`~jem.base.calendar.gregorian_ymd_from_days` -- real leap years,
+    not a fixed 365- or 360-day table. This is what makes a jax-gcm-coupled
+    run's ``monthly_mean`` bins equal ``groupby("time.month")`` (or
+    ``groupby(["time.year", "time.month"])``) of its own written output *by
+    construction*, at every boundary including a 29 February, rather than
+    only when the run's labels happen to agree with a fixed model-calendar
+    table (the residual mismatch :func:`monthly_mean`'s **Leap days** section
+    describes for the ``365_day``/``360_day`` calendars, which do not have
+    this luxury because they are not the calendar the labels are written in).
+
+    Parameters
+    ----------
+    start_days, start_seconds : int
+        Days and seconds since the Unix epoch of the run's start date (a
+        ``jax_datetime.Datetime``'s ``.delta.days``/``.delta.seconds``).
+    sequential : bool
+        ``False`` for the twelve-bin climatology (bin = calendar month,
+        0-indexed January first); ``True`` for the sequential form (bin =
+        months since the run's first record, per ``y0``/``m0``).
+    y0, m0 : int
+        For the sequential form: the calendar year and month of the *first
+        record's own midpoint* (not necessarily the run's start date -- see
+        :func:`monthly_mean`'s sequential-form sizing, which computes both on
+        the host with the same convention). Bin 0 is this month; ignored for
+        the twelve-bin form.
+    n_bins : int
+        For the sequential form: the accumulator's size, which a run longer
+        than wraps into modulo -- exactly as the fixed-calendar sequential
+        form wraps at its own span (:func:`monthly_mean`'s **The sequential
+        form wraps...** paragraph), except the wrap here is a wrap of
+        *months* rather than of seconds, since there is no fixed span of
+        seconds a whole number of Gregorian months corresponds to. Ignored
+        for the twelve-bin form.
+
+    Returns
+    -------
+    callable
+        ``(record, record_seconds) -> int32 bin index``.
+
+    """
+
+    def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
+        days, _ = gregorian_instant(
+            record, record_seconds, start_days, start_seconds,
+            offset_seconds=record_seconds // 2,
+        )
+        year, month, _ = gregorian_ymd_from_days(days)
+        if sequential:
+            index = (year - y0) * 12 + (month - m0)
+            return jnp.mod(index, n_bins).astype(jnp.int32)
+        return (month - 1).astype(jnp.int32)
+
+    return bin_of_record
+
+
 def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int:
     """Return ``duration`` as a whole positive number of seconds.
 
@@ -402,8 +584,7 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     :class:`~jem.base.coupler.Coupler` that runs ``r`` of its own coupled
     steps per outer step stacks its inner components' diagnostics on a leading
     axis of length ``r`` -- so a step's diagnostics for such a component are
-    not one record but several, each covering its own sub-interval and
-    labelled with the end of it.
+    not one record but several, each covering its own sub-interval.
 
     This is the map of that: ``{name: axes}``, where ``axes`` is the tuple of
     leading axis lengths one coupled step puts in front of the diagnostic's
@@ -688,16 +869,19 @@ def _build_binned_mean(
 
     **A record, not a step.** A coupled step does not produce one record per
     component: a component the workflow runs ``n`` times per step produces
-    ``n``, and each is labelled with the end of its own sub-interval, so they
-    need not all fall in the same bin. The 24 hourly records of the daily step
-    that covers 31 January are labelled 01:00 on the 31st through 00:00 on 1
-    February -- 23 of them in January and one in February. Every record is
-    therefore binned by its own label, from the coupler's own sub-step clock
-    (:meth:`~jem.base.coupler.Coupler.coupling_time_at_substep`), which is the
-    same instant :meth:`~jem.base.coupler.Coupler.to_xarray` labels that
-    record with. Binning them all by the coupled step instead would put a
-    whole day of hourly records in the month the day *ended* in, and the
-    accumulated mean would disagree with a ``groupby`` of the written output
+    ``n``, each covering its own sub-interval, so they need not all fall in
+    the same bin. The 24 hourly records of the daily step that covers 31
+    January have midpoints half an hour past each hour -- 23 of them (through
+    ``22:00-23:00``) before midnight and one (``23:00-00:00``) after. Every
+    record is therefore binned by its own interval -- its own midpoint, for
+    :func:`monthly_mean`, which is the same instant
+    :meth:`~jem.base.coupler.Coupler.to_xarray` labels that record with; its
+    own end, for :func:`windowed_mean`, independent of that label (see that
+    function's own docstring for why) -- read from the coupler's own sub-step
+    clock (:meth:`~jem.base.coupler.Coupler.coupling_time_at_substep`).
+    Binning them all by the coupled step instead would put a whole day of
+    hourly records in the month the day *ended* in, and the accumulated mean
+    would disagree with a ``groupby`` of the written output
     at every month boundary -- rather than only where the Gregorian labels and
     the model calendar themselves part company, which is the one residual
     disagreement and is :func:`monthly_mean`'s **Leap days**.
@@ -815,8 +999,9 @@ def _build_binned_mean(
             if records not in bins_by_rate:
                 # The coupler's own sub-step clock, one call at a time, rather
                 # than the same arithmetic written out again here: call `k` of
-                # coupled step `s` is sub-step `s * records + k`, and the
-                # record it produces is labelled at the end of that sub-step.
+                # coupled step `s` is sub-step `s * records + k`, and
+                # `bin_of_record` (below) is what turns that sub-step counter
+                # into the bin of the record it produces.
                 substeps = jnp.stack(
                     [
                         coupler.coupling_time_at_substep(time.step, call, records).step
@@ -916,83 +1101,111 @@ def monthly_mean(
 
     Everything the reduction needs it takes from ``coupler``: the diagnostics
     a step produces (their structure, shapes and dtypes), the coupling
-    timestep, the start date's offset into the year and the calendar's year
-    length. The caller supplies nothing but the coupler -- and, if the run's
-    months are each to have a bin of their own, how many::
+    timestep, the start date and the calendar. The caller supplies nothing but
+    the coupler -- and, if the run's months are each to have a bin of their
+    own, how many::
 
         monthly_mean(coupler)                          # (12, ...): a climatology
-        monthly_mean(coupler, total_time="10 years")   # (121, ...): every month
-        monthly_mean(coupler, n_months=121)            # sized directly instead
+        monthly_mean(coupler, total_time="10 years")   # (120, ...): every month
+        monthly_mean(coupler, n_months=120)            # sized directly instead
 
     The two forms bin by the same rule and the same convention; they differ in
     what the accumulator *is*. Twelve bins are the calendar months, so a
     ten-year run composites its ten Januaries into bin 0 -- a climatology.
     ``n_months`` bins are the months the run passes through, in order, so the
     same run gives January of year 1 in bin 0 and December of year 10 in bin
-    119, which is the monthly time series of the run. (A ten-year run sized by
-    ``total_time`` gets 121 bins, not 120: its last record is labelled 00:00
-    on 1 January of the eleventh year, which is that January's, and a bin has
-    to exist for it or it would wrap into bin 0 and quietly spoil the first
-    January. See ``total_time`` below.)
+    119, which is the monthly time series of the run -- and ``total_time``
+    gives that same count (``120``, not ``121``) when it names exactly ten
+    years: the run's *last* record's own midpoint, ``total_time - dt/2``, is
+    still within December of year 10, not on the January-of-year-11 boundary
+    a duration of exactly ``total_time`` would touch. (Before this migration,
+    when a record's defining instant for both binning and sizing was its
+    interval's *end* -- exactly ``total_time`` for a run of that length -- the
+    same call needed a 121st bin to hold that single boundary record; the
+    midpoint convention removes the boundary case entirely, not just relabels
+    it, which is why the sizing arithmetic below no longer needs the
+    corresponding "one more bin" adjustment either.)
 
-    **Which month a step counts in.** A coupled step covers
-    ``[start + k·dt, start + (k+1)·dt)`` and JEM labels the output record it
-    produces with the **end** of that interval (``TimeAxis.datetimes``, JCM's
-    convention). The bin follows that instant, read on the **model** calendar:
-    a step is counted in the month the end of its interval falls in, so
-    ``monthly.finalize(accumulator)`` is
-    ``coupler.to_xarray(diagnostics).groupby("time.month").mean()`` of the same
-    run, leaf for leaf -- and, for the sequential form, the same grouped by
-    year and month -- **for a run whose output labels cross no Gregorian 29
-    February**, because the labels are proleptic Gregorian whatever the model
-    calendar is while the bins are the model calendar's months (see **Leap
-    days** below). (For a component that records more than once per coupled
-    step that equality holds after :func:`fold_records`, which folds the
-    sub-step axis this reduction deliberately keeps; see **Sub-steps** below.)
+    Every calendar a :class:`~jem.base.coupler.Coupler` supports is handled
+    **exactly** and **in-scan**: ``"365_day"`` and ``"360_day"`` bin against
+    a fixed table of month lengths (:func:`month_lengths`), and
+    ``"gregorian"`` -- since 2026-09, no longer a
+    :class:`NotImplementedError` here -- bins against the real proleptic
+    Gregorian calendar (real leap years, via
+    :mod:`jem.base.calendar`), with no fixed table at all. This matters
+    because a :class:`~jem.base.coupler.Coupler` bound to a real
+    ``jcm.model.Model`` component (jax-gcm v3, PR 878) has no calendar of its
+    own to choose and *must* be Gregorian
+    (:meth:`~jem.components.jcm.component.JCMComponent.bind` enforces it),
+    and is also the coupler's own default calendar (see
+    :class:`~jem.base.coupler.Coupler`'s ``calendar`` parameter) -- so this is
+    the common case, not a special one, and the two forms below apply to it
+    exactly as they do to the fixed calendars.
 
-    Two consequences follow, and they are separate things. The first is the
-    closing convention, and it shows at every month boundary: the daily step
-    covering 31 January is labelled 1 February and counted in February.
-    Binning by the start of the interval instead would be equally defensible,
-    but then the accumulated mean and the written output would disagree about
-    the same run, which is worse than either convention. The second is not
-    the boundary but the *labels' calendar*, shows only once a run's labels
-    reach a leap day, and is the condition on the equality above -- **Leap
-    days**, next.
+    **Which month a record counts in.** A coupled step (or, for a component
+    recording more than once per coupled step, one of its sub-steps -- see
+    **Sub-steps** below) covers ``[start + k·dt, start + (k+1)·dt)``, and
+    JEM's own output labels that record with the interval's **midpoint**,
+    ``start + (k + 1/2)·dt`` (:class:`~jem.base.component.TimeAxis`, jax-gcm
+    v3's own convention change -- see that class's docstring). The bin
+    follows *that same instant*: a record is counted in the calendar month
+    its own midpoint falls in, which is what makes
+    ``monthly.finalize(accumulator)`` equal
+    ``coupler.to_xarray(diagnostics).groupby("time.month").mean()`` of the
+    same run **by construction**, leaf for leaf -- and, for the sequential
+    form, the same grouped by year and month -- for *every* calendar, not
+    only one whose labels happen to agree with a fixed model-calendar table.
+    (For a component that records more than once per coupled step that
+    equality holds after :func:`fold_records`, which folds the sub-step axis
+    this reduction deliberately keeps; see **Sub-steps** below.)
 
-    **Leap days**, and the one case in which the equality above does not
-    hold. The bins are the *model* calendar's months, while
-    :meth:`~jem.base.component.TimeAxis.datetimes` writes every label as a
-    proleptic-Gregorian ``datetime64`` whatever the model calendar is -- JCM's
-    convention, kept so that a slab's output and the atmosphere's merge on one
-    time axis, and recorded as a known inconsistency in jax-gcm#449. On a
-    ``365_day`` run the two agree until the labels reach a Gregorian 29
-    February, and from that record on each label is one day *earlier* than the
-    model-calendar date of the instant it stands for -- one more day for every
-    leap year the run passes. A run starting at 00:00 on 1 January 2000 (which
-    is where the shipped examples start) therefore labels its 59th record
-    ``2000-02-29`` while the model calls that instant 1 March and counts it in
-    March; the record the model calls 1 April 00:00 is labelled
-    ``2000-03-31``; and so on to the end of the Gregorian year.
+    This is a **breaking change** from the binning this function used before
+    the 2026-09 jax-gcm-878 migration review, which counted a record in the
+    month its interval's *end* fell in (to match the *pre-878* end-of-interval
+    output label). Once ``TimeAxis`` itself moved to midpoint labels, keeping
+    the old end-of-interval bin rule would have made ``monthly_mean`` disagree
+    with a ``groupby`` of its own coupler's written output at every month
+    boundary -- exactly the disagreement this rebinding exists to prevent --
+    so the bin rule moved to match, for **every** calendar
+    (``"365_day"``/``"360_day"`` included, not only the newly-supported
+    ``"gregorian"``). Bin *membership* near a month boundary therefore differs
+    from a pre-migration run: a coupled step whose interval spans a boundary
+    (only possible when the coupling step is not itself much shorter than a
+    month, e.g. the daily case never spans one) is now counted by which half
+    its midpoint falls in rather than always counting the step at its end.
+    See the CHANGELOG's Breaking Changes for the same note in one line.
 
-    What a user sees is that ``groupby("time.month")`` of the written output
-    moves the first record of every month from March on into the month before
-    it, gives February the record the model calls 1 March (29 records where
-    this reduction's February holds 28), and, in the twelve-bin form, hands
-    December the year's wrap record -- the one the model calls 1 January of
-    the next year, labelled ``2000-12-31`` -- which the reduction counts in
-    January. The accumulated bin stays the model's month, which is the month
-    the forcing and the seasonal cycle follow, so the bins are still the
-    model's own Februaries and Marches. To reproduce ``finalize`` from the
-    written output across a leap day, bin by **model day-of-year** -- each
-    label's offset from the start date in whole days, which is the same number
-    on both calendars -- rather than by ``time.month``. (On ``gregorian`` the
-    question does not arise: that calendar has no fixed month table and
-    :func:`monthly_mean` refuses it.) Emitting calendar-consistent labels
-    instead -- ``cftime`` no-leap dates, the atmosphere's output relabelled to
-    match -- is tracked as #118; what JCM writes on its own output is JCM's to
-    answer, and jax-gcm#449 records that inconsistency as tracking only.
-    Nothing here depends on whether either is ever taken up.
+    A midpoint that lands on a fractional half-second (an odd-length record)
+    is binned by the whole second it floors to, never the one after: every
+    month boundary falls on a whole second, so flooring can only move a
+    midpoint a half-second *away* from an upcoming boundary, never across one
+    -- see :func:`_midpoint_month_rule` and
+    :func:`jem.base.calendar.gregorian_instant` for exactly where this
+    floor happens on each calendar.
+
+    **Leap days on the fixed calendars.** ``"365_day"`` and ``"360_day"`` bin
+    against their own fixed month-length table, which is not the calendar
+    :meth:`~jem.base.component.TimeAxis.datetimes` labels with -- JEM writes
+    every label as proleptic Gregorian whatever the model calendar is (JCM's
+    convention, kept so a slab's output and the atmosphere's merge on one time
+    axis; a known inconsistency, tracked as jax-gcm#449). On a ``"365_day"``
+    run the two agree until the run's labels reach a Gregorian 29 February,
+    after which each label sits one day *earlier* than the model-calendar date
+    of the same instant -- one more day of drift per leap year the run
+    passes -- so ``groupby("time.month")`` of the written output and this
+    reduction's own bins part company by up to a few records near each
+    affected month boundary, though both still hold the same *total* of
+    records across the run. This residual mismatch is a property of the
+    ``"365_day"``/``"360_day"`` calendars specifically -- their fixed table is
+    not the calendar the labels are ever written in -- and does **not** arise
+    on ``"gregorian"``, where the bins and the labels are now the same real
+    calendar (see the paragraph above): the midpoint-vs-end rebinding closes
+    the boundary-convention half of the old mismatch for every calendar, and
+    using the real Gregorian calendar for ``"gregorian"`` runs closes the
+    other (leap-day) half for the calendar essentially every atmosphere-coupled
+    run now uses. Emitting calendar-consistent labels on the fixed calendars
+    too -- ``cftime`` no-leap dates -- remains tracked as #118 and is
+    unaffected by any of this.
 
     **The twelve-bin form wraps at the year**, because the bin is the calendar
     month and not the month since the run started: a three-year run's January
@@ -1021,14 +1234,20 @@ def monthly_mean(
     multiple of twelve and a ``total_time``-sized accumulator never wraps,
     there is nothing observable to pay for it.)
 
-    The first and last bins of the sequential form are usually **partial**,
-    and both for the same reason as everywhere else here: a bin holds the
-    records whose labels fall in it, and the run's labels start at
-    ``start_date + dt`` and stop at ``start_date + total_time``. A run
-    starting at 00:00 on 1 July therefore gives its July bin the 30 daily
-    labels 2 to 31 July -- the label at 00:00 on 1 July that would complete it
-    belongs to the run *before* this one. Every bin is divided by its own
-    count, so a partial month is the mean of what fell in it.
+    The first and last bins of the sequential form are **partial** whenever
+    the run's start (or end) does not itself sit at 00:00 on a calendar month
+    boundary: a bin holds the records whose *midpoints* fall in it, and the
+    run's first record's midpoint is ``start_date + dt/2``. A run starting
+    exactly at 00:00 on 1 July with daily coupling therefore fills its July
+    bin **completely** -- all 31 midpoints, 1 July 12:00 through 31 July
+    12:00, fall in July, unlike the pre-migration end-labelled convention,
+    under which the same run's last daily step of July (``[31 July, 1
+    August)``) was labelled 1 August and counted in August, leaving July one
+    record short (see the Breaking-change paragraph above). A run starting
+    mid-month still gets a partial first bin -- only the midpoints from its
+    own first record onward fall in that month -- and every bin is divided by
+    its own count regardless, so a partial month is the mean of what fell in
+    it.
 
     Both forms are the same twelve calendar-month lengths laid end to end and
     phased to the run's start date; only how many of them the accumulator
@@ -1039,11 +1258,14 @@ def monthly_mean(
     that axis is kept: the mean for that component comes back as
     ``(12, n, ...)``, the monthly mean of each sub-step slot -- a
     monthly-mean diurnal cycle for a component sub-cycling through the day.
-    Each of the ``n`` records is binned by **its own** label, not by the
-    coupled step's, so the 23 hourly records of 31 January count in January
-    and the one labelled 1 February 00:00 counts in February, as
-    ``groupby("time.month")`` of the written output does under the condition
-    in **Leap days** above. :func:`fold_records` folds that axis away,
+    Each of the ``n`` records is binned by **its own** midpoint, not by the
+    coupled step's, so of the 24 hourly records the daily step covering 31
+    January produces, the 23 whose midpoints (30 minutes past the hour) fall
+    before midnight count in January and the one covering ``23:00-00:00``
+    counts in February -- as ``groupby("time.month")`` of the written output
+    does, exactly, on ``"gregorian"``, or up to the residual mismatch in
+    **Leap days on the fixed calendars** above on ``"365_day"``/``"360_day"``.
+    :func:`fold_records` folds that axis away,
     weighting each slot by its own count, when the plain monthly mean is what
     was wanted::
 
@@ -1074,18 +1296,35 @@ def monthly_mean(
         :func:`_build_binned_mean`.
     n_months : int, optional
         Build the **sequential** form with this many bins: the months the run
-        passes through, in order, starting with the one the run starts in. At
-        most one of this and ``total_time``; neither gives the twelve-bin
-        climatology.
+        passes through, in order, starting with the month the run's *first
+        record's own midpoint* falls in (``start_date + dt/2`` -- see
+        **Sequential-form bin 0** below for why this, rather than
+        ``start_date`` itself, is what "the month the run starts in" means
+        now). At most one of this and ``total_time``; neither gives the
+        twelve-bin climatology.
     total_time : str or float, optional
         Build the sequential form sized to a run of this length -- a
-        ``jem.base.component.parse_duration_days`` string (``"10 years"``, ``"400
-        days"``) or a number of days, parsed on the coupler's calendar. The
-        count is the months the run's labels touch, from ``start_date + dt``
-        to ``start_date + total_time`` inclusive, so a run ending exactly on
-        the 1st of a month at 00:00 gets one more bin, holding that single
-        record (the closed-at-the-start convention below puts it in the month
-        it opens).
+        ``jem.base.component.parse_duration_days`` string (``"10 years"``,
+        ``"400 days"``) or a number of days, parsed on the coupler's calendar.
+        Must correspond to a whole number of coupling steps (as
+        :func:`windowed_mean`'s own ``total_time`` does). On ``"365_day"``/
+        ``"360_day"`` the bin count is the number of distinct calendar months
+        the run's record midpoints touch, computed from the fixed month-length
+        table; on ``"gregorian"`` it is computed on the **host**, with
+        Python's own ``datetime`` (exact, and calendar arithmetic has no place
+        in a bin-*count*, which is static): the calendar month of the run's
+        first and last record's own midpoints, ``(last.year - first.year) *
+        12 + (last.month - first.month) + 1``.
+
+    **Sequential-form bin 0.** Bin 0 is defined as the calendar month of the
+    run's *first record's own midpoint*, not of ``start_date`` itself, so
+    that record always lands in bin 0 by construction even in the rare case
+    where ``start_date`` sits within ``dt/2`` of a month's end and the first
+    record's midpoint therefore falls in the *next* calendar month from
+    ``start_date``'s own -- using ``start_date``'s month there would leave
+    bin 0 permanently empty. The two agree for every ordinary case (any run
+    whose coupling step is not itself comparable to a month in length), which
+    is every shipped configuration.
 
     Returns
     -------
@@ -1095,43 +1334,22 @@ def monthly_mean(
 
     Raises
     ------
-    NotImplementedError
-        If the run's calendar has no fixed table of month lengths --
-        ``gregorian``, whose leap years change it from year to year (see
-        :func:`month_lengths`). This is no longer a corner case since jax-gcm
-        v3 (PR 878): jax-gcm's own atmosphere clock is unconditionally
-        Gregorian now, with no calendar of its own to choose, so **every**
-        ``Coupler`` built with a real ``jcm.model.Model`` component must
-        itself use ``calendar="gregorian"`` (``jem.components.jcm.component
-        .JCMComponent.bind`` enforces this) -- and this in-scan accumulator
-        cannot bin calendar months on a calendar whose year is not a fixed
-        number of days, so it now refuses on *every* such coupled model,
-        where before PR 878 it only refused a model deliberately built with
-        ``calendar="gregorian"`` (the default was ``"365_day"``, which this
-        accumulator handles exactly). There is no in-scan fix for this --
-        making a fixed-size accumulator track a variable-length year is a
-        different, larger feature -- so for a jax-gcm-coupled run, bin
-        calendar months on the host instead, from the labelled output
-        (``coupler.to_xarray(diagnostics)[...].groupby("time.year")
-        .groupby("time.month")``, ``pandas``/``xarray``'s own Gregorian
-        calendar arithmetic, correct leap years included); this is slower and
-        costs the whole trajectory in memory, but it is the exact thing this
-        accumulator exists to avoid needing only when it can stay in-scan.
-        :func:`windowed_mean` is unaffected: a window is measured from the
-        run's own start with no phase and no calendar month table, so it
-        raises only if asked to parse a duration in months or years (a
-        `total_time="1 year"` request goes through the same
-        :func:`jem.base.component.parse_duration_days`, whose ``"gregorian"``
-        answer -- the true 365.2425-day average -- is exact enough for
-        *sizing* an accumulator, just not for a fixed calendar-month table).
     ValueError
         If both ``n_months`` and ``total_time`` are given, if ``n_months`` is
-        not a positive integer, if ``total_time`` is not positive, or if the
-        coupling timestep does not divide the year exactly -- the month of a
-        record is then not a function of its counter reduced modulo a whole
-        number of steps per year.
+        not a positive integer, if ``total_time`` is not positive or (on
+        ``"gregorian"``) not a whole number of coupling steps, or -- on
+        ``"365_day"``/``"360_day"`` only -- if the coupling timestep does not
+        divide the year exactly, since the month of a record there is found
+        from the step counter reduced modulo a whole number of steps per
+        year. ``"gregorian"`` has no such restriction: a record's real
+        calendar month is read directly off its exact date
+        (:func:`_gregorian_month_rule`), which needs no period to reduce the
+        step counter modulo at all.
 
     """
+    if coupler.calendar == "gregorian":
+        return _gregorian_monthly_mean(coupler, carry, n_months=n_months, total_time=total_time)
+
     # Whole seconds throughout: `jdt.Timedelta` is integer-backed and the year
     # offset is a difference of two dates, so this arithmetic is exact, which
     # float32 seconds-since-start would not be after a few decades of a run.
@@ -1150,7 +1368,9 @@ def monthly_mean(
             f"A monthly mean needs the coupling timestep ({dt_seconds} s) to "
             f"divide the year ({seconds_per_year} s) exactly, so that the "
             "month of a step can be found from the step counter reduced modulo "
-            "a whole number of steps per year."
+            "a whole number of steps per year. (This restriction is specific "
+            f"to the {coupler.calendar!r} calendar's fixed month-length "
+            "table; 'gregorian' has none.)"
         )
     if n_months is not None and total_time is not None:
         raise ValueError(
@@ -1166,23 +1386,32 @@ def monthly_mean(
         # so a multi-year run composites its Januaries, which is what the
         # fixed `(12, ...)` accumulator is for. The month lengths sum to the
         # calendar's year by construction, so the period *is* the year.
+        # `_midpoint_month_rule`, not `_variable_window_rule`: the bin has to
+        # follow the record's MIDPOINT (see the docstring's Breaking-change
+        # paragraph), which is a half-record shift that a record-count table
+        # cannot express exactly -- see `_midpoint_month_rule`'s own
+        # docstring for why that needs comparing in seconds instead.
         return _build_binned_mean(
             coupler,
-            _variable_window_rule(
-                np.cumsum(month_seconds), year_offset_seconds, "left"
-            ),
+            _midpoint_month_rule(np.cumsum(month_seconds), year_offset_seconds),
             MONTHS_PER_YEAR,
             carry,
         )
 
-    # The sequential form. The table is rotated so that bin 0 is the month the
-    # run starts in, and the phase is measured from the start of *that* month
-    # rather than from the start of the year: the bins are the months the run
-    # passes through, so they have to be aligned to the run's own start date
-    # and not to a January the run may never see.
+    # The sequential form. The table is rotated so that bin 0 is the month
+    # the run's *first record's own midpoint* falls in (see the docstring's
+    # **Sequential-form bin 0**) -- which, for the ordinary case of a
+    # coupling step much shorter than a month, is the month the run starts
+    # in, but is defined this way so that the first record always lands in
+    # bin 0 even in the (rare) case where it does not. The phase
+    # (`offset_seconds`) stays measured from the start date itself, not from
+    # the first record's midpoint: `_midpoint_month_rule` adds the
+    # per-record midpoint shift on its own, for every record, so adding it
+    # again here would double it.
     month_starts = np.concatenate([[0], np.cumsum(month_seconds)[:-1]])
+    first_record_midpoint = (year_offset_seconds + dt_seconds // 2) % seconds_per_year
     start_month = int(
-        np.searchsorted(month_starts, year_offset_seconds, side="right") - 1
+        np.searchsorted(month_starts, first_record_midpoint, side="right") - 1
     )
     offset_seconds = year_offset_seconds - int(month_starts[start_month])
     rotated = np.concatenate(
@@ -1191,7 +1420,22 @@ def monthly_mean(
 
     if total_time is not None:
         total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
-        bins = _months_covering(rotated, offset_seconds, total_seconds)
+        n_steps = total_seconds // dt_seconds
+        if n_steps < 1:
+            raise ValueError(
+                f"total_time={total_time!r} is {total_seconds} s, shorter "
+                f"than one coupling step ({dt_seconds} s); there is no "
+                "record for the accumulator to hold."
+            )
+        # The elapsed time, from the start date, of the LAST record's own
+        # midpoint -- `_months_covering` counts the calendar months from the
+        # start date to this instant, inclusive, which is the accumulator
+        # size the run needs. (`total_seconds` itself, the pre-878 argument,
+        # was the elapsed time to the last record's END; using it here would
+        # under- or over-count by a fraction of a step at the boundary,
+        # exactly the mismatch the midpoint rebinding exists to remove.)
+        last_record_midpoint = (n_steps - 1) * dt_seconds + dt_seconds // 2
+        bins = _months_covering(rotated, offset_seconds, last_record_midpoint)
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
         # `bool` is an `int`, and `n_months=True` would silently build a
         # one-month accumulator.
@@ -1219,8 +1463,84 @@ def monthly_mean(
 
     return _build_binned_mean(
         coupler,
-        _variable_window_rule(boundaries, offset_seconds, "left"),
+        _midpoint_month_rule(boundaries, offset_seconds),
         bins,
+        carry,
+    )
+
+
+def _gregorian_monthly_mean(
+    coupler: Any,
+    carry: Any,
+    *,
+    n_months: int | None,
+    total_time: str | float | None,
+) -> BinnedMean:
+    """Return :func:`monthly_mean` on the ``"gregorian"`` calendar.
+
+    Split out of :func:`monthly_mean` itself only to keep the two calendar
+    families' construction code apart -- this is the whole of the
+    ``"gregorian"`` path: no fixed month-length table, no divide-the-year
+    check, and the sequential form's bin count is sized on the **host**, with
+    Python's own ``datetime`` arithmetic, rather than in the seconds-only
+    arithmetic the fixed calendars use (there being no fixed span of seconds
+    a whole number of Gregorian months corresponds to in the first place).
+    See :func:`_gregorian_month_rule` for the in-scan bin rule itself, and
+    :func:`monthly_mean`'s own docstring for everything about what the two
+    forms mean.
+    """
+    if n_months is not None and total_time is not None:
+        raise ValueError(
+            "Give at most one of n_months and total_time: n_months sets the "
+            "accumulator's size directly and total_time counts it from the "
+            "run, while giving neither is the twelve-month climatology (got "
+            f"n_months={n_months!r}, total_time={total_time!r})."
+        )
+
+    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
+    start_days = int(np.asarray(coupler.start_date.delta.days))
+    start_seconds = int(np.asarray(coupler.start_date.delta.seconds))
+
+    if n_months is None and total_time is None:
+        return _build_binned_mean(
+            coupler,
+            _gregorian_month_rule(start_days, start_seconds, sequential=False),
+            MONTHS_PER_YEAR,
+            carry,
+        )
+
+    # The sequential form's bin 0 is the calendar month of the run's first
+    # record's own midpoint (`start_date + dt/2`) -- computed here, on the
+    # host, with Python's `datetime`, which does exact proleptic-Gregorian
+    # arithmetic for free and needs no `gcd`/period trick at all, since
+    # nothing here is traced. See `monthly_mean`'s **Sequential-form bin 0**.
+    start = coupler.start_date.to_pydatetime()
+    step = datetime.timedelta(seconds=dt_seconds)
+    first_midpoint = start + step / 2
+    y0, m0 = first_midpoint.year, first_midpoint.month
+
+    if total_time is not None:
+        total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
+        n_steps = total_seconds // dt_seconds
+        if n_steps < 1:
+            raise ValueError(
+                f"total_time={total_time!r} is {total_seconds} s, shorter "
+                f"than one coupling step ({dt_seconds} s); there is no "
+                "record for the accumulator to hold."
+            )
+        last_midpoint = start + step * (n_steps - 1) + step / 2
+        n_bins = (last_midpoint.year - y0) * 12 + (last_midpoint.month - m0) + 1
+    elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
+        raise ValueError(f"n_months must be a positive integer; got {n_months!r}.")
+    else:
+        n_bins = n_months
+
+    return _build_binned_mean(
+        coupler,
+        _gregorian_month_rule(
+            start_days, start_seconds, sequential=True, y0=y0, m0=m0, n_bins=n_bins
+        ),
+        n_bins,
         carry,
     )
 
@@ -1263,37 +1583,47 @@ def windowed_mean(
     ``inclusive=`` is not: a window's meaning is "so many days into the run", and
     a bin that means something else belongs to the builder that knows what.
 
-    **Which window a record counts in.** As in :func:`monthly_mean`, a record
-    is binned by its own label -- the **end** of the interval it covers -- not
-    by where that interval begins. Window ``w`` is therefore the records whose
-    labels fall in ``(start of w, end of w]`` measured from the run's start
-    date, so with daily coupling the first 5-day window is the records
-    labelled day 1 to day 5, which is what a forecast means by "the first
-    pentad". In terms of the counter of records of length ``r`` that is
-    ``record // (window/r)`` for equal windows, since record ``k`` is labelled
-    at ``(k+1)·r``.
+    **Which window a record counts in.** A record is binned against the
+    **end** of the interval it covers, measured in elapsed run-time from the
+    start date -- window ``w`` is the records whose intervals end in
+    ``(start of w, end of w]``, so with daily coupling the first 5-day window
+    is the records covering day 0 to day 5, which is what a forecast means by
+    "the first pentad". This is **not** the same instant
+    :class:`~jem.base.component.TimeAxis` labels that record with any more --
+    jax-gcm v3 (PR 878) moved every written record's label to its interval's
+    **midpoint**, not its end (see that class's docstring) -- and the two are
+    deliberately kept independent here: a window's meaning is "so many days
+    into the run", a fact about elapsed time that has nothing to do with what
+    instant a plotting library happens to stamp on the record, so this
+    function keeps binning against the interval end regardless of what the
+    output label says. (:func:`monthly_mean`, by contrast, *is* required to
+    agree with its own written output's ``groupby("time.month")``, which is
+    why *its* bin rule moved to the midpoint along with the label -- see that
+    function's docstring for why the two builders now differ here on purpose.)
+    In terms of the counter of records of length ``r`` that is ``record //
+    (window/r)`` for equal windows, since a record's interval-end position is
+    ``(k+1)·r`` for record ``k``.
 
-    That is the same rule :func:`monthly_mean` follows -- bin by the label --
-    applied to bins the *run* defines instead of bins the calendar defines,
-    and the boundaries close the other way as a result: a label falling
-    exactly on a boundary ends the window before it (JEM labels every record
-    at the end of its interval, and a window is one such interval), while the
-    same label starts the calendar month after it (which is what
-    ``groupby("time.month")`` does, and what a monthly mean has to agree with
-    -- for a run whose labels cross no Gregorian 29 February; see
-    :func:`monthly_mean`'s **Leap days**, which is a property of the calendar
-    and not of this closing convention). It is one step of difference in each
-    case and both are documented where they are; what neither does is bin by
-    the *start* of the step.
-
-    So a month-long *window* and a calendar *month* would still differ by one
-    record at their shared boundary even for a run that starts on 1 January:
-    with daily coupling the record labelled 00:00 on 1 February is the last of
-    a 31-day window starting the run and the first of February's month. No
-    ``inclusive=`` knob is offered to split the difference: the convention is not
-    a preference but what makes each builder agree with the thing it is meant
-    to agree with, and a run whose bins closed one way while its output was
-    grouped the other would silently disagree with itself.
+    A shared boundary places a record the same way in both builders whenever
+    the boundary itself is grid-aligned (a whole number of coupling steps from
+    the start, which both builders require of their own boundaries anyway):
+    the record ending exactly on the boundary has its midpoint half a record
+    *before* it, and the next record's midpoint sits half a record *after* --
+    so "ends at or before the boundary" (this function's rule) and "has its
+    midpoint before the boundary" (:func:`monthly_mean`'s) agree on every
+    record, on both sides. A month-long window pattern
+    (``windowed_mean(coupler, month_lengths(coupler), ...)``) from a run
+    starting at 00:00 on 1 January therefore now lands every record in the
+    same bin index a same-length :func:`monthly_mean` would -- which was
+    *not* true before this migration, when both builders bound by the
+    interval's end but closed a shared boundary in opposite directions (this
+    function keeps records up to and including a boundary in the window
+    before it; :func:`monthly_mean` used to put the record exactly on a
+    boundary in the month after it). No ``inclusive=`` knob is offered to
+    split the difference: the convention is not a preference but what makes
+    each builder agree with the thing it is meant to agree with, and a run
+    whose bins closed one way while its output was grouped the other would
+    silently disagree with itself.
 
     **A run longer than the accumulator wraps**, exactly as
     :func:`monthly_mean` wraps at a year (or at ``n_months``): window ``w``
@@ -1438,10 +1768,11 @@ def windowed_mean(
         dtype=np.int64,
     )
     # Offset 0: the windows are measured from the run's own start date, not
-    # from anything in the calendar. Closed at the end: JEM labels a record at
-    # the end of the interval it covers and a window is one such interval, so
-    # the record labelled exactly on a boundary is the last of the window it
-    # closes.
+    # from anything in the calendar. Closed at the end: a window is an
+    # interval, and the record whose OWN interval ends exactly on a boundary
+    # (in elapsed run-time -- see this function's own docstring for why this
+    # is independent of the record's written label) is the last of the
+    # window it closes.
     window_index = _variable_window_rule(boundaries, 0, "right")
 
     return _build_binned_mean(coupler, window_index, bins, carry)

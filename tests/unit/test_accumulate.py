@@ -2,18 +2,22 @@
 
 The model is a two-slab coupler -- an idealized atmosphere over a relaxing
 slab ocean on a 4x3 grid -- run for a whole 365-day year, which is the
-shortest run in which every month exists and the boundary cases (a step whose
-interval ends exactly on the first of a month, and the last step of the year,
-which is labelled 1 January of the next one) actually occur. A year is also
-exactly 73 pentads, so the same run fills a ``windowed_mean`` accumulator once
-with nothing wrapping.
+shortest run in which every month exists and the boundary case (a step whose
+interval's midpoint falls exactly at the start of a month) actually occurs. A
+year is also exactly 73 pentads, so the same run fills a ``windowed_mean``
+accumulator once with nothing wrapping.
 
 The last two sections run the same pair of slabs *weaved*: the atmosphere
 stepped hourly within the daily coupling, once as a repeated workflow and once
 as a nested hourly coupler. Those runs are 40 days from 1 January, so they
 cross a month boundary -- the case in which a coupled step's sub-steps do not
-all belong to the same month, and the only case that can tell the two binning
-conventions apart.
+all belong to the same month.
+
+A dedicated section near the end covers the ``"gregorian"`` calendar
+(2026-09 migration review, item A): real leap years, no fixed month table,
+cross-checked against `pandas`'s own Gregorian arithmetic rather than jem's
+own labelling function, so a bug shared between the two could not hide a
+disagreement.
 
 Every test here compares the reduction computed *inside* the ``lax.scan``
 with the same reduction computed on the host from the stacked diagnostics,
@@ -25,6 +29,7 @@ import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
+import pandas as pd
 import pytest
 
 from jem.accumulate import (
@@ -134,51 +139,28 @@ def coupler(climatology_file):
     return build_coupler(climatology_file)
 
 
-def _half_interval(dt: jdt.Timedelta) -> np.timedelta64:
-    """Return half of a ``jdt.Timedelta`` as an exact ``timedelta64[ms]``."""
-    total_ms = (
-        int(np.asarray(dt.days)) * 86_400_000 + int(np.asarray(dt.seconds)) * 1000
-    )
-    return np.timedelta64(total_ms // 2, "ms")
-
-
-def end_of_interval_labels(axis) -> np.ndarray:
-    """Return a :class:`TimeAxis`'s labels shifted back to the END of each interval.
-
-    jax-gcm PR 878 moved an averaged record's label from the end of its
-    interval to its **midpoint** (``docs/source/v2_to_v3.rst``, "One real
-    datetime clock"), and :meth:`TimeAxis.datetimes` -- which every non-JCM
-    component's output is labelled with, so it merges with the atmosphere's
-    on one time axis -- follows suit (see its docstring). ``jem.accumulate``'s
-    own bin math is untouched by that jax-gcm change: it still bins a record
-    by the calendar month its interval's **end** falls in
-    (``jem.accumulate._variable_window_rule``'s ``inclusive="left"``), which
-    is what keeps the accumulator's actual numbers bit-for-bit unchanged
-    across this migration. So a WRITTEN dataset's own labels (or
-    ``TimeAxis.datetimes()``) no longer equal what ``monthly_mean`` bins by --
-    for every month boundary now, not only across a Gregorian 29 February --
-    and this is the one-line fix to compare them: add back the half-interval
-    jax-gcm's midpoint convention subtracted.
-    """
-    return axis.datetimes() + _half_interval(axis.dt)
-
-
 @pytest.fixture(scope="module")
 def record_months(coupler):
     """Return the 0-based calendar month of each of the year's output records.
 
-    Taken from the END of each coupling interval -- :func:`end_of_interval_labels`
-    of the ``datetime64`` labels ``Coupler.to_xarray`` puts on the records --
-    which is what ``monthly_mean``'s own bin math bins by (see that function's
-    docstring), not the labels themselves (jax-gcm PR 878 moved those to each
-    interval's midpoint; see :func:`end_of_interval_labels`). It is the same
-    binning as the model calendar's because this run starts in 2001 and so
-    crosses no Gregorian 29 February; where the two calendars part company the
-    accumulator follows the model's, which is what the leap-year tests below
-    pin.
+    Taken **directly** from the ``datetime64`` labels ``Coupler.to_xarray``
+    puts on the records (``coupler.time_axis(...).datetimes()``), with no
+    correction -- since jax-gcm v3 (PR 878) moved the written label to each
+    interval's midpoint, and the 2026-09 migration review moved
+    ``monthly_mean``'s own bin rule to match (see that function's docstring's
+    Breaking-change paragraph), the two are now *the same instant* by
+    construction, for every calendar. This fixture, and every test built on
+    it, is therefore itself evidence of that equality: it is comparing
+    ``monthly_mean``'s in-scan bins against a mean grouped by the plain,
+    uncorrected written labels, which is exactly the user-facing claim
+    (``monthly.finalize(accumulator) ==
+    coupler.to_xarray(diagnostics).groupby("time.month").mean()``). It is the
+    same binning as the model calendar's because this run starts in 2001 and
+    so crosses no Gregorian 29 February; where the two calendars part company
+    the accumulator follows the model's, which is what the leap-year tests
+    below pin.
     """
-    axis = coupler.time_axis(0, STEPS_PER_YEAR)
-    labels = end_of_interval_labels(axis)
+    labels = coupler.time_axis(0, STEPS_PER_YEAR).datetimes()
     return labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
 
 
@@ -295,29 +277,24 @@ def test_monthly_means_match_the_host_side_binning(
 def test_monthly_means_match_an_xarray_groupby(coupler, stacked_year, accumulated_year):
     """And they match what a user would compute from the netCDF output.
 
-    Not a plain ``groupby("time.month")`` of the raw written time coordinate
-    any more: jax-gcm PR 878 labels an averaged record at its interval's
-    **midpoint**, while ``monthly_mean`` still bins by the interval's *end*
-    (unchanged -- see ``jem.accumulate``'s "Which month a step counts in").
-    Grouping by :func:`end_of_interval_labels`'s corrected month is the fix,
-    written down once so a user hitting this does not have to rediscover it;
-    they agree here because a 2001 run's labels cross no Gregorian 29
-    February -- the one year in which the labels and the model calendar
-    disagree *as well* is covered below.
+    A **plain** ``groupby("time.month")`` of the written time coordinate, with
+    no correction: jax-gcm PR 878 labels an averaged record at its interval's
+    **midpoint**, and the 2026-09 migration review moved ``monthly_mean``'s own
+    bin rule to match it exactly (see ``jem.accumulate``'s "Which month a
+    record counts in"), so the two are the same instant by construction and
+    this is the direct user-facing check of that claim -- they agree here
+    (also) because a 2001 run's labels cross no Gregorian 29 February -- the
+    one year in which the labels and the model calendar disagree *as well* is
+    covered below.
     """
     _, diagnostics = stacked_year
     monthly, _, accumulator = accumulated_year
 
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    month = (
-        end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
-        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
-    )
-    from_output = (
-        ocean.sea_surface_temperature.assign_coords(month=("time", month))
-        .groupby("month").mean("time")
-    )
-    np.testing.assert_array_equal(from_output.month.values, np.arange(MONTHS_PER_YEAR))
+    from_output = ocean.sea_surface_temperature.groupby("time.month").mean("time")
+    # `groupby("time.month")` labels its groups 1-12; `finalize` is 0-indexed,
+    # January first -- the two conventions this asserts line up.
+    np.testing.assert_array_equal(from_output["month"].values, np.arange(1, 13))
 
     accumulated = monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
     np.testing.assert_allclose(
@@ -336,9 +313,10 @@ def test_a_month_with_no_steps_is_nan(coupler):
     sea_surface_temperature = np.asarray(
         means["ocn"]["state"].sea_surface_temperature
     )
-    # 58 daily steps from 1 January are labelled 2 January to 28 February --
-    # 30 records in January and 28 in February -- so March onwards is empty.
-    np.testing.assert_array_equal(np.asarray(counts)[:2], [30, 28])
+    # 58 daily steps from 1 January have midpoints 1 January 12:00 to 27
+    # February 12:00 -- 31 records in January, 27 in February -- so March
+    # onwards is empty.
+    np.testing.assert_array_equal(np.asarray(counts)[:2], [31, 27])
     assert np.all(np.isfinite(sea_surface_temperature[:2]))
     assert np.all(np.isnan(sea_surface_temperature[2:]))
 
@@ -435,14 +413,14 @@ def test_sequential_months_bin_the_run_month_by_month(sequential_months):
     The counts are the assertion that matters: they are the number of output
     records the calendar puts in each month, so a bin that had drifted (a
     fixed 30-day window) or that had been phased to January rather than to the
-    run's own start date would show up immediately. Binned on the END of each
-    interval (:func:`end_of_interval_labels`), which is what ``monthly_mean``
-    itself bins by (jax-gcm PR 878 labels the WRITTEN output at each
-    interval's midpoint instead; see that function's docstring).
+    run's own start date would show up immediately. Binned on the plain,
+    uncorrected written labels -- the same instant ``monthly_mean`` itself now
+    bins by, exactly (see that function's docstring's "Which month a record
+    counts in").
     """
     coupler, _, (_, counts), diagnostics = sequential_months
     del diagnostics
-    labels = end_of_interval_labels(coupler.time_axis(0, SEQUENTIAL_STEPS))
+    labels = (coupler.time_axis(0, SEQUENTIAL_STEPS)).datetimes()
 
     bins = year_month_bins(labels)
     assert counts.shape == (int(bins.max()) + 1,)
@@ -466,14 +444,12 @@ def test_sequential_months_match_a_year_month_groupby(sequential_months):
 
     The same contract `monthly_mean`'s twelve bins are held to, for the bins
     that do not composite the years: the reduction and a `groupby` of the
-    output are the same number, month by month of the run -- once the output's
-    labels are put back on the interval END `monthly_mean` bins by
-    (:func:`end_of_interval_labels`; jax-gcm PR 878 labels them at the
-    midpoint instead).
+    output are the same number, month by month of the run, computed directly
+    from the output's own written labels with no correction.
     """
     coupler, monthly, accumulator, diagnostics = sequential_months
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    labels = end_of_interval_labels(coupler.time_axis(0, SEQUENTIAL_STEPS))
+    labels = (coupler.time_axis(0, SEQUENTIAL_STEPS)).datetimes()
 
     from_output = (
         ocean.sea_surface_temperature.assign_coords(
@@ -488,16 +464,22 @@ def test_sequential_months_match_a_year_month_groupby(sequential_months):
     )
 
 
-def test_a_run_ending_on_the_first_of_a_month_gets_a_bin_for_it(
+def test_a_run_spanning_exactly_one_calendar_month_gets_one_bin(
     coupler, climatology_file
 ):
-    """The last label is the first record of the month it opens, so it needs one.
+    """``total_time`` naming exactly one calendar month never spills into the next.
 
-    A month closes at its *start*: the record labelled 00:00 on 1 February is
-    February's, exactly as `groupby("time.month")` reads it. A 31-day run from
-    1 January therefore touches two months, the second holding that single
-    record -- and the bin has to exist, because the alternative is for it to
-    wrap into bin 0 and quietly add a February record to January.
+    Every record is binned by its own **midpoint**, and the last record of a
+    ``total_time``-sized run has its midpoint at ``total_time - dt/2`` -- half
+    a step *short* of the boundary, never exactly on it. A 31-day run from 1
+    January therefore keeps its last record (interval ``[30, 31)`` days,
+    midpoint 31 January 12:00) in January, and the run needs only the one
+    bin. This is a **breaking change**
+    from the pre-2026-09 end-of-interval convention, under which the same
+    run's last record's defining instant was exactly the boundary itself
+    (``total_time``), so it opened a second, single-record bin -- see
+    ``monthly_mean``'s own docstring for the worked ten-year version of this
+    same fact.
     """
     del climatology_file
     monthly = monthly_mean(coupler, total_time="31 days")
@@ -505,11 +487,12 @@ def test_a_run_ending_on_the_first_of_a_month_gets_a_bin_for_it(
         coupler.initialize()
     )
 
-    np.testing.assert_array_equal(np.asarray(counts), [30, 1])
+    np.testing.assert_array_equal(np.asarray(counts), [31])
     # The same arithmetic at the length the docstrings quote: ten years of a
-    # 365-day calendar end at 00:00 on 1 January, which is a 121st month.
+    # 365-day calendar is exactly 120 months now, not 121 -- the last
+    # record's midpoint stays within December of year 10.
     _, decade_counts = monthly_mean(coupler, total_time="10 years").init()
-    assert decade_counts.shape == (10 * MONTHS_PER_YEAR + 1,)
+    assert decade_counts.shape == (10 * MONTHS_PER_YEAR,)
 
 
 def test_n_months_and_total_time_size_the_same_accumulator(climatology_file):
@@ -526,8 +509,9 @@ def test_n_months_and_total_time_size_the_same_accumulator(climatology_file):
     _, second = coupler.generate_trajectory_function(100, accumulate=from_count)(
         coupler.initialize()
     )
-    # 100 daily records from 1 July are labelled 2 July to 9 October.
-    np.testing.assert_array_equal(np.asarray(first[1]), [30, 31, 30, 9])
+    # 100 daily records from 1 July have midpoints 1 July 12:00 to 8 October
+    # 12:00: whole July and August, all of September, and 8 days of October.
+    np.testing.assert_array_equal(np.asarray(first[1]), [31, 31, 30, 8])
     for got, want in zip(
         jax.tree_util.tree_leaves(from_total.finalize(first)),
         jax.tree_util.tree_leaves(from_count.finalize(second)),
@@ -544,28 +528,33 @@ def test_more_months_than_the_run_leaves_them_nan(coupler):
     )
     _, counts = accumulator
 
-    np.testing.assert_array_equal(np.asarray(counts), [30, 1, 0, 0, 0, 0])
+    # A 31-day run from 1 January stays entirely within January under the
+    # midpoint convention (its last record's midpoint is 31 January 12:00,
+    # short of the February boundary), so February is empty too.
+    np.testing.assert_array_equal(np.asarray(counts), [31, 0, 0, 0, 0, 0])
     sea_surface_temperature = np.asarray(
         monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
     )
-    assert np.all(np.isfinite(sea_surface_temperature[:2]))
-    assert np.all(np.isnan(sea_surface_temperature[2:]))
+    assert np.all(np.isfinite(sea_surface_temperature[:1]))
+    assert np.all(np.isnan(sea_surface_temperature[1:]))
 
 
 def test_a_run_longer_than_n_months_wraps(coupler):
     """`n_months` bins repeat, as `n_windows` windows do.
 
     Two bins from 1 January are January and February, 59 days of accumulator;
-    a 100-day run folds March back into the January bin and the first eleven
-    days of April into February's. That is the fixed-size accumulator behaving
-    as it does everywhere else -- size it to the run to avoid it.
+    a 100-day run folds March back into the January bin and the first ten
+    days of April into February's (a record's own midpoint, not the day
+    number, is what decides it: the 100th record's midpoint is 9 April 12:00,
+    still April's 10th day of this fold). That is the fixed-size accumulator
+    behaving as it does everywhere else -- size it to the run to avoid it.
     """
     monthly = monthly_mean(coupler, n_months=2)
     _, (_, counts) = coupler.generate_trajectory_function(100, accumulate=monthly)(
         coupler.initialize()
     )
 
-    np.testing.assert_array_equal(np.asarray(counts), [30 + 31, 28 + 11])
+    np.testing.assert_array_equal(np.asarray(counts), [31 + 31, 28 + 10])
     assert int(np.sum(np.asarray(counts))) == 100
 
 
@@ -596,12 +585,11 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
     A five-day step divides the 365-day year but not 59 days of January and
     February, so the span the bins repeat with is not a whole number of steps.
     That span is rounded up to one -- the wrap moves by less than a step and
-    every bin boundary stays exact -- rather than refused, because counting
-    months from a run always gives `12N + 1` of them, whose span is never a
-    whole number of years: refusing would reject every `total_time` form on
-    this coupling. A `total_time`-sized accumulator is never wrapped into, so
-    the rounding cannot show up in the answer, and this is the test of that:
-    it still equals the groupby.
+    every bin boundary stays exact -- rather than refused, which matters for
+    an `n_months` accumulator that *is* wrapped into (see
+    ``monthly_mean``'s docstring's wrap paragraph). A `total_time`-sized
+    accumulator is never wrapped into, so the rounding cannot show up in the
+    answer, and this is the test of that: it still equals the groupby.
     """
     coupler = build_coupler(
         climatology_file, coupling_timestep=jdt.to_timedelta(5, "day")
@@ -616,11 +604,13 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
     )
 
     ocean = coupler.to_xarray(diagnostics)["ocn"]
-    labels = end_of_interval_labels(coupler.time_axis(0, steps))
+    labels = (coupler.time_axis(0, steps)).datetimes()
     bins = year_month_bins(labels)
-    # Thirteen months: the last record is labelled 00:00 on 1 January of the
-    # next year, which is that January's.
-    assert accumulator[1].shape == (MONTHS_PER_YEAR + 1,)
+    # Exactly twelve months: the run's last record's own midpoint is short of
+    # the one-year boundary (half a coupling step, unlike the pre-migration
+    # end-of-interval convention, under which it sat exactly on it and opened
+    # a thirteenth, single-record bin -- see `monthly_mean`'s docstring).
+    assert accumulator[1].shape == (MONTHS_PER_YEAR,)
     np.testing.assert_array_equal(np.asarray(accumulator[1]), np.bincount(bins))
 
     from_output = (
@@ -639,7 +629,7 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
     # And the decade the docstrings quote builds on this coupling too, which
     # is what the refusal this replaced made impossible.
     _, decade_counts = monthly_mean(coupler, total_time="10 years").init()
-    assert decade_counts.shape == (10 * MONTHS_PER_YEAR + 1,)
+    assert decade_counts.shape == (10 * MONTHS_PER_YEAR,)
 
 
 def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
@@ -659,10 +649,9 @@ def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
         coupler.initialize()
     )
 
-    # Binned on the END of each interval, matching `monthly_mean`'s own bin
-    # math (jax-gcm PR 878 labels the WRITTEN output at the midpoint instead;
-    # see `end_of_interval_labels`).
-    labels = end_of_interval_labels(coupler.time_axis(0, steps))
+    # The plain written labels, matching `monthly_mean`'s own bin math exactly
+    # (both are the record's midpoint now).
+    labels = (coupler.time_axis(0, steps)).datetimes()
     elapsed = (labels - np.datetime64("2001-01-01")) / np.timedelta64(1, "D")
     span = np.cumsum(month_lengths(coupler)[:6])
     # A month is closed at its start, so the bin of a label is the number of
@@ -705,14 +694,21 @@ def test_folding_records_of_a_component_without_sub_steps_changes_nothing(
 #: user following the documentation makes.
 LEAP_START_DATE = "2000-01-01"
 
-#: The record whose label is 2000-02-29: the 365-day model calendar has no
-#: such date, and calls that instant 00:00 on 1 March.
-LEAP_DAY_RECORD = 58
+#: The record whose label is 2000-02-29: its interval is ``[59, 60)`` model
+#: days from the start (day 59, 0-indexed, is the leap day itself in the real
+#: Gregorian calendar), so its midpoint -- the label
+#: :meth:`~jem.base.component.TimeAxis.datetimes` writes -- is
+#: ``2000-02-29T12:00``. The 365-day model calendar has no such date at all,
+#: and calls that same instant (day 59 of its own fixed table, the 31 days of
+#: January plus the first 28 of a Feb that never reaches a 29th) 1 March.
+LEAP_DAY_RECORD = 59
 
-#: The record whose instant the model calls 00:00 on 1 April: that is 31 + 28
-#: + 31 = 90 model days after the start, and record `k` is labelled at day
-#: `k + 1`, so it is record 89. The Gregorian labels write it as 2000-03-31.
-APRIL_RECORD = 89
+#: The record whose instant the model calls 00:00 on 1 April: that is
+#: 31 + 28 + 31 = 90 model days after the start, and record `k`'s midpoint is
+#: at day `k + 0.5`, so it is record 90 (midpoint day 90.5, still within the
+#: model's own March -- the model's April starts at day 90 exactly). The
+#: Gregorian labels write its midpoint as 2000-03-31T12:00.
+APRIL_RECORD = 90
 
 #: Month lengths of the 365-day calendar, written out so that a test asserting
 #: the accumulator follows the model calendar does not ask the module under
@@ -739,22 +735,23 @@ def leap_year(climatology_file):
 def model_calendar_months(coupler, n_records):
     """Return each record's 0-based month in the *model* calendar.
 
-    The host-side binning the accumulator has to reproduce: record `k` ends at
-    day `k + 1` of a run starting on 1 January, and the model's year is the
-    fixed month table -- no `datetime64` anywhere. The modulo is the year
-    wrapping into bin 0, which is what makes the twelve bins a climatology.
+    The host-side binning the accumulator has to reproduce: record `k`'s
+    midpoint is at day `k + 0.5` of a run starting on 1 January, and the
+    model's year is the fixed month table -- no `datetime64` anywhere. The
+    modulo is the year wrapping into bin 0, which is what makes the twelve
+    bins a climatology.
     """
-    day_of_year = np.arange(1, n_records + 1) % int(coupler.days_per_year)
+    day_of_year_midpoint = (np.arange(n_records) + 0.5) % int(coupler.days_per_year)
     month_starts = np.cumsum((0,) + MONTH_LENGTHS_365[:-1])
-    return np.searchsorted(month_starts, day_of_year, side="right") - 1
+    return np.searchsorted(month_starts, day_of_year_midpoint, side="right") - 1
 
 
 def test_a_leap_year_start_bins_by_the_model_calendar_not_the_label(leap_year):
     """The record labelled 2000-02-29 is March's, because the model says so.
 
     The bins are the model calendar's months and the labels are proleptic
-    Gregorian, so on a 365-day calendar the instant written `2000-02-29` is
-    the model's 1 March and is accumulated into March. The twelve counts are
+    Gregorian, so on a 365-day calendar the instant written `2000-02-29T12:00`
+    is the model's 1 March and is accumulated into March. The twelve counts are
     therefore the 365-day month lengths whatever the labels read, and every
     mean is the mean of the records a host-side binning by model day-of-year
     puts in that month -- which is the binning the forcing and the seasonal
@@ -763,11 +760,8 @@ def test_a_leap_year_start_bins_by_the_model_calendar_not_the_label(leap_year):
     coupler, monthly, accumulator, diagnostics = leap_year
     _, counts = accumulator
 
-    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
-    # PR 878 labels the WRITTEN output at the midpoint instead; see
-    # `end_of_interval_labels`).
-    labels = end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
-    assert labels[LEAP_DAY_RECORD] == np.datetime64("2000-02-29T00:00")
+    labels = (coupler.time_axis(0, STEPS_PER_YEAR)).datetimes()
+    assert labels[LEAP_DAY_RECORD] == np.datetime64("2000-02-29T12:00")
     np.testing.assert_array_equal(np.asarray(counts), MONTH_LENGTHS_365)
 
     months = model_calendar_months(coupler, STEPS_PER_YEAR)
@@ -792,10 +786,10 @@ def test_a_run_stopping_on_the_leap_day_counts_that_record_in_march(
 ):
     """The accumulator itself, not just a host binning, puts it in bin 2.
 
-    59 daily steps from 1 January 2000 are the records labelled 2 January to
-    29 February; on the model calendar they are 2 January to 1 March, so 30
-    fall in January, 28 in February and the last one -- the one whose label is
-    the Gregorian leap day -- opens March.
+    60 daily steps from 1 January 2000 have midpoints 1 January 12:00 to
+    29 February 12:00 (real Gregorian); on the model calendar those same 60
+    records are 31 full days of January, 28 of February, and one -- record 59,
+    whose midpoint is the Gregorian leap day itself -- that opens March.
     """
     coupler = build_coupler(
         climatology_file, start_date=jdt.to_datetime(LEAP_START_DATE)
@@ -806,7 +800,7 @@ def test_a_run_stopping_on_the_leap_day_counts_that_record_in_march(
     )(coupler.initialize())
 
     expected = np.zeros(MONTHS_PER_YEAR, dtype=int)
-    expected[:3] = (30, 28, 1)
+    expected[:3] = (31, 28, 1)
     np.testing.assert_array_equal(np.asarray(counts), expected)
 
 
@@ -814,48 +808,47 @@ def test_leap_year_labels_run_a_day_behind_the_model_calendar(leap_year):
     """From the Gregorian 29 February on, a label is a day early.
 
     The consequence documented on `TimeAxis` and under `monthly_mean`'s **Leap
-    days**: the labels are a plain count of Gregorian days, so a 365-day run
-    loses a day to them at each leap day and keeps it for the rest of the
-    Gregorian year.
+    days on the fixed calendars**: the labels are a plain count of Gregorian
+    days (offset to each record's own midpoint), so a 365-day run loses a day
+    to them at each leap day and keeps it for the rest of the Gregorian year.
     """
     coupler, _, _, _ = leap_year
-    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
-    # PR 878 labels the WRITTEN output at the midpoint instead; see
-    # `end_of_interval_labels`).
-    labels = end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
+    labels = (coupler.time_axis(0, STEPS_PER_YEAR)).datetimes()
 
     # Up to the leap day the two calendars still agree.
-    assert labels[LEAP_DAY_RECORD - 1] == np.datetime64("2000-02-28T00:00")
+    assert labels[LEAP_DAY_RECORD - 1] == np.datetime64("2000-02-28T12:00")
     # And from it on the label is one day earlier than the model's own date:
     # the model calls these instants 1 March and 1 April.
-    assert labels[LEAP_DAY_RECORD] == np.datetime64("2000-02-29T00:00")
-    assert labels[APRIL_RECORD] == np.datetime64("2000-03-31T00:00")
+    assert labels[LEAP_DAY_RECORD] == np.datetime64("2000-02-29T12:00")
+    assert labels[APRIL_RECORD] == np.datetime64("2000-03-31T12:00")
 
 
 def test_a_leap_year_groupby_of_the_written_output_differs_as_documented(leap_year):
     """`finalize` and `groupby("time.month")` part company, in the stated way.
 
-    Grouping the written output by its own labels moves the first record of
-    every month from March on into the month before it; February keeps its own
-    records and gains the one the model calls 1 March (29 against the model's
-    28); and January loses its year-wrap record -- the one the model calls
-    1 January 2001, labelled `2000-12-31` -- to December. The counts alone
-    understate it, because every month from March on holds the *same number*
-    of records under both binnings but not the same ones, so the means differ
-    too.
+    Under the midpoint convention this collapses to exactly two months, not
+    the whole March-onward cascade the pre-migration end-of-interval
+    convention produced (every record's REAL-calendar month now equals its
+    MODEL-calendar month except across the one genuine difference between the
+    two calendars: real February has a 29th day the model's never does).
+    February's written labels therefore hold 29 records (its own real days,
+    leap day included) against the model's 28; and since the real year (2000,
+    a leap year) is 366 days while this run is only ``STEPS_PER_YEAR = 365``
+    records long, the run's labels never reach real 31 December at all, so
+    December's written labels hold only 30 (real 1-30 December) against the
+    model's clean 31. Every other month -- including March, which the
+    pre-migration test used as its worked example -- now agrees exactly,
+    because the boundary convention that used to shift every month from March
+    on by one record is gone (see ``monthly_mean``'s Breaking-change
+    paragraph); what is left is only the leap-day / short-run difference this
+    test now pins.
     """
     coupler, monthly, accumulator, diagnostics = leap_year
     _, counts = accumulator
 
-    # The END of each interval -- what `monthly_mean` itself bins by (jax-gcm
-    # PR 878 labels the WRITTEN output at the midpoint instead; see
-    # `end_of_interval_labels`). Applying that correction isolates the
-    # divergence this test is actually about (the model's 365-day calendar
-    # against the labels' real Gregorian one) from the unrelated
-    # midpoint-vs-end shift jax-gcm PR 878 also introduced.
     ocean = coupler.to_xarray(diagnostics)["ocn"]
     month = (
-        end_of_interval_labels(coupler.time_axis(0, STEPS_PER_YEAR))
+        (coupler.time_axis(0, STEPS_PER_YEAR)).datetimes()
         .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
     )
     from_output = (
@@ -865,17 +858,19 @@ def test_a_leap_year_groupby_of_the_written_output_differs_as_documented(leap_ye
     from_labels = np.bincount(month, minlength=MONTHS_PER_YEAR)
 
     np.testing.assert_array_equal(np.asarray(counts)[:2], [31, 28])
-    np.testing.assert_array_equal(from_labels[:2], [30, 29])
-    np.testing.assert_array_equal(from_labels[2:], np.asarray(counts)[2:])
+    np.testing.assert_array_equal(from_labels[:2], [31, 29])
+    # Every month but February and December now agrees exactly.
+    np.testing.assert_array_equal(from_labels[2:11], np.asarray(counts)[2:11])
+    assert from_labels[11] == np.asarray(counts)[11] - 1  # December: 30 vs 31
 
     accumulated = np.asarray(
         monthly.finalize(accumulator)["ocn"]["state"].sea_surface_temperature
     )
-    # March is the clearest case: 31 records either way, shifted by one, and
-    # the ocean's seasonal cycle makes that a difference far above float32
-    # noise (the accumulated means match the model-calendar binning to the
-    # float32 tolerance asserted above, rtol 1e-5 / atol 1e-4).
-    assert np.max(np.abs(accumulated[2] - from_output.values[2])) > 0.05
+    # February is the clearest case now: 29 records against 28, and the
+    # ocean's seasonal cycle makes that a difference far above float32 noise
+    # (the accumulated means match the model-calendar binning to the float32
+    # tolerance asserted above, rtol 1e-5 / atol 1e-4).
+    assert np.max(np.abs(accumulated[1] - from_output.values[1])) > 0.01
 
 
 def test_sequential_months_over_a_leap_year_keep_the_model_month_lengths(
@@ -883,11 +878,12 @@ def test_sequential_months_over_a_leap_year_keep_the_model_month_lengths(
 ):
     """The one-bin-per-month form bins by the model calendar too.
 
-    Sized by `total_time` the bins never wrap, so January's records are not
-    joined by the record the model calls 1 January of the next year (labelled
-    `2000-12-31`): the first bin holds 30 and that record gets the thirteenth
-    bin. Everything between is
-    the 365-day month lengths, unmoved by the labels' leap day.
+    Sized by `total_time` the bins never wrap: a run of exactly one model year
+    (``STEPS_PER_YEAR`` days) gets exactly the twelve model month lengths, the
+    same clean result as the twelve-bin climatology
+    (`test_a_leap_year_start_bins_by_the_model_calendar_not_the_label`) --
+    unaffected by the real calendar's leap day, which is a property of the
+    *labels*, not of this reduction's own bin math.
     """
     coupler = build_coupler(
         climatology_file, start_date=jdt.to_datetime(LEAP_START_DATE)
@@ -897,9 +893,7 @@ def test_sequential_months_over_a_leap_year_keep_the_model_month_lengths(
         STEPS_PER_YEAR, accumulate=monthly
     )(coupler.initialize())
 
-    np.testing.assert_array_equal(
-        np.asarray(counts), (30, *MONTH_LENGTHS_365[1:], 1)
-    )
+    np.testing.assert_array_equal(np.asarray(counts), MONTH_LENGTHS_365)
 
 
 # ---------------------------------------------------------------------------
@@ -921,11 +915,13 @@ def accumulated_pentads(coupler):
 def test_a_window_is_the_records_its_interval_ends_with(accumulated_pentads):
     """The first pentad is days 1 to 5 of the run, and every pentad holds five.
 
-    This is the convention the docstring commits to -- a step is binned by the
-    label of the record it produces, and a window is closed at its end, so the
-    record labelled exactly day 5 finishes the first pentad rather than
-    starting the second. A forecast's "first pentad" is days 1-5, and an
-    off-by-one here would make it days 1-4.
+    This is the convention the docstring commits to -- a record is binned
+    against its interval's *end* (elapsed time from the run's start, not the
+    record's own written label, which is its midpoint), and a window is
+    closed at its end, so the record covering ``[day 4, day 5)`` -- labelled
+    at its midpoint, day 4.5 -- finishes the first pentad rather than starting
+    the second. A forecast's "first pentad" is days 1-5, and an off-by-one
+    here would make it days 1-4.
     """
     _, carry, (_, counts) = accumulated_pentads
 
@@ -952,9 +948,13 @@ def test_windowed_means_match_an_xarray_groupby(coupler, stacked_year, accumulat
     elapsed_days = (
         ocean["time"].values - np.datetime64("2001-01-01")
     ) / np.timedelta64(1, "D")
-    # `ceil(elapsed / window) - 1`: the window a label belongs to when a window
-    # is the half-open interval (w*window, (w+1)*window] -- closed at the end,
-    # which is where JEM labels a record covering an interval.
+    # `ceil(elapsed / window) - 1`: the window a label belongs to when a
+    # window is the half-open interval (w*window, (w+1)*window] -- closed at
+    # the end. `elapsed_days` is the record's own *written* label (its
+    # midpoint), not its interval's end, but the two never straddle a
+    # different multiple of `window` (the window is several records long),
+    # so `ceil` gives the same answer either way -- see `windowed_mean`'s
+    # docstring for why the two conventions agree at a grid-aligned boundary.
     window = np.ceil(elapsed_days / PENTAD_DAYS).astype(int) - 1
     from_output = (
         ocean.sea_surface_temperature.assign_coords(window=("time", window))
@@ -1089,10 +1089,12 @@ def cycled_boundaries(lengths, bins):
 def window_of_label(boundaries_days, times):
     """Return the window each `datetime64` label falls in, binned on the host.
 
-    A window is closed at its end -- the record labelled exactly on a boundary
-    is the last of the window it closes, not the first of the next one -- so
-    the window of a label is the first boundary at or after its elapsed time,
-    which is what `searchsorted(..., side="left")` returns.
+    A window is closed at its end, so the window of a label is the first
+    boundary at or after its elapsed time -- `searchsorted(..., side="left")`.
+    A record's own written label is now its midpoint, never exactly on a
+    whole-day boundary, so `side` cannot actually change the answer here (see
+    `windowed_mean`'s docstring for why); it is kept explicit anyway, because
+    it is still what the convention means.
     """
     elapsed_days = (times - np.datetime64("2001-01-01")) / np.timedelta64(1, "D")
     return np.searchsorted(boundaries_days, elapsed_days, side="left")
@@ -1205,30 +1207,31 @@ def test_a_pattern_cannot_be_given_both_sizes(coupler):
         windowed_mean(coupler, ["10 days"], n_windows=4, total_time="20 days")
 
 
-def test_a_month_long_window_and_a_month_close_on_opposite_sides(coupler):
-    """The documented difference between a window and a calendar month.
+def test_a_month_long_window_and_a_month_now_agree_at_their_shared_boundary(coupler):
+    """The convention gap this test used to pin no longer exists.
 
-    A window closes at its end and a calendar month closes at its start, so
-    the record labelled 00:00 on 1 February is the **last** of a 31-day window
-    started on 1 January and the **first** of February's month. This coupler
-    starts at 00:00 on 1 January, which is the only case in which a window
-    pattern of month lengths lines up with the calendar at all -- that is why
-    calendar months come from `monthly_mean`, which phases itself to the run's
-    start date, and not from a pattern handed to `windowed_mean`, which cannot.
+    Before the 2026-09 jax-gcm-878 migration, `windowed_mean` and
+    `monthly_mean` both bound a record by its interval's END but closed a
+    shared boundary in *opposite* directions, so the record whose interval
+    ended exactly at 00:00 on 1 February was the **last** of a 31-day window
+    started on 1 January but the **first** of February's calendar-month bin.
+    `monthly_mean`'s rule moved to the record's MIDPOINT to keep pace with
+    ``TimeAxis``'s own new midpoint labels (see that function's docstring's
+    Breaking-change paragraph); `windowed_mean`'s did not, since its own
+    convention has nothing to do with the output label (see its own
+    docstring). The two now agree at any *grid-aligned* shared boundary
+    regardless -- this is the same record, still the last one before the
+    boundary, in **both** builders now.
     """
-    # The END of each interval -- what both `windowed_mean` and `monthly_mean`
-    # bin by (jax-gcm PR 878 labels the WRITTEN output at the midpoint
-    # instead; see `end_of_interval_labels`).
-    labels = end_of_interval_labels(coupler.time_axis(0, MONTH_WINDOW_STEPS))
-    boundary = np.flatnonzero(labels == np.datetime64("2001-02-01"))
+    last_january_record = month_lengths(coupler)[0] - 1  # 0-indexed: day 30
+    labels = (coupler.time_axis(0, MONTH_WINDOW_STEPS)).datetimes()
     window = window_of_label(
         cycled_boundaries(month_lengths(coupler), MONTHS_PER_YEAR + 2), labels
     )
     month = labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
 
-    assert boundary.size == 1
-    assert int(window[boundary[0]]) == 0
-    assert int(month[boundary[0]]) == 1
+    assert int(window[last_january_record]) == 0
+    assert int(month[last_january_record]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1330,13 +1333,18 @@ def weaved(climatology_file):
 
 
 def test_a_sub_stepped_component_is_counted_record_by_record(weaved):
-    """The 24 hourly records of a coupled step land in the months they label.
+    """Each hourly record lands in the month its own midpoint falls in.
 
-    The counts are what show the convention directly: 23 of the records of the
-    day covering 31 January are January's and the 24th, labelled 1 February
-    00:00, is February's. Binning the whole coupled step by its own label --
-    which is what the accumulator did before -- would have put all 24 in
-    February and disagreed with the written output by a day of records.
+    Every hour-of-day slot behaves identically here, which is itself the
+    point: a slot's midpoint offset from the hour (30 minutes, for an hourly
+    sub-step) is always under a day, so it can never itself cross the
+    January/February boundary regardless of which hour-of-day the slot is --
+    unlike the pre-migration end-labelled convention, under which the
+    23:00-00:00 slot's record was labelled exactly on the boundary and so
+    counted differently from the other 23. Binning the whole coupled step by
+    one label (rather than each of its 24 sub-step records by its own) would
+    still put all 24 of the boundary day's records on one side of it and
+    disagree with the written output by a whole day of records.
     """
     _, _, _, (_, counts) = weaved
 
@@ -1347,16 +1355,16 @@ def test_a_sub_stepped_component_is_counted_record_by_record(weaved):
     assert counts["ocn"].shape == (MONTHS_PER_YEAR,)
 
     atmosphere = np.asarray(counts["atm"])
-    np.testing.assert_array_equal(atmosphere[0], [JANUARY_DAYS] * 23 + [30])
     february_days = BOUNDARY_STEPS - JANUARY_DAYS
-    np.testing.assert_array_equal(
-        atmosphere[1], [february_days] * 23 + [february_days + 1]
-    )
+    np.testing.assert_array_equal(atmosphere[0], [JANUARY_DAYS] * HOURS_PER_DAY)
+    np.testing.assert_array_equal(atmosphere[1], [february_days] * HOURS_PER_DAY)
     assert np.all(atmosphere[2:] == 0)
     assert int(atmosphere.sum()) == BOUNDARY_STEPS * HOURS_PER_DAY
-    # The daily component is unaffected: its 40 records are labelled 2 January
-    # to 10 February.
-    np.testing.assert_array_equal(np.asarray(counts["ocn"])[:2], [30, 10])
+    # The daily component: its 40 records have midpoints 1 January 12:00
+    # through 9 February 12:00, 31 in January and 9 in February.
+    np.testing.assert_array_equal(
+        np.asarray(counts["ocn"])[:2], [JANUARY_DAYS, february_days]
+    )
 
 
 def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
@@ -1364,28 +1372,19 @@ def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
 
     The same contract the un-weaved run is held to, at the resolution the
     records are actually written at: the hourly stream is binned by hour and
-    the daily stream by day, and both come out of one accumulator. Each
-    stream's own labels are put back on the END of its own interval before
-    grouping -- half an hour for the sub-stepped atmosphere, half a day for
-    the ocean -- because jax-gcm PR 878 labels WRITTEN output at each
-    interval's midpoint while ``monthly_mean`` itself still bins by the end
-    (see :func:`end_of_interval_labels`).
+    the daily stream by day, and both come out of one accumulator. No
+    correction is needed on either stream's own written labels any more --
+    ``monthly_mean`` bins every record by the same midpoint
+    :class:`~jem.base.component.TimeAxis` labels it with, at whatever rate it
+    records.
     """
     coupler, diagnostics, monthly, accumulator = weaved
     _, counts = accumulator
     means = monthly.finalize(accumulator)
     datasets = coupler.to_xarray(diagnostics)
 
-    hourly_month = (
-        (datasets["atm"]["time"].values + np.timedelta64(30, "m"))
-        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
-    )
-    hourly = (
-        datasets["atm"].mean_air_temperature
-        .assign_coords(month=("time", hourly_month))
-        .groupby("month").mean("time")
-    )
-    np.testing.assert_array_equal(hourly.month.values, [0, 1])
+    hourly = datasets["atm"].mean_air_temperature.groupby("time.month").mean("time")
+    np.testing.assert_array_equal(hourly["month"].values, [1, 2])
     folded = fold_sub_steps(
         means["atm"]["state"].mean_air_temperature, counts["atm"]
     )
@@ -1393,14 +1392,8 @@ def test_weaved_monthly_means_match_an_xarray_groupby(weaved):
     # Every other month is empty, and empty means NaN rather than zero.
     assert np.all(np.isnan(folded[2:]))
 
-    daily_month = (
-        (datasets["ocn"]["time"].values + np.timedelta64(12, "h"))
-        .astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
-    )
     daily = (
-        datasets["ocn"].sea_surface_temperature
-        .assign_coords(month=("time", daily_month))
-        .groupby("month").mean("time")
+        datasets["ocn"].sea_surface_temperature.groupby("time.month").mean("time")
     )
     np.testing.assert_allclose(
         np.asarray(means["ocn"]["state"].sea_surface_temperature)[:2],
@@ -1432,8 +1425,9 @@ def test_weaved_windowed_means_match_the_host_binning(climatology_file):
     elapsed_days = (
         atmosphere["time"].values - np.datetime64("2001-01-01")
     ) / np.timedelta64(1, "D")
-    # `ceil(elapsed / window) - 1`: a window is closed at its end, which is
-    # where JEM labels the record covering it.
+    # `ceil(elapsed / window) - 1`: a window is closed at its end; `ceil` of
+    # the record's own midpoint label agrees with `ceil` of its true interval
+    # end here too (see `windowed_mean`'s docstring).
     window = np.ceil(elapsed_days / PENTAD_DAYS).astype(int) - 1
     from_output = (
         atmosphere.mean_air_temperature.assign_coords(window=("time", window))
@@ -1468,7 +1462,7 @@ def test_a_nested_coupler_bins_its_inner_records_the_same_way(climatology_file):
     for component in ("atm", "ocn"):
         np.testing.assert_array_equal(
             np.asarray(counts["fast"][component])[0],
-            [JANUARY_DAYS] * 23 + [30],
+            [JANUARY_DAYS] * HOURS_PER_DAY,
         )
 
     means = monthly.finalize(accumulator)
@@ -1671,21 +1665,10 @@ def test_month_lengths_refuses_a_calendar_with_no_fixed_table():
 # ---------------------------------------------------------------------------
 
 
-def test_a_gregorian_run_is_refused_with_a_reason(climatology_file):
-    """Leap years make the day-of-year to month table non-constant."""
-    grid = make_grid()
-    coupler = Coupler(
-        {"atm": SlabAtmosphereModel(grid)},
-        coupling_timestep=COUPLING_TIMESTEP,
-        start_date=START_DATE,
-        calendar="gregorian",
-    )
-    with pytest.raises(NotImplementedError, match="Gregorian"):
-        monthly_mean(coupler)
-
-
 def test_a_timestep_that_does_not_divide_the_year_is_refused(climatology_file):
-    """A month would then not be a function of the step counter alone."""
+    """On a fixed calendar, a month would then not be a function of the step
+    counter alone -- ``gregorian`` has no such restriction (below).
+    """
     grid = make_grid()
     coupler = Coupler(
         {"atm": SlabAtmosphereModel(grid)},
@@ -1695,6 +1678,186 @@ def test_a_timestep_that_does_not_divide_the_year_is_refused(climatology_file):
     )
     with pytest.raises(ValueError, match="divide the year"):
         monthly_mean(coupler)
+
+
+# ---------------------------------------------------------------------------
+# The "gregorian" calendar (2026-09 jax-gcm-878 migration review, item A)
+# ---------------------------------------------------------------------------
+
+#: A run long enough to touch every one of the four Gregorian century cases
+#: (`jem.base.calendar_test` cross-checks the vendored arithmetic itself over
+#: 400+ years; this run only needs to be long enough to cross a real leap day,
+#: which a single non-leap-adjacent year already does not, so this picks a
+#: run straddling 2000's 29 February specifically).
+GREGORIAN_START_DATE = "1999-11-15"
+GREGORIAN_STEPS = 120  # 15 Nov 1999 to 14 Mar 2000: crosses the leap day.
+
+
+@pytest.fixture(scope="module")
+def gregorian_coupler(climatology_file):
+    """Build a two-slab coupler on the (now default) ``gregorian`` calendar.
+
+    Built without `build_coupler`'s own `calendar=CALENDAR` ("365_day"): this
+    deliberately exercises `Coupler`'s own default rather than overriding it,
+    since `"gregorian"` is what every undecorated `Coupler(...)` means now.
+    """
+    grid = make_grid()
+    ocean = SlabOceanModel(
+        grid,
+        SlabOceanParameters(
+            forcing_method="relaxation", relaxation_time=RELAXATION_TIME
+        ),
+        sst_clim_file=climatology_file,
+    )
+    return Coupler(
+        {"atm": SlabAtmosphereModel(grid), "ocn": ocean},
+        {"exchange": slab_exchange},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime(GREGORIAN_START_DATE),
+    )
+
+
+def test_gregorian_no_longer_needs_a_fixed_table_or_a_divides_the_year_check(
+    gregorian_coupler,
+):
+    """``monthly_mean`` builds on ``gregorian`` directly now -- no refusal.
+
+    Confirmed working, both forms, cross-checked below against `pandas`'s own
+    Gregorian arithmetic (real leap years). This also needs no
+    "coupling timestep divides the year" check at all -- unlike the fixed
+    calendars, ``gregorian`` reads a record's real calendar month directly off
+    its exact date rather than reducing a step counter modulo a table.
+    """
+    monthly_mean(gregorian_coupler)  # twelve-bin form: does not raise
+    monthly_mean(gregorian_coupler, total_time="10 years")  # sequential: does not raise
+    assert gregorian_coupler.calendar == "gregorian"
+
+
+def test_gregorian_monthly_means_match_a_pandas_groupby_across_a_leap_day(
+    gregorian_coupler,
+):
+    """The midpoint-binning equality, proven independently of jem's own labels.
+
+    This is the equality ``monthly_mean``'s docstring claims -- bins equal
+    ``groupby("time.month")`` of the written output *by construction* -- but
+    checked against `pandas`'s own Gregorian ``Timestamp`` arithmetic rather
+    than against ``TimeAxis.datetimes()`` itself, so a bug shared between the
+    bin rule and the labelling function could not hide the disagreement. The
+    run straddles the real 2000-02-29, which the twelve-bin form composites
+    into February like any other February day (real leap years, not a fixed
+    table) and the leap day itself is not a special case in the code at all.
+    """
+    monthly = monthly_mean(gregorian_coupler)
+    trajectory = gregorian_coupler.generate_trajectory_function(
+        GREGORIAN_STEPS, accumulate=monthly
+    )
+    _, accumulator = trajectory(gregorian_coupler.initialize())
+    _, diagnostics = gregorian_coupler.generate_trajectory_function(GREGORIAN_STEPS)(
+        gregorian_coupler.initialize()
+    )
+
+    start = pd.Timestamp(GREGORIAN_START_DATE)
+    dt = pd.Timedelta(days=1)
+    midpoints = pd.date_range(start, periods=GREGORIAN_STEPS, freq="D") + dt / 2
+    month = np.asarray(midpoints.month) - 1  # 0-indexed, January first
+
+    ocean = gregorian_coupler.to_xarray(diagnostics)["ocn"]
+    # The written labels agree with the independent pandas computation, which
+    # is itself part of the claim: jem's labels and jem's bins and pandas's
+    # own Gregorian calendar are all the same calendar.
+    np.testing.assert_array_equal(
+        ocean["time"].values.astype("datetime64[us]"),
+        midpoints.values.astype("datetime64[us]"),
+    )
+
+    expected = host_monthly_means(diagnostics, month)
+    actual = monthly.finalize(accumulator)
+    for index, (got, want) in enumerate(
+        zip(
+            jax.tree_util.tree_leaves(actual),
+            jax.tree_util.tree_leaves(expected),
+            strict=True,
+        )
+    ):
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-4,
+            err_msg=f"leaf {index}",
+        )
+
+    from_output = ocean.sea_surface_temperature.groupby("time.month").mean("time")
+    accumulated = actual["ocn"]["state"].sea_surface_temperature
+    got_months = np.asarray(from_output["month"].values) - 1
+    np.testing.assert_allclose(
+        np.asarray(accumulated)[got_months],
+        from_output.values,
+        rtol=1e-5, atol=1e-4,
+    )
+
+
+def test_gregorian_sequential_months_size_and_bin_correctly(gregorian_coupler):
+    """The sequential form's host-sized bin count, cross-checked against pandas.
+
+    ``n_bins`` is computed on the host from the run's first and last records'
+    own midpoints (see ``monthly_mean``'s **Sequential-form bin 0**); this
+    checks that count, and every bin's membership, against an independent
+    `pandas` computation of the same thing.
+    """
+    monthly = monthly_mean(gregorian_coupler, total_time=f"{GREGORIAN_STEPS} days")
+    trajectory = gregorian_coupler.generate_trajectory_function(
+        GREGORIAN_STEPS, accumulate=monthly
+    )
+    _, (_, counts) = trajectory(gregorian_coupler.initialize())
+
+    start = pd.Timestamp(GREGORIAN_START_DATE)
+    dt = pd.Timedelta(days=1)
+    midpoints = pd.date_range(start, periods=GREGORIAN_STEPS, freq="D") + dt / 2
+    year_month = midpoints.year * 12 + midpoints.month
+    bins = year_month - int(year_month[0])
+
+    expected_n_bins = int(bins.max()) + 1
+    assert counts.shape == (expected_n_bins,)
+    np.testing.assert_array_equal(np.asarray(counts), np.bincount(bins))
+
+
+def test_the_documented_host_side_monthly_recipes(gregorian_coupler):
+    """Every host-side monthly-binning recipe the docs point at actually runs.
+
+    `jem/config/coupled_run/long_run.yaml`'s comment used to point at
+    ``ds.groupby("time.year").groupby("time.month")`` as the host-side
+    fallback for a Gregorian run (from before item A made `monthly_mean`
+    itself handle `"gregorian"` in-scan) -- that recipe was never actually
+    run and raises `AttributeError` (a `*GroupBy` object has no `.groupby` of
+    its own). This pins the two recipes that replaced it, so neither can
+    silently break the same way.
+    """
+    _, diagnostics = gregorian_coupler.generate_trajectory_function(GREGORIAN_STEPS)(
+        gregorian_coupler.initialize()
+    )
+    ocean = gregorian_coupler.to_xarray(diagnostics)["ocn"]
+
+    with pytest.raises(AttributeError):
+        ocean.groupby("time.year").groupby("time.month")
+
+    resampled = ocean.sea_surface_temperature.resample(time="MS").mean()
+    n_calendar_months = resampled.sizes["time"]
+    assert n_calendar_months > 0
+
+    # `groupby` on a LIST of keys returns the full (year, month) cross
+    # product, most of which is NaN for a run shorter than a year -- so this
+    # compares them by picking out, for each of `resample`'s months, the
+    # matching (year, month) slice of the `groupby` result, rather than by
+    # shape (which differ) or a flattened sort (which pads with NaN).
+    grouped = (
+        ocean.sea_surface_temperature.groupby(["time.year", "time.month"]).mean()
+    )
+    assert int((~grouped.isnull()).any(("lat", "lon")).sum()) == n_calendar_months
+    for label in resampled["time"].values:
+        timestamp = pd.Timestamp(label)
+        from_resample = resampled.sel(time=label)
+        from_groupby = grouped.sel(year=timestamp.year, month=timestamp.month)
+        np.testing.assert_allclose(
+            from_resample.values, from_groupby.values, rtol=1e-5, atol=1e-4
+        )
 
 
 def test_a_run_starting_mid_year_bins_from_its_own_dates(climatology_file):
@@ -1710,11 +1873,10 @@ def test_a_run_starting_mid_year_bins_from_its_own_dates(climatology_file):
     trajectory = coupler.generate_trajectory_function(31, accumulate=monthly)
     _, (_, counts) = trajectory(coupler.initialize())
 
-    # 31 daily steps from 1 July are labelled 2 July to 1 August: 30 records
-    # in July and one in August.
+    # 31 daily steps from 1 July have midpoints 1 July 12:00 to 31 July
+    # 12:00: all 31 stay in July, none spilling into August.
     expected = np.zeros(MONTHS_PER_YEAR, dtype=int)
-    expected[6] = 30
-    expected[7] = 1
+    expected[6] = 31
     np.testing.assert_array_equal(np.asarray(counts), expected)
 
 
