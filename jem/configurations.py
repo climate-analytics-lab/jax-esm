@@ -206,7 +206,9 @@ def _hydra_list_literal(value: list, key: str) -> str:
     - ``int`` -> its decimal digits;
     - ``float`` -> the shortest round-trip form (``2.5``, ``1e-10``, ``inf``);
     - ``str`` -> Hydra's own ``QuotedString`` serializer, the one a top-level
-      string uses, so quotes, backslashes, commas and ``=`` survive;
+      string uses, so quotes, backslashes, commas and ``=`` survive (a
+      ``${...}`` interpolation is still resolved, as for a top-level string;
+      see :func:`_override_str`);
     - ``list`` (exactly ``list``) -> recursively.
 
     ``test_every_accepted_list_element_type_round_trips`` pins that each of
@@ -250,7 +252,7 @@ def _unrepresentable_list_message(key: str, kind: type) -> str:
 
 
 def _override_str(key: str, value: Any) -> str:
-    """One Hydra override token from a ``**overrides`` item.
+    r"""One Hydra override token from a ``**overrides`` item.
 
     ``None`` -> ``null``. A ``str`` value is emitted as a Hydra *quoted
     string* so grammar characters (commas, ``=``, braces -- ordinary in
@@ -266,6 +268,17 @@ def _override_str(key: str, value: Any) -> str:
     to the Python string ``"3"``, unlike the CLI's own bare ``subsample=3``,
     which composes to the integer -- pass the unquoted Python ``int``/``float``
     for that.
+
+    Quoting protects a string from Hydra's *override* grammar only: a
+    ``${...}`` inside it is still an OmegaConf interpolation, resolved when
+    the configuration is composed, exactly as the CLI's
+    ``key='${...}'`` is. That is deliberate. It keeps ``load()`` equivalent to
+    the command line, and it is how a caller names packaged data:
+    ``load(name, ocean="slab_relax",
+    **{"ocean.sst_clim_file": "${jcm_data:bc/t30/clim/forcing.nc}"})``, the
+    Python spelling of the documented CLI override. A string that must
+    arrive holding a literal ``${`` escapes it as ``\${``, as it would on
+    the CLI. The same holds for strings inside a list.
 
     Non-string scalars pass through unquoted so ``coupled_run.total_time=10``
     stays the number ``10``. A ``dict`` is refused outright with a
@@ -451,8 +464,10 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ValueError
         If ``name`` is not one of :func:`available`.
     TypeError
-        If an override value is a ``dict``, a ``tuple``, or a ``list``
-        containing ``None`` at any nesting depth (see :func:`_override_str`).
+        If an override value is a ``dict`` or a ``tuple``, a ``list``
+        subclass, or a ``list`` holding anything other than ``None``, plain
+        ``bool``/``int``/``float``/``str`` and nested plain lists, at any
+        depth (see :func:`_override_str`).
 
     """
     from omegaconf import OmegaConf

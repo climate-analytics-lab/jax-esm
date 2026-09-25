@@ -232,7 +232,11 @@ caller's own code. `**overrides` is the escape hatch onto both a dotted
 value (`load("earth-slab", **{"coupled_run.total_time": "60 days"})` --
 `earth-slab`'s `chunk` stays its recipe default of 30 days, so this has to be
 a multiple of that) and a config-group selection (`load("aquaplanet-slab",
-seaice="none")`, the Python spelling of the CLI's `seaice=none`). `load`'s own
+seaice="none")`, the Python spelling of the CLI's `seaice=none`). A string
+override is carried literally except for a `${...}` interpolation, which
+resolves just as it does on the CLI, so
+`**{"ocean.sst_clim_file": "${jcm_data:bc/t30/clim/forcing.nc}"}` names the
+packaged file; write `\${` for a literal `${`. `load`'s own
 docstring lists the small, specific things `run_chunked(exp.coupler,
 **exp.run_kwargs)` does NOT reproduce of the CLI (a fresh `output_dir` of the
 door's own rather than the CLI's Hydra-managed one, no logger-level change)

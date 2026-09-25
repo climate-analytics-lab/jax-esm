@@ -468,6 +468,32 @@ class TestOverrideStr(unittest.TestCase):
                "coupled_run.total_time": "2 days", "coupled_run.chunk": "2 days"})
         self.assertEqual(exp.run_kwargs["output_dir"], "/tmp/a,b={run}=z")
 
+    def test_interpolation_resolves_as_on_the_cli_and_escapes_to_literal(self):
+        # A `${...}` in a string override -- top level or inside a list --
+        # resolves at composition exactly as the CLI's `key='${...}'` does,
+        # which is how a caller names packaged data; `\${` keeps it literal.
+        from omegaconf import OmegaConf
+
+        import jem.runners  # noqa: F401  (registers the ${jcm_data:} resolver)
+
+        resolver = "${jcm_data:bc/t30/clim/forcing.nc}"
+        overrides = {
+            "coupled_run.output_dir": resolver,
+            "+probe.listed": [resolver, [resolver]],
+            "+probe.literal": "\\${not.a.key}",
+            "+probe.literal_list": ["\\${not.a.key}"],
+        }
+        cfg = configurations._compose(
+            "aquaplanet-slab",
+            [configurations._override_str(k, v) for k, v in overrides.items()])
+        resolved = OmegaConf.to_container(cfg, resolve=True)
+        path = resolved["coupled_run"]["output_dir"]
+        self.assertNotIn("${", path)
+        self.assertTrue(path.endswith("bc/t30/clim/forcing.nc"))
+        self.assertEqual(resolved["probe"]["listed"], [path, [path]])
+        self.assertEqual(resolved["probe"]["literal"], "${not.a.key}")
+        self.assertEqual(resolved["probe"]["literal_list"], ["${not.a.key}"])
+
 
 def test_module_imports_no_hydra_or_omegaconf_at_top_level():
     """The door's whole point: a caller (this file) never imports hydra."""
