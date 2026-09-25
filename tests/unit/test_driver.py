@@ -46,6 +46,54 @@ def two_slabs() -> Coupler:
     )
 
 
+def doubly_nested_coupler() -> Coupler:
+    """Return the reviewer's doubly nested 24x6x5 toy coupler (2026-09 review round 3).
+
+    Three nested rates compound into one raw counter: an ``atm`` sub-stepped
+    5 times inside a 10-minute-inside-1-hour nesting (rate 6), itself nested
+    24x inside an outer daily coupler -- so the fastest raw counter anywhere
+    in the hierarchy advances ``24 * 6 * 5 = 720`` times per outer coupled
+    step. This is `rr/c3.py`'s ``dnested()``, rebuilt here on the toy
+    ``Counter``/exchanger fixtures :mod:`tests.unit.test_nested_coupler`
+    already defines for exactly this kind of test, so a resume bug in
+    ``_check_step_counters_fit_int32`` (which only shows up once
+    ``first_step`` is non-zero) has a coupler with a small enough raw-counter
+    limit to name a resume point inside it without an astronomical run.
+    """
+    from tests.unit.test_nested_coupler import (
+        Counter,
+        atm_lnd_exchange,
+        srf_ocn_exchange_nested,
+    )
+
+    ten_minutes = jdt.to_timedelta(10, "minute")
+    hour = jdt.to_timedelta(1, "hour")
+    day = jdt.to_timedelta(1, "day")
+    inner = Coupler(
+        {"atm": Counter("atm"), "lnd": Counter("lnd")},
+        {"atm_lnd_exchange": atm_lnd_exchange},
+        coupling_timestep=ten_minutes,
+        start_date=START_DATE,
+        name="atm_lnd",
+        workflow=["atm_lnd_exchange"] + ["atm"] * 5 + ["lnd"],
+    )
+    mid = Coupler(
+        {"atm_lnd": inner, "ocn": Counter("ocn")},
+        {"srf_ocn_exchange": srf_ocn_exchange_nested},
+        coupling_timestep=hour,
+        start_date=START_DATE,
+        name="mid",
+        workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
+    )
+    return Coupler(
+        {"mid": mid, "sea": Counter("sea")},
+        {},
+        coupling_timestep=day,
+        start_date=START_DATE,
+        workflow=["mid", "sea"],
+    )
+
+
 @pytest.fixture
 def coupler() -> Coupler:
     return two_slabs()
@@ -273,12 +321,12 @@ def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
     """The refusal's own boundary is exact: reaching `limit` itself is not refused.
 
     ``_check_step_counters_fit_int32(coupler, first_step, total_steps)``
-    checks the LAST coupled step the run would reach,
-    ``first_step + total_steps - 1`` -- ``total_steps`` counts steps, not the
-    index after the last one. This only exercises the check directly (not
-    the whole of `run_chunked`, which would then have to build and run a
-    multi-million-step trajectory) -- the boundary is what is under test,
-    not the run.
+    checks the LAST coupled step the run would reach, ``total_steps - 1`` --
+    ``total_steps`` is the run's own ABSOLUTE target step count (see the
+    function's own docstring), so it alone (not ``first_step``) says how far
+    the run goes. This only exercises the check directly (not the whole of
+    `run_chunked`, which would then have to build and run a multi-million-step
+    trajectory) -- the boundary is what is under test, not the run.
     """
     from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
 
@@ -287,9 +335,42 @@ def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
         _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        # A resumed run: `first_step` alone already at the limit, plus more
-        # steps to integrate, reaches past it.
-        _check_step_counters_fit_int32(coupler, limit, 2)
+        # A resumed run whose absolute target is past the limit: `total_steps`
+        # is the run's absolute target step count (see `remaining_batches`'s
+        # own docstring), so a resume at `limit` itself plus `limit + 2` more
+        # is expressed as a target of `limit + 2`, not `limit + 2` on its own.
+        _check_step_counters_fit_int32(coupler, limit, limit + 2)
+
+
+def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupler():
+    """2026-09 review, round 3: `total_steps` is absolute, not relative to `first_step`.
+
+    `run_chunked` passes `_check_step_counters_fit_int32` the same
+    `total_steps` it passes `remaining_batches` -- the ABSOLUTE coupled-step
+    count the *whole run* is asked to reach, never a count of steps still to
+    integrate from `first_step` (`remaining_batches`'s own docstring: "Coupled
+    steps the whole run is asked for"). The check used to compute
+    ``last_step = first_step + total_steps - 1``, silently double-counting
+    `first_step` -- so a real, legitimate 6000-year run of the doubly nested
+    24x6x5 coupler above (`rr/c5.py`), resumed at coupled step 1,000,000,
+    used to be refused even though its true last step (`total_steps - 1`,
+    about 2.19 million) sits well inside the raw-counter limit (about 2.98
+    million here, since `rate = 720`).
+    """
+    from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
+
+    coupler = doubly_nested_coupler()
+    limit = _max_safe_coupled_steps(coupler)
+    total_steps = 2_191_455  # ~6000 years of daily coupled steps
+    assert total_steps - 1 <= limit  # sanity: this run is genuinely in bounds
+
+    # Resumed at coupled step 1,000,000: legitimate, must be accepted.
+    _check_step_counters_fit_int32(coupler, 1_000_000, total_steps)
+
+    # One coupled step past the limit -- an absolute target one past `limit`
+    # -- is still refused, resumed or not.
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        _check_step_counters_fit_int32(coupler, 1_000_000, limit + 2)
 
 
 def test_run_chunked_writes_nothing_when_the_run_is_already_done(coupler, tmp_path):

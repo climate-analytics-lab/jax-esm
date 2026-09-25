@@ -968,7 +968,7 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
-        The coupled model a run's ``first_step + total_steps`` is checked
+        The coupled model a run's (absolute) ``total_steps`` is checked
         against.
 
     Returns
@@ -995,7 +995,7 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
 def _check_step_counters_fit_int32(
     coupler: "Coupler", first_step: int, total_steps: int
 ) -> None:
-    """Refuse a run whose ``first_step + total_steps`` would overflow a clock's own counter.
+    """Refuse a run whose ``total_steps`` would overflow a clock's own counter.
 
     Checked once, up front (as soon as ``first_step`` is known from the
     starting carry, before any trajectory is compiled), against
@@ -1005,36 +1005,54 @@ def _check_step_counters_fit_int32(
     ``year_fraction`` of a 73453 s coupling from 2000-01-01 was found wrong
     at step 58471 (about 25 years in) with no error at all.
 
+    ``total_steps`` is ``run_chunked``'s and :func:`~jem.checkpoint
+    .remaining_batches`'s own ``total_steps``: the ABSOLUTE coupled-step
+    count the *whole run* (not just this call) is asked to reach, counting
+    from the run's own step 0 -- never a count of steps still to integrate
+    from ``first_step``. The last coupled step this run reaches is therefore
+    ``total_steps - 1`` regardless of where a resume starts (a resume only
+    changes how much of ``0 .. total_steps - 1`` THIS CALL still has to
+    integrate, not the run's own target). A round 2 version of this check
+    computed ``first_step + total_steps - 1``, double-counting ``first_step``
+    -- which refused a real, legitimate 6000-year run of a doubly nested
+    24x6x5 coupler resumed at coupled step 1,000,000, even though its true
+    last step was still well inside the limit (2026-09 review, round 3,
+    finding 1; ``rr/c5.py``).
+
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
         The coupled model being run.
     first_step : int
-        The coupled step the run starts at (``int(carry.step)``).
+        The coupled step this call starts at (``int(carry.step)``) -- used
+        only to describe, in the message below, how much of the run this
+        call itself still has to integrate; it does not change what is
+        checked, since the run's own target does not move when it is resumed.
     total_steps : int
-        How many coupled steps this call will integrate.
+        The absolute coupled-step count the whole run is asked to reach.
 
     Raises
     ------
     ValueError
-        If ``first_step + total_steps - 1`` -- the last coupled step this
-        call would reach -- exceeds :func:`_max_safe_coupled_steps`.
+        If ``total_steps - 1`` -- the last coupled step this run reaches --
+        exceeds :func:`_max_safe_coupled_steps`.
 
     """
     limit = _max_safe_coupled_steps(coupler)
-    last_step = first_step + total_steps - 1
+    last_step = total_steps - 1
     if last_step > limit:
         raise ValueError(
-            f"This run would reach coupled step {last_step} (starting at "
-            f"{first_step}, integrating {total_steps} more), past "
-            f"{limit}, the largest this coupler's own clock can hold "
-            "exactly: either a step/sub-step counter somewhere in the "
-            "coupled hierarchy, or (on \"gregorian\") the exact int32 "
-            "day-count limit of its own calendar arithmetic, would silently "
-            "wrap rather than stay correct. Refused up front rather than "
-            "left to go wrong partway through -- see "
-            "jem.driver._max_safe_coupled_steps for exactly what is being "
-            "checked."
+            f"This run asks for {total_steps} coupled step(s) (0 through "
+            f"{last_step}) from the start of the run; this call starts at "
+            f"step {first_step} and would integrate {total_steps - first_step} "
+            f"more of them. {last_step} is past {limit}, the largest this "
+            "coupler's own clock can hold exactly: either a step/sub-step "
+            "counter somewhere in the coupled hierarchy, or (on "
+            "\"gregorian\") the exact int32 day-count limit of its own "
+            "calendar arithmetic, would silently wrap rather than stay "
+            "correct. Refused up front rather than left to go wrong partway "
+            "through -- see jem.driver._max_safe_coupled_steps for exactly "
+            "what is being checked."
         )
 
 
