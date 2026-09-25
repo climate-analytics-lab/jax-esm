@@ -20,8 +20,8 @@ recomputed from the coupler's own step counter each call: JCM's own
 jax-gcm's own migration guide (``docs/source/v2_to_v3.rst``, "One real
 datetime clock") is explicit that a caller should continue threading all of
 ``RunState`` rather than deriving ``time``/``step`` from a step counter kept
-elsewhere -- not because recomputing it would overflow (an int32-safe
-reduce-before-multiply decomposition, :func:`jem.base.calendar
+elsewhere -- not because recomputing it would overflow (an int32-safe limb
+multiply-then-divide decomposition, :func:`jem.base.calendar
 .gregorian_instant`, computes exactly this instant from the coupler's own
 step counter for :meth:`_report_authoritative_clock_drift`'s own drift check
 below, so recomputing it is not the problem). Threading it is simply what

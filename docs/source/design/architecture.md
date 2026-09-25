@@ -58,8 +58,8 @@ keep but expensive to rediagnose:
   threaded rather than recomputed from the coupler's own step counter each
   call because JCM's `RunState` is now the **authoritative** clock (jax-gcm
   v3, PR 878) and jax-gcm's own migration guide says to keep threading all of
-  it — not because recomputing it would overflow (an int32-safe
-  reduce-before-multiply decomposition, `jem.base.calendar.gregorian_instant`,
+  it — not because recomputing it would overflow (an int32-safe limb
+  multiply-then-divide decomposition, `jem.base.calendar.gregorian_instant`,
   computes exactly this instant from the coupler's own step count for
   `JCMComponent._report_authoritative_clock_drift`'s own drift check, so
   recomputing was never the problem) — but because threading is what
@@ -1367,11 +1367,13 @@ so every `Coupler` built with a real `jcm.model.Model` must itself use
 (the migration review's item A) was to stop trying to build a *table* of month
 lengths for a calendar whose year is not a fixed number of days, and instead
 read a record's real Gregorian `(year, month)` directly off its own midpoint,
-via `jem.base.calendar.gregorian_instant` (an int32-safe
-reduce-before-multiply, vendored from jax-gcm's own `jcm.date` algorithm so
-`jem.base` and `jem.accumulate` need no jax-gcm import to do it) and
-`gregorian_ymd_from_days` (the Fliegel & Van Flandern (1968) integer
-algorithm). The twelve-bin climatology needs nothing further — every record's
+via `jem.base.calendar.gregorian_instant` (jem's own int32-safe limb
+multiply-then-divide, exact for any traced record an int32 can hold — see
+that function's own docstring; not vendored from jax-gcm, which has no
+equivalent decomposition) and `gregorian_ymd_from_days` (the Fliegel & Van
+Flandern (1968) integer algorithm, which *is* vendored from jax-gcm's own
+`jcm.date` so `jem.base` and `jem.accumulate` need no jax-gcm import to do
+it). The twelve-bin climatology needs nothing further — every record's
 own real calendar month *is* its bin, 0-indexed January first. The sequential
 form's bin **count**, for `total_time=`, is computed on the **host**, with
 Python's own `datetime` (exact, and a bin count is static, so there is no
@@ -1764,7 +1766,7 @@ deliberate: JCM's `RunState` is the authoritative clock since jax-gcm v3 (PR
 datetime clock") is explicit that a caller should keep threading it rather
 than deriving it elsewhere — not because recomputing it would overflow (an
 earlier draft of this note said so; the CHANGELOG retracts it, since
-`jem.base.calendar.gregorian_instant`'s own int32-safe reduce-before-multiply
+`jem.base.calendar.gregorian_instant`'s own int32-safe limb multiply-then-divide
 decomposition computes exactly this instant from the coupler's own step count
 for `JCMComponent._report_authoritative_clock_drift`'s drift check below, so
 recomputing was never the obstacle) — but because threading is what

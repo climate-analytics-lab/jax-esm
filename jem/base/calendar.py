@@ -401,10 +401,13 @@ def max_safe_record(
     is traced, and refuse rather than silently integrate or bin past it. A
     caller with no such bound (``CouplingTime.year_fraction``, called once
     per step of a run whose length is not fixed in advance) cannot check
-    this per call -- ``record`` is traced -- and instead relies on the bound
-    being enormous for any coupling step of a realistic length (which it now
-    always is, e.g. `run_chunked`'s own validation refuses a run before it
-    could ever reach here).
+    this per call -- ``record`` is traced -- so it is protected differently:
+    ``jem.driver.run_chunked``'s own up-front check
+    (``_check_step_counters_fit_int32``) refuses, before anything is
+    compiled, any run whose coupled step counter could ever reach a record
+    past this bound. That is a guarantee, not a hope that the bound happens
+    to be large -- though for any realistic coupling step it also is (the
+    inherent int32 range above, about 5.87 million simulated years).
 
     **The bound, derived exactly.** ``gregorian_instant`` returns ``days =
     start_days + floor((record * record_seconds + offset_seconds +
