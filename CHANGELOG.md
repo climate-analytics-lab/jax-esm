@@ -6,16 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) from v1.0.0
 onwards. Before v1.0.0 the public API may change in any release; every such
 change is listed here.
 
-## [Unreleased] — 1.0.0b0, "the driver and configuration layer"
+## [Unreleased] — 1.0.0b0, "the driver, configuration and examples layer"
 
-Phase 2 of the [API hardening plan][plan]. Phase 1 made a coupled model a thing
-you could build in Python; this one makes it a thing you can *run*. It adds the
-one chunked run loop every example and experiment driver used to re-invent, the
-Hydra configuration that turns a coupled run into one command, the declarative
-exchange that writes the standard coupling down once, and a checkpoint format
-that validates what it loads. It also pins the jax-gcm revision all of that is
-built against, so "which jax-gcm does this work with?" has an answer in the
-repository.
+Phases 2 and 3 of the [API hardening plan][plan]. Phase 1 made a coupled model
+a thing you could build in Python; Phase 2 makes it a thing you can *run*: the
+one chunked run loop every example and experiment driver used to re-invent,
+the Hydra configuration that turns a coupled run into one command, the
+declarative exchange that writes the standard coupling down once, and a
+checkpoint format that validates what it loads. It also pins the jax-gcm
+revision all of that is built against, so "which jax-gcm does this work
+with?" has an answer in the repository. Phase 3 is the examples and user
+documentation written once against that API: the example notebooks, the
+`jem.plot` and `jem.fluxes` modules and the packaged Veros case setups they
+use, and the documentation pages that describe all of it.
 
 Breaking changes are marked; everything else is additive.
 
@@ -285,10 +288,11 @@ Breaking changes are marked; everything else is additive.
   shipped `veros-double-drake` and `veros-earth` configurations get a coupling
   that validates instead of one written for a slab carry. The wind stress is
   not in it and cannot be — Veros integrates a stress, the atmosphere publishes
-  a wind, and a drag law is not a copy — so those configurations run
-  thermodynamically forced and mechanically at rest until `coupling.exchanger`
-  names a hand-written one. A Veros ocean coupled to a sea-ice component is
-  warned about, because Veros publishes no freeze/melt potential to drive it.
+  a wind, and a drag law is not a copy — so the wind stress comes from a
+  `coupling.exchanger`: the shipped Veros configurations name
+  `jem.fluxes.VerosExchange` (below). A Veros ocean coupled to a sea-ice
+  component is warned about, because Veros publishes no freeze/melt potential
+  to drive it.
   The Veros wrapper's module is looked up in `sys.modules` rather than
   imported, so nothing here depends on the optional Veros install.
   `default_workflow` is the order a `Coupler` runs by default. The module
@@ -571,9 +575,86 @@ Breaking changes are marked; everything else is additive.
   a workflow-level `JCM_REV`, which the test asserts equals
   `JCM_SUPPORTED_REV`; a non-blocking `canary-jcm-dev` job keeps tracking
   `dev` so drift stays visible without blocking a pull request.
+- **`jem.fluxes`** (`bulk_wind_stress`, `mask_fluxes_under_ice`,
+  `rotate_vector`, `read_rotation_angles`, `VerosExchange`) — the computed
+  half of a Veros ocean's coupling that
+  `jem.exchangers.VEROS_OCEAN_EXCHANGES` deliberately cannot carry: a bulk
+  drag law turning the atmosphere's near-surface wind into the wind stress
+  Veros integrates (rotated into a rotated ocean grid's own frame first, when
+  one is given), and a "swamp" sea-ice mask on the heat and freshwater
+  fluxes once the surface reaches the freezing point. `VerosExchange` is the
+  `Exchanger` built from them; wiring it in as `coupling.exchanger` is what
+  makes the Veros configurations mechanically, not just thermodynamically,
+  forced — closing the limitation their own WHY comments recorded.
+- **`coupling.exchanger` may be an instantiable node, not only a dotted
+  path.** A bare function (`hydra.utils.get_method`) cannot be handed the
+  regridders a mixed-grid exchange needs; a mapping with a `_target_` is now
+  built with `hydra.utils.instantiate(node, regrid=dict(regridders),
+  _convert_="object")`, the same regridder mapping
+  `default_exchangers(components, regrid=...)` receives, so a hand-written
+  exchange and the default table draw on one vocabulary.
+  `jem/config/coupling/daily.yaml`'s `exchanger:` comment documents both
+  spellings.
+- **`jem.components.veros.setups.double_drake.double_drake_setup` and
+  `.earth.earth_setup`** — the two example drivers' `veros_case_setup.py`
+  (`generateVerosSetup`), moved into the package as importable factories so a
+  configuration can name them without a `PYTHONPATH` trick. Both derive their
+  grid shape (`nx`/`ny`) from their mask file's own shape rather than taking
+  it as an argument. `earth_setup`'s `GridInfo` — the grid-spacing
+  reconstruction that reproduces Veros' own `u_centered_grid` recursion
+  exactly, and the true-latitude Coriolis parameter — moved with every
+  explanatory comment intact.
+- **`jem.tools.idealised_terrain(reference_file, planet_type, output_file)`**
+  — the example drivers' `modify_jcm_terrain.py`, as a pure function (no
+  `argparse`, no `__main__`, no `print`) taking a full `output_file` path
+  rather than a directory plus an implied name, and building a fresh
+  `xarray.Dataset` rather than mutating one it had opened for reading. Its
+  `else` branch's `NameError` (`args.planet_type`, out of scope) is now a
+  `ValueError` naming the bad value and the valid ones.
+- **`jem/data/terrain_double_drake_T31.nc`** (packaged data, 96x48) — the
+  double-drake geography, generated once by
+  `jem.tools.idealised_terrain(jem/data/terrain_JCM_T31.nc, "double_drake",
+  ...)` and committed, rather than regenerated into a cache directory by
+  every run. `test_idealised_terrain.py` regenerates it into a temp file and
+  asserts the two are identical, so the tool and the shipped data cannot
+  silently drift apart.
+- **`jem.replace_field(carry, path, value)` / `jem.read_field(carry, path)`**
+  — write or read one `"component.section.field"` of a coupled carry, the
+  same address `jem.exchangers.Exchange` already uses. Every example that
+  customised a single initial condition rebuilt three nested containers by
+  hand to do it (`dict(carry, components=dict(carry.components, ocn=dict(
+  ocean_carry, state=ocean_carry["state"].replace(...))))`), and each did it
+  slightly differently; `replace_field` is that rebuild written once, and
+  works equally on a whole `CoupledCarry` or the bare `dict[str, Carry]`
+  mapping an exchanger is handed. Both live in `jem/exchangers.py`, which
+  already owns the path vocabulary and its error messages, rather than in a
+  new module.
+- **`jem.plot`** — the plotting the example notebooks share:
+  `open_output` glues a chunked run's files for one component back into one
+  dataset, `area_mean` is the cos(latitude)-weighted horizontal mean,
+  `map_plot` draws one 2-D field (handling both a separable lon/lat grid and
+  a curvilinear one, and the `(..., lon, lat)` transpose every JEM field
+  needs), and `animate_map` steps it through time. The four notebooks that
+  produced a map each carried ~90 lines of their own cartopy animation code;
+  this is that written once. Behind the `plot` extra, with matplotlib and
+  cartopy imported inside the functions that need them, so `import jem` (and
+  `import jem.plot`) never requires either.
+- **`docs/source/python_api.md`** — the complete direct-Python construction of
+  a coupled model, which is also the README's Quick Start:
+  `tests/unit/test_readme_quickstart.py` pins the two blocks to each other in
+  its fast, CI-gated test, and executes the page's block end to end in its
+  slow one, so the quick start that used to live in two places, only one of
+  them tested, cannot silently drift apart.
 
 ### Changed
 
+- **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
+  — the value the examples' `run.sh` validated, not the `1800.0` the copied
+  files carried — and take their layer count as `layer_thicknesses` (a
+  `Sequence[float]`), replacing the old `[:number_of_ocean_layers]` slicing
+  in the caller. `cold_start_ocean_temperature_reference_K` is renamed
+  `cold_start_temperature_celsius`: the value it holds was always degrees
+  Celsius (`vs.temp`'s own units), never Kelvin.
 - **jax-gcm configures no logging of its own, and `jcm.model.Model` takes no
   `log_level` keyword** (jax-gcm#819, at the pinned revision). Nothing under
   `jem/` ever passed it — only the test fixtures did, to silence the
@@ -650,15 +731,89 @@ Breaking changes are marked; everything else is additive.
   turn; `latest_complete_checkpoint` is still there for that.
 - The README quick start builds its coupling with `default_exchangers(components)`
   and runs it with `run_chunked`; the hand-written exchanger it used to show is
-  now the worked example in `docs/source/tutorial.rst` and
+  now the worked example in `docs/source/adding_a_component.rst` and
   `docs/source/design/architecture.md`, where the contract it illustrates is
   described.
 - `pyproject.toml` ships `config/**/*.yaml` as package data and declares the
   `jem` console script; its `jcm>=3.0.0rc1` floor now points at `contract.py`
   for the actual pin.
+- **`+configuration=veros-double-drake` and `+configuration=veros-earth` run
+  as one command** (breaking for anyone running the examples they replace):
+  `python -m jem.main +configuration=veros-double-drake` /
+  `...=veros-earth`, with no `PYTHONPATH`, no `???` left to fill in, and
+  nothing to generate first. Both name their setup from
+  `jem.components.veros.setups`, read their terrain from packaged data, and
+  couple through `jem.fluxes.VerosExchange` — closing the "thermodynamically
+  forced but mechanically at rest" limitation their own WHY comments used to
+  record. `tests/examples/test_configurations.py` runs both (and every other
+  named configuration) for two coupled days as its smoke test.
+- **Five example notebooks are rewritten against the configurations Phase 2
+  shipped** (`03_non_geoscience/01_SpringSystem.ipynb` is deliberately
+  untouched). The three ordinary ones (aquaplanet, mixed-grid aquaplanet,
+  Earth-like) are now one `python -m jem.main +configuration=...` run plus a
+  short plotting section built on `jem.plot`; the two bespoke ones (a
+  customized initial sea surface temperature, the `jax.jvp` response to an
+  SST bump) build their coupler with `jem.runners.build_coupler(compose(...))`
+  and customise only the one thing that is theirs, through
+  `jem.replace_field`. No notebook builds its components, its exchanger or
+  its coupler by hand any more, and none writes netCDF or an animation by
+  hand either. `examples/README.md` is the new index of which command or
+  notebook runs which example.
+- `tests/examples/test_examples.py` runs notebooks only, one test per
+  notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
+  caused it) rather than one test per example group; the `run.sh` driver it
+  used to also execute is gone (see *Removed*).
+- **`docs/source/quick_start.rst` is `docs/source/getting_started.rst`.** The
+  page stopped being a copy-and-paste script once that block moved to
+  `docs/source/python_api.md`, so it now leads with a command-line section
+  that mirrors jax-gcm's own (`--help`, `--cfg job`, the override spellings,
+  `+configuration=`) and hands the Python construction over to the new page.
+- **`docs/source/tutorial.rst` is `docs/source/adding_a_component.rst`.** The
+  five-step JCM walkthrough it used to be structured as is now organised
+  around the `Component` protocol instead, with JCM as its worked example
+  rather than its shape -- the substance did not change, since Phase 1 had
+  already replaced the monkey-patching content the plan meant to remove.
 
 ### Removed
 
+- **The three `examples/02_experimental` Veros directories**
+  (`02_experimental_JCM_Veros`, `02_jcm_veros_double_drake`,
+  `03_jcm_veros_earth`; breaking for anyone running them directly), and the
+  `pyproject.toml` ruff ignore that existed only because of them. Every
+  capability they had is now in the package or the run loop:
+  - `main.py`'s argparse driver, chunk loop, resume, health check and output
+    naming/averaging → `jem.driver.run_chunked` (already true since Phase 2;
+    this removes the last callers of the old pattern).
+  - `run.sh` → the two `configuration/veros-*.yaml` files, run with
+    `python -m jem.main +configuration=...`.
+  - `model_setup.py`'s coupled-model construction → `jem.runners.build_coupler`
+    plus the two configurations; its hand-written wind stress and sea-ice mask
+    closure → `jem.fluxes.VerosExchange`, named as `coupling.exchanger`.
+  - `veros_case_setup.py` → `jem.components.veros.setups.double_drake` /
+    `.earth`.
+  - `modify_jcm_terrain.py` → `jem.tools.idealised_terrain`, with its
+    double-drake output now packaged as `jem/data/terrain_double_drake_T31.nc`
+    instead of regenerated per run.
+  - `model_setup.py`'s `is_pytree_all_finite`/`report_first_nonfinite` debug
+    machinery → `run_chunked`'s health gate, which does the same job at chunk
+    granularity without tracing debug prints into every step.
+  - `veros_helper.py` → nothing; nothing imported it, and `VerosComponent`
+    already publishes `derived.sea_surface_temperature`.
+  - **The `fakelnd` stand-in is gone.** It was a `SlabOceanModel` named
+    `"fakelnd"` whose only job was handing the atmosphere a clipped `stl_am`;
+    both configurations already compose `land=none`, and their WHY comments
+    already documented that the atmosphere's land boundary conditions stay
+    at `jcm.forcing.ForcingData.zeros`. Keeping it would have meant a fourth
+    component with no configuration group. Use `land=slab_speedy` (with its
+    climatology file) for a responding land surface, or
+    `forcing@atmosphere.forcing=from_file` for a prescribed one.
+  - **The `_freeze_season` (perpetual-season) knob is gone.** It
+    monkey-patched a `jcm.model.Model` *instance*'s `date_from_sim_time`; no
+    shipped configuration used it (`freeze_season_at_day` defaulted to
+    `None`), and keeping dead code alive with its own test
+    (`tests/unit/test_examples_model_setup.py`, also removed) was worse than
+    recording the gap. A frozen seasonal cycle needs a supported hook in
+    jax-gcm itself — tracked as jax-esm#120.
 - **`jem.utils.checkpoints`** (whole module, breaking): `save_carry`,
   `load_carry`, `save_component_carries`, `load_component_carries`,
   `save_coupled_carry`, `load_coupled_carry`, `save_veros_carry` and
@@ -669,16 +824,37 @@ Breaking changes are marked; everything else is additive.
   functions are now `VerosComponent.save_carry` / `load_carry`, where they
   belong — the HDF5 restart is Veros' business, not the coupler's. Call
   `Coupler.save_carry` / `load_carry` rather than any of them.
+- **`examples/02_experimental/03_long_aquaplanet.py`**, a hand-rolled
+  chunked driver (a T106 aquaplanet, 100 model years in 30-day batches, with
+  its own per-batch netCDF write, time mean and NaN check). Every one of
+  those is now a feature of `run_chunked`/`coupled_run=long_run`; the
+  command that replaces it is the "Long aquaplanet at T106" row of
+  `examples/README.md`.
 
 ### Fixed
 
-Defects found by the local review of this change before it was pushed, all in
-code this release adds:
+Defects found by the local review of this change and by running its
+configurations end to end — some in code this release adds, some in older
+components these configurations are the first to exercise:
 
 - `jax` and `jaxlib` are capped below 0.11.2 for as long as no released flax
   survives it: jax 0.11.2 removed `jax.experimental.hijax.HiPrimitive`, which
   flax 0.12.9 subclasses at import time, so an environment resolving the two
   latest releases could not import `jcm` at all (#117 tracks lifting it).
+- **`VerosExchange` casts every value it writes to the destination carry's own
+  dtype.** Importing `veros.core` flips `jax.config.jax_enable_x64` to `True`
+  process-wide as a side effect (Veros runs double precision internally), and
+  that flip lands wherever build order happens to put it: the ocean's carry
+  is entirely float64, and the atmosphere's carry is *mixed* — whatever
+  jax-gcm had already allocated at `Model` construction (before Veros was
+  imported) stays float32, while everything allocated afterwards, including
+  `derived.u0` and `derived.total_heat_flux`, is float64 too. `jax.lax.scan`
+  requires a step's output carry to match its input dtype exactly regardless,
+  so an uncast value crossing the atm/ocn boundary broke the *first* coupled
+  step of `+configuration=veros-double-drake` with an opaque dtype-mismatch
+  error from inside `Coupler.generate_trajectory_function`, not a physics
+  one. Found by actually running both Veros configurations end to end, which
+  no earlier phase of this project had done.
 - `run_chunked` validates `subsample` before compiling a trajectory, instead of
   after the first chunk has been integrated.
 - `jem.runners` no longer reads a broken `_target_` lookup as "this component
@@ -737,6 +913,431 @@ code this release adds:
 - The two shipped Veros configurations state that, with `land=none` and the
   default atmospheric forcing, the atmosphere runs over land at a constant
   288.15 K with zero snow and soil water, and name the overrides that change it.
+- A coupled atmosphere built with `forcing@atmosphere.forcing=from_file` runs.
+  `+configuration=earth-slab` failed at trace time with `Workflow element
+  'exchange' changed the structure of the component carries`: jax-gcm builds
+  each time-varying boundary condition as a `jcm.forcing.TimeSeries` (values,
+  time axis, alignment mode — three pytree leaves) and slices it by date
+  internally, while the standard exchange writes one `(ix, il)` array into the
+  same five fields, so the atmosphere's carry had a different pytree structure
+  after the first exchange than before it. `JCMComponent` now takes the names
+  of the forcing fields the coupling supplies
+  (`set_exchanged_forcing(names)`, also a constructor keyword) and
+  `initialize()` collapses exactly those to the climatology at the run's start
+  date, which is the structure an exchange preserves; every other field keeps
+  its time series and goes on being sliced per internal timestep.
+  `jem.runners.build_coupler` reads the names off the built coupling table
+  with the new `jem.exchangers.exchanged_fields(exchangers, "atm")`, so an
+  unexchanged climatology stays climatological — with `land=none` the land
+  surface still follows the seasonal cycle — and `coupling.exchanged_forcing`
+  lists them for a configuration coupled by a hand-written
+  `coupling.exchanger`, which cannot be read that way. The coupler's
+  structure check is unchanged: it is what caught this.
+- **`+configuration=earth-slab` starts its sea ice from the observed cover.**
+  `SlabSeaiceModel` takes an optional `ice_clim_file` — a 12-month `icec`
+  concentration climatology on the model grid, read the way the slab ocean
+  reads `sst_clim_file` — and `initialize()` samples it at the run's start
+  date and inverts the `1 - exp(-h / scale)` fraction closure to a thickness,
+  capped at the new `max_initial_ice_thickness` (3 m) because the closure
+  saturates and a fully covered cell would otherwise invert to an infinite
+  depth. `earth-slab` wires the packaged file's `icec` in. It matters because
+  the exchange runs before the components and a `derived` field is only
+  rewritten at the end of a step, so `initialize()`'s `ice_fraction` is what
+  the atmosphere is handed for the first *two* coupling steps: the
+  configuration's claim that "the climatological sea-ice cover the atmosphere
+  sees comes from this component" was true only once the slab had grown some.
+  Without a file the behaviour is unchanged — a uniform
+  `initial_ice_thickness`, zero by default.
+- **A slab ocean no longer starts colder than it is allowed to be.**
+  `SlabOceanModel.initialize()` holds the initial sea surface temperature at
+  or above `jem.constants.seawater_freezing_point_K`, the floor `step` has
+  always maintained. An observed "SST" climatology is generally a *surface*
+  temperature, so where the surface is sea ice it reports the ice surface:
+  the packaged T30 file is below freezing on 5902 of 36960 ocean
+  point-months, by up to 31.9 K. Taken verbatim that deficit reached the
+  first step as `deficit * mixed_layer_depth * rho * cp` of freeze/melt
+  potential and the sea ice answered with **25.2 m** of ice in one coupling
+  day; with the floor applied, `earth-slab`'s two-day maximum is 3.7 m. The
+  ice such a cell really carries is the sea-ice component's to hold, which is
+  what the `ice_clim_file` above is for. How much of a climatology the floor
+  touches is logged at INFO when the model is built. Runs with no SST
+  climatology are unaffected: the idealized profile starts near 288 K.
+- **The floor above covered the initial state; the relaxation TARGET itself
+  was still the raw, sub-freezing climatology.** `forcing_method="relaxation"`
+  (`earth-slab`'s ocean) reads `_climatology_at()` every step as what the mixed
+  layer relaxes towards, not only at `t=0`; left unfloored, each step computed
+  a large anomaly against that sub-freezing target, relaxed the mixed layer
+  down towards it, clamped the result back to freezing, and reported the same
+  deficit as `ice_frazil_melt_energy` again — so the "one-off" transient the
+  previous fix eliminated from the initial state was regenerating itself every
+  coupling day instead. `SlabOceanModel` now floors `self.sst_climatology`
+  itself, once, right after it is loaded (and after the below-freezing points
+  are logged, since that log needs the raw values) — the initial condition and
+  the relaxation target both read the same, already-valid array, rather than
+  each call site needing to remember to floor it. On `earth-slab`'s two
+  coupled days this drops the maximum sea-ice thickness from 3.7 m to 3.0 m
+  (the seeded `ice_clim_file` maximum: growth beyond it stops entirely) and
+  the ocean's per-step `ice_frazil_melt_energy` from a repeating ~2.3-2.6e8
+  J/m^2 to 0 on the first day and ~1e7 J/m^2 on the second (genuine
+  atmosphere-driven cooling, not the relaxation artifact). A cell whose
+  climatology is already above freezing is untouched: `jnp.maximum` only ever
+  raises a value, never lowers one.
+- `Exchange.validate` compares the pytree **structure** of each row's two
+  ends and raises naming the row, so a destination that is a composite leaf
+  (a `jcm.forcing.TimeSeries` an exchanger would overwrite with one array)
+  is a build-time error naming `atm.forcing.<field>` instead of a trace-time
+  `RuntimeError` naming only the workflow element. Shapes and dtypes are
+  deliberately not compared, because a row that names a regridder changes
+  shape legitimately.
+- `coupling.exchanged_forcing` refuses a bare string, which is an iterable of
+  characters and would otherwise be declared as one-letter field names; the
+  message gives the `[...]` spelling. Its explicit branch now gets the same
+  safety net as the derived one: a declared field that is not time-varying,
+  and a time-varying field that nothing declared while a hand-written
+  exchanger is in play, are both warned about.
+- **`Exchange.__call__` casts a source value to its destination field's own
+  dtype instead of writing it through unchanged.** Importing Veros sets
+  `jax_enable_x64` process-wide, so a Veros ocean's carry is float64 while
+  parts of the atmosphere's carry stay float32; `ocean=veros`
+  (`VEROS_OCEAN_EXCHANGES`) then failed on its first coupled step with
+  `lax.scan`'s "carry input and carry output must have equal types ...
+  float32[96,48] vs float64[96,48]", naming neither the exchange nor the
+  field. A shape mismatch is not touched by this and still fails the same
+  way it always did -- only dtype, never shape, is silently reconciled here.
+- **The sea-ice fraction closure's inverse is differentiable at a fully
+  ice-covered cell.** `_thickness_from_fraction` inverts
+  `f = 1 - exp(-h / scale)` with `-scale * log1p(-f)`, applying a
+  `jnp.where` *after* the log so a saturated cell (`f == 1`, where the
+  inverse is genuinely infinite) reads back as `max_initial_ice_thickness`
+  instead of `inf`. That fixed the forward value but not the gradient:
+  `jax.grad` still evaluates the VJP of the unselected branch before
+  zeroing its cotangent, and `log1p(-1) = -inf`'s local derivative
+  (`-1 / (1 - f)`) produced `0 * inf = nan`, so any gradient with respect to
+  `ice_fraction_thickness_scale` (or reaching back through an ice-fraction
+  climatology, as `+configuration=earth-slab`'s January start does) was
+  `nan` the moment a cell was fully covered. `log1p` now reads a stand-in
+  (0.0) for a saturated cell instead of `f` itself, so every intermediate
+  stays finite and the outer `where` still selects the correct primal.
+- **`jem.plot.open_output` finds a component's files by their sanitised
+  on-disk name.** It globbed `f"{component}-*.nc"` against the raw
+  component name, but `write_chunk` sanitises a name before it ever reaches
+  a file name (`jem.output.output_file_name`), so a component called e.g.
+  `"sea ice"` writes `sea_ice-00000000.nc` and
+  `open_output(output_dir, "sea ice")` raised `FileNotFoundError` even
+  though its files were sitting right there; a component name containing
+  glob metacharacters (`*`, `[...]`) could also silently match unrelated
+  files under the raw pattern. It now lists every `*.nc` in the directory
+  and keeps the ones `jem.output.output_file_step` accepts as this
+  component's -- which applies that same sanitisation and the writer's
+  exact-reconstruction check -- sorted by the step that returns; the
+  `FileNotFoundError` still names the component, the directory and whatever
+  components' files *are* there when nothing matches.
+- **`declare_exchanged_forcing` only reads exchangers the workflow actually
+  runs.** `coupling.workflow` may omit
+  `jem.exchangers.DEFAULT_EXCHANGER_NAME` (`"exchange"`) to step every
+  component side by side with no coupling at all, for comparison against a
+  coupled run -- but the derived branch read every exchanger
+  `build_exchangers` registered regardless, so with
+  `forcing@atmosphere.forcing=from_file` an uncoupled workflow still
+  collapsed the fields the (never-run) exchanger would have written to
+  their start-date value: a climatology frozen with no symptom, in exactly
+  the field left unwritten because nothing coupled it. It now derives from
+  `coupler.workflow` -- the coupler's own resolution of an explicit
+  `coupling.workflow` or its default order, reused rather than duplicated --
+  so an exchanger the workflow does not run contributes no fields and is not
+  warned about as opaque. `_validate_exchangers` skips such an exchanger for
+  the same reason: its rows would otherwise be checked against a carry in
+  which the atmosphere's side is correctly still a `jcm.forcing.TimeSeries`
+  while the surface component's side is a plain array, raising a structure
+  mismatch that can only arise from an exchange that never executes.
+- **The sea-ice fraction closure's inverse masks land before inverting, not
+  only after.** The constructor accepts (and only checks for) a NaN fill
+  value over land in the ice climatology, which a real file's land cells
+  routinely carry, but `_thickness_from_fraction` inverted every cell's
+  concentration, land included, before `initialize`'s own `jnp.where(ocean,
+  ...)` zeroed the land cells' primal. That masking got the forward value
+  right regardless, but `jax.grad` still differentiates through
+  `log1p(-nan) = nan` for those land cells first, and multiplying that local
+  gradient by the outer mask's already-zeroed cotangent gave `0 * nan = nan`
+  -- the same failure mode 722c2d5 fixed for a fully ice-covered ocean cell
+  (`log1p(-1) = -inf`), just reached through a land NaN instead. Non-ocean
+  and non-finite concentrations are now masked to `0.0` before the log, with
+  the outer `ocean` mask kept as well for a stray nonzero value a mismatched
+  land mask might otherwise leave unmasked.
+- **`Exchange.__call__` reconciles dtype leaf by leaf, instead of on the whole
+  field value.** `Exchange.validate` accepts a row whose two ends are equal
+  pytree *structures*, not just bare arrays -- a `jcm.forcing.TimeSeries`
+  destination overwritten by another `TimeSeries` is a legal row -- but the
+  cast that keeps a plain-array field's dtype in step with its destination
+  (see the Veros float64/float32 entry above) ran `jnp.result_type`/
+  `jnp.asarray` on the whole value. `jnp.result_type` happens to accept a
+  struct (it reads `.dtype`), so a dtype mismatch was still detected, but
+  `jnp.asarray` cannot turn a struct into an array and raised `TypeError`,
+  so any composite row with a genuine dtype mismatch could never be copied.
+  It now walks the two same-shaped pytrees with `tree_map`, casting only the
+  leaves whose dtypes differ and reassembling the original container --
+  gated on the two ends actually sharing structure first, so an
+  *illegitimate* row (a field an exchanger writes that is still a
+  `TimeSeries` because it was never declared exchanged) is left exactly as
+  before for `Exchange.validate` or the coupler's own carry-structure check
+  to catch, instead of `tree_map` raising its own, differently-worded pytree
+  error first.
+- **`declare_exchanged_forcing`'s explicit branch is also inert when nothing
+  is active.** 7f346c5 filtered only the *derived* branch's field set by
+  `active` (the exchangers `coupling.workflow` actually runs), so a
+  configuration that sets `coupling.exchanged_forcing` explicitly (for a
+  hand-written `coupling.exchanger`, which cannot be read off a table) and
+  then leaves that exchanger out of `coupling.workflow` -- the supported way
+  to run every component side by side for an uncoupled comparison -- still
+  had every declared field collapsed to its start-date value, with no
+  exchanger ever actually writing it. With no active exchanger at all, the
+  explicit declaration now collapses nothing and logs an INFO note that it
+  is inert; an unknown declared name is still an error and a declared name
+  that is not time-varying is still warned about, unchanged.
+- **Both shipped Veros configurations (`veros-double-drake`, `veros-earth`)
+  now set `coupling.exchanged_forcing: [sea_surface_temperature]`**, the one
+  atmosphere-facing field `jem.fluxes.VerosExchange` writes. Composing either
+  configuration with `forcing@atmosphere.forcing=from_file` for a responding
+  land surface -- exactly what each configuration's own WHY comment already
+  invited a user to do -- built `sea_surface_temperature` as a
+  `jcm.forcing.TimeSeries`, and `VerosExchange` (a hand-written exchanger, so
+  `declare_exchanged_forcing` has no table to derive its field set from)
+  overwrote it with a plain array on the first coupled step, changing the
+  atmosphere's carry structure and having `lax.scan` refuse the trajectory.
+  Declaring the field under the default forcing (already all plain arrays)
+  does not trip the "declared but not time-varying" warning: that warning
+  already only fires when something is still a `TimeSeries`.
+- The getting-started page told a reader to install the plotting extras with
+  `pip install -e ".[plot]"` directly after an install block whose last step
+  leaves the shell inside the Veros checkout, so the command installed
+  another project's extras or none at all. It now says to run it from the
+  JEM checkout.
+- **`jem.plot.area_mean` reduced every dimension of `field` other than
+  `"time"`**, so a level-resolved field (or one with an ensemble or sub-step
+  axis) had that axis silently averaged away along with latitude and
+  longitude -- `area_mean(atm["temperature"])` returned a plain time series
+  instead of an area-mean vertical profile, with no error. It now reduces
+  only the dimensions the `lat`/`lon` coordinates actually span, the same
+  separable-vs-curvilinear reasoning `map_plot` already uses, and takes a new
+  `lon` keyword to match the existing `lat`; a field with neither coordinate
+  is a `ValueError` naming what was looked for, not a silent no-op.
+- **`jem.plot.animate_map` drew every frame on its own colour scale**, while
+  the one colorbar kept showing the first frame's, so an animation of a field
+  whose range drifts between frames misrepresented the data. It now derives
+  one scale from the whole field: shared `vmin`/`vmax`, and shared band
+  boundaries alongside them, since `contourf` picks its bands from each
+  frame's own data rather than from the colour limits. A `vmin` or `vmax` the
+  caller fixed is kept and only the open bound is filled in; an integer
+  `levels` is a band count, so it is expanded once from the bounds in force
+  rather than per frame. An explicit `levels` sequence already describes the
+  scale on its own and is passed through untouched. A `norm` is shared
+  across every frame by identity, but a *string* scale name
+  (`norm="log"`) previously reached each frame's `map_plot` call as that bare
+  string, which matplotlib resolved into a fresh norm object -- and
+  autoscaled from just that frame's data -- on every single frame, so a
+  field whose range drifted between frames was drawn on a drifting colour
+  scale despite `norm` never changing; it is now resolved once, up front,
+  into the same norm object matplotlib would otherwise have built, so every
+  frame shares it. That shared norm's *open* bounds (an object such as
+  `LogNorm()` given with none, or a string resolving to one) are likewise
+  filled once from the whole field rather than left for matplotlib to fill
+  from frame 0 alone and reuse from then on; a fully-bounded norm
+  (`Normalize(0, 310)`) has nothing open to fill and is used exactly as
+  given. A caller who also wants fixed bands under a norm passes `levels`
+  alongside it (`norm.boundaries` for a `BoundaryNorm`), which is still
+  deliberate: shared bands would have to come from the norm's own scale, and
+  a linear guess gives a `LogNorm` boundaries on the wrong scale with an
+  invalid first value. The colorbar is built from the mappable the draw
+  returns rather than found through the axes, so it does not depend on how a
+  given matplotlib groups contour bands. Two regressions the shared-scale
+  work above introduced are now fixed: an explicit `norm=None` -- one of
+  matplotlib's own supported values, meaning "use the default
+  normalization" the same as omitting `norm`, and how plotting options
+  forwarded programmatically routinely carry it -- reached
+  `norm.autoscale_None(...)` on `None` itself and raised `AttributeError`;
+  it is now dropped before any of the `norm` handling runs, so it is
+  indistinguishable from an omitted `norm` for the shared-scale logic here
+  and for `map_plot`'s own `levels`+`norm` curvilinear conflict check (which
+  had the identical `norm=None` latent bug and is fixed the same way). And
+  `vmin`/`vmax` given alongside a *string* `norm` (`animate_map(field,
+  norm="log", vmin=1)`) -- a combination matplotlib itself supports for a
+  string scale name -- broke once the string was resolved into a `Normalize`
+  *instance*, since matplotlib refuses `vmin`/`vmax` alongside a norm
+  instance (raising `ValueError` on the curvilinear `pcolormesh` path); the
+  caller's bound is now applied to the resolved norm directly, and dropped
+  from what is forwarded on, before its other, still-open bound is
+  autoscaled from the whole field -- so the caller's limit is honoured
+  exactly like matplotlib's own string+limits handling, and only what they
+  left open is filled from the whole field.
+- **`jem.plot.map_plot`'s documented `levels` keyword crashed on a
+  curvilinear grid**, e.g. the displaced-pole ocean output the shipped
+  `aquaplanet-slab-mixed-grid` configuration writes:
+  `map_plot(ocean_field, levels=[0, 10, 20, 30])` raised `AttributeError:
+  QuadMesh.set() got an unexpected keyword argument 'levels'`, because
+  `levels` was forwarded straight into `pcolormesh` (which draws that grid
+  and has no such argument) the same way it is into `contourf` (which draws
+  a separable lon/lat grid and does). `levels` is now realised as a
+  `matplotlib.colors.BoundaryNorm`, over the resolved colormap's colour
+  count, on the curvilinear path -- the same discrete colour bands `levels`
+  gives a separable grid, reached the way `pcolormesh` actually supports. An
+  integer `levels` *count* (rather than explicit boundaries) is expanded
+  first, with the same `matplotlib.ticker.MaxNLocator` locator `contourf`
+  itself falls back on for a count, so `levels=N` now means the same thing
+  on either grid layout -- differing from `contourf`'s own count handling
+  only in that `contourf` additionally trims a boundary falling outside the
+  data's actual range, which this does not. Passing `levels` together with
+  an explicit `norm` raises `ValueError` naming both, but only on a
+  curvilinear grid, where `levels` becomes a `norm` and would silently
+  overwrite the caller's own; on a separable grid both are passed through to
+  `contourf` unchanged, which is what matplotlib itself supports.
+- **`jem.plot.map_plot`'s `extend` keyword crashed on a curvilinear grid,
+  both combined with `levels` and on its own** -- the same class of bug as
+  the `levels`-on-`pcolormesh` crash just above, one keyword over:
+  `map_plot(ocean_field, levels=[0, 10, 20, 30], extend="both")` and, just
+  as much, `map_plot(ocean_field, extend="both")` with no `levels` at all,
+  both raised `AttributeError: QuadMesh.set() got an unexpected keyword
+  argument 'extend'`, because `extend` was left in `plot_kwargs` -- either
+  after `levels` was translated into a `BoundaryNorm`, or, with no `levels`
+  to force a pop, untouched from the start -- and `pcolormesh` has no
+  `extend` argument any more than it has `levels`. `extend` is now popped
+  unconditionally on the curvilinear path, before either sub-case, and
+  reaches a colorbar via a `colorbar_extend` value `_map_plot` hands back
+  alongside the axes and the mappable (a private helper, `animate_map`'s
+  only other caller, extended for exactly this), so both **`map_plot`'s own
+  (`colorbar=True`) and `animate_map`'s single, separately-drawn colorbar**
+  get it explicitly rather than risk one being silently left un-extended
+  while the other is. Without `levels`, the mappable's `norm` is a plain,
+  continuous one with no `.extend` attribute at all (confirmed:
+  `hasattr(matplotlib.colors.Normalize(0, 10), "extend")` is `False`), so
+  this explicit path is the only way `extend` could ever reach a colorbar
+  here, and matplotlib supports it against a continuous mapping just as
+  well as a discrete one. An invalid `extend` value still surfaces as
+  matplotlib's own `ValueError` at colorbar-draw time either way, exactly
+  as `contourf`'s own (undocumented) handling of one does. The
+  separable/`contourf` path is unchanged throughout -- it accepts `extend`
+  natively regardless of `levels`.
+
+  A follow-up (Codex round 18, P2) found this first version's `levels`
+  handling still wrong, not merely incomplete: it passed `extend` straight
+  through to the constructed `BoundaryNorm`'s own `extend` parameter, which
+  demands a colour count (`ncolors`, given as `cmap.N`) covering the
+  ordinary bands *plus* one more per end `extend` covers. That is
+  comfortably true of the 256-entry continuous colormaps every shipped
+  example resolves here, but not of a caller's own small `ListedColormap`
+  paired with explicit `levels` -- an entirely ordinary combination
+  `contourf` already supports on the separable path -- so e.g. four
+  boundaries and `extend="both"` against a 3-colour `ListedColormap` raised
+  `ValueError: There are 5 color bins including extensions, but ncolors =
+  3; ncolors must equal or exceed the number of bins`. Rendering both grid
+  layouts and comparing the actual drawn colours (not just whether either
+  raises) showed passing `extend` to `BoundaryNorm` is the wrong
+  construction at any colormap size, not only a too-small one: even a
+  `ListedColormap` sized to exactly cover the inflated count renders
+  colours `contourf` never produces for the same call, because
+  `BoundaryNorm`'s own documented fallback for "fewer bins than colours"
+  linearly interpolates across the *inflated* range and pulls in colormap
+  entries that do not belong to any of the caller's bands. The
+  `BoundaryNorm` is now always built over exactly `cmap.N` colours with
+  **no** `extend` of its own -- matplotlib's own documented idiom for a
+  discrete colorbar with extended ends -- so a value beyond `levels` gets a
+  distinct colour via `Colormap.__call__`'s existing under/over fallback to
+  the colormap's own first/last entry, the same "beyond the outer boundary"
+  colour `contourf` itself defaults to; the extension triangles remain
+  purely the colorbar's own decoration, carried by the `colorbar_extend`
+  plumbing above, which already reached both colorbar call sites and needed
+  no change. Verified by comparing the curvilinear and separable paths'
+  rendered colours for identical `levels`/`extend`/`cmap` on identical
+  data, for both the reported small `ListedColormap` and the ordinary
+  256-entry continuous case.
+- **`jem.plot.map_plot`'s curvilinear `levels` translation rendered
+  different colours from `contourf` on identical data**, not merely
+  different bugs at small colormap sizes (Codex round 19). Two related
+  findings, both on the `BoundaryNorm` the previous fix (`ee6ecb5`) built
+  directly over the resolved colormap's own colour count (`cmap.N`, 256 for
+  the default continuous colormap): (A) that spreads a band's colour index
+  evenly across the *whole* colormap, whereas `contourf` colours band *i* as
+  `cmap(norm(0.5 * (levels[i] + levels[i + 1])))` -- the colormap sampled at
+  each band's own numeric *midpoint* through a continuous `Normalize` (read
+  from matplotlib's source, `ContourSet._process_colors`/`_process_levels`,
+  and confirmed by rendering both paths, not assumed from a one-line
+  description) -- so a nonuniform `levels=[0, 1, 10]` produced disjoint
+  colour sets between the two grid layouts on identical data; and (B)
+  `vmin`/`vmax` given alongside `levels` were popped and never used again,
+  though `contourf` folds them into that same `Normalize` in place of the
+  `min(levels)`/`max(levels)` it would otherwise autoscale to.
+
+  Both are fixed together, in the same construction: `_map_plot` now builds
+  the exact per-band colours `contourf` would (including an extended end's,
+  via the same `+-1e250` sentinel boundary `contourf` inserts before taking
+  its midpoint, which resolves through the colormap's own
+  `get_under()`/`get_over()`), folding an explicit `vmin`/`vmax` into the
+  `Normalize` those colours are sampled through. Those colours become a
+  `ListedColormap` sized to exactly the number of bands `extend` implies,
+  paired with a `BoundaryNorm` over the *un*extended `levels` and `ncolors`
+  equal to that same band count -- which, unlike the reverted attempt the
+  previous fix's own history records, never hits `BoundaryNorm`'s "fewer
+  bins than colours" interpolation, because `ncolors` is now built to match
+  exactly regardless of the caller's own colormap size. This also means
+  `extend` can be passed to `BoundaryNorm` again (its `.norm.extend` now
+  reads the real value, not always `"neither"`), which a
+  `matplotlib.colorbar.Colorbar` given no explicit `extend` of its own
+  picks up automatically -- confirmed, though `map_plot`/`animate_map`
+  still pass `colorbar_extend` explicitly, since the no-`levels` sub-case
+  still has nothing for a colorbar to read it from.
+
+  `pcolormesh` (drawing the mesh's actual cells) is kept rather than
+  switching the curvilinear path to `contourf` (which does accept 2-D
+  `X`/`Y`, but interpolates between cell centres -- a real difference for a
+  curvilinear ocean mesh built from real grid cells) once matching
+  `contourf`'s own colours turned out not to require it. One difference
+  between the layouts remains, and is pre-existing rather than introduced or
+  removed here: for `extend="neither"` (or a side `extend` does not cover),
+  `contourf`'s filled polygons are geometrically bounded by the outermost
+  `levels` and leave a beyond-range value unfilled, while `pcolormesh` still
+  paints every cell, clamping such a value to the nearest edge band's
+  colour. This affects which cells get painted at all, never which colour a
+  cell painted by both layouts gets.
+- **`VerosComponent.initialize()` seeds `derived` from the ocean's own
+  initial state, instead of `VerosDerived.zeros()`'s uniform 273.15 K.** Both
+  shipped Veros configurations run the default workflow -- every exchanger,
+  then every component -- so the exchanger reads `derived` *before* the
+  ocean has taken a single step, and whatever `initialize()` put there is
+  what the atmosphere integrates its entire first coupling interval over.
+  `VerosDerived.zeros()`'s placeholder made that interval run over a
+  fictitious freezing-point ocean: measured on the packaged setups, the
+  ocean's actual cold start is a uniform 288.03 K over ocean cells (`(1 -
+  zt/zw[0]) * 15 degC` at the surface layer, `double_drake_setup`'s and
+  `earth_setup`'s shared cold-start formula) against the placeholder's
+  273.15 K -- a 15 K day-1 error -- and after the ocean's real first step
+  the published SST is 288.03 K over ocean cells, confirming the seeded
+  value is the right one. The surface-extraction convention (the interior
+  slice, the `tau` time index, the Kelvin offset, the land-column
+  substitution) is now a single private helper,
+  `VerosComponent._derived_fields(state)`, called from both `step()` (after
+  integrating) and `initialize()` (on `self.model.state`, before any step),
+  so the two can no longer drift apart on it the way two separate copies of
+  a coupling convention have before in this project.
+- **`declare_exchanged_forcing` now rejects a declared field that a fully
+  inspectable active table never writes**, instead of silently freezing it.
+  The existing `pinned` warning only fires for a declared name that is *not*
+  time-varying, and the "opaque hand-written exchanger" warning only fires
+  when an active exchanger cannot be read at all -- so a time-varying field
+  declared alongside an active table of nothing but `jem.exchangers.Exchange`
+  instances (e.g. declaring `sice_am` in an atmosphere/ocean run with no
+  sea-ice component) fell through both: `atm.initialize()` collapsed it to
+  its start-date value for the whole run, with no warning at all. When
+  *every* active exchanger is an `Exchange`, `jem.exchangers.exchanged_fields`
+  is a complete list of what the coupling writes, so a declared, time-varying
+  name outside it provably has no writer; this is now a `ValueError`, not a
+  warning, because unlike the `pinned` case the run is not merely
+  misdescribed but actually wrong -- a seasonal cycle silently replaced by a
+  constant for the whole integration -- and the fix is a one-line edit. When
+  any active exchanger is hand-written, nothing can be concluded (that
+  opacity is exactly why the explicit declaration exists), so this check
+  stays silent there, unchanged. Both shipped Veros configurations couple
+  through a hand-written `coupling.exchanger` and are unaffected, including
+  under the `forcing@atmosphere.forcing=from_file` override their own WHY
+  comments document.
 
 ## [Unreleased] — 1.0.0a0, "the core API contract"
 

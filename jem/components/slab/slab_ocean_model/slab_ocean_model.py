@@ -140,8 +140,33 @@ class SlabOceanModel(SlabModelBase):
     -----------------
     With an SST climatology, the initial SST is that climatology sampled at
     the month the run starts in (:attr:`SlabModelBase.start_year_fraction`,
-    which the coupler sets through ``bind``). Without one it is an idealized
-    profile,
+    which the coupler sets through ``bind``), held at or above the seawater
+    freezing point. That floor is the same one ``step`` maintains, and it
+    matters because an observed "SST" climatology is generally a *surface*
+    temperature: where the surface is sea ice the file reports the ice
+    surface, tens of kelvin below freezing, which is not a temperature a
+    mixed layer can have. Taken verbatim it would be handed to the first step
+    as a heat deficit and converted, in one coupling interval, into tens of
+    metres of ice. The ice that such a cell really carries is the business of
+    a sea-ice component started from an ice-concentration climatology
+    (``SlabSeaiceModel(..., ice_clim_file=...)``), not of the mixed layer's
+    temperature.
+
+    The floor is applied to ``self.sst_climatology`` itself, once, at
+    construction (right after the below-freezing points are logged) -- not
+    only to the initial condition drawn from it. ``forcing_method="relaxation"``
+    reads that same climatology as the RELAXATION TARGET on every subsequent
+    step (``_climatology_at``), not only at ``t=0``; a target left sub-freezing
+    would pull the mixed layer down towards an ice-surface temperature every
+    step, have ``step`` clamp the result back to freezing, and report the
+    difference as frazil energy each time -- regenerating that "initial
+    deficit" for the life of the run instead of it being a one-off transient.
+    Flooring the source once means every reader of ``self.sst_climatology``
+    (the initial condition and the relaxation target alike) sees a physically
+    valid target: under sea ice the mixed layer sits at the freezing point, so
+    the freezing point -- not the sub-freezing ice-surface skin temperature --
+    is the correct thing to relax towards there. Without a climatology it is
+    an idealized profile,
     ``params.initial_sst`` at the poles rising by
     :data:`IDEALIZED_SST_RANGE` towards the equator. ``initial_sst`` is what
     the constructor has always accepted (as
@@ -293,6 +318,56 @@ class SlabOceanModel(SlabModelBase):
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
                     "points of this grid: the file's land mask and the grid's disagree."
                 )
+            # Said out loud at construction, where the arrays are concrete: the
+            # floor applied below silently raises these cells to the freezing
+            # point, and how much of the file that touches is something an
+            # operator should be able to read in the log rather than infer
+            # from the output. It is normal for an observed surface-temperature
+            # climatology (see the class docstring), so it is not an error.
+            # Computed from the RAW climatology, before the floor below is
+            # applied -- flooring first would make every deficit here read as
+            # zero.
+            below_freezing = (
+                (self.sst_climatology < constants.seawater_freezing_point_K)
+                & ocean[..., None]
+            )
+            n_below = int(jnp.sum(below_freezing))
+            if n_below:
+                logger.info(
+                    "%s: the SST climatology is below the seawater freezing point "
+                    "(%.2f K) on %d of %d ocean point-months, by up to %.1f K -- "
+                    "an ice-covered surface temperature. The mixed layer (and, for "
+                    "forcing_method='relaxation', the target it relaxes towards) is "
+                    "floored at the freezing point there; the ice itself is a "
+                    "sea-ice component's to carry.",
+                    self.name, constants.seawater_freezing_point_K, n_below,
+                    int(jnp.sum(jnp.broadcast_to(ocean[..., None],
+                                                 self.sst_climatology.shape))),
+                    float(jnp.max(jnp.where(
+                        below_freezing,
+                        constants.seawater_freezing_point_K - self.sst_climatology,
+                        0.0,
+                    ))),
+                )
+            # Floor the climatology itself, once, here -- not just the initial
+            # condition `initialize` draws from it. `step`'s relaxation branch
+            # (`_climatology_at`) reads `self.sst_climatology` directly as the
+            # RELAXATION TARGET every step, not only at t=0; leaving it
+            # sub-freezing would relax the mixed layer down towards an
+            # ice-surface temperature it can never physically have, `step`
+            # would clamp the result back to freezing and report the
+            # difference as frazil energy, and that heat deficit would
+            # regenerate every coupling step for the life of the run instead
+            # of being a one-off transient at initialization. Flooring the
+            # source once makes "the mixed layer's target is never
+            # sub-freezing" a structural invariant that every reader of
+            # `self.sst_climatology` gets for free, rather than something each
+            # call site has to remember to re-apply (`initialize` still floors
+            # its own result too, but only because the no-climatology,
+            # idealized-profile branch has no climatology to floor here).
+            self.sst_climatology = jnp.maximum(
+                self.sst_climatology, constants.seawater_freezing_point_K
+            )
 
     def _check_forcing_configuration(self, params: SlabOceanParameters) -> None:
         """Reject parameters whose static configuration this model cannot run.
@@ -369,6 +444,20 @@ class SlabOceanModel(SlabModelBase):
             sea_surface_temperature = params.initial_sst + IDEALIZED_SST_RANGE * (
                 positive_cosine_cubic_latitude_squared(self.grid.latitude_radian)
             )
+        # The run starts inside the state space it is integrated in. `step`
+        # holds the mixed layer at or above the seawater freezing point and
+        # reports the heat that clamp removes as this step's freeze/melt
+        # potential, so a sub-freezing INITIAL temperature is not a cold ocean
+        # -- it is a whole run's worth of frazil energy released in step one.
+        # `self.sst_climatology` is already floored (see __init__), so this is
+        # a no-op on the climatology branch above; it is load-bearing only for
+        # the idealized-profile branch, which has no climatology to floor at
+        # construction and builds straight off `params.initial_sst`. See the
+        # class docstring for what makes an observed climatology sub-freezing
+        # in the first place.
+        sea_surface_temperature = jnp.maximum(
+            sea_surface_temperature, constants.seawater_freezing_point_K
+        )
         sea_surface_temperature = jnp.where(
             ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
@@ -517,7 +606,14 @@ class SlabOceanModel(SlabModelBase):
         )
 
     def _climatology_at(self, time: CouplingTime, ocean: jnp.ndarray) -> jnp.ndarray:
-        """SST climatology interpolated to ``time``, masked to ocean cells."""
+        """SST climatology interpolated to ``time``, masked to ocean cells.
+
+        This is the relaxation target ``step`` pulls the mixed layer towards,
+        every step. ``self.sst_climatology`` was already floored at the
+        seawater freezing point in ``__init__`` (see the class docstring), so
+        no separate floor is needed here -- the interpolation of two already
+        non-negative-anomaly values stays at or above freezing too.
+        """
         # Only reachable with forcing_method="relaxation", which the constructor
         # refuses to build without a climatology file.
         assert self.sst_climatology is not None

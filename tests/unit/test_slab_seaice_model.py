@@ -300,3 +300,244 @@ def test_grad_wrt_initial_thickness_reaches_the_trajectory(uniform_grid):
     assert abs(float(gradient)) > 0.0
     # Basal growth is additive, so a metre of initial ice is a metre at the end.
     np.testing.assert_allclose(float(gradient), 1.0, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Starting from an observed ice concentration
+# ---------------------------------------------------------------------------
+#
+# Under the standard workflow the exchange runs before the components, and a
+# `derived` field is only rewritten at the end of a step, so
+# `initialize()`'s `ice_fraction` is what an atmosphere is handed for its
+# first two coupling steps. Starting from zero hands an Earth-like run
+# ice-free poles, and the heat loss that causes comes back as a freeze/melt
+# potential that grows implausibly thick ice in one step. These pin the
+# climatological start that avoids it.
+
+
+#: A January-peaking concentration: fully covered in January, ice-free in July.
+MONTHLY_ICE_FRACTION = 0.5 + 0.5 * np.cos(2 * np.pi * np.arange(12) / 12.0)
+
+
+@pytest.fixture
+def ice_clim_file(tmp_path, uniform_grid):
+    """Write a 12-month `icec` concentration climatology the tests own."""
+    from tests.unit.slab_test_utils import write_climatology
+
+    shape = uniform_grid.shape[::-1]  # (lat, lon), the file's order
+    seasonal = [np.full(shape, value, dtype=np.float32)
+                for value in MONTHLY_ICE_FRACTION]
+    return write_climatology(tmp_path / "icec.nc", "icec", np.array(seasonal))
+
+
+def _bind(model, start="2000-04-01"):
+    """Bind a model to a one-day coupler starting on ``start``."""
+    import jax_datetime as jdt
+
+    model.bind(
+        coupling_timestep=jdt.to_timedelta(1, "day"),
+        start_date=jdt.to_datetime(start),
+        calendar="365_day",
+    )
+    return model
+
+
+def test_initial_fraction_reproduces_the_climatology_at_the_start_date(
+    uniform_grid, ice_clim_file
+):
+    """The fraction `initialize` publishes is the file's, at the run's month.
+
+    Round-tripped through the closure and its inverse, so this checks the
+    inversion as well as the sampling: away from saturation the two are exact
+    to float32. The climatology is read here the way the slab ocean reads its
+    SST -- `load_monthly_climatology` then `evaluate_cyclic_linear` -- so the
+    file's own month-to-month interpolation is what is compared against.
+    """
+    from jem.components.slab.base import load_monthly_climatology
+    from jem.utils.cycles import evaluate_cyclic_linear
+
+    model = _bind(SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file))
+
+    fraction = np.asarray(model.initialize()["derived"].ice_fraction)
+    expected = np.asarray(evaluate_cyclic_linear(
+        model.start_year_fraction,
+        load_monthly_climatology(ice_clim_file, "icec", uniform_grid),
+    ))
+    assert 0.0 < expected.max() < 0.95, expected.max()
+    np.testing.assert_allclose(fraction, expected, atol=1e-6)
+
+    # And it is the START date that selected it, not simply the first month:
+    # a January start of the same file gives a different (saturated) cover.
+    january = _bind(
+        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",
+    ).initialize()["derived"].ice_fraction
+    assert float(np.asarray(january).min()) > fraction.max()
+
+
+def test_a_fully_covered_cell_is_capped_rather_than_infinite(
+    uniform_grid, ice_clim_file
+):
+    """Concentration 1 inverts to infinity, so it is given a real depth instead.
+
+    The closure saturates, so a fully covered cell's thickness is not
+    recoverable from its fraction; `max_initial_ice_thickness` is what such a
+    cell gets. It must still *read back* as effectively fully covered.
+    """
+    model = _bind(
+        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",  # the month the climatology is 1.0
+    )
+    carry = model.initialize()
+
+    thickness = np.asarray(carry["state"].ice_thickness)
+    np.testing.assert_allclose(
+        thickness, float(model.params.max_initial_ice_thickness), rtol=1e-6
+    )
+    assert np.isfinite(thickness).all()
+    assert np.asarray(carry["derived"].ice_fraction).min() > 0.99
+
+
+def test_without_a_climatology_the_ice_starts_from_the_parameter(uniform_grid):
+    """No file is the unchanged behaviour: a uniform thickness, zero by default."""
+    bare = _bind(SlabSeaiceModel(uniform_grid)).initialize()
+    assert float(np.asarray(bare["state"].ice_thickness).max()) == 0.0
+    assert float(np.asarray(bare["derived"].ice_fraction).max()) == 0.0
+
+    uniform = _bind(
+        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(initial_ice_thickness=0.5))
+    ).initialize()
+    np.testing.assert_allclose(
+        np.asarray(uniform["state"].ice_thickness), 0.5, rtol=1e-6
+    )
+
+
+def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
+    """The ocean mask still wins: a land cell has no ice whatever the file says."""
+    model = _bind(
+        SlabSeaiceModel(half_land_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",
+    )
+    carry = model.initialize()
+
+    land = np.asarray(half_land_grid.binary_mask == 1.0)
+    assert np.asarray(carry["state"].ice_thickness)[land].max() == 0.0
+    assert np.asarray(carry["derived"].ice_fraction)[land].max() == 0.0
+
+
+def test_a_missing_climatology_file_is_reported_at_construction(uniform_grid):
+    """A bad path fails where the traceback still points at the caller."""
+    with pytest.raises(FileNotFoundError, match="no-such-file.nc"):
+        SlabSeaiceModel(uniform_grid, ice_clim_file="no-such-file.nc")
+
+
+def test_a_climatology_with_nans_over_ocean_is_refused(tmp_path, uniform_grid):
+    """NaNs over ocean mean the file's land mask and the grid's disagree."""
+    from tests.unit.slab_test_utils import write_climatology
+
+    shape = (12,) + uniform_grid.shape[::-1]
+    values = np.zeros(shape, dtype=np.float32)
+    values[0, 0, 0] = np.nan
+    path = write_climatology(tmp_path / "nan.nc", "icec", values)
+
+    with pytest.raises(ValueError, match="NaNs over ocean"):
+        SlabSeaiceModel(uniform_grid, ice_clim_file=path)
+
+
+def test_max_initial_ice_thickness_is_validated_and_differentiable(
+    uniform_grid, ice_clim_file
+):
+    """It is a depth like the others, and a gradient reaches it through the state."""
+    with pytest.raises(ValueError, match="max_initial_ice_thickness"):
+        SlabSeaiceModel(
+            uniform_grid, SlabSeaiceParameters(max_initial_ice_thickness=-1.0)
+        )
+
+    model = _bind(
+        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",  # saturated, so the cap is what sets the thickness
+    )
+
+    def total_thickness(cap):
+        params = SlabSeaiceParameters(max_initial_ice_thickness=cap)
+        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+
+    gradient = float(jax.grad(total_thickness)(3.0))
+    assert gradient == pytest.approx(float(np.prod(uniform_grid.shape)))
+
+
+def test_saturated_cell_gradient_is_finite_not_nan(uniform_grid, ice_clim_file):
+    """Regression: a fully-covered cell must not poison the closure's gradient.
+
+    ``_thickness_from_fraction`` inverts ``f = 1 - exp(-h / scale)`` with
+    ``log1p(-f)``. At ``f == 1`` that is ``log1p(-1) = -inf``, and although
+    the outer ``jnp.where`` replaces the *primal* with the cap for such a
+    cell, reverse-mode AD still evaluates the VJP of the unselected branch
+    before zeroing its cotangent -- ``0 * inf = nan``. Every ocean cell of
+    ``ice_clim_file`` is exactly 1.0 in January, so this exercises the bug
+    with real data rather than a hand-built edge case.
+    """
+    model = _bind(
+        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
+        start="2000-01-01",  # the month the climatology is 1.0 everywhere
+    )
+
+    def total_thickness(scale):
+        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
+        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+
+    thickness = np.asarray(model.initialize()["state"].ice_thickness)
+    gradient = jax.grad(total_thickness)(jnp.float32(0.5))
+
+    # The primal is unchanged by the fix: every cell is still capped.
+    np.testing.assert_allclose(
+        thickness, float(model.params.max_initial_ice_thickness), rtol=1e-6
+    )
+    assert bool(jnp.isfinite(gradient))
+    # Every cell is saturated, so the cap -- not the scale -- sets the
+    # thickness everywhere: the gradient is exactly zero, not merely finite.
+    assert float(gradient) == 0.0
+
+
+def test_a_nan_land_fill_value_does_not_poison_the_gradient(half_land_grid, tmp_path):
+    """Regression: a NaN land fill value must not poison the closure's gradient.
+
+    `__init__` accepts a NaN fill value over land in the ice climatology --
+    only a NaN over *ocean* is refused, since a real file's land cells
+    routinely carry one. `_thickness_from_fraction` used to invert every
+    cell's concentration, land included, only for the caller's own
+    ``jnp.where(ocean, ...)`` to zero the land cells afterwards. That gets the
+    *primal* right, but `jax.grad` still differentiates through
+    `log1p(-nan) = nan` for the land cells first, and multiplying that local
+    gradient by the outer mask's already-zeroed cotangent is `0 * nan = nan`
+    -- the same failure `test_saturated_cell_gradient_is_finite_not_nan`
+    regression-tests for a saturated ocean cell, just reached through a land
+    NaN instead.
+    """
+    from tests.unit.slab_test_utils import write_climatology
+
+    # `half_land_grid`'s land half is the eastern two of its four longitudes
+    # (see the fixture); write the file in its own (time, lat, lon) order and
+    # NaN exactly those columns, leaving the ocean half a plain 0.5 everywhere.
+    land_lat_lon = np.asarray(half_land_grid.binary_mask == 1.0).T
+    values = np.full((12,) + half_land_grid.shape[::-1], 0.5, dtype=np.float32)
+    values[:, land_lat_lon] = np.nan
+    path = write_climatology(tmp_path / "icec_nan_land.nc", "icec", values)
+
+    # Construction succeeds: the NaNs are over land, not ocean.
+    model = _bind(SlabSeaiceModel(half_land_grid, ice_clim_file=path))
+
+    def total_thickness(scale):
+        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
+        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+
+    ocean = np.asarray(half_land_grid.binary_mask == 0.0)
+    thickness = np.asarray(model.initialize()["state"].ice_thickness)
+    gradient = jax.grad(total_thickness)(jnp.float32(0.7))
+
+    # The primal was already correct before the fix: land is exactly zero,
+    # ocean is finite.
+    assert bool(np.all(thickness[~ocean] == 0.0))
+    assert bool(np.all(np.isfinite(thickness[ocean])))
+    assert bool(jnp.isfinite(gradient))
+    assert float(gradient) != 0.0

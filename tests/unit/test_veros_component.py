@@ -379,6 +379,38 @@ def test_initialize_carry_structure(component, grid_shape):
     assert carry["state"] is component.model.state
 
 
+def test_initialize_seeds_sst_from_the_setup_initial_condition(
+        component, veros_model):
+    """``initialize()``'s SST is the setup's initial condition, not 273.15 K.
+
+    The default coupling workflow runs every exchanger before any component
+    has stepped, so whatever ``initialize()`` puts in ``derived`` is what the
+    atmosphere integrates its whole first coupling interval over. The
+    expected value is recomputed here directly from the setup's own raw
+    ``variables.temp`` -- mirroring the extraction ``step()`` performs, at
+    the initial ``tau`` (Veros initializes ``tau=1`` and a setup's
+    ``set_initial_conditions`` fills all three time levels with the same
+    profile, so this is well-defined before any step has run) -- rather than
+    calling the code under test a second time or asserting against a
+    hard-coded constant.
+    """
+    interior = slice(GHOST_CELLS, -GHOST_CELLS)
+    variables = veros_model.state.variables
+    tau = variables.tau
+    expected = np.asarray(variables.temp[interior, interior, -1, tau]) + 273.15
+    # Land columns carry no temperature (masked to 0 by the setup); step()
+    # patches them to a plausible constant so downstream components never
+    # see an unphysical value, and initialize() must match that convention.
+    expected = np.where(expected < 100, 288.15, expected)
+
+    sst = np.asarray(component.initialize()["derived"].sea_surface_temperature)
+
+    np.testing.assert_allclose(sst, expected)
+    # A uniform 273.15 K (VerosDerived.zeros' placeholder) would trivially
+    # satisfy a looser check; this setup's cold start is genuinely warmer.
+    assert not np.allclose(sst, 273.15)
+
+
 def test_step_before_bind_raises(veros_model):
     """Stepping an unregistered component names the fix."""
     wrapper = VerosComponent(veros_model)

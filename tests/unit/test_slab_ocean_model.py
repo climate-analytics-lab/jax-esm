@@ -682,3 +682,221 @@ def test_initialize_rejects_relaxation_without_a_climatology(uniform_grid):
     # The default, and a method the model can run, still initialize.
     model.initialize()
     model.initialize(SlabOceanParameters(forcing_method="qflux"))
+
+
+# ---------------------------------------------------------------------------
+# The initial mixed layer cannot start colder than it is allowed to be
+# ---------------------------------------------------------------------------
+
+
+def test_initial_sst_is_held_at_the_seawater_freezing_point(tmp_path, uniform_grid):
+    """A sub-freezing climatology starts the mixed layer at freezing, not below.
+
+    An observed "SST" climatology is generally a *surface* temperature: where
+    the surface is sea ice the file reports the ice surface, tens of kelvin
+    below freezing. `step` holds the mixed layer at or above the seawater
+    freezing point and turns the heat that clamp removes into this step's
+    freeze/melt potential, so an initial state below the floor is not a cold
+    ocean -- it is a heat deficit the first step converts into ice.
+    """
+    deficit = 30.0
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - deficit),
+    )
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    sea_surface_temperature = np.asarray(
+        model.initialize()["state"].sea_surface_temperature
+    )
+
+    np.testing.assert_allclose(
+        sea_surface_temperature, constants.seawater_freezing_point_K, rtol=1e-6
+    )
+
+
+def test_a_sub_freezing_start_no_longer_dumps_its_deficit_into_ice(
+    tmp_path, uniform_grid
+):
+    """The first step's freeze/melt potential is a step's worth, not a run's.
+
+    Taken verbatim, a climatology 30 K below freezing would be handed to the
+    first step as `deficit * mixed_layer_depth * rho * cp` of frazil energy --
+    enough for tens of metres of ice in one coupling interval. With the floor
+    applied the first step starts in balance, so whatever potential it reports
+    comes from the heat flux it was actually given.
+    """
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - 30.0),
+    )
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+    carry = model.initialize()
+
+    # No heat flux at all: an ocean already at the floor has nothing to freeze.
+    stepped, _ = model.step(carry, coupling_time(0))
+
+    np.testing.assert_allclose(
+        np.asarray(stepped["derived"].ice_frazil_melt_energy), 0.0, atol=1e-6
+    )
+
+
+def test_a_warm_climatology_is_untouched_by_the_floor(tmp_path, uniform_grid):
+    """The floor is a floor: it may not move an ocean that is above it."""
+    sst_file = write_seasonal_sst(tmp_path / "sst.nc")
+    model = SlabOceanModel(uniform_grid, sst_clim_file=sst_file)
+
+    sea_surface_temperature = np.asarray(
+        model.initialize()["state"].sea_surface_temperature
+    )
+
+    np.testing.assert_allclose(
+        sea_surface_temperature,
+        climatology_at(MONTHLY_SST, model.start_year_fraction),
+        rtol=1e-6,
+    )
+    assert sea_surface_temperature.min() > constants.seawater_freezing_point_K
+
+
+# ---------------------------------------------------------------------------
+# The RELAXATION TARGET cannot be sub-freezing either, not just the initial
+# state (Codex review round 15, P1): `_climatology_at` used to return the raw
+# climatology every step, so a relaxation run pulled the mixed layer down
+# towards an ice-surface temperature it can never have, reported the same
+# deficit as frazil energy every coupling step, and then clamped the state
+# straight back to the floor -- regenerating that "initial" deficit for the
+# life of the run instead of it being a one-off transient at t=0.
+# ---------------------------------------------------------------------------
+
+
+def test_relaxation_to_a_sub_freezing_climatology_stops_regenerating_frazil(
+    tmp_path, uniform_grid
+):
+    """A relaxation target that starts sub-freezing must not keep making ice.
+
+    With the climatology floored only in the initial state (the bug), the
+    mixed layer is pulled back down towards the raw sub-freezing climatology
+    on *every* step, clamped back up to freezing, and the same large deficit
+    is reported as ``ice_frazil_melt_energy`` again and again. With the
+    climatology itself floored (the fix), the relaxation target equals the
+    already-at-freezing state from the second step on, so there is nothing
+    left to relax away and the diagnostic collapses to (numerical-noise)
+    zero -- it does not keep reproducing the first step's large value.
+    """
+    deficit = 30.0
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - deficit),
+    )
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method="relaxation", relaxation_time=30 * 86400.0),
+        sst_clim_file=sst_file,
+    )
+    carry = model.initialize()
+    # No heat flux: any frazil energy reported has to come from the relaxation
+    # target alone, not from the atmosphere.
+    n_steps = 5
+    frazil_by_step = []
+    for step in range(n_steps):
+        carry, diagnostics = model.step(carry, coupling_time(step))
+        frazil_by_step.append(
+            float(jnp.max(jnp.abs(diagnostics["derived"].ice_frazil_melt_energy)))
+        )
+
+    # The mixed layer never goes anywhere: it starts and stays at the floor.
+    np.testing.assert_allclose(
+        np.asarray(carry["state"].sea_surface_temperature),
+        constants.seawater_freezing_point_K,
+        rtol=1e-6,
+    )
+    # This is the property the bug violated: a floored relaxation target
+    # makes the deficit a one-step transient, not a per-step constant. The
+    # unfixed code reports the SAME large value (of order
+    # `deficit * mixed_layer_depth * rho * cp`, ~1e8 J/m^2 here) on every one
+    # of these steps; fixed, only the first step can show a floor-crossing
+    # transient and every step after it is at the freezing point already, so
+    # there is nothing left to clamp.
+    heat_capacity_scale = (
+        constants.ocean_density
+        * constants.ocean_specific_heat_capacity
+        * float(jnp.max(carry["derived"].mixed_layer_depth))
+    )
+    negligible = 1e-3 * heat_capacity_scale  # << the ~1e8 J/m^2 the bug produced
+    assert all(value < negligible for value in frazil_by_step[1:]), frazil_by_step
+    assert frazil_by_step[-1] < negligible, frazil_by_step
+
+
+def test_relaxation_climatology_is_floored_at_construction(tmp_path, uniform_grid):
+    """`self.sst_climatology` itself carries the floor, not just the initial draw.
+
+    Directly guards the fix's chosen call site: flooring `initialize()`'s
+    result is not enough, because `_climatology_at` (the relaxation target)
+    reads `self.sst_climatology`, not the initial state.
+    """
+    deficit = 30.0
+    sst_file = write_seasonal_sst(
+        tmp_path / "cold.nc",
+        monthly=np.full(12, constants.seawater_freezing_point_K - deficit),
+    )
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method="relaxation"),
+        sst_clim_file=sst_file,
+    )
+
+    assert float(jnp.min(model.sst_climatology)) == pytest.approx(
+        constants.seawater_freezing_point_K, rel=1e-6
+    )
+
+
+def test_relaxation_climatology_floor_leaves_warm_cells_untouched(tmp_path, uniform_grid):
+    """A climatology cell already above freezing is not moved by the floor.
+
+    Half the grid is ice-covered (sub-freezing) and half is not; the floor
+    must be a `jnp.maximum`, not a global shift, so only the cold half changes
+    and the warm half's relaxation target -- and therefore its whole
+    trajectory -- is bit-for-bit what it always was.
+    """
+    warm_value = 290.0
+    cold_value = constants.seawater_freezing_point_K - 30.0
+    # Row 0 (latitude -60) is ice-covered; the rest of the grid is warm.
+    monthly = np.full(
+        (12, len(LATITUDE_DEGREES), len(LONGITUDE_DEGREES)), warm_value
+    )
+    monthly[:, 0, :] = cold_value
+    sst_file = write_climatology(tmp_path / "mixed.nc", "sst", monthly)
+
+    model = SlabOceanModel(
+        uniform_grid,
+        SlabOceanParameters(forcing_method="relaxation", relaxation_time=30 * 86400.0),
+        sst_clim_file=sst_file,
+    )
+
+    climatology = np.asarray(model.sst_climatology)
+    # (lon, lat, time) on the model grid: latitude is axis 1.
+    np.testing.assert_allclose(
+        climatology[:, 0, :], constants.seawater_freezing_point_K, rtol=1e-6
+    )
+    # The warm half must be BIT-FOR-BIT what the file held: `jnp.maximum`
+    # against a smaller value returns its first argument exactly (unlike a
+    # clip that also rescales), so this is not just a tolerant comparison.
+    np.testing.assert_array_equal(climatology[:, 1:, :], warm_value)
+
+    carry = model.initialize()
+    warm_initial = np.asarray(carry["state"].sea_surface_temperature)[:, 1:]
+    np.testing.assert_allclose(warm_initial, warm_value, rtol=1e-6)
+
+    stepped, _ = model.step(carry, coupling_time(0))
+    warm_frazil = np.asarray(stepped["derived"].ice_frazil_melt_energy)[:, 1:]
+    # Above freezing, with no heat flux, the mixed layer stays at the warm
+    # climatology and the freeze/melt potential is the ordinary (large,
+    # negative -- "surplus available to melt ice") value the docstring
+    # describes, not zero and not affected by anything the cold row does.
+    expected_warm_frazil = (
+        (constants.seawater_freezing_point_K - warm_value)
+        * np.asarray(stepped["derived"].mixed_layer_depth)[:, 1:]
+        * constants.ocean_density
+        * constants.ocean_specific_heat_capacity
+    )
+    np.testing.assert_allclose(warm_frazil, expected_warm_frazil, rtol=1e-5)

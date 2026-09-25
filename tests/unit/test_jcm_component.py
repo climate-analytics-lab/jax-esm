@@ -13,6 +13,8 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+from jcm.date import DateData
+from jcm.forcing import ForcingData, TimeSeries
 from jcm.model import Model
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.terrain import TerrainData
@@ -24,6 +26,7 @@ from jem.base.component import (
     SupportsXarray,
     TimeAxis,
 )
+from jem import constants
 from jem.components.jcm import JCMComponent, exchange_fields
 
 START_DATE = jdt.to_datetime("2000-01-01")
@@ -340,3 +343,325 @@ def test_rebinding_to_a_different_timestep_is_rejected(model):
             start_date=START_DATE,
             calendar=CALENDAR,
         )
+
+
+# ---------------------------------------------------------------------------
+# Forcing read from a file, and the fields a coupled run overwrites
+# ---------------------------------------------------------------------------
+#
+# The atmosphere's `forcing` section is the one section a coupled model both
+# reads from a file and overwrites every step. jax-gcm builds a time-varying
+# boundary condition as a `TimeSeries` (values, time axis, alignment mode --
+# three pytree leaves) and slices it by date internally; an exchanger writes a
+# single `(ix, il)` array into the same field. These pin which fields end up
+# which way, and that a coupled step with a file-forced atmosphere really does
+# keep its carry structure.
+
+
+@pytest.fixture(scope="module")
+def file_forcing(model) -> ForcingData:
+    """jax-gcm's packaged T30 surface climatology on the test model's grid.
+
+    The same file `+configuration=earth-slab` names as
+    `${jcm_data:bc/t30/clim/forcing.nc}`, reached through the resolver's own
+    helper so the test and the configuration cannot drift onto different data.
+    """
+    from jem.config import package_data_path
+
+    return ForcingData.from_file(
+        package_data_path("jcm.data", "bc/t30/clim/forcing.nc"),
+        coords=model.coords,
+    )
+
+
+def _is_time_series(value) -> bool:
+    """Return True if ``value`` is a jax-gcm time-varying forcing leaf."""
+    return isinstance(value, TimeSeries)
+
+
+def test_file_forcing_starts_out_as_time_series(file_forcing):
+    """The premise: a from-file boundary condition is a `TimeSeries`, not an array.
+
+    Every other test in this section is about what JAX-ESM does with that, so
+    if jax-gcm ever stopped building one there would be nothing left to fix
+    and these would pass vacuously.
+    """
+    for name in ("sea_surface_temperature", "sice_am", "stl_am",
+                 "snowc_am", "soilw_am"):
+        assert _is_time_series(getattr(file_forcing, name)), name
+
+
+def test_the_component_reports_which_forcing_fields_vary_in_time(
+    model, file_forcing
+):
+    """`time_varying_forcing` is what a hand-written coupling has to declare."""
+    assert set(JCMComponent(model, forcing=file_forcing).time_varying_forcing) == {
+        "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
+    }
+    # The default forcing is plain arrays throughout, so there is nothing to
+    # declare and an exchange into it never changes the carry's structure.
+    assert JCMComponent(model).time_varying_forcing == ()
+
+
+def test_initialize_collapses_only_the_exchanged_forcing(model, file_forcing):
+    """Declared fields become per-step arrays; the rest stay climatologies."""
+    component = JCMComponent(
+        model, forcing=file_forcing,
+        exchanged_forcing=("sea_surface_temperature", "sice_am"),
+    )
+    forcing = component.initialize()["forcing"]
+
+    for name in ("sea_surface_temperature", "sice_am"):
+        value = getattr(forcing, name)
+        assert not _is_time_series(value), name
+        assert value.shape == GRID_SHAPE, name
+    # Nothing supplies the land surface here, so it must still vary through
+    # the year -- freezing it at the start date would be a silent change to
+    # what the atmosphere stands on.
+    for name in ("stl_am", "snowc_am", "soilw_am"):
+        value = getattr(forcing, name)
+        assert _is_time_series(value), name
+        assert value.values.shape[0] > 1, name
+
+
+def test_collapsed_forcing_is_the_climatology_at_the_start_date(
+    model, file_forcing
+):
+    """The value a collapsed field takes is the file's, read at the start date."""
+    component = JCMComponent(
+        model, forcing=file_forcing, exchanged_forcing=("sea_surface_temperature",),
+    )
+    expected = file_forcing.select(
+        DateData.set_date(START_DATE), calendar=CALENDAR
+    ).sea_surface_temperature
+
+    collapsed = np.asarray(
+        component.initialize()["forcing"].sea_surface_temperature
+    )
+    np.testing.assert_array_equal(collapsed, np.asarray(expected))
+    # And it is that date's slice rather than any date's: a mid-year one
+    # differs, so the start date is doing real work here.
+    midyear = np.asarray(file_forcing.select(
+        DateData.set_date(jdt.to_datetime("2000-07-01")), calendar=CALENDAR
+    ).sea_surface_temperature)
+    assert not np.allclose(collapsed, midyear)
+
+
+def test_initialize_leaves_the_forcing_alone_when_nothing_is_exchanged(
+    model, file_forcing
+):
+    """An atmosphere no exchanger writes to keeps jax-gcm's forcing untouched."""
+    component = JCMComponent(model, forcing=file_forcing)
+
+    assert component.exchanged_forcing == ()
+    assert component.initialize()["forcing"] is file_forcing
+
+
+def test_set_exchanged_forcing_rejects_an_unknown_field(model):
+    """A field `ForcingData` does not have is refused while the model is built."""
+    component = JCMComponent(model)
+    with pytest.raises(ValueError, match="sea_ice_fraction"):
+        component.set_exchanged_forcing(["sice_am", "sea_ice_fraction"])
+    # The declaration is all-or-nothing: the valid name in the same call is
+    # not half-applied.
+    assert component.exchanged_forcing == ()
+
+
+def test_set_exchanged_forcing_deduplicates_and_keeps_order(model):
+    component = JCMComponent(model)
+    component.set_exchanged_forcing(["stl_am", "sice_am", "stl_am"])
+    assert component.exchanged_forcing == ("stl_am", "sice_am")
+
+
+def test_coupled_step_keeps_its_structure_with_file_forcing(model, file_forcing):
+    """One coupled step with a file-forced atmosphere scans.
+
+    The regression this section exists for: the standard exchange writes plain
+    arrays into `atm.forcing`, so before the fields it writes were collapsed
+    the atmosphere's carry had one pytree structure going into the first
+    exchange and another coming out -- which `lax.scan` cannot carry, and
+    which `Coupler` refuses by name at trace time.
+
+    Traced with `jax.eval_shape` rather than run: the structure check is a
+    trace-time check, so tracing is what exercises it, and it costs no
+    compilation. No land model, so the file's land climatology is not
+    exchanged and has to come through the step still time-varying.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel, SlabSeaiceModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers, exchanged_fields
+
+    atm = JCMComponent(model, forcing=file_forcing)
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": atm,
+        "ocn": SlabOceanModel(grid),
+        "seaice": SlabSeaiceModel(grid, name="seaice"),
+    }
+    exchangers = default_exchangers(components)
+    # What a coupler's runner does: the coupling table is what knows which of
+    # the atmosphere's boundary conditions somebody else supplies.
+    atm.set_exchanged_forcing(exchanged_fields(exchangers, atm.name))
+    assert atm.exchanged_forcing == ("sea_surface_temperature", "sice_am")
+
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+    carry = coupler.initialize()
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    # The land surface nothing supplies came through with its time axis, so
+    # the atmosphere goes on being given a seasonal cycle for it.
+    assert _is_time_series(final.components["atm"]["forcing"].stl_am)
+    assert final.components["atm"]["forcing"].stl_am.values.shape[0] > 1
+
+
+def test_undeclared_file_forcing_is_refused_by_the_structure_check(
+    model, file_forcing
+):
+    """An undeclared time-varying field is a named error, not a silent one.
+
+    The declaration exists because of this: an exchanger writing an array
+    into a field that is still a `TimeSeries` changes the carry's pytree
+    structure, and the coupler's per-element check is what says so. Pinned
+    here so that check is not weakened into accepting it -- the only right
+    answer is to declare the field, which is what
+    `jem.runners.build_coupler` does from the coupling table.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model, forcing=file_forcing),
+        "ocn": SlabOceanModel(grid),
+    }
+    coupler = Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+    with pytest.raises(RuntimeError, match="changed the structure"):
+        jax.eval_shape(
+            coupler.generate_trajectory_function(1), coupler.initialize()
+        )
+
+
+def test_validate_names_the_spec_for_an_undeclared_file_forcing(
+    model, file_forcing
+):
+    """The pre-flight catches it too, and names the row rather than the element.
+
+    `Exchange.validate` runs on the initial carries before anything is
+    compiled, so a `TimeSeries` destination that an exchanger would overwrite
+    with one array is a build-time `ValueError` naming the spec -- where the
+    coupler's own check, which still fires, can only name the workflow
+    element `'exchange'` at trace time.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model, forcing=file_forcing),
+        "ocn": SlabOceanModel(grid),
+    }
+    exchangers = default_exchangers(components)
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+    with pytest.raises(ValueError, match="atm.forcing.sea_surface_temperature"):
+        exchangers["exchange"].validate(coupler.initialize().components)
+
+
+def test_validate_passes_once_the_forcing_is_declared(model, file_forcing):
+    """Declaring the field makes both ends the same pytree, and validate agrees."""
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers, exchanged_fields
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    atm = JCMComponent(model, forcing=file_forcing)
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    exchangers = default_exchangers(components)
+    atm.set_exchanged_forcing(exchanged_fields(exchangers, atm.name))
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+    exchangers["exchange"].validate(coupler.initialize().components)
+
+
+@pytest.mark.slow
+def test_earth_slab_runs_from_the_command_line(tmp_path):
+    """`+configuration=earth-slab` runs end to end with its file forcing.
+
+    The shipped configuration that couples a from-file-forced atmosphere to a
+    slab ocean, land and sea ice -- the one the structure mismatch stopped
+    before it had integrated a single step. A subprocess, like the aquaplanet
+    smoke test in `test_driver.py`, because Hydra's composition from the
+    installed package and the `${jcm_data:}` resolver are part of what is
+    being checked.
+    """
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    repository = pathlib.Path(__file__).resolve().parents[2]
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(repository), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    finished = subprocess.run(
+        [sys.executable, "-m", "jem.main",
+         "+configuration=earth-slab", "coupled_run=short_run"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=1800,
+    )
+    assert finished.returncode == 0, finished.stderr[-4000:]
+
+    run_directories = sorted((tmp_path / "outputs").glob("*/*"))
+    assert len(run_directories) == 1, run_directories
+    written = sorted(path.name for path in run_directories[0].glob("*.nc"))
+    assert written == [
+        "atm-00000000.nc", "lnd-00000000.nc",
+        "ocn-00000000.nc", "seaice-00000000.nc",
+    ]
+
+    # The polar surface the run starts from, end to end. The first record is
+    # what `seaice.initialize()` published, which under the standard workflow
+    # is also what the atmosphere was handed for its first two steps: it has
+    # to be the observed cover, not an ice-free ocean. And the ice must still
+    # be a plausible thickness two days later -- a run that begins out of
+    # balance with its own freezing point answers with tens of metres of ice
+    # in a single coupling step.
+    import xarray as xr
+
+    with xr.open_dataset(run_directories[0] / "seaice-00000000.nc") as sea_ice:
+        first = sea_ice["ice_fraction"].isel(time=0).values
+        assert float(first.max()) > 0.9
+        assert float(first.mean()) > 0.01
+        thickness = sea_ice["ice_thickness"].values
+        assert np.isfinite(thickness).all()
+        assert float(thickness.max()) < 5.0, float(thickness.max())
+
+    with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
+        # The whole field: land carries the 288.15 K fill value, which is
+        # above the floor and so cannot hide an ocean cell below it.
+        sst = ocean["sea_surface_temperature"].isel(time=0).values
+        assert float(sst.min()) >= constants.seawater_freezing_point_K

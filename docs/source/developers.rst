@@ -33,11 +33,33 @@ seen, not discover it.
 ``JAX_PLATFORMS=cpu`` is required on GPU hosts, otherwise every test process
 grabs the same GPU.
 
-Two suites sit behind those gates. ``tests/unit`` is fast and needs no external
-data. ``tests/examples`` executes every notebook under ``examples/`` and every
-``run.sh`` it finds, with a 600 s budget each; CI runs it on pull requests only,
-because it integrates whole coupled models. Run it before changing the public
-API, since the examples are the largest body of code that uses it:
+Mypy sees a different world in CI than on a development machine: the lint job
+installs ``.[dev]`` and no more, so an optional dependency such as matplotlib
+is absent there and ``--ignore-missing-imports`` turns everything it exports
+into ``Any``. A function in :mod:`jem.plot` that returns a matplotlib value
+directly therefore passes locally, where the real types resolve, and fails in
+CI under ``warn_return_any``. Convert such a value to the declared type rather
+than returning it straight through, so the annotation holds either way.
+
+Two suites sit behind those gates. ``tests/unit``'s fast gate is
+``-m "not slow"`` and needs no external data; its ``@pytest.mark.slow`` tests
+(whole-model builds and the Veros setups -- ``test_readme_quickstart.py``,
+which executes the README quick-start block end to end, is among them) are not
+part of that gate. They run in the ``examples`` CI job below, as three
+separate ``pytest`` invocations per #113 (the two Veros files cannot share a
+process with each other or with the netCDF-writing slow tests), and locally
+with ``JAX_PLATFORMS=cpu pytest tests/unit -m slow`` when a change touches
+what they cover. ``tests/examples`` has two files: ``test_examples.py`` executes every
+notebook under ``examples/`` end to end (a 1800 s budget each), and
+``test_configurations.py`` composes, builds and runs every named configuration
+under ``jem/config/configuration/`` for two coupled days
+(``coupled_run=short_run``), skipping the ``veros-*`` configurations where the
+optional ``veros`` dependency is not installed. CI runs the suite on pull
+requests only, because it integrates whole coupled models. There are no
+``run.sh`` drivers left to run -- every runnable configuration is a notebook or
+a ``python -m jem.main +configuration=...`` command, listed with the rest in
+``examples/README.md``. Run it before changing the public API, since the
+examples are the largest body of code that uses it:
 
 .. code-block:: bash
 

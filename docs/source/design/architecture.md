@@ -2,7 +2,9 @@
 
 How JEM couples black-box components. This is the reference for developers
 adding a component or debugging an exchange; the user-facing walkthrough is
-{doc}`../tutorial`.
+{doc}`../adding_a_component`. {doc}`../python_api` shows the same objects --
+`Coupler`, the exchangers, `run_chunked` -- built directly, for a reader who
+wants the construction rather than the design rationale.
 
 Every statement about the coupling core is checkable against
 `jem/base/component.py` and `jem/base/coupler.py`, which are the whole of it;
@@ -52,6 +54,35 @@ keep but expensive to rediagnose:
   surface exchange (`total_heat_flux`, `total_freshwater_flux`, `evaporation`,
   `precipitation`, `u0`, `v0`) plus `physics`, JCM's own per-step diagnostics
   dict, carried opaquely so an exchanger can reach any field JCM computes.
+- `JCMComponent`'s `carry["forcing"]` is a whole `jcm.forcing.ForcingData`, so
+  an exchanger addresses a boundary condition under JCM's own field name
+  (`atm.forcing.sea_surface_temperature`). It is the one carry section that is
+  both **read from a file and overwritten every step**, and the two want
+  different shapes. With `forcing@atmosphere.forcing=from_file` JCM builds each
+  time-varying boundary condition as a `jcm.forcing.TimeSeries` — values, time
+  axis and alignment mode, three pytree leaves — and slices it by date on every
+  internal timestep; an exchanger writes one `(ix, il)` array. A field that was
+  a time series before the exchange and an array after it changes the carry's
+  pytree structure, which `lax.scan` cannot carry (and which the coupler
+  refuses by name — rule 2 of [Exchangers](#exchangers)).
+
+  So the atmosphere is *told* which fields the coupling supplies —
+  `JCMComponent.set_exchanged_forcing(names)` — and `initialize()` collapses
+  exactly those to the climatology at the run's start date. From `initialize()`
+  onward the section has the structure an exchange preserves. Every field no
+  component supplies keeps its time series and goes on being sliced by JCM, so
+  a land surface in a run built with `land=none` still follows the seasonal
+  cycle.
+
+  The names are a property of the *coupled model*, not of the atmosphere, which
+  is why nothing assumes them: `jem.runners.build_coupler` reads them off the
+  built coupling table with `jem.exchangers.exchanged_fields(exchangers,
+  "atm")`, and a configuration coupled by a hand-written `coupling.exchanger` —
+  a function, with nothing to read — lists them in
+  `coupling.exchanged_forcing`. Assuming a fixed set instead would freeze an
+  unexchanged climatology at its start-date value without saying so; a
+  structure error that names the element responsible is much the better
+  failure.
 
 The coupler's own state is a **`CoupledCarry`** (`flax.struct.dataclass`):
 
@@ -837,8 +868,12 @@ Veros integrates `forcing.surface_taux`/`tauy` and the atmosphere publishes a
 near-surface *wind*, so getting from one to the other is a bulk drag law (and,
 on a rotated grid, a rotation into its local frame) — a computation, not a
 copy, and therefore a hand-written exchanger. The shipped `veros-*`
-configurations run thermodynamically forced and mechanically at rest until one
-is given.
+configurations give one:
+`coupling.exchanger: jem.fluxes.VerosExchange` — a bulk drag law on the
+atmosphere's near-surface wind, regridded then rotated into the ocean grid's
+frame, plus a freezing-point mask on the heat and freshwater fluxes. See
+`jem.fluxes` for the exchanger itself; the declarative table above carries
+the rest of the coupling.
 
 Three properties are worth stating, because a hand-written exchanger has them
 only by accident:
@@ -893,8 +928,12 @@ exchange is lagged by one coupling step. With `["exchange", "atm", "ocn"]`:
   of step *n−1*.
 - On the **first** step there is no previous step, so each component receives
   whatever its `initialize()` put in its forcing section — zeros, for every
-  packaged component. A run therefore begins with one step of uncoupled
-  spin-up: the ocean's first step sees no heat flux at all.
+  packaged surface component, and for `JCMComponent` the boundary conditions it
+  was built with, taken at the start date. A run therefore begins with one step
+  of uncoupled spin-up: the ocean's first step sees no heat flux at all. (Under
+  this workflow the atmosphere's own initial forcing is overwritten before it
+  ever steps, since `exchange` runs first; under `["atm", "exchange", ...]` it
+  is what the atmosphere integrates its first step on.)
 - The lag is a property of the *workflow*, not of the exchanger. An
   `["atm", "exchange", "ocn"]` workflow hands the ocean the atmosphere's fluxes
   from the same step, at the cost of giving the atmosphere a two-step-old SST.
@@ -1654,6 +1693,9 @@ checks report through `jax.debug.callback` rather than raising: they run inside
 the coupled `lax.scan`, where a Python exception cannot fire on a traced value.
 
 ## Adding a new component
+
+See {doc}`../adding_a_component` for the narrative version of this checklist,
+worked through end to end for JCM; keep the two in sync when either changes.
 
 1. Write the class (or a wrapper class for an external model) under
    `jem/components/`. Give it a `name`, an `initialize()` and a

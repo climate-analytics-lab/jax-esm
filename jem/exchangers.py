@@ -13,8 +13,10 @@ sea-ice wiring that every example in this repository writes out by hand
 today. A declarative exchange is not more capable than a hand-written one --
 an exchanger that computes a flux, converts units or blends two fields still
 has to be a function -- but it is checkable: :meth:`Exchange.validate` names
-a mistyped field *before* a run starts, and :meth:`Exchange.__repr__` prints
-the whole coupling as a table.
+a mistyped field *before* a run starts, :meth:`Exchange.__repr__` prints
+the whole coupling as a table, and :func:`exchanged_fields` answers, for one
+component, which of its fields somebody else supplies -- which is what a
+component needs to know before it builds a carry the coupled step can scan.
 
 Carry layout
 ------------
@@ -72,7 +74,10 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
-from jem.base.component import Carry, Component, CouplingTime, Exchanger
+import jax
+import jax.numpy as jnp
+
+from jem.base.component import Carry, Component, CoupledCarry, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +300,84 @@ def _field_names(section: Any) -> list[str]:
     return sorted(name for name in dir(section) if not name.startswith("_"))
 
 
+def _resolve_section(
+    components: Mapping[str, Carry],
+    name: str,
+    section: str,
+    context: str,
+    *,
+    not_a_mapping_hint: str,
+) -> Any:
+    """Return one section of one component's carry, or raise naming ``context``.
+
+    Shared by :class:`Exchange` (``context`` is the offending spec) and
+    :func:`read_field`/:func:`replace_field` (``context`` is the offending
+    path), so an unknown component or section is named the same way whichever
+    called it -- there is exactly one place this message is written.
+
+    What to suggest when the component's carry is not a mapping at all --
+    which is what a nested :class:`~jem.base.coupler.Coupler` looks like from
+    here, since its carry is a whole ``CoupledCarry`` rather than a mapping of
+    sections -- differs by caller: an exchange table needs a hand-written
+    exchanger, while :func:`read_field`/:func:`replace_field` need
+    :func:`~jem.base.coupler.nested_carry`/
+    :func:`~jem.base.coupler.with_nested_carry`. ``not_a_mapping_hint`` is
+    therefore a required parameter rather than a second copy of the message
+    with a different tail.
+    """
+    if name not in components:
+        raise KeyError(
+            f"{context} names the component {name!r}, which this coupled "
+            f"model does not have (it has {sorted(components)!r})."
+        )
+    carry = components[name]
+    if not isinstance(carry, Mapping):
+        raise TypeError(
+            f"{context}: the carry of {name!r} is a {type(carry).__name__}, "
+            f"not a mapping, so it has no {section!r} section to address. "
+            f"{not_a_mapping_hint}"
+        )
+    if section not in carry:
+        raise KeyError(
+            f"{context}: {name!r}'s carry has no {section!r} section "
+            f"(it has {sorted(carry)!r})."
+        )
+    return carry[section]
+
+
+def _require_field(section: Any, field: str, context: str, path: str) -> None:
+    """Raise, naming ``context`` and ``path``, if ``section`` lacks ``field``.
+
+    See :func:`_resolve_section` for why this is a free function rather than
+    two copies of the same check. ``context`` and ``path`` name two different
+    things for an :class:`Exchange` spec -- the whole spec, and which of its
+    two endpoints (source or destination) is the bad one -- so both appear in
+    the message; :func:`read_field`/:func:`replace_field` have only the one
+    path and pass ``context=""``, which prints it once rather than twice.
+    """
+    if not hasattr(section, field):
+        prefix = f"{context}: " if context else ""
+        raise ValueError(
+            f"{prefix}{path!r} names the field {field!r}, which "
+            f"{type(section).__name__} does not have (it has "
+            f"{_field_names(section)!r})."
+        )
+
+
+def _reconcile_leaf_dtype(current_leaf: Any, value_leaf: Any) -> Any:
+    """Cast ``value_leaf`` to ``current_leaf``'s dtype if they differ.
+
+    Used as the per-leaf function of a ``tree_map`` over a destination field
+    and its incoming value (see :meth:`Exchange.__call__`), so it only ever
+    sees actual array leaves, never a whole struct -- the structure walking
+    is ``tree_map``'s job, not this function's.
+    """
+    current_dtype = jnp.result_type(current_leaf)
+    if jnp.result_type(value_leaf) != current_dtype:
+        value_leaf = jnp.asarray(value_leaf, dtype=current_dtype)
+    return value_leaf
+
+
 class Exchange:
     """An :data:`~jem.base.component.Exchanger` built from a table of specs.
 
@@ -407,6 +490,57 @@ class Exchange:
             # TypeError naming neither the spec nor the component.
             destination = self._section(components, component, section, spec)
             self._require_field(destination, field, spec, spec.dst)
+            current = getattr(destination, field)
+            # A coupled step must return its carry with exactly the dtype it
+            # received, or `lax.scan` rejects it as a changed carry type --
+            # and two components built on either side of a process-wide
+            # precision flip (importing Veros sets `jax_enable_x64`)
+            # genuinely disagree on dtype, so a source and its destination
+            # can differ here even though nothing about the exchange itself
+            # is wrong. Casting, not rejecting, is the right response: unlike
+            # a shape mismatch (which this does not touch, and which still
+            # fails downstream exactly as before -- no silent broadcasting),
+            # dtype is not part of what the exchange table promises to
+            # preserve, only the destination component's own working
+            # precision is.
+            #
+            # `value`/`current` are not always a bare array: `validate()`
+            # only requires the two ends to share pytree *structure*, so a
+            # row between two matching composites (e.g. two
+            # `jcm.forcing.TimeSeries`) is legal, and casting has to walk
+            # that structure rather than treat the whole field as one array
+            # (a plain `jnp.result_type`/`jnp.asarray` on a struct raises --
+            # `.dtype` is defined on it for `jnp.result_type` to read, but
+            # `jnp.asarray` has no way to turn the struct itself into an
+            # array). `tree_map` over the two same-shaped pytrees reconciles
+            # dtype leaf by leaf and reassembles the original container, so
+            # a composite row is copied instead of raising, and the plain
+            # -array case (a single leaf) casts exactly as before.
+            #
+            # Structure is only walked this way when it actually matches: an
+            # *illegitimate* row (an exchanger writing a plain array into a
+            # field that is still a `TimeSeries` because it was never
+            # declared exchanged, `jem.runners.declare_exchanged_forcing`)
+            # has `current`/`value` at different structures, and `tree_map`
+            # itself would refuse them with its own generic pytree error
+            # naming neither the spec nor "structure". That check is
+            # `Exchange.validate`'s job (named-spec, build time) with the
+            # coupler's per-workflow-element carry check as the trace-time
+            # backstop when `validate` was skipped -- not this cast's, so an
+            # unequal pair is left exactly as before (no-op unless `value`
+            # is itself a bare array needing a dtype cast, which it always
+            # is here) for one of those two to catch downstream.
+            # Typed as Any because `tree_structure` returns an opaque
+            # PyTreeDef that static analysis cannot compare, exactly as in
+            # `_require_same_structure` above.
+            current_structure: Any = jax.tree_util.tree_structure(current)
+            value_structure: Any = jax.tree_util.tree_structure(value)
+            if current_structure == value_structure:
+                value = jax.tree_util.tree_map(_reconcile_leaf_dtype, current, value)
+            else:
+                current_dtype = jnp.result_type(current)
+                if jnp.result_type(value) != current_dtype:
+                    value = jnp.asarray(value, dtype=current_dtype)
             updates.setdefault(component, {}).setdefault(section, {})[field] = value
 
         exchanged = dict(components)
@@ -425,6 +559,24 @@ class Exchange:
         regridder into an error that names the spec, instead of a trace-time
         failure inside the coupled step (or, worse, a silently unused field).
 
+        It also checks that each row's two ends have the **same pytree
+        structure**, because a row is a copy: writing the source's value into
+        the destination gives the destination the source's structure, and a
+        carry whose structure changes mid-step is one ``lax.scan`` cannot
+        carry. The coupler catches that too, but only at trace time and only
+        by naming the workflow element; here the offending row is named. The
+        case this exists for is a destination that is a *composite* leaf --
+        a ``jcm.forcing.TimeSeries`` (values, time axis, alignment mode) that
+        the atmosphere was given from a file and an exchanger overwrites with
+        one array (see
+        :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`,
+        which is how that is arranged).
+
+        Structure only: **shapes and dtypes are deliberately not compared**,
+        because a row that names a regridder legitimately changes shape, and a
+        row between grids of different resolution is the normal case rather
+        than an error.
+
         Parameters
         ----------
         components : Mapping[str, Carry]
@@ -437,7 +589,8 @@ class Exchange:
             If a spec names a component, a carry section or a regridder that
             does not exist.
         ValueError
-            If a spec names a field its section does not have.
+            If a spec names a field its section does not have, or if its two
+            ends have different pytree structures.
         TypeError
             If a component's carry is not a mapping, so it has no sections to
             address.
@@ -445,12 +598,36 @@ class Exchange:
         """
         for spec in self.specs:
             self._regridder(spec)
-            for path, (component, section, field) in (
-                (spec.src, spec.src_parts),
-                (spec.dst, spec.dst_parts),
+            values = {}
+            for end, path, (component, section, field) in (
+                ("src", spec.src, spec.src_parts),
+                ("dst", spec.dst, spec.dst_parts),
             ):
                 resolved = self._section(components, component, section, spec)
                 self._require_field(resolved, field, spec, path)
+                values[end] = getattr(resolved, field)
+            self._require_same_structure(spec, values["src"], values["dst"])
+
+    @staticmethod
+    def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
+        """Raise, naming the spec, if its two ends are different pytrees."""
+        # Typed as Any because `tree_structure` returns an opaque PyTreeDef
+        # that static analysis cannot compare, exactly as in
+        # `Coupler.generate_step_function`.
+        source_structure: Any = jax.tree_util.tree_structure(source)
+        destination_structure: Any = jax.tree_util.tree_structure(destination)
+        if source_structure == destination_structure:
+            return
+        raise ValueError(
+            f"Exchange spec {spec} copies a {source_structure} into a field "
+            f"that currently holds a {destination_structure}, so applying it "
+            "would change the pytree structure of the carries -- which "
+            "`lax.scan` cannot carry, and the coupled step refuses. The two "
+            "ends of a row have to be the same kind of pytree (shapes may "
+            "differ; a regridder changes those).\n"
+            f"  {spec.src}: {source_structure}\n"
+            f"  {spec.dst}: {destination_structure}"
+        )
 
     # -- lookups, shared by __call__ and validate --------------------------
 
@@ -472,37 +649,17 @@ class Exchange:
         components: Mapping[str, Carry], name: str, section: str, spec: ExchangeSpec
     ) -> Any:
         """Return one section of one component's carry, or raise naming the spec."""
-        if name not in components:
-            raise KeyError(
-                f"Exchange spec {spec} names the component {name!r}, which this "
-                f"coupled model does not have (it has {sorted(components)!r})."
-            )
-        carry = components[name]
-        if not isinstance(carry, Mapping):
-            raise TypeError(
-                f"Exchange spec {spec}: the carry of {name!r} is a "
-                f"{type(carry).__name__}, not a mapping, so it has no {section!r} "
-                "section to address. Couple this component with a hand-written "
-                "exchanger."
-            )
-        if section not in carry:
-            raise KeyError(
-                f"Exchange spec {spec}: {name!r}'s carry has no {section!r} section "
-                f"(it has {sorted(carry)!r})."
-            )
-        return carry[section]
+        return _resolve_section(
+            components, name, section, f"Exchange spec {spec}",
+            not_a_mapping_hint="Couple this component with a hand-written exchanger.",
+        )
 
     @staticmethod
     def _require_field(
         section: Any, field: str, spec: ExchangeSpec, path: str
     ) -> None:
         """Raise, naming the spec, if ``section`` does not have ``field``."""
-        if not hasattr(section, field):
-            raise ValueError(
-                f"Exchange spec {spec}: {path!r} names the field {field!r}, which "
-                f"{type(section).__name__} does not have (it has "
-                f"{_field_names(section)!r})."
-            )
+        _require_field(section, field, f"Exchange spec {spec}", path)
 
 
 def default_exchanges(
@@ -715,6 +872,63 @@ def default_exchangers(
     )}
 
 
+def exchanged_fields(
+    exchangers: Mapping[str, Exchanger] | Iterable[Exchanger],
+    component: str,
+    section: str = "forcing",
+) -> tuple[str, ...]:
+    """Return the fields a coupling table writes into one carry section.
+
+    "Which of my fields does somebody else supply?" is a question a component
+    has to be able to answer before it builds its carry: a field an exchanger
+    overwrites every step has to be *shaped* like what the exchanger writes,
+    and the only place that is written down is the coupling table. The
+    atmosphere is the case that needs it -- with ``forcing=from_file`` its
+    boundary conditions are time series until a surface component takes one
+    over (see
+    :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`)
+    -- but the question is not specific to it, so the answer is read off the
+    table here rather than restated anywhere else.
+
+    Only :class:`Exchange` exchangers are read: a hand-written exchanger is an
+    arbitrary function and there is nothing in it to inspect, so it
+    contributes no names. A model coupled by one has to declare what it
+    writes itself; guessing would be worse, because the guess that is wrong
+    silently freezes a climatology instead of failing.
+
+    Parameters
+    ----------
+    exchangers : Mapping[str, Exchanger] or iterable of Exchanger
+        The coupled model's exchangers, as a mapping (its values are read) or
+        as a plain iterable.
+    component : str
+        Destination component name, e.g. ``"atm"``.
+    section : str, optional
+        Destination carry section; ``"forcing"`` by default, which is the
+        section an exchanger writes to by convention.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The destination field names, de-duplicated, in table order.
+
+    """
+    values = (
+        exchangers.values() if isinstance(exchangers, Mapping) else exchangers
+    )
+    # A dict rather than a set: the table's order is the order this reads
+    # best in, and a set would make the result depend on hash ordering.
+    fields: dict[str, None] = {}
+    for exchanger in values:
+        if not isinstance(exchanger, Exchange):
+            continue
+        for spec in exchanger.specs:
+            dst_component, dst_section, field = spec.dst_parts
+            if dst_component == component and dst_section == section:
+                fields[field] = None
+    return tuple(fields)
+
+
 def default_workflow(
     components: Mapping[str, Component] | Iterable[str],
     exchangers: Mapping[str, Exchanger] | Iterable[str],
@@ -744,3 +958,254 @@ def default_workflow(
 
     """
     return [*exchangers, *components]
+
+
+def _split_field_path(path: str) -> tuple[str, str, str]:
+    """Split a ``"component.section.field"`` path for :func:`read_field`/:func:`replace_field`.
+
+    The same three-part address :func:`_parse_path` checks for an
+    :class:`ExchangeSpec`, but there is no spec to attach the error to here --
+    the path itself is the only thing there is to name, so the message reads
+    around it directly rather than around ``f"Exchange spec {spec}"``.
+    """
+    parts = path.split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(
+            f"{path!r} is not of the form \"component.section.field\"."
+        )
+    component, section, field = parts
+    if section not in SECTIONS:
+        raise ValueError(
+            f"{path!r} names the carry section {section!r}, which is not one "
+            f"of {list(SECTIONS)!r}."
+        )
+    return component, section, field
+
+
+def _carry_components(carry: Any, path: str) -> Mapping[str, Carry]:
+    """Return the ``{name: carry}`` mapping ``carry`` addresses, or raise.
+
+    ``carry`` is either a whole :class:`~jem.base.component.CoupledCarry` (as
+    ``Coupler.initialize()`` returns) or the bare ``dict[str, Carry]`` mapping
+    an exchanger is handed -- see :func:`read_field`/:func:`replace_field`.
+    """
+    if isinstance(carry, CoupledCarry):
+        return carry.components
+    if isinstance(carry, Mapping):
+        return carry
+    raise TypeError(
+        f"{path!r}: `carry` is a {type(carry).__name__}, not a CoupledCarry "
+        "or a mapping of component carries."
+    )
+
+
+def read_field(carry: CoupledCarry | dict[str, Carry], path: str) -> Any:
+    """Return the value at ``"component.section.field"`` of a coupled carry.
+
+    The read side of :func:`replace_field` -- see its docstring for why both
+    exist. ``carry`` may be a whole :class:`~jem.base.component.CoupledCarry`
+    or the bare ``dict[str, Carry]`` mapping an exchanger is handed; either
+    way this reaches straight to the one field named by ``path`` instead of
+    the caller indexing through ``.components[...]["section"].field`` (or
+    ``carry["section"].field`` for the bare mapping) itself.
+
+    Parameters
+    ----------
+    carry : jem.base.component.CoupledCarry or dict[str, Carry]
+        The coupled carry, or a mapping of component carries.
+    path : str
+        ``"component.section.field"``, with ``section`` one of
+        :data:`SECTIONS`.
+
+    Returns
+    -------
+    Any
+        The value ``path`` names.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is malformed, or names a section or field the addressed
+        carry does not have.
+    KeyError
+        If ``path`` names a component the carry does not have.
+    TypeError
+        If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
+        component's carry is not a mapping of sections.
+
+    See Also
+    --------
+    jem.base.coupler.nested_carry :
+        Read a component's carry inside a *nested* coupled model -- one
+        registered as a component of another :class:`~jem.base.coupler.Coupler`
+        -- whose own carry is a whole ``CoupledCarry`` rather than the mapping
+        of sections this function addresses.
+
+    """
+    component, section, field = _split_field_path(path)
+    components = _carry_components(carry, path)
+    resolved = _resolve_section(
+        components, component, section, repr(path),
+        not_a_mapping_hint=(
+            "This looks like a nested coupled model: read its component's "
+            "carry with jem.nested_carry instead."
+        ),
+    )
+    _require_field(resolved, field, "", path)
+    return getattr(resolved, field)
+
+
+def replace_field(
+    carry: CoupledCarry | dict[str, Carry], path: str, value: Any
+) -> CoupledCarry | dict[str, Carry]:
+    """Return a coupled carry with one ``"component.section.field"`` replaced.
+
+    Every example that customises one initial condition -- a bumped initial
+    sea surface temperature, an SST an ``jax.jvp`` differentiates -- had to
+    rebuild three nested containers by hand to change a single field
+    (``dict(carry, components=dict(carry.components, ocn=dict(ocean_carry,
+    state=ocean_carry["state"].replace(...))))``), and every example did it
+    slightly differently. This is that rebuild, written once against the
+    ``"component.section.field"`` vocabulary :class:`Exchange` already uses,
+    so a notebook or a driver names the field it wants changed rather than the
+    nested containers around it.
+
+    Nothing is mutated: a new section struct comes from ``.replace(**{field:
+    value})``, a new component carry from ``dict(carry, **{section: ...})``,
+    and a new components mapping from ``dict(components, **{name: ...})`` --
+    the same pattern :func:`~jem.base.coupler.with_nested_carry` uses for a
+    nested coupler. ``carry`` may be a whole
+    :class:`~jem.base.component.CoupledCarry` or the bare ``dict[str, Carry]``
+    mapping an exchanger is handed, and the return is the same kind: a
+    ``CoupledCarry`` is rebuilt with ``dataclasses.replace(carry,
+    components=...)`` so that a field added to it later (there is only
+    ``components`` and ``step`` today) is carried through unchanged, and a
+    bare mapping is returned as a new mapping.
+
+    Parameters
+    ----------
+    carry : jem.base.component.CoupledCarry or dict[str, Carry]
+        The coupled carry, or a mapping of component carries, to build the
+        replacement from.
+    path : str
+        ``"component.section.field"``, with ``section`` one of
+        :data:`SECTIONS`.
+    value : Any
+        The new value for the field. Its pytree structure, and every leaf's
+        shape and dtype, must match the field it replaces exactly --
+        :func:`replace_field` does not broadcast a scalar or cast a dtype, it
+        rejects them (see Raises). This is deliberate: a coupled carry that
+        merely *compiles* after this call is not enough, since a leaf shape
+        or dtype that quietly changed would either broadcast wrongly inside a
+        component's step or -- if it also happened to change the field's
+        pytree structure, as replacing a boundary-condition field built from
+        a file (:class:`jcm.forcing.TimeSeries`, several leaves) with a plain
+        array (one leaf) does -- fail one coupled step later with a bare
+        ``lax.scan`` structure-mismatch error naming neither this field nor
+        this call.
+
+    Returns
+    -------
+    jem.base.component.CoupledCarry or dict[str, Carry]
+        The same kind of object as ``carry``, with one field replaced.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` is malformed, names a section or field the addressed
+        carry does not have, or ``value`` does not match the field it would
+        replace: a different pytree structure, or -- structure equal -- a
+        different shape or dtype on any leaf. The message names the path and
+        both structures/shapes/dtypes, and suggests
+        ``jnp.full_like(read_field(carry, path), value)`` for a scalar or a
+        differently-shaped array, since that is what actually broadcasts.
+    KeyError
+        If ``path`` names a component the carry does not have.
+    TypeError
+        If ``carry`` is not a ``CoupledCarry`` or a mapping, or if the named
+        component's carry is not a mapping of sections.
+
+    See Also
+    --------
+    jem.base.coupler.with_nested_carry :
+        Replace a component's carry inside a *nested* coupled model -- one
+        registered as a component of another :class:`~jem.base.coupler.Coupler`
+        -- whose own carry is a whole ``CoupledCarry`` rather than the mapping
+        of sections this function addresses.
+
+    """
+    component, section, field = _split_field_path(path)
+    components = _carry_components(carry, path)
+    resolved = _resolve_section(
+        components, component, section, repr(path),
+        not_a_mapping_hint=(
+            "This looks like a nested coupled model: replace its component's "
+            "carry with jem.with_nested_carry instead."
+        ),
+    )
+    _require_field(resolved, field, "", path)
+    _check_replacement(path, getattr(resolved, field), value)
+    new_section = resolved.replace(**{field: value})
+    new_component_carry = dict(components[component], **{section: new_section})
+    new_components = dict(components, **{component: new_component_carry})
+    if isinstance(carry, CoupledCarry):
+        return dataclasses.replace(carry, components=new_components)
+    return new_components
+
+
+def _check_replacement(path: str, current: Any, value: Any) -> None:
+    """Raise, naming ``path``, if ``value`` cannot cleanly replace ``current``.
+
+    :func:`replace_field` is the one core addition every notebook and driver
+    is meant to use instead of nested-container surgery by hand, and the
+    surgery it replaces was exactly what let a shape, dtype or (as in a field
+    built from a :class:`jcm.forcing.TimeSeries`, several leaves) a whole
+    pytree structure drift silently between what a carry held and what
+    replaced it -- a mismatch ``lax.scan`` only catches one coupled step
+    later, with a message naming neither the field nor this call. Checking it
+    here, against the very value :func:`read_field` would return for the same
+    path, is cheap (:func:`jax.tree_util.tree_structure`, ``jnp.shape`` and
+    ``jnp.result_type`` are all static/abstract -- no value is read, so this
+    is safe to call while tracing) and turns that failure into one that names
+    the path at the point the mistake was made.
+
+    No implicit broadcasting: a Python scalar or a differently shaped array
+    is rejected exactly like any other mismatch, even where NumPy-style
+    broadcasting would have "worked" -- silently changing the field's shape
+    is the failure mode this function exists to catch, not a convenience to
+    preserve. Build a broadcast explicitly with
+    ``jnp.full_like(read_field(carry, path), value)`` if that is genuinely
+    what is wanted.
+    """
+    current_structure: Any = jax.tree_util.tree_structure(current)
+    value_structure: Any = jax.tree_util.tree_structure(value)
+    if current_structure != value_structure:
+        raise ValueError(
+            f"{path!r}: the field's pytree structure is {current_structure}, "
+            f"but the replacement's is {value_structure}. replace_field does "
+            "not restructure a field -- build a replacement with the same "
+            "structure, e.g. jnp.full_like(read_field(carry, "
+            f"{path!r}), <value>) for a plain array field."
+        )
+    mismatches = [
+        (jnp.shape(current_leaf), jnp.result_type(current_leaf),
+         jnp.shape(value_leaf), jnp.result_type(value_leaf))
+        for current_leaf, value_leaf in zip(
+            jax.tree_util.tree_leaves(current), jax.tree_util.tree_leaves(value)
+        )
+        if (
+            jnp.shape(current_leaf) != jnp.shape(value_leaf)
+            or jnp.result_type(current_leaf) != jnp.result_type(value_leaf)
+        )
+    ]
+    if mismatches:
+        described = "; ".join(
+            f"{current_shape}/{current_dtype} -> {value_shape}/{value_dtype}"
+            for current_shape, current_dtype, value_shape, value_dtype in mismatches
+        )
+        raise ValueError(
+            f"{path!r}: the replacement's shape/dtype does not match the "
+            f"field's ({described}). replace_field does not broadcast or "
+            "cast -- build a same-shaped, same-dtype replacement, e.g. "
+            f"jnp.full_like(read_field(carry, {path!r}), <value>)."
+        )

@@ -46,9 +46,13 @@ four things JAX-ESM is written against:
   ``Model.date_from_sim_time`` (the old name kept only as a delegating
   alias). ``JCMComponent`` is built on all three, so it reaches for no private
   jax-gcm attribute at all; and because the old private date name only
-  delegates, an instance-level override of it -- the season freeze in
-  ``examples/02_experimental/03_jcm_veros_earth`` -- has to move to the public
-  name or it silently stops taking effect.
+  delegates, an instance-level override of ``date_from_sim_time`` has to
+  target the public name or it silently stops taking effect --
+  ``JCMComponent.step`` calls ``Model.run_from_state_with_carry`` every
+  coupled step (:mod:`jem.components.jcm.component`), and that call resolves
+  the public name internally, not the alias. JEM ships no such override
+  today; a perpetual-season (frozen seasonal cycle) hook, which would be
+  exactly this pattern, is tracked as jax-esm#120.
 
 jax-gcm reports ``3.0.0rc1`` here -- its first 3.0 release candidate -- but the
 tag is not cut, so a commit sha is still what is pinned. The ``jcm>=3.0.0rc1``
@@ -225,12 +229,17 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     IntegrationPoint(
         "jcm.model.Model", "date_from_sim_time", "public",
         "jax-gcm's own elapsed-seconds -> DateData conversion, and the method"
-        " jcm.model.Model calls internally for date-aware forcing. The"
-        " season-freeze helper in"
-        " examples/02_experimental/03_jcm_veros_earth/model_setup.py overrides"
-        " it on the model instance, so a rename turns that override into a"
-        " silent no-op rather than an error (which is exactly what the rename"
-        " from _date_from_sim_time in jax-gcm#824 would have done).",
+        " jcm.model.Model calls internally for date-aware forcing on every"
+        " coupled step: JCMComponent.step (jem/components/jcm/component.py)"
+        " calls run_from_state_with_carry, which resolves this name"
+        " internally. An instance-level override of it -- the shape a"
+        " perpetual-season (frozen seasonal cycle) hook would take, tracked"
+        " as jax-esm#120 since JEM ships none today -- has to target this"
+        " public name: jax-gcm's own internal calls resolve it directly, not"
+        " the _date_from_sim_time alias jax-gcm#824 left behind, so patching"
+        " the alias would be a silent no-op from the start, and a future"
+        " rename of this public name would turn a correctly-targeted"
+        " override into the same silent no-op.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "run_from_state_with_carry", "public",
@@ -289,6 +298,33 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "Type of the `forcing` entry of JCMComponent's carry, which"
         " exchangers overwrite (the SST an ocean component computes) every"
         " coupling step.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing", "TimeSeries", "public",
+        "The time-varying forcing leaf a from-file boundary condition is"
+        " built as. JAX-ESM never constructs one; it is watched because"
+        " whether a ForcingData field IS one decides the pytree structure of"
+        " the atmosphere's carry, which is what JCMComponent.initialize()"
+        " has to settle before a coupled run can scan.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "select", "public",
+        "Collapse every TimeSeries leaf to one date's slice."
+        " JCMComponent.initialize() takes the fields the coupling supplies"
+        " from the start-date slice, so they are the plain arrays an"
+        " exchanger writes rather than time series."
+        " Signature: select(date: DateData, calendar=...) -> ForcingData.",
+    ),
+    IntegrationPoint(
+        "jcm.date", "DateData", "public",
+        "The per-step date object ForcingData.select takes; JCMComponent"
+        " builds one for the run's start date with DateData.set_date.",
+    ),
+    IntegrationPoint(
+        "jcm.date.DateData", "set_date", "public",
+        "Build a DateData at a given jax_datetime.Datetime."
+        " Signature: set_date(model_time, model_step=None, dt_seconds=None,"
+        " calendar=...) -> DateData.",
     ),
     IntegrationPoint(
         "jcm.forcing", "default_forcing", "public",

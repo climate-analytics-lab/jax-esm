@@ -22,9 +22,14 @@
 #    tdland = 1 day rather than SPEEDY's 40: the land temperature anomaly runs
 #    unrealistically hot and cold at this resolution (jax-esm#1), and the
 #    strong relaxation is the stopgap the notebook validated.
-#  - seaice=slab: the relaxed ocean still reports freeze/melt energy, and the
-#    climatological sea-ice cover the atmosphere sees comes from this
-#    component, not from the forcing file.
+#  - seaice=slab on the same file's `icec`: the relaxed ocean still reports
+#    freeze/melt energy, and the sea-ice cover the atmosphere sees comes from
+#    this component, not from the forcing file -- the exchange overwrites
+#    `atm.forcing.sice_am` with the slab's `ice_fraction` before the
+#    atmosphere's first step, and a `derived` field is only rewritten at the
+#    end of a step, so whatever `initialize()` publishes is what the
+#    atmosphere runs on for the first two coupling steps. Starting the slab
+#    from the observed concentration is what stops that being ice-free poles.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8
@@ -49,3 +54,8 @@ land:
   land_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
   params:
     tdland: 86400.0             # 1 day, in seconds
+
+seaice:
+  # The same file's `icec`, for the initial ice cover only; this component has
+  # no relaxation and never reads it again.
+  ice_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}

@@ -484,8 +484,71 @@ class VerosComponent:
         if self._veros_time_zero is None:
             self._veros_time_zero = float(self.model.state.variables.time)
 
+    def _derived_fields(self, state: Any) -> "VerosDerived":
+        """Extract the fields ``VerosDerived`` publishes, from any state.
+
+        This is the surface-extraction convention -- the interior slice,
+        the ``tau`` time index, the Kelvin offset and the land-column
+        substitution -- defined exactly once so :meth:`step` (after
+        integrating) and :meth:`initialize` (before any step) cannot drift
+        apart on it. ``state.variables.tau`` is well-defined even before
+        the model has taken a single step (Veros initializes it to ``1``
+        and a setup's ``setup()`` fills all three time levels of
+        ``temp``/``u``/``v`` with the same initial condition), so calling
+        this on the freshly built ``model.state`` reads the setup's actual
+        initial surface fields rather than a placeholder.
+
+        Parameters
+        ----------
+        state : veros.state.VerosState
+            Either the setup's freshly initialized state, or the state
+            :meth:`step` has just advanced.
+
+        Returns
+        -------
+        VerosDerived
+            The sea surface temperature, u and v this state implies.
+
+        """
+        interior = slice(GHOST_CELLS, -GHOST_CELLS)
+        variables = state.variables
+        tau = variables.tau
+
+        sea_surface_temperature = (
+            variables.temp[interior, interior, -1, tau] + 273.15
+        )
+        # Intended to replace a land column's fill value with a plausible
+        # constant, so downstream components never read an unphysical SST
+        # through the mask. It does not fire for either shipped setup: both
+        # build their cold start as `... * vs.maskT`, so a land column holds
+        # 0 degC and reaches `273.15` here rather than the large negative
+        # sentinel this threshold assumes, and land is published as 273.15 K.
+        # Left as-is deliberately -- what a land column should publish is a
+        # contract decision for the exchange, not a change to make in passing;
+        # see jax-esm#127. Whatever is decided, `step` and `initialize` share
+        # this helper, so they cannot disagree about it.
+        sea_surface_temperature = jnp.where(
+            sea_surface_temperature < 100, 288.15, sea_surface_temperature)
+        zonal_velocity = variables.u[interior, interior, :, tau]
+        sea_surface_u = zonal_velocity[:, :, -1]
+        sea_surface_v = variables.v[interior, interior, -1, tau]
+
+        return VerosDerived(  # type: ignore[call-arg]
+            sea_surface_temperature, sea_surface_u, sea_surface_v,
+        )
+
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
+
+        ``derived`` is seeded from the Veros setup's own initial condition
+        via :meth:`_derived_fields`, not from ``VerosDerived.zeros``'
+        placeholder. Every shipped coupling workflow runs the exchangers
+        before any component has stepped, so whatever ``derived`` holds
+        here is exactly what the atmosphere integrates over for the whole
+        first coupling interval; publishing ``VerosDerived.zeros``'s
+        uniform 273.15 K here would mean that interval runs over a
+        fictitious freezing-point ocean instead of the setup's actual
+        (e.g. ~288 K) surface temperature.
 
         Returns
         -------
@@ -496,7 +559,7 @@ class VerosComponent:
         """
         return {
             "state": self.model.state,
-            "derived": VerosDerived.zeros(self.horizontal_shape),
+            "derived": self._derived_fields(self.model.state),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
         }
 
@@ -614,18 +677,12 @@ class VerosComponent:
         variables = state.variables
         tau = variables.tau
 
-        sea_surface_temperature = (
-            variables.temp[interior, interior, -1, tau] + 273.15
-        )
-        # Land columns carry a fill value rather than a temperature; replace
-        # them with a plausible constant so downstream components never see
-        # an unphysical SST through the mask.
-        sea_surface_temperature = jnp.where(
-            sea_surface_temperature < 100, 288.15, sea_surface_temperature)
+        derived = self._derived_fields(state)
+        sea_surface_temperature = derived.sea_surface_temperature
+        sea_surface_u = derived.sea_surface_u
+        sea_surface_v = derived.sea_surface_v
         sea_surface_salinity = variables.salt[interior, interior, -1, tau]
         zonal_velocity = variables.u[interior, interior, :, tau]
-        sea_surface_u = zonal_velocity[:, :, -1]
-        sea_surface_v = variables.v[interior, interior, -1, tau]
 
         # The barotropic streamfunction, from whichever of the two this run
         # actually has: Veros only carries a real one when it solves the
@@ -680,11 +737,7 @@ class VerosComponent:
         return (
             {
                 "state": state,
-                # ``tree_math.struct`` builds the dataclass at runtime, so
-                # mypy cannot see the generated __init__ signature.
-                "derived": VerosDerived(  # type: ignore[call-arg]
-                    sea_surface_temperature, sea_surface_u, sea_surface_v,
-                ),
+                "derived": derived,
                 "forcing": forcing,
             },
             diagnostics,

@@ -44,18 +44,37 @@ myst_heading_anchors = 3
 
 # Never execute notebooks as part of the docs build. The example notebooks are
 # checked in with their outputs cleared, so 'auto' would execute every one of
-# them on every docs build (~16 minutes) -- and the docs environment does not
-# install the Veros fork the experimental examples need, so those would fail
-# outright. The examples CI job is what executes the notebooks and proves they
-# run; the docs show their code only. How (and whether) to publish executed
-# outputs is a Phase 3 decision.
+# them on every docs build, adding roughly 15 minutes. Notebooks stay
+# unexecuted in the docs build: the examples CI job (tests/examples) is what
+# proves they run; the docs build only renders their checked-in outputs.
 nbsphinx_execute = 'never'
 
 templates_path = ['_templates']
-exclude_patterns = []
+# `docs/Makefile`'s `copy_examples` rsyncs `examples/` into
+# `docs/source/examples/`, and MyST parses every `.md` under there; a
+# `README.md` anywhere under `examples/` (the top-level index and one per
+# example directory) is a GitHub-facing index (rendered on github.com, never
+# linked from a toctree), not a docs page -- the actual Sphinx pages for the
+# examples are `examples.rst`/`experimental.rst` -- so without this it is
+# orphaned and warns "document isn't included in any toctree". Both patterns
+# are needed: Sphinx's `**` glob requires at least one directory between
+# `examples/` and the filename, so it alone misses the top-level
+# `examples/README.md`.
+exclude_patterns = ['examples/README.md', 'examples/**/README.md']
 
 autosummary_generate = True
 autosummary_generate_overwrite = True  # Regenerate on each buil
+
+# Read the Docs installs docs/requirements.txt, which carries no Veros fork
+# (there is no released PyPI veros this project's `jem.components.veros`
+# subpackage could depend on instead); without a stub here, autosummary's
+# import of `jem.components.veros.setups.double_drake`/`.earth` and
+# `jem.components.veros_component` -- all of which import `veros` at module
+# scope to subclass its `VerosSetup` -- fails on RTD and those pages render
+# empty. The GitHub `docs` CI job checks out the jittable fork and puts it on
+# `PYTHONPATH` before building, so the real `veros` shadows this mock there
+# and the mock has no effect.
+autodoc_mock_imports = ['veros']
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
