@@ -2119,9 +2119,10 @@ def test_a_climatology_bins_every_record_across_several_years():
     twice, not just once. The span is kept within 2001-2003 so the
     comparison isn't crossed by a real Gregorian leap day: the written
     labels are proleptic Gregorian even under the `365_day` model calendar
-    (see the module's Output Conventions), so a span that crossed one would
-    disagree with this test's own leap-year-blind `365_day` bin counts for a
-    reason unrelated to the wrap being tested here.
+    (see `monthly_mean`'s own **Leap days on the fixed calendar** docstring
+    paragraph), so a span that crossed one would disagree with this test's
+    own leap-year-blind `365_day` bin counts for a reason unrelated to the
+    wrap being tested here.
     """
     grid = make_grid()
     coupler = Coupler(
