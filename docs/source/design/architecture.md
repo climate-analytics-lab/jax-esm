@@ -54,10 +54,19 @@ keep but expensive to rediagnose:
   them from the incoming dycore state: dropping any of the three between
   coupling steps would reset physics memory or lose the exact clock, both
   silent and systematic. `"physics"` contains integer and boolean leaves, so
-  it must never be cast wholesale to a float dtype; recomputing `"time"` /
-  `"step"` from the coupler's own step counter instead of threading them would
-  eventually overflow a whole-seconds product that JCM's own incremental
-  clock never forms (see `jem.components.jcm.component`'s module docstring).
+  it must never be cast wholesale to a float dtype; `"time"` / `"step"` are
+  threaded rather than recomputed from the coupler's own step counter each
+  call because JCM's `RunState` is now the **authoritative** clock (jax-gcm
+  v3, PR 878) and jax-gcm's own migration guide says to keep threading all of
+  it — not because recomputing it would overflow (an int32-safe
+  reduce-before-multiply decomposition, `jem.base.calendar.gregorian_instant`,
+  computes exactly this instant from the coupler's own step count for
+  `JCMComponent._report_authoritative_clock_drift`'s own drift check, so
+  recomputing was never the problem) — but because threading is what
+  guarantees JCM's clock and the coupler's can never disagree, which
+  recomputing one from scratch cannot once a checkpoint or a
+  differently-configured coupler is involved (see
+  `jem.components.jcm.component`'s module docstring).
 - `JCMComponent`'s `carry["derived"]` is a `JCMDerived` struct holding the
   surface exchange (`total_heat_flux`, `total_freshwater_flux`, `evaporation`,
   `precipitation`, `u0`, `v0`) plus `physics`, JCM's own per-step diagnostics
@@ -1731,10 +1740,19 @@ its own timestep and returns exactly one saved record per coupling step, along
 with the `RunState` to carry into the next call. `step` then reads the surface
 exchange out of the returned physics diagnostics. Threading `"time"`/`"step"`
 rather than recomputing them from the coupler's own step counter each call is
-deliberate: the coupler's step times however many JCM timesteps make one
-coupling step would eventually overflow a whole-seconds product that JCM's own
-incremental clock (`time = time + dt`, every internal timestep) never forms at
-all — see `jem.components.jcm.component`'s module docstring.
+deliberate: JCM's `RunState` is the authoritative clock since jax-gcm v3 (PR
+878), and jax-gcm's own migration guide (`docs/source/v2_to_v3.rst`, "One real
+datetime clock") is explicit that a caller should keep threading it rather
+than deriving it elsewhere — not because recomputing it would overflow (an
+earlier draft of this note said so; the CHANGELOG retracts it, since
+`jem.base.calendar.gregorian_instant`'s own int32-safe reduce-before-multiply
+decomposition computes exactly this instant from the coupler's own step count
+for `JCMComponent._report_authoritative_clock_drift`'s drift check below, so
+recomputing was never the obstacle) — but because threading is what
+guarantees JCM's clock and the coupler's can never disagree about what instant
+a step is at, which recomputing one from the coupler's own step count cannot
+once a checkpoint or a differently-configured coupler is involved — see
+`jem.components.jcm.component`'s module docstring.
 
 That read is isolated in `jem/components/jcm/exchange_fields.py`, which since
 jax-gcm#754 (PR 877) is a single reader,

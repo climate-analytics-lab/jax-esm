@@ -15,10 +15,20 @@ requires both explicitly rather than inferring them from the incoming dycore
 state. So they live in the component carry under ``"time"``/``"step"``,
 exactly like ``"physics"`` below, and are passed straight back in as
 ``initial_time``/``initial_step``. They must be threaded rather than
-recomputed from the coupler's own step counter each call: the coupler's step
-times however many JCM timesteps make one coupling step would eventually
-overflow a whole-seconds product that JCM's own incremental clock never
-forms in the first place (see :meth:`JCMComponent.initialize`).
+recomputed from the coupler's own step counter each call: JCM's own
+``RunState`` is now the **authoritative** clock (jax-gcm v3, PR 878), and
+jax-gcm's own migration guide (``docs/source/v2_to_v3.rst``, "One real
+datetime clock") is explicit that a caller should continue threading all of
+``RunState`` rather than deriving ``time``/``step`` from a step counter kept
+elsewhere -- not because recomputing it would overflow (an int32-safe
+reduce-before-multiply decomposition, :func:`jem.base.calendar
+.gregorian_instant`, computes exactly this instant from the coupler's own
+step counter for :meth:`_report_authoritative_clock_drift`'s own drift check
+below, so recomputing it is not the problem). Threading it is simply what
+keeps two clocks -- JCM's and the coupler's -- from ever being able to
+disagree about what instant a step is at, which recomputing one from scratch
+every call cannot guarantee once a checkpoint or a differently-configured
+coupler enters the picture (see :meth:`JCMComponent.initialize`).
 
 **The physics carry is threaded.** JCM's operator-split integration keeps
 cross-step physics state — sub-cycled radiation, prior-step TKE, the
@@ -605,11 +615,19 @@ class JCMComponent:
         :meth:`step` threads them the same way it already threads
         ``"physics"``: read from ``carry``, passed as ``initial_time`` /
         ``initial_step``, and replaced with the exact ``RunState`` the call
-        returns. This is what keeps the clock exact for a run of any length
-        -- the coupler's own step counter multiplied by however many JCM
-        timesteps make one coupling step would eventually overflow the whole
-        -seconds product long before JCM's own incremental clock does, since
-        the latter never forms that product at all.
+        returns. JCM's ``RunState`` is the **authoritative** clock now (jax-gcm
+        v3, PR 878), and jax-gcm's own migration guide
+        (``docs/source/v2_to_v3.rst``, "One real datetime clock") says
+        explicitly to keep threading it rather than deriving it from a step
+        counter kept elsewhere -- threading it is what guarantees JCM's clock
+        and the coupler's can never disagree about what instant a step is at,
+        which recomputing one from the coupler's own step count every call
+        would not, once a checkpoint or a differently-configured coupler is
+        involved (:meth:`_report_authoritative_clock_drift` is the check that
+        catches exactly that disagreement, and does so with the same
+        int32-safe arithmetic -- :func:`jem.base.calendar.gregorian_instant`
+        -- that recomputing the clock itself would use, so overflow was never
+        the reason to thread it).
 
         Returns
         -------

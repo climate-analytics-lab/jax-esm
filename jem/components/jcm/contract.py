@@ -60,8 +60,10 @@ against all of it:
   :class:`~jem.components.jcm.component.JCMComponent` now threads
   ``RunState.time``/``.step`` through its own carry under ``"time"``/
   ``"step"``, exactly as it already threaded ``"physics"`` -- see that
-  module's docstring for why recomputing them from the coupler's own step
-  counter, instead, would eventually overflow;
+  module's docstring for why: ``RunState`` is now the authoritative clock
+  and jax-gcm's own migration guide says to keep threading it, not because
+  recomputing it from the coupler's own step counter would overflow (a
+  retracted earlier justification -- see the CHANGELOG);
 * :func:`jcm.predictions.output_time_labels` is the published, exact
   (``datetime64[ms]``) conversion from a ``jax_datetime.Datetime`` to an
   output label. ``jem.base.component.TimeAxis.datetimes`` -- which labels
