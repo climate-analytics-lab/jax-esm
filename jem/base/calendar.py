@@ -419,9 +419,14 @@ def max_safe_record(
     Raises
     ------
     ValueError
-        If ``record_seconds`` is not positive, or if ``start_days`` alone
-        already exceeds what an ``int32`` day count can hold (so there is no
-        non-negative ``record``, not even ``0``, this is safe for).
+        If ``record_seconds`` is not positive, or if ``start_days``,
+        ``offset_seconds`` and ``start_seconds`` together already exceed
+        what an ``int32`` day count can hold before a single record is added
+        (so there is no non-negative ``record``, not even ``0``, this is
+        safe for) -- whether that is because ``start_days`` alone is already
+        past int32's range, or because it is in range but ``offset_seconds``
+        / ``start_seconds`` alone are large enough to push even record 0's
+        day count past it.
 
     """
     record_seconds = int(record_seconds)
@@ -434,13 +439,27 @@ def max_safe_record(
     start_seconds = int(start_seconds)
     start_days = int(start_days)
     day_budget = _INT32_MAX - start_days
-    if day_budget < 0:
-        raise ValueError(
-            f"start_days={start_days!r} alone already exceeds what an int32 "
-            "day count can hold; there is no safe record, not even 0."
-        )
     seconds_budget = (
         SECONDS_PER_DAY * day_budget + (SECONDS_PER_DAY - 1)
         - offset_seconds - start_seconds
     )
-    return max(0, min(_INT32_MAX, seconds_budget // record_seconds))
+    # One check covers both ways this can happen: `start_days` alone past
+    # int32 (`day_budget < 0`, which drives `seconds_budget` very negative on
+    # its own), or `start_days` in range but `offset_seconds`/`start_seconds`
+    # alone big enough to push even record 0's day count past int32 (2026-09
+    # review, round 3, finding 3 -- the previous version only checked the
+    # first case, and `max(0, ...)` clamped the second's negative result up
+    # to a lying `0`, claiming record 0 was safe when it was not:
+    # `record_seconds=1, offset_seconds=400*86400, start_days=2**31-6` lands
+    # record 0 alone 400 days past int32's own range). Either way, a negative
+    # `seconds_budget` means there is no non-negative `record` -- not even
+    # 0 -- this is safe for, which is exactly what the docstring promises to
+    # raise on rather than silently answer.
+    if seconds_budget < 0:
+        raise ValueError(
+            f"start_days={start_days!r}, offset_seconds={offset_seconds!r} "
+            f"and start_seconds={start_seconds!r} together already exceed "
+            "what an int32 day count can hold before a single record is "
+            "added; there is no safe record, not even 0."
+        )
+    return min(_INT32_MAX, seconds_budget // record_seconds)

@@ -316,6 +316,29 @@ def test_max_safe_record_reserves_start_days_against_the_same_day_budget():
     assert int(wrapped_days) < 0  # silently wrapped, not the true (huge) day count
 
 
+def test_max_safe_record_raises_rather_than_silently_return_zero_when_even_record_0_is_unsafe():
+    """2026-09 review, round 3, finding 3: a promised raise, not a lying ``0``.
+
+    ``max_safe_record``'s docstring promises a raise when there is "no safe
+    record, not even 0" -- but it only actually checked ``start_days`` alone
+    for that; a large ``offset_seconds`` (or ``start_seconds``) can just as
+    well push the day count for record 0 itself past int32, and the old code
+    clamped the resulting negative bound up to ``0`` with ``max(0, ...)``
+    instead, silently claiming record 0 was safe. Reproduction from the
+    review: ``record_seconds=1``, ``offset_seconds=400*86400`` (400 days),
+    ``start_days=2**31-6`` -- record 0 alone already lands 400 days past
+    int32's own range.
+    """
+    with pytest.raises(ValueError, match="no safe record, not even 0"):
+        max_safe_record(1, offset_seconds=400 * 86400, start_days=2**31 - 6)
+
+    # Confirm the reproduction's own premise: record 0 really is unsafe here,
+    # so a raise is the correct answer, not an artifact of the check being
+    # too strict.
+    days, _ = gregorian_instant(jnp.int32(0), 1, 2**31 - 6, 0, offset_seconds=400 * 86400)
+    assert int(days) < 0  # wrapped: the true day count is past int32's range
+
+
 def test_gregorian_instant_midpoint_never_crosses_a_month_boundary():
     """Flooring an odd record's midpoint to a whole second must stay in the record.
 
