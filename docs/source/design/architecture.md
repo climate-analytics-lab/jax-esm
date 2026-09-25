@@ -1593,20 +1593,20 @@ which is what makes it possible to decide whether an entry may be deleted.
 `tests/unit/test_jcm_contract.py` walks that list against the installed `jcm`,
 so a jax-gcm rename fails as "jax-gcm renamed or removed X, which JAX-ESM used
 for Y, at revision Z" — at the cheapest possible moment, rather than mid-run.
-The pin was a `dev` sha because no tagged jax-gcm release carries the changes
-JAX-ESM is written against — #750's one run schema and `configuration` group,
+The pin is a `dev` sha because no tagged jax-gcm release carries the changes
+JAX-ESM is written against. It is the `dev` commit that merged jax-gcm PR 877
+(`46eb3fc1`) — the merge commit itself rather than whatever `dev` was at bump
+time, since later unrelated `dev` commits have not been checked against this
+code. That revision carries #750's one run schema and `configuration` group,
 #763's input-resolution engine, #819's removal of jax-gcm's own logging
-configuration and #824's public resumable state and date conversion — and it
-is currently, as a deliberate stopgap, jax-gcm **PR 877's head commit**
-instead: PR 877 closes jax-gcm#754 (the package-independent `SurfaceExchange`
-struct — see "The JCM adapter" below) and adds #884's declared forcing-
-alignment rule (`jcm.forcing.resolve_align`: `auto` no longer infers
+configuration and #824's public resumable state and date conversion, plus PR
+877's own two changes: jax-gcm#754, the package-independent `SurfaceExchange`
+struct (see "The JCM adapter" below), and #884's declared forcing-alignment
+rule. Under that rule, `jcm.forcing.resolve_align`'s `auto` no longer infers
 climatology-vs-transient from a file's time axis, and raises for any file it
 cannot resolve from jax-gcm's own data-mirror manifest — see the
 `forcing.align` comments in `jem/config/configuration/{earth-slab,
-veros-double-drake,veros-earth}.yaml`), neither of which is on `dev` yet. `contract.py`'s docstring names the exact constraint this
-creates — **this branch cannot merge with the pin in that state** — and the
-re-pin procedure once PR 877 lands. `pyproject.toml`'s `jcm>=3.0.0rc1` is the
+veros-double-drake,veros-earth}.yaml`. `pyproject.toml`'s `jcm>=3.0.0rc1` is the
 loosest true statement of the version, since jax-gcm bumps its version string
 only at release. Every required CI job checks that revision out through a
 workflow-level `JCM_REV`, which the test asserts equals `JCM_SUPPORTED_REV`,
@@ -1689,7 +1689,9 @@ mechanical jax-gcm update: jax-gcm's contract publishes only the *scalar*
 `jem.fluxes.VerosExchange` applies for a Veros ocean) still reads SPEEDY's
 private `_surface_flux.u0`/`.v0` directly. ECHAM has no wind vector anywhere
 in its own diagnostics either (its boundary layer scheme diagnoses only a
-speed), so this is not a regression from the #754 collapse — it predates it.
+speed), so this is not a regression from the #754 collapse — it predates it,
+and is the reason the pre-#754 `echam()` reader could never have supplied a
+wind vector either, even if it had had a heat/water struct to read.
 
 Before jax-esm#129, `from_diagnostics()` read that wind *eagerly* and raised
 `NotImplementedError` for any package other than SPEEDY, which meant no
@@ -1703,11 +1705,19 @@ nothing it runs actually needs the wind. The one thing that does,
 `VerosExchange.validate()` (called by `jem.runners._validate_exchangers`
 inside `build_coupler`, the same slot `ComposablePhysics.
 require_surface_exchange` fills for the surface struct itself) raises,
-naming jax-esm#129, if the atmosphere it is coupled to has no wind vector —
-so building an ECHAM/Veros combination fails before a run is even compiled,
-and `VerosExchange.__call__` repeats the same check for a `Coupler` built by
-hand that skips that step. No shipped JAX-ESM configuration combines ECHAM
-with a Veros ocean, so this is only reachable through a hand-built coupler.
+naming the composed atmosphere's physics package and jax-esm#132, if the
+atmosphere it is coupled to has no wind vector. This is reachable through a
+shipped command, not only a hand-built coupler — `python -m jem.main
++configuration=veros-earth physics@atmosphere.physics=echam` reaches
+`build_coupler` too, since JAX-ESM reuses jax-gcm's own `physics` group and
+jax-gcm ships `echam.yaml` — so an ECHAM/Veros combination is **refused at
+build time**, before a run is ever compiled, rather than mid-run or with a
+silently wrong stress. Choosing `VerosExchange`'s wind-stress source for a
+windless atmosphere (reusing the published `stress_u`/`stress_v`, deriving a
+direction some other way, or a different bulk law entirely) is the decision
+jax-esm#132 tracks; #129 closes only the eager-read failure above.
+`VerosExchange.__call__` repeats the same check, naming the same issue, for a
+`Coupler` built by hand that skips `_validate_exchangers`.
 
 Every JCM *attribute* the wrapper touches is public at the pinned revision,
 apart from that one underscore-prefixed diagnostics key
