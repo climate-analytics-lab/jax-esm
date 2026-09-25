@@ -235,9 +235,8 @@ a multiple of that) and a config-group selection (`load("aquaplanet-slab",
 seaice="none")`, the Python spelling of the CLI's `seaice=none`). `load`'s own
 docstring lists the small, specific things `run_chunked(exp.coupler,
 **exp.run_kwargs)` does NOT reproduce of the CLI (a fresh `output_dir` of the
-door's own rather than the CLI's Hydra-managed one, no working-directory
-change, no logger-level change) and the process-global persistence of a
-`+atmosphere.constants.*` override.
+door's own rather than the CLI's Hydra-managed one, no logger-level change)
+and the process-global persistence of a `+atmosphere.constants.*` override.
 
 A notebook that *runs* a validated configuration to demonstrate something
 else -- perturbing an initial condition, differentiating through a

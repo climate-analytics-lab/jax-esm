@@ -11,7 +11,7 @@ plain-dict ``.config`` is exposed for introspection). So
 ``jem.run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's build
 and its ``coupled_run`` settings; see :func:`load`'s docstring for the small,
 enumerated list of things around that build which it does NOT reproduce
-(``output_dir``'s exact path, the working-directory change, the logger level).
+(``output_dir``'s exact path, the logger level).
 
 This door routes through the SAME :mod:`jem.runners` builders the CLI uses
 (:func:`jem.runners.build_coupler` and :func:`jem.runners.build_run_kwargs`),
@@ -40,12 +40,11 @@ class LoadedConfiguration:
     ``jem.run_chunked(coupler, **run_kwargs)`` reproduces the CLI's build and
     integration -- with the exceptions :func:`load`'s docstring enumerates
     (``output_dir`` is a fresh directory this door manufactures, not the
-    CLI's Hydra-managed one; no working-directory change; no logger-level
-    change). ``config`` is a plain resolved dict for introspection -- no
-    ``DictConfig`` leaks out, but see :func:`load` on why a
-    ``+atmosphere.constants.*`` override will not show up in a *later*
-    call's ``config`` even though it is still silently affecting that later
-    call's build.
+    CLI's Hydra-managed one; no logger-level change). ``config`` is a plain
+    resolved dict for introspection -- no ``DictConfig`` leaks out, but see
+    :func:`load` on why a ``+atmosphere.constants.*`` override will not show
+    up in a *later* call's ``config`` even though it is still silently
+    affecting that later call's build.
     """
 
     name: str
@@ -153,17 +152,21 @@ def _compose(name: str, overrides: list[str]):
 
     This is NOT "the same call ``jem.main`` makes": ``jem.main`` decorates its
     entry point with ``@hydra.main(version_base=None, config_path="config")``,
-    which runs Hydra's full job lifecycle around the composition --
-    output-directory creation, ``chdir``, job logging setup (see ``load``'s
-    docstring for exactly which of those this door does not reproduce).
+    which runs Hydra's full JOB lifecycle around the composition -- creating
+    Hydra's own run directory and writing its own log file into it, on top of
+    whatever ``coupled_run.output_dir``/``run_chunked`` do -- while
     ``initialize_config_module`` + ``compose`` is Hydra's separate, lighter
     *compose API*, meant for exactly this (calling from a notebook/script/test
-    without a job run), and produces the identical resolved ``DictConfig`` with
-    none of that job machinery attached. The ``version_base`` also differs
-    (``"1.3"`` here vs. ``None`` on ``jem.main``'s decorator) -- checked against
-    installed Hydra 1.3.6, that only changes the parsing of a few deprecated,
-    pre-1.1 override spellings that no jem or jax-gcm config uses, so it does
-    not affect what a real override composes to here.
+    without a job run), and produces the identical resolved ``DictConfig``
+    with none of that job machinery (see ``load``'s docstring for the two
+    things that difference actually amounts to for a caller). The
+    ``version_base`` given here (``"1.3"``) and ``jem.main``'s (``None``,
+    which ``hydra.main`` resolves to the installed version -- also 1.3.6
+    here) are IDENTICAL on this installed Hydra, so nothing about how an
+    override composes differs between the two calls today; where a base
+    below 1.2 would matter is deprecated *defaults-list* spellings
+    (``optional: true``, ``_name_``, a bare ``hydra/`` default with no
+    ``override`` keyword) that no jem or jax-gcm config uses.
 
     ``initialize_config_module`` clears the global Hydra on exit, and we also
     clear a pre-existing one up front, so ``load`` is safe to call repeatedly.
@@ -186,6 +189,20 @@ def _compose(name: str, overrides: list[str]):
         Singleton.set_state(saved)
 
 
+def _contains_none(value: Any) -> bool:
+    """Return whether ``value`` is ``None``, or a list containing it anywhere.
+
+    Recurses into nested lists (Hydra list values may nest), since the same
+    silent-``None``-mis-compose problem :func:`_override_str` guards against
+    applies at any depth, not only the top one.
+    """
+    if value is None:
+        return True
+    if isinstance(value, list):
+        return any(_contains_none(item) for item in value)
+    return False
+
+
 def _override_str(key: str, value: Any) -> str:
     """One Hydra override token from a ``**overrides`` item.
 
@@ -205,16 +222,29 @@ def _override_str(key: str, value: Any) -> str:
     for that.
 
     Non-string scalars pass through unquoted so ``coupled_run.total_time=10``
-    stays the number ``10``. A ``dict`` or ``tuple`` is refused outright with a
-    ``TypeError`` naming the key: unlike a list (which Hydra's grammar can
-    represent as an override value token), there is no single override token
-    that reproduces an arbitrary nested mapping or a tuple, so silently
-    stringifying one here would emit a token that composes to something else
-    entirely (or that Hydra's parser rejects) rather than failing where the
-    caller can see why. Give one dotted override per field instead, e.g.
-    ``load(name, **{"ocean.params.forcing_method": "relaxation",
-    "ocean.params.relaxation_time": 1e6})`` rather than
-    ``load(name, **{"ocean.params": {"forcing_method": ...}})``.
+    stays the number ``10``. A ``dict`` is refused outright with a
+    ``TypeError`` naming the key: there is no single override token that
+    reproduces an arbitrary nested mapping, so silently stringifying one here
+    would emit a token that composes to something else entirely (or that
+    Hydra's parser rejects) rather than failing where the caller can see why.
+    Give one dotted override per field instead, e.g. ``load(name,
+    **{"ocean.params.forcing_method": "relaxation",
+    "ocean.params.relaxation_time": 1e6})`` rather than ``load(name,
+    **{"ocean.params": {"forcing_method": ...}})``. A ``tuple`` is refused
+    the same way, for the same reason -- Hydra's grammar has no tuple literal
+    -- but its message suggests a plain ``list`` instead (which composes
+    fine, see below), since "one dotted override per field" is meaningless
+    for a tuple that is not naming nested config keys.
+
+    A ``list`` composes to a Hydra list value token by the same unquoted
+    ``str(value)`` path as any other non-string scalar -- correct for a list
+    of plain numbers, strings or bools, and even nested lists, but NOT for
+    one containing ``None`` anywhere (at any nesting depth): Python's ``str``
+    spells that element ``None``, which is not Hydra's ``null`` spelling, so
+    Hydra's parser reads it back as the STRING ``"None"`` rather than the
+    value ``None`` -- a silent mis-compose exactly like the dict/tuple cases
+    above, just one nesting level down where a caller is far less likely to
+    notice. Refused with a ``TypeError`` for the same reason those are.
 
     Parameters
     ----------
@@ -231,20 +261,40 @@ def _override_str(key: str, value: Any) -> str:
     Raises
     ------
     TypeError
-        If ``value`` is a ``dict`` or a ``tuple``.
+        If ``value`` is a ``dict``, a ``tuple``, or a ``list`` containing
+        ``None`` at any nesting depth.
 
     """
     from hydra.core.override_parser.types import Quote, QuotedString
 
     if value is None:
         return f"{key}=null"
-    if isinstance(value, (dict, tuple)):
+    if isinstance(value, dict):
         raise TypeError(
-            f"load() override {key!r} is a {type(value).__name__}, which has "
-            "no single Hydra override token that reproduces it faithfully; "
-            f"give one dotted override per field instead, e.g. "
+            f"load() override {key!r} is a dict, which has no single Hydra "
+            "override token that reproduces it faithfully; give one dotted "
+            f"override per field instead, e.g. "
             f"**{{{key + '.<field>'!r}: <value>, ...}} rather than "
             f"**{{{key!r}: {{'<field>': <value>, ...}}}}."
+        )
+    if isinstance(value, tuple):
+        raise TypeError(
+            f"load() override {key!r} is a tuple, which has no single Hydra "
+            "override token that reproduces it faithfully; pass a list "
+            f"instead, e.g. **{{{key!r}: [<value>, ...]}}."
+        )
+    if isinstance(value, list) and _contains_none(value):
+        raise TypeError(
+            f"load() override {key!r} is a list containing None (at some "
+            "nesting depth); Hydra's grammar spells that element `null`, not "
+            "Python's `None`, so composing this list with str() would "
+            "silently read back as the STRING 'None' rather than the value "
+            "None. There is no faithful way to pass this through "
+            "load()'s **overrides for a list with a None element; compose "
+            "it through jem.configurations._compose(name, [...]) directly "
+            "with the literal override string (e.g. "
+            f"f'{key}=[1, null, 2]'), or restructure the recipe so the "
+            "field does not need a None entry."
         )
     if isinstance(value, str):
         return f"{key}={QuotedString(text=value, quote=Quote.single).with_quotes()}"
@@ -269,8 +319,12 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     -----------------------------------------------------------------
     ``jem.run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's
     build and every ``coupled_run`` setting the recipe (plus any
-    ``**overrides``) resolved to. Three things the CLI does around that build
-    are deliberately NOT reproduced:
+    ``**overrides``) resolved to. The CLI does NOT change the process's
+    working directory (``python -m jem.main +configuration=... --cfg hydra``
+    shows ``chdir: null``, and with Hydra's resolved ``version_base`` of 1.3
+    a ``null`` ``chdir`` means no chdir at all), so that is not something to
+    enumerate here. Two things the CLI does around the build ARE deliberately
+    NOT reproduced:
 
     - **``output_dir``.** When the recipe names none (the common case --
       every shipped configuration leaves it ``null``), the CLI gets a fresh
@@ -287,14 +341,6 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
       meant to be called more than once in a process. An explicit
       ``coupled_run.output_dir`` override (or one set in the recipe itself)
       is honoured exactly, with no substitution.
-    - **The working directory.** ``python -m jem.main`` changes into its run
-      directory before building anything (``jem.main``'s
-      ``@hydra.main(version_base=None, ...)`` decorator defaults to Hydra's
-      pre-1.2 ``chdir=True`` behaviour, since ``jem/config/config.yaml`` sets
-      no explicit ``hydra.job.chdir``). ``load()`` never changes the calling
-      process's working directory -- a relative path a caller builds AFTER
-      ``load()`` returns is relative to wherever the process already was, not
-      to ``exp.run_kwargs["output_dir"]``.
     - **The ``jem`` logger's level.** ``jem.main`` sets it from
       ``cfg.coupled_run.log_level`` (``logging.getLogger("jem").setLevel(...)``,
       see its module docstring); ``load()`` touches no logger.
@@ -305,16 +351,24 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     as it reaches the CLI's -- see the paragraph below on why no separate step
     is needed for that. But :mod:`jcm.constants` is a **process-global
     singleton** (``jcm.runners.apply_constants_overrides`` calls
-    ``jcm.constants.set_constants(...)``, which mutates it in place), and
-    neither this door nor jax-gcm's own (:func:`jcm.configurations.load`)
-    resets or restores it afterwards. So:
+    ``jcm.constants.set_constants(...)``, which REBINDS the module-global
+    ``physical_constants`` name to a new ``PhysicalConstants`` built by its
+    own ``_replace`` -- it is a ``NamedTuple``, so nothing is mutated in
+    place, but the
+    process-wide effect is the same: every subsequent attribute access,
+    ``c.grav`` included, now reads the new one), and neither this door nor
+    jax-gcm's own (:func:`jcm.configurations.load`) resets or restores it
+    afterwards. So:
 
     - the override OUTLIVES the ``load()`` call that applied it, and silently
       applies to every model built in the same process afterwards -- another
       ``load()`` of a DIFFERENT recipe with no constants override of its own
-      still sees the earlier override, and its own ``.config`` will show the
-      *default* constants even though the live singleton (and so the model it
-      just built) is running with the earlier, overridden ones;
+      still sees the earlier override, and its own
+      ``.config["atmosphere"]["constants"]`` will show the empty ``{}`` a
+      configuration with no override of its own composes to (not the values
+      the live singleton actually holds) even though the live singleton (and
+      so the model that ``load()`` call just built) is running with the
+      earlier, overridden ones;
     - this is deliberate, not an oversight to fix here: restoring the
       singleton after ``load()`` returns would silently change an
       already-built, already-traced model's physics parameters out from under
@@ -342,10 +396,9 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     calling ``build_coupler(cfg)`` here, exactly as ``run()`` does, already
     reproduces those effects with no separate call needed. What ``run()``
     does that this door does NOT reproduce is enumerated above (``output_dir``,
-    the working directory, the logger level) plus logging the composed
-    config, which is a convenience with no bearing on the objects built and
-    which this door's caller can reproduce for themselves from ``exp.config``
-    if wanted.
+    the logger level) plus logging the composed config, which is a
+    convenience with no bearing on the objects built and which this door's
+    caller can reproduce for themselves from ``exp.config`` if wanted.
 
     Parameters
     ----------
@@ -363,8 +416,8 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ValueError
         If ``name`` is not one of :func:`available`.
     TypeError
-        If an override value is a ``dict`` or a ``tuple`` (see
-        :func:`_override_str`).
+        If an override value is a ``dict``, a ``tuple``, or a ``list``
+        containing ``None`` at any nesting depth (see :func:`_override_str`).
 
     """
     from omegaconf import OmegaConf
