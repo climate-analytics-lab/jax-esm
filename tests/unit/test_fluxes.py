@@ -176,12 +176,20 @@ class _OcnDerived:
     sea_surface_temperature: jnp.ndarray
 
 
-def _fake_components():
+def _fake_components(windless: bool = False):
+    """Build fake ``atm``/``ocn`` carries.
+
+    ``windless=True`` gives ``derived.u0``/``.v0`` as ``None`` -- what
+    ``jem.components.jcm.exchange_fields.from_diagnostics`` now returns for a
+    composed physics package with no near-surface wind *vector* (jax-esm#129,
+    e.g. ECHAM) -- rather than a value that only a real ``jcm`` model could
+    produce, since nothing here needs one built.
+    """
     shape = (4,)
     atm = {
         "derived": _AtmDerived(
-            u0=jnp.full(shape, 5.0),
-            v0=jnp.full(shape, -3.0),
+            u0=None if windless else jnp.full(shape, 5.0),
+            v0=None if windless else jnp.full(shape, -3.0),
             total_heat_flux=jnp.full(shape, 20.0),
             total_freshwater_flux=jnp.full(shape, 1e-6),
         ),
@@ -360,3 +368,55 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
     assert "a2o_flux=identity" in text  # no regrid was given to this instance
     assert "o2a_state=identity" in text
     assert "rotates=yes" in text
+
+
+# ---------------------------------------------------------------------------
+# jax-esm#129: no wind vector -- build-time failure, not a silent bad stress
+# ---------------------------------------------------------------------------
+#
+# `jem.components.jcm.exchange_fields.from_diagnostics` returns
+# `derived.u0`/`.v0` as `None`, not a value, for a composed atmosphere physics
+# package that publishes no near-surface wind vector (today: everything but
+# SPEEDY, e.g. ECHAM). `VerosExchange` is the one production consumer of that
+# vector (`bulk_wind_stress`), so it -- not `bulk_wind_stress` itself, which
+# has no carry to inspect -- is where the absence has to be caught, and it
+# must be caught before a coupled run starts, not by computing a stress from
+# `None` mid-step.
+
+
+def test_veros_exchange_validate_rejects_a_windless_atmosphere():
+    """Build-time failure: `validate()` names jax-esm#129 for a windless atmosphere.
+
+    This is the check `jem.runners._validate_exchangers` runs, right after
+    `Coupler.initialize()` and before a coupled run is ever compiled, for
+    every exchanger with a `validate` method -- the same slot
+    `jem.exchangers.Exchange.validate` fills for a declarative table.
+    """
+    components = _fake_components(windless=True)
+
+    with pytest.raises(ValueError, match="jax-esm#129"):
+        VerosExchange().validate(components)
+
+
+def test_veros_exchange_validate_passes_for_a_windy_atmosphere():
+    """The happy path: `validate()` is silent when the wind vector is present."""
+    VerosExchange().validate(_fake_components())
+
+
+def test_veros_exchange_validate_names_a_missing_atm_component():
+    """A coupled model with no `atm` at all is named, not a bare `KeyError`."""
+    with pytest.raises(KeyError, match="atm"):
+        VerosExchange().validate({"ocn": _fake_components()["ocn"]})
+
+
+def test_veros_exchange_call_also_rejects_a_windless_atmosphere():
+    """Defence in depth: `__call__` refuses too, not only `validate`.
+
+    A `Coupler` built by hand, bypassing `jem.runners.build_coupler` (the
+    only caller of `validate` today), must still fail on its very first step
+    rather than silently computing a stress from an absent wind.
+    """
+    components = _fake_components(windless=True)
+
+    with pytest.raises(ValueError, match="jax-esm#129"):
+        VerosExchange()(components, TIME)

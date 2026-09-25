@@ -427,7 +427,9 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " reads directly because jax-gcm's #754 surface-exchange contract"
         " publishes only the scalar wind_speed, not a vector -- see that"
         " module's docstring. Feeds jem.fluxes.bulk_wind_stress via"
-        " JCMDerived.u0.",
+        " JCMDerived.u0, which is None (a static absence, not a per-step"
+        " failure -- jax-esm#129) for any package that does not write this"
+        " key, e.g. ECHAM.",
     ),
     IntegrationPoint(
         "speedy", "_surface_flux.v0", "diagnostics",

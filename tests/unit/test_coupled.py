@@ -11,7 +11,10 @@ The atmosphere here is a real JCM model at the smallest configuration SPEEDY
 physics supports (T21 on its (64, 32) nodal grid, 5 levels -- the fewest its
 convective cloud-top search accepts), on an aquaplanet. Building it and
 compiling one coupled step is the bulk of the runtime, so the model, the
-coupler and the two-step trajectory are module-scoped and shared.
+coupler and the two-step trajectory are module-scoped and shared. A second,
+smaller section further down couples an ECHAM atmosphere the same way (the
+regression test for jax-esm#129: ECHAM publishes no near-surface wind vector,
+which must not stop a coupled step that never needs one).
 """
 
 import dataclasses
@@ -358,6 +361,150 @@ def test_continuous_equals_chunked_with_jcm(atmosphere_ocean):
     assert int(continuous.step) == 4
     assert int(chunked.step) == 4
     assert_carries_close(chunked, continuous)
+
+
+# ---------------------------------------------------------------------------
+# An ECHAM atmosphere coupled to a slab ocean (jax-esm#129)
+# ---------------------------------------------------------------------------
+#
+# ECHAM publishes no near-surface wind *vector* (only a speed) anywhere in its
+# diagnostics, so `atm.derived.u0`/`.v0` are `None` throughout this coupled
+# model (`jem.components.jcm.exchange_fields`, `JCMDerived`). Before jax-esm#129
+# that made `JCMComponent.step` raise on the very first coupled step of ANY
+# ECHAM configuration -- whatever the exchanger, including this one, which
+# never reads `u0`/`v0` at all. This section is the regression test: an ECHAM
+# atmosphere coupled to the slab ocean must complete several coupled steps,
+# with finite heat and water fluxes, exactly as the SPEEDY case above does.
+
+
+#: ECHAM's own stable-step default (``Model``'s 12-minute production step,
+#: 720 s, verified against a real build rather than assumed). The coupling
+#: timestep below must be a whole multiple of this (``JCMComponent.bind``'s
+#: own requirement) -- but a bare multiple is not enough: it must ALSO be a
+#: power-of-two fraction of a day, or the atmosphere's own time labels and
+#: the ones ``jem.base.component.TimeAxis`` computes for the ocean part
+#: company by up to 128 ns (that class's own docstring: "a 10- or 20-minute
+#: coupling step puts roughly half the labels 128 ns off", tracked upstream
+#: as jax-gcm#862) -- which breaks the ``xr.merge(..., join="exact")`` this
+#: test's own output check relies on. 21600 s (6 hours, 1/4 of a day) is the
+#: smallest such interval above the model step -- 30 atmospheric steps per
+#: coupled step, exactly divisible both ways.
+_ECHAM_MODEL_TIMESTEP_SECONDS = 720
+ECHAM_COUPLING_TIMESTEP = jdt.to_timedelta(6 * 3600, "second")
+
+
+def _build_echam_model(echam_coords) -> Model:
+    """T31L47 ECHAM on an aquaplanet -- the smallest hybrid-vertical-coordinate
+    setup jax-gcm's own test suite runs a real model on
+    (jax-gcm's ``model_test.py``, ``test_echam_hybrid_model_output_averages``:
+    "smallest hybrid setup that exercises the same code path"). ECHAM's
+    hybrid levels are a fixed table (``get_echam_levels`` only defines 47 or
+    95 levels), so unlike SPEEDY's ``layers=5`` there is no coarser built-in
+    vertical resolution to drop to; T31 is the coarsest horizontal truncation
+    used for it.
+    """
+    from jcm.physics.echam.echam_terms import echam_physics
+
+    model = Model(
+        coords=echam_coords,
+        terrain=TerrainData.aquaplanet(echam_coords),
+        physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+        start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+    actual = int(model.dt_si.to_timedelta().total_seconds())
+    assert actual == _ECHAM_MODEL_TIMESTEP_SECONDS, (
+        f"ECHAM's stable-step default changed ({actual}s, expected "
+        f"{_ECHAM_MODEL_TIMESTEP_SECONDS}s) -- re-check ECHAM_COUPLING_TIMESTEP "
+        "still divides it evenly before trusting this test's timing."
+    )
+    return model
+
+
+@pytest.fixture(scope="module")
+def echam_coords():
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.utils import get_coords
+
+    return get_coords(get_echam_levels(47), spectral_truncation=31)
+
+
+@pytest.fixture(scope="module")
+def echam_model(echam_coords) -> Model:
+    return _build_echam_model(echam_coords)
+
+
+@pytest.fixture(scope="module")
+def echam_atmosphere_ocean(echam_model) -> Coupler:
+    """Couple an ECHAM atmosphere to a slab ocean with the same minimal
+    exchange as the SPEEDY case above (heat flux down, SST up) -- it never
+    reads ``derived.u0``/``.v0``, so their absence must not stop the run.
+    """
+    grid = SlabGrid.from_coords(echam_model.coords.horizontal)
+    return Coupler(
+        {"atm": JCMComponent(echam_model), "ocn": SlabOceanModel(grid)},
+        {"exchange": atmosphere_ocean_exchange},
+        coupling_timestep=ECHAM_COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        calendar=CALENDAR,
+    )
+
+
+@pytest.mark.slow
+def test_echam_coupled_to_a_slab_ocean_completes_several_steps(echam_atmosphere_ocean):
+    """jax-esm#129: an ECHAM-composed coupled model must complete coupled steps.
+
+    Checks, on a real ECHAM model, everything the fix promises:
+
+    - the initial and the post-step carry both have ``derived.u0``/``.v0`` as
+      ``None`` (the static absence design), and the carry's overall pytree
+      structure survives the step (what ``lax.scan`` itself enforces, and
+      what the previous ``NotImplementedError`` never let this model reach);
+    - the heat flux that reaches the slab ocean's forcing, and the
+      atmosphere's own derived heat and freshwater fluxes, are finite and
+      non-trivial after several steps;
+    - the run's output still serializes and merges across components
+      (``Coupler.to_xarray``), the same round trip the SPEEDY case's
+      ``test_component_datasets_merge_on_one_time_and_grid`` checks.
+
+    The freshwater flux is checked on ``atm.derived`` rather than on the
+    ocean's own forcing: ``jem.components.slab.slab_ocean_model.SlabOceanModel``
+    has no freshwater intake at all (its ``OceanForcing`` carries only
+    ``total_heat_flux``/``q_flux`` -- it models temperature, not salinity), so
+    only the heat flux is actually exchanged here, exactly as in the SPEEDY
+    case's own ``atmosphere_ocean_exchange``. That the atmosphere's
+    freshwater flux is finite and computed is still evidence #754's water
+    flux works for ECHAM; it is jax-esm#128, not #129, that would give a slab
+    or Veros ocean somewhere to put it.
+    """
+    initial = echam_atmosphere_ocean.initialize()
+    assert initial.components["atm"]["derived"].u0 is None
+    assert initial.components["atm"]["derived"].v0 is None
+
+    n_steps = 3
+    trajectory = echam_atmosphere_ocean.generate_trajectory_function(n_steps)
+    final, diagnostics = trajectory(initial)
+
+    assert jax.eval_shape(lambda: final) == jax.eval_shape(lambda: initial)
+    assert int(final.step) == n_steps
+    assert final.components["atm"]["derived"].u0 is None
+    assert final.components["atm"]["derived"].v0 is None
+
+    ocean_heat_flux = np.asarray(final.components["ocn"]["forcing"].total_heat_flux)
+    assert np.all(np.isfinite(ocean_heat_flux))
+    assert np.any(ocean_heat_flux != 0.0)
+
+    atm_derived = final.components["atm"]["derived"]
+    for name in ("total_heat_flux", "total_freshwater_flux",
+                 "evaporation", "precipitation"):
+        field = np.asarray(getattr(atm_derived, name))
+        assert np.all(np.isfinite(field)), name
+
+    datasets = echam_atmosphere_ocean.to_xarray(diagnostics)
+    merged = xr.merge(
+        [datasets["atm"], datasets["ocn"]], join="exact", compat="no_conflicts"
+    )
+    assert merged.sizes["time"] == n_steps
 
 
 # ---------------------------------------------------------------------------

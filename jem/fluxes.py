@@ -22,6 +22,21 @@ and :func:`rotate_vector` are pure functions with no notion of a carry, and
 :class:`VerosExchange` is the thin :class:`~jem.base.component.Exchanger`
 that reads the atmosphere and ocean carries, calls them, and writes the
 result back with ``.replace(...)``.
+
+The wind vector this needs is not guaranteed
+---------------------------------------------
+``derived.u0``/``.v0`` are ``None``, not an array, for a composed atmosphere
+physics package that publishes no near-surface wind *vector* -- today,
+everything but SPEEDY (jax-esm#129; see
+:mod:`jem.components.jcm.exchange_fields`'s module docstring). Since this is
+the one production consumer of that vector, it is the one place that has to
+notice its absence rather than compute a stress from ``None``:
+:meth:`VerosExchange.validate` checks it at **composition time** (called from
+:func:`jem.runners._validate_exchangers`, inside
+:func:`jem.runners.build_coupler`), and :meth:`VerosExchange.__call__` checks
+it again, defensively, for a coupler built by hand that skips that step. Both
+raise the same ``ValueError``, naming jax-esm#129, rather than letting
+:func:`bulk_wind_stress` fail on ``None**2`` deep inside a traced step.
 """
 
 from __future__ import annotations
@@ -138,6 +153,44 @@ def bulk_wind_stress(
     speed = jnp.sqrt(jnp.maximum(u**2 + v**2, min_speed**2))
     scale = drag_coefficient * air_density * speed
     return scale * u, scale * v
+
+
+def _require_wind_vector(u0: Any, v0: Any) -> None:
+    """Raise, naming jax-esm#129, if ``u0``/``v0`` are absent.
+
+    Shared by :meth:`VerosExchange.validate` (the build-time check) and
+    :meth:`VerosExchange.__call__` (a defensive repeat for a coupler built by
+    hand, bypassing :func:`jem.runners.build_coupler`'s
+    ``_validate_exchangers``): whether the composed atmosphere physics
+    publishes a near-surface wind *vector* is fixed at composition and never
+    varies mid-run (:mod:`jem.components.jcm.exchange_fields`'s module
+    docstring), so ``u0``/``v0`` are either both real arrays or both ``None``
+    on every carry this exchanger will ever see, and one check run once,
+    wherever the carry is first in hand, is enough -- there is no "maybe
+    windless this step" case to keep re-checking for.
+
+    Parameters
+    ----------
+    u0, v0 : jax.Array or None
+        ``atm["derived"].u0`` / ``.v0``.
+
+    Raises
+    ------
+    ValueError
+        If either is ``None``.
+
+    """
+    if u0 is None or v0 is None:
+        raise ValueError(
+            "VerosExchange needs the atmosphere's near-surface wind VECTOR "
+            "(derived.u0/.v0) to compute a wind stress (bulk_wind_stress), "
+            "but this atmosphere's composed physics publishes none "
+            "(jax-esm#129): only SPEEDY carries a true near-surface wind "
+            "vector -- see jem.components.jcm.exchange_fields's module "
+            "docstring ('Why the near-surface wind is still a narrow "
+            "exception'). Couple a SPEEDY atmosphere to Veros instead, or "
+            "write a wind-free wind-stress exchanger for this one."
+        )
 
 
 def mask_fluxes_under_ice(
@@ -301,6 +354,10 @@ class VerosExchange:
     cast in its own ``__call__``, so an ``ocean=veros`` configuration that
     composes the default table instead of this exchanger gets the same fix.
 
+    This exchanger needs the atmosphere's near-surface wind *vector*
+    (``derived.u0``/``.v0``), which not every composed physics package
+    publishes (jax-esm#129) -- see :meth:`validate`.
+
     """
 
     def __init__(
@@ -384,6 +441,14 @@ class VerosExchange:
         # what makes the coupling robust to that ordering.
         u0 = atm["derived"].u0
         v0 = atm["derived"].v0
+        # Defence in depth: `validate()` is the intended build-time gate (run
+        # by `jem.runners._validate_exchangers` inside `build_coupler`), but a
+        # `Coupler` built by hand and never validated must still fail here,
+        # on the very first step, rather than compute a stress from `None`
+        # (jax-esm#129). `u0`/`v0` are Python `None` or real arrays, decided
+        # at composition and never traced, so this is a plain Python check,
+        # not a value the trace has to branch on.
+        _require_wind_vector(u0, v0)
         total_heat_flux = atm["derived"].total_heat_flux
         total_freshwater_flux = atm["derived"].total_freshwater_flux
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
@@ -450,6 +515,53 @@ class VerosExchange:
             sea_surface_temperature=sea_surface_temperature_on_atm,
         ))
         return dict(components, atm=atm, ocn=ocn)
+
+    def validate(self, components: Mapping[str, Carry]) -> None:
+        """Raise, naming jax-esm#129, if the atmosphere publishes no wind vector.
+
+        The build-time pre-flight: :func:`jem.runners._validate_exchangers`
+        calls this, right after ``Coupler.initialize()`` and before a coupled
+        run is ever compiled, for every exchanger that has a ``validate``
+        method -- the same slot :meth:`jem.exchangers.Exchange.validate` fills
+        for a declarative table, and, one step earlier still,
+        ``ComposablePhysics.require_surface_exchange`` fills for the surface
+        struct itself (:func:`jem.runners.build_atmosphere`). Without this, a
+        coupler built with ``coupling.exchanger`` naming
+        :class:`VerosExchange` on an atmosphere with no near-surface wind
+        vector (any ECHAM composition -- jax-esm#129) would only discover
+        that the first time :meth:`__call__` actually traced, which also
+        checks (see the comment there), but only at the coupled step, not at
+        composition.
+
+        This checks the wind vector only. It deliberately does **not**
+        replicate :meth:`jem.exchangers.Exchange.validate`'s general
+        component/section/field/regridder/structure checks for every field
+        this exchanger reads (the ocean's ``forcing.surface_taux`` and
+        friends): those still fail with jax-gcm's or JEM's own ``KeyError``/
+        ``AttributeError`` at the first traced step, exactly as before this
+        change, since #129 is about the wind vector specifically.
+
+        Parameters
+        ----------
+        components : Mapping[str, Carry]
+            The initial carries, as ``Coupler.initialize()`` builds them
+            (``CoupledCarry.components``). Only ``"atm"`` is read.
+
+        Raises
+        ------
+        KeyError
+            If ``components`` has no ``"atm"`` entry.
+        ValueError
+            If ``components["atm"]["derived"].u0``/``.v0`` is ``None``.
+
+        """
+        if "atm" not in components:
+            raise KeyError(
+                f"VerosExchange.validate: this coupled model has no 'atm' "
+                f"component (it has {sorted(components)!r})."
+            )
+        derived = components["atm"]["derived"]
+        _require_wind_vector(derived.u0, derived.v0)
 
     def __repr__(self) -> str:
         """Name the regridders this exchange holds and whether it rotates."""
