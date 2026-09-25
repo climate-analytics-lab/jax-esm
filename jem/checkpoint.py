@@ -246,6 +246,73 @@ def save(carry: Carry, path: str | Path) -> Path:
     return path
 
 
+#: Fragments of a `jax.tree_util.keystr` path that a `"time"`/`"step"` dict
+#: key renders as, however deeply nested (a bare component carry, or one
+#: inside a coupled carry's own `"components"` mapping) -- checked as plain
+#: substrings rather than parsed, since the exact quoting `keystr` uses is not
+#: a contract this module should depend on. See :func:`_leaf_count_mismatch_hint`.
+_CLOCK_KEY_FRAGMENTS = ("'time'", "'step'")
+
+
+def _leaf_count_mismatch_hint(
+    keyed_leaves: Any, saved_paths: list[str]
+) -> str:
+    """Return a sentence naming the cause, if a leaf-count mismatch looks like #877->878.
+
+    A generic "holds N leaves but the model expects M" is unhelpful for the
+    one cause this module can actually name: a checkpoint written before the
+    jax-gcm PR 878 migration has no ``"time"``/``"step"`` entry in the
+    atmosphere's carry (:class:`~jem.components.jcm.component.JCMComponent`
+    gained them, threaded exactly like the pre-existing ``"physics"`` key --
+    see the 2026-09 migration review, item 7), so loading such a file into a
+    post-migration template is short by exactly those two leaves. This is a
+    heuristic on the *shape* of the mismatch, not a version stamp (#119 tracks
+    the real fix -- a recorded jax-gcm revision in the file itself, which
+    would name the cause exactly instead of guessing at it from which paths
+    are missing): both a template path containing a clock-key fragment that no
+    saved path does, and the count being short by exactly the number of such
+    fragments, have to hold before this says anything, so an unrelated leaf
+    count mismatch (a genuinely different component composition) still gets
+    the plain message alone.
+
+    Parameters
+    ----------
+    keyed_leaves : list of (KeyPath, leaf)
+        The template's own flattened leaves, as
+        ``jax.tree_util.tree_flatten_with_path`` returns them.
+    saved_paths : list of str
+        The leaf paths recorded in the checkpoint file.
+
+    Returns
+    -------
+    str
+        A sentence to append to the mismatch message (starting with a space),
+        or ``""`` if the mismatch does not match this specific shape.
+
+    """
+    saved_path_set = set(saved_paths)
+    missing_fragments = [
+        fragment
+        for fragment in _CLOCK_KEY_FRAGMENTS
+        if any(
+            fragment in jax.tree_util.keystr(key_path)
+            and jax.tree_util.keystr(key_path) not in saved_path_set
+            for key_path, _ in keyed_leaves
+        )
+    ]
+    if len(missing_fragments) != len(_CLOCK_KEY_FRAGMENTS):
+        return ""
+    if len(keyed_leaves) - len(saved_paths) != len(_CLOCK_KEY_FRAGMENTS):
+        return ""
+    return (
+        " This looks like a checkpoint written before the jax-gcm PR 878 "
+        "migration (jax-esm's 2026-09 clock update): the atmosphere's carry "
+        "gained 'time'/'step' entries then, which such a checkpoint has no "
+        "values for. There is no migration path for a pre-878 checkpoint "
+        "today; start a new run instead of resuming this one."
+    )
+
+
 def load(template: Carry, path: str | Path) -> Carry:
     """Read back a pytree written by :func:`save`, shaped like ``template``.
 
@@ -333,11 +400,12 @@ def load(template: Carry, path: str | Path) -> Carry:
 
     keyed_leaves, treedef = jax.tree_util.tree_flatten_with_path(template)
     if len(saved_leaves) != len(keyed_leaves):
+        hint = _leaf_count_mismatch_hint(keyed_leaves, saved_paths)
         raise ValueError(
             f"{path} holds {len(saved_leaves)} leaves but the model expects "
             f"{len(keyed_leaves)}. It was written by a different component "
             "composition, or by a version whose carry structs had different "
-            "fields."
+            f"fields.{hint}"
         )
 
     restored: list[jnp.ndarray] = []

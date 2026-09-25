@@ -164,6 +164,41 @@ def test_a_different_leaf_count_is_refused(tmp_path):
              tmp_path / "carry.msgpack")
 
 
+def test_a_pre_878_checkpoint_names_the_cause(tmp_path):
+    """A carry missing exactly 'time'/'step' gets a specific hint, not just a count.
+
+    2026-09 migration review, item 7: a checkpoint saved before jax-gcm PR
+    878 added `"time"`/`"step"` to the atmosphere's carry fails the generic
+    leaf-count check like any other composition mismatch, but the message
+    now also names the likely cause and says there is no migration path.
+    """
+    save(
+        {"state": jnp.zeros(2), "physics": jnp.zeros(2)},
+        tmp_path / "carry.msgpack",
+    )
+
+    with pytest.raises(ValueError, match="jax-gcm PR 878 migration"):
+        load(
+            {
+                "state": jnp.zeros(2),
+                "physics": jnp.zeros(2),
+                "time": jnp.int32(0),
+                "step": jnp.int32(0),
+            },
+            tmp_path / "carry.msgpack",
+        )
+
+
+def test_an_unrelated_leaf_count_mismatch_gets_no_878_hint(tmp_path):
+    """The pre-878 hint is specific: an ordinary composition change gets none."""
+    save({"a": jnp.zeros(2), "b": jnp.zeros(2)}, tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError) as excinfo:
+        load({"a": jnp.zeros(2), "b": jnp.zeros(2), "c": jnp.zeros(2)},
+             tmp_path / "carry.msgpack")
+    assert "878" not in str(excinfo.value)
+
+
 def test_a_renamed_leaf_is_refused_even_when_the_shapes_line_up(tmp_path):
     """Same leaf count, same shapes, different names is a different carry.
 
