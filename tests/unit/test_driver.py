@@ -241,10 +241,17 @@ class _FakeJCMLikeComponent:
     ``tests/unit/test_jcm_component.py``'s job).
     """
 
-    def __init__(self, internal_rate: int, name: str = "atm"):
-        """Name the component and fix the internal rate it reports."""
+    def __init__(self, internal_rate: int, name: str = "atm", starting_counter: int = 0):
+        """Name the component, fix the internal rate, and seed its own counter.
+
+        ``starting_counter`` stands in for a component whose own internal
+        counter does not start at zero when a run begins -- a model
+        integrated before it was wrapped or registered (Veros), or a
+        resumed run's carry (JCM, Veros, and this fake alike).
+        """
         self.name = name
         self._internal_rate = internal_rate
+        self._starting_counter = starting_counter
 
     def initialize(self):
         return {"value": jnp.float32(0.0)}
@@ -256,6 +263,18 @@ class _FakeJCMLikeComponent:
     def internal_steps_per_call(self) -> int:
         """Report the internal rate, exactly as ``JCMComponent._inner_steps`` does."""
         return self._internal_rate
+
+    def internal_counter(self, carry) -> int:
+        """Report this fake's own seeded starting counter, ignoring ``carry``.
+
+        A real component (JCM, Veros) reads its counter from its own carry
+        (``carry["step"]``, ``carry["state"].variables.itt``); this fake's
+        own carry (``{"value": ...}``) has no such field, so the counter it
+        reports is fixed at construction instead, which is enough to
+        exercise ``jem.driver``'s arithmetic without needing a real one.
+        """
+        del carry
+        return self._starting_counter
 
 
 def test_max_element_rate_includes_a_components_own_internal_stepping_rate():
@@ -339,9 +358,10 @@ def test_check_step_counters_accepts_exactly_at_and_refuses_one_past_a_component
     limit = _max_safe_coupled_steps(coupler)
     assert limit < 10**7  # sanity: the internal-rate limit, not the day one
 
-    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    carries = {"atm": component.initialize()}
+    _check_step_counters_fit_int32(coupler, 0, limit + 1, carries)  # last step == limit: fine
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+        _check_step_counters_fit_int32(coupler, 0, limit + 2, carries)  # last step == limit + 1
 
     def must_not_be_called(iterations, **kwargs):
         raise AssertionError(
@@ -355,6 +375,65 @@ def test_check_step_counters_accepts_exactly_at_and_refuses_one_past_a_component
             coupler, total_time=f"{limit + 2} days", chunk=f"{limit + 2} days",
             output_dir=tmp_path,
         )
+
+
+def test_check_step_counters_refuses_a_run_that_wraps_a_components_own_starting_counter():
+    """A component's own internal counter is refused exactly where IT would wrap.
+
+    `_max_element_rate`'s own rate assumes an internal counter starts at
+    zero and stays in lockstep with the coupled step -- true only until a
+    component's own counter starts somewhere else, which its rate alone
+    cannot know. Here the fake's counter is already close to int32's own
+    range before this run even starts (standing in for a `VerosComponent`
+    wrapping a model that was integrated before it was bound -- see
+    `VerosComponent.bind`'s own docstring -- or any component's carry coming
+    from elsewhere), so the OLD, rate-only check would have accepted a run
+    this one refuses.
+    """
+    from jem.driver import _check_step_counters_fit_int32
+
+    rate = 24
+    # Chosen so the boundary is exact: `starting_counter + 10 * rate ==
+    # 2**31 - 1` precisely, with no remainder to obscure the "one step past
+    # is refused" edge.
+    starting_counter = 2**31 - 1 - 10 * rate
+    component = _FakeJCMLikeComponent(rate, starting_counter=starting_counter)
+    coupler = Coupler(
+        {"atm": component}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    carries = {"atm": component.initialize()}
+
+    _check_step_counters_fit_int32(coupler, 0, 10, carries)  # counter reaches 2**31 - 1: fine
+    with pytest.raises(ValueError, match="own internal counter"):
+        _check_step_counters_fit_int32(coupler, 0, 11, carries)  # one step past
+
+
+def test_check_step_counters_accepts_a_resume_whose_counter_matches_first_step_times_rate():
+    """An ordinary resume's counter is exactly what its own rate predicts.
+
+    A resumed run's carry already holds an advanced internal counter -- the
+    normal case, not the pre-stepped-before-binding one above -- and the new
+    per-component check must accept it exactly as the old, rate-only check
+    did: this is `total_steps` being absolute, not relative to `first_step`
+    (the same distinction the coupler-level check already makes), now
+    checked for a component's own counter too, so it must not be
+    double-counted here either.
+    """
+    from jem.driver import _check_step_counters_fit_int32
+
+    rate = 48
+    first_step = 1_000
+    # Exactly what an uninterrupted run from step 0 would have left this
+    # component's own counter at by the time it reached `first_step`.
+    component = _FakeJCMLikeComponent(rate, starting_counter=first_step * rate)
+    coupler = Coupler(
+        {"atm": component}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    carries = {"atm": component.initialize()}
+
+    _check_step_counters_fit_int32(coupler, first_step, first_step + 10, carries)
 
 
 def test_run_chunked_refuses_a_run_past_a_sub_stepped_elements_own_counter(
@@ -498,7 +577,7 @@ def test_max_safe_coupled_steps_day_limit_covers_an_end_of_interval_offset(coupl
 def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
     """The refusal's own boundary is exact: reaching `limit` itself is not refused.
 
-    ``_check_step_counters_fit_int32(coupler, first_step, total_steps)``
+    ``_check_step_counters_fit_int32(coupler, first_step, total_steps, carries)``
     checks the LAST coupled step the run would reach, ``total_steps - 1`` --
     ``total_steps`` is the run's own ABSOLUTE target step count (see the
     function's own docstring), so it alone (not ``first_step``) says how far
@@ -509,15 +588,19 @@ def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
     from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
 
     limit = _max_safe_coupled_steps(coupler)
-    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    # No `SupportsInternalStepping` component here, so `carries`' own content
+    # feeds no counter check -- it still has to be a real starting carry
+    # (structurally, for the nested-coupler walk), not an empty placeholder.
+    carries = coupler.initialize().components
+    _check_step_counters_fit_int32(coupler, 0, limit + 1, carries)  # last step == limit: fine
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+        _check_step_counters_fit_int32(coupler, 0, limit + 2, carries)  # last step == limit + 1
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
         # A resumed run whose absolute target is past the limit: `total_steps`
         # is the run's absolute target step count (see `remaining_batches`'s
         # own docstring), so a resume at `limit` itself plus `limit + 2` more
         # is expressed as a target of `limit + 2`, not `limit + 2` on its own.
-        _check_step_counters_fit_int32(coupler, limit, limit + 2)
+        _check_step_counters_fit_int32(coupler, limit, limit + 2, carries)
 
 
 def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupler():
@@ -542,13 +625,18 @@ def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupl
     total_steps = 2_191_455  # ~6000 years of daily coupled steps
     assert total_steps - 1 <= limit  # sanity: this run is genuinely in bounds
 
+    # No `SupportsInternalStepping` component in this coupler, so `carries`
+    # feeds no counter check -- it still has to be a real starting carry
+    # (structurally, for the nested-coupler walk), not an empty placeholder.
+    carries = coupler.initialize().components
+
     # Resumed at coupled step 1,000,000: legitimate, must be accepted.
-    _check_step_counters_fit_int32(coupler, 1_000_000, total_steps)
+    _check_step_counters_fit_int32(coupler, 1_000_000, total_steps, carries)
 
     # One coupled step past the limit -- an absolute target one past `limit`
     # -- is still refused, resumed or not.
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        _check_step_counters_fit_int32(coupler, 1_000_000, limit + 2)
+        _check_step_counters_fit_int32(coupler, 1_000_000, limit + 2, carries)
 
 
 def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment():

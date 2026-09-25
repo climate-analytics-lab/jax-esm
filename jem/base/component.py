@@ -859,7 +859,7 @@ class SupportsBind(Protocol):
 
 @runtime_checkable
 class SupportsInternalStepping(Protocol):
-    """Optional: report how many of a component's own internal steps one ``step()`` call makes.
+    """Optional: report a component's own internal step rate and its current counter.
 
     A component with its own inner timestep (JCM, Veros) may keep raw
     counters of its own -- an internal step count, or a clock like JCM's own
@@ -870,26 +870,45 @@ class SupportsInternalStepping(Protocol):
     (JCM's ``expected_step = time.step * self._inner_steps()`` in
     ``JCMComponent._report_authoritative_clock_drift``), it needs the same
     int32-overflow protection the coupler's own counters get -- but nothing
-    outside that component can know the rate to protect it at without being
-    told.
+    outside that component can know the rate, or the counter's current
+    value, without being told.
 
-    ``internal_steps_per_call`` is that rate: how many of *this* component's
+    ``internal_steps_per_call`` is the rate: how many of *this* component's
     own internal timesteps happen inside one call to :meth:`Component.step`.
-    :func:`jem.driver._max_element_rate` multiplies it in for every element
-    clock that calls this component (a workflow multiplicity, or -- via the
-    recursion -- a nested coupler's own substep rate), so
-    :func:`jem.driver.run_chunked`'s up-front int32 check
-    (``_check_step_counters_fit_int32``) covers it too, the same way it
-    covers a plain workflow multiplicity. A component that does not
-    implement this capability is
-    assumed to advance no faster than the calls it receives (rate 1) -- the
-    same as every component before this capability existed; a component that
-    *does* keep such counters but does not report them here is simply not
-    protected, the same way an unbound component's own clock mismatch is
-    only ever caught if it implements :class:`SupportsBind`.
+    ``internal_counter`` is the counter's own current value, read from a
+    concrete carry -- the one a run is about to start from, on the host,
+    before anything is traced. Both matter: a component whose internal
+    counter always starts at zero and advances in lockstep with the coupled
+    step would be fully described by its rate alone, but that does not hold
+    for a component whose underlying model was integrated -- its own counter
+    already advanced -- before it was ever wrapped or registered with a
+    coupler (a ``VerosComponent`` built from a model stepped before
+    :meth:`SupportsBind.bind`, which :meth:`VerosComponent.bind`'s own
+    docstring explicitly allows for). Reading the counter directly off the
+    starting carry covers that case, an ordinary resume, and a fresh run
+    alike, with no assumption about how the counter got to its current
+    value.
+
+    :func:`jem.driver._max_element_rate` multiplies ``internal_steps_per_call``
+    in for every element clock that calls this component (a workflow
+    multiplicity, or -- via the recursion -- a nested coupler's own substep
+    rate), and :func:`jem.driver.run_chunked`'s up-front int32 check reads
+    ``internal_counter`` off the starting carry for every component that
+    implements this capability, so a run that would carry either this
+    component's own counter, or the coupler hierarchy's own, past ``int32``
+    is refused before anything is compiled -- the same protection a workflow
+    multiplicity or a nested ``Coupler`` already gets. A component that does
+    not implement this capability is assumed to advance no faster than the
+    calls it receives, from zero (rate 1, counter 0) -- the same as every
+    component before this capability existed; a component that *does* keep
+    such counters but does not report them here is simply not protected, the
+    same way an unbound component's own clock mismatch is only ever caught
+    if it implements :class:`SupportsBind`.
     """
 
     def internal_steps_per_call(self) -> int: ...
+
+    def internal_counter(self, carry: Carry) -> int: ...
 
 
 # An exchanger moves information between components. It receives the mapping

@@ -196,11 +196,74 @@ def test_double_drake_veros_component_declares_its_internal_stepping_rate():
     assert component.internal_steps_per_call() == 24  # 86400 s / 3600 s
     assert _max_element_rate(coupler) == 24
 
+    # A freshly built model: `itt` starts at 0, so this exercises the same
+    # bound the rate alone would predict -- the pre-stepped case (a model
+    # integrated before it was ever bound) is
+    # `test_double_drake_veros_component_refuses_a_run_that_would_wrap_a_pre_stepped_itt`'s
+    # job.
+    carries = {"ocn": component.initialize()}
     limit = _max_safe_coupled_steps(coupler)
     assert limit < 2**31 - 2  # sanity: strictly tighter than the rate-1 floor
-    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    _check_step_counters_fit_int32(coupler, 0, limit + 1, carries)  # last step == limit: fine
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+        _check_step_counters_fit_int32(coupler, 0, limit + 2, carries)  # last step == limit + 1
+
+
+@pytest.mark.slow
+def test_double_drake_veros_component_refuses_a_run_that_would_wrap_a_pre_stepped_itt():
+    """A model integrated before it was bound is refused where ITS OWN itt would wrap.
+
+    ``VerosComponent.bind``'s own docstring explicitly allows wrapping a
+    model that was already integrated before it was ever registered with a
+    coupler: "a setup that was already integrated before it was wrapped
+    therefore starts the coupled run at its own current time rather than
+    being declared wrong". Such a model's ``itt`` does not start at 0, so a
+    coupled-step-count-only rate (``_max_element_rate``'s own) cannot bound
+    it -- only reading ``itt`` off the concrete starting carry can. Built on
+    a real double-drake ``VerosComponent`` (the shipped coupled ocean setup),
+    with its own ``itt`` set to a large value before ``bind`` -- the
+    reproduction the review's own probe used -- and checked at the exact
+    boundary where advancing it further would silently wrap.
+    """
+    import jax.numpy as jnp
+    import jax_datetime as jdt
+
+    from jem.base.coupler import Coupler
+    from jem.components.veros.setups.double_drake import double_drake_setup
+    from jem.components.veros_component import VerosComponent
+    from jem.driver import _check_step_counters_fit_int32
+
+    setup_cls = double_drake_setup(land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE)
+    model = setup_cls()
+    model.setup()
+
+    rate = 24  # 86400 s coupling / 3600 s dt_tracer
+    steps_to_boundary = 100
+    # Chosen so the boundary is exact: `starting_itt + 100 * rate == 2**31 -
+    # 1` precisely -- no remainder to obscure the "one step past is refused"
+    # edge. Simulates a model that was run standalone (`model.step(state)`,
+    # or an earlier coupled run) before this wrapper or coupler ever existed.
+    starting_itt = 2**31 - 1 - steps_to_boundary * rate
+    with model.state.variables.unlock():
+        model.state.variables.itt = jnp.int32(starting_itt)
+
+    component = VerosComponent(model)
+    coupling_timestep = jdt.to_timedelta(1, "day")
+    coupler = Coupler(
+        {"ocn": component}, {}, coupling_timestep=coupling_timestep,
+        start_date=jdt.to_datetime("2000-01-01"), calendar="365_day",
+    )
+    carry = coupler.initialize()
+    assert int(carry.components["ocn"]["state"].variables.itt) == starting_itt
+    carries = carry.components
+
+    _check_step_counters_fit_int32(
+        coupler, 0, steps_to_boundary, carries
+    )  # itt reaches 2**31 - 1 exactly: fine
+    with pytest.raises(ValueError, match="own internal counter"):
+        _check_step_counters_fit_int32(
+            coupler, 0, steps_to_boundary + 1, carries
+        )  # one step past
 
 
 @pytest.mark.slow

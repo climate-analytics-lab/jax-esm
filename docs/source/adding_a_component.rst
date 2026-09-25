@@ -77,18 +77,24 @@ simply skipped there, never broken:
        ``ValueError``, a configuration that cannot work (a coupling timestep
        that does not divide the model's own).
    * - :class:`~jem.base.component.SupportsInternalStepping`
-     - ``internal_steps_per_call() -> int``
-     - Report how many of the component's own internal timesteps happen
-       inside one ``step()`` call, for a component that keeps a raw counter
-       of its own faster than the coupled step calling it (JCM's own
-       ``RunState.step``, or Veros' own ``state.variables.itt`` tracer step
-       counter -- ``VerosComponent`` reports its own tracer steps per
-       coupling step). ``jem.driver._max_element_rate`` multiplies this
-       in the same way it does a workflow multiplicity, so
-       ``jem.driver.run_chunked``'s int32 safety check covers this
-       component's own counter too -- a component that omits it is simply
-       assumed to advance no faster than the calls it receives (rate 1),
-       the same as before this capability existed.
+     - ``internal_steps_per_call() -> int`` /
+       ``internal_counter(carry) -> int``
+     - For a component that keeps a raw counter of its own faster than the
+       coupled step calling it (JCM's own ``RunState.step``, or Veros' own
+       ``state.variables.itt`` tracer step counter). ``internal_steps_per_call``
+       reports the rate -- ``jem.driver._max_element_rate`` multiplies it in
+       the same way it does a workflow multiplicity -- and
+       ``internal_counter(carry)`` reports the counter's own *current* value,
+       read directly off the concrete starting carry, since a component's
+       counter is not guaranteed to start at zero (a ``VerosComponent`` may
+       wrap a model integrated before it was ever bound; any component's
+       carry may come from a resumed run).
+       ``jem.driver.run_chunked``'s int32 safety check reads both, so a run
+       that would carry this component's own counter past ``int32`` is
+       refused whether it starts fresh, resumes, or wraps an
+       already-advanced model -- a component that omits this capability is
+       simply assumed to advance no faster than the calls it receives, from
+       zero (rate 1, counter 0), the same as before this capability existed.
 
 
 Designing the carry
@@ -205,10 +211,13 @@ Four things to note:
   per coupling step. That internal sub-stepping is exactly what
   :code:`internal_steps_per_call` (:code:`self._inner_steps()`, how many of
   JCM's own timesteps make one coupling step) reports to
-  :code:`jem.driver._max_element_rate`, so a run long enough to overflow
-  JCM's own internal step counter is refused by
-  :code:`jem.driver.run_chunked` up front, the same as one long enough to
-  overflow the coupler's own.
+  :code:`jem.driver._max_element_rate`, and :code:`internal_counter(carry)`
+  (:code:`carry["step"]`, JCM's own :code:`RunState.step`) reports the
+  counter's own current value, so a run long enough to overflow JCM's own
+  internal step counter is refused by :code:`jem.driver.run_chunked` up
+  front -- from a fresh start, a resume, or a carry whose own step already
+  holds a value the coupled step count alone would not predict -- the same
+  as one long enough to overflow the coupler's own.
 - The surface fluxes are converted on the way out, in
   :mod:`jem.components.jcm.exchange_fields`: JCM publishes its
   package-independent :code:`SurfaceExchange` contract (jax-gcm#754) with

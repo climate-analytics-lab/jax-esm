@@ -129,6 +129,21 @@ def test_internal_steps_per_call_matches_inner_steps(component):
     assert component.internal_steps_per_call() == component._inner_steps() == 48
 
 
+def test_internal_counter_reads_the_carrys_own_step(component):
+    """``internal_counter`` reads ``carry["step"]``, not a stand-in.
+
+    ``jem.driver.run_chunked``'s int32 check reads a component's own
+    counter directly off the concrete starting carry, so it must be exactly
+    ``carry["step"]`` -- JCM's own ``RunState.step`` -- for whatever carry it
+    is handed, a fresh one or an arbitrary one, not always ``0``.
+    """
+    carry = component.initialize()
+    assert component.internal_counter(carry) == int(carry["step"]) == 0
+
+    advanced = dict(carry, step=jnp.int32(12345))
+    assert component.internal_counter(advanced) == 12345
+
+
 def test_run_chunked_accepts_a_10000_year_earth_slab_style_run(model):
     """A realistic configuration: JCM's own internal counter sets the limit.
 
@@ -169,13 +184,20 @@ def test_run_chunked_accepts_a_10000_year_earth_slab_style_run(model):
     )
     assert _max_element_rate(coupler) == 48  # JCM's own internal_steps_per_call
 
+    # A fresh carry: JCM's own RunState.step starts at 0, so this exercises
+    # the same bound the rate alone would predict -- the pre-stepped case
+    # (a model integrated before it was ever wrapped) is
+    # `test_check_step_counters_refuses_a_run_that_wraps_a_components_own_starting_counter`'s
+    # job, on a lightweight fake, and Veros' own equivalent in
+    # `tests/unit/test_veros_setups.py`.
+    carries = coupler.initialize().components
     ten_thousand_years = 3_652_425  # ~10,000 proleptic-Gregorian years, daily steps
-    _check_step_counters_fit_int32(coupler, 0, ten_thousand_years)  # must not raise
+    _check_step_counters_fit_int32(coupler, 0, ten_thousand_years, carries)  # must not raise
 
     limit = _max_safe_coupled_steps(coupler)
     assert ten_thousand_years < limit  # sanity: comfortably inside, not at the edge
     with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
-        _check_step_counters_fit_int32(coupler, 0, limit + 2)
+        _check_step_counters_fit_int32(coupler, 0, limit + 2, carries)
 
 
 def test_step_before_bind_raises(model):

@@ -516,6 +516,19 @@ class VerosComponent:
         assert self._steps_per_coupling_step is not None
         return self._steps_per_coupling_step
 
+    def internal_counter(self, carry: Carry) -> int:
+        """Return ``carry["state"].variables.itt``, Veros' own iteration count.
+
+        Implements :class:`~jem.base.component.SupportsInternalStepping`'s
+        other half: ``jem.driver.run_chunked``'s int32 check reads this off
+        the concrete carry a run is about to start from, rather than
+        assuming it equals ``coupled_step * self._steps_per_coupling_step`` --
+        :meth:`bind`'s own docstring explicitly allows binding a model that
+        was already integrated, whose ``itt`` a coupled-step count would
+        then not predict.
+        """
+        return int(carry["state"].variables.itt)
+
     def _derived_fields(self, state: Any) -> "VerosDerived":
         """Extract the fields ``VerosDerived`` publishes, from any state.
 

@@ -316,7 +316,7 @@ at a random call site:
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
-| `SupportsInternalStepping` | `internal_steps_per_call() -> int` | `JCMComponent`, `VerosComponent` |
+| `SupportsInternalStepping` | `internal_steps_per_call() -> int` / `internal_counter(carry) -> int` | `JCMComponent`, `VerosComponent` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -356,16 +356,31 @@ docstring; Veros' own `state.variables.itt` iteration counter, similarly —
 see `VerosComponent.internal_steps_per_call`'s docstring). `jem.driver
 ._max_element_rate` multiplies this rate in for every element clock that
 calls the component (a workflow multiplicity, or a nested `Coupler`'s own
-substep rate), so `jem.driver.run_chunked`'s up-front int32 check covers a
-component's own internal counter the same way it covers a workflow
-multiplicity or a nested coupler — with no jcm- or Veros-specific knowledge
-added to `jem.driver` itself: the capability is generic, and any component
-with a faster internal clock of its own may implement it the same way
-`JCMComponent` and `VerosComponent` do. A component that does not implement
-it is assumed to
-advance no faster than the calls it receives (rate 1), and one that keeps
-such counters without reporting them is simply not protected — the same as a
-component that skips `SupportsBind`'s clock-agreement check.
+substep rate) — with no jcm- or Veros-specific knowledge added to
+`jem.driver` itself: the capability is generic, and any component with a
+faster internal clock of its own may implement it the same way `JCMComponent`
+and `VerosComponent` do.
+
+That rate alone assumes the counter starts at zero and advances in lockstep
+with the coupled step — true of the coupler hierarchy's own counters (a
+workflow multiplicity, a nested coupler's own step field), not necessarily of
+a component's own: `VerosComponent.bind` explicitly allows wrapping a model
+that was already integrated before it was ever bound, whose `itt` a
+coupled-step count would then not predict, and any component's carry may
+equally come from a resumed run. `internal_counter(carry)` is the other half:
+the counter's own current value, read directly off the concrete starting
+carry (`JCMComponent` returns `carry["step"]`; `VerosComponent` returns
+`carry["state"].variables.itt`), on the host, before anything is traced.
+`jem.driver.run_chunked`'s up-front int32 check reads it for every component
+that implements this capability and refuses a run that would carry it (or the
+coupler hierarchy's own counters) past `int32`, whether the run starts fresh,
+resumes, or wraps a component whose model was stepped before it was ever
+coupled — the same protection a workflow multiplicity or a nested `Coupler`
+already gets. A component that does not implement this capability is assumed
+to advance no faster than the calls it receives, from zero (rate 1, counter
+0), and one that keeps such counters without reporting them is simply not
+protected — the same as a component that skips `SupportsBind`'s
+clock-agreement check.
 
 `step` must be a pure function of `(carry, time)` and must return a carry with
 exactly the pytree structure, shapes and dtypes it received, or `lax.scan`
@@ -1917,11 +1932,13 @@ worked through end to end for JCM; keep the two in sync when either changes.
    when the coupling timestep does not divide it. Add `to_xarray(diagnostics,
    time)` if it produces output, and `save_carry`/`load_carry` if its carry
    cannot be checkpointed as a plain pytree. Add `internal_steps_per_call()`
-   (`SupportsInternalStepping`) if the component keeps a raw counter of its
-   own that advances faster than the coupled step calling it (an internal
-   step count, a threaded clock like JCM's `RunState`) — otherwise
-   `jem.driver.run_chunked`'s int32 safety check cannot see it and cannot
-   refuse a run before it silently overflows.
+   and `internal_counter(carry)` (`SupportsInternalStepping`) if the
+   component keeps a raw counter of its own that advances faster than the
+   coupled step calling it (an internal step count, a threaded clock like
+   JCM's `RunState`) — otherwise `jem.driver.run_chunked`'s int32 safety
+   check cannot see it and cannot refuse a run before it silently overflows,
+   whether that run starts fresh, resumes, or wraps a model whose own
+   counter was already advanced before it was ever coupled.
 4. Export it from `jem/components/__init__.py` (lazily, via the module's
    `__getattr__`, if it pulls in an optional dependency — as Veros does).
 5. Register it: `Coupler({"mycomp": MyComponent(...)}, ...)`. If it is one of

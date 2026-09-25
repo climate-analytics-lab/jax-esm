@@ -254,6 +254,22 @@ def test_internal_steps_per_call_matches_steps_per_coupling_step(component):
     assert component.internal_steps_per_call() == component._steps_per_coupling_step == 2
 
 
+def test_internal_counter_reads_the_carrys_own_itt(component):
+    """``internal_counter`` reads ``carry["state"].variables.itt``, not a stand-in.
+
+    ``jem.driver.run_chunked``'s int32 check reads a component's own counter
+    directly off the concrete starting carry, so it must be exactly
+    ``carry["state"].variables.itt`` -- Veros' own iteration count -- for
+    whatever carry it is handed, not always the freshly built model's ``0``.
+    """
+    carry = component.initialize()
+    assert component.internal_counter(carry) == int(carry["state"].variables.itt) == 0
+
+    with carry["state"].variables.unlock():
+        carry["state"].variables.itt = jnp.int32(98765)
+    assert component.internal_counter(carry) == 98765
+
+
 def test_construction_disables_the_setups_own_forcing(veros_model):
     """Veros calls set_forcing every step; a coupled run must neutralise it."""
     VerosComponent(veros_model)
