@@ -704,19 +704,19 @@ Breaking changes are marked; everything else is additive.
   than mid-run or with a silently wrong stress; `__call__` repeats the same
   check for a hand-built `Coupler` that skips `_validate_exchangers`.
   **What breaks**: `JCMDerived.zeros()` now takes three required positional
-  arguments, `zeros(diagnostics_template, nodal_shape, physics, **overrides)` —
-  the former `shape` argument is renamed `diagnostics_template`, `nodal_shape`
-  (the atmosphere's horizontal grid) is now a separate required argument, and a
-  new `physics` argument (the composed atmosphere physics package) is required
-  so `zeros()` can decide `u0`/`v0`'s presence from it. A legacy call whose
-  first argument still looks like a shape (a `tuple`, `list`, `numpy.ndarray`
-  or `jax.Array`) raises `TypeError` naming the new signature, rather than
-  failing opaquely several calls deep — `JCMDerived` is exported from
-  `jem.components.jcm`, so this is public API, not a private helper. Migration:
-  call `zeros(diagnostics_template, nodal_shape, physics)`, passing a
-  structural diagnostics template (e.g. `Physics.get_empty_data(coords)`) in
-  place of the old bare `shape`. `from_diagnostics()` gains a required second
-  argument, `from_diagnostics(diagnostics, physics)`. Migration: pass the
+  arguments, `zeros(diagnostics_template, nodal_shape, physics, **overrides)`,
+  in place of `zeros(shape, physics, **overrides)`. The structural diagnostics
+  template (formerly the second argument, confusingly named `physics`) now
+  comes first as `diagnostics_template`; the horizontal grid shape (formerly
+  first, `shape`) comes second as `nodal_shape`; and a new third argument,
+  `physics`, is the composed atmosphere physics package itself, which `zeros()`
+  needs to decide `u0`/`v0`'s presence. A legacy call whose first argument
+  still looks like a shape (a `tuple`, `list`, `numpy.ndarray` or `jax.Array`)
+  raises `TypeError` naming the new signature, rather than failing opaquely
+  several calls deep — `JCMDerived` is exported from `jem.components.jcm`, so
+  this is public API, not a private helper. Migration: `zeros(shape, template)`
+  becomes `zeros(template, shape, model.physics)`. `from_diagnostics()` gains a
+  required second argument, `from_diagnostics(diagnostics, physics)`. Migration: pass the
   composed physics package alongside the diagnostics dict at every call site.
   `has_wind_vector()` now takes the composed physics package rather than the
   diagnostics dict, `has_wind_vector(physics)` — whether a wind vector exists
