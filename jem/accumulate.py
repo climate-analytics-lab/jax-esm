@@ -649,9 +649,10 @@ def _whole_coupling_steps(total_seconds: int, dt_seconds: int, total_time: str |
             f"{total_seconds / dt_seconds:g} coupling steps of {dt_seconds} s "
             "-- not a whole number of them (or shorter than one). An "
             "accumulator is sized in whole coupled steps, exactly like a run "
-            "itself (jem.driver.run_chunked's own total_time/chunk validates "
-            "the same way), so there would be no well-defined record for a "
-            "fractional step to hold."
+            "itself (jem.driver.run_chunked's own total_time/chunk is checked "
+            "for the same reason, though not with quite the same tolerance -- "
+            "see this function's own docstring), so there would be no "
+            "well-defined record for a fractional step to hold."
         )
     return int(n_steps)
 
