@@ -119,7 +119,14 @@ record against its own interval (its midpoint, to match the label -- see that
 function's docstring) whatever the chunking. Note that in a coupled run the
 atmosphere's per-step records are *already* step means -- the JCM wrapper
 integrates each coupling step with ``output_averages=True`` -- so averaging a
-chunk of them is the chunk mean exactly, with no double counting.
+chunk of them is the chunk mean exactly, with no double counting of the
+*values*. Their ``cell_methods`` already says ``"time: mean"`` too, though,
+and :func:`postprocess` must not double-count *that*: appending the same bare
+text again would give the meaningless ``"time: mean time: mean"``, so it is
+skipped when the text is already identical to the tag already there, and
+otherwise (a subsampled chunk, see :func:`postprocess`'s own docstring)
+appended with a distinguishing comment instead of a bare repeat (2026-09
+review, round 2, finding N3; see :func:`_with_cell_method`).
 """
 
 from __future__ import annotations
@@ -209,9 +216,30 @@ def _time_bounds_name(dataset: xr.Dataset) -> str | None:
 
 
 def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
-    """Return ``attrs`` with ``method`` appended to its CF ``cell_methods``."""
+    """Return ``attrs`` with ``method`` appended to its CF ``cell_methods``.
+
+    Skipped when ``method`` is already the existing string verbatim, or its
+    trailing entry: a JCM variable already carries ``cell_methods = "time:
+    mean"`` by the time :func:`postprocess` sees it, because JCM integrates
+    each coupling step with ``run.output_averages=True`` (see the module
+    docstring) -- so a bare, unannotated call here would append the identical
+    text a second time, giving ``"time: mean time: mean"``. Two indistinguishable
+    entries say nothing a single one didn't already, so that is a duplicate to
+    suppress, not a description of a genuine second reduction (2026-09 review,
+    round 2, finding N3 -- reproduced in
+    ``test_postprocess_does_not_duplicate_an_identical_cell_method_already_present``).
+
+    A *distinguishing* ``method`` -- the parenthetical
+    :func:`postprocess` builds for a subsampled chunk, see its own docstring
+    -- is never identical to a bare one, so it is always appended even when a
+    bare "time: mean" is already present: unlike the first case, the two
+    entries genuinely say different things (JCM's own per-step average vs.
+    this subsampled chunk average) and neither should be dropped.
+    """
     updated = dict(attrs)
     existing = str(updated.get("cell_methods", "")).strip()
+    if existing == method or existing.endswith(f" {method}"):
+        return updated
     # CF cell methods are a space-separated list, applied in order.
     updated["cell_methods"] = f"{existing} {method}".strip()
     return updated
@@ -394,9 +422,16 @@ def postprocess(
         carries one, otherwise from the average of its first and last
         record's own midpoint labels (see the module docstring) -- whether or
         not ``subsample`` dropped a record from the mean itself, with
-        ``cell_methods =
-        "time: mean"`` on every variable that was averaged. See the module
-        docstring for why the chunk is the averaging interval.
+        ``cell_methods = "time: mean"`` appended to every variable that was
+        averaged (skipped if that exact text is already the trailing entry --
+        a JCM variable already carries it from JCM's own per-step average --
+        see :func:`_with_cell_method`). When ``subsample > 1`` the appended
+        text instead carries an explicit CF comment saying the mean was
+        computed from only the kept records while the label/``time_bounds``
+        above still span the chunk's whole interval, so the two do not get
+        conflated into one misleadingly plain "time: mean" (2026-09 review,
+        round 2, finding N3). See the module docstring for why the chunk is
+        the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
         from its start, with all of the records that step produced; ``1``
@@ -544,10 +579,27 @@ def postprocess(
         .expand_dims({TIME_DIMENSION: chunk_label})
     )
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
-    for name in timed:
-        averaged[name].attrs = _with_cell_method(
-            dataset[name].attrs, TIME_MEAN_CELL_METHOD
+    if subsample > 1:
+        # Honesty fix (2026-09 review, round 2, finding N3's second half): the
+        # label and, for a `time_bounds`-carrying dataset, the bound itself
+        # (see above) span the chunk's WHOLE interval regardless of
+        # `subsample` -- computed from the chunk's records as given, before
+        # the stride removed any -- but the mean just below is only over the
+        # records the stride *kept*. A bare "time: mean" would then read as
+        # "the mean of the whole interval named above", which is not quite
+        # what happened. Say so explicitly with a CF comment rather than
+        # silently letting the label overstate what fed the average; this
+        # also never collides with an already-present bare "time: mean" (see
+        # `_with_cell_method`), since it is a different, more specific string.
+        method = (
+            f"{TIME_MEAN_CELL_METHOD} (comment: subsampled to every "
+            f"{subsample} coupled step(s) before averaging; the label/"
+            "time_bounds above still span the chunk's whole interval)"
         )
+    else:
+        method = TIME_MEAN_CELL_METHOD
+    for name in timed:
+        averaged[name].attrs = _with_cell_method(dataset[name].attrs, method)
     for variable in dataset.data_vars:
         if str(variable) not in timed and str(variable) != bounds_name:
             averaged[variable] = dataset[variable]

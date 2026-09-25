@@ -154,6 +154,56 @@ def test_postprocess_appends_to_an_existing_cell_methods():
     assert averaged["temperature"].attrs["cell_methods"] == "area: mean time: mean"
 
 
+def test_postprocess_does_not_duplicate_an_identical_cell_method_already_present():
+    """N3 (2026-09 review, round 2): JCM's own per-step "time: mean" must not double up.
+
+    JCM writes each of its own per-coupling-step records already averaged
+    over the physics sub-steps (``run.output_averages``, see the module
+    docstring), so by the time :func:`postprocess` sees a JCM variable it
+    *already* carries ``cell_methods = "time: mean"``. Appending the bare,
+    unannotated method text a second time used to give
+    ``"time: mean time: mean"`` -- a real bug, reproduced here, that showed up
+    on every atm variable of a real coupled earth-slab run (see
+    ``rr/run_e2e.sh`` / ``rr/b8.py`` in the 2026-09 review). Two identical,
+    unannotated entries carry no more information than one, so the second is
+    a duplicate rather than a description of a genuine further reduction --
+    see :func:`~jem.output._with_cell_method`'s own docstring.
+    """
+    dataset = simple_dataset(3)
+    dataset["temperature"].attrs["cell_methods"] = "time: mean"
+    averaged = postprocess(dataset, output_averages=True)
+    assert averaged["temperature"].attrs["cell_methods"] == "time: mean"
+
+
+def test_postprocess_annotates_cell_methods_honestly_when_subsampled():
+    """N3's second half: a subsampled mean's ``cell_methods`` says so.
+
+    With ``subsample > 1`` the recorded label/``time_bounds`` still spans the
+    chunk's *whole* interval (see
+    ``test_postprocess_time_bounds_survive_a_subsample_then_average``) while
+    the mean itself is only over the records the stride *kept* -- so a bare,
+    unannotated "time: mean" would overstate what interval actually informed
+    the number (the metadata would read as if every record of the chunk had
+    been averaged). :func:`postprocess` instead appends an explicit CF
+    comment saying so.
+    """
+    dataset = simple_dataset(4)
+    averaged = postprocess(dataset, output_averages=True, subsample=2)
+    cell_methods = averaged["temperature"].attrs["cell_methods"]
+    assert cell_methods.startswith("time: mean (comment:")
+    assert "subsampl" in cell_methods
+    assert "time_bounds" in cell_methods
+
+    # This annotated text is never textually identical to a bare, upstream
+    # "time: mean" -- so unlike the plain (subsample=1) case, both entries
+    # survive: one describes JCM's own per-step average, the other this
+    # subsampled chunk average, and they say different things.
+    dataset2 = simple_dataset(4)
+    dataset2["temperature"].attrs["cell_methods"] = "time: mean"
+    averaged2 = postprocess(dataset2, output_averages=True, subsample=2)
+    assert averaged2["temperature"].attrs["cell_methods"] == f"time: mean {cell_methods}"
+
+
 def test_postprocess_averages_time_bounds_correctly():
     """The 2026-09 migration review's item 1: the exact bug, reproduced and fixed.
 
