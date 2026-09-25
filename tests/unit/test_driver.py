@@ -98,20 +98,15 @@ def doubly_nested_coupler() -> Coupler:
 def daily_nested_gregorian_coupler() -> Coupler:
     """Return a ``"gregorian"`` daily coupler nested 1:1 inside another one.
 
-    ``doubly_nested_coupler``'s own nested couplers (``mid``, hourly;
-    ``atm_lnd``, 10-minute) are too fine-grained to exercise the day-count
-    bound of a nested coupler's own clock (``jem.driver._day_count_limit``):
-    a fine coupling timestep pushes ``max_safe_record``'s own bound up toward
-    the raw int32 range itself (its own docstring: the bound *shrinks* as the
-    record length grows), to the point of coinciding with it, so a hand-built
-    starting step near the raw counter's own limit is already refused by the
-    RAW check alone and never reaches the day-count one. A **daily** nested
-    coupler -- the same order of coupling timestep ``jcm-878-clock``'s own
-    finding 2 describes -- keeps the two bounds meaningfully apart (see
-    ``test_check_step_counters_refuses_a_run_that_wraps_a_nested_gregorian_
-    couplers_own_day_count``), which is the whole point of this fixture.
-    ``bind`` requires the nested coupler's calendar and start date to match
-    the outer's exactly, so both are ``"gregorian"``/``START_DATE`` here.
+    A nested coupler's own day-count bound (``jem.driver._day_count_limit``)
+    only sits meaningfully below the raw int32 range for a coarse coupling
+    timestep: ``max_safe_record``'s bound grows as the record length shrinks,
+    and for ``doubly_nested_coupler``'s hourly ``mid`` it is clamped to the
+    raw range itself, so a starting step near that coupler's day bound is
+    already refused by the raw-counter check. A daily nested coupler keeps
+    the two bounds about eleven thousand steps apart. ``bind`` requires the
+    nested coupler's calendar and start date to match the outer's, so both
+    are ``"gregorian"``/``START_DATE``.
     """
     from tests.unit.test_nested_coupler import Counter
 
@@ -560,23 +555,16 @@ def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
         )
 
 
-def test_run_chunked_refuses_a_run_past_the_day_count_limit_on_365_day_too(tmp_path):
-    """Reproduction (jcm-878-clock finding 1): the day-count bound binds on ``"365_day"`` too.
+def test_run_chunked_refuses_a_run_past_the_day_count_limit_on_365_day(tmp_path):
+    """The Gregorian day-count bound binds on ``"365_day"``, below the raw-counter one.
 
-    An earlier version of `_max_safe_coupled_steps` checked this only on
-    `calendar == "gregorian"`, reasoning that `"365_day"`'s own
-    `year_fraction` never risks it (true, and still true: see
-    `jem.driver._day_count_limit`'s own docstring). But every coupler's
-    OUTPUT labels are proleptic Gregorian regardless of its own calendar
-    (`jem.base.component.TimeAxis`'s class docstring), so a `"365_day"`
-    coupler is exposed to exactly the same `gregorian_instant`-derived
-    int32 day-count limit through `TimeAxis.datetimes` -- and, before this
-    fix, nothing checked it there: a run whose raw step counter still fit
-    int32 (comfortably below `2**31 - 1`) could already be past the point
-    where `TimeAxis.datetimes` would write a wrapped, nonsense label (pinned
-    directly, with no need to integrate anything, by
-    `test_datetimes_wraps_a_365_day_axis_past_the_day_count_limit_if_unchecked`
-    in ``tests/unit/test_component.py``).
+    ``"365_day"``'s own ``year_fraction`` forms no day count, but every
+    coupler's output labels are proleptic Gregorian whatever its calendar
+    (`jem.base.component.TimeAxis`), so a ``"365_day"`` run is refused at
+    the same ``max_safe_record`` bound a ``"gregorian"`` one is -- a bound
+    that, from 2001 with a daily step, is stricter than the raw int32
+    counter's. `test_datetimes_refuses_a_step_whose_day_count_would_wrap_on_every_calendar`
+    in ``tests/unit/test_component.py`` pins that the label past it wraps.
     """
     from jem.base.calendar import max_safe_record
     from jem.driver import _max_safe_coupled_steps
@@ -786,27 +774,21 @@ def test_check_step_counters_accepts_an_ordinary_resume_of_a_nested_couplers_own
 
 
 def test_a_nested_gregorian_couplers_own_step_past_its_day_count_bound_gives_a_wrong_year_fraction():
-    """Reproduction (jcm-878-clock finding 2): a nested coupler's own step, out of lockstep, wraps ITS OWN clock.
+    """A nested coupler's own step past its own day-count bound gives a wrong ``year_fraction``.
 
-    `Coupler.step` builds the `CouplingTime` a nested coupler's components see
-    straight from `carry.step` (`Coupler.coupling_time`), with no per-call
-    bound to check -- `step` is traced (`CouplingTime._gregorian_year_fraction`'s
-    own docstring). A nested coupler's own step is not guaranteed to stay in
-    lockstep with the outer one (the same starting-carry freedom
-    `jem.driver._component_internal_counters`'s own docstring describes for
-    its raw counter), so it can already sit past ITS OWN day-count bound --
-    computed from its own coupling timestep and start date, exactly like the
-    outermost coupler's (`jem.driver._day_count_limit`) -- while comfortably
-    inside the shared raw int32 range every counter uses.
-
-    Shown here directly, through the real `year_fraction` a slab model reads
-    (rather than only through `_check_step_counters_fit_int32`'s refusal):
-    at `_day_count_limit(inner)` and one step later, `year_fraction` advances
-    by the normal ~1/365.25 daily increment; one step further -- 2 past the
-    bound, so already refused -- the SAME arithmetic (`gregorian_instant`)
-    wraps and `year_fraction` jumps BACKWARDS by about 20 times that normal
-    increment, because the real Gregorian year implicit in the step has
-    silently rolled from AD 5881580 to 3 BC.
+    `Coupler.step` builds the `CouplingTime` a nested coupler's components
+    see from that coupler's own ``carry.step``, which is not guaranteed to
+    stay in lockstep with the outer coupler's and so can sit past its own
+    day-count bound (`jem.driver._day_count_limit`, from its own coupling
+    timestep and start date) while well inside the raw int32 range. This
+    pins what goes wrong there, through the real ``year_fraction`` a slab
+    model reads: from `_day_count_limit(inner)` to the next step it advances
+    by the normal ~1/365.2425 daily increment, but one step further the
+    ``gregorian_instant`` arithmetic wraps and ``year_fraction`` jumps
+    backwards by many daily increments. The bound is taken at the END of a
+    step's interval,
+    so it is one step more conservative than ``year_fraction`` (the step's
+    start) alone needs.
     """
     from jem.driver import _STEP_INT32_MAX, _day_count_limit
 
@@ -818,62 +800,98 @@ def test_a_nested_gregorian_couplers_own_step_past_its_day_count_bound_gives_a_w
     fractions = [float(inner.coupling_time(step).year_fraction) for step in (limit, limit + 1, limit + 2)]
     normal_daily_step = 1.0 / 365.2425
 
-    # `limit -> limit + 1` (still within the bound `year_fraction`'s own,
-    # start-of-interval arithmetic needs): an ordinary, small, POSITIVE
-    # advance.
+    # `limit -> limit + 1`: both steps' starts still fit, an ordinary small
+    # positive advance.
     np.testing.assert_allclose(fractions[1] - fractions[0], normal_daily_step, atol=1e-4)
-    # `limit + 1 -> limit + 2` (past `_day_count_limit`, already refused by
-    # `_check_step_counters_fit_int32` below): a wrong, backwards jump, far
-    # larger in magnitude than one more ordinary daily step.
+    # `limit + 1 -> limit + 2`: the start of step `limit + 2` wraps, a wrong
+    # backwards jump far larger than one ordinary daily step.
     wrong_delta = fractions[2] - fractions[1]
     assert wrong_delta < 0
     assert abs(wrong_delta) > 10 * normal_daily_step
 
 
 def test_check_step_counters_refuses_a_run_that_wraps_a_nested_gregorian_couplers_own_day_count():
-    """A nested Gregorian coupler's own day-count bound is checked, not just its raw counter.
+    """A nested coupler's own step is checked against its own day-count bound, exactly at the edge.
 
-    Reproduces jcm-878-clock finding 2 at the level of the actual up-front
-    refusal: `daily_nested_gregorian_coupler`'s `inner` is chosen so that its
-    own `_day_count_limit` sits far below the shared raw int32 range (unlike
-    `doubly_nested_coupler`'s hourly `mid`, whose fine timestep pushes that
-    bound up to coincide with the raw range -- see that fixture's own
-    docstring), so a starting `inner.step` comfortably inside the raw range
-    can still be past ITS OWN day-count bound, exactly as the wrong
-    `year_fraction` reproduction above demonstrates numerically.
+    `daily_nested_gregorian_coupler`'s ``inner`` has a day-count bound far
+    below the raw int32 range, so a starting ``inner.step`` comfortably
+    inside the raw range can still take it past its own day-count bound.
+    The bound is on the last step ``inner`` dates in the run -- one short of
+    the step it leaves in the carry, since the step is dated before it is
+    incremented -- the same convention the outermost coupler's check applies
+    to ``total_steps - 1``.
     """
     from jem.driver import _STEP_INT32_MAX, _check_step_counters_fit_int32, _day_count_limit
 
     coupler = daily_nested_gregorian_coupler()
     inner_limit = _day_count_limit(coupler.components["inner"])
     rate = 1  # `inner` runs 1:1 with the (also daily) outer coupler.
-    # Chosen so the boundary is exact: `starting_counter + 10 * rate ==
-    # inner_limit` precisely, the same construction the raw-counter version
-    # of this test (`test_check_step_counters_refuses_a_run_that_wraps_a_
-    # nested_couplers_own_step`) uses.
-    starting_counter = inner_limit - 10 * rate
+    # Chosen so the last step `inner` dates in a 10-step run,
+    # `starting_counter + 10 * rate - 1`, is exactly `inner_limit`.
+    starting_counter = inner_limit - 10 * rate + 1
     assert starting_counter + 10 * rate < _STEP_INT32_MAX  # sanity: the raw counter is not what binds here
 
     def carries_with_inner_step(value):
         carry = coupler.initialize()
         return dict(carry.components, inner=carry.components["inner"].replace(step=jnp.int32(value)))
 
-    # `starting_counter + 10 * rate == inner_limit` exactly: fine.
+    # The last dated step is `inner_limit` exactly: fine.
     _check_step_counters_fit_int32(coupler, 0, 10, carries_with_inner_step(starting_counter))
     with pytest.raises(ValueError, match="own step counter \\(this is itself a nested Coupler\\)"):
-        # One step past `inner_limit`: refused, even though the raw int32
-        # counter (checked by `test_check_step_counters_refuses_a_run_that_
-        # wraps_a_nested_couplers_own_step`) is nowhere near overflowing.
+        # The last dated step is one past `inner_limit`: refused, with the
+        # raw int32 counter nowhere near overflowing.
         _check_step_counters_fit_int32(coupler, 0, 10, carries_with_inner_step(starting_counter + 1))
 
 
-def test_check_step_counters_accepts_an_ordinary_resume_of_a_nested_gregorian_couplers_own_day_count():
-    """An ordinary (lockstep) resume is unaffected by the new day-count check.
+def test_check_step_counters_checks_a_doubly_nested_couplers_own_day_count():
+    """A coupler nested two levels deep is checked against its own day-count bound too.
 
-    The counterpart of the refusal above: `inner`'s own step, resumed exactly
-    where an uninterrupted run would have left it (`first_step * rate`, well
-    under its own day-count bound for any realistic `first_step`), must not
-    be refused just because its day count is now checked too.
+    ``deep`` sits inside ``inner``, which sits inside the outermost coupler,
+    all daily and 1:1. Only ``deep``'s own step is moved out of lockstep, to
+    the exact edge of its own day-count bound and then one past it, so the
+    refusal can only come from the recursion reaching ``deep``'s own entry.
+    """
+    from tests.unit.test_nested_coupler import Counter
+
+    from jem.driver import _check_step_counters_fit_int32, _day_count_limit
+
+    day = jdt.to_timedelta(1, "day")
+    deep = Coupler(
+        {"leaf": Counter("leaf")}, {}, coupling_timestep=day,
+        start_date=START_DATE, calendar="gregorian", name="deep",
+    )
+    inner = Coupler(
+        {"deep": deep, "mid_leaf": Counter("mid_leaf")}, {}, coupling_timestep=day,
+        start_date=START_DATE, calendar="gregorian", name="inner",
+    )
+    coupler = Coupler(
+        {"inner": inner, "other": Counter("other")}, {}, coupling_timestep=day,
+        start_date=START_DATE, calendar="gregorian",
+    )
+    deep_limit = _day_count_limit(deep)
+
+    def carries_with_deep_step(value):
+        carry = coupler.initialize()
+        inner_carry = carry.components["inner"]
+        deep_carry = inner_carry.components["deep"].replace(step=jnp.int32(value))
+        inner_carry = inner_carry.replace(
+            components=dict(inner_carry.components, deep=deep_carry)
+        )
+        return dict(carry.components, inner=inner_carry)
+
+    # A 10-step run whose last dated `deep` step is exactly `deep_limit`.
+    at_edge = deep_limit - 10 + 1
+    _check_step_counters_fit_int32(coupler, 0, 10, carries_with_deep_step(at_edge))
+    with pytest.raises(ValueError, match="'inner/deep'"):
+        _check_step_counters_fit_int32(coupler, 0, 10, carries_with_deep_step(at_edge + 1))
+
+
+def test_check_step_counters_accepts_an_ordinary_resume_of_a_nested_gregorian_couplers_own_day_count():
+    """An ordinary (lockstep) resume of a nested coupler passes its own day-count check.
+
+    The counterpart of the refusal above: ``inner``'s own step, resumed
+    exactly where an uninterrupted run would have left it (``first_step *
+    rate``, far below its own day-count bound), is accepted.
     """
     from jem.driver import _check_step_counters_fit_int32
 
@@ -1010,21 +1028,17 @@ def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment()
     COMPUTED at -- it is one less than that, so the resulting ``carry.step``
     (the computed step's index plus one) is itself still representable.
 
-    ``"365_day"`` DOES also carry a calendar-derived (day-count) limit now --
-    its output labels are always proleptic Gregorian regardless of its own
-    calendar (`jem.base.component.TimeAxis`'s own docstring; see
-    `jem.driver._day_count_limit`) -- so this test starts the coupler at the
-    Unix epoch (`start_days == 0`) specifically to keep that limit from
-    confounding the one thing under test here: at `start_days == 0` and
-    `offset_seconds == record_seconds` (a whole day, this coupler's own
-    coupling timestep), `max_safe_record`'s day budget and the raw counter's
-    own `2**31 - 2` land on exactly the same number (asserted below, not
-    assumed), so this coupler's raw-counter reservation is what actually
-    binds `limit`, cleanly isolating it.
+    Every calendar also carries the Gregorian day-count limit
+    (`jem.driver._day_count_limit`: output labels are proleptic Gregorian
+    whatever the calendar), so this test starts the coupler at the Unix
+    epoch (`start_days == 0`) to keep that limit from confounding the one
+    thing under test here: at `start_days == 0` and a whole-day
+    `offset_seconds == record_seconds`, `max_safe_record`'s bound and the
+    raw counter's `2**31 - 2` are the same number (asserted below, not
+    assumed), so the raw-counter reservation is what binds `limit`.
     `test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit` and
-    `test_run_chunked_refuses_a_run_past_the_day_count_limit_on_365_day_too`
-    use a realistic, non-epoch start date and exercise the day-count bound
-    itself, on ``"gregorian"`` and ``"365_day"`` respectively.
+    `test_run_chunked_refuses_a_run_past_the_day_count_limit_on_365_day`
+    exercise the day-count bound itself from a realistic start date.
     """
     from jem.base.calendar import max_safe_record
     from jem.driver import _max_element_rate, _max_safe_coupled_steps
@@ -1052,15 +1066,12 @@ def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment()
     assert limit + 1 <= 2**31 - 1  # the post-increment `carry.step` still fits
 
 
-def test_run_chunked_accepts_a_1000_year_365_day_daily_run():
-    """A realistic run: checking the day-count bound on ``"365_day"`` too is additive, not a new obstacle.
+def test_check_step_counters_accepts_a_1000_year_365_day_daily_run():
+    """A realistic ``"365_day"`` run is far inside both int32 bounds and is accepted.
 
-    `jem.driver._day_count_limit` is now checked for every calendar (finding
-    1 above), so this pins that the change protects a run without getting in
-    the way of one that was always safe: 1000 years of daily coupled steps on
-    the fixed calendar (365,000 of them) is nowhere near either int32 limit --
-    the raw counter's or the day-count one -- from a realistic 2001 start
-    date.
+    1000 years of daily coupled steps on the fixed calendar (365,000 of
+    them) from 2001 is nowhere near the raw counter's limit or the Gregorian
+    day-count one, both of which apply on ``"365_day"``.
     """
     from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
 

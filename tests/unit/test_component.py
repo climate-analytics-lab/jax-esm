@@ -264,23 +264,27 @@ def test_datetimes_gives_an_exact_half_second_midpoint():
     )
 
 
-def test_datetimes_wraps_a_365_day_axis_past_the_day_count_limit_if_unchecked():
-    """Reproduction: an unchecked int32 day count wraps a ``"365_day"`` axis's labels.
+def test_datetimes_refuses_a_step_whose_day_count_would_wrap_on_every_calendar():
+    """A step the int32 step counter holds, but whose date wraps, is refused on both calendars.
 
-    `TimeAxis`'s own labels are always proleptic Gregorian regardless of
-    ``self.calendar`` (the class docstring), so this axis's ``"365_day"``
-    calendar gives it no protection at all: at a step count that a raw int32
-    step COUNTER still holds exactly (`_STEP_INT32_MAX == 2**31 - 1`), the
-    Gregorian day count the label is built from has already wrapped, giving a
-    label almost six million years in the PAST instead of continuing forward
-    from 2001 -- the exact failure this codebase's own "jcm-878-clock"
-    finding describes. This pins the wrap itself, on a `TimeAxis` built with
-    ``calendar="gregorian"`` too, so the guard added below is not
-    accidentally scoped to one calendar only.
+    The labels are proleptic Gregorian whatever the axis's calendar is, so a
+    ``"365_day"`` axis is as exposed as a ``"gregorian"`` one. At
+    ``2**31 - 1`` daily steps from 2001 the step itself fits int32, but the
+    day count of the end of its interval does not: the same arithmetic,
+    ``gregorian_instant`` at the interval's end, wraps to a negative day
+    (a date millions of years before the start), and ``datetimes`` refuses
+    rather than write it.
     """
-    step_int32_max = 2**31 - 1  # the raw int32 range every step counter shares
+    from jem.base.calendar import gregorian_instant
+
+    step_int32_max = 2**31 - 1
     start = jdt.to_datetime("2001-01-01")
     dt = jdt.to_timedelta(1, "day")
+    end_days, _ = gregorian_instant(
+        jnp.int32(step_int32_max), 86_400, int(start.delta.days),
+        int(start.delta.seconds), offset_seconds=86_400,
+    )
+    assert int(end_days) < 0  # the day count this step would be labelled with wraps
     for calendar in ("365_day", "gregorian"):
         axis = TimeAxis(
             start_date=start, steps=np.array([step_int32_max], dtype=np.int64),
@@ -290,13 +294,13 @@ def test_datetimes_wraps_a_365_day_axis_past_the_day_count_limit_if_unchecked():
             axis.datetimes()
 
 
-def test_datetimes_refuses_exactly_at_and_accepts_one_below_its_own_day_count_limit():
-    """The `TimeAxis` guard's own boundary is exact, on every calendar.
+def test_datetimes_accepts_exactly_at_and_refuses_one_past_its_day_count_limit():
+    """The bound is exact: the last safe step is labelled, the next is refused, on every calendar.
 
-    Mirrors `jem.driver`'s own "accepted at the limit, refused one past it"
-    pattern, but for the guard that lives in `TimeAxis.datetimes` itself (see
-    that method's own docstring for why it duplicates, rather than merely
-    relies on, `run_chunked`'s up-front check).
+    The last safe step's label is also checked against the exact day it
+    must fall on -- the midpoint of its interval, one day before the last
+    day an int32 day count holds -- so the accepted boundary is a correct
+    label, not merely an unrefused one.
     """
     from jem.base.calendar import max_safe_record
 
@@ -307,12 +311,13 @@ def test_datetimes_refuses_exactly_at_and_accepts_one_below_its_own_day_count_li
         dt_seconds, offset_seconds=dt_seconds,
         start_seconds=int(start.delta.seconds), start_days=int(start.delta.days),
     )
+    expected = np.datetime64(0, "ms") + np.timedelta64(2**31 - 2, "D") + np.timedelta64(12, "h")
     for calendar in ("365_day", "gregorian"):
         accepted = TimeAxis(
             start_date=start, steps=np.array([limit], dtype=np.int64),
             dt=dt, calendar=calendar,
         )
-        accepted.datetimes()  # at the limit: fine
+        assert accepted.datetimes()[0] == expected
 
         refused = TimeAxis(
             start_date=start, steps=np.array([limit + 1], dtype=np.int64),
@@ -320,6 +325,68 @@ def test_datetimes_refuses_exactly_at_and_accepts_one_below_its_own_day_count_li
         )
         with pytest.raises(ValueError, match="would wrap"):
             refused.datetimes()
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64, np.uint32, np.int16])
+def test_datetimes_checks_the_largest_step_of_any_integer_dtype(dtype):
+    """The bound is checked against the largest step, whatever integer dtype ``steps`` has.
+
+    The step past the bound is placed in the middle of the array, so a check
+    that read only the first or last step would miss it.
+    """
+    from jem.base.calendar import max_safe_record
+
+    start = jdt.to_datetime("2001-01-01")
+    dt = jdt.to_timedelta(1, "day")
+    limit = max_safe_record(
+        86_400, offset_seconds=86_400,
+        start_seconds=int(start.delta.seconds), start_days=int(start.delta.days),
+    )
+    if limit + 1 > np.iinfo(dtype).max:
+        # A dtype too narrow to hold a step past the bound cannot ask for one;
+        # its own largest step is labelled.
+        steps = np.array([0, np.iinfo(dtype).max, 1], dtype=dtype)
+        assert len(TimeAxis(start, steps, dt, "365_day").datetimes()) == 3
+        return
+    steps = np.array([0, limit + 1, 1], dtype=dtype)
+    with pytest.raises(ValueError, match="would wrap"):
+        TimeAxis(start, steps, dt, "365_day").datetimes()
+
+
+def test_datetimes_of_an_empty_axis_is_empty():
+    """An axis with no records has no step to bound, and returns no labels."""
+    axis = TimeAxis(
+        start_date=jdt.to_datetime("2001-01-01"), steps=np.array([], dtype=np.int64),
+        dt=jdt.to_timedelta(1, "day"), calendar="365_day",
+    )
+    assert len(axis.datetimes()) == 0
+
+
+def test_datetimes_is_exact_at_the_bound_for_a_start_before_the_epoch():
+    """A pre-epoch start labels its last safe step exactly, although its relative day count passes int32.
+
+    From 1850 with a two-day step, the last step
+    :func:`jem.base.calendar.max_safe_record` allows ends more than
+    ``2**31 - 1`` days after the start while its absolute date still fits
+    int32. ``datetimes`` bounds the absolute date only, so this step must be
+    both accepted and labelled with the exact day -- the midpoint of its
+    interval, one day before the last day an int32 day count holds.
+    """
+    from jem.base.calendar import max_safe_record
+
+    start = jdt.to_datetime("1850-01-01")
+    dt = jdt.to_timedelta(2, "day")
+    start_days = int(start.delta.days)
+    limit = max_safe_record(
+        2 * 86_400, offset_seconds=2 * 86_400,
+        start_seconds=int(start.delta.seconds), start_days=start_days,
+    )
+    assert 2 * (limit + 1) > 2**31 - 1  # the relative day count is past int32
+    labels = TimeAxis(start, np.array([limit]), dt, "gregorian").datetimes()
+    expected_days = start_days + 2 * limit + 1
+    assert labels[0] == np.datetime64(0, "ms") + np.timedelta64(expected_days, "D")
+    with pytest.raises(ValueError, match="would wrap"):
+        TimeAxis(start, np.array([limit + 1]), dt, "gregorian").datetimes()
 
 
 def test_time_axis_attrs_is_a_fresh_dict_per_access():

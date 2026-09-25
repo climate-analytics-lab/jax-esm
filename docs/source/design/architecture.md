@@ -382,30 +382,27 @@ to advance no faster than the calls it receives, from zero (rate 1, counter
 protected — the same as a component that skips `SupportsBind`'s
 clock-agreement check.
 
-That check (`jem.driver._check_step_counters_fit_int32`) actually refuses a
-run against TWO different kinds of int32 limit for each clock in the coupled
-hierarchy, not just one: the raw counter range described above, and a second,
-independent **Gregorian day-count limit** (`jem.driver._day_count_limit`, via
-`jem.base.calendar.max_safe_record`) that a step feeds through
-`gregorian_instant` on its way to becoming a real calendar date. That second
-limit is checked **on every calendar, not only `"gregorian"`**: a component's
-output labels (`TimeAxis.datetimes`, above) are proleptic Gregorian regardless
-of the run's own calendar, so a `"365_day"` coupler is exposed to exactly the
-same day-count limit through its OUTPUT that a `"gregorian"` one is exposed to
-through `CouplingTime.year_fraction` — checking only the calendar-dependent
-path would have let a `"365_day"` run whose raw step counter still fit int32
-already be labelling records with a wrapped, nonsense date. It is checked for
-the OUTERMOST coupler's own step (folded into the same limit
-`_max_safe_coupled_steps` returns) and, separately, for each NESTED coupler's
-own step (`_component_internal_counters`), because a nested coupler's own
-step is not guaranteed to stay in lockstep with the outer one — the same
-starting-carry freedom that makes its raw counter need its own entry — so its
-day-count exposure has to be checked against its own actual starting value
-too, not inferred from the outer coupler's. `TimeAxis.datetimes` itself also
-carries the identical check directly, as the guarantee that holds even for a
-caller that reaches it without going through `run_chunked` at all (a
-hand-built `TimeAxis`, or `Coupler.to_xarray()` called directly on a
-trajectory driven some other way).
+That check (`jem.driver._check_step_counters_fit_int32`) refuses a run
+against two kinds of int32 limit for each clock in the coupled hierarchy: the
+raw counter range described above, and the **Gregorian day-count limit**
+(`jem.driver._day_count_limit`, via `jem.base.calendar.max_safe_record`) of
+the proleptic Gregorian date a step is turned into. The day-count limit
+applies **on every calendar**: output labels (`TimeAxis.datetimes`, above) are
+proleptic Gregorian whatever the run's calendar is, and the `CouplingTime` a
+coupler hands its components carries the start date, so a component may date
+its step on the Gregorian calendar itself. On `"gregorian"`,
+`CouplingTime.year_fraction` dates every step as well; on `"365_day"` it forms
+no day count. The limit is checked for the outermost coupler's own step
+(folded into the limit `_max_safe_coupled_steps` returns) and, separately, for
+each nested coupler's own step (`_component_internal_counters`), because a
+nested coupler's step is not guaranteed to stay in lockstep with the outer one
+— the same starting-carry freedom that gives its raw counter its own entry.
+Both bound the last step a clock dates, with the end of that step's interval
+as the instant that must fit, which covers every instant within a step that
+anything dates (its start, a sub-step inside it, its midpoint label).
+`TimeAxis.datetimes` refuses a step past the same bound itself, which covers a
+caller that labels output without going through `run_chunked` (a hand-built
+`TimeAxis`, or `Coupler.to_xarray()` on a trajectory driven directly).
 
 `step` must be a pure function of `(carry, time)` and must return a carry with
 exactly the pytree structure, shapes and dtypes it received, or `lax.scan`

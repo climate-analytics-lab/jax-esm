@@ -696,27 +696,21 @@ Breaking changes are marked; everything else is additive.
     and the coupler's from ever disagreeing.
 
     `jem.driver.run_chunked` refuses, up front and before anything is
-    compiled, a run whose steps would ever push that day-count limit past its
-    bound (`_check_step_counters_fit_int32` / `_max_safe_coupled_steps`) —
-    for the outermost coupler's own clock, and, separately, for each NESTED
-    coupler's own clock against its own starting step, coupling timestep and
-    start date (a nested coupler's own step is not guaranteed to stay in
-    lockstep with the outer one, so this cannot simply reuse the outer
-    check). **This bound is checked on every calendar, not only
-    `"gregorian"`**: a component's output labels
-    (`jem.base.component.TimeAxis.datetimes`) are proleptic Gregorian
-    regardless of the run's own calendar, so a `"365_day"` coupler is exposed
-    to the same int32 day-count limit through its OUTPUT even though its own
-    `year_fraction` has no such risk on that calendar. `TimeAxis.datetimes`
-    itself now also carries the identical check directly, as the guarantee
-    that holds even for a caller that reaches it without going through
-    `run_chunked` at all (a hand-built `TimeAxis`, or `Coupler.to_xarray()`
-    called directly on a trajectory driven some other way). An earlier
-    version of this refusal checked the day-count bound only for the
-    outermost coupler and only on `"gregorian"`, which both a `"365_day"` run
-    near the raw counter limit and an out-of-lockstep nested `"gregorian"`
-    coupler could slip past — see `jem.driver._day_count_limit`'s own
-    docstring for the exact mechanism.
+    compiled, a run that would date a step past that limit
+    (`_check_step_counters_fit_int32`, `_max_safe_coupled_steps`,
+    `_day_count_limit`). The limit is checked **on every calendar**, since
+    output labels (`jem.base.component.TimeAxis.datetimes`) are proleptic
+    Gregorian whatever the run's calendar is: a `"365_day"` run is bounded
+    by it just as a `"gregorian"` one is, although its own `year_fraction`
+    forms no day count. It is checked for the outermost coupler's clock and,
+    separately, for each nested coupler's own clock (its own start date,
+    coupling timestep and starting step), because a nested coupler's step is
+    not guaranteed to stay in lockstep with the outer one. Both checks bound
+    the last step a clock dates, the end of whose interval must fit.
+    `TimeAxis.datetimes` refuses a step past the same bound itself, which
+    covers a caller that labels output without going through `run_chunked`
+    (a hand-built `TimeAxis`, or `Coupler.to_xarray()` on a trajectory
+    driven directly).
   - **An averaged output record is now labelled at its interval's MIDPOINT**,
     not its end (jax-gcm's own convention change). `TimeAxis.datetimes` — which
     labels every non-JCM component's output so it merges with the
