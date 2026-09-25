@@ -286,16 +286,20 @@ def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
     phase (`CouplingTime.year_fraction`) with no error. This coupler has no
     sub-stepped element, so `_max_safe_coupled_steps` here is exactly
     `jem.base.calendar.max_safe_record` of its own coupling timestep and
-    start date -- checked directly, so this test does not have to construct
-    (or wait out) a multi-million-year run to prove the refusal fires
-    exactly where that limit is.
+    start date, checked at `offset_seconds=dt_seconds` (round 3, finding 5:
+    conservative enough to cover every offset within one record a caller
+    downstream -- a midpoint or end label -- actually uses) -- checked
+    directly, so this test does not have to construct (or wait out) a
+    multi-million-year run to prove the refusal fires exactly where that
+    limit is.
     """
     from jem.base.calendar import max_safe_record
     from jem.driver import _max_safe_coupled_steps
 
     start = coupler.start_date
+    dt_seconds = int(round(coupler.dt_seconds))
     expected = max_safe_record(
-        int(round(coupler.dt_seconds)),
+        dt_seconds, offset_seconds=dt_seconds,
         start_seconds=int(start.delta.seconds),
         start_days=int(start.delta.days),
     )
@@ -315,6 +319,52 @@ def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
             coupler, total_time=f"{limit + 2} days", chunk=f"{limit + 2} days",
             output_dir=tmp_path,
         )
+
+
+def test_max_safe_coupled_steps_day_limit_covers_an_end_of_interval_offset(coupler):
+    """2026-09 review, round 3, finding 5: the day limit must cover more than offset 0.
+
+    `_max_safe_coupled_steps` checked the day-count limit at ``offset_seconds
+    = 0`` -- the record's own START -- but `jem.accumulate`'s gregorian
+    monthly-mean rules bin at the record's MIDPOINT
+    (``offset_seconds=dt_seconds // 2``), and a caller is free to label at the
+    record's END too (``offset_seconds=dt_seconds``). Since
+    `max_safe_record`'s bound only ever shrinks as ``offset_seconds`` grows, a
+    check at offset 0 can accept a coupled-step count that a midpoint- or
+    end-labelled caller downstream would silently get wrong: this coupler's
+    own last-safe-at-offset-0 record already wraps to a negative day count
+    once `gregorian_instant` is asked for its END instead
+    (``offset_seconds=dt_seconds``).
+    """
+    from jem.base.calendar import gregorian_instant, max_safe_record
+    from jem.driver import _max_safe_coupled_steps
+
+    start = coupler.start_date
+    dt_seconds = int(round(coupler.dt_seconds))
+    start_seconds = int(start.delta.seconds)
+    start_days = int(start.delta.days)
+    offset_0_bound = max_safe_record(
+        dt_seconds, start_seconds=start_seconds, start_days=start_days,
+    )
+    # The reproduction: at offset 0's own bound, the END of that same
+    # interval (one full `dt_seconds` later) already wraps.
+    end_days, _ = gregorian_instant(
+        jnp.int32(offset_0_bound), dt_seconds, start_days, start_seconds,
+        offset_seconds=dt_seconds,
+    )
+    assert int(end_days) < 0  # wrapped -- confirms this is a genuine gap
+
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit < offset_0_bound  # the fix must be strictly more conservative
+    # Checking at `offset_seconds=dt_seconds` (a full record later than record
+    # 0's own start) is exactly one record's worth stricter here, since
+    # `max_safe_record`'s bound moves by a whole record for a whole
+    # `record_seconds` of extra offset.
+    end_of_interval_bound = max_safe_record(
+        dt_seconds, offset_seconds=dt_seconds,
+        start_seconds=start_seconds, start_days=start_days,
+    )
+    assert limit == end_of_interval_bound
 
 
 def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):

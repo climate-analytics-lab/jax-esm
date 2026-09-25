@@ -990,6 +990,24 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
       1`` -- so the ``min`` of the two can never exceed that ceiling either,
       whichever one binds.
 
+      It DOES need to be checked at ``offset_seconds = coupler``'s own
+      ``dt_seconds``, not ``0``: this bound is what stands between a run and
+      a silently wrong ``gregorian_instant`` anywhere downstream (this
+      module's own ``year_fraction``, but also every consumer in
+      :mod:`jem.accumulate`, none of which resolve the record at its own
+      START). ``jem.accumulate``'s gregorian monthly-mean rules resolve a
+      record at its MIDPOINT (``offset_seconds = dt_seconds // 2``), and a
+      caller is free to label at the record's END too (``offset_seconds =
+      dt_seconds``, one whole record later than the start) --
+      :func:`~jem.base.calendar.max_safe_record`'s bound only ever *shrinks*
+      as ``offset_seconds`` grows, so checking at ``0`` can accept a coupled
+      step count that a midpoint- or end-offset caller downstream would
+      silently get wrong (2026-09 review, round 3, finding 5). Checking at
+      ``dt_seconds`` -- the largest offset any offset *within one record* can
+      be -- is conservative enough to cover every smaller offset a caller
+      anywhere in this codebase actually uses, present or future, without
+      having to know what that offset is.
+
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
@@ -1009,8 +1027,10 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
     if coupler.calendar != "gregorian":
         return counter_limit
     start = coupler.start_date
+    dt_seconds = int(round(coupler.dt_seconds))
     day_limit = max_safe_record(
-        int(round(coupler.dt_seconds)),
+        dt_seconds,
+        offset_seconds=dt_seconds,
         start_seconds=int(start.delta.seconds),
         start_days=int(start.delta.days),
     )
