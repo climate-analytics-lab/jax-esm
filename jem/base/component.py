@@ -472,9 +472,9 @@ class CouplingTime:
         calendar (identified by ``days_per_year == 365.2425``, the same
         sentinel :func:`seconds_since_new_year` tests) to compute the exact
         Gregorian day-of-year and leap-year status of this step, via
-        :mod:`jem.base.calendar`. The ``365_day``/``360_day`` calendars do not
-        read these fields at all -- their year has no leap day, so the
-        existing modular-arithmetic path below is already exact.
+        :mod:`jem.base.calendar`. The ``365_day`` calendar does not read
+        these fields at all -- its year has no leap day, so the existing
+        modular-arithmetic path below is already exact.
 
     """
 

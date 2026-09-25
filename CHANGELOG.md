@@ -780,7 +780,7 @@ Breaking changes are marked; everything else is additive.
   **every** month boundary, which is exactly the disagreement this reduction
   exists to prevent (the whole point of computing it in-scan rather than
   telling users to `groupby` the written output themselves). The bin rule
-  therefore moved to match, for `"365_day"`/`"360_day"` (`jem.accumulate
+  therefore moved to match, for `"365_day"` (`jem.accumulate
   ._midpoint_month_rule`, replacing `_variable_window_rule` for this caller)
   as well as for the newly-supported `"gregorian"` (`_gregorian_month_rule`).
   Consequences, all documented in `monthly_mean`'s own docstring:

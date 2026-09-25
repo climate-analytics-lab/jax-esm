@@ -553,8 +553,8 @@ class Coupler:
         # static fields (see that property's docstring), and every
         # `CouplingTime` this coupler builds -- `coupling_time` and
         # `coupling_time_at_substep` -- carries the same pair regardless of
-        # calendar, since the ``365_day``/``360_day`` branch of
-        # `year_fraction` never reads them.
+        # calendar, since the ``365_day`` branch of `year_fraction` never
+        # reads them.
         self._start_day = int(np.asarray(start_date.delta.days))
         self._start_second = int(np.asarray(start_date.delta.seconds))
 

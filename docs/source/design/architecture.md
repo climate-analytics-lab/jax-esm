@@ -1337,12 +1337,15 @@ PR 878 moved `TimeAxis`'s own label to the midpoint without this reduction's
 bin rule following — so for one migration round the two genuinely disagreed at
 every month boundary, which the review caught and fixed rather than leaving as
 a documented gotcha. Two implementations share the underlying arithmetic:
-`jem.accumulate._midpoint_month_rule` for the fixed-length calendars
-(`365_day`/`360_day`, a static table of month boundaries, compared in **days**
+`jem.accumulate._midpoint_month_rule` for the fixed-length calendar
+(`365_day` — the only fixed-length calendar a `Coupler` accepts; `month_lengths`
+can still build a 360-day table, but there is no `"360_day"` calendar name
+anywhere in jem — a static table of month boundaries, compared in **days**
 — not seconds, since a sequential accumulator's own boundary-seconds period
 can itself run well past `2**31` for a multi-decade run — against a record's
-own midpoint via `jem.base.calendar.gregorian_instant`'s int32-safe block
-decomposition) and `_gregorian_month_rule` for `gregorian` (below), which uses
+own midpoint via `jem.base.calendar.gregorian_instant`'s int32-safe limb
+(schoolbook) multiply-then-divide) and `_gregorian_month_rule` for `gregorian`
+(below), which uses
 `gregorian_instant` directly. (This replaced a genuinely different,
 smaller-range decomposition in a 2026-09 fix — see `gregorian_instant`'s own
 docstring's **History** note and `max_safe_record` for the current, tested
@@ -1370,10 +1373,10 @@ reason to do calendar arithmetic in jit for it): the calendar month of the
 run's first and last records' own midpoints,
 `(last.year - first.year) * 12 + (last.month - first.month) + 1`.
 
-Separately, on the fixed calendars (`365_day`/`360_day`) only, the *bins'*
+Separately, on the fixed calendar (`365_day`) only, the *bins'*
 calendar can still disagree with the *labels'*: the labels are always
-proleptic Gregorian (above, and jax-gcm#449), while these two calendars' bins
-are their own fixed table's months. On a `365_day` run started on 1 January
+proleptic Gregorian (above, and jax-gcm#449), while this calendar's bins
+are its own fixed table's months. On a `365_day` run started on 1 January
 2000 — where the shipped examples start — the record whose midpoint is the
 real Gregorian leap day, `2000-02-29T12:00`, is one the model's own fixed
 calendar (no 29 February) calls 1 March and bins into March. `groupby
@@ -1506,17 +1509,22 @@ which the record-count conversion above cannot express (it only supports a
 whole-record shift).
 
 **`monthly_mean`'s own bin rules.** `_midpoint_month_rule` (the fixed
-calendars, `365_day`/`360_day`) compares a record's midpoint directly in
-**seconds** rather than record counts — `record_mod * record_seconds +
-record_seconds // 2 + offset_seconds`, reduced modulo the period, then a
-`searchsorted` against the same seconds-boundary table — which needs no
-record-count conversion and stays int32-safe because `record_mod` is already
-bounded to one period before it is ever multiplied. `_gregorian_month_rule`
-(`gregorian`) needs no period or table at all: `jem.base.calendar
-.gregorian_instant` reduces the traced record counter modulo a small static
-period (the same `gcd`/`P`/`D` decomposition item B's exact `year_fraction`
-uses) to get the record's midpoint as an exact (days, seconds) pair, and
-`gregorian_ymd_from_days` reads its real calendar month directly off that.
+calendar, `365_day`) compares a record's midpoint in **days**, not
+seconds or record counts (2026-09 migration review, round 2: comparing in
+seconds, as this rule first did, overflows int32 for a sequential
+accumulator's own boundary-seconds period past about 68 simulated years,
+regardless of the coupling step) — `jem.base.calendar.gregorian_instant`
+gives the record's own (day, second) exactly, and a `searchsorted` against
+the pattern's own boundaries, rounded up to the day (so a pattern's
+occasionally fractional-day last boundary can never place a record past the
+last bin), decides the bin; the second is not needed, since every month
+boundary but that possibly-fractional last one falls exactly at midnight.
+`_gregorian_month_rule` (`gregorian`) needs no period or table at all:
+`jem.base.calendar.gregorian_instant` — the same limb (schoolbook)
+multiply-then-divide, exact for any traced record counter an int32 can hold,
+not merely one reduced modulo some period first — gets the record's midpoint
+as an exact (days, seconds) pair, and `gregorian_ymd_from_days` reads its
+real calendar month directly off that.
 
 **A coupled step is not always one record.** A component the workflow runs
 *n* times per coupled step emits *n* records, each with its own sub-interval,

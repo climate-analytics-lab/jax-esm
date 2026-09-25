@@ -339,8 +339,12 @@ def _midpoint_month_rule(
 ) -> Callable[[jnp.ndarray, int], jnp.ndarray]:
     """Return :func:`monthly_mean`'s ``bin_of_record`` rule, binning by MIDPOINT.
 
-    This is the fixed-calendar (``365_day``/``360_day``) counterpart of
-    :func:`_gregorian_month_rule`, and exists as a separate function from
+    This is the fixed-calendar (``365_day`` -- the only fixed-length
+    calendar a :class:`~jem.base.coupler.Coupler` actually accepts; see
+    :func:`month_lengths`'s own docstring for the ``360_day`` *table*, which
+    this rule's arithmetic is agnostic to but which is not a calendar name
+    anywhere in jem) counterpart of :func:`_gregorian_month_rule`, and
+    exists as a separate function from
     :func:`_variable_window_rule` -- rather than a third mode of that one --
     because the two do genuinely different arithmetic. A record's *label* is
     now its interval's midpoint (:class:`~jem.base.component.TimeAxis`'s
@@ -511,8 +515,8 @@ def _gregorian_month_rule(
     construction*, at every boundary including a 29 February, rather than
     only when the run's labels happen to agree with a fixed model-calendar
     table (the residual mismatch :func:`monthly_mean`'s **Leap days** section
-    describes for the ``365_day``/``360_day`` calendars, which do not have
-    this luxury because they are not the calendar the labels are written in).
+    describes for the ``365_day`` calendar, which does not have this luxury
+    because it is not the calendar the labels are written in).
 
     Parameters
     ----------
@@ -1297,8 +1301,8 @@ def monthly_mean(
     with a ``groupby`` of its own coupler's written output at every month
     boundary -- exactly the disagreement this rebinding exists to prevent --
     so the bin rule moved to match, for **every** calendar
-    (``"365_day"``/``"360_day"`` included, not only the newly-supported
-    ``"gregorian"``). Bin *membership* near a month boundary therefore differs
+    (``"365_day"`` included, not only the newly-supported ``"gregorian"``).
+    Bin *membership* near a month boundary therefore differs
     from a pre-migration run: a coupled step whose interval spans a boundary
     (only possible when the coupling step is not itself much shorter than a
     month, e.g. the daily case never spans one) is now counted by which half
@@ -1313,8 +1317,8 @@ def monthly_mean(
     :func:`jem.base.calendar.gregorian_instant` for exactly where this
     floor happens on each calendar.
 
-    **Leap days on the fixed calendars.** ``"365_day"`` and ``"360_day"`` bin
-    against their own fixed month-length table, which is not the calendar
+    **Leap days on the fixed calendar.** ``"365_day"`` bins
+    against its own fixed month-length table, which is not the calendar
     :meth:`~jem.base.component.TimeAxis.datetimes` labels with -- JEM writes
     every label as proleptic Gregorian whatever the model calendar is (JCM's
     convention, kept so a slab's output and the atmosphere's merge on one time
@@ -1326,14 +1330,14 @@ def monthly_mean(
     reduction's own bins part company by up to a few records near each
     affected month boundary, though both still hold the same *total* of
     records across the run. This residual mismatch is a property of the
-    ``"365_day"``/``"360_day"`` calendars specifically -- their fixed table is
+    ``"365_day"`` calendar specifically -- its fixed table is
     not the calendar the labels are ever written in -- and does **not** arise
     on ``"gregorian"``, where the bins and the labels are now the same real
     calendar (see the paragraph above): the midpoint-vs-end rebinding closes
     the boundary-convention half of the old mismatch for every calendar, and
     using the real Gregorian calendar for ``"gregorian"`` runs closes the
     other (leap-day) half for the calendar essentially every atmosphere-coupled
-    run now uses. Emitting calendar-consistent labels on the fixed calendars
+    run now uses. Emitting calendar-consistent labels on the fixed calendar
     too -- ``cftime`` no-leap dates -- remains tracked as #118 and is
     unaffected by any of this.
 
@@ -1394,7 +1398,7 @@ def monthly_mean(
     before midnight count in January and the one covering ``23:00-00:00``
     counts in February -- as ``groupby("time.month")`` of the written output
     does, exactly, on ``"gregorian"``, or up to the residual mismatch in
-    **Leap days on the fixed calendars** above on ``"365_day"``/``"360_day"``.
+    **Leap days on the fixed calendar** above on ``"365_day"``.
     :func:`fold_records` folds that axis away,
     weighting each slot by its own count, when the plain monthly mean is what
     was wanted::
@@ -1437,10 +1441,10 @@ def monthly_mean(
         ``jem.base.component.parse_duration_days`` string (``"10 years"``,
         ``"400 days"``) or a number of days, parsed on the coupler's calendar.
         Must correspond to a whole number of coupling steps (as
-        :func:`windowed_mean`'s own ``total_time`` does). On ``"365_day"``/
-        ``"360_day"`` the bin count is the number of distinct calendar months
-        the run's record midpoints touch, computed from the fixed month-length
-        table; on ``"gregorian"`` it is computed on the **host**, with
+        :func:`windowed_mean`'s own ``total_time`` does). On ``"365_day"``
+        the bin count is the number of distinct calendar months the run's
+        record midpoints touch, computed from the fixed month-length table;
+        on ``"gregorian"`` it is computed on the **host**, with
         Python's own ``datetime`` (exact, and calendar arithmetic has no place
         in a bin-*count*, which is static): the calendar month of the run's
         first and last record's own midpoints, ``(last.year - first.year) *
@@ -1466,11 +1470,12 @@ def monthly_mean(
     ------
     ValueError
         If both ``n_months`` and ``total_time`` are given, if ``n_months`` is
-        not a positive integer, if ``total_time`` is not positive or (on
-        ``"gregorian"``) not a whole number of coupling steps, or -- on
-        ``"365_day"``/``"360_day"`` only -- if the coupling timestep does not
-        divide the year exactly, since the month of a record there is found
-        from the step counter reduced modulo a whole number of steps per
+        not a positive integer, if ``total_time`` is not positive or not a
+        whole number of coupling steps (:func:`_whole_coupling_steps`,
+        checked on every calendar, not only ``"gregorian"``), or -- on
+        ``"365_day"`` only -- if the coupling timestep does not divide the
+        year exactly, since the month of a record there is found from the
+        step counter reduced modulo a whole number of steps per
         year. ``"gregorian"`` has no such restriction: a record's real
         calendar month is read directly off its exact date
         (:func:`_gregorian_month_rule`), which needs no period to reduce the
