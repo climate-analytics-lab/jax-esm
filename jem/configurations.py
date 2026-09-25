@@ -192,6 +192,11 @@ def _compose(name: str, overrides: list[str]):
 #: The only element types ``str(list)`` spells as a faithful Hydra list
 #: literal: Hydra reads back ``True``/``1``/``2.5``/``'a,b'`` and nested lists
 #: exactly (pinned by ``test_every_accepted_list_element_type_round_trips``).
+#: Matched by EXACT type, never ``isinstance``: ``str(list)`` spells each
+#: element by its ``repr``, and a subclass of one of these can carry a repr
+#: that is no Hydra literal at all -- an ``IntEnum``'s ``<Level.LOW: 1>``, a
+#: ``StrEnum``'s, or numpy 2's ``np.float64(1.5)`` (``np.float64`` subclasses
+#: ``float``).
 _LIST_ELEMENT_TYPES = (bool, int, float, str)
 
 
@@ -213,7 +218,7 @@ def _unrepresentable_list_element(value: list) -> str | None:
                 return found
         elif item is None:
             return "None"
-        elif not isinstance(item, _LIST_ELEMENT_TYPES):
+        elif type(item) not in _LIST_ELEMENT_TYPES:
             return type(item).__name__
     return None
 
@@ -253,9 +258,10 @@ def _override_str(key: str, value: Any) -> str:
 
     A ``list`` composes to a Hydra list value token by the same unquoted
     ``str(value)`` path as any other non-string scalar, which is faithful
-    only when every element, at any nesting depth, is a ``bool``, ``int``,
-    ``float``, ``str`` or a nested list (:data:`_LIST_ELEMENT_TYPES`). Any
-    other element is refused with a ``TypeError`` naming it:
+    only when every element, at any nesting depth, is exactly a ``bool``,
+    ``int``, ``float`` or ``str`` -- not a subclass, see
+    :data:`_LIST_ELEMENT_TYPES` -- or a nested list. Any other element is
+    refused with a ``TypeError`` naming it:
 
     - ``None``: Python's ``str`` spells it ``None``, not Hydra's ``null``, so
       Hydra's parser reads it back as the STRING ``"None"``. That is a silent
@@ -263,8 +269,8 @@ def _override_str(key: str, value: Any) -> str:
       notice.
     - A ``dict`` or ``tuple``: unrepresentable for the same reasons as at the
       top level.
-    - Anything else, e.g. a ``Path``: its ``str`` is a Python repr, which
-      Hydra's parser rejects or misreads.
+    - Anything else, e.g. a ``Path``, a numpy scalar or an enum member: each
+      is spelled by a Python repr that Hydra's parser rejects or misreads.
 
     Hydra would reject most of these loudly anyway, but with an opaque parser
     error far from the call; refusing them here names the key and the cause.
@@ -315,9 +321,11 @@ def _override_str(key: str, value: Any) -> str:
             f"load() override {key!r} is a list containing a {bad_element} "
             "(at some nesting depth), which str() cannot spell as a Hydra list "
             "literal: Hydra's parser would reject it or read back something "
-            "else. A list override may contain only bool, int, float and str "
-            "values and nested lists; give one dotted override per field for "
-            "a structured value instead."
+            "else. A list override may contain only plain bool, int, float "
+            "and str values (exactly those types, so convert a numpy scalar "
+            "or an enum member with float(), int() or str() first) and nested "
+            "lists; give one dotted override per field for a structured value "
+            "instead."
         )
     if bad_element == "None":
         raise TypeError(

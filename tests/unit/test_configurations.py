@@ -391,6 +391,27 @@ class TestOverrideStr(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"ocean\.params.*PosixPath"):
             configurations._override_str("ocean.params", [Path("/tmp/x")])
 
+    def test_list_containing_a_scalar_subclass_raises_type_error(self):
+        # str(list) spells each element by its repr. A subclass of an
+        # accepted scalar can carry a repr that is not a Hydra literal --
+        # an IntEnum's <Level.LOW: 1>, a StrEnum's, and numpy 2's
+        # np.float64(1.5) (np.float64 subclasses float) -- so acceptance
+        # must be by EXACT type, not isinstance.
+        import enum
+
+        import numpy as np
+
+        class Level(enum.IntEnum):
+            LOW = 1
+
+        class Color(enum.StrEnum):
+            RED = "red"
+
+        for value in ([Level.LOW], [Color.RED], [np.float64(1.5)], [[np.float64(2.0)]]):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, r"ocean\.params.*float\(\)"):
+                    configurations._override_str("ocean.params", value)
+
     def test_every_accepted_list_element_type_round_trips(self):
         # The accepted set must be exactly what composes faithfully: each
         # element type, alone and nested, parses back to the same value.
