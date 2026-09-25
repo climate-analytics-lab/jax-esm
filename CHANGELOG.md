@@ -779,6 +779,22 @@ Breaking changes are marked; everything else is additive.
   physics this way, so nothing that ran before this fix produces a different
   answer today; the review closes an unfaithful predicate discovered by
   reasoning about `ComposablePhysics`, not by a failing run.
+  `_require_wind_vector`'s error message also used to call its list of
+  top-level diagnostics-dict keys "composed terms", which they are not (a
+  term's *name* and the keys it publishes are different things); it now says
+  "diagnostics published by the composed physics". And `JCMDerived.zeros()`'s
+  legacy-call guard, which only ever caught a `tuple` first argument, now
+  catches a `list`, a `numpy.ndarray` or a `jax.Array` of ints too — each an
+  equally ordinary way a caller migrating a pre-#129 call site by hand might
+  have spelled the old `shape` argument.
+  Finally, two coverage gaps the review found but that needed no code change:
+  `_unflatten_to_nodal_shape`'s `ValueError` branch (added in the first
+  review round) had no direct test, so a mutation that made it return the
+  unexpected shape unchanged instead of raising went unnoticed by the
+  existing suite; and ECHAM's precipitation is exactly `0.0` in the slow
+  two-day coupled regression run, so nothing there would have caught a
+  placement or sign bug specific to it. Both now have direct unit tests
+  (`tests/unit/test_jcm_component.py`).
 - **`jem.runners.build_atmosphere` calls
   `model.physics.require_surface_exchange()`** right after building the
   atmosphere Model, so a physics package that cannot publish the
@@ -2049,6 +2065,9 @@ otherwise**; the code that has to change is named in each one.
 
 ### Known gaps
 
+- The ECHAM surface exchange is not implemented: `exchange_fields.echam()`
+  raises `NotImplementedError` naming jax-gcm#754. Coupled runs need SPEEDY
+  physics until that lands.
 - The land model's ice-sheet branch is never reached in practice: nothing wires
   a real surface albedo into `SlabLandModel`, so `params.surface_albedo = 0.2`
   applies everywhere and every land cell is soil. Tracked as jax-esm#109 and

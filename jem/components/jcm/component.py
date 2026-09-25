@@ -79,6 +79,7 @@ from typing import Any, overload
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -254,6 +255,40 @@ def _surface_exchange_on_nodal_grid(
         v0=_unflatten_to_nodal_shape(exchange.v0, nodal_shape, "v0"),
     )
 
+
+def _looks_like_a_shape(value: Any) -> bool:
+    """Whether ``value`` looks like the pre-#129 ``shape`` positional argument.
+
+    ``JCMDerived.zeros``'s first argument used to be a shape (before
+    jax-esm#129 swapped both its order and its meaning, and before this
+    review added the required ``physics`` argument). A shape happens to be
+    written as a `tuple` most of the time -- the original guard checked only
+    that one spelling (a code-review finding) -- but a caller migrating a
+    call site by hand could just as easily reach for a `list`, a
+    `numpy.ndarray` or a `jax.Array` of a couple of ints, none of which is a
+    diagnostics-dict template (a `dict`) either. Each of the three untested
+    spellings previously fell through to fail several calls deep as an
+    opaque, unrelated error (e.g. a plain array read as if it were a
+    diagnostics dict inside ``exchange_fields.from_diagnostics``) rather
+    than naming this method or the argument that actually changed, so this
+    widens the check to all four rather than only the one jax-esm#129
+    happened to test.
+
+    A 1-D array of a couple of small integers is treated as a shape; a
+    multi-dimensional or non-integer array is not one JCMDerived.zeros has
+    ever accepted as `diagnostics_template` either, but it is also not what
+    a legacy caller would have passed as `shape`, so it is left to fail on
+    its own terms rather than be folded into this specific, named guard.
+    """
+    if isinstance(value, (tuple, list)):
+        return True
+    if isinstance(value, np.ndarray):
+        return value.ndim == 1 and np.issubdtype(value.dtype, np.integer)
+    if isinstance(value, jax.Array):
+        return value.ndim == 1 and jnp.issubdtype(value.dtype, jnp.integer)
+    return False
+
+
 @tree_math.struct
 class JCMDerived:
     """What the atmosphere publishes for the other components to read.
@@ -347,28 +382,31 @@ class JCMDerived:
         Raises
         ------
         TypeError
-            If ``diagnostics_template`` is a tuple -- the signature was
-            ``zeros(shape, physics, **overrides)`` before jax-esm#129 swapped
-            the first two arguments' order and meaning, and this review added
-            the required third ``physics`` argument; a legacy positional call
-            passes its old ``shape`` tuple where ``diagnostics_template`` now
-            goes, which otherwise fails several calls deep as an opaque error
-            naming neither this method nor the argument that actually
-            changed.
+            If ``diagnostics_template`` looks like a shape -- a `tuple`,
+            `list`, `numpy.ndarray` or `jax.Array` of ints (see
+            :func:`_looks_like_a_shape`) -- rather than a diagnostics dict.
+            The signature was ``zeros(shape, physics, **overrides)`` before
+            jax-esm#129 swapped the first two arguments' order and meaning,
+            and this review added the required third ``physics`` argument; a
+            caller updating a pre-#129 call site by simply appending the new
+            argument (rather than also reordering the first two) still puts
+            a shape first, which otherwise fails several calls deep as an
+            opaque error naming neither this method nor the argument that
+            actually changed.
 
         """
-        if isinstance(diagnostics_template, tuple):
+        if _looks_like_a_shape(diagnostics_template):
             raise TypeError(
                 "JCMDerived.zeros(diagnostics_template, nodal_shape, "
                 "physics, **overrides) takes the diagnostics template "
-                "first and the atmosphere's nodal shape second; got a "
-                f"tuple ({diagnostics_template!r}) as the first argument. "
-                "jax-esm#129 swapped both the order and the meaning of "
-                "zeros()'s first two arguments (it used to be zeros(shape, "
-                "physics, **overrides)), and this review added the "
-                "required third `physics` argument (the composed "
-                "atmosphere physics package) -- update this call site to "
-                "zeros(diagnostics_template, nodal_shape, physics)."
+                "first and the atmosphere's nodal shape second; got "
+                f"{diagnostics_template!r}, which looks like a shape, as "
+                "the first argument. jax-esm#129 swapped both the order "
+                "and the meaning of zeros()'s first two arguments (it used "
+                "to be zeros(shape, physics, **overrides)), and this "
+                "review added the required third `physics` argument (the "
+                "composed atmosphere physics package) -- update this call "
+                "site to zeros(diagnostics_template, nodal_shape, physics)."
             )
         exchange = _surface_exchange_on_nodal_grid(
             diagnostics_template, nodal_shape, physics)

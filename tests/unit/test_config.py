@@ -610,10 +610,13 @@ def test_veros_atmosphere_with_no_wind_vector_is_refused_at_build_time(_veros_x6
             "physics@atmosphere.physics=echam",
             "grid@atmosphere.grid=echam_t42_l8_sigma",
         ]))
-    # Names the composed terms (an ECHAM-only one, "aerosol", among them),
-    # not just "this atmosphere's composed physics" -- issue #129 asked for
-    # this explicitly, and it is what `ComposablePhysics.
-    # require_surface_exchange` already does for the surface struct itself.
+    # Names the diagnostics published by the composed physics (an ECHAM-only
+    # one, "aerosol", among them), not just "this atmosphere's composed
+    # physics" -- issue #129 asked for this explicitly, in the same spirit as
+    # `ComposablePhysics.require_surface_exchange`, which names its `terms`
+    # list for the surface struct itself (a code review later found the
+    # wording here claimed the stronger, inaccurate "composed terms" -- see
+    # `jem.fluxes._require_wind_vector`'s docstring).
     assert "aerosol" in str(excinfo.value)
 
 

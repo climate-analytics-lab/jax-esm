@@ -176,6 +176,19 @@ def _require_wind_vector(
     wherever the carry is first in hand, is enough -- there is no "maybe
     windless this step" case to keep re-checking for.
 
+    This function does not re-decide presence itself -- it only checks the
+    ``None``-ness of ``u0``/``v0``, which :func:`~jem.components.jcm.
+    exchange_fields.has_wind_vector` already decided, once, off the composed
+    physics's actual terms, when the carry's ``derived`` was built (see that
+    function's docstring). Neither this function nor :meth:`VerosExchange.
+    validate` has the composed ``ComposablePhysics`` object in hand to call
+    ``has_wind_vector`` directly -- the carry holds only the atmosphere's
+    diagnostics dict, not a reference to the ``Model`` or its physics package
+    -- so checking ``u0``/``v0`` here is not a second, independent predicate
+    that could disagree with ``has_wind_vector``; it is the one place that
+    predicate's decision is *observed*, downstream of the only place it is
+    *made*.
+
     Parameters
     ----------
     u0, v0 : jax.Array or None
@@ -184,11 +197,14 @@ def _require_wind_vector(
         ``atm["derived"].physics`` -- the composed atmosphere's own per-step
         diagnostics dict (or, at composition time, the structural template
         :meth:`~jem.components.jcm.component.JCMComponent.initialize` seeds
-        it with, which has the same keys). Its top-level keys are what each
-        composed term published, so they name the composed physics the same
-        way ``ComposablePhysics.require_surface_exchange`` names its
-        ``terms`` list -- the carry holds no reference to the ``Model`` or
-        its ``ComposablePhysics`` object for this to read directly.
+        it with, which has the same keys). Used only to build the error
+        message below: its top-level keys are what each composed term
+        *published* to the diagnostics dict, which is not the same thing as
+        the composed physics's *term names* (``ComposablePhysics.
+        require_surface_exchange`` names those instead, from ``term.name``)
+        -- named accurately as such in the message, since a code review
+        found the previous wording ("composed terms") claimed the stronger,
+        inaccurate thing.
 
     Raises
     ------
@@ -198,22 +214,25 @@ def _require_wind_vector(
     """
     if u0 is not None and v0 is not None:
         return
-    composed_terms = sorted(
+    published_diagnostics = sorted(
         key for key in diagnostics if not str(key).startswith("_")
     )
     raise ValueError(
         "VerosExchange needs the atmosphere's near-surface wind VECTOR "
         "(derived.u0/.v0) to compute a wind stress (bulk_wind_stress), but "
-        "this atmosphere's composed physics publishes none (composed "
-        f"terms: {composed_terms}). Only a package that writes SPEEDY's "
-        "private '_surface_flux' diagnostics key carries a true "
-        "near-surface wind vector -- see "
-        "jem.components.jcm.exchange_fields's module docstring ('Why the "
-        "near-surface wind is still a narrow exception'). Choosing "
-        "VerosExchange's wind-stress source for a windless atmosphere "
-        "(e.g. ECHAM) is tracked as jax-esm#132 -- couple a SPEEDY "
-        "atmosphere to Veros instead, or write a wind-free wind-stress "
-        "exchanger, until that lands."
+        "this atmosphere's composed physics publishes none (diagnostics "
+        f"published by the composed physics: {published_diagnostics}). Only "
+        "an atmosphere composing a "
+        "jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux term actually "
+        "computes a near-surface wind vector -- see "
+        "jem.components.jcm.exchange_fields.has_wind_vector and that "
+        "module's docstring ('Why the near-surface wind is still a narrow "
+        "exception'). Choosing VerosExchange's wind-stress source for a "
+        "windless atmosphere (e.g. ECHAM, or a SPEEDY-legacy composition "
+        "built without SpeedySurfaceFlux) is tracked as jax-esm#132 -- "
+        "couple a SPEEDY atmosphere (with SpeedySurfaceFlux composed) to "
+        "Veros instead, or write a wind-free wind-stress exchanger, until "
+        "that lands."
     )
 
 

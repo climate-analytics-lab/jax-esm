@@ -387,6 +387,60 @@ def _fake_column_vectorized_echam_diagnostics():
     }
     return diagnostics, code
 
+
+def _fake_column_vectorized_echam_diagnostics_with_precipitation():
+    """Like :func:`_fake_column_vectorized_echam_diagnostics`, but with
+    ``precipitation`` and ``evaporation`` independently position-encoded and
+    nonzero, rather than sharing one code (``evaporation``) with a
+    permanently-zero ``precipitation``.
+
+    jax-esm#129-review nit: ECHAM's precipitation is exactly ``0.0`` in the
+    two-day slow coupled regression run (``tests/unit/test_coupled.py``), so
+    nothing there would ever catch a placement or sign bug specific to
+    precipitation -- unlike ``total_heat_flux``, whose placement and sign
+    flip are already exercised, with a genuinely nonzero, position-encoded
+    value, by :func:`_fake_column_vectorized_echam_diagnostics` /
+    ``test_unflatten_places_each_cell_correctly``. This fixture gives
+    ``evaporation`` and ``precipitation`` each their own nonzero code (a
+    constant offset apart), so a placement bug (a transposed or reversed
+    reshape), a field mix-up (the two swapped) or a sign bug (either one
+    negated, which neither should be -- see ``exchange_fields``'s own
+    docstring table: both are already in JEM's sign convention) each produce
+    a distinctly wrong, checkable value rather than an indistinguishable
+    uniform or zero one. ``net_heat_flux`` is held at a uniform, uninteresting
+    value here since its own placement/sign is not what this fixture is for.
+
+    Returns
+    -------
+    tuple[dict, numpy.ndarray, numpy.ndarray]
+        The diagnostics dict, the ``(ix, il)`` evaporation code array, and
+        the ``(ix, il)`` precipitation code array.
+
+    """
+    ix, il = GRID_SHAPE
+    lon_index, lat_index = np.meshgrid(np.arange(ix), np.arange(il), indexing="ij")
+    evaporation_code = (1000 * lon_index + lat_index + 1.0).astype(np.float64)
+    precipitation_code = (1000 * lon_index + lat_index + 3000.0).astype(np.float64)
+    evaporation_flat = jnp.asarray(evaporation_code.reshape(-1))
+    precipitation_flat = jnp.asarray(precipitation_code.reshape(-1))
+    zero = jnp.zeros_like(evaporation_flat)
+    diagnostics = {
+        "surface_exchange": JcmSurfaceExchange(
+            net_heat_flux=zero,
+            sensible_heat_flux=zero,
+            latent_heat_flux=zero,
+            evaporation=evaporation_flat,
+            precipitation=precipitation_flat,
+            stress_u=zero,
+            stress_v=zero,
+            wind_speed=jnp.full_like(zero, 3.0),
+            air_density=jnp.full_like(zero, 1.2),
+            air_potential_temperature=jnp.full_like(zero, 290.0),
+        ),
+    }
+    return diagnostics, evaporation_code, precipitation_code
+
+
 def test_speedy_exchange_shapes_and_signs():
     """Sign flip only: evaporation/precipitation need no unit conversion any
     more, because the #754 contract already publishes them in JEM's units
@@ -551,23 +605,47 @@ def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
         field = np.asarray(getattr(derived, name))
         assert not bool(np.signbit(field).any()), name
 
-def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call():
-    """A pre-#129 call, ``zeros(shape, physics)``, fails with a message
-    naming the new signature, not an opaque ``TypeError`` several calls deep.
 
-    ``zeros()``'s argument order was ``(shape, physics, **overrides)``
-    before #129; it is now ``(diagnostics_template, nodal_shape, physics,
+@pytest.mark.parametrize("shape_like", [
+    GRID_SHAPE,                              # tuple
+    list(GRID_SHAPE),                        # list
+    np.asarray(GRID_SHAPE),                  # numpy.ndarray
+    jnp.asarray(GRID_SHAPE),                 # jax.Array
+], ids=["tuple", "list", "numpy_ndarray", "jax_array"])
+def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call(
+    shape_like,
+):
+    """A pre-#129 call, ``zeros(shape, physics)``, fails with a message
+    naming the new signature, not an opaque ``TypeError`` several calls deep
+    -- whichever of the ordinary ways a caller might spell a shape (a code
+    review finding: the original guard caught only the exact ``tuple``
+    spelling of ``shape``, so a ``list``/``numpy.ndarray``/``jax.Array`` call
+    site still fell through to an opaque, unrelated error).
+
+    ``zeros()``'s argument order was ``(shape, physics, **overrides)`` before
+    jax-esm#129; it is now ``(diagnostics_template, nodal_shape, physics,
     **overrides)`` -- #129 swapped the first two, and this review added the
-    required third. Passing the old order with the new argument simply
-    appended -- a tuple where ``diagnostics_template`` now goes -- used to
+    required third. Passing the pre-#129 order with the new argument simply
+    appended -- a shape where ``diagnostics_template`` now goes -- used to
     fail as an opaque error several calls deep (``TypeError: tuple indices
     must be integers or slices, not str`` out of
-    ``exchange_fields.from_diagnostics``'s ``dict.get``) rather than naming
-    this method or the argument order that actually changed.
+    ``exchange_fields.from_diagnostics``'s ``dict.get``, for the ``tuple``
+    case) rather than naming this method or the argument that changed.
     """
     with pytest.raises(TypeError, match="zeros\\(diagnostics_template, nodal_shape"):
         JCMDerived.zeros(
-            GRID_SHAPE, _fake_speedy_diagnostics(), _speedy_physics_with_wind())
+            shape_like, _fake_speedy_diagnostics(), _speedy_physics_with_wind())
+
+
+def test_jcm_derived_zeros_missing_the_physics_argument_names_it():
+    """A 2-positional-argument call (the exact pre-#129 spelling) is refused
+    by Python's own signature check, naming the missing argument, since
+    jax-esm#129's review made ``physics`` a required third argument rather
+    than something ``zeros()`` could default or infer.
+    """
+    with pytest.raises(TypeError, match="physics"):
+        JCMDerived.zeros(_fake_speedy_diagnostics(), GRID_SHAPE)
+
 
 def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     """jax-esm#129 regression: a real ECHAM step's surface exchange is
@@ -626,6 +704,42 @@ def test_unflatten_places_each_cell_correctly():
 
     evaporation = np.asarray(exchange.evaporation)  # = evaporation = code
     np.testing.assert_array_equal(evaporation, code)
+
+
+def test_unflatten_places_precipitation_and_evaporation_correctly():
+    """jax-esm#129-review nit: ECHAM's precipitation is exactly ``0.0`` in
+    the two-day slow coupled regression run, so nothing exercises a
+    placement or sign bug specific to it. Feeds independently
+    position-encoded, nonzero precipitation and evaporation through the same
+    column-vectorized-ECHAM unflatten path
+    (:func:`_fake_column_vectorized_echam_diagnostics_with_precipitation`)
+    and asserts each lands at its own cell with no sign flip -- both are
+    already in JEM's convention (positive up for evaporation, positive down
+    for precipitation), unlike ``total_heat_flux = -net_heat_flux``.
+    """
+    from jem.components.jcm.component import _surface_exchange_on_nodal_grid
+
+    diagnostics, evaporation_code, precipitation_code = (
+        _fake_column_vectorized_echam_diagnostics_with_precipitation()
+    )
+    exchange = _surface_exchange_on_nodal_grid(
+        diagnostics, GRID_SHAPE, _echam_style_physics())
+
+    evaporation = np.asarray(exchange.evaporation)
+    precipitation = np.asarray(exchange.precipitation)
+    assert evaporation.shape == GRID_SHAPE
+    assert precipitation.shape == GRID_SHAPE
+    np.testing.assert_array_equal(evaporation, evaporation_code)
+    np.testing.assert_array_equal(precipitation, precipitation_code)
+    # A handful of individual cells, spelled out, so a placement bug -- or a
+    # mix-up between the two fields, which their distinct offsets would also
+    # reveal -- is visible in the assertion itself.
+    for i, j in ((0, 0), (1, 0), (0, 1), (7, 13), (63, 31)):
+        assert evaporation[i, j] == evaporation_code[i, j], ("evaporation", i, j)
+        assert precipitation[i, j] == precipitation_code[i, j], ("precipitation", i, j)
+    # Neither field is sign-flipped (unlike total_heat_flux = -net_heat_flux).
+    assert np.all(precipitation > 0)
+    assert np.all(evaporation > 0)
 
 
 def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
