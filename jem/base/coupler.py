@@ -387,11 +387,22 @@ class Coupler:
     calendar : str
         Calendar name as JCM used to spell it (``"gregorian"``, ``"365_day"``);
         determines the length of the year used for the annual cycle
-        (:func:`jem.base.component.days_per_year`). A coupler built with a
-        real ``jcm.model.Model`` component must use ``"gregorian"`` --
-        jax-gcm v3's atmosphere clock is unconditionally Gregorian, and
+        (:func:`jem.base.component.days_per_year`). Defaults to
+        ``"gregorian"`` -- the calendar every jem component actually
+        supports exactly (:func:`jem.base.component.CouplingTime
+        .year_fraction` and :func:`jem.accumulate.monthly_mean` both handle
+        it exactly, using real per-year leap-day arithmetic rather than a
+        fixed average) and the **only** choice for a coupler with a real
+        ``jcm.model.Model`` component: jax-gcm v3's atmosphere clock is
+        unconditionally Gregorian, and
         :meth:`~jem.components.jcm.component.JCMComponent.bind` refuses
-        anything else.
+        anything else. ``"365_day"`` and ``"360_day"`` remain available as
+        explicit choices for a coupled model with no atmosphere. (Before the
+        2026-09 jax-gcm-878 migration this default was ``"365_day"``, which
+        every documented example that omitted ``calendar=`` then relied on;
+        it changed because that default silently failed
+        :meth:`~jem.components.jcm.component.JCMComponent.bind` for any
+        atmosphere-coupled example -- see the CHANGELOG's Breaking Changes.)
     name : str
         The coupler's own name, as the :class:`Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see
@@ -485,7 +496,7 @@ class Coupler:
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str = "365_day",
+        calendar: str = "gregorian",
         name: str = "coupled",
         workflow: Sequence[Any] | None = None,
     ):
@@ -521,6 +532,16 @@ class Coupler:
         self._dt_total_seconds = _timedelta_seconds(coupling_timestep)
         self._year_offset_seconds = seconds_since_new_year(start_date, calendar)
         self._days_per_year = float(days_per_year(calendar))
+        # Days/seconds since the Unix epoch of `start_date`, resolved once
+        # here (never inside a traced step) exactly as `_dt_total_seconds`
+        # is: `CouplingTime`'s exact Gregorian `year_fraction` needs them as
+        # static fields (see that property's docstring), and every
+        # `CouplingTime` this coupler builds -- `coupling_time` and
+        # `coupling_time_at_substep` -- carries the same pair regardless of
+        # calendar, since the ``365_day``/``360_day`` branch of
+        # `year_fraction` never reads them.
+        self._start_day = int(np.asarray(start_date.delta.days))
+        self._start_second = int(np.asarray(start_date.delta.seconds))
 
         for name, exchanger in (exchangers or {}).items():
             self.add_exchanger(name, exchanger)
@@ -770,6 +791,8 @@ class Coupler:
             dt=self._dt_seconds,
             year_offset_seconds=self._year_offset_seconds,
             days_per_year=self._days_per_year,
+            start_day=self._start_day,
+            start_second=self._start_second,
         )
 
     def coupling_time_at_substep(
@@ -809,6 +832,8 @@ class Coupler:
             dt=sub_dt,
             year_offset_seconds=self._year_offset_seconds,
             days_per_year=self._days_per_year,
+            start_day=self._start_day,
+            start_second=self._start_second,
         )
 
     def time_axis(self, first_step: int, n: int, *, multiplicity: int = 1) -> TimeAxis:

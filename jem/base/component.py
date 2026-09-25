@@ -383,10 +383,24 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
     """Return the position of ``start_date`` in the annual cycle, in ``[0, 1)``.
 
     Zero is 00:00 on 1 January. This is the same quantity
-    :attr:`CouplingTime.year_fraction` reports at step 0, computed from the
-    same two facts (the offset into the year and the calendar's year length),
-    so a component that samples a climatology in ``initialize()`` and one that
-    samples it in ``step()`` cannot disagree about where the run starts.
+    :attr:`CouplingTime.year_fraction` reports at step 0, so a component that
+    samples a climatology in ``initialize()`` and one that samples it in
+    ``step()`` cannot disagree about where the run starts.
+
+    On ``"gregorian"`` this computes the exact real-calendar day-of-year and
+    leap-year status of ``start_date`` on the host, with Python's
+    ``datetime`` -- rather than reusing :func:`seconds_since_new_year`'s
+    fixed-average-year division, which is what :attr:`CouplingTime
+    .year_fraction` itself no longer does either (see that property's
+    docstring for the phase-drift this was found to cause). The two are the
+    same computation at ``step == 0`` -- one on the host in Python, one
+    in-jit via :func:`jem.base.calendar.gregorian_instant` -- so this function
+    still gives the same value ``year_fraction`` gives at step 0, up to the
+    float32-vs-float64 rounding between a host Python float and a traced JAX
+    array (the same precision gap that existed before this fix), which is the
+    property this function exists to keep. ``"365_day"`` and
+    ``"360_day"`` are unchanged: their year has no leap day, so the
+    fixed-average division was already exact.
 
     Parameters
     ----------
@@ -400,6 +414,13 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
     float
 
     """
+    if float(days_per_year(calendar)) == 365.2425:
+        when = start_date.to_pydatetime()
+        is_leap = when.year % 4 == 0 and (when.year % 100 != 0 or when.year % 400 == 0)
+        day_of_year = (when - datetime.datetime(when.year, 1, 1)).days
+        seconds_into_day = when.hour * 3600 + when.minute * 60 + when.second
+        year_length = 366.0 if is_leap else 365.0
+        return float(day_of_year + seconds_into_day / SECONDS_PER_DAY) / year_length
     seconds_per_year = SECONDS_PER_DAY * float(days_per_year(calendar))
     # `seconds_since_new_year` already counts in the model calendar, so this
     # is strictly below 1; the modulo only guards the boundary against
@@ -443,6 +464,16 @@ class CouplingTime:
     days_per_year : float
         Length of the year in days for the run's calendar, from this module's
         own :func:`days_per_year`. Static.
+    start_day, start_second : int
+        Days and seconds since the Unix epoch of ``start_date`` (a
+        ``jax_datetime.Datetime``'s ``.delta.days``/``.delta.seconds``).
+        Static. Used only by :attr:`year_fraction` on the ``"gregorian"``
+        calendar (identified by ``days_per_year == 365.2425``, the same
+        sentinel :func:`seconds_since_new_year` tests) to compute the exact
+        Gregorian day-of-year and leap-year status of this step, via
+        :mod:`jem.base.calendar`. The ``365_day``/``360_day`` calendars do not
+        read these fields at all -- their year has no leap day, so the
+        existing modular-arithmetic path below is already exact.
 
     """
 
@@ -451,6 +482,8 @@ class CouplingTime:
     dt: float = struct.field(pytree_node=False)
     year_offset_seconds: float = struct.field(pytree_node=False)
     days_per_year: float = struct.field(pytree_node=False)
+    start_day: int = struct.field(pytree_node=False, default=0)
+    start_second: int = struct.field(pytree_node=False, default=0)
 
     def end_of_step(self) -> "CouplingTime":
         """Return the clock as it reads at the end of this step (one step later).
@@ -477,19 +510,68 @@ class CouplingTime:
         """Position in the annual cycle in ``[0, 1)`` at the *start* of this step.
 
         Zero is 00:00 on 1 January. This is what a monthly climatology is
-        interpolated with (``jem.utils.cycles.evaluate_cyclic_linear``).
+        interpolated with (``jem.utils.cycles.evaluate_cyclic_linear``) -- the
+        slab ocean's ``sst_climatology``/``q_flux``, the sea-ice model's
+        ``ice_climatology``, and the slab land model's surface temperature,
+        snow and soil water at both ends of a step.
 
-        Precision note: ``sim_time`` is a float32 array unless x64 is enabled,
-        and float32 resolves only ~7 digits, so after a century of simulated
-        time (3e9 s) it is quantised to hundreds of seconds. When the
-        coupling step divides the year exactly (the usual case: daily steps
-        in a 365-day year) the step count is reduced modulo the steps per
-        year in exact integer arithmetic first, so the fraction keeps full
-        float32 precision (a few seconds) for runs of any length. Otherwise
-        the seconds are used directly and precision degrades with run length.
+        **On ``"gregorian"``** (``days_per_year == 365.2425``, the same
+        sentinel :func:`seconds_since_new_year` tests -- the true average
+        Gregorian year, not any particular year's length; see
+        :func:`days_per_year`), this is computed from the **exact** proleptic
+        Gregorian date of this step -- real leap years, not the 365.2425-day
+        average -- via :func:`jem.base.calendar.gregorian_instant` and
+        :func:`~jem.base.calendar.gregorian_day_of_year`. This closes a
+        confirmed phase-drift bug (the 2026-09 jax-gcm-878 migration review):
+        dividing elapsed seconds by the *average* year length, as every
+        calendar here used to, is only ever exactly right at a handful of
+        instants and drifts by up to a full day within the run (peaking at
+        every year boundary, since the atmosphere's real Gregorian calendar
+        and this fixed-average one fall on opposite sides of 31 December for
+        most of the year) -- up to +1.48 days over 400 years, and +0.757 days
+        within the single leap year 2000. Every ``"gregorian"``-calendar
+        consumer of ``year_fraction`` (the slab models, listed above) reads
+        this property, so the fix applies to all of them without their own
+        code changing.
+
+        This intentionally does **not** match jax-gcm's own ``wrap_year``
+        step function bit for bit: jax-gcm samples a climatology by
+        interpolating between the two nearest of a fixed number of samples
+        *within whichever year length the current year actually has*, while
+        this property (and the slab models built on it) keep sampling by a
+        single ``[0, 1)`` fraction of the year that never itself changes
+        length -- interpolating a climatology by ``year_fraction`` some 0.001
+        further into 2000's 366 days is a very slightly different instant
+        than the equivalent step of a 365-day year, whereas jax-gcm's own
+        ``wrap_year`` is calibrated per actual year length so that "day 60"
+        always means 1 March regardless of leap years. Changing the slabs to
+        match would change which day of the climatology they sample on a leap
+        year -- a science change, not a bug fix -- so it is deliberately out
+        of scope here: this property only removes the *drift*, not the
+        (separate, and much smaller) day-of-climatology convention
+        difference from jax-gcm's own scheme.
+
+        **On ``"365_day"``/``"360_day"``** this is unchanged from before the
+        2026-09 review: those calendars have no leap day, so a fixed
+        average-year-length division was already exact, and the modular
+        integer-step reduction below (kept for its float32-precision benefit
+        over many decades of simulated time -- see the note in its own
+        branch) still applies.
         """
+        if self.days_per_year == 365.2425:
+            return self._gregorian_year_fraction()
+
         steps_per_year = self.seconds_per_year / self.dt
         if float(steps_per_year).is_integer():
+            # Precision note: `sim_time` is a float32 array unless x64 is
+            # enabled, and float32 resolves only ~7 digits, so after a
+            # century of simulated time (3e9 s) it is quantised to hundreds
+            # of seconds. When the coupling step divides the year exactly
+            # (the usual case: daily steps in a 365-day year) the step count
+            # is reduced modulo the steps per year in exact integer
+            # arithmetic first, so the fraction keeps full float32 precision
+            # (a few seconds) for runs of any length. Otherwise the seconds
+            # are used directly and precision degrades with run length.
             seconds_into_year = self.year_offset_seconds + (
                 jnp.mod(self.step, int(steps_per_year)) * self.dt
             )
@@ -500,6 +582,34 @@ class CouplingTime:
         # whereas the remainder in seconds is exact for whole-second steps and
         # the division then has full relative precision.
         return jnp.mod(seconds_into_year, self.seconds_per_year) / self.seconds_per_year
+
+    def _gregorian_year_fraction(self) -> jax.Array:
+        """Return the exact Gregorian ``year_fraction``; see that property.
+
+        ``dt`` is static (never traced) and is always a whole number of
+        seconds -- the coupler only ever builds whole-second clocks
+        (``Coupler._element_timestep`` refuses a sub-timestep that is not) --
+        so ``record_seconds`` below is exact. ``step`` is the only traced
+        quantity, and :func:`~jem.base.calendar.gregorian_instant` reduces it
+        modulo a small static period before ever multiplying it, so this is
+        int32-safe for a run of any length (see that function's docstring for
+        the bound).
+        """
+        from jem.base.calendar import (
+            gregorian_day_of_year,
+            gregorian_instant,
+            gregorian_ymd_from_days,
+            is_leap_year,
+        )
+
+        record_seconds = round(self.dt)
+        days, seconds = gregorian_instant(
+            self.step, record_seconds, self.start_day, self.start_second
+        )
+        year, month, day = gregorian_ymd_from_days(days)
+        day_of_year = gregorian_day_of_year(year, month, day)
+        year_length = jnp.where(is_leap_year(year), 366, 365)
+        return (day_of_year + seconds / SECONDS_PER_DAY) / year_length
 
 
 @struct.dataclass
