@@ -446,6 +446,25 @@ def _midpoint_month_rule(
     half-second truncation can only move an instant within the same second,
     let alone the same day.
 
+    **Reducing the phase, not just the record.** ``record_mod`` wraps the
+    RECORD index into one period, but ``offset_seconds`` -- where the run's
+    own start date sits in the pattern, added on top of every record's
+    midpoint -- is not itself bounded by ``period``: a run starting midway
+    through the pattern (a twelve-bin climatology starting any month but
+    January, or a sequential accumulator resumed partway through its span)
+    carries a nonzero, unreduced phase, and once ``record_mod`` climbs high
+    enough that ``record_mod * record_seconds + offset_seconds +
+    record_seconds // 2`` exceeds ``period``, the resulting ``day`` lands
+    past every entry in ``boundary_days`` even though ``record_mod`` itself
+    never left ``[0, records_per_period)``. ``bin_of_record`` must be total
+    (see :func:`_build_binned_mean`'s own docstring), so ``day`` is reduced
+    modulo ``period_days`` immediately before the ``searchsorted`` call, not
+    just ``record`` before it: this is exact, since ``gregorian_instant``'s
+    own decomposition already bounds ``day`` to a small, known multiple of
+    ``period_days`` (it is only ever asked to resolve one pattern's worth of
+    elapsed time, per the reduction above), well within int32 regardless of
+    how long the run itself runs.
+
     """
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1])
@@ -455,6 +474,7 @@ def _midpoint_month_rule(
     # `boundaries_int32` (SECONDS) array this replaces, which is what
     # overflowed for a multi-decade sequential accumulator.
     boundary_days = jnp.asarray(-(-boundaries // _SECONDS_PER_DAY), dtype=jnp.int32)
+    period_days = int(boundary_days[-1])
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         records_per_period, remainder = divmod(period, record_seconds)
@@ -492,6 +512,26 @@ def _midpoint_month_rule(
             record_mod, record_seconds, 0, 0,
             offset_seconds=offset_seconds + record_seconds // 2,
         )
+        # `record_mod` alone wraps the RECORD index into one period, but
+        # `offset_seconds` (where the run's start date sits in the pattern)
+        # is added on top, unreduced -- for a run that does not start at the
+        # pattern's own beginning, `record_mod * record_seconds +
+        # offset_seconds + record_seconds // 2` can therefore reach past
+        # `period` even though `record_mod` itself never does (a run
+        # starting mid-year, once it reaches the months before its own start
+        # date again). `day` is then past every real boundary in
+        # `boundary_days`, and `searchsorted` returns the one index past the
+        # table's end -- silently dropped by the accumulator's `.at[].add`
+        # rather than landing in any of its bins (see `_build_binned_mean`'s
+        # own docstring on why `bin_of_record` must be total). Reducing `day`
+        # by the pattern's own length in days brings it back into the table
+        # regardless of how far the phase alone would have pushed it, and is
+        # exact: `record_mod`'s own contribution is already strictly less
+        # than one period in seconds, so the day this reduces is bounded
+        # (comfortably within int32, since `record_mod` itself was already
+        # checked against `gregorian_instant`'s own resolution above)
+        # regardless of how long the run's pattern spans.
+        day = jnp.mod(day, period_days)
         return jnp.searchsorted(boundary_days, day, side="right").astype(jnp.int32)
 
     return bin_of_record

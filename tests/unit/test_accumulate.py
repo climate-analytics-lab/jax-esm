@@ -2013,6 +2013,79 @@ def test_a_run_starting_mid_year_bins_from_its_own_dates(climatology_file):
     np.testing.assert_array_equal(np.asarray(counts), expected)
 
 
+def _climatology_counts_by_groupby(coupler, days):
+    """Return `monthly_mean(coupler)`'s twelve bin counts for `days` steps.
+
+    An independent count of the same run's own written labels, by calendar
+    month -- what the accumulator's counts must equal if every record landed
+    in exactly one bin.
+    """
+    monthly = monthly_mean(coupler)
+    trajectory = coupler.generate_trajectory_function(days, accumulate=monthly)
+    _, (_, counts) = trajectory(coupler.initialize())
+    labels = coupler.time_axis(0, days).datetimes()
+    months = labels.astype("datetime64[M]").astype(int) % MONTHS_PER_YEAR
+    expected = np.bincount(months, minlength=MONTHS_PER_YEAR)
+    return np.asarray(counts), expected
+
+
+@pytest.mark.parametrize(
+    "start_date", ["2001-01-01", "2001-03-01", "2001-07-01", "2001-12-31"]
+)
+def test_a_climatology_bins_every_record_past_the_years_own_wrap(start_date):
+    """A run past the pattern's own end still lands every record in its own month.
+
+    ``_midpoint_month_rule``'s ``record_mod`` wraps the RECORD index into one
+    period, but the run's own start-date phase (``offset_seconds``) is added
+    on top, unreduced -- so a run that does not start at 1 January drops
+    every record whose unwrapped day falls past the twelve-bin table once
+    the run reaches the months before its own start again (an out-of-range
+    ``searchsorted`` index is dropped by the accumulator's ``.at[].add``, not
+    clipped or raised -- see ``_build_binned_mean``'s own docstring on why
+    ``bin_of_record`` must be total). 400 days from each start date reaches
+    past the wrap regardless of which month the run starts in.
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime(start_date),
+        calendar=CALENDAR,
+    )
+    days = 400
+    counts, expected = _climatology_counts_by_groupby(coupler, days)
+
+    assert int(counts.sum()) == days  # every record landed in exactly one bin
+    np.testing.assert_array_equal(counts, expected)
+
+
+def test_a_climatology_bins_every_record_across_several_years():
+    """The same wrap, exercised across more than one calendar year.
+
+    A single wrap (`test_a_climatology_bins_every_record_past_the_years_own_wrap`'s
+    own 400-day runs) only ever needs the phase reduced back by one period;
+    this checks the reduction is exact after crossing the year boundary
+    twice, not just once. The span is kept within 2001-2003 so the
+    comparison isn't crossed by a real Gregorian leap day: the written
+    labels are proleptic Gregorian even under the `365_day` model calendar
+    (see the module's Output Conventions), so a span that crossed one would
+    disagree with this test's own leap-year-blind `365_day` bin counts for a
+    reason unrelated to the wrap being tested here.
+    """
+    grid = make_grid()
+    coupler = Coupler(
+        {"atm": SlabAtmosphereModel(grid)},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime("2001-07-01"),
+        calendar=CALENDAR,
+    )
+    days = 2 * STEPS_PER_YEAR + 40  # a bit over two 365-day years
+    counts, expected = _climatology_counts_by_groupby(coupler, days)
+
+    assert int(counts.sum()) == days
+    np.testing.assert_array_equal(counts, expected)
+
+
 def test_a_misspelled_inclusive_is_refused():
     """``Literal`` does not check at runtime, so the rule builder must.
 
