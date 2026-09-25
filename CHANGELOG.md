@@ -680,17 +680,13 @@ Breaking changes are marked; everything else is additive.
     clock), threaded exactly like the existing `"physics"` key — following
     jax-gcm's own v3 migration guide, which is explicit that a caller should
     continue threading all four fields of `RunState` rather than deriving
-    `time`/`step` from a step counter kept elsewhere. (An earlier draft of
-    this note justified the threading by an unavoidable int32 overflow in a
-    step-counter product; that was overstated — `jem.base.calendar
-    .gregorian_instant` (used for `monthly_mean`/`year_fraction` below) is a
-    limb multiply-then-divide, exact for any step counter an int32 can hold
-    up to the exact int32 day-count limit its own docstring derives (about
-    5.87 million simulated years — two earlier decompositions shipped and
-    were superseded before this one, each silently breaking far short of its
-    own claimed range; see that function's **History** note), so there is no
-    overflow to avoid by threading. Threading is still the right design,
-    just for the migration-guide reason, not an unavoidable one.)
+    `time`/`step` from a step counter kept elsewhere. Threading is not
+    forced by overflow: `jem.base.calendar.gregorian_instant` (used for
+    `monthly_mean`/`year_fraction` below) is a limb multiply-then-divide,
+    exact for any step counter an int32 can hold, up to the int32 day-count
+    limit its docstring derives (about 5.87 million simulated years). It is
+    the design the migration guide asks for, and it is what keeps JCM's clock
+    and the coupler's from ever disagreeing.
   - **An averaged output record is now labelled at its interval's MIDPOINT**,
     not its end (jax-gcm's own convention change). `TimeAxis.datetimes` — which
     labels every non-JCM component's output so it merges with the
@@ -701,9 +697,8 @@ Breaking changes are marked; everything else is additive.
     fraction of a day. See the standalone Breaking-change bullet below for
     this change's full user-facing impact (it is not scoped to
     `jcm.model.Model` users only — every jem output changes, slab-only runs
-    included) and for what happened to `jem.accumulate.monthly_mean`'s own
-    bin math, which an earlier draft of this entry said was left unchanged —
-    it was not; see that bullet and `monthly_mean`'s own docstring.
+    included) and for the change to `jem.accumulate.monthly_mean`'s own bin
+    math; see that bullet and `monthly_mean`'s own docstring.
   - `jcm.date` dropped `days_per_year` and the `calendar` argument of
     `parse_duration_days` / `DateData.set_date` / `ForcingData.select`, along
     with the calendar concept itself. JEM's own annual-cycle bookkeeping
@@ -721,13 +716,10 @@ Breaking changes are marked; everything else is additive.
     `jem.accumulate.monthly_mean`'s in-scan calendar-month accumulator (both
     the twelve-bin climatology and the sequential `total_time`/`n_months`
     forms) **now works exactly on `"gregorian"`, in-scan, real leap years
-    included** — an earlier draft of this entry said this needed a calendar
-    whose year is a fixed number of days and so could never work on Gregorian
-    in-scan; that was wrong (refuted by a review: a twelve-bin accumulator is
-    sum/count per bin and never needs a fixed year length if each record's own
-    bin is read off its real Gregorian date, which
-    `jem.base.calendar.gregorian_instant` now does, int32-safely, without ever
-    forming a step-count-sized product). See `monthly_mean`'s own docstring
+    included**. A twelve-bin accumulator is a sum and count per bin, so it
+    never needs a fixed year length as long as each record's bin is read off
+    its real Gregorian date, which `jem.base.calendar.gregorian_instant` does
+    exactly, in int32, without ever forming a step-count-sized product. See `monthly_mean`'s own docstring
     and the **binning-convention breaking change** bullet below for the full
     story, including how this interacts with the midpoint-label change.
     `windowed_mean` is unaffected either way (a window has no calendar-month
@@ -815,9 +807,7 @@ Breaking changes are marked; everything else is additive.
   this or any earlier jem revision: `jem.base.component.days_per_year`, the
   one table every calendar-aware part of jem reads, has never had a
   `"360_day"` entry, matching the pre-878 `jcm.date.days_per_year` it was
-  copied from. A previous version of this entry, and several other
-  docstrings, wrongly said otherwise — see the jax-gcm-878 clock migration
-  review that caught it. A 360-day fixed-length year is still a table
+  copied from; docstrings that said otherwise are corrected. A 360-day fixed-length year is still a table
   `jem.accumulate.month_lengths` can build, given the bare number `360`
   directly, but there is no calendar *name* that reaches it through a
   `Coupler`.) Every documented example that

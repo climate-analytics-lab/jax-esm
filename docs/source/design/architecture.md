@@ -1376,9 +1376,8 @@ can itself run well past `2**31` for a multi-decade run — against a record's
 own midpoint via `jem.base.calendar.gregorian_instant`'s int32-safe limb
 (schoolbook) multiply-then-divide) and `_gregorian_month_rule` for `gregorian`
 (below), which uses
-`gregorian_instant` directly. (This replaced a genuinely different,
-smaller-range decomposition in a 2026-09 fix — see `gregorian_instant`'s own
-docstring's **History** note and `max_safe_record` for the current, tested
+`gregorian_instant` directly. (See `gregorian_instant`'s docstring, "Why
+limbs", for why it uses a limb lookup, and `max_safe_record` for its tested
 bound.) Without `accumulate`, the generated function is what it always was.
 
 **`gregorian` now works in-scan, exactly, real leap years included** — no
@@ -1785,12 +1784,11 @@ rather than recomputing them from the coupler's own step counter each call is
 deliberate: JCM's `RunState` is the authoritative clock since jax-gcm v3 (PR
 878), and jax-gcm's own migration guide (`docs/source/v2_to_v3.rst`, "One real
 datetime clock") is explicit that a caller should keep threading it rather
-than deriving it elsewhere — not because recomputing it would overflow (an
-earlier draft of this note said so; the CHANGELOG retracts it, since
-`jem.base.calendar.gregorian_instant`'s own int32-safe limb multiply-then-divide
-decomposition computes exactly this instant from the coupler's own step count
-for `JCMComponent._report_authoritative_clock_drift`'s drift check below, so
-recomputing was never the obstacle) — but because threading is what
+than deriving it elsewhere — not because recomputing it would overflow
+(`jem.base.calendar.gregorian_instant`'s int32-safe limb multiply-then-divide
+computes exactly this instant from the coupler's own step count, for
+`JCMComponent._report_authoritative_clock_drift`'s drift check below) — but
+because threading is what
 guarantees JCM's clock and the coupler's can never disagree about what instant
 a step is at, which recomputing one from the coupler's own step count cannot
 once a checkpoint or a differently-configured coupler is involved — see

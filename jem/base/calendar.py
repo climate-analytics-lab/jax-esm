@@ -334,17 +334,14 @@ def gregorian_instant(
     ``start_days >= 0``; the arithmetic is exact modulo ``2**32``
     unconditionally.
 
-    **History.** Two earlier decompositions were tried and superseded:
-    reducing ``record`` modulo ``SECONDS_PER_DAY // gcd(record_seconds,
-    SECONDS_PER_DAY)`` (int32-safe only up to ``D <= 24855``, i.e. as little
-    as 817 records for a "1 month" 2629746 s step); then reducing modulo a
-    single static "block" sized from ``record_seconds`` alone (int32-safe up
-    to a computed ``max_safe_record``, but that bound could itself be as
-    small as about 68 simulated years -- e.g. a 73453 s coupling step -- and
-    nothing but :func:`jem.accumulate._midpoint_month_rule` ever checked it,
-    so a longer run silently wrapped with no error). Both are corrected here
-    rather than repeated, and neither is a description of what this function
-    does any more.
+    **Why limbs.** The simpler reductions are int32-safe only for a bounded
+    record count that depends on ``record_seconds``: reducing ``record``
+    modulo ``SECONDS_PER_DAY // gcd(record_seconds, SECONDS_PER_DAY)`` stays
+    in range only while that period ``D <= 24855`` (as few as 817 records for
+    a "1 month" 2629746 s step), and reducing modulo one static block sized
+    from ``record_seconds`` can overflow after about 68 simulated years
+    (e.g. a 73453 s step). The limb lookup has no such bound short of the
+    int32 day count itself, so no caller has to track one.
 
     Parameters
     ----------
