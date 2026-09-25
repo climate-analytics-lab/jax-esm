@@ -51,6 +51,48 @@ def test_python_api_block_is_the_readme_quick_start():
         )
 
 
+def test_configurations_door_example_compiles_and_names_resolve():
+    """``python_api.md``'s door example compiles and every name it uses resolves.
+
+    The ``## Validated configurations from Python`` section's fenced block
+    builds a real coupler and would integrate `earth-slab`'s default 30-day
+    run -- too expensive for this fast test -- so
+    ``jem.configurations.load`` and ``jem.run_chunked`` are patched to
+    lightweight stand-ins carrying the same attributes the real objects have
+    (``.coupler``/``.config``/``.run_kwargs``), and the block is genuinely
+    executed (not merely ``compile()``-d, which only checks syntax) against
+    them. This is exactly the gap an earlier draft of the block fell into: it
+    called ``run_chunked`` without importing it, a ``NameError`` that
+    ``compile()`` alone would not have caught either.
+    """
+    from types import SimpleNamespace
+    from unittest import mock
+
+    import jem
+    from jem import configurations as configurations_module
+
+    blocks = _PYTHON_FENCE.findall(PYTHON_API.read_text())
+    matches = [b for b in blocks if "configurations.load" in b]
+    assert len(matches) == 1, (
+        f"expected exactly one door example (naming `configurations.load`) in "
+        f"{PYTHON_API}, found {len(matches)}"
+    )
+    code = matches[0]
+
+    fake_loaded = SimpleNamespace(coupler="<coupler>", config={"ocean": {}}, run_kwargs={})
+    run_chunked_calls = []
+    with mock.patch.object(configurations_module, "load",
+                           return_value=fake_loaded) as fake_load, \
+         mock.patch.object(jem, "run_chunked",
+                           side_effect=lambda *a, **k: run_chunked_calls.append((a, k))):
+        exec(compile(code, str(PYTHON_API), "exec"), {"__name__": "__main__"})
+
+    fake_load.assert_called_once_with("aquaplanet-slab")
+    assert run_chunked_calls, (
+        f"{PYTHON_API}'s door example never called run_chunked(...)"
+    )
+
+
 @pytest.mark.slow
 def test_readme_quickstart_runs(tmp_path, monkeypatch):
     """Run the first ``python`` block of ``python_api.md`` in a scratch directory."""

@@ -15,6 +15,7 @@ door's own module, which is the property the AST meta-test checks.
 """
 
 import ast
+import shutil
 import unittest
 from pathlib import Path
 
@@ -69,15 +70,17 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(exp.run_kwargs["chunk"], "30 days")
         self.assertNotIn("log_level", exp.run_kwargs)
 
-    def test_matches_cli_composition(self):
-        """The door and the CLI path build the identical coupled model.
+    def test_load_builds_through_the_cli_builders(self):
+        """``load()`` calls the SAME ``jem.runners`` builders the CLI does.
 
-        Both routes call the SAME ``jem.runners`` builders
-        (:func:`jem.runners.build_coupler`, :func:`jem.runners.build_run_kwargs`)
-        on the same composed config, so this is really checking that
-        ``load()`` does not skip, reorder or duplicate any of that assembly --
-        not re-testing the builders themselves (``tests/unit/test_runners.py``
-        already does that in depth).
+        This only shows that ``load()`` does not skip, reorder or duplicate
+        the ``build_coupler``/``build_run_kwargs`` assembly -- it composes
+        through ``configurations._compose`` itself, so it cannot by itself
+        prove the door agrees with the REAL command line
+        (``python -m jem.main``); ``test_load_matches_the_cli_entry_point``
+        below exercises that entry point directly, in a subprocess.
+        ``tests/unit/test_runners.py`` tests the builders themselves in
+        depth.
         """
         exp = configurations.load("aquaplanet-slab")
 
@@ -94,8 +97,62 @@ class TestLoad(unittest.TestCase):
         # The carry each coupler scans over has the identical pytree shape.
         self.assertEqual(jax.tree_util.tree_structure(exp.coupler.initialize()),
                          jax.tree_util.tree_structure(ref_coupler.initialize()))
-        # run_kwargs is exactly what the CLI would have handed run_chunked.
-        self.assertEqual(exp.run_kwargs, ref_run_kwargs)
+        # run_kwargs matches `build_run_kwargs` on every key except
+        # `output_dir`, which the door deliberately diverges on: it gets its
+        # own fresh `outputs/<date>/<time>` (see `load`'s docstring),
+        # `build_run_kwargs` called directly gets the plain `"outputs"`
+        # fallback. Checked explicitly rather than silently dropped from the
+        # comparison.
+        exp_kwargs = dict(exp.run_kwargs)
+        exp_output_dir = exp_kwargs.pop("output_dir")
+        ref_kwargs = dict(ref_run_kwargs)
+        ref_output_dir = ref_kwargs.pop("output_dir")
+        self.assertEqual(exp_kwargs, ref_kwargs)
+        self.assertEqual(ref_output_dir, "outputs")
+        self.assertTrue(exp_output_dir.startswith("outputs/"), exp_output_dir)
+        shutil.rmtree(exp_output_dir, ignore_errors=True)
+
+    def test_load_matches_the_cli_entry_point(self):
+        """The door's ``.config`` matches ``python -m jem.main``'s own composition.
+
+        Runs the REAL entry point in a subprocess (``--cfg job --resolve``,
+        which composes and prints without building or running anything) and
+        compares its YAML against ``load(...).config`` -- unlike
+        ``test_load_builds_through_the_cli_builders``, this cannot pass
+        because both sides happen to call the same private helper; it only
+        passes if ``python -m jem.main`` and ``jem.configurations.load``
+        agree on what a recipe composes to.
+
+        Today the two are byte-for-byte identical once parsed: ``compose()``
+        (what the door uses) and ``--cfg job`` (what the CLI prints) both
+        exclude Hydra's own ``hydra:`` config node already, and
+        ``coupled_run.output_dir`` is still ``null`` in the COMPOSED config
+        on both sides -- the door's fresh-directory substitution happens
+        after this point, in ``run_kwargs``, not in ``.config`` (see
+        ``load``'s docstring). So nothing needs excluding today; if that ever
+        stops being true, name here exactly what has to be excluded and why,
+        rather than loosening this into a partial comparison silently.
+        """
+        import subprocess
+        import sys
+
+        import yaml
+
+        result = subprocess.run(
+            [sys.executable, "-m", "jem.main", "+configuration=aquaplanet-slab",
+             "--cfg", "job", "--resolve"],
+            capture_output=True, text=True, check=True,
+        )
+        cli_config = yaml.safe_load(result.stdout)
+        # Defensive: if a future Hydra/jem change starts printing the
+        # `hydra:` node under `--cfg job`, drop it here rather than let it
+        # fail this comparison for a reason unrelated to what this test is
+        # for (`compose()` on the door's side never includes it either).
+        cli_config.pop("hydra", None)
+
+        door_config = configurations.load("aquaplanet-slab").config
+
+        self.assertEqual(cli_config, door_config)
 
     def test_dotted_value_override_reaches_run_kwargs(self):
         exp = configurations.load(
@@ -103,6 +160,57 @@ class TestLoad(unittest.TestCase):
                                   "coupled_run.chunk": "2 days"})
         self.assertEqual(exp.run_kwargs["total_time"], "4 days")
         self.assertEqual(exp.run_kwargs["chunk"], "2 days")
+
+    def test_documented_total_time_override_is_a_whole_number_of_chunks(self):
+        """The override example in this module's docstring/docs/CHANGELOG runs.
+
+        A local review of #131 found the ORIGINAL example
+        (``load("earth-slab", **{"coupled_run.total_time": 10})``) actually
+        raises from ``run_chunked``, because every shipped recipe's own
+        ``coupled_run.chunk`` stays its 30-day default and 10 is not a
+        multiple of it. This composes the CORRECTED example ("60 days") and
+        validates it against ``run_chunked``'s own whole-number-of-chunks
+        rule (:func:`jem.driver._whole_steps`) -- the same check
+        ``run_chunked`` itself makes before compiling -- rather than
+        actually integrating 60 days, so a future change to the default
+        chunk length is still caught without this test itself becoming slow.
+        """
+        from jem import driver
+
+        exp = configurations.load(
+            "earth-slab", **{"coupled_run.total_time": "60 days"})
+        coupling_days = exp.coupler.dt_seconds / 86400
+        steps_per_chunk = driver._whole_steps(
+            exp.run_kwargs["chunk"], coupling_days, exp.coupler, "chunk")
+        total_steps = driver._whole_steps(
+            exp.run_kwargs["total_time"], coupling_days, exp.coupler, "total_time")
+        self.assertEqual(total_steps % steps_per_chunk, 0)
+
+    def test_output_dir_defaults_to_a_fresh_directory_per_call(self):
+        """Two successive ``load()`` calls with no ``output_dir`` do not collide.
+
+        A local review of #131 found ``load()`` defaulting ``output_dir`` to
+        the literal ``"outputs"`` (``build_run_kwargs``'s own non-door
+        fallback): a second ``load()`` + ``run_chunked`` would then resume
+        the first's checkpoint rather than starting a fresh run.
+        """
+        exp1 = configurations.load("aquaplanet-slab")
+        exp2 = configurations.load("aquaplanet-slab")
+        try:
+            self.assertNotEqual(exp1.run_kwargs["output_dir"], exp2.run_kwargs["output_dir"])
+            # Neither is a subdirectory (in particular, a checkpoint
+            # directory) of the other.
+            dir1, dir2 = exp1.run_kwargs["output_dir"], exp2.run_kwargs["output_dir"]
+            self.assertFalse(str(dir2).startswith(str(dir1) + "/"))
+            self.assertFalse(str(dir1).startswith(str(dir2) + "/"))
+        finally:
+            for d in (exp1.run_kwargs["output_dir"], exp2.run_kwargs["output_dir"]):
+                shutil.rmtree(d, ignore_errors=True)
+
+    def test_explicit_output_dir_override_is_honoured_exactly(self):
+        exp = configurations.load(
+            "aquaplanet-slab", **{"coupled_run.output_dir": "/tmp/jem-explicit-output-dir"})
+        self.assertEqual(exp.run_kwargs["output_dir"], "/tmp/jem-explicit-output-dir")
 
     def test_config_group_override_selects_an_option(self):
         # `seaice="none"` is a plain Python string, exactly the CLI's bare
@@ -124,17 +232,32 @@ class TestLoad(unittest.TestCase):
         self.assertAlmostEqual(float(lnd_params.tdland), 86400.0)
 
     def test_restores_host_hydra_context(self):
-        """F3: a host application's own Hydra context survives ``load()``."""
-        from hydra import compose, initialize_config_module
+        """F3: a host application's own, DIFFERENT Hydra context survives ``load()``.
+
+        The host composes its OWN tiny config from a temp directory, not
+        jem's -- if ``load()`` left the wrong context active (e.g. its own,
+        not properly cleared and restored), the host's ``compose()`` below
+        would either raise or hand back jem's config instead of the host's,
+        rather than this test passing vacuously because both sides happen to
+        be jem's own context.
+        """
+        import tempfile
+        from pathlib import Path as _Path
+
+        from hydra import compose, initialize_config_dir
         from hydra.core.global_hydra import GlobalHydra
 
-        with initialize_config_module(config_module="jem.config", version_base="1.3"):
-            self.assertTrue(GlobalHydra.instance().is_initialized())
-            configurations.load("aquaplanet-slab")
-            # The host's context survived load(): still initialised and it
-            # composes without raising.
-            self.assertTrue(GlobalHydra.instance().is_initialized())
-            self.assertIsNotNone(compose(config_name="config"))
+        with tempfile.TemporaryDirectory() as host_dir:
+            (_Path(host_dir) / "host_config.yaml").write_text("host_marker: 42\n")
+            with initialize_config_dir(version_base=None, config_dir=host_dir):
+                self.assertTrue(GlobalHydra.instance().is_initialized())
+                configurations.load("aquaplanet-slab")
+                # The host's context survived load(): still initialised, and
+                # it is still able to compose its OWN config, not jem's.
+                self.assertTrue(GlobalHydra.instance().is_initialized())
+                host_cfg = compose(config_name="host_config")
+                self.assertEqual(host_cfg.host_marker, 42)
+                self.assertNotIn("atmosphere", host_cfg)
 
     def test_constants_override_reaches_the_build_through_the_door(self):
         """A `+atmosphere.constants.*` override reaches the built model.
@@ -152,6 +275,12 @@ class TestLoad(unittest.TestCase):
                 "aquaplanet-slab", **{"+atmosphere.constants.grav": 9.7})
             self.assertAlmostEqual(c.grav, 9.7)
         finally:
+            # Required, not decorative: jcm.constants is a process-global
+            # singleton that `load()` deliberately never resets (see its
+            # docstring's "Constants overrides are process-global" section),
+            # so without this restore the override above would leak into
+            # every OTHER test in this process that builds a jax-gcm model,
+            # not just this one.
             c.set_constants(saved)
 
 
@@ -173,6 +302,28 @@ class TestOverrideStr(unittest.TestCase):
         self.assertEqual(
             configurations._override_str("coupled_run.subsample", 3),
             "coupled_run.subsample=3")
+
+    def test_numeric_looking_string_stays_a_string(self):
+        # Unlike the CLI's bare `subsample=3` (composes to the int 3), a
+        # Python **overrides value that is itself a numeric-looking `str`
+        # composes to the STRING "3" -- it goes through the same quoting as
+        # any other string, since `_override_str` has no way to know the
+        # caller meant a number rather than, say, a zero-padded code.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        tok = configurations._override_str("coupled_run.subsample", "3")
+        value = parser.parse_overrides([tok])[0].value()
+        self.assertEqual(value, "3")
+        self.assertIsInstance(value, str)
+
+    def test_dict_value_raises_type_error(self):
+        with self.assertRaisesRegex(TypeError, "ocean.params"):
+            configurations._override_str("ocean.params", {"forcing_method": "relaxation"})
+
+    def test_tuple_value_raises_type_error(self):
+        with self.assertRaisesRegex(TypeError, "ocean.params"):
+            configurations._override_str("ocean.params", (1, 2))
 
     def test_quoted_path_composes_through_load(self):
         # F2 end to end: a grammar-carrying path survives a real compose via

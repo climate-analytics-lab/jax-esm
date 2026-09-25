@@ -8,8 +8,10 @@ frozen :class:`LoadedConfiguration` of built objects -- a
 :class:`~jem.base.coupler.Coupler` and the ``run_kwargs`` a caller passes to
 ``jem.run_chunked`` -- with Hydra/omegaconf invisible to the caller (only a
 plain-dict ``.config`` is exposed for introspection). So
-``jem.run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces
-``python -m jem.main +configuration=<name>``'s single integration.
+``jem.run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's build
+and its ``coupled_run`` settings; see :func:`load`'s docstring for the small,
+enumerated list of things around that build which it does NOT reproduce
+(``output_dir``'s exact path, the working-directory change, the logger level).
 
 This door routes through the SAME :mod:`jem.runners` builders the CLI uses
 (:func:`jem.runners.build_coupler` and :func:`jem.runners.build_run_kwargs`),
@@ -20,6 +22,7 @@ notebook.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,17 +35,84 @@ CONFIGURATION_DIR = CONFIG_DIR / "configuration"
 class LoadedConfiguration:
     """A composed configuration, built and Hydra-free.
 
-    ``run_kwargs`` is exactly what :func:`jem.runners.build_run_kwargs` would
-    hand ``python -m jem.main`` for the same composed config, so
-    ``jem.run_chunked(coupler, **run_kwargs)`` reproduces the CLI's
-    integration. ``config`` is a plain resolved dict for introspection -- no
-    ``DictConfig`` leaks out.
+    ``run_kwargs`` reproduces the CLI's ``coupled_run`` settings exactly
+    (whatever the recipe and any ``**overrides`` resolved them to), so
+    ``jem.run_chunked(coupler, **run_kwargs)`` reproduces the CLI's build and
+    integration -- with the exceptions :func:`load`'s docstring enumerates
+    (``output_dir`` is a fresh directory this door manufactures, not the
+    CLI's Hydra-managed one; no working-directory change; no logger-level
+    change). ``config`` is a plain resolved dict for introspection -- no
+    ``DictConfig`` leaks out, but see :func:`load` on why a
+    ``+atmosphere.constants.*`` override will not show up in a *later*
+    call's ``config`` even though it is still silently affecting that later
+    call's build.
     """
 
     name: str
     coupler: Any
     run_kwargs: dict
     config: dict = field(default_factory=dict)
+
+
+#: Directories :func:`_fresh_output_dir` has already handed out in this
+#: process, so two calls in the same wall-clock second still disambiguate
+#: even though NEITHER has written anything to disk yet at the point they are
+#: handed out (see that function's docstring for why checking the filesystem
+#: alone is not enough). Never cleared -- the whole point is that a name once
+#: given out is never given out again for the life of the process.
+_HANDED_OUT_OUTPUT_DIRS: set[str] = set()
+
+
+def _fresh_output_dir() -> str:
+    """Return a fresh directory mirroring Hydra's own default -- not yet created.
+
+    :func:`jem.runners.build_run_kwargs` falls back to a literal ``"outputs"``
+    when a config names no ``output_dir`` -- correct for a single ``run(cfg)``
+    call from a script, but wrong for the door: a caller can build several
+    experiments in one process (a notebook cell re-run, a loop over
+    configurations), and a literal constant would make the second ``load()``
+    land in, and resume the checkpoint of, the first's directory. This
+    manufactures the door's own ``outputs/<date>/<time>``, mirroring the
+    ``hydra.run.dir`` pattern ``jem/config/config.yaml`` gives the CLI
+    (``outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}``), with a numeric suffix if
+    that path is already spoken for.
+
+    "Already spoken for" checks two things, not just one: the directory
+    genuinely existing on disk already (an earlier PROCESS's real output, or
+    this process's own after a caller actually ran something into it), and
+    :data:`_HANDED_OUT_OUTPUT_DIRS` (a name this function itself already
+    returned, in THIS process, whether or not anything has been written to it
+    yet). The second check is the one that matters in the ordinary case:
+    ``load()`` never creates the directory it names -- only `run_chunked`
+    writing the first chunk does that -- so two ``load()`` calls made within
+    the same wall-clock second, before either one's caller has started a run,
+    would otherwise see the SAME still-nonexistent path on disk and be handed
+    the identical "fresh" directory twice. Not creating the directory here is
+    deliberate: a caller building several ``LoadedConfiguration``s purely for
+    introspection (comparing ``.config`` across recipes, say, never
+    running any of them) should not litter the working directory with empty
+    ones.
+
+    This is deliberately NOT done in :func:`jem.runners.build_run_kwargs`
+    itself: a caller of ``runners.run(cfg)`` directly (a script, most of this
+    repository's own tests) is a single call per process and gets the
+    documented, simple ``"outputs"`` fallback; only the door needs freshness,
+    since only the door is meant to be called more than once in a process.
+
+    Returns
+    -------
+    str
+
+    """
+    now = datetime.now()
+    base = Path("outputs") / now.strftime("%Y-%m-%d") / now.strftime("%H-%M-%S")
+    candidate = base
+    suffix = 1
+    while str(candidate) in _HANDED_OUT_OUTPUT_DIRS or candidate.exists():
+        candidate = Path(f"{base}-{suffix}")
+        suffix += 1
+    _HANDED_OUT_OUTPUT_DIRS.add(str(candidate))
+    return str(candidate)
 
 
 def _summary(path: Path) -> str:
@@ -71,11 +141,29 @@ def available() -> dict[str, str]:
 def _compose(name: str, overrides: list[str]):
     """Compose ``+configuration=<name>`` (+ dotted overrides) against the root.
 
-    Uses ``initialize_config_module`` on ``jem.config`` -- the same call every
-    other composer in this repository makes (``jem.main``, the test suite) --
-    rather than ``initialize_config_dir`` on a physical path: jem's own
-    convention is the package form, so this stays composable the same way
-    even if the installed package's files move relative to this source file.
+    Uses ``initialize_config_module`` on ``jem.config`` -- the same package
+    name every other composer in this repository resolves against
+    (``jem.main``, the test suite) -- rather than ``initialize_config_dir`` on
+    a physical path, so this composition step is robust to the installed
+    package's files moving relative to this source file. That is narrower
+    than it sounds: ``available()``/``CONFIGURATION_DIR`` below still resolve
+    the recipe *names* through a plain ``Path(__file__)``-relative path, not
+    through this same package machinery, so the asymmetry is real -- a
+    packaging change that broke one would not necessarily break the other.
+
+    This is NOT "the same call ``jem.main`` makes": ``jem.main`` decorates its
+    entry point with ``@hydra.main(version_base=None, config_path="config")``,
+    which runs Hydra's full job lifecycle around the composition --
+    output-directory creation, ``chdir``, job logging setup (see ``load``'s
+    docstring for exactly which of those this door does not reproduce).
+    ``initialize_config_module`` + ``compose`` is Hydra's separate, lighter
+    *compose API*, meant for exactly this (calling from a notebook/script/test
+    without a job run), and produces the identical resolved ``DictConfig`` with
+    none of that job machinery attached. The ``version_base`` also differs
+    (``"1.3"`` here vs. ``None`` on ``jem.main``'s decorator) -- checked against
+    installed Hydra 1.3.6, that only changes the parsing of a few deprecated,
+    pre-1.1 override spellings that no jem or jax-gcm config uses, so it does
+    not affect what a real override composes to here.
 
     ``initialize_config_module`` clears the global Hydra on exit, and we also
     clear a pre-existing one up front, so ``load`` is safe to call repeatedly.
@@ -110,14 +198,54 @@ def _override_str(key: str, value: Any) -> str:
     such as ``seaice=none`` (a bare Python string, since a caller writes
     ``load(name, seaice="none")``) -- verified to compose identically quoted
     or not, since group resolution reads the parsed override's value, not its
-    source spelling. Non-string scalars pass through unquoted so
-    ``coupled_run.total_time=10`` stays the number ``10`` (and a Python
-    list/dict keeps its native override meaning).
+    source spelling. A numeric-LOOKING string (``load(name,
+    **{"coupled_run.subsample": "3"})``) stays a quoted string and so composes
+    to the Python string ``"3"``, unlike the CLI's own bare ``subsample=3``,
+    which composes to the integer -- pass the unquoted Python ``int``/``float``
+    for that.
+
+    Non-string scalars pass through unquoted so ``coupled_run.total_time=10``
+    stays the number ``10``. A ``dict`` or ``tuple`` is refused outright with a
+    ``TypeError`` naming the key: unlike a list (which Hydra's grammar can
+    represent as an override value token), there is no single override token
+    that reproduces an arbitrary nested mapping or a tuple, so silently
+    stringifying one here would emit a token that composes to something else
+    entirely (or that Hydra's parser rejects) rather than failing where the
+    caller can see why. Give one dotted override per field instead, e.g.
+    ``load(name, **{"ocean.params.forcing_method": "relaxation",
+    "ocean.params.relaxation_time": 1e6})`` rather than
+    ``load(name, **{"ocean.params": {"forcing_method": ...}})``.
+
+    Parameters
+    ----------
+    key : str
+        The (possibly dotted) override key, as a caller's ``**overrides``
+        item's key.
+    value : Any
+        The override's value.
+
+    Returns
+    -------
+    str
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is a ``dict`` or a ``tuple``.
+
     """
     from hydra.core.override_parser.types import Quote, QuotedString
 
     if value is None:
         return f"{key}=null"
+    if isinstance(value, (dict, tuple)):
+        raise TypeError(
+            f"load() override {key!r} is a {type(value).__name__}, which has "
+            "no single Hydra override token that reproduces it faithfully; "
+            f"give one dotted override per field instead, e.g. "
+            f"**{{{key + '.<field>'!r}: <value>, ...}} rather than "
+            f"**{{{key!r}: {{'<field>': <value>, ...}}}}."
+        )
     if isinstance(value, str):
         return f"{key}={QuotedString(text=value, quote=Quote.single).with_quotes()}"
     return f"{key}={value}"
@@ -129,38 +257,95 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ``name`` is any :func:`available` key (a
     ``jem/config/configuration/*.yaml`` stem). ``**overrides`` is the optional
     escape hatch: Hydra overrides passed straight into compose -- a plain
-    value override (``load("earth-slab", **{"coupled_run.total_time": 10})``,
-    where the dict key carries the dots a Python kwarg cannot) or a
-    config-group selection (``load("aquaplanet-slab", seaice="none")``,
-    exactly the CLI's ``seaice=none``). The returned
-    :class:`LoadedConfiguration` is Hydra-free: ``coupler`` is built and
-    ``config`` is a plain resolved dict.
+    value override (``load("earth-slab", **{"coupled_run.total_time": "60
+    days"})`` -- the recipe's chunk stays its default 30 days, so this has to
+    be a multiple of that, not the CLI's own arbitrary "10 days"; the dict key
+    carries the dots a Python kwarg cannot) or a config-group selection
+    (``load("aquaplanet-slab", seaice="none")``, exactly the CLI's
+    ``seaice=none``). The returned :class:`LoadedConfiguration` is Hydra-free:
+    ``coupler`` is built and ``config`` is a plain resolved dict.
 
+    What ``run_kwargs`` reproduces of the CLI, and what it does not
+    -----------------------------------------------------------------
     ``jem.run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's
-    single integration for the recipe.
+    build and every ``coupled_run`` setting the recipe (plus any
+    ``**overrides``) resolved to. Three things the CLI does around that build
+    are deliberately NOT reproduced:
+
+    - **``output_dir``.** When the recipe names none (the common case --
+      every shipped configuration leaves it ``null``), the CLI gets a fresh
+      Hydra-managed ``outputs/<date>/<time>`` job directory. This function
+      cannot use that (there is no Hydra *job* here, only a *composition* --
+      see :func:`_compose`'s docstring), so it manufactures its OWN fresh
+      ``outputs/<date>/<time>`` directory instead (:func:`_fresh_output_dir`),
+      unique per call: two successive ``load()`` calls in one process land in
+      two different directories, and neither is the other's checkpoint
+      location. This is intentionally different from
+      :func:`jem.runners.build_run_kwargs`'s own non-door fallback (a literal
+      ``"outputs"``, correct for a script's single ``runners.run(cfg)``
+      call) -- only the door needs per-call freshness, since only the door is
+      meant to be called more than once in a process. An explicit
+      ``coupled_run.output_dir`` override (or one set in the recipe itself)
+      is honoured exactly, with no substitution.
+    - **The working directory.** ``python -m jem.main`` changes into its run
+      directory before building anything (``jem.main``'s
+      ``@hydra.main(version_base=None, ...)`` decorator defaults to Hydra's
+      pre-1.2 ``chdir=True`` behaviour, since ``jem/config/config.yaml`` sets
+      no explicit ``hydra.job.chdir``). ``load()`` never changes the calling
+      process's working directory -- a relative path a caller builds AFTER
+      ``load()`` returns is relative to wherever the process already was, not
+      to ``exp.run_kwargs["output_dir"]``.
+    - **The ``jem`` logger's level.** ``jem.main`` sets it from
+      ``cfg.coupled_run.log_level`` (``logging.getLogger("jem").setLevel(...)``,
+      see its module docstring); ``load()`` touches no logger.
+
+    Constants overrides are process-global and persist after ``load()``
+    ----------------------------------------------------------------------
+    A ``+atmosphere.constants.*`` override reaches this door's build exactly
+    as it reaches the CLI's -- see the paragraph below on why no separate step
+    is needed for that. But :mod:`jcm.constants` is a **process-global
+    singleton** (``jcm.runners.apply_constants_overrides`` calls
+    ``jcm.constants.set_constants(...)``, which mutates it in place), and
+    neither this door nor jax-gcm's own (:func:`jcm.configurations.load`)
+    resets or restores it afterwards. So:
+
+    - the override OUTLIVES the ``load()`` call that applied it, and silently
+      applies to every model built in the same process afterwards -- another
+      ``load()`` of a DIFFERENT recipe with no constants override of its own
+      still sees the earlier override, and its own ``.config`` will show the
+      *default* constants even though the live singleton (and so the model it
+      just built) is running with the earlier, overridden ones;
+    - this is deliberate, not an oversight to fix here: restoring the
+      singleton after ``load()`` returns would silently change an
+      already-built, already-traced model's physics parameters out from under
+      whatever holds a reference to it, and resetting it *before* building
+      would silently clobber a caller's own deliberate
+      ``jcm.constants.set_constants(...)`` made earlier in the process. Both
+      are worse than the leak.
+
+    The practical rule: use at most one constants configuration per process.
+    A script or notebook that needs several different overrides should run
+    each in its own process (or explicitly save/restore
+    ``jcm.constants.physical_constants`` itself, understanding that this
+    changes the physics of any model already built with the old value).
 
     Other pre-build side effects of :func:`jem.runners.run`
     ---------------------------------------------------------
     Unlike jax-gcm's own door (:func:`jcm.configurations.load`), which has to
     separately call ``apply_constants_overrides`` before building the model,
-    this door needs no equivalent step: every build-relevant side effect
-    ``run()`` relies on is already inside :func:`jem.runners.build_coupler`
-    itself, because ``build_coupler`` calls :func:`jem.runners.build_atmosphere`,
-    which applies jax-gcm's ``+atmosphere.constants.*`` overrides and its
-    config-trap warnings before constructing the model (see
-    ``build_atmosphere``'s own docstring). So calling ``build_coupler(cfg)``
-    here, exactly as ``run()`` does, already reproduces those effects with no
-    separate call needed.
-
-    The ONE thing ``run()`` does before ``build_coupler(cfg)`` that this door
-    does not repeat is logging the composed config -- a convenience with no
-    bearing on the objects built, and one this door's caller can reproduce
-    for themselves from ``exp.config`` if wanted.
-    ``run()``'s other work (choosing ``output_dir``, handing everything to
-    ``driver.run_chunked``) is exactly what building ``run_kwargs`` and
-    returning them, rather than starting the run, replaces -- the run itself
-    is left to the caller, same as the CLI leaves it to
-    ``driver.run_chunked``.
+    this door needs no equivalent step for THAT: every build-relevant side
+    effect ``run()`` relies on is already inside
+    :func:`jem.runners.build_coupler` itself, because ``build_coupler`` calls
+    :func:`jem.runners.build_atmosphere`, which applies jax-gcm's
+    ``+atmosphere.constants.*`` overrides and its config-trap warnings before
+    constructing the model (see ``build_atmosphere``'s own docstring). So
+    calling ``build_coupler(cfg)`` here, exactly as ``run()`` does, already
+    reproduces those effects with no separate call needed. What ``run()``
+    does that this door does NOT reproduce is enumerated above (``output_dir``,
+    the working directory, the logger level) plus logging the composed
+    config, which is a convenience with no bearing on the objects built and
+    which this door's caller can reproduce for themselves from ``exp.config``
+    if wanted.
 
     Parameters
     ----------
@@ -177,6 +362,9 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ------
     ValueError
         If ``name`` is not one of :func:`available`.
+    TypeError
+        If an override value is a ``dict`` or a ``tuple`` (see
+        :func:`_override_str`).
 
     """
     from omegaconf import OmegaConf
@@ -193,6 +381,14 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
 
     coupler = runners.build_coupler(cfg)
     run_kwargs = runners.build_run_kwargs(cfg)
+    # A fresh directory per call, UNLESS the recipe (or an override) named an
+    # explicit one -- checked on the composed config itself, before
+    # `build_run_kwargs` folded a `null` into its own "outputs" fallback, so
+    # this cannot mistake an explicit `coupled_run.output_dir="outputs"` for
+    # the unset case. See `load`'s own docstring for why this differs from
+    # `build_run_kwargs`'s non-door fallback.
+    if cfg.coupled_run.get("output_dir") is None:
+        run_kwargs["output_dir"] = _fresh_output_dir()
     # Plain resolved dict for introspection; a still-unfilled ``???`` key stays
     # a string rather than raising on this read-only copy. `cfg` is always a
     # mapping node (the whole composed config), so `to_container` always
