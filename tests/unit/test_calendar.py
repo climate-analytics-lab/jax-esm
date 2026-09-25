@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 from jem.base.calendar import (
+    SECONDS_PER_DAY,
     gregorian_day_of_year,
     gregorian_instant,
     gregorian_ymd_from_days,
@@ -271,6 +272,43 @@ def test_gregorian_instant_exact_at_and_near_2_31_for_every_adversarial_record_s
                 assert (int(day), int(second)) == (want_day, want_second), (
                     record_seconds, record, bound,
                 )
+
+
+def test_gregorian_instant_is_exact_even_when_the_loops_own_days_accumulator_overflows_int32():
+    """2026-09 review, round 3, finding 8: the "every intermediate" claim, precisely.
+
+    The limb-processing loop's own running ``days`` accumulator is computed
+    with no ``start_days`` in it at all (that is added only once, at the very
+    end); ``max_safe_record`` bounds it by ``_INT32_MAX - start_days``, which
+    for a sufficiently negative ``start_days`` *exceeds* ``_INT32_MAX`` --
+    so the loop's own accumulator can itself need to represent a value past
+    int32's own positive range before the final ``+ start_days`` brings the
+    total back down. This is harmless: ``jnp.int32`` addition is exact modulo
+    ``2**32`` (two's complement), so the final sum is correct regardless of
+    whether the loop's own running total needed to wrap through ``2**32`` to
+    get there -- verified here directly against exact Python ``int``
+    arithmetic, reproducing the review's own example
+    (``record_seconds=172800, start_days=-10**9``).
+    """
+    record_seconds = 172800  # 2 days
+    start_days = -10**9
+    bound = max_safe_record(record_seconds, start_days=start_days)
+    # Confirm the premise this test exists to cover: the loop's own
+    # accumulator genuinely needs to exceed int32's own range here, or this
+    # would not be testing what it claims to.
+    assert (bound * record_seconds) // SECONDS_PER_DAY > 2**31 - 1
+
+    def exact(record):
+        total = record * record_seconds
+        return start_days + total // SECONDS_PER_DAY, total % SECONDS_PER_DAY
+
+    records = np.array([0, 1, bound - 2, bound - 1, bound], dtype=np.int64)
+    days, seconds = gregorian_instant(
+        jnp.asarray(records, dtype=jnp.int32), record_seconds, start_days, 0
+    )
+    for record, day, second in zip(records, np.asarray(days), np.asarray(seconds), strict=True):
+        want_day, want_second = exact(int(record))
+        assert (int(day), int(second)) == (want_day, want_second), record
 
 
 def test_max_safe_record_reserves_start_days_against_the_same_day_budget():

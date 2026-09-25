@@ -256,26 +256,54 @@ def gregorian_instant(
     bound, not merely a handful of spot values -- for the empirical
     confirmation of it).
 
-    **Why every intermediate stays int32-safe.** ``combined`` is bounded by
-    ``SECONDS_PER_DAY * _LIMB_BASE + SECONDS_PER_DAY`` regardless of
-    ``record`` or ``record_seconds`` (``seconds < SECONDS_PER_DAY`` and
+    **Why the loop's own arithmetic stays int32-safe.** ``combined`` is
+    bounded by ``SECONDS_PER_DAY * _LIMB_BASE + SECONDS_PER_DAY`` regardless
+    of ``record`` or ``record_seconds`` (``seconds < SECONDS_PER_DAY`` and
     ``table_seconds[d] < SECONDS_PER_DAY`` are both invariants), which is
-    what ``_LIMB_BASE`` was chosen to keep under ``2**31``. The one quantity
-    that is *not* bounded independently of ``record`` -- ``days`` -- is
-    bounded by construction whenever the *final* answer is: at every step,
+    what ``_LIMB_BASE`` was chosen to keep under ``2**31``. The loop's own
+    ``days`` accumulator is bounded by the same induction: at every step,
     ``acc`` (this step's partial record, built from the limbs folded in so
     far) satisfies ``acc <= record`` and ``acc * _LIMB_BASE <= acc'`` for the
     *next* partial record ``acc'``, so ``days * _LIMB_BASE <= floor(acc *
     _LIMB_BASE * record_seconds / SECONDS_PER_DAY) <= floor(acc' *
     record_seconds / SECONDS_PER_DAY)`` -- i.e. the multiply this function
     performs on ``days`` at each step is bounded by the *next* step's own
-    (bounded, by the same induction) result, and so transitively by the
-    final ``floor(record * record_seconds / SECONDS_PER_DAY)`` -- which is
-    exactly :func:`max_safe_record`'s condition. This is a proof, not an
-    empirical bound: there is no ``record``/``record_seconds`` pair for
-    which this function is inexact below that limit, only the limit itself
-    (the inherent range of an int32 *day count*, about 5.87 million years --
-    see :func:`max_safe_record`), which no algorithm can move.
+    (bounded, by the same induction) result, and so transitively by
+    ``floor(record * record_seconds / SECONDS_PER_DAY)``, the loop's *own*
+    final value, computed with no ``start_days`` in it at all (that is added
+    only once, at the very end, line 350 below).
+
+    That final loop value is what :func:`max_safe_record` bounds by
+    ``_INT32_MAX - start_days`` (its own ``day_budget``) -- **not** by
+    ``_INT32_MAX`` itself -- exactly so the eventual ``start_days + days``
+    stays in range. For ``start_days >= 0`` those two bounds coincide and the
+    loop's own ``days`` therefore never needs to represent more than
+    ``_INT32_MAX`` either. For a sufficiently negative ``start_days``,
+    though, ``_INT32_MAX - start_days`` **exceeds** ``_INT32_MAX``, so the
+    loop's own ``days`` -- still exact arithmetic *mod* ``2**32``, just no
+    longer within int32's own positive range -- can itself need more than an
+    int32's worth of magnitude before the final ``+ start_days`` brings the
+    total back down (2026-09 review, round 3, finding 8; confirmed:
+    ``record_seconds=172800, start_days=-10**9`` reaches a loop ``days`` of
+    ``3147483646``, past ``2**31 - 1``, at :func:`max_safe_record`'s own
+    bound for that input). This is harmless, not merely "usually fine":
+    ``jnp.int32`` addition and subtraction are two's-complement, i.e. exact
+    modulo ``2**32``, so ``(loop_days mod 2**32) + start_days`` and
+    ``(loop_days + start_days) mod 2**32`` are the *same* value -- and since
+    :func:`max_safe_record` guarantees the true, infinite-precision
+    ``start_days + loop_days`` fits in ``[-2**31, 2**31 - 1]`` whenever
+    ``record`` is within its bound, that unique representable value is
+    exactly what the final addition below computes, regardless of whether
+    the loop's own running total needed to "overflow" (wrap through
+    ``2**32``) to get there. So this is still a proof, not an empirical
+    bound: there is no ``record``/``record_seconds``/``start_days``
+    combination for which this function is inexact below
+    :func:`max_safe_record`'s own limit (the inherent range of an int32 *day
+    count*, about 5.87 million years for a realistic coupling step), which no
+    algorithm can move -- only the claim that every *named local* stays
+    within int32's own dynamic range along the way is specific to
+    ``start_days >= 0``; the arithmetic is exact modulo ``2**32``
+    unconditionally.
 
     **History.** Two earlier decompositions shipped and were superseded:
     reducing ``record`` modulo ``SECONDS_PER_DAY // gcd(record_seconds,
