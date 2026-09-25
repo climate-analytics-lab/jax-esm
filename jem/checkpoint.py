@@ -265,15 +265,18 @@ def _leaf_count_mismatch_hint(
     atmosphere's carry (:class:`~jem.components.jcm.component.JCMComponent`
     gained them, threaded exactly like the pre-existing ``"physics"`` key --
     see the 2026-09 migration review, item 7), so loading such a file into a
-    post-migration template is short by exactly those two leaves. This is a
-    heuristic on the *shape* of the mismatch, not a version stamp (#119 tracks
-    the real fix -- a recorded jax-gcm revision in the file itself, which
-    would name the cause exactly instead of guessing at it from which paths
-    are missing): both a template path containing a clock-key fragment that no
-    saved path does, and the count being short by exactly the number of such
-    fragments, have to hold before this says anything, so an unrelated leaf
-    count mismatch (a genuinely different component composition) still gets
-    the plain message alone.
+    post-migration template is short by exactly the LEAVES those two entries
+    add -- **three**, not two: ``"step"`` is one leaf, but a real
+    ``jax_datetime.Datetime`` (``"time"``) is itself two (its ``Timedelta``'s
+    ``days`` and ``seconds``), both of which flatten under a path mentioning
+    ``"time"``. This is a heuristic on the *shape* of the mismatch, not a
+    version stamp (#119 tracks the real fix -- a recorded jax-gcm revision in
+    the file itself, which would name the cause exactly instead of guessing
+    at it from which paths are missing): every one of the deficit's leaves
+    has to be traceable to a missing template path mentioning ``"time"`` or
+    ``"step"``, and both entries have to be represented, before this says
+    anything, so an unrelated leaf count mismatch (a genuinely different
+    component composition) still gets the plain message alone.
 
     Parameters
     ----------
@@ -291,18 +294,38 @@ def _leaf_count_mismatch_hint(
 
     """
     saved_path_set = set(saved_paths)
-    missing_fragments = [
-        fragment
-        for fragment in _CLOCK_KEY_FRAGMENTS
-        if any(
+    # Every template LEAF whose path is missing from the checkpoint and
+    # mentions a clock-key fragment -- not one entry per fragment, because a
+    # real `jax_datetime.Datetime` is TWO pytree leaves (its `Timedelta`'s
+    # `days` and `seconds`), both of which render a path containing `'time'`
+    # (e.g. `['components']['atm']['time'][<flat index 0>][<flat index 0>]`)
+    # -- so counting fragments rather than leaves undercounts a `"time"`
+    # field by one and can never match a real deficit (this is what made an
+    # earlier version of this function, and the test that modelled `"time"`
+    # as a single `jnp.int32`, unable to ever fire on a real checkpoint).
+    # `not in saved_path_set` is checked per LEAF, which is also what keeps
+    # this from being confused by a coupled carry's own top-level `"step"`
+    # -- present, and so not missing, in both an old and a new checkpoint --
+    # matching the same `'step'` fragment as the atmosphere's own, genuinely
+    # missing, component-level `"step"`.
+    missing_clock_leaves = [
+        key_path
+        for key_path, _ in keyed_leaves
+        if jax.tree_util.keystr(key_path) not in saved_path_set
+        and any(
             fragment in jax.tree_util.keystr(key_path)
-            and jax.tree_util.keystr(key_path) not in saved_path_set
-            for key_path, _ in keyed_leaves
+            for fragment in _CLOCK_KEY_FRAGMENTS
         )
     ]
-    if len(missing_fragments) != len(_CLOCK_KEY_FRAGMENTS):
+    matched_fragments = {
+        fragment
+        for key_path in missing_clock_leaves
+        for fragment in _CLOCK_KEY_FRAGMENTS
+        if fragment in jax.tree_util.keystr(key_path)
+    }
+    if matched_fragments != set(_CLOCK_KEY_FRAGMENTS):
         return ""
-    if len(keyed_leaves) - len(saved_paths) != len(_CLOCK_KEY_FRAGMENTS):
+    if len(missing_clock_leaves) != len(keyed_leaves) - len(saved_paths):
         return ""
     return (
         " This looks like a checkpoint written before the jax-gcm PR 878 "

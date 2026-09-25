@@ -740,12 +740,18 @@ Breaking changes are marked; everything else is additive.
     corrections, not tolerance changes).
   - **Pre-878 checkpoints cannot resume.** A checkpoint saved by a jem built
     against jax-gcm PR 877 (or earlier) has no `"time"`/`"step"` entry in the
-    atmosphere's carry, so `jem.checkpoint.load_carry` refuses it with a leaf
-    count mismatch — currently a generic "holds N leaves but the model expects
-    M" rather than one that names the cause; there is no migration path for
-    such a checkpoint today. Start a new run (or re-run from an earlier,
-    pre-878 jem to produce fresh output, then switch) rather than attempting
-    to resume one across this boundary.
+    atmosphere's carry, so `jem.checkpoint.load` refuses it with a leaf count
+    mismatch — the message names the likely cause and says there is no
+    migration path, when the mismatch has that specific shape (a template
+    path mentioning `"time"` or `"step"` that the checkpoint has no value
+    for, and the leaf-count deficit exactly accounted for by such paths — a
+    real `"time"` is two leaves, since a `jax_datetime.Datetime` is its
+    `Timedelta`'s `days` and `seconds`, not one, so the deficit for a real
+    pre-878 checkpoint is three leaves, not two); an unrelated leaf-count
+    mismatch still gets the plain "holds N leaves but the model expects M"
+    message alone. Start a new run (or re-run from an earlier, pre-878 jem to
+    produce fresh output, then switch) rather than attempting to resume one
+    across this boundary.
 - **BREAKING — every written record's time axis moves, including
   slab-only runs with no atmosphere.** This is deliberately its own bullet,
   not folded into the `jcm.model.Model`-scoped one above: it changes

@@ -30,6 +30,7 @@ import logging
 import flax.serialization
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 from flax import struct
@@ -171,22 +172,41 @@ def test_a_pre_878_checkpoint_names_the_cause(tmp_path):
     878 added `"time"`/`"step"` to the atmosphere's carry fails the generic
     leaf-count check like any other composition mismatch, but the message
     now also names the likely cause and says there is no migration path.
-    """
-    save(
-        {"state": jnp.zeros(2), "physics": jnp.zeros(2)},
-        tmp_path / "carry.msgpack",
-    )
 
-    with pytest.raises(ValueError, match="jax-gcm PR 878 migration"):
-        load(
-            {
+    A real ``jax_datetime.Datetime`` is what the fix actually has to count
+    right: it is TWO pytree leaves (its ``Timedelta``'s ``days`` and
+    ``seconds``), not one, so a real pre-878 carry loaded into a real
+    post-878 template is short by **three** leaves (two for ``"time"``, one
+    for ``"step"``) -- modelling ``"time"`` as a single ``jnp.int32`` (as an
+    earlier version of this test did) is short by only two and never
+    exercises that count at all, which is why that version had no teeth
+    (the hint's own leaf-count check was hard-coded to ``2`` and could never
+    fire for a real checkpoint). The carry also nests both the pre-existing,
+    always-present coupled-carry ``"step"`` (a plain ``CoupledCarry.step``,
+    unrelated to jax-gcm and present in both an old and a new checkpoint)
+    alongside the atmosphere's own new ``"step"``, so this also exercises the
+    hint not being confused by the ``'step'`` fragment matching two different
+    paths, only one of which is actually missing.
+    """
+    old_carry = {
+        "components": {"atm": {"state": jnp.zeros(2), "physics": jnp.zeros(2)}},
+        "step": jnp.int32(3),
+    }
+    new_template = {
+        "components": {
+            "atm": {
                 "state": jnp.zeros(2),
                 "physics": jnp.zeros(2),
-                "time": jnp.int32(0),
+                "time": jdt.to_datetime("2000-01-01"),
                 "step": jnp.int32(0),
             },
-            tmp_path / "carry.msgpack",
-        )
+        },
+        "step": jnp.int32(3),
+    }
+    save(old_carry, tmp_path / "carry.msgpack")
+
+    with pytest.raises(ValueError, match="jax-gcm PR 878 migration"):
+        load(new_template, tmp_path / "carry.msgpack")
 
 
 def test_an_unrelated_leaf_count_mismatch_gets_no_878_hint(tmp_path):
