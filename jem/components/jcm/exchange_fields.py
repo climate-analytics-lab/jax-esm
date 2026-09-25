@@ -106,17 +106,18 @@ grid-mean heat/water fluxes) it always raised ``NotImplementedError``.
 :func:`from_diagnostics` therefore keeps exactly one package-specific read
 after the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- and
 raises when no physics package's diagnostics publish a wind vector
-(currently: anything other than SPEEDY). The heat and water fluxes above are
-still read from the single published contract and are returned correctly
-regardless of whether a wind vector is available; only a caller that reaches
-for ``u0``/``v0`` on a windless package's exchange is affected, which today
-means only :class:`jem.fluxes.VerosExchange` on a non-SPEEDY physics
-package -- a combination no shipped JAX-ESM configuration uses (every
-``jem/config/configuration/veros-*.yaml`` composes ``physics=speedy``).
-Publishing a near-surface wind vector from every package is tracked
-upstream; until then, ``jem.components.jcm.component.JCMComponent`` (whose
-``JCMDerived.u0``/``.v0`` this feeds) cannot step an ECHAM-composed coupled
-model, which is an unchanged limitation, not a new one.
+(currently: anything other than SPEEDY). It reads the wind *eagerly*, so it
+raises for such a package even though the heat and water fluxes above are
+available from the published contract. And because
+:meth:`jem.components.jcm.component.JCMComponent.step` calls it on every
+coupled step to fill ``JCMDerived`` (whose ``u0``/``v0`` this feeds), **no
+ECHAM-composed coupled model can complete a step** -- whatever the exchanger,
+not only :class:`jem.fluxes.VerosExchange`. No shipped JAX-ESM configuration
+composes ECHAM, so nothing shipped is affected. This is an unchanged
+limitation, not a new one: the pre-#754 ``echam()`` reader raised
+unconditionally. Making the wind optional -- through ``JCMDerived``, the
+coupled carry and the output -- is a design change tracked in jax-esm#129;
+publishing a wind vector from every package upstream would remove the need.
 
 What this replaces
 -------------------
@@ -129,10 +130,12 @@ as the fix, with "Use SPEEDY physics for coupled runs until then." A
 ``detect()`` function picked between the two readers by which package-marker
 key was present in the diagnostics dict. All three -- ``speedy()``,
 ``echam()``, ``detect()`` -- are gone: the heat and water fluxes both
-packages deliver are now read identically, off the one contract, so ECHAM's
-surface exchange (net heat flux, evaporation, precipitation) now works for
-the first time. The old ``speedy()`` reader's source (commit ``756cc2c``, the
-last commit before this collapse) is vendored, frozen, as
+packages deliver are now read identically, off the one contract. ECHAM's
+grid-mean heat and water fluxes are therefore published and translatable for
+the first time -- but an ECHAM coupled step still fails on the wind vector,
+as described above (jax-esm#129). The old ``speedy()`` reader's source
+(commit ``756cc2c``, the last commit before this collapse) is vendored,
+frozen, as
 ``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
 historical baseline, by the numeric old-vs-new equivalence test in
 ``tests/unit/test_jcm_component.py`` -- vendored rather than loaded from git
@@ -213,10 +216,11 @@ def _near_surface_wind_vector(diagnostics: dict[str, Any]) -> tuple[Any, Any]:
         f"key is. ECHAM has none anywhere in its diagnostics (its vdiff "
         "diagnoses only |U(10m)|), so this is not a regression from the "
         "#754 collapse -- the pre-#754 echam() reader could not have "
-        "supplied a wind vector either. Use SPEEDY physics for a coupled "
-        "run that needs the near-surface wind vector (e.g. "
-        "jem.fluxes.VerosExchange's bulk-drag stress law) until jax-gcm "
-        "publishes one from every package."
+        "supplied a wind vector either. JCMComponent needs it on every "
+        "coupled step (it fills JCMDerived.u0/v0), so any coupled run on "
+        "this physics package fails here, whatever the exchanger: use "
+        "SPEEDY physics for coupled runs until the wind is made optional "
+        "(jax-esm#129) or jax-gcm publishes one from every package."
     )
 
 

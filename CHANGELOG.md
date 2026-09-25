@@ -661,9 +661,15 @@ Breaking changes are marked; everything else is additive.
   package-independent `SurfaceExchange` struct
   (`diagnostics["surface_exchange"]`, published identically by every physics
   package that resolves a surface), replacing the old per-package
-  `speedy()`/`echam()`/`detect()` readers. **ECHAM's surface exchange now
-  works** — the old `echam()` reader always raised `NotImplementedError` for
-  lack of a package-independent struct to read; SPEEDY's translated values are
+  `speedy()`/`echam()`/`detect()` readers. ECHAM now *publishes* the same
+  grid-mean heat and water fluxes, but **an ECHAM-composed coupled run still
+  cannot complete a step**: `from_diagnostics()` also reads the near-surface
+  wind vector, eagerly, and ECHAM has none (see below), so
+  `JCMComponent.step()` raises `NotImplementedError` on the first coupled step
+  for every ECHAM configuration, not only Veros ones. That is unchanged from
+  before the collapse (the old `echam()` reader raised unconditionally);
+  making the wind optional through `JCMDerived`, the carry and the output is
+  jax-esm#129. SPEEDY's translated values are
   numerically unchanged (verified against the pre-#754 adapter on a real
   model step: the sign flip on the net heat flux is the same transform, and
   the evaporation/precipitation unit conversion the old adapter applied is
