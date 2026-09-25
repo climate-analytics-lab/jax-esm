@@ -232,10 +232,14 @@ def _variable_window_rule(
 
     Notes
     -----
-    **Why the boundaries are converted to record counts.** Record ``k`` of
-    length ``r`` is labelled at ``(k + 1)·r`` seconds from the start of the
-    run, so the obvious rule -- multiply the record counter by ``r`` and look
-    the result up in a table of seconds -- costs one multiplication whose
+    **Why the boundaries are converted to record counts.** This rule bins
+    record ``k`` of length ``r`` by its interval's **end**, ``(k + 1)·r``
+    seconds from the start of the run -- not by the record's own *output*
+    label, which is its interval's **midpoint** (``TimeAxis``'s convention
+    since jax-gcm PR 878; see this function's own docstring, above, for why
+    the two are kept independent on purpose). So the obvious rule -- multiply
+    the record counter by ``r`` and look the result up in a table of seconds
+    -- costs one multiplication whose
     product grows with the run. JAX indices are int32 by default, and a
     product of seconds passes 2^31 after 68 years of simulated time, at which
     point the bins would silently wrap to nonsense. Reducing the record
@@ -257,33 +261,34 @@ def _variable_window_rule(
         )
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
     period = int(boundaries[-1])
-    # The two conventions differ by one second of the label. A record's label
-    # sits at the END of its interval, and `bin_of_record` counts how many
-    # boundaries lie at or before `label + shift_seconds`. With 5-day bins and
-    # daily records (record k labelled at day k + 1):
+    # The two conventions differ by one second of the instant this rule bins
+    # by -- the record's interval END (not its own output label, the
+    # interval's midpoint; see the docstring above) -- and `bin_of_record`
+    # counts how many boundaries lie at or before `end + shift_seconds`. With
+    # 5-day bins and daily records (record k's interval ends at day k + 1):
     #
-    #   inclusive="right": shift -1 s. A label of day 5 is looked up a second
+    #   inclusive="right": shift -1 s. An end of day 5 is looked up a second
     #     before the first boundary, so no boundary precedes it -> bin 0; it
     #     is the LAST record of (day 0, day 5]. Day 6 -> bin 1.
-    #   inclusive="left": no shift. A label of day 5 is looked up at the
+    #   inclusive="left": no shift. An end of day 5 is looked up at the
     #     boundary itself, which now counts -> bin 1; it is the FIRST record
     #     of [day 5, day 10).
     #
-    # In calendar months from 1 January with daily records, the record
-    # labelled 1 February 00:00 is therefore January's last record under
-    # "right" and February's first under "left".
+    # In calendar months from 1 January with daily records, the record whose
+    # interval ends at 1 February 00:00 is therefore January's last record
+    # under "right" and February's first under "left".
     shift_seconds = -1 if inclusive == "right" else 0
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         """Return the 0-based bin a record of ``record_seconds`` counts in.
 
         ``record`` counts records of that length from the start of the run.
-        With daily records, 5-day bins and ``inclusive="right"``: record 0 is
-        labelled day 1 and lands in bin 0; record 4 (day 5) is the last of
-        bin 0; record 5 (day 6) is the first of bin 1; and in a 73-bin
-        accumulator record 365 -- labelled day 366, one year on -- wraps to
-        bin 0 again. Under ``inclusive="left"`` record 4 (day 5) is instead
-        the first of bin 1.
+        With daily records, 5-day bins and ``inclusive="right"``: record 0's
+        interval ends at day 1 and it lands in bin 0; record 4 (interval end
+        day 5) is the last of bin 0; record 5 (day 6) is the first of bin 1;
+        and in a 73-bin accumulator record 365 -- interval end day 366, one
+        year on -- wraps to bin 0 again. Under ``inclusive="left"`` record 4
+        (day 5) is instead the first of bin 1.
         """
         records_per_period, remainder = divmod(period, record_seconds)
         # An invariant of the callers, not a user error: every builder checks
@@ -301,17 +306,19 @@ def _variable_window_rule(
         # offset into the pattern need not be a whole number of records, so it
         # is split into whole records (`shifted`, folded into the counter) and
         # a remainder (`phase`, folded into the boundaries); the ceiling is
-        # then the first record whose label reaches the boundary.
+        # then the first record whose interval end reaches the boundary.
         shifted, phase = divmod(offset_seconds + shift_seconds, record_seconds)
         # The last entry lands exactly on `records_per_period`: the period is
         # a whole number of records and `phase` is less than one, so the
         # ceiling cannot overshoot it, and every wrapped record has a bin.
         in_records = _ceil_div(boundaries - phase, record_seconds)
         boundary_records = jnp.asarray(in_records, dtype=jnp.int32)
-        # `record + 1` because record k is labelled at the END of its own
-        # interval. The modulo is what wraps a run longer than the pattern
-        # and, with it, keeps the index inside the accumulator whatever the
-        # run's length; it is also what keeps the arithmetic in int32.
+        # `record + 1` because this rule bins record k by the END of its own
+        # interval (not by its own output label, the interval's midpoint --
+        # see the docstring above for why the two are kept independent). The
+        # modulo is what wraps a run longer than the pattern and, with it,
+        # keeps the index inside the accumulator whatever the run's length;
+        # it is also what keeps the arithmetic in int32.
         label = jnp.mod(
             jnp.asarray(record, dtype=jnp.int32) + (1 + shifted), records_per_period
         )
