@@ -23,20 +23,35 @@ notebook's construction" is defined precisely as:
    call after it (which the notebook legitimately calls with its own
    ``total_time``/``chunk``/``output_dir``/... -- run *settings*, not
    construction).
-2. Apply exactly two substitutions to that prefix, both required by adding
-   the sea-ice component ``python_api.md``'s pair-only example leaves out:
-   the import line gains ``SlabSeaiceModel``, and the ``components`` dict
-   gains a ``"seaice": SlabSeaiceModel(grid, name="seaice")`` entry (written
-   as a multi-line dict literal purely for line length -- the mapping it
-   builds, and the substituted import, are the only two changes).
+2. Apply exactly three substitutions to that prefix:
+
+   - the import line gains ``SlabSeaiceModel``, and the ``components`` dict
+     gains a ``"seaice": SlabSeaiceModel(grid, name="seaice")`` entry
+     (written as a multi-line dict literal purely for line length), both
+     required by adding the sea-ice component ``python_api.md``'s pair-only
+     example leaves out;
+   - the ``Model(...)`` call gains an explicit ``time_step=12`` (minutes),
+     with a comment explaining why: without it, ``Model`` picks the
+     physics' own stable time step (30 minutes for SPEEDY T31L8) rather
+     than the ``+configuration=aquaplanet-slab`` recipe's actual step
+     (``atmosphere.run.time_step``, 12 minutes, from jax-gcm's
+     ``run/default.yaml`` -- the recipe never overrides ``atmosphere.run``).
+     ``python_api.md``'s own worked example is a standalone construction
+     with no configuration to match, so it is not wrong to leave this
+     implicit there; this notebook explicitly claims to run the same model
+     as ``+configuration=aquaplanet-slab``, and that claim would be false at
+     the physics level (a different, faster-diffusing time step) without
+     this substitution -- ``tests/unit/test_notebook_equivalence.py``
+     verifies the claim holds, ``dt`` included.
 
 The notebook's own code cell that builds ``coupler`` (identified as the one
 whose source contains ``"coupler = Coupler("``) must equal the result of
-that substitution byte for byte. If ``python_api.md``'s block changes (the
-#878 clock migration's ``start_date`` -> ``start_time`` rename, for
-instance), this test fails until the notebook's construction cell is
-updated to match -- which is the whole point: the two are pinned into
-staying in step rather than drifting the way a copy-pasted example would.
+these three substitutions byte for byte. If ``python_api.md``'s block
+changes (the #878 clock migration's ``start_date`` -> ``start_time``
+rename, for instance), this test fails until the notebook's construction
+cell is updated to match -- which is the whole point: the two are pinned
+into staying in step rather than drifting the way a copy-pasted example
+would.
 """
 
 from pathlib import Path
@@ -48,9 +63,9 @@ from tests.unit.test_readme_quickstart import PYTHON_API, _first_python_block
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOK = REPO_ROOT / "examples" / "01_basic" / "01_aquaplanet.ipynb"
 
-#: The two substitutions that turn `python_api.md`'s atmosphere/ocean-only
-#: prefix into what the notebook must build (atmosphere/ocean/sea-ice). Each
-#: is applied exactly once; see the module docstring for why these two.
+#: The three substitutions that turn `python_api.md`'s atmosphere/ocean-only,
+#: configuration-free prefix into what the notebook must build. Each is
+#: applied exactly once; see the module docstring for why these three.
 _OLD_IMPORT = "from jem.components import JCMComponent, SlabOceanModel\n"
 _NEW_IMPORT = "from jem.components import JCMComponent, SlabOceanModel, SlabSeaiceModel\n"
 _OLD_COMPONENTS = 'components = {"atm": atm, "ocn": SlabOceanModel(grid)}\n'
@@ -60,6 +75,27 @@ _NEW_COMPONENTS = (
     '    "ocn": SlabOceanModel(grid),\n'
     '    "seaice": SlabSeaiceModel(grid, name="seaice"),\n'
     '}\n'
+)
+_OLD_MODEL = (
+    "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
+    "atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)\n"
+)
+_NEW_MODEL = (
+    "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
+    "# `time_step=12` (minutes) is the step `+configuration=aquaplanet-slab`\n"
+    "# actually runs at -- jax-gcm's `run/default.yaml`, composed at\n"
+    "# `atmosphere.run.time_step` -- and has to be given explicitly: with no\n"
+    "# `time_step`, `Model` instead picks the physics' own stable step (30\n"
+    "# minutes for SPEEDY T31L8), a materially different, faster-diffusing\n"
+    "# model than the one this notebook claims to reproduce.\n"
+    "atm_model = jcm.model.Model(\n"
+    "    coords=get_speedy_coords(), start_date=start_date, time_step=12\n"
+    ")\n"
+)
+_SUBSTITUTIONS = (
+    (_OLD_IMPORT, _NEW_IMPORT),
+    (_OLD_MODEL, _NEW_MODEL),
+    (_OLD_COMPONENTS, _NEW_COMPONENTS),
 )
 
 
@@ -73,7 +109,7 @@ def _expected_construction() -> str:
     )
     prefix = block[:block.index(marker) + len(marker)]
 
-    for old, new in ((_OLD_IMPORT, _NEW_IMPORT), (_OLD_COMPONENTS, _NEW_COMPONENTS)):
+    for old, new in _SUBSTITUTIONS:
         count = prefix.count(old)
         assert count == 1, (
             f"{PYTHON_API} construction no longer contains {old!r} exactly "
