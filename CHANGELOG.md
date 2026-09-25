@@ -783,6 +783,15 @@ Breaking changes are marked; everything else is additive.
   Consequences, all documented in `monthly_mean`'s own docstring:
   - bin *membership* near a month boundary differs from a pre-migration run,
     on every calendar the function ever ran on, not only `"gregorian"`;
+  - the resulting equality with `groupby("time.month")` of the written
+    output is exact on `"gregorian"`. On `"365_day"` it is exact only until
+    the run's own written labels (always proleptic Gregorian, whatever the
+    model calendar is) cross a real 29 February; past that point the two
+    drift by one more record at every month boundary for every further leap
+    day the run passes, a pre-existing, tracked inconsistency
+    (`monthly_mean`'s **Leap days on the fixed calendar** docstring
+    paragraph; jax-gcm#449, jax-esm#118) that this change does not introduce
+    or widen;
   - `monthly_mean(coupler, total_time=...)`'s bin *count* also changes for a
     `total_time` landing exactly on a month boundary: a ten-year run is now
     exactly `120` bins, not `121` — the pre-migration boundary record (the

@@ -1382,8 +1382,13 @@ def monthly_mean(
     ``monthly.finalize(accumulator)`` equal
     ``coupler.to_xarray(diagnostics).groupby("time.month").mean()`` of the
     same run **by construction**, leaf for leaf -- and, for the sequential
-    form, the same grouped by year and month -- for *every* calendar, not
-    only one whose labels happen to agree with a fixed model-calendar table.
+    form, the same grouped by year and month -- on ``"gregorian"``, where the
+    bin and the written label are the same real calendar date. On
+    ``"365_day"`` the equality holds only until the run's *written labels*
+    (always proleptic Gregorian -- see **Leap days on the fixed calendar**
+    below) cross a real 29 February: up to that point the two genuinely
+    agree for *every* calendar, not only one whose labels happen to match a
+    fixed table, but past it they drift exactly as that paragraph describes.
     (For a component that records more than once per coupled step that
     equality holds after :func:`fold_records`, which folds the sub-step axis
     this reduction deliberately keeps; see **Sub-steps** below.)
@@ -1422,10 +1427,14 @@ def monthly_mean(
     after which each label sits one day *earlier* than the model-calendar date
     of the same instant -- one more day of drift per leap year the run
     passes -- so ``groupby("time.month")`` of the written output and this
-    reduction's own bins part company by up to a few records near each
-    affected month boundary, though both still hold the same *total* of
-    records across the run. This residual mismatch is a property of the
-    ``"365_day"`` calendar specifically -- its fixed table is
+    reduction's own bins part company by one record at every month boundary
+    the run crosses after that first 29 February, and by one MORE record at
+    every boundary after each further leap day the run passes (measured with
+    daily coupling: a run starting 2003-01-01 already shows 10 misattributed
+    records by the end of 2004, one at each of the ten month boundaries from
+    March onward that first leap year), though both still hold the same
+    *total* of records across the run. This residual mismatch is a property
+    of the ``"365_day"`` calendar specifically -- its fixed table is
     not the calendar the labels are ever written in -- and does **not** arise
     on ``"gregorian"``, where the bins and the labels are now the same real
     calendar (see the paragraph above): the midpoint-vs-end rebinding closes
