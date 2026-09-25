@@ -276,6 +276,33 @@ def check_subsample(subsample: Any) -> int:
     return subsample
 
 
+def _records_per_step(n_records: int, steps: int) -> int:
+    """Return ``n_records // steps``, or raise if it does not divide evenly.
+
+    Shared by :func:`_kept_records` (the stride needs to know which coupled
+    step a record belongs to) and :func:`_assert_contiguous_chunk` (the
+    chunk-mean label/``time_bounds`` derivation needs the records to be a
+    whole number of equal-length coupled steps to begin with) -- one message
+    for the one underlying condition, rather than two call sites drifting
+    apart on what "not a whole multiple" is called.
+
+    Raises
+    ------
+    ValueError
+        If ``n_records`` is not a whole positive multiple of ``steps``.
+
+    """
+    records_per_step, remainder = divmod(n_records, steps)
+    if remainder or records_per_step < 1:
+        raise ValueError(
+            f"A chunk of {steps} coupled step(s) cannot hold {n_records} "
+            f"record(s): a component records the same whole number of times "
+            f"every coupled step, so the coupled step each record belongs to "
+            f"-- and with it a stride over coupled steps -- is undefined here."
+        )
+    return records_per_step
+
+
 def _kept_records(
     n_records: int, *, first_step: int, steps: int, subsample: int
 ) -> slice | np.ndarray:
@@ -334,14 +361,7 @@ def _kept_records(
         raise ValueError(f"steps must be a positive integer; got {steps!r}.")
     if first_step < 0:
         raise ValueError(f"first_step must not be negative; got {first_step!r}.")
-    records_per_step, remainder = divmod(n_records, steps)
-    if remainder or records_per_step < 1:
-        raise ValueError(
-            f"A chunk of {steps} coupled step(s) cannot hold {n_records} "
-            f"record(s): a component records the same whole number of times "
-            f"every coupled step, so the coupled step each record belongs to "
-            f"-- and with it a stride over coupled steps -- is undefined here."
-        )
+    records_per_step = _records_per_step(n_records, steps)
     # Where this chunk sits in the run's stride period: the first of its
     # coupled steps whose run-global index is a multiple of `subsample`.
     first_kept = -first_step % subsample
@@ -373,6 +393,99 @@ def _dataset_is_empty(dataset: xr.Dataset) -> bool:
 
     """
     return dataset.sizes.get(TIME_DIMENSION, 1) == 0
+
+
+def _assert_contiguous_chunk(
+    dataset: xr.Dataset, *, bounds_name: str | None, steps: int | None
+) -> None:
+    """Raise unless ``dataset``'s records are the contiguous run ``postprocess`` assumes.
+
+    ``postprocess``'s chunk-mean label -- and, for a dataset with
+    ``time_bounds``, the chunk-wide bound it recomputes -- is derived from
+    only the *first* and *last* record (see that function's own docstring's
+    derivation), which is exact only when the records in between are their
+    equal-length, gap-free continuation. Nothing upstream of
+    :func:`postprocess` enforced that before this check existed: a caller
+    handing it a record count that is not a whole number of ``steps``, or a
+    set of records with an irregular gap, used to get a label back anyway --
+    silently wrong rather than refused (2026-09 review, round 2, finding N4).
+
+    Every chunk :func:`datasets_for_chunk`/``Coupler.to_xarray`` actually
+    produce is contiguous by construction, so this should never fire on a
+    real run; it exists to catch a chunk assembled some other way before it
+    can mislabel silently, which is why it is checked here rather than left
+    to the derivation itself to get subtly wrong.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        The chunk as given to :func:`postprocess`, before ``subsample``
+        removes any record -- the derivation runs on the chunk as given, so
+        that is what must be contiguous.
+    bounds_name : str, optional
+        The CF ``time_bounds`` variable's name, from :func:`_time_bounds_name`,
+        or ``None`` if this dataset has none.
+    steps : int, optional
+        Coupled steps in the chunk, as passed to :func:`postprocess`; ``None``
+        skips the whole-multiple check (the same default ``postprocess``
+        itself uses: one record per coupled step).
+
+    Raises
+    ------
+    ValueError
+        If ``steps`` is given and is not positive, if the record count is not
+        a whole multiple of it, or if the records are not evenly spaced (no
+        ``time_bounds``) / contiguously bounded (with ``time_bounds``).
+
+    """
+    n_records = int(dataset.sizes[TIME_DIMENSION])
+    if steps is not None:
+        if steps < 1:
+            raise ValueError(f"steps must be a positive integer; got {steps!r}.")
+        _records_per_step(n_records, steps)
+    if n_records < 2:
+        # A single record is trivially "contiguous" -- there is nothing
+        # between a record and itself to have a gap.
+        return
+    if bounds_name is not None:
+        bounds_dim = next(d for d in dataset[bounds_name].dims if d != TIME_DIMENSION)
+        starts = (
+            dataset[bounds_name]
+            .isel({bounds_dim: 0})
+            .values.astype("datetime64[ms]")
+            .astype("int64")
+        )
+        ends = (
+            dataset[bounds_name]
+            .isel({bounds_dim: 1})
+            .values.astype("datetime64[ms]")
+            .astype("int64")
+        )
+        if not np.array_equal(ends[:-1], starts[1:]):
+            raise ValueError(
+                "Cannot average this chunk: its records' time_bounds are not "
+                "contiguous (record k's interval must end exactly where "
+                "record k+1's begins). postprocess's chunk-wide time_bounds "
+                "and label are built from only the first record's own start "
+                "and the last record's own end, which would silently claim "
+                "coverage over a gap -- or double-count an overlap -- that "
+                "these records do not actually have."
+            )
+    else:
+        times = (
+            dataset[TIME_DIMENSION].values.astype("datetime64[ms]").astype("int64")
+        )
+        gaps = np.diff(times)
+        if not np.all(gaps == gaps[0]):
+            raise ValueError(
+                "Cannot average this chunk: its records are not evenly "
+                f"spaced in time (gaps of {sorted(set(gaps.tolist()))} "
+                "milliseconds between consecutive records). postprocess's "
+                "chunk label -- the average of the first and last record's "
+                "own midpoint -- is exact only for a contiguous run of "
+                "equal-length intervals (see postprocess's own docstring's "
+                "derivation)."
+            )
 
 
 def postprocess(
@@ -461,6 +574,11 @@ def postprocess(
         If ``subsample`` is not a positive integer, a reduction was asked for
         and the dataset has no time dimension to reduce, or (when the stride
         is applied) the record count is not a whole multiple of ``steps``.
+        When ``output_averages`` is set, also if the record count is not a
+        whole multiple of ``steps`` (checked here too, independently of
+        ``subsample``) or the records are not the contiguous, equal-length
+        run the chunk label/``time_bounds`` derivation assumes -- see
+        :func:`_assert_contiguous_chunk`.
 
     """
     check_subsample(subsample)
@@ -480,6 +598,12 @@ def postprocess(
     # spaced (and, for `time_bounds`, wrong) whenever the stride's phase falls
     # differently in successive chunks.
     bounds_name = _time_bounds_name(dataset)
+    if output_averages:
+        # The label/`time_bounds` built below assume a contiguous run of
+        # equal-length coupled steps (see `_assert_contiguous_chunk`'s own
+        # docstring); only checked when there is actually a mean to label --
+        # a `subsample`-only call never reads either.
+        _assert_contiguous_chunk(dataset, bounds_name=bounds_name, steps=steps)
     if bounds_name is not None:
         # Exact: the CHUNK's own true interval is
         # [the first record's own interval start, the last record's own

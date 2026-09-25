@@ -369,6 +369,55 @@ def test_postprocess_rejects_a_nonsensical_chunk(kwargs, message):
         postprocess(simple_dataset(6), subsample=2, **kwargs)
 
 
+def test_postprocess_refuses_to_average_a_chunk_that_does_not_divide_by_steps():
+    """N4 (2026-09 review, round 2): checked for averaging too, not just the stride.
+
+    ``_kept_records`` already refused this when ``subsample > 1`` triggered
+    it; ``output_averages`` on its own (``subsample=1``, the default) used to
+    skip that check entirely and label the chunk anyway, even though the
+    chunk-mean derivation equally assumes a whole number of equal-length
+    coupled steps.
+    """
+    with pytest.raises(ValueError, match="cannot hold 5 record"):
+        postprocess(simple_dataset(5), output_averages=True, steps=3)
+
+
+def test_postprocess_refuses_to_average_records_with_an_irregular_gap():
+    """N4: a non-contiguous set of records must not get a silently wrong label.
+
+    ``postprocess``'s chunk label -- the average of the first and last
+    record's own midpoint -- is only exact for a contiguous run of
+    equal-length intervals (see its own docstring's derivation). Widening the
+    last gap here breaks that assumption without changing the record count,
+    so nothing about ``steps`` would have caught it.
+    """
+    dataset = simple_dataset(4)  # days 0, 1, 2, 3, evenly spaced
+    times = dataset["time"].values.copy()
+    times[-1] = np.datetime64("1970-01-11")  # days 0, 1, 2, 10
+    dataset = dataset.assign_coords(time=("time", times))
+    with pytest.raises(ValueError, match="not evenly spaced"):
+        postprocess(dataset, output_averages=True)
+
+
+def test_postprocess_refuses_to_average_time_bounds_with_a_gap():
+    """N4, the ``time_bounds`` variant: a gap between bounded intervals.
+
+    Unlike the label-only case above, a ``time_bounds``-carrying dataset
+    (JCM's) has an explicit per-record interval to check for contiguity
+    directly -- record k's own bound must end exactly where record k+1's
+    begins.
+    """
+    dataset = bounded_dataset("2000-02-02", n_records=3)
+    bounds = dataset["time_bounds"].values.copy()
+    # Push the last record's interval a day later, opening a one-day gap
+    # between it and the record before it.
+    bounds[-1] += np.timedelta64(1, "D")
+    dataset = dataset.copy()
+    dataset["time_bounds"] = (("time", "bounds"), bounds, dataset["time_bounds"].attrs)
+    with pytest.raises(ValueError, match="not contiguous"):
+        postprocess(dataset, output_averages=True)
+
+
 def test_postprocess_keeps_nothing_from_a_chunk_the_stride_skips():
     """A chunk with no step on the stride is skipped rather than bent.
 
