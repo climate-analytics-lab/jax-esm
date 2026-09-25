@@ -169,6 +169,7 @@ jem/                             # Main package
 │   └── <group>/*.yaml           #   ocean, land, seaice, coupling, regrid,
 │                                #   coupled_run, configuration
 ├── base/
+│   ├── calendar.py              # exact int32 Gregorian date arithmetic for the clock
 │   ├── component.py             # the contract: Component + optional capabilities,
 │   │                            #   CoupledCarry, CouplingTime, TimeAxis, Exchanger
 │   └── coupler.py               # Coupler — the coupled model, its clock and its step
@@ -346,13 +347,25 @@ conventions are JCM's, and every component follows them:
   (`jem.components.slab.grid.to_degrees`), which is character for character what
   `jcm.utils.data_to_xarray` does. Any other route risks a last-bit difference,
   which is enough to turn two 96-point longitude axes into a 119-point union.
-- **The `time` coordinate** is an absolute `datetime64[ns]` axis — never
-  "hours since <start>" — and record *k* is labelled with the **end** of the
-  interval it covers, `start_date + (k+1)*dt`. `TimeAxis.datetimes()` is the
-  single definition, and every component's `to_xarray` calls it (with
-  `TimeAxis.attrs` for the CF attributes) directly rather than through a
-  helper.
+- **The `time` coordinate** is an absolute `datetime64[ms]` axis — never
+  "hours since <start>" — and record *k* is labelled with the **midpoint** of
+  the interval it covers, `start + (k + 1/2)*dt`, exactly as jcm labels its own
+  output (`jcm.predictions.output_time_labels`), so every component's file
+  merges with the atmosphere's. `TimeAxis.datetimes()` is the single
+  definition, and every component's `to_xarray` calls it (with `TimeAxis.attrs`
+  for the CF attributes) directly rather than through a helper. A chunk mean
+  (`postprocess(output_averages=True)`) is labelled with the chunk's midpoint.
   The dates are proleptic Gregorian whatever the model calendar is.
+  `monthly_mean` bins each record by that same midpoint, so on the
+  `"gregorian"` calendar it equals a `groupby("time.month")` of the written
+  file; on `"365_day"` the two drift apart by a record per month boundary once
+  the labels cross a 29 February.
+- **The clock is exact integer arithmetic.** The coupler's step counter and
+  every date derived from it are int32 inside `lax.scan`;
+  `jem.base.calendar` does the Gregorian date arithmetic without float
+  rounding, and `run_chunked` refuses up front a run whose counters or day
+  count would pass int32 (millions of simulated years) rather than letting
+  them wrap. A new counter carried through the scan belongs in that check.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
