@@ -582,6 +582,44 @@ def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
     )
 
 
+def test_unflatten_to_nodal_shape_rejects_an_unexpected_shape_with_trailing_axis():
+    """jax-esm#129 review finding: a mutation that made
+    ``_unflatten_to_nodal_shape`` return the value UNCHANGED instead of
+    raising went unnoticed by the existing suite (41 tests still passed),
+    because nothing exercised the ``ValueError`` branch directly. A shape
+    that is neither ``nodal_shape`` nor a flattened ``(ncols,)`` -- here,
+    ``(ncols, 1)``, e.g. a future package publishing a per-column field with
+    a spurious trailing axis -- must raise, naming the field and both shapes
+    it was checked against, rather than pass through silently to fail later
+    as an opaque broadcast error somewhere downstream.
+    """
+    from jem.components.jcm.component import _unflatten_to_nodal_shape
+
+    nodal_shape = GRID_SHAPE
+    ncols = nodal_shape[0] * nodal_shape[1]
+    value = jnp.zeros((ncols, 1))
+
+    with pytest.raises(ValueError, match="'total_heat_flux' has shape"):
+        _unflatten_to_nodal_shape(value, nodal_shape, "total_heat_flux")
+
+
+def test_unflatten_to_nodal_shape_rejects_a_wrong_length_1d_array():
+    """Same finding as above, for the other unexpected shape a caller might
+    pass: a 1-D array whose length is neither ``prod(nodal_shape)`` (the
+    flattened, column-vectorized case) nor a match for ``nodal_shape``
+    itself (impossible for a 1-D array against a 2-D ``nodal_shape``, but
+    checked here via a length that is simply wrong either way).
+    """
+    from jem.components.jcm.component import _unflatten_to_nodal_shape
+
+    nodal_shape = GRID_SHAPE
+    ncols = nodal_shape[0] * nodal_shape[1]
+    value = jnp.zeros((ncols - 1,))
+
+    with pytest.raises(ValueError, match="'evaporation' has shape"):
+        _unflatten_to_nodal_shape(value, nodal_shape, "evaporation")
+
+
 def test_windless_jcm_derived_survives_a_jit_round_trip():
     """jax-esm#129: the static-``None`` design must survive ``jax.jit``, the
     same structural-equality check ``lax.scan`` applies to a coupled step's
