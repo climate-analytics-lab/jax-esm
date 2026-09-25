@@ -21,13 +21,15 @@ on:
 # one and the test tells you to change the other. The `canary-jcm-dev` job
 # below still tracks `dev`, so drift is visible without blocking a PR.
 #
-# This is the `dev` merge commit of jax-gcm PR 877 (closes jax-gcm#754, #301
-# and #884) -- the revision that first carries the package-independent
-# `SurfaceExchange` struct and the declared forcing-alignment rule this
-# repository is written against. See JCM_SUPPORTED_REV's docstring in
-# contract.py.
+# This is the `dev` merge commit of jax-gcm PR 878 ("v3: unify the real
+# datetime clock and bounded monthly output", closes jax-gcm#862) -- the
+# revision that replaced jax-gcm's float sim_time clock and configurable
+# Model.calendar with one exact, unconditionally proleptic-Gregorian
+# RunState clock, and published jcm.predictions.output_time_labels as the
+# one conversion from it to an output label. See JCM_SUPPORTED_REV's
+# docstring in contract.py.
 env:
-  JCM_REV: 46eb3fc1efc3d16fde5458736d80a3491698f3ed
+  JCM_REV: 808412a5dc9e5a6de86d02a3e4f054249a7572fe
 
 jobs:
   lint:

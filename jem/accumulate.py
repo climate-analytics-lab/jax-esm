@@ -54,7 +54,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jem.base.component import CouplingTime, Diagnostics
+from jem.base.component import (
+    CouplingTime,
+    Diagnostics,
+    days_per_year as jem_days_per_year,
+    parse_duration_days,
+)
 
 #: The accumulator a :class:`BinnedMean` carries: an ``(n_bins, ...)`` running
 #: sum shaped like one step's diagnostics, and the count of records that
@@ -78,10 +83,10 @@ _SECONDS_PER_DAY = 86400
 
 #: Month lengths, in days, of the fixed-length calendars a static month table
 #: can be built for, keyed by the length of their year. :func:`month_lengths`
-#: is the public way to read it. ``jcm.date`` defines only ``365_day`` (and
-#: ``gregorian``, whose leap years make no such table possible), so
-#: ``360_day`` is here because the table is the same kind of object, not
-#: because a ``Coupler`` can be built with it today.
+#: is the public way to read it. :func:`jem.base.component.days_per_year`
+#: defines only ``365_day`` (and ``gregorian``, whose leap years make no such
+#: table possible), so ``360_day`` is here because the table is the same kind
+#: of object, not because a ``Coupler`` can be built with it today.
 _MONTH_LENGTHS: dict[int, tuple[int, ...]] = {
     365: (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31),
     360: (30,) * MONTHS_PER_YEAR,
@@ -117,8 +122,8 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
         ``days_per_year``, which is what a
         :class:`~jem.base.coupler.Coupler` carries), the name of a calendar
         (``"365_day"``), or a year length in days. A name is resolved through
-        ``jcm.date.days_per_year`` rather than through a table of JEM's own,
-        so the two cannot disagree about how long a calendar's year is.
+        :func:`jem.base.component.days_per_year`, the single table every
+        calendar-aware part of JEM (this one included) reads.
 
     Returns
     -------
@@ -136,11 +141,7 @@ def month_lengths(calendar_or_coupler: Any) -> tuple[int, ...]:
     # A coupler carries its year length; a bare number is one already.
     days_per_year = getattr(calendar_or_coupler, "days_per_year", calendar_or_coupler)
     if isinstance(days_per_year, str):
-        # Imported here rather than at module scope so that importing this
-        # module does not pull in jax-gcm; see `_duration_to_seconds`.
-        from jcm.date import days_per_year as jcm_days_per_year
-
-        days_per_year = jcm_days_per_year(days_per_year)
+        days_per_year = jem_days_per_year(days_per_year)
     length = int(days_per_year)
     if length != days_per_year or length not in _MONTH_LENGTHS:
         raise NotImplementedError(
@@ -326,12 +327,6 @@ def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int
     the start of a run stops being exact within a few decades of simulated
     time, and a fractional second is refused rather than rounded away.
     """
-    # Imported here rather than at module scope so that importing this module
-    # does not pull in jax-gcm (and with it dinosaur and the whole
-    # atmosphere); `jem.driver` imports it the same way and for the same
-    # reason.
-    from jcm.date import parse_duration_days
-
     days = float(parse_duration_days(duration, calendar))
     seconds = _exact_seconds(days * _SECONDS_PER_DAY, f"{what}={duration!r}")
     if seconds <= 0:
@@ -1084,7 +1079,7 @@ def monthly_mean(
         climatology.
     total_time : str or float, optional
         Build the sequential form sized to a run of this length -- a
-        ``jcm.date.parse_duration_days`` string (``"10 years"``, ``"400
+        ``jem.base.component.parse_duration_days`` string (``"10 years"``, ``"400
         days"``) or a number of days, parsed on the coupler's calendar. The
         count is the months the run's labels touch, from ``start_date + dt``
         to ``start_date + total_time`` inclusive, so a run ending exactly on
@@ -1103,7 +1098,32 @@ def monthly_mean(
     NotImplementedError
         If the run's calendar has no fixed table of month lengths --
         ``gregorian``, whose leap years change it from year to year (see
-        :func:`month_lengths`).
+        :func:`month_lengths`). This is no longer a corner case since jax-gcm
+        v3 (PR 878): jax-gcm's own atmosphere clock is unconditionally
+        Gregorian now, with no calendar of its own to choose, so **every**
+        ``Coupler`` built with a real ``jcm.model.Model`` component must
+        itself use ``calendar="gregorian"`` (``jem.components.jcm.component
+        .JCMComponent.bind`` enforces this) -- and this in-scan accumulator
+        cannot bin calendar months on a calendar whose year is not a fixed
+        number of days, so it now refuses on *every* such coupled model,
+        where before PR 878 it only refused a model deliberately built with
+        ``calendar="gregorian"`` (the default was ``"365_day"``, which this
+        accumulator handles exactly). There is no in-scan fix for this --
+        making a fixed-size accumulator track a variable-length year is a
+        different, larger feature -- so for a jax-gcm-coupled run, bin
+        calendar months on the host instead, from the labelled output
+        (``coupler.to_xarray(diagnostics)[...].groupby("time.year")
+        .groupby("time.month")``, ``pandas``/``xarray``'s own Gregorian
+        calendar arithmetic, correct leap years included); this is slower and
+        costs the whole trajectory in memory, but it is the exact thing this
+        accumulator exists to avoid needing only when it can stay in-scan.
+        :func:`windowed_mean` is unaffected: a window is measured from the
+        run's own start with no phase and no calendar month table, so it
+        raises only if asked to parse a duration in months or years (a
+        `total_time="1 year"` request goes through the same
+        :func:`jem.base.component.parse_duration_days`, whose ``"gregorian"``
+        answer -- the true 365.2425-day average -- is exact enough for
+        *sizing* an accumulator, just not for a fixed calendar-month table).
     ValueError
         If both ``n_months`` and ``total_time`` are given, if ``n_months`` is
         not a positive integer, if ``total_time`` is not positive, or if the
@@ -1298,7 +1318,7 @@ def windowed_mean(
     coupler : jem.base.coupler.Coupler
         The coupled model the accumulator is for.
     window : str or float or sequence of str or float
-        Length of one window, as a ``jcm.date.parse_duration_days`` string
+        Length of one window, as a ``jem.base.component.parse_duration_days`` string
         (``"5 days"``, ``"2 days"``, ``"12 hours"``) or a number of days,
         parsed on the coupler's calendar; or a **sequence** of such lengths,
         which is a pattern the windows cycle through (``["10 days",

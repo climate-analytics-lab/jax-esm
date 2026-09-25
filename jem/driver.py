@@ -21,7 +21,7 @@ passes them through, so a default can only be changed in one place.
 
 Chunking rules
 --------------
-``total_time`` and ``chunk`` are durations -- a ``jcm.date.parse_duration_days``
+``total_time`` and ``chunk`` are durations -- a ``jem.base.component.parse_duration_days``
 string (``"30 days"``, ``"1 year"``) or a plain number of days -- and both must
 be whole multiples of the coupling timestep, because a coupled step is the
 smallest thing this loop can integrate. ``total_time`` must in turn be a whole
@@ -161,7 +161,7 @@ from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
-from jem.base.component import CoupledCarry, SupportsXarray
+from jem.base.component import CoupledCarry, SupportsXarray, parse_duration_days
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
 from jem.output import (
     check_subsample,
@@ -180,7 +180,7 @@ SECONDS_PER_DAY = 86400.0
 
 #: Relative slack allowed when a duration is divided by the coupling timestep
 #: before being called a whole number of steps. The durations come from
-#: ``jcm.date.parse_duration_days``, which returns float days, so an exactly
+#: ``jem.base.component.parse_duration_days``, which returns float days, so an exactly
 #: expressible request ("1 year" of daily steps) can still land a few ulps off
 #: an integer; anything a user would call "not a whole number of steps" is
 #: many orders of magnitude larger than this.
@@ -336,7 +336,7 @@ def run_chunked(
         The coupled model. Its workflow, exchangers and clock are the run's;
         there is no second place to configure them.
     total_time : str or float
-        How far to integrate, as a ``jcm.date.parse_duration_days`` string
+        How far to integrate, as a ``jem.base.component.parse_duration_days`` string
         (``"90 days"``, ``"1 year"``) or a number of days. Must be a whole
         multiple of both the coupling timestep and ``chunk``.
     chunk : str or float
@@ -844,9 +844,6 @@ def _whole_steps(
     The duration is parsed on the *coupler's* calendar, so "1 year" is as long
     as the atmosphere's year rather than as long as a Gregorian one.
     """
-    # Imported here rather than at module scope: see `default_health_check`.
-    from jcm.date import parse_duration_days
-
     days = float(parse_duration_days(duration, coupler.calendar))
     steps = days / coupling_days
     rounded = round(steps)

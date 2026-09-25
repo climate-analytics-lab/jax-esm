@@ -42,6 +42,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 # the resolvers must exist before a value that uses one is read.
 import jem.config  # noqa: F401
 from jem import driver
+from jem.base.component import parse_duration_days
 from jem.base.coupler import Coupler
 from jem.components.jcm import JCMComponent
 from jem.components.slab import SlabGrid
@@ -675,6 +676,22 @@ def declare_exchanged_forcing(
         atm.set_exchanged_forcing(())
 
 
+#: The calendar every jax-gcm-coupled ``Coupler`` is built with. Through
+#: jax-gcm PR 877 this was read off the built atmosphere (``atm.model.calendar``),
+#: because jax-gcm's own ``Model.calendar`` was itself configurable and the
+#: coupler had to match whatever the atmosphere was built with. jax-gcm PR
+#: 878 (the v3 exact datetime clock) removed ``Model.calendar`` entirely --
+#: jax-gcm's atmosphere physics and forcing selection are unconditionally
+#: proleptic Gregorian now, with no configuration knob -- so there is only
+#: one correct value left to pass here, and it is hardcoded rather than read
+#: off an attribute that no longer exists.
+#: :meth:`~jem.components.jcm.component.JCMComponent.bind` enforces the same
+#: thing from the other side: a coupler built with any other calendar and a
+#: real jax-gcm component fails there instead of silently drifting the two
+#: components' seasonal cycles apart.
+ATMOSPHERE_CALENDAR = "gregorian"
+
+
 def build_coupler(cfg: DictConfig) -> Coupler:
     """Build the whole coupled model from a composed config.
 
@@ -707,9 +724,9 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     coupler = Coupler(
         components,
         exchangers,
-        coupling_timestep=_coupling_timestep(cfg, atm.model.calendar),
-        start_date=atm.model.start_date,
-        calendar=atm.model.calendar,
+        coupling_timestep=_coupling_timestep(cfg, ATMOSPHERE_CALENDAR),
+        start_date=atm.model.start_time,
+        calendar=ATMOSPHERE_CALENDAR,
         workflow=None if workflow is None else list(workflow),
     )
     # After the coupler, not before: what `declare_exchanged_forcing` needs is
@@ -947,8 +964,6 @@ def _coupling_timestep(cfg: DictConfig, calendar: str) -> jdt.Timedelta:
     "12 hours"), on the atmosphere's calendar; the coupler holds whole
     seconds.
     """
-    from jcm.date import parse_duration_days
-
     spelling = cfg.coupling.timestep
     seconds = float(parse_duration_days(spelling, calendar)) * SECONDS_PER_DAY
     if abs(seconds - round(seconds)) > 1e-6 or round(seconds) < 1:

@@ -55,7 +55,6 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import xarray as xr
-from jcm.date import days_per_year as jcm_days_per_year
 
 from jem.base.component import (
     Carry,
@@ -68,6 +67,7 @@ from jem.base.component import (
     SupportsCheckpoint,
     SupportsXarray,
     TimeAxis,
+    days_per_year,
     seconds_since_new_year,
 )
 
@@ -385,8 +385,13 @@ class Coupler:
     start_date : jdt.Datetime
         Date of coupled step 0.
     calendar : str
-        Calendar name as JCM spells it; determines the length of the year
-        used for the annual cycle (``jcm.date.days_per_year``).
+        Calendar name as JCM used to spell it (``"gregorian"``, ``"365_day"``);
+        determines the length of the year used for the annual cycle
+        (:func:`jem.base.component.days_per_year`). A coupler built with a
+        real ``jcm.model.Model`` component must use ``"gregorian"`` --
+        jax-gcm v3's atmosphere clock is unconditionally Gregorian, and
+        :meth:`~jem.components.jcm.component.JCMComponent.bind` refuses
+        anything else.
     name : str
         The coupler's own name, as the :class:`Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see
@@ -515,7 +520,7 @@ class Coupler:
         # expressible as a `jdt.Timedelta` at all.
         self._dt_total_seconds = _timedelta_seconds(coupling_timestep)
         self._year_offset_seconds = seconds_since_new_year(start_date, calendar)
-        self._days_per_year = float(jcm_days_per_year(calendar))
+        self._days_per_year = float(days_per_year(calendar))
 
         for name, exchanger in (exchangers or {}).items():
             self.add_exchanger(name, exchanger)

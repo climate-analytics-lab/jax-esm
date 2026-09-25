@@ -48,7 +48,6 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 from flax import struct
-from jcm.date import days_per_year as jcm_days_per_year
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -60,10 +59,6 @@ Carry = Any
 Diagnostics = Any
 
 SECONDS_PER_DAY = 86400.0
-
-#: Nanoseconds in a day, as a float64 -- the exact factor JCM multiplies its
-#: float64 day counts by when it builds a ``datetime64[ns]`` time axis.
-NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
 
 #: Prefix on the output name of a field a component was *given*, as opposed to
 #: one it computed. See :func:`forcing_variable`.
@@ -182,6 +177,161 @@ def role_attrs(role: Role) -> dict[str, str]:
     return {ROLE_ATTRIBUTE: role}
 
 
+#: Days per year for each calendar JEM's own annual-cycle bookkeeping
+#: supports (:class:`CouplingTime`'s ``year_fraction``, the slab models'
+#: climatology sampling via :func:`start_year_fraction`, and
+#: ``jem.accumulate.monthly_mean``'s fixed month-length table).
+#:
+#: Through jax-gcm PR 877 this table lived in jax-gcm itself
+#: (``jcm.date.days_per_year``), because jax-gcm's own ``Model.calendar``
+#: selected between the same two conventions and JEM deliberately deferred to
+#: it so the two packages could not disagree about a year's length. jax-gcm
+#: PR 878 (the v3 exact datetime clock) made jax-gcm's clock unconditionally
+#: proleptic Gregorian and removed both the calendar concept and this table
+#: -- ``jcm.date`` has no ``days_per_year`` any more. JEM's own components
+#: still need a *fixed-length* "days per year" for windows and seasonal-cycle
+#: bookkeeping that has nothing to do with the atmosphere's clock -- a
+#: Veros- or slab-only coupled run has no jax-gcm component at all -- so the
+#: table moves here unchanged rather than disappearing with jax-gcm's copy of
+#: it. See :data:`jem.components.jcm.contract.JCM_SUPPORTED_REV`.
+#:
+#: A ``Coupler`` bound to a real ``jcm.model.Model`` must use ``"gregorian"``
+#: -- :meth:`jem.components.jcm.component.JCMComponent.bind` enforces this --
+#: because jax-gcm's atmosphere physics and forcing selection are
+#: unconditionally Gregorian now, and any other choice here would silently
+#: put the atmosphere's seasonal cycle out of phase with every other
+#: component's. ``"365_day"`` remains for a coupled model with no atmosphere.
+_DAYS_PER_YEAR_BY_CALENDAR: dict[str, float] = {
+    "gregorian": 365.2425,
+    "365_day": 365.0,
+}
+
+#: Duration units whose length in days does not depend on the calendar,
+#: mirroring the fixed-unit table ``jcm.date`` carried before PR 878 (which
+#: replaced it with an equivalent whole-seconds table of its own,
+#: ``jcm.date._FIXED_UNIT_SECONDS`` -- not imported here, so that JEM's own
+#: duration parsing does not depend on jax-gcm's internal names, and so that
+#: it keeps accepting durations at plain floating-point precision rather than
+#: jax-gcm v3's stricter whole-second requirement, which JEM's own scheduling
+#: was never written to).
+_FIXED_UNIT_DAYS: dict[str, float] = {
+    "sec": 1.0 / 86400.0, "secs": 1.0 / 86400.0,
+    "second": 1.0 / 86400.0, "seconds": 1.0 / 86400.0,
+    "min": 1.0 / 1440.0, "mins": 1.0 / 1440.0,
+    "minute": 1.0 / 1440.0, "minutes": 1.0 / 1440.0,
+    "h": 1.0 / 24.0, "hr": 1.0 / 24.0, "hrs": 1.0 / 24.0,
+    "hour": 1.0 / 24.0, "hours": 1.0 / 24.0,
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
+}
+_MONTH_ALIASES = {"mo", "mon", "mons", "month", "months"}
+_YEAR_ALIASES = {"y", "yr", "yrs", "year", "years"}
+
+
+def days_per_year(calendar: str) -> float:
+    """Return the days-per-year JEM's own annual-cycle bookkeeping uses for ``calendar``.
+
+    ``"gregorian"`` is the true average Gregorian year, ``365.2425`` days
+    (the astronomical value the calendar is calibrated to: 400 years contain
+    exactly 97 leap years, so ``365 + 97/400 = 365.2425``) -- **not** the
+    exact length of any *particular* year, which is 365 or 366 depending
+    which one. Every caller of this value (:class:`CouplingTime`'s
+    ``year_fraction``, :func:`seconds_since_new_year` /
+    :func:`start_year_fraction`, and ``jem.accumulate``'s bin-sizing
+    arithmetic) treats a calendar's year as one fixed length for the whole
+    run, so there is no way to plug in "365 or 366, whichever this
+    particular year is" without changing that shared assumption -- doing so
+    is a larger redesign than this migration's scope (see
+    ``jem.accumulate.monthly_mean``'s own ``NotImplementedError`` for the
+    sharpest edge of the same limit: a *fixed* calendar-month table cannot
+    exist for a calendar whose year is not a fixed number of days at all).
+    The consequence is a **bounded, non-accumulating** phase error of at most
+    a fraction of a day within any given year (as opposed to ``"365_day"``,
+    whose error against a real Gregorian atmosphere *accumulates* -- about a
+    day every four years, since it never has a 29 February at all) -- see
+    :data:`jem.components.jcm.contract.JCM_SUPPORTED_REV`'s "Why a `dev`
+    revision" note for why ``"gregorian"`` is nonetheless the required choice
+    for a jax-gcm-coupled run. This value is unchanged from the one
+    ``jcm.date.days_per_year("gregorian")`` returned before jax-gcm v3
+    removed it (jax-gcm PR 878) -- moved here, not reconsidered, because nothing
+    about the migration bears on what the right approximation is.
+
+    Parameters
+    ----------
+    calendar : str
+        ``"gregorian"`` or ``"365_day"``.
+
+    Raises
+    ------
+    ValueError
+        If ``calendar`` is neither.
+
+    """
+    try:
+        return _DAYS_PER_YEAR_BY_CALENDAR[calendar]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown calendar {calendar!r}; expected one of "
+            f"{tuple(_DAYS_PER_YEAR_BY_CALENDAR)}."
+        ) from exc
+
+
+def parse_duration_days(value: str | float, calendar: str) -> float:
+    """Parse a duration spec into a float number of days, on ``calendar``.
+
+    Numeric input (int / float) is returned as-is -- assumed to be days.
+    Strings are parsed as ``<number> <unit>``, e.g. ``'1 month'``,
+    ``'5 years'``, ``'30 days'``, ``'12 hours'``. Months and years are mapped
+    through :func:`days_per_year` (so under ``'365_day'``, ``'1 month'`` is
+    ``365/12`` days; under ``'gregorian'`` it is ``365.2425/12``).
+
+    This is JEM's own duration parser (jax-gcm's ``jcm.date.parse_duration_days``
+    dropped both the calendar argument and month/year units in PR 878, since a
+    fixed-duration model clock has no use for either) -- it schedules JEM's own
+    coupled-run and output-windowing durations (``coupled_run.total_time``,
+    ``jem.accumulate``'s windows), which are calendar concepts independent of
+    whatever clock the atmosphere -- if there is one -- runs on.
+
+    Parameters
+    ----------
+    value : str or float
+        The duration, as a number of days or a ``'<number> <unit>'`` string.
+    calendar : str
+        Calendar name as JCM used to spell it (``"365_day"``, ``"gregorian"``),
+        used only to resolve a month/year unit.
+
+    Returns
+    -------
+    float
+
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    import re
+    s = str(value).strip().lower()
+    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z]+)\s*$", s)
+    if not m:
+        raise ValueError(
+            f"Cannot parse duration {value!r}. Expected '<number> <unit>' "
+            "with unit in {seconds, minutes, hours, days, weeks, months, years}."
+        )
+    n = float(m.group(1))
+    unit = m.group(2)
+
+    if unit in _FIXED_UNIT_DAYS:
+        return n * _FIXED_UNIT_DAYS[unit]
+    if unit in _MONTH_ALIASES:
+        return n * days_per_year(calendar) / 12.0
+    if unit in _YEAR_ALIASES:
+        return n * days_per_year(calendar)
+
+    raise ValueError(
+        f"Unknown duration unit {unit!r} in {value!r}. Expected one of "
+        f"{sorted(_FIXED_UNIT_DAYS)} ∪ {sorted(_MONTH_ALIASES | _YEAR_ALIASES)}."
+    )
+
+
 def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:
     """Return the seconds from 1 January of ``start_date``'s year to ``start_date``.
 
@@ -202,17 +352,17 @@ def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:
     start_date : jax_datetime.Datetime
         The run's start date.
     calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
+        Calendar name as JCM used to spell it (``"365_day"``, ``"gregorian"``).
 
     Raises
     ------
     ValueError
         If ``start_date`` does not exist in ``calendar`` (29 February on a
-        365-day calendar), or the calendar is unknown to ``jcm.date``.
+        365-day calendar), or the calendar is unknown (see :func:`days_per_year`).
 
     """
     when = start_date.to_pydatetime()
-    if float(jcm_days_per_year(calendar)) == 365.0:
+    if float(days_per_year(calendar)) == 365.0:
         if when.month == 2 and when.day == 29:
             raise ValueError(
                 f"{when.date()} does not exist in the {calendar!r} calendar, "
@@ -250,24 +400,27 @@ def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
     float
 
     """
-    seconds_per_year = SECONDS_PER_DAY * float(jcm_days_per_year(calendar))
+    seconds_per_year = SECONDS_PER_DAY * float(days_per_year(calendar))
     # `seconds_since_new_year` already counts in the model calendar, so this
     # is strictly below 1; the modulo only guards the boundary against
     # rounding.
     return (seconds_since_new_year(start_date, calendar) / seconds_per_year) % 1.0
 
 
-def _timedelta_days(delta: Any) -> float:
-    """Return a ``jax_datetime`` days/seconds pair as a float64 count of days.
+def _timedelta_seconds(delta: Any) -> int:
+    """Return a ``jax_datetime`` days/seconds pair as an exact int64 count of seconds.
 
     ``jdt.Timedelta`` (and the ``.delta`` of a ``jdt.Datetime``) stores whole
-    days and the seconds within the day separately. Dividing by a one-day
-    ``Timedelta`` would work but goes through jax; this stays in numpy so the
-    result is a plain float64 usable in the output-labelling arithmetic.
+    days and the seconds within the day separately, so this is exact -- unlike
+    the float64-days arithmetic :meth:`TimeAxis.datetimes` used before
+    jax-gcm#862 published :func:`jcm.predictions.output_time_labels`. Plain
+    ``int`` (arbitrary precision), not ``int32``: the caller multiplies this by
+    a record count that can run to the millions over a multi-decade run, which
+    would overflow ``int32`` well before it overflows an unbounded seconds
+    count.
     """
-    return (
-        float(np.asarray(delta.days))
-        + float(np.asarray(delta.seconds)) / SECONDS_PER_DAY
+    return int(np.asarray(delta.days)) * int(SECONDS_PER_DAY) + int(
+        np.asarray(delta.seconds)
     )
 
 
@@ -288,8 +441,8 @@ class CouplingTime:
     year_offset_seconds : float
         Seconds from 1 January of the start year to ``start_date``. Static.
     days_per_year : float
-        Length of the year in days for the run's calendar, from
-        ``jcm.date.days_per_year``. Static.
+        Length of the year in days for the run's calendar, from this module's
+        own :func:`days_per_year`. Static.
 
     """
 
@@ -379,51 +532,46 @@ class TimeAxis:
 
     The labelling convention is JCM's: record ``k`` is the average over
     ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with the
-    **end** of that interval, ``start_date + (k+1) dt``, as a
-    ``datetime64[ns]`` on the proleptic Gregorian calendar whatever the
-    model calendar is (a ``365_day`` run still writes real dates; the
-    calendar governs only the seasonal cycle and forcing selection).
+    **midpoint** of that interval, ``start_date + (k + 1/2) dt``, as an exact
+    ``datetime64[ms]`` on the proleptic Gregorian calendar whatever the
+    coupler's own calendar is (a ``365_day`` coupler still writes real dates;
+    the calendar governs only the seasonal cycle and forcing selection, not
+    the output labels -- see :func:`jem.base.component.days_per_year`).
     :meth:`datetimes` implements exactly that and is the one place the
-    convention is written down. It reimplements JCM's arithmetic rather than
-    calling JCM, and at the pinned revision (``JCM_SUPPORTED_REV``) that is a
-    deliberate choice rather than a missing API: jax-gcm#824 made
-    ``Model.date_from_sim_time`` public, but that is JCM's *model clock*
-    conversion -- exact integer day/second arithmetic on the model calendar,
-    returning a ``jcm.date.DateData`` for forcing and physics -- and not the
-    conversion these labels have to match, which is the float64
-    days-since-epoch product in ``ModelPredictions._trajectory_dataset``
-    (still internal, and still what JCM's own output files are labelled with).
-    Calling the public one would give the exact nanosecond count where JCM's
-    own output gives a float64 product whose ulp at a 2000s date is 128 ns.
-    The two agree whenever the step is a power-of-two fraction of a day (every
-    configuration JAX-ESM ships, and hence today's tests), and part company
-    when it is not -- a 10- or 20-minute coupling step puts roughly half the
-    labels 128 ns off -- at which point a slab dataset stops aligning with the
-    atmosphere's on one time axis and ``xr.merge`` gives a 2N-long union
-    instead of an N-long join, which is the very thing this class exists to
-    prevent. Sharing one computation therefore needs JCM to publish its
-    *output* labelling, which is jax-gcm#862; jax-gcm#824 published the
-    clock, not the labelling, so adopting ``date_from_sim_time`` here on its
-    own would be a regression waiting for the first sub-hourly run.
+    convention is written down.
 
-    The consequence to know about is at a leap day. The labels are
-    Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap
-    year, so from the first 29 February a run's labels reach, every label
-    falls one day *behind* the model-calendar date of the instant it stands
-    for -- one more day for every leap year the run passes. A run starting on
-    1 January 2000 labels the record whose instant the model calls 1 March
-    00:00 as ``2000-02-29``, and the one the model calls 1 April 00:00 as
-    ``2000-03-31``. Anything binning the output by its own labels
-    (``groupby("time.month")``) therefore parts company from that record on
-    with anything binning by the model calendar -- which is what
-    :func:`jem.accumulate.monthly_mean` does, and what the forcing and the
-    seasonal cycle follow; ``monthly_mean`` documents the difference where a
-    user meets it, under **Leap days**. The inconsistency is JCM's and is
-    recorded upstream as jax-gcm#449; JAX-ESM mirrors the convention rather
-    than diverging from it, because labels of its own would no longer merge
-    with the atmosphere's on one time axis. Emitting calendar-consistent
-    labels for every component, the atmosphere's included, is tracked as
-    #118.
+    Through jax-gcm PR 877 this reimplemented JCM's *labelling* arithmetic
+    (an end-of-interval label, via a float64 days-since-epoch product that is
+    not exact past a 128 ns ulp) rather than calling JCM, because the only
+    public conversion at the time (``Model.date_from_sim_time``, jax-gcm#824)
+    was JCM's *model clock* conversion -- exact but for a different quantity
+    (forcing/physics dates from elapsed seconds) -- and not what the output
+    files were labelled with, so adopting it here would only have merged with
+    JCM's output when the coupling step happened to be a power-of-two fraction
+    of a day. jax-gcm PR 878 published the labelling conversion itself,
+    ``jcm.predictions.output_time_labels`` (closing jax-gcm#862), and moved
+    JCM's own averaged output from an end-of-interval label to a
+    **midpoint-of-interval** one (`docs/source/v2_to_v3.rst`, "One real
+    datetime clock"). :meth:`datetimes` now calls that function directly
+    instead of reimplementing it: every component computes its record's exact
+    interval bounds with ``jax_datetime`` (whole-second arithmetic, so the
+    bounds themselves are always exactly representable), converts them to
+    ``datetime64[ms]`` with :func:`~jcm.predictions.output_time_labels`, and
+    takes the midpoint by plain NumPy ``datetime64``/``timedelta64``
+    arithmetic on the millisecond values -- the same two-step recipe
+    ``ModelPredictions.to_xarray`` uses for its own averaged output, which is
+    what lets a midpoint fall on a half second for an odd-length interval
+    without ``jax_datetime.Timedelta`` (whole-seconds-only) ever having to
+    represent one. This is exact for *any* coupling step, not merely a
+    power-of-two fraction of a day, so the jax-gcm#862 gap this class existed
+    to work around is closed rather than merely documented.
+
+    The leap-day / calendar-months caveat this class used to carry (a
+    ``365_day`` coupler's *labels* falling a day behind the model calendar
+    from the first 29 February the run reaches) is unaffected by the
+    midpoint change and is not repeated here in full; see
+    :func:`jem.accumulate.monthly_mean`'s **Leap days** section, which is
+    where a user actually meets it.
 
     Attributes
     ----------
@@ -434,7 +582,7 @@ class TimeAxis:
     dt : jdt.Timedelta
         Coupling timestep.
     calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
+        Calendar name as JCM used to spell it (``"365_day"``, ``"gregorian"``).
 
     """
 
@@ -448,46 +596,38 @@ class TimeAxis:
         return len(self.steps)
 
     def datetimes(self) -> np.ndarray:
-        """Return the record labels as ``datetime64[ns]`` (end of each interval).
+        """Return the record labels as exact ``datetime64[ms]`` (interval midpoints).
 
-        The arithmetic, not just the answer, is JCM's
-        (``jcm.predictions.ModelPredictions._trajectory_dataset``)::
-
-            times = start_date.delta.days + save_interval * (arange(n) + 1)
-            time  = (times * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
-
-        that is: a float64 count of **days** since the 1970 epoch, multiplied
-        into nanoseconds at the end. That product overflows the exactly
-        representable range of float64 (a 2001 date is ~9.5e17 ns, whose ulp
-        is 128 ns), so the instants are not exact to the nanosecond -- but
-        they are *identically* inexact for every component that comes through
-        here, which is the property that makes ``xr.merge`` align two
-        components' output on one time axis. Computing the exact integer
-        nanosecond count instead would be more accurate and would merge with
-        nothing.
-
-        The count of days is a plain count, so the dates it lands on are
-        proleptic Gregorian and a ``365_day`` run's labels fall a day further
-        behind the model calendar at every Gregorian 29 February -- the
-        leap-day consequence the class docstring spells out. Making the labels
-        calendar-consistent is not a change this method can make alone
-        (jax-gcm#449): it would put JEM's output on a different time axis from
-        the JCM output it is written to merge with. Doing it for every
-        component at once is #118.
-
-        Sub-day start dates are the one deliberate difference from JCM's own
-        output path, which takes ``start_date.delta.days`` and drops
-        ``.seconds`` entirely, so a JCM run starting at 06:00 labels its
-        records from midnight. Reproducing that here would mislabel a slab
-        dataset by up to a day, so the seconds are kept. For a start date at
-        midnight -- every configuration JAX-ESM ships -- the two agree bit for
-        bit, because the added term is exactly 0.0.
+        See the class docstring for the convention and why this calls
+        :func:`jcm.predictions.output_time_labels` rather than reimplementing
+        it. The interval bounds are computed in exact int64 seconds (never a
+        floating day count, and never an ``int32`` total that a
+        many-thousand-record run could overflow) before being split back into
+        the whole day/second pair ``jax_datetime.Timedelta`` needs.
         """
-        start_days = _timedelta_days(self.start_date.delta)
-        step_days = _timedelta_days(self.dt)
-        steps = np.asarray(self.steps, dtype=np.float64)
-        days = start_days + step_days * (steps + 1.0)
-        return (days * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
+        from jcm.predictions import output_time_labels
+
+        dt_seconds = _timedelta_seconds(self.dt)
+        steps = np.asarray(self.steps, dtype=np.int64)
+        interval_start_seconds = steps * dt_seconds
+        interval_end_seconds = interval_start_seconds + dt_seconds
+
+        def _exact_datetime(seconds_since_start: np.ndarray) -> jdt.Datetime:
+            days, seconds = np.divmod(seconds_since_start, int(SECONDS_PER_DAY))
+            return self.start_date + jdt.Timedelta(
+                days=jnp.asarray(days, dtype=jnp.int32),
+                seconds=jnp.asarray(seconds, dtype=jnp.int32),
+            )
+
+        bounds_start = output_time_labels(_exact_datetime(interval_start_seconds))
+        bounds_end = output_time_labels(_exact_datetime(interval_end_seconds))
+        # Integer-divide the millisecond *bounds*, not a jax_datetime
+        # Timedelta: a whole-second interval's length in milliseconds is
+        # always even (a multiple of 1000), so this only ever produces a
+        # half-second midpoint for an odd number of seconds, exactly as
+        # jax-gcm's own `ModelPredictions.to_xarray` computes it.
+        midpoints: np.ndarray = bounds_start + (bounds_end - bounds_start) // 2
+        return midpoints
 
     @property
     def attrs(self) -> dict[str, str]:

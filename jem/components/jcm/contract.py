@@ -23,24 +23,77 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 -------------------------------------------
-``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **877**,
-``46eb3fc1efc3d16fde5458736d80a3491698f3ed``. jax-gcm has no 3.x tag yet --
+``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **878**,
+``808412a5dc9e5a6de86d02a3e4f054249a7572fe`` ("v3: unify the real datetime
+clock and bounded monthly output"). jax-gcm has no 3.x tag yet --
 ``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
 ``dev`` sha is the most precise thing there is to name. It is the merge
 commit itself rather than whatever ``dev`` happened to be at bump time,
-because later, unrelated ``dev`` commits are not revisions this branch has
-been checked against.
+because later, unrelated ``dev`` commits -- four physics fixes landed on
+``dev`` after 878 merged -- are not revisions this branch has been checked
+against.
 
-PR 877 closes jax-gcm#754 (the package-independent ``SurfaceExchange``
-coupling struct every physics package now publishes identically), #301
-(prescribed surface fluxes) and #884 (the declared forcing-alignment rule,
-``jcm.forcing.resolve_align``) -- the first and last of which this revision
-of JAX-ESM is written against (``jem/components/jcm/exchange_fields.py`` and
-the ``forcing.align`` knobs in ``jem/config/configuration/*.yaml``).
+PR 878 is a deliberate, wholesale replacement of jax-gcm's clock: the float
+``sim_time`` (exact only to float32 rounding, which stops being enough after
+a few decades of simulated time) and the configurable ``Model.calendar``
+(``"365_day"`` / ``"gregorian"``) are gone, replaced by one exact,
+unconditionally proleptic-Gregorian ``RunState`` clock (``time`` + ``step``),
+and jax-gcm now publishes ``jcm.predictions.output_time_labels`` as the one
+conversion from that clock to an output label (closing jax-gcm#862, open
+since before this project existed). This revision of JAX-ESM is written
+against all of it:
 
-The revision this pin replaced was jax-gcm ``dev`` as it stood on
-2026-09-21, and carried four things JAX-ESM was written against (all still
-true here, since PR 877 was merged on top of that ``dev`` commit):
+* ``Model.__init__`` takes ``start_time`` in place of ``start_date`` and has
+  no ``calendar`` parameter or attribute any more -- jax-gcm's atmosphere
+  physics (seasonal phase), forcing alignment and output labelling are all
+  unconditionally Gregorian, with no configuration knob left to disagree
+  with. ``JCMComponent.bind`` checks the coupler's start date against
+  ``Model.start_time`` and refuses any coupler calendar but ``"gregorian"``
+  (``jem.runners.ATMOSPHERE_CALENDAR``) instead of checking it against a
+  ``Model.calendar`` that no longer exists;
+* ``Model.run_from_state_with_carry`` now *requires* ``initial_time`` and
+  ``initial_step`` (the two new ``RunState`` fields) and returns
+  ``(RunState, ModelPredictions)`` in place of the old
+  ``(dycore_state, physics_carry, predictions)`` triple: it no longer infers
+  the clock from the incoming dycore state, because that inference went
+  through the same float ``sim_time`` this PR removed.
+  :class:`~jem.components.jcm.component.JCMComponent` now threads
+  ``RunState.time``/``.step`` through its own carry under ``"time"``/
+  ``"step"``, exactly as it already threaded ``"physics"`` -- see that
+  module's docstring for why recomputing them from the coupler's own step
+  counter, instead, would eventually overflow;
+* :func:`jcm.predictions.output_time_labels` is the published, exact
+  (``datetime64[ms]``) conversion from a ``jax_datetime.Datetime`` to an
+  output label. ``jem.base.component.TimeAxis.datetimes`` -- which labels
+  every non-JCM component's output, so that ``xr.merge`` aligns it with
+  JCM's own -- now calls it directly instead of reimplementing an
+  approximate version of JCM's pre-878 labelling, and picks up PR 878's own
+  labelling change in the process: an averaged interval is now labelled at
+  its **midpoint**, not its end;
+* ``jcm.date`` dropped its ``days_per_year`` table and the ``calendar``
+  argument of ``parse_duration_days``/``DateData.set_date``/
+  ``ForcingData.select``, along with the calendar concept itself. JEM's own
+  annual-cycle bookkeeping (``CouplingTime.year_fraction``, the slab models'
+  climatology sampling, ``jem.accumulate.monthly_mean``) still needs a
+  calendar concept unrelated to jax-gcm's own clock -- a Veros- or slab-only
+  coupled run has no jax-gcm component at all -- so
+  :func:`jem.base.component.days_per_year` and
+  :func:`jem.base.component.parse_duration_days` now hold that table and
+  that parser themselves, unchanged in value from jax-gcm's pre-878 copies,
+  rather than delegating to a jax-gcm that no longer offers them;
+* ``Model.date_from_sim_time`` (jax-gcm#824, see the 877 note below) is no
+  longer resolved anywhere in JCM's own integration path -- the exact
+  ``RunState`` clock is threaded incrementally now, never recomputed from
+  elapsed seconds -- so the perpetual-season override hook jax-esm#120
+  tracked (overriding this method on a ``Model`` instance) would be a silent
+  no-op even targeting the right name. Neither JEM nor jax-gcm's own code
+  calls it any more, so it is removed from :data:`JCM_INTEGRATION_POINTS`
+  below rather than re-pinned; jax-esm#120 needs a different mechanism if it
+  is still wanted.
+
+The revision this pin replaced was jax-gcm ``dev`` at the merge of PR 877 on
+2026-09-23, and carried five things JAX-ESM was written against (all still
+true here, since PR 878 was merged on top of PR 877's own merge commit):
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
@@ -55,20 +108,14 @@ true here, since PR 877 was merged on top of that ``dev`` commit):
   this is the removal of a conflict, and the ``log_level=50`` the test
   fixtures used to pass purely to silence that ``basicConfig`` is gone with
   it;
-* **#824** -- the resumable model state and the date conversion are public.
-  ``Model.bootstrap_state()`` returns its ``(dycore_state, physics_carry)``
-  pair, ``ModelPredictions.with_context(model)`` re-attaches the context a
-  pytree round trip drops, and ``Model._date_from_sim_time`` is now
-  ``Model.date_from_sim_time`` (the old name kept only as a delegating
-  alias). ``JCMComponent`` is built on all three, so it reaches for no private
-  jax-gcm attribute at all; and because the old private date name only
-  delegates, an instance-level override of ``date_from_sim_time`` has to
-  target the public name or it silently stops taking effect --
-  ``JCMComponent.step`` calls ``Model.run_from_state_with_carry`` every
-  coupled step (:mod:`jem.components.jcm.component`), and that call resolves
-  the public name internally, not the alias. JEM ships no such override
-  today; a perpetual-season (frozen seasonal cycle) hook, which would be
-  exactly this pattern, is tracked as jax-esm#120;
+* **#824** -- the resumable model state is public. ``Model.bootstrap_state()``
+  returns its ``(dycore_state, physics_carry)`` pair, and
+  ``ModelPredictions.with_context(model)`` re-attaches the context a pytree
+  round trip drops. ``JCMComponent`` is built on both, so it reaches for no
+  private jax-gcm attribute for either. (#824 also made
+  ``Model._date_from_sim_time`` a public ``Model.date_from_sim_time``; PR
+  878 then changed what calls it, or rather stopped calling it at all --
+  see the 878 note above);
 * **#754/#301/#884 (PR 877 itself)** -- the package-independent
   ``SurfaceExchange`` coupling struct, published identically under
   ``diagnostics["surface_exchange"]`` by every physics package that resolves
@@ -117,11 +164,11 @@ from typing import NamedTuple
 #: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
 #: can be compared against directly.
 #:
-#: This is jax-gcm ``dev`` at the merge of PR 877 on 2026-09-23
-#: (``feat(coupling): surface-exchange contract + forced-flux mode``), which
-#: closes jax-gcm#754, #301 and #884 -- see "Why a ``dev`` revision rather
-#: than a release" above.
-JCM_SUPPORTED_REV = "46eb3fc1efc3d16fde5458736d80a3491698f3ed"
+#: This is jax-gcm ``dev`` at the merge of PR 878 on 2026-09-24
+#: ("v3: unify the real datetime clock and bounded monthly output"), which
+#: closes jax-gcm#862 -- see "Why a ``dev`` revision rather than a release"
+#: above.
+JCM_SUPPORTED_REV = "808412a5dc9e5a6de86d02a3e4f054249a7572fe"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -231,20 +278,18 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " Signature: check_health(ds, chunk_idx: int, elapsed_days: float)"
         " -> tuple[bool, dict].",
     ),
-    IntegrationPoint(
-        "jcm.date", "parse_duration_days", "public",
-        "Turn a human run length or coupling interval ('1 year', '10 days')"
-        " into days on the model's calendar."
-        " Signature: parse_duration_days(value, calendar='gregorian')"
-        " -> float.",
-    ),
-    IntegrationPoint(
-        "jcm.date", "days_per_year", "public",
-        "Calendar length used by jem.base.component.TimeAxis and"
-        " jem.base.coupler for the annual cycle, so every component's seasonal"
-        " forcing agrees with the atmosphere's calendar."
-        " Signature: days_per_year(calendar='gregorian') -> float.",
-    ),
+    # ------------------------------------------------------------------
+    # jcm.date.parse_duration_days and jcm.date.days_per_year were watched
+    # here through jax-gcm PR 877. PR 878 dropped the `calendar` argument of
+    # the former (a fixed-duration model clock has no use for a calendar
+    # month or year) and removed the latter entirely (there is no longer a
+    # calendar to report the length of), so JAX-ESM's own scheduling and
+    # annual-cycle bookkeeping -- which still need both, independent of
+    # whatever clock the atmosphere runs on -- no longer delegates either to
+    # jax-gcm. Both now live, unchanged in value, as
+    # `jem.base.component.parse_duration_days` and
+    # `jem.base.component.days_per_year`; see the "Why a `dev` revision"
+    # note above.
     # ------------------------------------------------------------------
     # The wrapped model (jem.components.jcm.component).
     # ------------------------------------------------------------------
@@ -264,25 +309,32 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " / `Model.physics_carry`, which JAX-ESM deliberately does not read,"
         " so neither name is watched here.",
     ),
-    IntegrationPoint(
-        "jcm.model.Model", "date_from_sim_time", "public",
-        "jax-gcm's own elapsed-seconds -> DateData conversion, and the method"
-        " jcm.model.Model calls internally for date-aware forcing on every"
-        " coupled step: JCMComponent.step (jem/components/jcm/component.py)"
-        " calls run_from_state_with_carry, which resolves this name"
-        " internally. An instance-level override of it -- the shape a"
-        " perpetual-season (frozen seasonal cycle) hook would take, tracked"
-        " as jax-esm#120 since JEM ships none today -- has to target this"
-        " public name: jax-gcm's own internal calls resolve it directly, not"
-        " the _date_from_sim_time alias jax-gcm#824 left behind, so patching"
-        " the alias would be a silent no-op from the start, and a future"
-        " rename of this public name would turn a correctly-targeted"
-        " override into the same silent no-op.",
-    ),
+    # ------------------------------------------------------------------
+    # jcm.model.Model.date_from_sim_time was watched here through jax-gcm PR
+    # 877, when JCM's own internal per-step date construction resolved this
+    # public name (so an instance-level override of it -- the shape a
+    # perpetual-season / frozen-seasonal-cycle hook would take, tracked as
+    # jax-esm#120 -- would have worked). PR 878's exact RunState clock builds
+    # each step's date incrementally instead (`time = time + dt`, never
+    # recomputed from elapsed seconds), so nothing in jax-gcm's own
+    # integration path calls this method any more; it is a compatibility
+    # adapter for external elapsed-seconds callers only, and JEM is not one
+    # (see the module docstring's "Why a `dev` revision" note). Overriding it
+    # today would be a silent no-op, so it is removed from this list rather
+    # than re-pinned; jax-esm#120 needs a different mechanism if it is still
+    # wanted.
+    # ------------------------------------------------------------------
     IntegrationPoint(
         "jcm.model.Model", "run_from_state_with_carry", "public",
         "Advance the atmosphere by exactly one coupling interval, threading"
-        " the cross-step physics carry; the whole coupled step is this call.",
+        " the cross-step physics carry and jax-gcm's exact RunState clock"
+        " (`time`/`step`, jax-gcm PR 878): JCMComponent.step passes"
+        " `initial_time`/`initial_step` from its own carry (mirroring"
+        " `RunState.time`/`.step`) and threads the returned RunState's"
+        " `time`/`step` back into it, exactly as it already threaded"
+        " `physics`. Returns `(RunState, ModelPredictions)` -- a 2-tuple,"
+        " not the pre-878 `(dycore_state, physics_carry, predictions)`"
+        " triple.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "dt_si", "public",
@@ -290,13 +342,15 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " timestep in JCMComponent.bind().",
     ),
     IntegrationPoint(
-        "jcm.model.Model", "start_date", "public",
+        "jcm.model.Model", "start_time", "public",
         "Checked against the coupler's start date in JCMComponent.bind() so a"
-        " mismatch is refused up front rather than drifting silently.",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "calendar", "public",
-        "Checked against the coupler's calendar in JCMComponent.bind().",
+        " mismatch is refused up front rather than drifting silently."
+        " Renamed from `start_date` by jax-gcm PR 878, which also removed"
+        " `Model.calendar` entirely -- jax-gcm's atmosphere clock is"
+        " unconditionally proleptic Gregorian now, so JCMComponent.bind()"
+        " instead refuses any coupler calendar but 'gregorian'"
+        " (`jem.runners.ATMOSPHERE_CALENDAR`), with nothing left on `Model`"
+        " itself to check that against.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "coords", "public",
@@ -396,13 +450,30 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " replaced JAX-ESM's read of the private `_predictions` payload.",
     ),
     # ------------------------------------------------------------------
-    # Private names. One is left: JAX-ESM copies its *values* rather than
-    # importing it, so there is nothing for jax-gcm to make public and no
-    # issue to track -- but a jax-gcm that stopped defining it would leave
-    # the copies describing nothing, so it is watched here. An entry that
-    # does have a jax-gcm issue behind it names that issue in `access`
-    # ("private, TODO(jax-gcm#123)"), and so does the code that reads it.
+    # Private names. An entry that has a jax-gcm issue behind it names that
+    # issue in `access` ("private, TODO(jax-gcm#123)"), and so does the code
+    # that reads it; one below has none yet because this revision is the one
+    # that found the gap (see its own note).
     # ------------------------------------------------------------------
+    IntegrationPoint(
+        "jcm.dycore.base.Predictions", "time_cell_method", "private",
+        "jax-gcm PR 878's single per-trajectory interval-mean flag, read by"
+        " ModelPredictions.time_labels/.to_xarray as `bool(...)` -- which"
+        " raises on more than one element. JCMComponent.step calls"
+        " run_from_state_with_carry with a fixed output_averages=True every"
+        " time, so this leaf is identical on every call, but JEM's coupler"
+        " stacks it to shape (iterations,) like any other leaf before"
+        " JCMComponent.to_xarray hands the result back to jax-gcm's own"
+        " serialization -- there is no other place to fix it. There is no"
+        " public accessor or setter for it (`ModelPredictions.with_context`,"
+        " jax-gcm#824, restores context but not this), so"
+        " `jem.components.jcm.component._collapse_time_cell_method` reaches"
+        " `ModelPredictions._predictions.time_cell_method` directly, exactly"
+        " where jax-gcm's own readers get it. No jax-gcm issue exists for"
+        " this gap yet -- worth filing (a way to rebuild a stacked"
+        " ModelPredictions' scalar metadata after external stacking, or a"
+        " public setter) -- so this entry has no TODO() to point at.",
+    ),
     IntegrationPoint(
         "jcm.cf_metadata", "_COORD_ATTRS", "private",
         "The CF attributes jax-gcm gives its horizontal coordinates. The slab"

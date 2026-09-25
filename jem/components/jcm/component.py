@@ -4,7 +4,21 @@
 monkey-patching methods onto it, so the atmosphere JEM drives is the same
 object the user configured and nothing in JCM has to know JEM exists.
 
-Three things this wrapper exists to get right:
+Four things this wrapper exists to get right:
+
+**The exact clock is threaded.** jax-gcm v3 (PR 878) replaced the model's
+float ``sim_time`` -- exact only to float32 rounding, which stops being
+enough after a few decades of simulated time -- with an exact ``RunState``
+clock (``time``, an absolute :class:`jax_datetime.Datetime`, and ``step``, an
+integer JCM-timestep count), and ``Model.run_from_state_with_carry`` now
+requires both explicitly rather than inferring them from the incoming dycore
+state. So they live in the component carry under ``"time"``/``"step"``,
+exactly like ``"physics"`` below, and are passed straight back in as
+``initial_time``/``initial_step``. They must be threaded rather than
+recomputed from the coupler's own step counter each call: the coupler's step
+times however many JCM timesteps make one coupling step would eventually
+overflow a whole-seconds product that JCM's own incremental clock never
+forms in the first place (see :meth:`JCMComponent.initialize`).
 
 **The physics carry is threaded.** JCM's operator-split integration keeps
 cross-step physics state — sub-cycled radiation, prior-step TKE, the
@@ -190,14 +204,28 @@ def _with_model_context(predictions: ModelPredictions,
 def _diagnostics_template(model: Model) -> Any:
     """Structural template matching one step's saved physics diagnostics.
 
-    JCM's averaged output path accumulates the per-step diagnostics dict
-    into a float-cast zero template built from
-    ``Physics.get_empty_data(coords)``, minus the ``_sampler_state`` entry,
-    which stays in the integration carry but is never saved. Reproducing
-    both transforms here is what lets :meth:`JCMComponent.initialize` seed
-    ``JCMDerived.physics`` with the exact structure, shapes and dtypes step
-    1 will produce — without integrating a step to find out, which is what
-    the previous adapter did.
+    JCM's averaged output path accumulates the per-step diagnostics dict into
+    a zero template built from ``Physics.get_empty_data(coords)``, minus the
+    ``_sampler_state`` entry, which stays in the integration carry but is
+    never saved. Reproducing both transforms here is what lets
+    :meth:`JCMComponent.initialize` seed ``JCMDerived.physics`` with the exact
+    structure, shapes and dtypes step 1 will produce — without integrating a
+    step to find out, which is what the previous adapter did.
+
+    Only *inexact* (float) leaves are cast to float: a categorical (integer or
+    boolean) diagnostic is not meaningfully averaged, so jax-gcm's own
+    accumulator leaves it at its native dtype and simply keeps the latest
+    step's raw value (``jcm.model._op_split_trajectory``'s ``inner_step``,
+    which JCM's own release notes describe as "categorical" diagnostics --
+    see ``ModelPredictions.to_xarray``'s ``omitted_interval_mean_variables``).
+    Every other leaf is float-cast because it *is* divided by the number of
+    inner steps. This mirrors JCM's own accumulator seed
+    (``jcm.model._get_op_split_integrate_fn``'s ``empty_diag_sum``) leaf for
+    leaf; blanket-casting every leaf to float here (as before jax-gcm PR 878,
+    when every leaf — categorical ones included — WAS promoted) now produces
+    a template whose categorical leaves disagree in dtype with what a real
+    step actually returns, which ``lax.scan`` catches as a carry-structure
+    error on the first coupled step.
 
     A mismatch would surface as a ``lax.scan`` carry-structure error on the
     first coupled step, so it is checked directly by the component's tests
@@ -205,11 +233,12 @@ def _diagnostics_template(model: Model) -> Any:
     """
     template = model.physics.get_empty_data(model.coords)
     template = {k: v for k, v in template.items() if k != "_sampler_state"}
-    # ``dtype=float`` (the default float type, so float64 under
-    # jax_enable_x64) exactly mirrors JCM's own accumulator, which promotes
-    # every leaf — integer and boolean ones included — because it divides by
-    # the number of inner steps.
-    return jax.tree.map(lambda leaf: jnp.zeros_like(leaf, dtype=float), template)
+    return jax.tree.map(
+        lambda leaf: (jnp.zeros_like(leaf, dtype=float)
+                      if jnp.issubdtype(leaf.dtype, jnp.inexact)
+                      else jnp.zeros_like(leaf)),
+        template,
+    )
 
 
 def _forcing_field_names() -> frozenset[str]:
@@ -226,7 +255,6 @@ def _collapse_exchanged_forcing(
     forcing: ForcingData,
     names: tuple[str, ...],
     date: jdt.Datetime,
-    calendar: str,
 ) -> ForcingData:
     """Return ``forcing`` with the ``names`` fields taken at ``date``.
 
@@ -258,18 +286,22 @@ def _collapse_exchanged_forcing(
         Fields of ``ForcingData`` the coupled model supplies.
     date : jax_datetime.Datetime
         The run's start date.
-    calendar : str
-        The model's calendar, which decides how a wrap-year climatology is
-        indexed.
 
     Returns
     -------
     jcm.forcing.ForcingData
 
+    Notes
+    -----
+    jax-gcm PR 878 dropped ``calendar`` from both ``DateData.set_date`` and
+    ``ForcingData.select``: a wrap-year climatology is now always replayed on
+    the real Gregorian calendar (``docs/source/v2_to_v3.rst``, "One real
+    datetime clock"), so there is no longer a calendar to pass here.
+
     """
     if not names:
         return forcing
-    at_date = forcing.select(DateData.set_date(date), calendar=calendar)
+    at_date = forcing.select(DateData.set_date(date))
     # ``tree_math.struct`` generates ``replace`` at runtime, so mypy cannot
     # see it on the struct.
     return forcing.replace(  # type: ignore[no-any-return]
@@ -289,6 +321,42 @@ def _collapse_save_axis(leaf: jnp.ndarray) -> jnp.ndarray:
     return leaf.reshape((-1, *leaf.shape[2:]))
 
 
+def _collapse_time_cell_method(predictions: ModelPredictions) -> ModelPredictions:
+    """Collapse a stacked ``time_cell_method`` flag back to jax-gcm's expected scalar.
+
+    jax-gcm PR 878 added ``time_cell_method`` -- a single JAX boolean on the
+    whole prediction frame (true for an interval mean), read by
+    ``ModelPredictions.time_labels``/``.to_xarray`` as a bare Python ``bool``.
+    It has no per-record axis of its own -- one ``run_from_state_with_carry``
+    call produces one flag for its whole trajectory, not one per saved frame
+    -- but :meth:`JCMComponent.step` always calls it with the same fixed
+    ``output_averages=True``, and the coupler's ``lax.scan`` necessarily
+    stacks this leaf to shape ``(iterations,)`` like every other one: to JAX
+    it is structurally identical to a genuine per-record leaf. jax-gcm's own
+    ``bool(np.asarray(...))`` then raises on more than one element. Every
+    stacked copy is identical (the fixed argument never varies), so this
+    keeps only the first.
+
+    There is no public accessor for this field, so this reaches
+    ``ModelPredictions._predictions.time_cell_method`` -- the same private
+    attribute jax-gcm's own ``time_labels``/``.to_xarray`` read internally
+    (``getattr(self._predictions, "time_cell_method", None)``) -- rather than
+    reimplementing the read; ``jem/components/jcm/contract.py`` pins it as a
+    private, watched integration point so a future rename is caught by
+    ``test_jcm_contract.py``, not by this function returning silently wrong
+    output.
+    """
+    raw = getattr(predictions, "_predictions", None)
+    cell_method = getattr(raw, "time_cell_method", None) if raw is not None else None
+    if cell_method is None or getattr(cell_method, "ndim", 0) == 0:
+        return predictions
+    return ModelPredictions(
+        raw.replace(time_cell_method=cell_method[0]),  # type: ignore[union-attr]
+        None, None,
+        observations=getattr(predictions, "_observations", None),
+    )
+
+
 class JCMComponent:
     """The JCM atmosphere, driven one coupling timestep at a time.
 
@@ -299,8 +367,11 @@ class JCMComponent:
     Parameters
     ----------
     model : jcm.model.Model
-        A fully configured JCM model. Its ``start_date`` and ``calendar``
-        must match the coupler's; :meth:`bind` checks that.
+        A fully configured JCM model. Its ``start_time`` must match the
+        coupler's ``start_date``, and the coupler must run on the
+        ``"gregorian"`` calendar -- jax-gcm's own clock is unconditionally
+        Gregorian since v3 (PR 878) and no longer has a ``calendar`` of its
+        own to check against. :meth:`bind` checks both.
     forcing : jcm.forcing.ForcingData, optional
         Boundary conditions for the atmosphere. Defaults to JCM's
         :func:`~jcm.forcing.default_forcing` (prescribed SSTs) on the
@@ -447,9 +518,9 @@ class JCMComponent:
             timesteps and a coupling interval that is not a multiple of one
             would silently be rounded.
         start_date : jax_datetime.Datetime
-            The run's start date; must equal ``model.start_date``.
+            The run's start date; must equal ``model.start_time``.
         calendar : str
-            The run's calendar; must equal ``model.calendar``.
+            The run's calendar; must be ``"gregorian"``.
 
         Raises
         ------
@@ -462,19 +533,31 @@ class JCMComponent:
             again to the same clock is a no-op).
 
         """
-        if str(calendar) != str(self.model.calendar):
+        # jax-gcm v3 (PR 878) removed ``Model.calendar``: the atmosphere's
+        # own clock -- physics seasonal phase, forcing alignment, output
+        # labelling -- is unconditionally proleptic Gregorian now, with no
+        # configuration knob to check this against. So the check runs the
+        # other way: the coupler itself must be on the one calendar jax-gcm
+        # still understands. Any other choice would not fail loudly -- the
+        # atmosphere would simply run Gregorian regardless -- it would
+        # silently put the atmosphere's seasonal cycle out of phase with
+        # every other component's, which reads its calendar from the
+        # coupler (:func:`jem.base.component.days_per_year`).
+        if str(calendar) != "gregorian":
             raise ValueError(
-                f"Calendar mismatch: the coupler runs {calendar!r} but"
-                f" {self.name!r} was built with"
-                f" {self.model.calendar!r}. Rebuild the model with"
-                " calendar=<coupler calendar>."
+                f"{self.name!r} needs the coupler's calendar to be "
+                f"'gregorian', not {calendar!r}: jax-gcm v3's atmosphere "
+                "clock (physics seasonal phase, forcing alignment, output "
+                "labelling) is unconditionally proleptic Gregorian and has "
+                "no calendar of its own to match. Build the Coupler with "
+                "calendar='gregorian'."
             )
-        if start_date != self.model.start_date:
+        if start_date != self.model.start_time:
             raise ValueError(
                 f"Start-date mismatch: the coupler starts at {start_date!r}"
-                f" but {self.name!r} was built with"
-                f" {self.model.start_date!r}. Rebuild the model with"
-                " start_date=<coupler start date>."
+                f" but {self.name!r} was built with start_time="
+                f"{self.model.start_time!r}. Rebuild the model with"
+                " start_time=<coupler start date>."
             )
         model_timestep = jdt.to_timedelta(
             int(self.model.dt_si.to_timedelta().total_seconds()), "second")
@@ -509,24 +592,40 @@ class JCMComponent:
         ``(ix, il)`` array into each of those fields every coupling step, and
         a ``lax.scan`` carry may not change structure between steps.
 
+        The ``"time"``/``"step"`` entries are JCM's own exact clock
+        (``jcm.model.RunState.time`` / ``.step``): jax-gcm PR 878 requires
+        ``run_from_state_with_carry`` to be given this pair explicitly on
+        every call rather than inferring it from the incoming dycore state
+        (see ``docs/source/v2_to_v3.rst``, "One real datetime clock"), so
+        :meth:`step` threads them the same way it already threads
+        ``"physics"``: read from ``carry``, passed as ``initial_time`` /
+        ``initial_step``, and replaced with the exact ``RunState`` the call
+        returns. This is what keeps the clock exact for a run of any length
+        -- the coupler's own step counter multiplied by however many JCM
+        timesteps make one coupling step would eventually overflow the whole
+        -seconds product long before JCM's own incremental clock does, since
+        the latter never forms that product at all.
+
         Returns
         -------
         dict
             ``{"state": dycore state, "physics": cross-step physics carry,
-            "derived": JCMDerived, "forcing": ForcingData}``.
+            "time": exact jax_datetime.Datetime, "step": exact JCM step
+            count, "derived": JCMDerived, "forcing": ForcingData}``.
 
         """
         dycore_state, physics_carry = self.model.bootstrap_state()
         return {
             "state": dycore_state,
             "physics": physics_carry,
+            "time": self.model.start_time,
+            "step": jnp.int32(0),
             "derived": JCMDerived.zeros(
                 self.nodal_shape, _diagnostics_template(self.model)),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
-                self.model.start_date,
-                self.model.calendar,
+                self.model.start_time,
             ),
         }
 
@@ -562,13 +661,15 @@ class JCMComponent:
             )
         self._report_clock_drift(carry["state"], time)
 
-        state, physics_carry, predictions = self.model.run_from_state_with_carry(
+        run_state, predictions = self.model.run_from_state_with_carry(
             initial_state=carry["state"],
             forcing=carry["forcing"],
             save_interval=self._coupling_days,
             total_time=self._coupling_days,
             output_averages=True,
             initial_physics_state=carry["physics"],
+            initial_time=carry["time"],
+            initial_step=carry["step"],
         )
         # One coupling step is exactly one save interval, so the saved
         # trajectory has a length-1 leading axis; the derived fields are
@@ -588,8 +689,10 @@ class JCMComponent:
         )
         return (
             {
-                "state": state,
-                "physics": physics_carry,
+                "state": run_state.dynamics,
+                "physics": run_state.physics,
+                "time": run_state.time,
+                "step": run_state.step,
                 "derived": derived,
                 "forcing": carry["forcing"],
             },
@@ -624,20 +727,21 @@ class JCMComponent:
         than guessed at, because JCM owns those names and their meaning.
 
         The ``time`` coordinate is JCM's, not the coupler's: JCM labels each
-        averaged record with the **end** of the interval it covers
-        (``datetime64[ns]``, absolute, from the model's own ``start_date``),
-        and JEM does not relabel it, because a coupled dataset in which the
+        averaged record with the **midpoint** of the interval it covers
+        (exact ``datetime64[ms]``, absolute, from the model's own
+        ``start_time`` -- jax-gcm v3's ``jcm.predictions.output_time_labels``,
+        see ``docs/source/v2_to_v3.rst``, "One real datetime clock"), and JEM
+        does not relabel it, because a coupled dataset in which the
         atmosphere's time axis disagrees with the atmosphere's own output
         files would be worse than one where two components label the same
         interval differently. The labels the other components carry come from
-        ``TimeAxis.datetimes``, which reproduces JCM's *output* arithmetic
-        rather than calling ``Model.date_from_sim_time`` -- public since
-        jax-gcm#824, but a different conversion, for the reason set out on
-        :class:`jem.base.component.TimeAxis`. Publishing the labelling
-        itself is jax-gcm#862.
+        ``TimeAxis.datetimes``, which since jax-gcm#862 (closed by PR 878)
+        calls the same ``output_time_labels`` conversion directly rather than
+        reimplementing it -- see :class:`jem.base.component.TimeAxis`.
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)
+        collapsed = _collapse_time_cell_method(collapsed)
         predictions = _with_model_context(collapsed, self.model)
         n_records = int(jnp.shape(predictions.times)[0])
         if len(time) != n_records:
