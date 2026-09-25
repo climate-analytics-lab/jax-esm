@@ -67,6 +67,16 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   touching it — no methods are attached to the model. The coupler calls its
   `bind()` when it is registered, which is where the model's start date,
   calendar and timestep are checked against the coupler's.
+- **The atmosphere's own timestep.** `Model(...)` above passes no
+  `time_step`, so it picks the active physics' *stable* step — 30 minutes for
+  SPEEDY at T31L8 — rather than any particular jax-gcm configuration's own
+  choice. `python -m jem.main`'s atmosphere instead reads `atmosphere.run.time_step`
+  from its composed config (12 minutes by jax-gcm's own `run/default.yaml`
+  default), so a script that means to match a specific `+configuration=<name>`
+  bit for bit — not just build *an* aquaplanet — should pass that recipe's own
+  `time_step` explicitly, in minutes, rather than rely on this page's
+  no-configuration default; see `jem.configurations` below for loading the
+  recipe itself instead of reproducing it by hand.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
@@ -204,14 +214,14 @@ configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
 `jem.configurations` is the recipe door onto them (issue #131):
 
 ```python
-from jem import configurations
+from jem import configurations, run_chunked
 
 configurations.available()          # {name: one-line summary}, read off the yaml
 
 exp = configurations.load("aquaplanet-slab")
 exp.coupler                         # the built jem.base.coupler.Coupler
 exp.config["ocean"]                 # a plain dict -- what the recipe resolved to
-run_chunked(exp.coupler, **exp.run_kwargs)   # reproduces the CLI's own run
+run_chunked(exp.coupler, **exp.run_kwargs)   # reproduces the CLI's build and run settings
 ```
 
 `load` composes the named yaml through Hydra internally, builds it through
@@ -219,9 +229,15 @@ the SAME `jem.runners` builders `python -m jem.main` uses
 (`jem.runners.build_coupler`, `jem.runners.build_run_kwargs`), and hands back
 a Hydra-free `LoadedConfiguration` -- `omegaconf`/`hydra` never appear in a
 caller's own code. `**overrides` is the escape hatch onto both a dotted
-value (`load("earth-slab", **{"coupled_run.total_time": 10})`) and a
-config-group selection (`load("aquaplanet-slab", seaice="none")`, the
-Python spelling of the CLI's `seaice=none`).
+value (`load("earth-slab", **{"coupled_run.total_time": "60 days"})` --
+`earth-slab`'s `chunk` stays its recipe default of 30 days, so this has to be
+a multiple of that) and a config-group selection (`load("aquaplanet-slab",
+seaice="none")`, the Python spelling of the CLI's `seaice=none`). `load`'s own
+docstring lists the small, specific things `run_chunked(exp.coupler,
+**exp.run_kwargs)` does NOT reproduce of the CLI (a fresh `output_dir` of the
+door's own rather than the CLI's Hydra-managed one, no working-directory
+change, no logger-level change) and the process-global persistence of a
+`+atmosphere.constants.*` override.
 
 A notebook that *runs* a validated configuration to demonstrate something
 else -- perturbing an initial condition, differentiating through a

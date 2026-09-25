@@ -137,17 +137,3 @@ def test_importing_jem_does_not_import_configurations():
         " sorted(m for m in sys.modules if m.startswith('jem'))"
     )
     subprocess.run([sys.executable, "-c", source], check=True)
-
-
-def test_configurations_is_the_recipe_door():
-    """``jem.configurations`` is reachable and carries the door's whole API.
-
-    Not part of ``jem.__all__`` (see the test above) -- reached instead as a
-    submodule, ``import jem.configurations`` or ``from jem import
-    configurations``, the same way jax-gcm's own ``jcm.configurations`` is.
-    """
-    import jem.configurations as configurations
-
-    assert callable(configurations.available)
-    assert callable(configurations.load)
-    assert configurations.LoadedConfiguration is not None

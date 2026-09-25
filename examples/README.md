@@ -37,7 +37,13 @@ drift the door exists to prevent.
 
 The `python -m jem.main` commands above remain exactly valid; the "How to run
 it" column says how each *notebook* gets to the same model, since none of
-them compose Hydra any more.
+them compose Hydra any more. "Equivalent to" for the two directly-built
+notebooks (01, 04) includes the atmosphere's physics timestep: both pass
+`time_step=12` (minutes) explicitly, matching `atmosphere.run.time_step` in
+the configuration they claim to reproduce -- without it, `jcm.model.Model`
+would instead pick SPEEDY T31L8's own stable step (30 minutes), a materially
+different model. `tests/unit/test_notebook_equivalence.py` checks the claim
+structurally, `dt` included.
 
 jax-gcm ships no T106 grid option, so the resolution above is raised with the
 grid's own keys, `atmosphere.grid.spectral_truncation=106`, paired with a

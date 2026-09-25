@@ -156,7 +156,15 @@ the caller:
 
     exp = configurations.load("earth-slab")
     exp.coupler                                       # the built Coupler
-    result = run_chunked(exp.coupler, **exp.run_kwargs)   # the CLI's own run
+    result = run_chunked(exp.coupler, **exp.run_kwargs)
+
+``run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's build and
+its ``coupled_run`` settings exactly, but NOT everything ``python -m
+jem.main`` does around that build -- see :func:`jem.configurations.load`'s
+own docstring for the precise, short list (a fresh ``output_dir`` of the
+door's own rather than the CLI's Hydra-managed one, no working-directory
+change, no logger-level change) and for why a ``+atmosphere.constants.*``
+override outlives the call that applied it.
 
 See :doc:`python_api`'s *Validated configurations from Python* section for
 the escape hatch onto an override (a dotted key or a config-group selection
