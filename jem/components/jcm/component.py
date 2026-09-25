@@ -226,7 +226,7 @@ def _unflatten_to_nodal_shape(
 
 
 def _surface_exchange_on_nodal_grid(
-    diagnostics: dict[str, Any], nodal_shape: tuple[int, int]
+    diagnostics: dict[str, Any], nodal_shape: tuple[int, int], physics: Any
 ) -> exchange_fields.SurfaceExchange:
     """:func:`~jem.components.jcm.exchange_fields.from_diagnostics`, gridded.
 
@@ -234,9 +234,15 @@ def _surface_exchange_on_nodal_grid(
     :meth:`JCMComponent.step` both go through, so the exchange a coupled
     model's initial (all-zero) carry is built from and the one a real step
     later produces are put on the same grid the same way -- see
-    :func:`_unflatten_to_nodal_shape`.
+    :func:`_unflatten_to_nodal_shape`. ``physics`` (``model.physics``) is
+    forwarded to :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
+    unchanged: whether a near-surface wind vector is present is a fact of
+    which terms are composed (:func:`~jem.components.jcm.exchange_fields.
+    has_wind_vector`), not something ``diagnostics`` alone can answer
+    faithfully (a hybrid composition's diagnostics dict can carry a *zeroed*
+    wind-vector key with no term that ever computed a real one).
     """
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, physics)
     return exchange_fields.SurfaceExchange(
         total_heat_flux=_unflatten_to_nodal_shape(
             exchange.total_heat_flux, nodal_shape, "total_heat_flux"),
@@ -247,7 +253,6 @@ def _surface_exchange_on_nodal_grid(
         u0=_unflatten_to_nodal_shape(exchange.u0, nodal_shape, "u0"),
         v0=_unflatten_to_nodal_shape(exchange.v0, nodal_shape, "v0"),
     )
-
 
 @tree_math.struct
 class JCMDerived:
@@ -294,17 +299,17 @@ class JCMDerived:
     v0: jnp.ndarray | None
 
     @classmethod
-    def zeros(cls, physics, nodal_shape, **overrides):
+    def zeros(cls, diagnostics_template, nodal_shape, physics, **overrides):
         """Zero-filled derived fields shaped like a real step's, off a template.
 
-        Every named field's shape is read off ``physics`` itself, through
-        :func:`~jem.components.jcm.exchange_fields.from_diagnostics` -- the
-        same reader a real step's diagnostics go through -- and then put on
-        ``nodal_shape`` by :func:`_unflatten_to_nodal_shape`, rather than
-        this method assuming zeros of ``nodal_shape`` directly the way it
-        used to. Composed physics that keeps its state on the atmosphere's
-        own grid (SPEEDY) already agrees with ``nodal_shape``, so this is a
-        no-op for it; one that vectorizes columns
+        Every named field's shape is read off ``diagnostics_template``,
+        through :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
+        -- the same reader a real step's diagnostics go through -- and then
+        put on ``nodal_shape`` by :func:`_unflatten_to_nodal_shape`, rather
+        than this method assuming zeros of ``nodal_shape`` directly the way
+        it used to. Composed physics that keeps its state on the
+        atmosphere's own grid (SPEEDY) already agrees with ``nodal_shape``,
+        so this is a no-op for it; one that vectorizes columns
         (``ComposablePhysics(vectorize_columns=True)``, e.g. ECHAM) publishes
         the surface exchange on a flattened ``(ncols,)`` axis instead, and a
         template built with the wrong shape here would only be discovered
@@ -313,57 +318,71 @@ class JCMDerived:
 
         Parameters
         ----------
-        physics : Any
+        diagnostics_template : Any
             Structural (all-zero) template of one step's diagnostics dict,
             e.g. ``Physics.get_empty_data(coords)`` (as
             :meth:`JCMComponent.initialize` builds it) -- it must have the
             pytree structure, shapes and dtypes a real step produces, or the
-            coupled ``lax.scan`` rejects the carry after the first step. Also
-            what :func:`~jem.components.jcm.exchange_fields.from_diagnostics`
-            decides ``u0``/``v0``'s presence from: ``None`` on this template
-            reads back as ``None`` here too (see the class docstring).
+            coupled ``lax.scan`` rejects the carry after the first step.
+            Stored unchanged as this instance's own ``physics`` field (the
+            class docstring: "JCM's own per-step diagnostics dict, carried
+            through opaquely").
         nodal_shape : tuple of int
             The atmosphere's horizontal nodal shape, ``(ix, il)``
             (:attr:`JCMComponent.nodal_shape`) -- the grid every named field
             is put on, whatever grid the composed physics happened to
             publish it on.
+        physics : jcm.physics_interface.Physics
+            The composed atmosphere physics package (``model.physics``) that
+            ``diagnostics_template`` was built from. Passed to
+            :func:`~jem.components.jcm.exchange_fields.has_wind_vector` (via
+            ``from_diagnostics``) to decide ``u0``/``v0``'s presence -- a
+            fact of which terms are composed, not something
+            ``diagnostics_template`` can answer faithfully by itself for a
+            hybrid composition (see that module's docstring's "What decides
+            the presence is the composed TERM" section).
         **overrides
             Named fields to use instead of the template-derived defaults.
 
         Raises
         ------
         TypeError
-            If ``physics`` is a tuple -- the signature was ``zeros(shape,
-            physics, **overrides)`` before jax-esm#129 swapped the argument
-            order (and what the first one means); a legacy positional call
-            passes its old ``shape`` tuple where ``physics`` now goes, which
-            otherwise fails several calls deep, as an opaque ``TypeError:
-            tuple indices must be integers or slices, not str`` out of
-            ``exchange_fields.from_diagnostics``'s ``dict.get`` -- naming
-            neither this method nor the argument order that actually changed.
+            If ``diagnostics_template`` is a tuple -- the signature was
+            ``zeros(shape, physics, **overrides)`` before jax-esm#129 swapped
+            the first two arguments' order and meaning, and this review added
+            the required third ``physics`` argument; a legacy positional call
+            passes its old ``shape`` tuple where ``diagnostics_template`` now
+            goes, which otherwise fails several calls deep as an opaque error
+            naming neither this method nor the argument that actually
+            changed.
 
         """
-        if isinstance(physics, tuple):
+        if isinstance(diagnostics_template, tuple):
             raise TypeError(
-                "JCMDerived.zeros(physics, nodal_shape, **overrides) takes "
-                "the diagnostics template first and the atmosphere's nodal "
-                f"shape second; got a tuple ({physics!r}) as the first "
-                "argument. jax-esm#129 swapped both the order and the "
-                "meaning of zeros()'s first two arguments (it used to be "
-                "zeros(shape, physics, **overrides)) -- swap them at this "
-                "call site."
+                "JCMDerived.zeros(diagnostics_template, nodal_shape, "
+                "physics, **overrides) takes the diagnostics template "
+                "first and the atmosphere's nodal shape second; got a "
+                f"tuple ({diagnostics_template!r}) as the first argument. "
+                "jax-esm#129 swapped both the order and the meaning of "
+                "zeros()'s first two arguments (it used to be zeros(shape, "
+                "physics, **overrides)), and this review added the "
+                "required third `physics` argument (the composed "
+                "atmosphere physics package) -- update this call site to "
+                "zeros(diagnostics_template, nodal_shape, physics)."
             )
-        exchange = _surface_exchange_on_nodal_grid(physics, nodal_shape)
-        # `zeros_like`, not the exchange's own values: `physics` is an
-        # all-zero template, so every field below is already mathematically
-        # zero, but `total_heat_flux = -net_heat_flux`'s negation turns a
-        # template's `+0.0` into `-0.0` (a distinct float bit pattern, code
-        # review finding) -- and a SPEEDY run's `zeros()` used to give `+0.0`
-        # unconditionally (`jnp.zeros(shape)`, no negation involved), so a
-        # signed zero here would be a real, if invisible, regression against
-        # the "SPEEDY bit-for-bit unchanged" guarantee. `zeros_like` keeps
-        # every field's shape (already put on `nodal_shape` above) and dtype
-        # while canonicalising the value to positive zero.
+        exchange = _surface_exchange_on_nodal_grid(
+            diagnostics_template, nodal_shape, physics)
+        # `zeros_like`, not the exchange's own values: `diagnostics_template`
+        # is an all-zero template, so every field below is already
+        # mathematically zero, but `total_heat_flux = -net_heat_flux`'s
+        # negation turns a template's `+0.0` into `-0.0` (a distinct float
+        # bit pattern, code review finding) -- and a SPEEDY run's `zeros()`
+        # used to give `+0.0` unconditionally (`jnp.zeros(shape)`, no
+        # negation involved), so a signed zero here would be a real, if
+        # invisible, regression against the "SPEEDY bit-for-bit unchanged"
+        # guarantee. `zeros_like` keeps every field's shape (already put on
+        # `nodal_shape` above) and dtype while canonicalising the value to
+        # positive zero.
         defaults = {
             "total_heat_flux": jnp.zeros_like(exchange.total_heat_flux),
             "total_freshwater_flux": jnp.zeros_like(exchange.evaporation),
@@ -373,7 +392,7 @@ class JCMDerived:
             "v0": None if exchange.v0 is None else jnp.zeros_like(exchange.v0),
         }
         fields = {name: overrides.get(name, value) for name, value in defaults.items()}
-        return cls(physics, **fields)
+        return cls(diagnostics_template, **fields)
 
 
 def _with_model_context(predictions: ModelPredictions,
@@ -753,7 +772,8 @@ class JCMComponent:
             "state": dycore_state,
             "physics": physics_carry,
             "derived": JCMDerived.zeros(
-                _diagnostics_template(self.model), self.nodal_shape),
+                _diagnostics_template(self.model), self.nodal_shape,
+                self.model.physics),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
@@ -806,7 +826,8 @@ class JCMComponent:
         # trajectory has a length-1 leading axis; the derived fields are
         # per-step maps, not trajectories.
         diagnostics = jax.tree.map(lambda leaf: leaf[0], predictions.physics)
-        exchange = _surface_exchange_on_nodal_grid(diagnostics, self.nodal_shape)
+        exchange = _surface_exchange_on_nodal_grid(
+            diagnostics, self.nodal_shape, self.model.physics)
         # ``tree_math.struct`` builds the dataclass at runtime, so mypy
         # cannot see the generated __init__ signature.
         derived = JCMDerived(  # type: ignore[call-arg]

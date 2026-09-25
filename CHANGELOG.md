@@ -753,6 +753,32 @@ Breaking changes are marked; everything else is additive.
   negates a template's `total_heat_flux`: it now canonicalises every field
   to positive zero, restoring "SPEEDY's `zeros()` is bit-for-bit unchanged"
   literally rather than only up to sign.
+  A second round of review found `exchange_fields.has_wind_vector()` itself
+  unfaithful (breaking, and recorded as a known, deliberately unfixed gap in
+  the commit that found it): it asked whether the diagnostics dict carried
+  SPEEDY's private `_surface_flux` key, but every `SpeedyTermBase` term —
+  not only `SpeedySurfaceFlux`, the one that fills `u0`/`v0` with a real
+  bulk-formula wind — round-trips that key through the diagnostics dict, so
+  a hybrid composition with some other SPEEDY-legacy term but no
+  `SpeedySurfaceFlux` had a *zeroed* `_surface_flux` and was reported as
+  having a wind vector anyway; `VerosExchange.validate` then passed it, and
+  Veros would have silently received a zero wind stress. `has_wind_vector()`
+  now asks the composed physics package's own **terms**
+  (`any(isinstance(term, SpeedySurfaceFlux) for term in physics.terms)`) —
+  a static, jit-safe check identical for a whole-grid or column-vectorized
+  composition — and both `from_diagnostics()` and `JCMDerived.zeros()` gain
+  a required `physics` argument (`from_diagnostics(diagnostics, physics)`;
+  `JCMDerived.zeros(diagnostics_template, nodal_shape, physics, **overrides)`
+  — its first argument is also renamed `diagnostics_template`, matching what
+  it always was) so the one place this decision is made has the composed
+  physics object in hand. `VerosExchange.validate`/`_require_wind_vector`
+  still only check `u0`/`v0`'s `None`-ness (the carry holds no reference to
+  `model.physics` for them to call `has_wind_vector()` directly), which is
+  not a second predicate — it is that one decision's effect, observed
+  downstream of the only place it is made. No shipped configuration composes
+  physics this way, so nothing that ran before this fix produces a different
+  answer today; the review closes an unfaithful predicate discovered by
+  reasoning about `ComposablePhysics`, not by a failing run.
 - **`jem.runners.build_atmosphere` calls
   `model.physics.require_surface_exchange()`** right after building the
   atmosphere Model, so a physics package that cannot publish the

@@ -481,6 +481,32 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " surface fluxes) fails at composition with a named error, not at"
         " the first coupled step.",
     ),
+    IntegrationPoint(
+        "jcm.physics.composable_physics.ComposablePhysics",
+        "terms", "public",
+        "The ordered list of composed PhysicsTerm instances -- what"
+        " jem.components.jcm.exchange_fields.has_wind_vector walks (with"
+        " isinstance(term, SpeedySurfaceFlux)) to decide, faithfully,"
+        " whether the composed physics actually computes a near-surface"
+        " wind vector, rather than merely whether a diagnostics-dict key"
+        " shaped like one happens to be present (jax-esm#129 review: a"
+        " hybrid composition with some other SPEEDY-legacy term but no"
+        " SpeedySurfaceFlux still carries a zeroed"
+        " '_surface_flux' diagnostics key). Already read this way inside"
+        " jax-gcm itself (jcm.model.Model, e.g. `getattr(self.physics,"
+        " \"terms\", ())`), so this is a stable, public attribute of"
+        " ComposablePhysics, not an implementation detail.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.speedy_terms", "SpeedySurfaceFlux", "public",
+        "The one SPEEDY term that fills the private"
+        " '_surface_flux.u0'/'.v0' diagnostics with a real bulk-formula"
+        " wind rather than PhysicsData.zeros's default zero (see the"
+        " '_surface_flux.u0'/'.v0' entries above); jem.components.jcm."
+        " exchange_fields.has_wind_vector checks a composed physics"
+        " package's terms for an instance of this class -- see the"
+        " ComposablePhysics.terms entry above.",
+    ),
     # ------------------------------------------------------------------
     # Package data. Shipped inside the `jcm` wheel, so it is reachable with
     # importlib.resources and needs no path from the user.

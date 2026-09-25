@@ -7,6 +7,7 @@ dominates the runtime.
 """
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -16,7 +17,14 @@ import pytest
 from jcm.date import DateData
 from jcm.forcing import ForcingData, TimeSeries
 from jcm.model import Model
+from jcm.physics.composable_physics import ComposablePhysics
+from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.speedy.speedy_terms import (
+    SpeedyHumidity,
+    SpeedySurfaceFlux,
+    speedy_physics,
+)
 from jcm.physics.surface.echam.surface_exchange_publisher import (
     EchamSurfaceExchange,
 )
@@ -24,7 +32,7 @@ from jcm.physics.surface.surface_exchange import (
     SurfaceExchange as JcmSurfaceExchange,
 )
 from jcm.physics.surface.surface_exchange import surface_exchange_from
-from jcm.physics_interface import PhysicsState
+from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
 from jem.base.component import (
@@ -47,6 +55,90 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 LAYERS = 5
 TRUNCATION = 21
 GRID_SHAPE = (64, 32)
+
+
+# ---------------------------------------------------------------------------
+# Real (but minimal) ComposablePhysics objects for exchange_fields.
+# has_wind_vector, which since the jax-esm#129 review decides presence from
+# the composed physics's own TERMS rather than from a diagnostics-dict key
+# (see that function's docstring) -- so a fixture built from real jcm terms,
+# not a stand-in, is what proves the check actually inspects them.
+# ---------------------------------------------------------------------------
+
+def _speedy_physics_with_wind() -> ComposablePhysics:
+    """Build a minimal composed physics that DOES publish a near-surface wind
+    vector: it composes a real ``SpeedySurfaceFlux`` term, the one term that
+    fills SPEEDY's private ``_surface_flux.u0``/``.v0`` with a real
+    bulk-formula wind. No coords are cached and nothing is ever run -- only
+    ``.terms`` is read by ``has_wind_vector`` -- so this is cheap to build.
+    """
+    return ComposablePhysics([SpeedySurfaceFlux()], checkpoint_terms=False)
+
+
+def _speedy_legacy_physics_without_wind() -> ComposablePhysics:
+    """Build a real, if unusual, hybrid composition: a SPEEDY-legacy term
+    (``SpeedyHumidity``) with NO ``SpeedySurfaceFlux`` composed.
+
+    This is the jax-esm#129-review defect's own regression fixture: every
+    ``SpeedyTermBase`` term (``SpeedyHumidity`` included) round-trips
+    SPEEDY's whole ``PhysicsData`` struct through the diagnostics dict
+    (``_data_from_diagnostics``/``_diagnostics_from_data``), so a real step
+    of THIS composition would still carry a ``_surface_flux`` diagnostics
+    key -- zeroed, because nothing here ever computed a real wind. A
+    predicate that read the diagnostics dict's keys (the pre-review
+    ``has_wind_vector``) would misreport a wind vector for it; the composed-
+    terms predicate must not. No shipped jem/jcm configuration composes
+    SPEEDY terms this way (23fba9e's commit message records the gap this
+    closes), but nothing stops a hand-built ``ComposablePhysics`` from it,
+    which is exactly why the predicate has to be faithful rather than
+    incidentally correct for the shipped cases alone.
+    """
+    return ComposablePhysics([SpeedyHumidity()], checkpoint_terms=False)
+
+
+class _SurfaceProbe(PhysicsTerm):
+    """Publish the diagnostics keys ``EchamSurfaceExchange`` requires
+    (``surface``, ``vertical_diffusion``, ``pressure_full``), position-coded
+    off the column-vectorized state, so a real column-vectorized ECHAM-style
+    composition can be built and run without a full ECHAM physics package.
+    Shared by every test that needs a real, minimal, wind-vector-free,
+    column-vectorized ``ComposablePhysics`` (see :func:`_echam_style_physics`).
+    """
+
+    name: ClassVar[str] = "surface_probe"
+    category: ClassVar[str] = "surface"
+    provides: ClassVar[tuple[str, ...]] = (
+        "surface", "vertical_diffusion", "pressure_full")
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        t_bot = state.temperature[-1]  # (ncols,), jax-gcm's own flatten order
+        sst = forcing.sea_surface_temperature.reshape(t_bot.shape)
+        zero = jnp.zeros_like(t_bot)
+        diagnostics = {
+            **diagnostics,
+            "surface": SimpleNamespace(
+                sensible_heat_flux=t_bot, latent_heat_flux=zero,
+                evaporation=sst, momentum_flux_u=zero, momentum_flux_v=zero,
+            ),
+            "vertical_diffusion": SimpleNamespace(wind_10m=zero),
+            "pressure_full": jnp.full(state.temperature.shape, 95000.0),
+        }
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+def _echam_style_physics() -> ComposablePhysics:
+    """Build a real, minimal, column-vectorized composition with no wind vector.
+
+    Composes :class:`_SurfaceProbe` (satisfying ``EchamSurfaceExchange``'s
+    ``requires``) and the real ``EchamSurfaceExchange`` publisher, with
+    ``vectorize_columns=True`` -- exactly ECHAM's own composition shape --
+    so ``has_wind_vector`` is exercised against a real column-vectorized
+    ``ComposablePhysics``, not only a whole-grid (SPEEDY-shaped) one.
+    """
+    return ComposablePhysics(
+        [_SurfaceProbe(), EchamSurfaceExchange()],
+        checkpoint_terms=False, vectorize_columns=True,
+    )
 
 
 def _build_model() -> Model:
@@ -295,14 +387,13 @@ def _fake_column_vectorized_echam_diagnostics():
     }
     return diagnostics, code
 
-
 def test_speedy_exchange_shapes_and_signs():
     """Sign flip only: evaporation/precipitation need no unit conversion any
     more, because the #754 contract already publishes them in JEM's units
     (kg m-2 s-1) -- see the module docstring's derivation table.
     """
     diagnostics = _fake_speedy_diagnostics()
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, _speedy_physics_with_wind())
 
     assert exchange.total_heat_flux.shape == GRID_SHAPE
     # jax-gcm's net_heat_flux is positive DOWN into the surface; JEM is up.
@@ -351,7 +442,7 @@ def test_echam_wind_vector_is_none_not_an_error():
     composition time instead (see ``tests/unit/test_fluxes.py``).
     """
     diagnostics = _fake_echam_diagnostics()
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, _echam_style_physics())
 
     assert exchange.u0 is None
     assert exchange.v0 is None
@@ -360,13 +451,54 @@ def test_echam_wind_vector_is_none_not_an_error():
     np.testing.assert_allclose(exchange.precipitation, 0.004)
 
 
-def test_has_wind_vector_is_true_only_for_the_speedy_key():
+def test_has_wind_vector_is_true_only_when_speedy_surface_flux_is_composed():
     """The structural question ``JCMDerived.zeros`` decides composition-time
-    absence from (see ``exchange_fields.has_wind_vector`` and the SPEEDY/ECHAM
-    fixtures above).
+    absence from. Since the jax-esm#129 review, this is decided from the
+    composed physics's own TERMS (real ``ComposablePhysics`` objects here),
+    not from a diagnostics-dict key -- see ``exchange_fields.has_wind_vector``.
     """
-    assert exchange_fields.has_wind_vector(_fake_speedy_diagnostics())
-    assert not exchange_fields.has_wind_vector(_fake_echam_diagnostics())
+    assert exchange_fields.has_wind_vector(_speedy_physics_with_wind())
+    assert not exchange_fields.has_wind_vector(_echam_style_physics())
+
+
+def test_has_wind_vector_is_true_for_standard_speedy_physics():
+    """The real, full SPEEDY factory composes ``SpeedySurfaceFlux``."""
+    assert exchange_fields.has_wind_vector(speedy_physics())
+
+
+def test_has_wind_vector_is_true_for_prescribed_flux_speedy():
+    """``speedy-forced-flux`` (``SpeedySurfaceFlux(prescribed_fluxes=True)``,
+    ``jcm/config/physics/speedy-forced-flux.yaml``) still composes
+    ``SpeedySurfaceFlux`` -- forced mode replaces the turbulent fluxes with
+    prescribed ones, but the term (and its near-surface wind) is unaffected.
+    """
+    physics = ComposablePhysics(
+        [SpeedySurfaceFlux(prescribed_fluxes=True)], checkpoint_terms=False)
+    assert exchange_fields.has_wind_vector(physics)
+
+
+def test_has_wind_vector_is_false_for_a_hybrid_composition_without_speedy_surface_flux():
+    """The jax-esm#129-review defect, fixed here: a hybrid composition with a
+    SPEEDY-legacy term (``SpeedyHumidity``) but no ``SpeedySurfaceFlux`` must
+    report no wind vector -- even though its diagnostics dict, exactly like a
+    real SPEEDY step's (``_fake_speedy_diagnostics``, which carries the
+    ``_surface_flux`` key), looks structurally identical to one. Every
+    ``SpeedyTermBase`` term writes that key (zeroed here, since nothing in
+    this composition ever computed a real wind), which is precisely why a
+    diagnostics-dict-key check used to get this wrong (recorded, not fixed,
+    in 23fba9e's commit message; fixed here by asking the composed TERMS
+    instead -- see ``exchange_fields.has_wind_vector``'s docstring).
+    """
+    physics = _speedy_legacy_physics_without_wind()
+    diagnostics = _fake_speedy_diagnostics()  # has the misleading `_surface_flux` key
+
+    assert not exchange_fields.has_wind_vector(physics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, physics)
+    assert exchange.u0 is None
+    assert exchange.v0 is None
+    # The heat/water fluxes are unaffected -- only the wind-vector decision
+    # changes for this composition.
+    np.testing.assert_allclose(exchange.total_heat_flux, -10.0)
 
 
 def test_jcm_derived_zeros_is_windless_for_a_template_with_no_wind_key():
@@ -377,7 +509,8 @@ def test_jcm_derived_zeros_is_windless_for_a_template_with_no_wind_key():
     the carry ``JCMComponent.initialize()`` builds already has the structure
     step 1 will produce.
     """
-    derived = JCMDerived.zeros(_fake_echam_diagnostics(), GRID_SHAPE)
+    derived = JCMDerived.zeros(
+        _fake_echam_diagnostics(), GRID_SHAPE, _echam_style_physics())
 
     assert derived.u0 is None
     assert derived.v0 is None
@@ -391,15 +524,16 @@ def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
     as before #129.
 
     Deliberately the SAME non-zero fixture
-    ``test_has_wind_vector_is_true_only_for_the_speedy_key`` reads for
-    translation, not a special all-zero variant: ``zeros()`` derives every
-    field's shape/dtype from a real translated exchange but always
+    ``test_has_wind_vector_is_true_only_when_speedy_surface_flux_is_composed``
+    reads for translation, not a special all-zero variant: ``zeros()`` derives
+    every field's shape/dtype from a real translated exchange but always
     canonicalises the *value* to positive zero (code review finding -- see
     the ``signbit`` assertion below), so a non-zero template reading back as
     all-zero here is the stronger proof that ``zeros()`` truly ignores the
     template's values rather than merely happening to be handed zeros.
     """
-    derived = JCMDerived.zeros(_fake_speedy_diagnostics(), GRID_SHAPE)
+    derived = JCMDerived.zeros(
+        _fake_speedy_diagnostics(), GRID_SHAPE, _speedy_physics_with_wind())
 
     assert derived.u0.shape == GRID_SHAPE
     assert derived.v0.shape == GRID_SHAPE
@@ -417,20 +551,23 @@ def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
         field = np.asarray(getattr(derived, name))
         assert not bool(np.signbit(field).any()), name
 
-
 def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call():
     """A pre-#129 call, ``zeros(shape, physics)``, fails with a message
     naming the new signature, not an opaque ``TypeError`` several calls deep.
 
     ``zeros()``'s argument order was ``(shape, physics, **overrides)``
-    before #129; it is now ``(physics, nodal_shape, **overrides)``. Passing
-    the old order -- a tuple where ``physics`` now goes -- used to fail as
-    ``TypeError: tuple indices must be integers or slices, not str`` out of
-    ``exchange_fields.from_diagnostics``'s ``dict.get`` (code review finding).
+    before #129; it is now ``(diagnostics_template, nodal_shape, physics,
+    **overrides)`` -- #129 swapped the first two, and this review added the
+    required third. Passing the old order with the new argument simply
+    appended -- a tuple where ``diagnostics_template`` now goes -- used to
+    fail as an opaque error several calls deep (``TypeError: tuple indices
+    must be integers or slices, not str`` out of
+    ``exchange_fields.from_diagnostics``'s ``dict.get``) rather than naming
+    this method or the argument order that actually changed.
     """
-    with pytest.raises(TypeError, match="zeros\\(physics, nodal_shape"):
-        JCMDerived.zeros(GRID_SHAPE, _fake_speedy_diagnostics())
-
+    with pytest.raises(TypeError, match="zeros\\(diagnostics_template, nodal_shape"):
+        JCMDerived.zeros(
+            GRID_SHAPE, _fake_speedy_diagnostics(), _speedy_physics_with_wind())
 
 def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     """jax-esm#129 regression: a real ECHAM step's surface exchange is
@@ -455,7 +592,7 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     do that.
     """
     template, _ = _fake_column_vectorized_echam_diagnostics()
-    derived = JCMDerived.zeros(template, GRID_SHAPE)
+    derived = JCMDerived.zeros(template, GRID_SHAPE, _echam_style_physics())
 
     assert derived.total_heat_flux.shape == GRID_SHAPE
     assert derived.evaporation.shape == GRID_SHAPE
@@ -476,7 +613,8 @@ def test_unflatten_places_each_cell_correctly():
     from jem.components.jcm.component import _surface_exchange_on_nodal_grid
 
     diagnostics, code = _fake_column_vectorized_echam_diagnostics()
-    exchange = _surface_exchange_on_nodal_grid(diagnostics, GRID_SHAPE)
+    exchange = _surface_exchange_on_nodal_grid(
+        diagnostics, GRID_SHAPE, _echam_style_physics())
 
     actual = np.asarray(exchange.total_heat_flux)  # = -net_heat_flux = -code
     assert actual.shape == GRID_SHAPE
@@ -503,12 +641,6 @@ def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
     wrote to prove the fix on jax-gcm's own machinery, adapted into a
     permanent regression test.
     """
-    from typing import ClassVar
-
-    from jcm.physics.composable_physics import ComposablePhysics
-    from jcm.physics.physics_term import PhysicsTerm
-    from jcm.physics_interface import PhysicsTendency
-
     from jem.components.jcm.component import _surface_exchange_on_nodal_grid
 
     nlon, nlat, nlev = 6, 4, 2  # deliberately non-square, and small
@@ -565,7 +697,7 @@ def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
     published = diagnostics["surface_exchange"]
     assert published.net_heat_flux.shape == (ncols,)
 
-    exchange = _surface_exchange_on_nodal_grid(diagnostics, (nlon, nlat))
+    exchange = _surface_exchange_on_nodal_grid(diagnostics, (nlon, nlat), physics)
     # JEM's total_heat_flux = -net_heat_flux; the probe set
     # sensible_heat_flux = t_bot = code with lhf/radiation/precip all zero,
     # so net_heat_flux = -code and total_heat_flux = +code.
@@ -626,7 +758,7 @@ def test_windless_jcm_derived_survives_a_jit_round_trip():
     carry every iteration.
     """
     derived = JCMDerived.zeros(
-        _fake_echam_diagnostics(), GRID_SHAPE,
+        _fake_echam_diagnostics(), GRID_SHAPE, _echam_style_physics(),
         total_heat_flux=jnp.full(GRID_SHAPE, 3.0),
     )
 
@@ -648,7 +780,7 @@ def test_windless_jcm_derived_survives_a_checkpoint_round_trip(tmp_path):
     from jem import checkpoint
 
     derived = JCMDerived.zeros(
-        _fake_echam_diagnostics(), GRID_SHAPE,
+        _fake_echam_diagnostics(), GRID_SHAPE, _echam_style_physics(),
         total_heat_flux=jnp.full(GRID_SHAPE, 3.0),
         evaporation=jnp.full(GRID_SHAPE, 0.001),
     )
@@ -667,7 +799,8 @@ def test_missing_surface_exchange_raises_jcms_own_key_error():
     fails with jax-gcm's own pointed error, not a bare ``KeyError``.
     """
     with pytest.raises(KeyError, match="surface_exchange"):
-        exchange_fields.from_diagnostics({"radiation": None, "clouds": None})
+        exchange_fields.from_diagnostics(
+            {"radiation": None, "clouds": None}, _speedy_physics_with_wind())
 
 
 def test_collapse_save_axis_handles_a_zero_sized_diagnostic():
@@ -707,7 +840,7 @@ def test_collapse_save_axis_handles_a_zero_sized_diagnostic():
 
 
 @pytest.mark.slow
-def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
+def test_speedy_new_reader_agrees_with_the_pre_754_reader(component, stepped):
     """The #754 collapse must not change what a SPEEDY run exchanges.
 
     Runs one real coupled step (the ``stepped`` fixture) and reads the SAME
@@ -733,7 +866,7 @@ def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
     diagnostics = carry1["derived"].physics
 
     old_exchange = _pre754_exchange_reader.speedy(diagnostics)
-    new_exchange = exchange_fields.from_diagnostics(diagnostics)
+    new_exchange = exchange_fields.from_diagnostics(diagnostics, component.model.physics)
 
     for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
         np.testing.assert_allclose(
@@ -805,7 +938,7 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
 
     # jax-esm#129: `from_diagnostics` now succeeds for ECHAM -- it no longer
     # raises for lack of a wind vector -- and returns u0/v0 as None.
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, _echam_style_physics())
     assert exchange.u0 is None
     assert exchange.v0 is None
     np.testing.assert_allclose(exchange.total_heat_flux, -expected_net_heat_flux)

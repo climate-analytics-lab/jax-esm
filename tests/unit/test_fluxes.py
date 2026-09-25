@@ -435,3 +435,68 @@ def test_veros_exchange_call_also_rejects_a_windless_atmosphere():
 
     with pytest.raises(ValueError, match="jax-esm#132"):
         VerosExchange()(components, TIME)
+
+
+def test_veros_exchange_validate_rejects_a_hybrid_composition_without_speedy_surface_flux():
+    """The jax-esm#129-review defect: a hybrid composition with a SPEEDY-
+    legacy term but no `SpeedySurfaceFlux` must be refused here too, not only
+    for ECHAM.
+
+    Built through the REAL, fixed pipeline rather than a `u0=None` set by
+    hand: a genuine `ComposablePhysics([SpeedyHumidity()])` (no
+    `SpeedySurfaceFlux`) and a diagnostics dict shaped exactly like a real
+    SPEEDY step's -- carrying the `_surface_flux` key every `SpeedyTermBase`
+    term writes, zeroed here because nothing in this composition ever
+    computed a real wind -- fed through `exchange_fields.from_diagnostics`.
+    The point is that `has_wind_vector` must say False for this composition
+    even though its diagnostics dict has the very key a pre-review predicate
+    mistook for "has a wind vector" (23fba9e's commit message records the
+    gap; fixed here), and that `VerosExchange.validate` refuses it exactly
+    as it already does for ECHAM.
+    """
+    from types import SimpleNamespace
+
+    from jcm.physics.composable_physics import ComposablePhysics
+    from jcm.physics.speedy.speedy_terms import SpeedyHumidity
+    from jcm.physics.surface.surface_exchange import (
+        SurfaceExchange as JcmSurfaceExchange,
+    )
+
+    from jem.components.jcm import exchange_fields
+
+    shape = (4,)
+    field = lambda value: jnp.full(shape, value)  # noqa: E731
+    # A minimal SPEEDY-shaped diagnostics dict: `_surface_flux` (zeroed
+    # `u0`/`v0` -- exactly what a `SpeedyTermBase` term leaves behind with no
+    # `SpeedySurfaceFlux` composed) plus a real jax-gcm `SurfaceExchange`
+    # contract struct (published, in a real hybrid model, by some other
+    # composed term -- see `exchange_fields`'s module docstring).
+    diagnostics = {
+        "_surface_flux": SimpleNamespace(u0=field(0.0), v0=field(0.0)),
+        "surface_exchange": JcmSurfaceExchange(
+            net_heat_flux=field(10.0),
+            sensible_heat_flux=field(0.0),
+            latent_heat_flux=field(0.0),
+            evaporation=field(0.002),
+            precipitation=field(0.008),
+            stress_u=field(0.0),
+            stress_v=field(0.0),
+            wind_speed=field(0.0),
+            air_density=field(1.2),
+            air_potential_temperature=field(290.0),
+        ),
+    }
+    physics = ComposablePhysics([SpeedyHumidity()], checkpoint_terms=False)
+    assert not exchange_fields.has_wind_vector(physics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, physics)
+    assert exchange.u0 is None
+    assert exchange.v0 is None
+
+    components = _fake_components()
+    atm_derived = components["atm"]["derived"].replace(
+        u0=exchange.u0, v0=exchange.v0, physics={"speedy_humidity": True},
+    )
+    components["atm"] = {**components["atm"], "derived": atm_derived}
+
+    with pytest.raises(ValueError, match="jax-esm#132"):
+        VerosExchange().validate(components)
