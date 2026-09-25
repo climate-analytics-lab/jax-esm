@@ -59,6 +59,40 @@ def test_vendored_matches_jcm_date_over_400_years():
     np.testing.assert_array_equal(mine_leap, their_leap)
 
 
+def _fliegel_van_flandern_python(days_since_epoch: int) -> tuple[int, int, int]:
+    """Run the same published algorithm in unbounded Python ints."""
+    l = days_since_epoch + 2440588 + 68569  # noqa: E741
+    n = (4 * l) // 146097
+    l = l - (146097 * n + 3) // 4  # noqa: E741
+    i = (4000 * (l + 1)) // 1461001
+    l = l - (1461 * i) // 4 + 31  # noqa: E741
+    j = (80 * l) // 2447
+    day = l - (2447 * j) // 80
+    l = j // 11  # noqa: E741
+    return 100 * (n - 49) + i + l, j + 2 - 12 * l, day
+
+
+def test_ymd_is_exact_across_the_whole_int32_day_range():
+    """Stay exact over every day count an int32 holds.
+
+    ``4 * l`` would overflow int32 past about 5.3e8 days; the 400-year
+    reduction keeps the result exact up to ``2**31 - 1`` days and down to
+    ``-2**31``, against the same algorithm in unbounded Python ints.
+    """
+    rng = np.random.default_rng(0)
+    edges = [0, -1, 536_000_000, 536_870_911, 536_870_912, 1_000_000_000,
+             2**31 - 146097, 2**31 - 2, 2**31 - 1, -(2**31), -(2**31) + 146097]
+    days = np.concatenate([
+        np.array(edges, dtype=np.int64),
+        rng.integers(-(2**31), 2**31 - 1, size=20_000, dtype=np.int64),
+    ])
+    year, month, day = gregorian_ymd_from_days(jnp.asarray(days, dtype=jnp.int32))
+    expected = np.array([_fliegel_van_flandern_python(int(d)) for d in days])
+    np.testing.assert_array_equal(np.asarray(year), expected[:, 0])
+    np.testing.assert_array_equal(np.asarray(month), expected[:, 1])
+    np.testing.assert_array_equal(np.asarray(day), expected[:, 2])
+
+
 def test_vendored_matches_pandas_ymd_over_400_years_century_rules_included():
     """The vendored (year, month, day) must match pandas's, including century rules."""
     dates = pd.date_range(_START, periods=_DAYS, freq="D")

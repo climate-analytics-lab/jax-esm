@@ -9,12 +9,14 @@ from ``jcm.date`` -- the same reason ``jem.base.component.days_per_year``
 already keeps its own copy of the days-per-year table rather than importing
 jax-gcm's.
 
-:func:`gregorian_ymd_from_days` and :func:`is_leap_year` are byte-for-byte
-the algorithm in ``jcm/date.py``'s ``gregorian_ymd_from_days`` /
-``is_leap_year`` (Fliegel, H. F., & Van Flandern, T. C. (1968); see also
+:func:`gregorian_ymd_from_days` and :func:`is_leap_year` are the algorithm
+in ``jcm/date.py``'s ``gregorian_ymd_from_days`` / ``is_leap_year``
+(Fliegel, H. F., & Van Flandern, T. C. (1968); see also
 https://aa.usno.navy.mil/faq/JD_formula) -- copied rather than reimplemented
 so that the two packages can never silently disagree about what a given day
-number means. ``gregorian_day_of_year`` is the same computation as jcm's
+number means. The one addition is a reduction by whole 400-year cycles before
+the algorithm runs, which keeps its int32 intermediates in range for every
+day count an int32 can hold (see :func:`gregorian_ymd_from_days`). ``gregorian_day_of_year`` is the same computation as jcm's
 private ``_gregorian_day_of_year``, made public here because JEM's own
 ``year_fraction`` needs it outside this module.
 ``tests/unit/test_calendar.py`` cross-checks all three against
@@ -85,6 +87,10 @@ _N_LIMBS = 3
 # `jcm.date._UNIX_EPOCH_JDN`.
 _UNIX_EPOCH_JDN = 2440588
 
+# Days in one 400-year proleptic-Gregorian cycle (97 leap years): the
+# calendar repeats exactly after this many days.
+_DAYS_PER_400_YEARS = 146097
+
 
 def gregorian_ymd_from_days(days_since_epoch: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Convert days-since-1970 to a proper Gregorian (year, month, day).
@@ -95,11 +101,24 @@ def gregorian_ymd_from_days(days_since_epoch: jnp.ndarray) -> tuple[jnp.ndarray,
         - Fliegel, H. F., & Van Flandern, T. C. (1968).
         - https://aa.usno.navy.mil/faq/JD_formula
 
-    Vendored verbatim (variable names included) from ``jcm.date`` -- see the
-    module docstring for why this package keeps its own copy rather than
-    importing jax-gcm's. Variable names match the published algorithm and are
-    intentionally not renamed (``# noqa: E741`` for the lowercase ``l``).
+    The algorithm body is vendored verbatim (variable names included) from
+    ``jcm.date`` -- see the module docstring for why this package keeps its
+    own copy rather than importing jax-gcm's. Variable names match the
+    published algorithm and are intentionally not renamed (``# noqa: E741``
+    for the lowercase ``l``).
+
+    Its first step forms ``4 * l`` with ``l`` about the Julian Day Number,
+    which overflows int32 once ``days_since_epoch`` passes about 5.3e8 (some
+    1.46 million years), well inside the int32 day-count range
+    :func:`max_safe_record` allows. So the input is first reduced by whole
+    400-year Gregorian cycles, each exactly ``_DAYS_PER_400_YEARS`` days: the
+    algorithm then runs on a day number in ``[0, 146097)``, where every
+    intermediate is small, and the cycles come back as ``400 *`` whole years.
+    The reduction is exact (the calendar repeats every 400 years to the day)
+    and uses floor division, so it holds for dates before 1970 as well.
     """
+    cycles = days_since_epoch // _DAYS_PER_400_YEARS
+    days_since_epoch = days_since_epoch - cycles * _DAYS_PER_400_YEARS
     jdn = days_since_epoch + _UNIX_EPOCH_JDN
     l = jdn + 68569                              # noqa: E741
     n = (4 * l) // 146097
@@ -110,7 +129,7 @@ def gregorian_ymd_from_days(days_since_epoch: jnp.ndarray) -> tuple[jnp.ndarray,
     day = l - (2447 * j) // 80
     l = j // 11                                  # noqa: E741
     month = j + 2 - 12 * l
-    year = 100 * (n - 49) + i + l
+    year = 100 * (n - 49) + i + l + 400 * cycles
     return year, month, day
 
 
