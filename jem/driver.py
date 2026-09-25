@@ -560,6 +560,14 @@ def run_chunked(
     carry, provenance, resumed = _starting_carry(
         coupler, initial_carry, checkpoint_dir
     )
+    # Checked as soon as `first_step` is known (a checkpoint load, not a
+    # compile) and so still "up front": a run that would carry a step counter
+    # -- the coupled one, a sub-stepped element's, a nested coupler's own, or
+    # the day count `gregorian` calendar math derives from one -- past what
+    # int32 can hold is refused here rather than left to silently wrap deep
+    # inside a traced step (2026-09 migration review, round 2, finding B1's
+    # remaining half; see `_max_safe_coupled_steps`'s own docstring).
+    _check_step_counters_fit_int32(coupler, int(carry.step), total_steps)
     # One line, always, whatever the run does next: a modeller reading a log
     # has to be able to see at a glance whether the state being integrated is
     # a restart or a cold start, and which. It is the first thing the run
@@ -861,6 +869,173 @@ def _whole_steps(
             "positive number of them."
         )
     return int(rounded)
+
+
+#: The largest magnitude a JAX int32 value can hold. Every counter
+#: `_check_step_counters_fit_int32` bounds a run against is one: the coupled
+#: step itself, a sub-stepped element's or a nested coupler's own counter,
+#: and (via `jem.base.calendar.max_safe_record`) the day count `"gregorian"`
+#: calendar math derives from one.
+_STEP_INT32_MAX = 2**31 - 1
+
+
+def _max_element_rate(coupler: Any) -> int:
+    """Return the fastest rate, in records per ``coupler``'s own coupled step,
+    any element anywhere in it runs at.
+
+    "Anywhere in it" includes a nested coupler's own step counter (which
+    advances ``ratio`` times for every one of the *outer* coupler's coupled
+    steps -- :meth:`~jem.base.coupler.Coupler.step`'s own docstring: "the
+    inner clock comes from the inner carry's own step counter... continuous
+    across outer steps") and, recursively, that nested coupler's own
+    elements, whose own combined rate (multiplicity times whatever nesting is
+    further inside) is scaled by ``ratio`` again to express it in terms of
+    the *outermost* coupler's steps. A plain (non-nested) element of
+    multiplicity ``m`` is rate ``m`` on its own
+    (:meth:`~jem.base.coupler.Coupler.coupling_time_at_substep`'s ``substep =
+    step * m + call``, which is what overflows before the coupled step
+    counter itself does whenever ``m > 1``).
+
+    This is exactly what bounds every RAW step/substep counter in the
+    coupled hierarchy against int32, independent of calendar: a component
+    run ``n`` times ``r`` levels of nesting deep sees a counter that grows
+    ``n`` times faster than the outermost coupled step, so ``n`` times fewer
+    outer steps are safe.
+
+    Parameters
+    ----------
+    coupler : jem.base.coupler.Coupler
+        The (possibly nested) coupled model. Typed ``Any`` here rather than
+        ``Coupler`` only because the recursive call reaches a nested
+        coupler through ``coupler.components``, whose values are typed as
+        the ``Component`` protocol -- narrowed back with ``getattr``
+        (``outer_ratio``) and ``hasattr`` (``multiplicities``) rather than
+        an ``isinstance`` check, so a nested coupled model does not have to
+        import :class:`~jem.base.coupler.Coupler` to be recognised as one.
+
+    Returns
+    -------
+    int
+        At least 1 (a coupler with no multiplicity and no nested coupler
+        inside it never counts faster than its own coupled step).
+
+    """
+    rate = 1
+    for name, multiplicity in coupler.multiplicities().items():
+        # `multiplicities()` counts every name in the workflow, exchangers
+        # included; only a registered component can be a nested coupler, and
+        # `coupler.components` holds only those, so an exchanger's name (or
+        # any component that is not itself a coupler) is simply not found and
+        # contributes only its own multiplicity below.
+        component = coupler.components.get(name)
+        inner_ratio = getattr(component, "outer_ratio", None)
+        if inner_ratio and hasattr(component, "multiplicities"):
+            rate = max(rate, multiplicity * inner_ratio * _max_element_rate(component))
+        else:
+            rate = max(rate, multiplicity)
+    return rate
+
+
+def _max_safe_coupled_steps(coupler: "Coupler") -> int:
+    """Return the largest coupled-step index ``coupler``'s own clock can hold exactly.
+
+    The minimum of two, genuinely different, int32 limits:
+
+    - **A raw counter limit**, from :func:`_max_element_rate`: the fastest
+      any step/substep counter in the coupled hierarchy counts, relative to
+      ``coupler``'s own coupled step, bounds how many of *those* the counter
+      itself (an ``int32``, however it is eventually used) can hold before
+      it, not the outer coupled step, is what overflows first.
+    - **The exact int32 day-count limit** (:func:`jem.base.calendar
+      .max_safe_record`) of ``coupler``'s own clock, on ``"gregorian"``
+      only -- the calendar whose ``CouplingTime.year_fraction`` and
+      ``jem.accumulate._gregorian_month_rule`` derive a Gregorian date from
+      the coupled step counter via ``gregorian_instant``, in scan, on every
+      step, with no per-call bound to check (``step`` is traced). This is a
+      property of *elapsed simulated time*, not of how many counters divide
+      it up, so it is checked once, in terms of ``coupler``'s own coupled
+      step and coupling timestep, and not separately for every sub-stepped
+      or nested element's own (finer, but proportionally more frequent)
+      clock: a component sub-stepped ``n`` times covers the same elapsed
+      time in ``n`` times more, ``n`` times shorter records, so its own day
+      count limit, expressed in *its own* records, is exactly ``n`` times
+      the coupled-step limit -- the same number of *coupled* steps either
+      way. ``"365_day"`` has no such risk: its own ``year_fraction`` branch
+      reduces the step counter modulo a whole year's worth of steps before
+      ever multiplying it, bounded by one year's own length in seconds
+      (always small) regardless of run length.
+
+    Parameters
+    ----------
+    coupler : jem.base.coupler.Coupler
+        The coupled model a run's ``first_step + total_steps`` is checked
+        against.
+
+    Returns
+    -------
+    int
+        The largest coupled-step index safe to reach.
+
+    """
+    from jem.base.calendar import max_safe_record
+
+    rate = _max_element_rate(coupler)
+    counter_limit = (_STEP_INT32_MAX - (rate - 1)) // rate
+    if coupler.calendar != "gregorian":
+        return counter_limit
+    start = coupler.start_date
+    day_limit = max_safe_record(
+        int(round(coupler.dt_seconds)),
+        start_seconds=int(start.delta.seconds),
+        start_days=int(start.delta.days),
+    )
+    return min(counter_limit, day_limit)
+
+
+def _check_step_counters_fit_int32(
+    coupler: "Coupler", first_step: int, total_steps: int
+) -> None:
+    """Refuse a run whose ``first_step + total_steps`` would overflow a clock's own counter.
+
+    Checked once, up front (as soon as ``first_step`` is known from the
+    starting carry, before any trajectory is compiled), against
+    :func:`_max_safe_coupled_steps` -- rather than discovered from a wrong
+    date deep inside a traced step, which is what a run past this bound used
+    to do silently (2026-09 migration review, round 2, finding B1): a daily
+    ``year_fraction`` of a 73453 s coupling from 2000-01-01 was found wrong
+    at step 58471 (about 25 years in) with no error at all.
+
+    Parameters
+    ----------
+    coupler : jem.base.coupler.Coupler
+        The coupled model being run.
+    first_step : int
+        The coupled step the run starts at (``int(carry.step)``).
+    total_steps : int
+        How many coupled steps this call will integrate.
+
+    Raises
+    ------
+    ValueError
+        If ``first_step + total_steps - 1`` -- the last coupled step this
+        call would reach -- exceeds :func:`_max_safe_coupled_steps`.
+
+    """
+    limit = _max_safe_coupled_steps(coupler)
+    last_step = first_step + total_steps - 1
+    if last_step > limit:
+        raise ValueError(
+            f"This run would reach coupled step {last_step} (starting at "
+            f"{first_step}, integrating {total_steps} more), past "
+            f"{limit}, the largest this coupler's own clock can hold "
+            "exactly: either a step/sub-step counter somewhere in the "
+            "coupled hierarchy, or (on \"gregorian\") the exact int32 "
+            "day-count limit of its own calendar arithmetic, would silently "
+            "wrap rather than stay correct. Refused up front rather than "
+            "left to go wrong partway through -- see "
+            "jem.driver._max_safe_coupled_steps for exactly what is being "
+            "checked."
+        )
 
 
 def _checkpoint_steps(

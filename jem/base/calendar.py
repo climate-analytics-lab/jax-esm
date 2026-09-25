@@ -24,33 +24,62 @@ included, so a divergence between the two copies is a test failure rather
 than a silent drift.
 
 :func:`gregorian_instant` is the one piece of arithmetic new to this module:
-an int32-safe "reduce-before-multiply" decomposition (see its own docstring
-for exactly which one, and :func:`max_safe_record` for the exact range it is
-exact over) that turns a record counter that can run into the billions over a
-long or fine-grained run into the (days, seconds)-since-epoch of one instant
-within that record, without ever forming a product that could overflow
-``int32``. Three callers use it -- :func:`jem.accumulate._gregorian_month_rule`
-and :func:`jem.accumulate._midpoint_month_rule` at the record's **midpoint**
-(the bin a record counts in, matching the midpoint labelling convention
+an int32-safe **limb (schoolbook) multiply-then-divide** (see its own
+docstring for the design, and :func:`max_safe_record` for the one limit that
+survives it -- the *inherent* range of an int32 day count, not an artifact of
+the algorithm) that turns a record counter that can run up to ``2**31 - 1``
+into the (days, seconds)-since-epoch of one instant within that record,
+without ever forming an intermediate that could overflow ``int32``. Three
+callers use it -- :func:`jem.accumulate._gregorian_month_rule` and
+:func:`jem.accumulate._midpoint_month_rule` at the record's **midpoint** (the
+bin a record counts in, matching the midpoint labelling convention
 :class:`jem.base.component.TimeAxis` writes -- see that module's decision
 record) and :class:`~jem.base.component.CouplingTime` at the record's
 **start** (``year_fraction`` is defined at the start of a step, matching its
-pre-existing convention on the ``365_day``/``360_day`` calendars).
+pre-existing convention on the ``365_day`` calendar).
+
+**2026-09 review, round 2 (finding B1).** The version of this function that
+shipped after round 1's fix (see git history / the CHANGELOG) still had a
+*bound*, not a universal exactness proof: it multiplied by reducing the
+record counter modulo a single static "block" chosen from ``record_seconds``
+alone, which was int32-safe only up to a computed ``max_safe_record`` that
+could be as small as about 68 simulated years (e.g. a 73453 s coupling step)
+-- smaller than several real coupled-run lengths -- and nothing outside
+:func:`jem.accumulate._midpoint_month_rule` ever checked it, so a run past it
+silently wrapped to a wrong instant with no error at all (confirmed: a daily
+``year_fraction`` at step 58471 of a 73453 s coupling from 2000-01-01 came
+back ``0.9969`` against an exact ``0.0988``, and a 400000-step Gregorian
+``monthly_mean`` at the same step length mis-binned three records). The limb
+decomposition below removes the bound rather than raising it: it is exact for
+*every* ``record`` up to ``2**31 - 1`` and *every* whole-second
+``record_seconds``, up to the one limit no algorithm can move -- an ``int32``
+day count's own representable range (:func:`max_safe_record`, now exactly
+that limit, including the ``start_days`` offset it did not reserve before).
 """
 
 from __future__ import annotations
 
-import math
-
 import jax.numpy as jnp
+import numpy as np
 
 SECONDS_PER_DAY = 86_400
 
-# The largest magnitude a JAX int32 value can hold. `gregorian_instant` and
-# `max_safe_record` size their block decomposition against this, not against
-# `jnp.iinfo(jnp.int32).max`, so that the bound is visible as a plain number
-# in both docstrings without importing NumPy just for it.
+# The largest magnitude a JAX int32 value can hold. `max_safe_record` sizes
+# the one genuine limit -- an int32 day count's own range -- against this,
+# not against `jnp.iinfo(jnp.int32).max`, so the bound is visible as a plain
+# number in its own docstring without importing NumPy just for it.
 _INT32_MAX = 2**31 - 1
+
+# `gregorian_instant`'s limb width and count: `record` is `int32`, so it fits
+# in 31 bits, and 3 limbs of `_LIMB_BITS` bits cover any width up to `3 *
+# _LIMB_BITS` -- 42 for 14, comfortably over 31. `_LIMB_BITS` itself is
+# chosen so that `SECONDS_PER_DAY * _LIMB_BASE` (the largest intermediate the
+# per-limb combine step forms -- see `gregorian_instant`'s docstring) stays
+# well under `2**31`: `86400 * 2**14 == 1415577600 < 2**31 - 1`, whereas
+# `86400 * 2**15` would not.
+_LIMB_BITS = 14
+_LIMB_BASE = 1 << _LIMB_BITS
+_N_LIMBS = 3
 
 # Julian Day Number of 1970-01-01 -- the Unix epoch. Vendored verbatim from
 # `jcm.date._UNIX_EPOCH_JDN`.
@@ -114,6 +143,60 @@ def gregorian_day_of_year(year: jnp.ndarray, month: jnp.ndarray, day: jnp.ndarra
     return cum_no_leap[month - 1] + leap_offset + (day - 1)
 
 
+def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the per-digit ``(days, seconds)`` lookup tables ``gregorian_instant`` reduces through.
+
+    Entry ``d`` of each table is ``divmod(d * record_seconds, SECONDS_PER_DAY)``
+    for ``d`` in ``[0, _LIMB_BASE)`` -- computed here, in plain Python/NumPy
+    ``int64`` (unbounded for any ``record_seconds`` this codebase builds, and
+    never traced), so it is exact regardless of how large ``record_seconds``
+    is; only the *stored* dtype is ``int32``, and only because every value
+    that ends up in it is checked to fit one first.
+
+    This is the one place a per-digit product (``d * record_seconds``) is
+    ever formed: :func:`gregorian_instant` looks a digit's contribution up
+    here instead of multiplying it live, which is what lets the traced
+    computation stay in ``int32`` however large ``record_seconds`` is.
+
+    Parameters
+    ----------
+    record_seconds : int
+        Length of one record, in seconds. Must be positive.
+
+    Returns
+    -------
+    days, seconds : numpy.ndarray
+        ``int32`` arrays of length ``_LIMB_BASE``.
+
+    Raises
+    ------
+    ValueError
+        If ``record_seconds`` is not positive, or is so large that even one
+        digit's own contribution (``(_LIMB_BASE - 1) * record_seconds``, in
+        days) would not fit ``int32`` -- true only for a ``record_seconds``
+        far beyond anything this codebase constructs (order ``10**13`` s),
+        included only so a pathological input fails here with a clear
+        message rather than downstream with a wrapped one.
+
+    """
+    record_seconds = int(record_seconds)
+    if record_seconds <= 0:
+        raise ValueError(
+            "record_seconds must be a positive whole number of seconds; "
+            f"got {record_seconds!r}."
+        )
+    digits = np.arange(_LIMB_BASE, dtype=np.int64)
+    products = digits * np.int64(record_seconds)  # exact int64; see docstring
+    days, seconds = np.divmod(products, SECONDS_PER_DAY)
+    if int(days.max()) > _INT32_MAX:
+        raise ValueError(
+            f"record_seconds={record_seconds!r} is too large: even a single "
+            "digit's own contribution to gregorian_instant's limb reduction "
+            "would not fit an int32 day count."
+        )
+    return days.astype(np.int32), seconds.astype(np.int32)
+
+
 def gregorian_instant(
     record: jnp.ndarray,
     record_seconds: int,
@@ -129,80 +212,100 @@ def gregorian_instant(
     epoch); the instant returned is ``offset_seconds`` into record ``record``,
     e.g. ``0`` for the record's start or ``record_seconds // 2`` for its
     midpoint (see the module docstring for why the two callers use different
-    offsets).
+    offsets). ``record`` and every other argument are assumed non-negative
+    except ``start_days``, which may be negative (a date before the epoch);
+    nothing here supports a negative ``record``, ``record_seconds``,
+    ``offset_seconds`` or ``start_seconds``, which no caller in this codebase
+    ever constructs.
 
-    The naive way to find it -- multiply the record counter by
-    ``record_seconds`` and add the offsets -- costs one product that grows
-    with the run: JAX indices are int32 by default, and a whole-run count of
-    seconds passes 2**31 after a few decades of daily coupling (sooner for
-    finer coupling). The fix, in the spirit of jax-gcm's own v3 clock
-    (``jcm.date``) but a genuinely different decomposition from the one this
-    function shipped with through 2026-09 (see **History** below): reduce the
-    **traced** record counter modulo a small, **static** ``block_size`` --
-    chosen, from ``record_seconds`` alone, to be the largest block whose own
-    total length in seconds still fits an ``int32`` -- *before* multiplying,
-    and let the (per-block) day/second decomposition of that block's own
-    length, plus a day count that only grows with elapsed *days* rather than
-    with the record count, carry the rest. Concretely: ``block_size =
-    (2**31 - 1 - |offset_seconds| - |start_seconds|) // record_seconds``
-    (at least 1), so ``block_size * record_seconds`` -- an exact, unbounded
-    Python integer, since ``record_seconds`` is static -- never has to be
-    multiplied by anything traced; ``record = block_index * block_size +
-    within_block`` puts ``within_block * record_seconds`` (bounded by
-    ``block_size * record_seconds``, int32-safe by construction) on one side
-    and ``block_index`` -- which grows only as fast as ``record /
-    block_size``, i.e. only as fast as *elapsed blocks*, not as fast as
-    ``record`` itself -- on the other, multiplied only by the block's own
-    (necessarily small, ``< SECONDS_PER_DAY``) leftover-seconds and
-    (necessarily small relative to ``2**31``) day count.
+    **The naive way -- multiply the record counter by ``record_seconds`` and
+    add the offsets -- costs one product that grows with the run**: JAX
+    indices are ``int32`` by default, and a whole-run count of seconds passes
+    ``2**31`` after 68 years of simulated time *regardless of the coupling
+    step* (not "a few decades of daily coupling" -- a finer step reaches the
+    same elapsed-seconds total in the same elapsed time, just over more
+    records; the count that overflows is a count of *seconds*, which cares
+    about elapsed time, not step size).
 
-    **Representable range.** This is exact up to :func:`max_safe_record`
-    (see that function for the exact, tested bound and its derivation) --
-    which reaches the *full* (or, for a ``record_seconds`` that is itself an
-    exact multiple of a day, within about a day's worth of) ``int32`` record
-    range for any ``record_seconds`` that divides or is divided by a day
-    exactly, since then the block above has no leftover seconds at all and
-    the only limit left is the day count itself (representable to about 5.87
-    million years). For a ``record_seconds`` that shares little structure
-    with a day -- a calendar month, say -- the safe range is smaller, but
-    still enormously larger than the ``D <= 24855`` (about 68 years' worth of
-    *records*, not of run length) this function's previous decomposition
-    silently broke beyond: a "1 month" (2629746 s) Gregorian coupling step is
-    now exact for 82415 records -- nearly 6,900 years of monthly output --
-    rather than breaking after 817 of them (2026-09 migration review, item 2
-    -- see :func:`max_safe_record`'s own docstring for the derivation, and
-    ``tests/unit/test_calendar.py``'s property test for the cross-check
-    against Python's exact arithmetic that caught the previous version being
-    wrong).
+    **The fix is a limb (schoolbook) multiply-then-divide**, exact for any
+    ``record`` an ``int32`` can hold and any whole-second ``record_seconds``,
+    with only ``int32`` arithmetic throughout. Write ``record`` in base
+    ``_LIMB_BASE`` (``2**14``, chosen so that ``SECONDS_PER_DAY *
+    _LIMB_BASE`` -- the largest intermediate this ever forms -- stays under
+    ``2**31``): ``record = d[2]*_LIMB_BASE**2 + d[1]*_LIMB_BASE + d[0]``,
+    3 limbs comfortably covering any ``int32`` (``3 * 14 == 42 >= 31``).
+    Processing the limbs from *most* significant to *least* (Horner's rule,
+    run on the ``(days, seconds)`` pair rather than on ``record`` itself),
+    maintain the exact ``(days, seconds)`` of ``acc * record_seconds`` for
+    the *partial* record ``acc`` built from the limbs seen so far
+    (``_digit_tables`` gives this directly for a single limb: ``acc = d``);
+    folding in the next limb ``d`` replaces ``acc`` with ``acc * _LIMB_BASE +
+    d``, so its seconds and days update as
 
-    **History.** The version of this function shipped before the above fix
-    reduced ``record`` modulo the *minimal* period that lines up with whole
-    days (``period_records = SECONDS_PER_DAY // gcd(record_seconds,
-    SECONDS_PER_DAY)``), which is a genuinely different quantity from
-    ``block_size`` above and can be far larger: for the "1 month" step,
-    ``gcd(2629746, 86400) == 54``, giving a period of 1600 records whose
-    *own* total length (2145872736 s) already exceeds ``2**31`` -- so a
-    record as small as 817 already overflowed. That decomposition's
-    docstring claimed it was int32-safe "for any coupling timestep up to
-    tens of years", which was never true (the bound is on
-    ``record_seconds / gcd(record_seconds, SECONDS_PER_DAY)``, not on
-    ``record_seconds`` itself) and is corrected here rather than repeated.
+    .. code-block:: text
+
+        combined     = seconds * _LIMB_BASE + table_seconds[d]
+        extra, seconds = divmod(combined, SECONDS_PER_DAY)
+        days         = days * _LIMB_BASE + table_days[d] + extra
+
+    -- exactly (`combined` reconstructs `(acc*_LIMB_BASE+d)*record_seconds`'s
+    own seconds-of-day component before re-reducing it, and the days update
+    absorbs the carry; see the proof below, and
+    ``tests/unit/test_calendar.py``'s property tests -- densely sampled
+    near ``2**31 - 1`` and near every tested ``record_seconds``'s own
+    bound, not merely a handful of spot values -- for the empirical
+    confirmation of it).
+
+    **Why every intermediate stays int32-safe.** ``combined`` is bounded by
+    ``SECONDS_PER_DAY * _LIMB_BASE + SECONDS_PER_DAY`` regardless of
+    ``record`` or ``record_seconds`` (``seconds < SECONDS_PER_DAY`` and
+    ``table_seconds[d] < SECONDS_PER_DAY`` are both invariants), which is
+    what ``_LIMB_BASE`` was chosen to keep under ``2**31``. The one quantity
+    that is *not* bounded independently of ``record`` -- ``days`` -- is
+    bounded by construction whenever the *final* answer is: at every step,
+    ``acc`` (this step's partial record, built from the limbs folded in so
+    far) satisfies ``acc <= record`` and ``acc * _LIMB_BASE <= acc'`` for the
+    *next* partial record ``acc'``, so ``days * _LIMB_BASE <= floor(acc *
+    _LIMB_BASE * record_seconds / SECONDS_PER_DAY) <= floor(acc' *
+    record_seconds / SECONDS_PER_DAY)`` -- i.e. the multiply this function
+    performs on ``days`` at each step is bounded by the *next* step's own
+    (bounded, by the same induction) result, and so transitively by the
+    final ``floor(record * record_seconds / SECONDS_PER_DAY)`` -- which is
+    exactly :func:`max_safe_record`'s condition. This is a proof, not an
+    empirical bound: there is no ``record``/``record_seconds`` pair for
+    which this function is inexact below that limit, only the limit itself
+    (the inherent range of an int32 *day count*, about 5.87 million years --
+    see :func:`max_safe_record`), which no algorithm can move.
+
+    **History.** Two earlier decompositions shipped and were superseded:
+    reducing ``record`` modulo ``SECONDS_PER_DAY // gcd(record_seconds,
+    SECONDS_PER_DAY)`` (int32-safe only up to ``D <= 24855``, i.e. as little
+    as 817 records for a "1 month" 2629746 s step -- 2026-09 review, round 1,
+    finding 2); then reducing modulo a single static "block" sized from
+    ``record_seconds`` alone (int32-safe up to a computed
+    ``max_safe_record``, but that bound could itself be as small as about 68
+    simulated years -- e.g. a 73453 s coupling step -- and nothing but
+    :func:`jem.accumulate._midpoint_month_rule` ever checked it, so a longer
+    run silently wrapped with no error; 2026-09 review, round 2, finding B1).
+    Both are corrected here rather than repeated, and neither is a
+    description of what this function does any more.
 
     Parameters
     ----------
     record : jax.Array
-        int32 (or castable) record counter, traced.
+        int32 (or castable) record counter, traced. Non-negative.
     record_seconds : int
         Length of one record, in seconds. Static (a Python int, not traced).
         Must be positive.
     start_days, start_seconds : int
         Days and seconds since the Unix epoch of record 0's start. Static.
+        ``start_days`` may be negative; ``start_seconds`` must not be.
     offset_seconds : int, optional
         Seconds into record ``record`` at which to evaluate the instant.
         Static; both callers pass ``0`` or ``record_seconds // 2``, but
         nothing here requires ``offset_seconds <= record_seconds`` --
         :func:`jem.accumulate._midpoint_month_rule` also adds a pattern
-        phase that is typically much larger than one record.
+        phase that is typically much larger than one record. Non-negative.
 
     Returns
     -------
@@ -210,234 +313,134 @@ def gregorian_instant(
         int32 arrays: whole days since the Unix epoch, and the seconds within
         that day, of the requested instant, exact for any ``record`` up to
         ``max_safe_record(record_seconds, offset_seconds=...,
-        start_seconds=...)`` (:func:`max_safe_record`).
+        start_seconds=..., start_days=...)`` (:func:`max_safe_record`).
 
     Raises
     ------
     ValueError
-        If ``record_seconds`` is not positive, or if ``offset_seconds`` and
-        ``start_seconds`` alone (before ``record`` even enters) already leave
-        no int32-safe room for a single record -- see
-        :func:`_gregorian_instant_block`.
+        If ``record_seconds`` is not positive -- see :func:`_digit_tables`.
 
     """
-    block_size, block_days, block_extra_seconds = _gregorian_instant_block(
-        record_seconds, offset_seconds=offset_seconds, start_seconds=start_seconds
-    )
-    record = jnp.asarray(record, dtype=jnp.int32)
-    block_index, within_block = jnp.divmod(record, block_size)
-    # `within_block * record_seconds` is bounded by `block_size *
-    # record_seconds`, int32-safe by `_gregorian_instant_block`'s own
-    # construction of `block_size`; `block_index * block_extra_seconds` is
-    # what eventually overflows for a large enough `record` (bounded in
-    # `max_safe_record`, not here) -- `block_extra_seconds < SECONDS_PER_DAY`
-    # keeps it small for as long as `block_index` itself stays small.
-    seconds_within_block = (
-        within_block * record_seconds
-        + block_index * block_extra_seconds
-        + offset_seconds + start_seconds
-    )
-    extra_days, seconds = jnp.divmod(seconds_within_block, SECONDS_PER_DAY)
-    # `block_index * block_days`: a plain int32 multiply of two quantities
-    # that both grow only with elapsed *days* (not with the record count
-    # directly), which is what stays representable for a run of any
-    # realistic length -- see `max_safe_record`.
-    days = start_days + block_index * block_days + extra_days
+    offset_seconds = int(offset_seconds)
+    start_seconds = int(start_seconds)
+    table_days, table_seconds = _digit_tables(record_seconds)
+    table_days_j = jnp.asarray(table_days)
+    table_seconds_j = jnp.asarray(table_seconds)
+
+    # Base-`_LIMB_BASE` digits of `record`, least significant first, then
+    # reversed so Horner's rule below folds in the MOST significant limb
+    # first -- `digits[0]` after the reversal is `record`'s top limb.
+    remaining = jnp.asarray(record, dtype=jnp.int32)
+    digits = []
+    for _ in range(_N_LIMBS - 1):
+        remaining, digit = jnp.divmod(remaining, _LIMB_BASE)
+        digits.append(digit)
+    digits.append(remaining)  # the top limb: whatever is left after `_N_LIMBS - 1` shifts
+    digits.reverse()
+
+    days = table_days_j[digits[0]]
+    seconds = table_seconds_j[digits[0]]
+    for digit in digits[1:]:
+        combined = seconds * _LIMB_BASE + table_seconds_j[digit]
+        extra_days, seconds = jnp.divmod(combined, SECONDS_PER_DAY)
+        days = days * _LIMB_BASE + table_days_j[digit] + extra_days
+
+    final_seconds = seconds + offset_seconds + start_seconds
+    extra_days, seconds = jnp.divmod(final_seconds, SECONDS_PER_DAY)
+    days = start_days + days + extra_days
     return days, seconds
 
 
-def _gregorian_instant_block(
-    record_seconds: int, *, offset_seconds: int = 0, start_seconds: int = 0
-) -> tuple[int, int, int]:
-    """Return ``(block_size, block_days, block_extra_seconds)`` -- shared by
-    :func:`gregorian_instant` and :func:`max_safe_record`, so the two can
-    never disagree about what block a given ``record_seconds`` decomposes
-    into.
+def max_safe_record(
+    record_seconds: int,
+    *,
+    offset_seconds: int = 0,
+    start_seconds: int = 0,
+    start_days: int = 0,
+) -> int:
+    """Return the largest ``record`` for which ``gregorian_instant``'s day count fits int32.
 
-    ``block_size`` is the largest number of records of ``record_seconds``
-    whose *own* total length still leaves an exact, unbounded Python integer
-    (``block_size * record_seconds``) safely under ``2**31 - 1`` once
-    ``offset_seconds`` and ``start_seconds`` -- the other two additive terms
-    :func:`gregorian_instant` ever multiplies nothing by, but does add --
-    are accounted for, **rounded down to the nearest multiple of
-    ``SECONDS_PER_DAY // gcd(record_seconds, SECONDS_PER_DAY)``** (the
-    smallest number of records that lines up with a whole number of days --
-    the same quantity this module's superseded decomposition used directly
-    as its one, possibly-too-large, block; see :func:`gregorian_instant`'s
-    **History** note) whenever that fits at least once. That rounding is
-    what makes ``block_extra_seconds`` exactly ``0`` -- and so
-    :func:`max_safe_record` unbounded but for the day-count limit itself --
-    for *any* ``record_seconds`` that shares a day-aligning factor with
-    ``SECONDS_PER_DAY`` small enough for at least one such minimal period to
-    fit the budget (every sub-daily divisor of a day, and every whole-day
-    multiple, in practice): rounding to the nearest such multiple, rather
-    than using the plain floor of ``budget // record_seconds``, does not
-    shrink ``block_size`` by more than one minimal period's worth of records
-    -- negligible next to the budget -- but turns a would-be leftover
-    fraction of a day into exactly none.  When even one minimal period does
-    not fit the budget (an extreme ``record_seconds``, comparable to
-    ``2**31`` seconds itself), this falls back to the plain, unaligned
-    ``block_size``, which is still int32-safe by construction, just no
-    longer exactly day-aligned.  ``block_days``/``block_extra_seconds`` are
-    the resulting block's own exact whole-day and leftover-second lengths
-    (both computed in Python, which has no overflow, so this never
-    approximates).
+    :func:`gregorian_instant` is now exact for *every* ``record`` up to this
+    bound (a proof, not an empirical one -- see that function's own
+    docstring), so this is not a workaround for an imprecise algorithm: it is
+    the **inherent** range of an ``int32`` days-since-epoch value, about 5.87
+    million years, which no algorithm can extend. A caller that knows its own
+    maximum record count ahead of time -- the only place in this codebase
+    that does is :func:`jem.accumulate.monthly_mean`'s sequential form,
+    handed ``n_months``/``total_time`` up front, and
+    :func:`jem.driver.run_chunked`'s own up-front duration validation --
+    should check it against this bound **at construction**, before anything
+    is traced, and refuse rather than silently integrate or bin past it. A
+    caller with no such bound (``CouplingTime.year_fraction``, called once
+    per step of a run whose length is not fixed in advance) cannot check
+    this per call -- ``record`` is traced -- and instead relies on the bound
+    being enormous for any coupling step of a realistic length (which it now
+    always is, e.g. `run_chunked`'s own validation refuses a run before it
+    could ever reach here).
+
+    **The bound, derived exactly.** ``gregorian_instant`` returns ``days =
+    start_days + floor((record * record_seconds + offset_seconds +
+    start_seconds) / SECONDS_PER_DAY)``, non-decreasing in ``record`` since
+    every other term is non-negative; the largest ``record`` keeping ``days
+    <= 2**31 - 1`` is (writing ``K = 2**31 - 1 - start_days`` for the day
+    budget ``start_days`` leaves, and using ``floor(x / d) <= K <=> x <= d*K
+    + (d - 1)`` for the exact seconds budget that corresponds to)::
+
+        record <= (SECONDS_PER_DAY * K + SECONDS_PER_DAY - 1
+                   - offset_seconds - start_seconds) / record_seconds
+
+    floored, and clamped to ``[0, 2**31 - 1]`` (the ``record`` dtype's own
+    range). Unlike the bound this replaces (2026-09 review, round 2, finding
+    N1), ``start_days`` is charged against the same ``2**31 - 1`` day budget
+    every other term is, rather than left unreserved -- the earlier bound
+    could itself be wrong by exactly the amount a nonzero ``start_days``
+    left unaccounted for (confirmed: ``record_seconds=86400,
+    offset_seconds=43200, start_days=10957, start_seconds=86399`` -- 2000-01-01
+    -- computed a bound of 2147473170, one more than 2147473169, the actual
+    edge, and ``gregorian_instant`` at that (wrong) bound had already wrapped
+    to a negative day count).
 
     Parameters
     ----------
     record_seconds : int
         Length of one record, in seconds. Must be positive.
     offset_seconds, start_seconds : int, optional
-        The same arguments :func:`gregorian_instant` takes; only their
-        magnitude matters here, since both are added (never multiplied by
-        anything traced) at every call.
+        The same arguments :func:`gregorian_instant` takes. Non-negative.
+    start_days : int, optional
+        The same argument :func:`gregorian_instant` takes. May be negative
+        (a start date before the epoch), which only *enlarges* the budget.
 
     Returns
     -------
-    block_size, block_days, block_extra_seconds : int
+    int
+        The largest ``record`` for which every intermediate
+        :func:`gregorian_instant` forms, and its result, is exact.
 
     Raises
     ------
     ValueError
-        If ``record_seconds`` is not positive, or if ``offset_seconds`` and
-        ``start_seconds`` alone already leave no room for even one record
-        (a pathological combination no caller in this codebase constructs,
-        but a clear error here is cheaper than a wrong one downstream).
+        If ``record_seconds`` is not positive, or if ``start_days`` alone
+        already exceeds what an ``int32`` day count can hold (so there is no
+        non-negative ``record``, not even ``0``, this is safe for).
 
     """
     record_seconds = int(record_seconds)
     if record_seconds <= 0:
         raise ValueError(
-            f"record_seconds must be a positive whole number of seconds; "
+            "record_seconds must be a positive whole number of seconds; "
             f"got {record_seconds!r}."
         )
-    budget = _INT32_MAX - abs(int(offset_seconds)) - abs(int(start_seconds))
-    if budget < record_seconds:
+    offset_seconds = int(offset_seconds)
+    start_seconds = int(start_seconds)
+    start_days = int(start_days)
+    day_budget = _INT32_MAX - start_days
+    if day_budget < 0:
         raise ValueError(
-            f"offset_seconds={offset_seconds!r} and start_seconds="
-            f"{start_seconds!r} alone leave no int32-safe room for even one "
-            f"{record_seconds} s record; this instant cannot be computed "
-            "exactly."
+            f"start_days={start_days!r} alone already exceeds what an int32 "
+            "day count can hold; there is no safe record, not even 0."
         )
-    unaligned_block_size = max(1, budget // record_seconds)
-    # The smallest number of records that lines up with a whole number of
-    # days -- exactly `period_records` in this module's superseded
-    # decomposition (`gregorian_instant`'s **History** note). Rounding
-    # `unaligned_block_size` down to a multiple of it costs at most one such
-    # period's worth of records (negligible next to the budget) but makes the
-    # block's own length an EXACT multiple of a day whenever at least one
-    # period fits, which is what lets `max_safe_record` be unbounded but for
-    # the day-count limit itself for the overwhelming majority of coupling
-    # steps in practice (anything that shares a reasonably small
-    # day-aligning factor with `SECONDS_PER_DAY`).
-    minimal_period = SECONDS_PER_DAY // math.gcd(record_seconds, SECONDS_PER_DAY)
-    aligned_periods = unaligned_block_size // minimal_period
-    block_size = (
-        aligned_periods * minimal_period if aligned_periods >= 1
-        else unaligned_block_size
+    seconds_budget = (
+        SECONDS_PER_DAY * day_budget + (SECONDS_PER_DAY - 1)
+        - offset_seconds - start_seconds
     )
-    block_seconds = block_size * record_seconds  # exact Python int, <= budget
-    block_days, block_extra_seconds = divmod(block_seconds, SECONDS_PER_DAY)
-    return block_size, block_days, block_extra_seconds
-
-
-def max_safe_record(
-    record_seconds: int, *, offset_seconds: int = 0, start_seconds: int = 0
-) -> int:
-    """Return the largest ``record`` for which :func:`gregorian_instant` is exact.
-
-    A caller that knows its own maximum record count ahead of time -- the
-    only place in this codebase that does is
-    :func:`jem.accumulate.monthly_mean`'s sequential form, which is handed
-    ``n_months`` or ``total_time`` up front -- should check it against this
-    bound **at construction**, before anything is traced, and raise rather
-    than silently accumulate into bins :func:`gregorian_instant` can no
-    longer place correctly. A caller with no such bound (``CouplingTime``'s
-    ``year_fraction``, called once per step of a run whose length is not
-    fixed in advance) cannot check this per call -- ``record`` is traced --
-    and instead relies on the bound below being enormous for any coupling
-    step of a realistic length.
-
-    **The bound, derived exactly.** Write ``budget = 2**31 - 1 -
-    |offset_seconds| - |start_seconds|``, ``block_size = budget //
-    record_seconds`` and ``slack = budget - block_size * record_seconds``
-    (the remainder that floor division leaves on the table) -- the same
-    three quantities :func:`gregorian_instant` computes via
-    :func:`_gregorian_instant_block`. Within one block,
-    ``within_block * record_seconds <= (block_size - 1) * record_seconds =
-    block_size * record_seconds - record_seconds``, so the one term that
-    grows without bound as ``record`` does -- ``block_index *
-    block_extra_seconds`` -- has, after accounting for ``slack``, exactly
-    ``slack + record_seconds`` of int32 headroom left to spend before the
-    sum could exceed ``2**31 - 1``. So the largest safe ``block_index`` is
-    ``(slack + record_seconds) // block_extra_seconds`` (unbounded by this
-    term when ``block_extra_seconds == 0``, i.e. when ``record_seconds``
-    divides -- or is divided by -- a day exactly, so the block has no
-    leftover seconds at all), and the largest safe ``record`` is that many
-    whole blocks plus one block's worth of ``within_block``.
-
-    A second, independent limit is the day count itself: ``block_index *
-    block_days`` must also stay under ``2**31 - 1`` (this is the *inherent*
-    limit of an ``int32`` days-since-epoch representation, about 5.87
-    million years -- no algorithm can move it), so the safe ``block_index``
-    is also capped by ``(2**31 - 1) // block_days`` whenever ``block_days``
-    is positive. The bound returned is the smaller of the two.
-
-    This is a **guaranteed-safe lower bound**, proven exact by the
-    derivation above and checked against Python's own (arbitrary-precision)
-    integer arithmetic for every sampled ``record`` up to it in
-    ``tests/unit/test_calendar.py`` -- not necessarily the largest record
-    :func:`gregorian_instant` happens to still get right (the true failure
-    point can be a little further out, since the bound above pessimistically
-    assumes ``within_block`` is simultaneously at its own maximum), but
-    every record up to it is exact.
-
-    For a ``record_seconds`` that divides, or is divided by, a day exactly
-    (the overwhelmingly common case: sub-daily, daily, or multi-day coupling)
-    ``block_extra_seconds == 0`` and this returns ``2**31 - 1`` -- the full
-    ``int32`` record range -- or, for a ``record_seconds`` that is itself an
-    exact number of days (so the "block" is many records long to begin with),
-    a number within about a day's worth of records of it; either way, no
-    representable-range caveat worth naming. For the "1 month" (2629746 s)
-    Gregorian step this migration review found broken at record 817
-    (:func:`gregorian_instant`'s **History** note), it returns 82415 --
-    nearly 6,900 years of monthly records, not 817 of them.
-
-    Parameters
-    ----------
-    record_seconds : int
-        Length of one record, in seconds. Must be positive.
-    offset_seconds, start_seconds : int, optional
-        The same arguments :func:`gregorian_instant` takes.
-
-    Returns
-    -------
-    int
-        The largest ``record`` guaranteed exact.
-
-    """
-    block_size, block_days, block_extra_seconds = _gregorian_instant_block(
-        record_seconds, offset_seconds=offset_seconds, start_seconds=start_seconds
-    )
-    budget = _INT32_MAX - abs(int(offset_seconds)) - abs(int(start_seconds))
-    slack = budget - block_size * int(record_seconds)
-
-    max_block_index = _INT32_MAX  # unbounded by the (would-be-zero) term below
-    if block_extra_seconds > 0:
-        max_block_index = (slack + int(record_seconds)) // block_extra_seconds
-    if block_days > 0:
-        # `gregorian_instant`'s final `days = ... + block_index * block_days +
-        # extra_days` needs the WHOLE sum under `2**31 - 1`, not just the
-        # product: `extra_days` (the leftover from `within_block`'s own
-        # contribution, independent of `block_index`) can itself be almost a
-        # full `block_days` -- `within_block` ranges over nearly a whole
-        # block, and a block's own length is `block_days` days by
-        # construction -- so it is reserved as headroom here rather than
-        # (wrongly) treated as negligible.
-        within_block_days = budget // SECONDS_PER_DAY
-        max_block_index = min(
-            max_block_index, (_INT32_MAX - within_block_days) // block_days
-        )
-    # `record` itself is also an int32 value, so the bound can never exceed
-    # what that type holds regardless of what the block arithmetic allows.
-    return min(_INT32_MAX, block_size * max_block_index + (block_size - 1))
+    return max(0, min(_INT32_MAX, seconds_budget // record_seconds))

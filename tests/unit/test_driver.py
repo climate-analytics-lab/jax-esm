@@ -157,6 +157,141 @@ def test_run_chunked_rejects_a_bad_subsample_before_it_integrates(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_max_element_rate_is_one_with_no_multiplicity_or_nesting(coupler):
+    """The floor: nothing runs faster than the coupled step itself."""
+    from jem.driver import _max_element_rate
+
+    assert _max_element_rate(coupler) == 1
+
+
+def test_max_element_rate_follows_a_sub_stepped_element():
+    """An element run `n` times a coupled step counts `n` times as fast."""
+    from jem.driver import _max_element_rate
+
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    exchangers = default_exchangers(components)
+    coupler = Coupler(
+        components, exchangers, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[list(exchangers), ["ocn"] * 24, "seaice"],
+    )
+    assert _max_element_rate(coupler) == 24
+
+
+def test_run_chunked_refuses_a_run_past_a_sub_stepped_elements_own_counter(
+    tmp_path,
+):
+    """A sub-stepped element's own `step*multiplicity+call` overflows first.
+
+    `_check_step_counters_fit_int32` is checked before any trajectory is
+    built (the trajectory factory is replaced with one that explodes, as
+    `test_run_chunked_rejects_a_bad_subsample_before_it_integrates` does for
+    `subsample`), so this is a real up-front refusal, not one discovered
+    partway through a run that happened to be interrupted.
+    """
+    from jem.driver import _max_safe_coupled_steps
+
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    exchangers = default_exchangers(components)
+    # 2880 divides the 86400 s coupling timestep exactly (30 s sub-steps),
+    # and is large enough that the resulting limit is reached at a coupled
+    # step count small enough to name in this test's own assertions, not
+    # (like the calendar's own day-count limit) in the millions of years.
+    coupler = Coupler(
+        components, exchangers, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+        workflow=[list(exchangers), ["ocn"] * 2880, "seaice"],
+    )
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit < 10**7  # sanity: this is the sub-step limit, not the day one
+
+    def must_not_be_called(iterations, **kwargs):
+        raise AssertionError(
+            f"a {iterations}-step trajectory was built for a run past the "
+            "sub-stepped element's own counter limit"
+        )
+
+    coupler.generate_trajectory_function = must_not_be_called
+    # `total_time` of `limit + 1` days reaches coupled step `limit` exactly
+    # (steps `0` through `limit`, `limit + 1` of them) -- still within
+    # bounds; `limit + 2` reaches `limit + 1`, one past it.
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        run_chunked(
+            coupler, total_time=f"{limit + 2} days", chunk=f"{limit + 2} days",
+            output_dir=tmp_path,
+        )
+
+
+def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
+    coupler, tmp_path,
+):
+    """The int32 day-count limit of ``gregorian`` calendar math is checked too.
+
+    2026-09 migration review, round 2, finding B1: before this check
+    existed, nothing outside `jem.accumulate._midpoint_month_rule` (which
+    only ever runs on the fixed calendars) ever checked this at all, so a
+    ``"gregorian"`` run past it -- which `gregorian_instant` is now exact
+    for up to about 5.87 million years, but not beyond, an inherent int32
+    limit no algorithm can move -- would silently derive a wrong seasonal
+    phase (`CouplingTime.year_fraction`) with no error. This coupler has no
+    sub-stepped element, so `_max_safe_coupled_steps` here is exactly
+    `jem.base.calendar.max_safe_record` of its own coupling timestep and
+    start date -- checked directly, so this test does not have to construct
+    (or wait out) a multi-million-year run to prove the refusal fires
+    exactly where that limit is.
+    """
+    from jem.base.calendar import max_safe_record
+    from jem.driver import _max_safe_coupled_steps
+
+    start = coupler.start_date
+    expected = max_safe_record(
+        int(round(coupler.dt_seconds)),
+        start_seconds=int(start.delta.seconds),
+        start_days=int(start.delta.days),
+    )
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit == expected
+    assert limit > 5 * 10**8  # sanity: millions of years, not a small bound
+
+    def must_not_be_called(iterations, **kwargs):
+        raise AssertionError(
+            f"a {iterations}-step trajectory was built for a run past the "
+            "day-count limit"
+        )
+
+    coupler.generate_trajectory_function = must_not_be_called
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        run_chunked(
+            coupler, total_time=f"{limit + 2} days", chunk=f"{limit + 2} days",
+            output_dir=tmp_path,
+        )
+
+
+def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
+    """The refusal's own boundary is exact: reaching `limit` itself is not refused.
+
+    ``_check_step_counters_fit_int32(coupler, first_step, total_steps)``
+    checks the LAST coupled step the run would reach,
+    ``first_step + total_steps - 1`` -- ``total_steps`` counts steps, not the
+    index after the last one. This only exercises the check directly (not
+    the whole of `run_chunked`, which would then have to build and run a
+    multi-million-step trajectory) -- the boundary is what is under test,
+    not the run.
+    """
+    from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
+
+    limit = _max_safe_coupled_steps(coupler)
+    _check_step_counters_fit_int32(coupler, 0, limit + 1)  # last step == limit: fine
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        _check_step_counters_fit_int32(coupler, 0, limit + 2)  # last step == limit + 1
+    with pytest.raises(ValueError, match="largest this coupler's own clock can hold"):
+        # A resumed run: `first_step` alone already at the limit, plus more
+        # steps to integrate, reaches past it.
+        _check_step_counters_fit_int32(coupler, limit, 2)
+
+
 def test_run_chunked_writes_nothing_when_the_run_is_already_done(coupler, tmp_path):
     """A carry already at `total_time` completes with no chunks and no files."""
     carry = coupler.initialize()

@@ -705,6 +705,36 @@ def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve(
         rule(jnp.int32(0), record_seconds)
 
 
+def test_gregorian_monthly_mean_refuses_a_total_time_gregorian_instant_cannot_resolve(
+    gregorian_coupler,
+):
+    """The Gregorian sequential form gets the same construction-time refusal.
+
+    2026-09 migration review, round 2, finding B1: `_midpoint_month_rule`
+    (the fixed-calendar path, see the test above) already checked this;
+    `_gregorian_monthly_mean`'s own sequential form did not, even though it
+    is exactly the same situation -- `total_time` fixes the number of
+    records `_gregorian_month_rule.bin_of_record` will be asked to resolve,
+    known here in plain Python before any bin is ever computed. Refused
+    rather than left to silently bin a too-long run wrong, exactly as
+    `run_chunked`'s own equivalent check (`_check_step_counters_fit_int32`)
+    is for a run of that length. `gregorian_instant`'s own limb-based fix
+    (same review round) makes this bound astronomically large for any
+    realistic coupling timestep (millions of years), so the run
+    `total_time` names here is deliberately far beyond even that.
+    """
+    dt_seconds = int(round(gregorian_coupler.dt_seconds))
+    start = gregorian_coupler.start_date
+    bound = max_safe_record(
+        dt_seconds, offset_seconds=dt_seconds // 2,
+        start_seconds=int(start.delta.seconds), start_days=int(start.delta.days),
+    )
+    too_many_days = (bound + 10) * dt_seconds // 86400
+
+    with pytest.raises(ValueError, match="too long to bin exactly"):
+        monthly_mean(gregorian_coupler, total_time=f"{too_many_days} days")
+
+
 def test_a_wrapped_sequential_month_straddles_two_bins(coupler):
     """What wrapping an `n_months` accumulator really does, said honestly.
 

@@ -229,6 +229,93 @@ def test_gregorian_instant_one_month_step_survives_far_past_its_old_817_break(
     assert (int(days), int(seconds)) == (want_days, want_seconds)
 
 
+def test_gregorian_instant_exact_at_and_near_2_31_for_every_adversarial_record_seconds():
+    """2026-09 migration review, round 2, finding B1's own reproduction, fixed.
+
+    The block-based decomposition that shipped after round 1's fix (git
+    history) was still only int32-safe up to a computed
+    ``max_safe_record`` that could itself be as small as about 68 simulated
+    years (e.g. this test's own ``73453`` s coupling step), and nothing but
+    ``jem.accumulate._midpoint_month_rule`` ever checked it -- a
+    ``year_fraction`` or ``monthly_mean`` bin past that point was silently
+    wrong with no error (confirmed: a daily ``year_fraction`` at step 58471
+    of a 73453 s coupling from 2000-01-01 came back ``0.9969`` against an
+    exact ``0.0988``). ``gregorian_instant`` is now a limb (schoolbook)
+    decomposition, proven exact up to the one limit no algorithm can move --
+    an int32 day count's own range -- so ``max_safe_record`` for every one
+    of these record lengths is now within the full ``int32`` record range
+    (some exactly ``2**31 - 1``; the rest -- record lengths that do not
+    divide evenly into a day -- are the exact day-count limit itself, still
+    around 5.87 million years' worth of records). Checked densely around
+    ``2**31 - 1`` and around each ``record_seconds``'s own bound, not just
+    at a handful of spot values, and against plain Python ``int``
+    arithmetic throughout -- no algorithm this test trusts to be correct.
+    """
+    adversarial_record_seconds = [
+        73453, 73738, 86399, 86401, 7 * 86400 + 1, 1_314_873, 2_629_746,
+        31_556_952,
+    ]
+    rng = np.random.default_rng(878)
+    for record_seconds in adversarial_record_seconds:
+        bound = max_safe_record(record_seconds)
+        near_top = {2**31 - 1, 2**31 - 2, bound, min(bound + 1, 2**31 - 1)}
+        near_bound = set(range(max(0, bound - 5), min(bound + 5, 2**31 - 1) + 1))
+        sampled = set(rng.integers(0, min(bound, 2**31 - 1) + 1, size=200).tolist())
+        records = sorted(near_top | near_bound | sampled | {0, 1})
+        days, seconds = gregorian_instant(
+            jnp.asarray(records, dtype=jnp.int32), record_seconds, 0, 0
+        )
+        for record, day, second in zip(records, np.asarray(days), np.asarray(seconds), strict=True):
+            want_day, want_second = _exact_instant(record, record_seconds)
+            if record <= bound:
+                assert (int(day), int(second)) == (want_day, want_second), (
+                    record_seconds, record, bound,
+                )
+
+
+def test_max_safe_record_reserves_start_days_against_the_same_day_budget():
+    """N1: ``start_days`` must be charged against the ``2**31 - 1`` day budget too.
+
+    Before this fix ``max_safe_record`` had no ``start_days`` parameter at
+    all, so a nonzero ``start_days`` was not reserved -- the returned bound
+    could itself already be past the true edge (confirmed with these exact
+    values, ``record_seconds=86400``, ``offset_seconds=43200``,
+    ``start_days=10957`` -- 2000-01-01 -- ``start_seconds=86399``: calling
+    ``gregorian_instant`` at the old, ``start_days``-blind bound already
+    gave a negative, wrapped day count). The true edge is checked here
+    directly against exact Python ``int`` arithmetic -- the definition of
+    "the largest record keeping the day count in int32 range" -- rather
+    than against one specific number, since the exact value is a consequence
+    of the derivation, not the definition.
+    """
+    record_seconds, offset, start_days, start_seconds = 86400, 43200, 10957, 86399
+    bound = max_safe_record(
+        record_seconds, offset_seconds=offset, start_seconds=start_seconds,
+        start_days=start_days,
+    )
+
+    def days_at(record):
+        total = record * record_seconds + offset + start_seconds
+        return start_days + total // 86400
+
+    assert days_at(bound) == 2**31 - 1
+    assert days_at(bound + 1) == 2**31  # one past int32's own range
+    # Reserving `start_days` costs exactly `start_days` records here (this
+    # `record_seconds` is an exact day, so the `* 86400` it is charged in
+    # cancels the `/ record_seconds` it is spent through): the old,
+    # `start_days`-blind computation is too generous by exactly that much,
+    # and calling `gregorian_instant` at ITS bound had already wrapped.
+    old_start_days_blind_bound = max_safe_record(
+        record_seconds, offset_seconds=offset, start_seconds=start_seconds
+    )
+    assert old_start_days_blind_bound == bound + start_days
+    wrapped_days, _ = gregorian_instant(
+        jnp.int32(old_start_days_blind_bound), record_seconds, start_days,
+        start_seconds, offset_seconds=offset,
+    )
+    assert int(wrapped_days) < 0  # silently wrapped, not the true (huge) day count
+
+
 def test_gregorian_instant_midpoint_never_crosses_a_month_boundary():
     """Flooring an odd record's midpoint to a whole second must stay in the record.
 

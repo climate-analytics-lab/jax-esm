@@ -1646,6 +1646,31 @@ def _gregorian_monthly_mean(
     if total_time is not None:
         total_seconds = _duration_to_seconds(total_time, coupler.calendar, "total_time")
         n_steps = _whole_coupling_steps(total_seconds, dt_seconds, total_time)
+        # `_gregorian_month_rule.bin_of_record` evaluates `gregorian_instant`
+        # at every record's own midpoint (`offset_seconds=dt_seconds // 2`)
+        # for every record `0` through `n_steps - 1`; this is exactly the
+        # same "check the maximum record a construction-time-known pattern
+        # will ever ask for" this module already does for the fixed
+        # calendars' own `_midpoint_month_rule` -- see that check's own
+        # comment -- extended here to the calendar whose sequential form
+        # this branch builds (2026-09 migration review, round 2, finding
+        # B1's `run_chunked` refusal, mirrored here since `monthly_mean` is
+        # its own construction site with its own known record count, not
+        # something `run_chunked`'s check can see).
+        last_record = n_steps - 1
+        bound = max_safe_record(
+            dt_seconds, offset_seconds=dt_seconds // 2,
+            start_seconds=start_seconds, start_days=start_days,
+        )
+        if last_record > bound:
+            raise ValueError(
+                f"total_time={total_time!r} needs {n_steps} {dt_seconds} s "
+                f"records, but gregorian_instant can only resolve up to "
+                f"{bound + 1} of them (record {bound}) exactly for a "
+                "coupling timestep and start date this long (see "
+                "jem.base.calendar.max_safe_record) -- this run is too long "
+                "to bin exactly."
+            )
         last_midpoint = start + step * (n_steps - 1) + step / 2
         n_bins = (last_midpoint.year - y0) * 12 + (last_midpoint.month - m0) + 1
     elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
