@@ -189,65 +189,60 @@ def _compose(name: str, overrides: list[str]):
         Singleton.set_state(saved)
 
 
-def _hydra_list_literal(value: list, key: str) -> str:
-    """Spell ``value`` as a Hydra list literal, or raise ``TypeError``.
+def _hydra_literal(value: Any, key: str) -> str:
+    """Spell one override value as a Hydra token, or raise ``TypeError``.
 
-    jem builds the token itself rather than using ``str(value)``, because
-    ``str(list)`` spells each element by that object's own ``repr``. An
-    object that controls its repr could then compose to something other than
-    what was checked: an ``IntEnum`` (``<Level.LOW: 1>``), numpy 2's
-    ``np.float64(1.5)`` (``np.float64`` subclasses ``float``), or a ``list``
-    subclass whose repr differs from its contents. So only EXACT built-in
-    types are accepted, at any depth, and each is spelled here, never by its
-    own repr:
+    jem builds the token itself rather than using ``str(value)`` or
+    ``repr(value)``, because either lets an object that controls its own
+    spelling compose to something other than the value it holds: an
+    ``IntEnum`` (``<Level.LOW: 1>`` in a list), numpy 2's ``np.float64(1.5)``
+    (``np.float64`` subclasses ``float``), an ``int`` subclass whose
+    ``__str__`` says ``2`` while its value is ``1``, or a ``list`` subclass
+    whose repr differs from its contents. So only EXACT built-in types are
+    accepted, at the top level and at any depth inside a list, and each is
+    spelled here from its value:
 
     - ``None`` -> ``null``;
     - ``bool`` -> ``true`` / ``false``;
     - ``int`` -> its decimal digits;
     - ``float`` -> the shortest round-trip form (``2.5``, ``1e-10``, ``inf``);
-    - ``str`` -> Hydra's own ``QuotedString`` serializer, the one a top-level
-      string uses, so quotes, backslashes, commas and ``=`` survive (a
-      ``${...}`` interpolation is still resolved, as for a top-level string;
-      see :func:`_override_str`);
-    - ``list`` (exactly ``list``) -> recursively.
+    - ``str`` -> Hydra's own ``QuotedString`` serializer, so quotes,
+      backslashes, commas and ``=`` survive (a ``${...}`` interpolation is
+      still resolved; see :func:`_override_str`);
+    - ``list`` (exactly ``list``) -> ``[...]``, each element recursively.
 
-    ``test_every_accepted_list_element_type_round_trips`` pins that each of
-    these parses back to the same value.
+    ``test_every_accepted_list_element_type_round_trips`` and
+    ``test_every_accepted_top_level_type_round_trips`` pin that each of these
+    parses back to the same value.
     """
     from hydra.core.override_parser.types import Quote, QuotedString
 
-    if type(value) is not list:
-        raise TypeError(_unrepresentable_list_message(key, type(value)))
-    parts = []
-    for item in value:
-        kind = type(item)
-        if item is None:
-            parts.append("null")
-        elif kind is bool:
-            parts.append("true" if item else "false")
-        elif kind is int:
-            parts.append(str(item))
-        elif kind is float:
-            parts.append(repr(item))
-        elif kind is str:
-            parts.append(QuotedString(text=item, quote=Quote.single).with_quotes())
-        elif kind is list:
-            parts.append(_hydra_list_literal(item, key))
-        else:
-            raise TypeError(_unrepresentable_list_message(key, kind))
-    return "[" + ", ".join(parts) + "]"
+    kind = type(value)
+    if value is None:
+        return "null"
+    if kind is bool:
+        return "true" if value else "false"
+    if kind is int:
+        return str(value)
+    if kind is float:
+        return repr(value)
+    if kind is str:
+        return QuotedString(text=value, quote=Quote.single).with_quotes()
+    if kind is list:
+        return "[" + ", ".join(_hydra_literal(item, key) for item in value) + "]"
+    raise TypeError(_unrepresentable_message(key, kind))
 
 
-def _unrepresentable_list_message(key: str, kind: type) -> str:
-    """Return the ``TypeError`` message for a list override holding ``kind``."""
+def _unrepresentable_message(key: str, kind: type) -> str:
+    """Return the ``TypeError`` message for an override that is or holds ``kind``."""
     return (
-        f"load() override {key!r} is a list containing a {kind.__name__} (at "
-        "some nesting depth), which jem cannot spell as a faithful Hydra list "
-        "literal. A list override may contain only None and plain bool, int, "
-        "float and str values -- exactly those types, so convert a numpy "
-        "scalar or an enum member with float(), int() or str() first -- and "
-        "nested lists (exactly `list`, not a subclass); give one dotted "
-        "override per field for a structured value instead."
+        f"load() override {key!r} is, or is a list containing (at some "
+        f"nesting depth), a {kind.__name__}, which jem cannot spell as a "
+        "faithful Hydra override value. An override value may be only None, "
+        "a plain bool, int, float or str, or a list of those (exactly `list`, "
+        "not a subclass) -- exactly those types, so convert a numpy scalar, "
+        "an enum member or a Path with float(), int() or str() first; give "
+        "one dotted override per field for a structured value instead."
     )
 
 
@@ -287,8 +282,14 @@ def _override_str(key: str, value: Any) -> str:
     second time, so the escaped text is read as an interpolation again.
     Construct that component in Python instead.
 
-    Non-string scalars pass through unquoted so ``coupled_run.total_time=10``
-    stays the number ``10``. A ``dict`` is refused outright with a
+    Other values are spelled by :func:`_hydra_literal` from their value,
+    never by their own ``str``/``repr``, so ``coupled_run.total_time=10``
+    stays the number ``10`` and ``None`` becomes ``null``. Only exact
+    built-in types are accepted -- ``None``, ``bool``, ``int``, ``float``,
+    ``str`` and ``list`` -- so a subclass (a numpy scalar, an enum member)
+    or any other object (a ``Path``) is refused with a ``TypeError`` rather
+    than trusted to spell itself; convert it with ``float()``, ``int()`` or
+    ``str()`` first. A ``dict`` is refused outright with a
     ``TypeError`` naming the key: there is no single override token that
     reproduces an arbitrary nested mapping, so silently stringifying one here
     would emit a token that composes to something else entirely (or that
@@ -302,14 +303,10 @@ def _override_str(key: str, value: Any) -> str:
     fine, see below), since "one dotted override per field" is meaningless
     for a tuple that is not naming nested config keys.
 
-    A ``list`` is spelled by :func:`_hydra_list_literal`, which builds the
-    Hydra token itself from exact built-in types (``None``, ``bool``,
-    ``int``, ``float``, ``str``, nested ``list``) rather than by ``str()``, so
-    a list's elements compose to exactly the values given -- ``None`` to
-    ``null``, strings through Hydra's own quoting. Any other element, and any
-    ``list`` subclass, is refused with a ``TypeError`` naming it: a ``dict``
-    or ``tuple`` for the reasons above, and anything else (a ``Path``, a numpy
-    scalar, an enum member) because nothing guarantees its spelling.
+    A ``list`` follows the same rule at every depth: its elements compose to
+    exactly the values given -- ``None`` to ``null``, strings through Hydra's
+    own quoting -- and any other element, or a ``list`` subclass, is refused
+    with a ``TypeError`` naming it.
 
     Parameters
     ----------
@@ -326,15 +323,11 @@ def _override_str(key: str, value: Any) -> str:
     Raises
     ------
     TypeError
-        If ``value`` is a ``dict`` or a ``tuple``, a ``list`` subclass, or a
-        ``list`` containing, at any nesting depth, anything but ``None``,
-        ``bool``/``int``/``float``/``str`` (exact types) and nested lists.
+        If ``value`` is not ``None``, an exact ``bool``/``int``/``float``/
+        ``str``, or an exact ``list`` holding only those and nested exact
+        lists at any depth.
 
     """
-    from hydra.core.override_parser.types import Quote, QuotedString
-
-    if value is None:
-        return f"{key}=null"
     if isinstance(value, dict):
         raise TypeError(
             f"load() override {key!r} is a dict, which has no single Hydra "
@@ -349,11 +342,7 @@ def _override_str(key: str, value: Any) -> str:
             "override token that reproduces it faithfully; pass a list "
             f"instead, e.g. **{{{key!r}: [<value>, ...]}}."
         )
-    if isinstance(value, list):
-        return f"{key}={_hydra_list_literal(value, key)}"
-    if isinstance(value, str):
-        return f"{key}={QuotedString(text=value, quote=Quote.single).with_quotes()}"
-    return f"{key}={value}"
+    return f"{key}={_hydra_literal(value, key)}"
 
 
 def load(name: str, **overrides: Any) -> LoadedConfiguration:
@@ -471,10 +460,10 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ValueError
         If ``name`` is not one of :func:`available`.
     TypeError
-        If an override value is a ``dict`` or a ``tuple``, a ``list``
-        subclass, or a ``list`` holding anything other than ``None``, plain
-        ``bool``/``int``/``float``/``str`` and nested plain lists, at any
-        depth (see :func:`_override_str`).
+        If an override value is not ``None``, an exact
+        ``bool``/``int``/``float``/``str``, or an exact ``list`` holding only
+        those and nested exact lists at any depth (see
+        :func:`_override_str`).
 
     """
     from omegaconf import OmegaConf

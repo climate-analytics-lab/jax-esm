@@ -359,7 +359,7 @@ class TestOverrideStr(unittest.TestCase):
         self.assertNotIn("dotted override per field", str(ctx.exception))
 
     def test_list_containing_none_composes_to_null_at_any_depth(self):
-        # jem spells a list itself (_hydra_list_literal), so None becomes
+        # jem spells a list itself (_hydra_literal), so None becomes
         # Hydra's `null` and composes back to the value None -- not the
         # STRING "None" that str(list) would have produced.
         from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -413,6 +413,50 @@ class TestOverrideStr(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(TypeError, r"ocean\.params.*float\(\)"):
                     configurations._override_str("ocean.params", value)
+
+    def test_top_level_scalar_subclass_or_object_raises_type_error(self):
+        # A top-level value is spelled from its value by the same rule as a
+        # list element, never by its own __str__: an int subclass holding 1
+        # whose __str__ says "2" would otherwise compose to the integer 2,
+        # silently. Enum members, numpy scalars and Paths are refused too,
+        # with a message saying how to convert them.
+        import enum
+        from pathlib import Path
+
+        import numpy as np
+
+        class Lying(int):
+            def __str__(self):
+                return "2"
+
+            __repr__ = __str__
+
+        class Level(enum.IntEnum):
+            LOW = 1
+
+        class Color(enum.StrEnum):
+            RED = "red"
+
+        for value in (Lying(1), Level.LOW, Color.RED, np.float64(1.5),
+                      np.int64(3), Path("/tmp/x")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                        TypeError, r"coupled_run\.subsample.*float\(\)"):
+                    configurations._override_str("coupled_run.subsample", value)
+
+    def test_every_accepted_top_level_type_round_trips(self):
+        # The positive control for the rule above: each accepted top-level
+        # type parses back to exactly the value given.
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        parser = OverridesParser.create()
+        for value in (True, False, 0, -7, 2.5, 1e-10, float("inf"), "a,b=c",
+                      None, [1, None]):
+            with self.subTest(value=value):
+                tok = configurations._override_str("coupled_run.subsample", value)
+                parsed = parser.parse_overrides([tok])[0].value()
+                self.assertEqual(parsed, value)
+                self.assertIs(type(parsed), type(value))
 
     def test_list_subclass_raises_type_error_at_any_depth(self):
         # A list subclass controls its own repr, so a token built from it
