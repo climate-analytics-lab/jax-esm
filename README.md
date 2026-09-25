@@ -282,7 +282,8 @@ means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 Every record is binned by its own **midpoint** — the same instant it is
 written with — so `monthly.finalize(...)` and
 `to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers **by construction**, on every calendar this works on: `"gregorian"`
+numbers by construction on `"gregorian"`, and on `"365_day"` until the run's
+labels cross a real 29 February (below): `"gregorian"`
 (the coupler's default, and the only calendar a real atmosphere accepts) bins
 against the exact, real Gregorian calendar, real leap years included, entirely
 in-scan; `"365_day"` (the only other calendar name a `Coupler` accepts —
@@ -291,12 +292,14 @@ fixed table of month lengths.
 On the fixed calendars only, the *labels* are still proleptic Gregorian
 whatever the model calendar is (JCM's convention, jax-gcm#449;
 calendar-consistent labels there are tracked as #118), so a `365_day` run
-started on 1 January 2000 differs from `groupby("time.month")` of its own
-written output at exactly the real leap day (February holds 29 real days
-against the model's 28) and, if the run is exactly one model year long, at
-December (short one real day, since the real Gregorian year that year is 366
-days). To reproduce `finalize` from the written output exactly across a leap
-day, bin on model day-of-year instead of `time.month`.
+started on 1 January 2000 agrees with `groupby("time.month")` of its own
+written output until 29 February. From then on each label sits one day
+earlier than the model-calendar date of the same instant, so one record moves
+across every later month boundary, and one more per boundary for each further
+leap day the run passes. Monthly counts differ only in February and the run's
+final month, but the monthly means differ in every month after the leap day.
+To reproduce `finalize` from the written output across a leap day, bin on
+model day-of-year instead of `time.month`.
 
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on

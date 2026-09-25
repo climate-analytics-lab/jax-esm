@@ -1375,8 +1375,9 @@ three consequences are chosen rather than inherited:
 its own **midpoint** — the same instant `TimeAxis` labels the record with —
 which is what makes `monthly.finalize(...)` equal
 `to_xarray(...).groupby("time.month").mean()` of the same run **by
-construction**, for every calendar, rather than only for a run whose labels
-happen to agree with a fixed table. Binning by the interval's *end* instead
+construction** on `gregorian`, and on `365_day` until the run's labels cross a
+real 29 February (see below), rather than only for a run whose labels happen
+to agree with a fixed table. Binning by the interval's *end* instead
 (matching JCM's own pre-878 label convention) would disagree with
 `TimeAxis`'s midpoint label at every month boundary, since jax-gcm PR 878
 moved that label to the midpoint without changing what a "month" means for a
@@ -1425,13 +1426,13 @@ proleptic Gregorian (above, and jax-gcm#449), while this calendar's bins
 are its own fixed table's months. On a `365_day` run started on 1 January
 2000 — where the shipped examples start — the record whose midpoint is the
 real Gregorian leap day, `2000-02-29T12:00`, is one the model's own fixed
-calendar (no 29 February) calls 1 March and bins into March. `groupby
-("time.month")` of the written output and this reduction's own bins therefore
-part company only at February (29 records under the real labels' calendar
-against the model's 28) and, if the run is exactly one model year long,
-December (short one real day, since the real year is 366 days and the model's
-is 365) — a much narrower residual than before the midpoint rebinding, which
-used to cascade the mismatch through every month from March on. Reproducing
+calendar (no 29 February) calls 1 March and bins into March. From then on each
+label sits one day earlier than the model-calendar date of the same instant,
+so one record moves across every later month boundary, and one more per
+boundary for each further leap day the run passes (10 records by the end of
+a run's first leap year with daily coupling). Monthly *counts* differ only in
+February and the run's final month, but the monthly *means* differ in every
+month after the leap day. Reproducing
 `finalize` from the written output across a leap day still means binning by
 model day-of-year rather than by `time.month`. `gregorian` has no such
 mismatch at all: the bins and the labels are the same real calendar. Nothing
@@ -1524,8 +1525,9 @@ jax-gcm v3, PR 878, that label is the interval's midpoint, not its end).
 monthly mean is required to equal `groupby("time.month")` of the *same*
 written output, which is also labelled at the midpoint — keeping
 `monthly_mean` on an end-of-interval rule while `TimeAxis` labels at the
-midpoint would make the two disagree at every month boundary rather than
-only across a Gregorian 29 February. A useful consequence: at any boundary
+midpoint would make the two disagree at every month boundary from the start
+of every run, on every calendar, rather than only after a `365_day` run's
+labels cross a Gregorian 29 February. A useful consequence: at any boundary
 both a window and a calendar month actually land on (a month-length window
 pattern from a 1 January start, say), the two agree exactly — a record
 ending precisely on the boundary has its midpoint half a record *before* it
