@@ -16,8 +16,9 @@ https://aa.usno.navy.mil/faq/JD_formula) -- copied rather than reimplemented
 so that the two packages can never silently disagree about what a given day
 number means. The one addition is a reduction by whole 400-year cycles before
 the algorithm runs, which keeps its int32 intermediates in range for every
-day count an int32 can hold (see :func:`gregorian_ymd_from_days`). ``gregorian_day_of_year`` is the same computation as jcm's
-private ``_gregorian_day_of_year``, made public here because JEM's own
+day count an int32 can hold (see :func:`gregorian_ymd_from_days`).
+``gregorian_day_of_year`` is the same computation as jcm's private
+``_gregorian_day_of_year``, made public here because JEM's own
 ``year_fraction`` needs it outside this module.
 ``tests/unit/test_calendar.py`` cross-checks all three against
 ``jcm.date`` and against ``pandas`` over 400+ years, century leap-year rules
@@ -115,10 +116,11 @@ def gregorian_ymd_from_days(days_since_epoch: jnp.ndarray) -> tuple[jnp.ndarray,
     algorithm then runs on a day number in ``[0, 146097)``, where every
     intermediate is small, and the cycles come back as ``400 *`` whole years.
     The reduction is exact (the calendar repeats every 400 years to the day)
-    and uses floor division, so it holds for dates before 1970 as well.
+    and uses floor division and floor modulo, so it holds for dates before
+    1970 as well and forms no product that could overflow.
     """
     cycles = days_since_epoch // _DAYS_PER_400_YEARS
-    days_since_epoch = days_since_epoch - cycles * _DAYS_PER_400_YEARS
+    days_since_epoch = days_since_epoch % _DAYS_PER_400_YEARS
     jdn = days_since_epoch + _UNIX_EPOCH_JDN
     l = jdn + 68569                              # noqa: E741
     n = (4 * l) // 146097
