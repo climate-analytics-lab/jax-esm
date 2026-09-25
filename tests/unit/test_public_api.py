@@ -27,6 +27,7 @@ CORE_NAMES = (
     "Exchanger",
     "SupportsBind",
     "SupportsCheckpoint",
+    "SupportsInternalStepping",
     "SupportsXarray",
     "TimeAxis",
     # The helpers an exchanger reaches into a nested coupler's carry with.

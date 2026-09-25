@@ -316,7 +316,7 @@ at a random call site:
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
-| `SupportsInternalStepping` | `internal_steps_per_call() -> int` | `JCMComponent` |
+| `SupportsInternalStepping` | `internal_steps_per_call() -> int` | `JCMComponent`, `VerosComponent` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
 from the constructor for everything passed to it), and it is the only way a
@@ -346,19 +346,23 @@ is what a bare `model.initialize()` in a test or a notebook gets.
 `internal_steps_per_call()` reports how many of a component's own internal
 timesteps happen inside one `step()` call — for a component with an internal
 clock faster than the coupled step calling it (`JCMComponent`'s
-`self._inner_steps()`, JCM's own physics timestep count per coupling step),
-which may keep raw counters of its own that overflow before the coupler
-hierarchy's own do (JCM's `RunState.step`, and the `time.step *
-self._inner_steps()` product `JCMComponent
+`self._inner_steps()`, JCM's own physics timestep count per coupling step, or
+`VerosComponent`'s `self._steps_per_coupling_step`, Veros' own tracer step
+count per coupling step), which may keep raw counters of its own that
+overflow before the coupler hierarchy's own do (JCM's `RunState.step`, and
+the `time.step * self._inner_steps()` product `JCMComponent
 ._report_authoritative_clock_drift` computes from it — see that method's own
-docstring). `jem.driver._max_element_rate` multiplies this rate in for every
-element clock that calls the component (a workflow multiplicity, or a nested
-`Coupler`'s own substep rate), so `jem.driver.run_chunked`'s up-front int32
-check covers a component's own internal counter the same way it covers a
-workflow multiplicity or a nested coupler — with no jcm-specific knowledge
+docstring; Veros' own `state.variables.itt` iteration counter, similarly —
+see `VerosComponent.internal_steps_per_call`'s docstring). `jem.driver
+._max_element_rate` multiplies this rate in for every element clock that
+calls the component (a workflow multiplicity, or a nested `Coupler`'s own
+substep rate), so `jem.driver.run_chunked`'s up-front int32 check covers a
+component's own internal counter the same way it covers a workflow
+multiplicity or a nested coupler — with no jcm- or Veros-specific knowledge
 added to `jem.driver` itself: the capability is generic, and any component
 with a faster internal clock of its own may implement it the same way
-`JCMComponent` does. A component that does not implement it is assumed to
+`JCMComponent` and `VerosComponent` do. A component that does not implement
+it is assumed to
 advance no faster than the calls it receives (rate 1), and one that keeps
 such counters without reporting them is simply not protected — the same as a
 component that skips `SupportsBind`'s clock-agreement check.

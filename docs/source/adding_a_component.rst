@@ -81,7 +81,9 @@ simply skipped there, never broken:
      - Report how many of the component's own internal timesteps happen
        inside one ``step()`` call, for a component that keeps a raw counter
        of its own faster than the coupled step calling it (JCM's own
-       ``RunState.step``). ``jem.driver._max_element_rate`` multiplies this
+       ``RunState.step``, or Veros' own ``state.variables.itt`` tracer step
+       counter -- ``VerosComponent`` reports its own tracer steps per
+       coupling step). ``jem.driver._max_element_rate`` multiplies this
        in the same way it does a workflow multiplicity, so
        ``jem.driver.run_chunked``'s int32 safety check covers this
        component's own counter too -- a component that omits it is simply

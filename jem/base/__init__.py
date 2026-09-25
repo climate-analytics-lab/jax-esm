@@ -9,6 +9,7 @@ from jem.base.component import (
     Exchanger,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsInternalStepping,
     SupportsXarray,
     TimeAxis,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "Exchanger",
     "SupportsBind",
     "SupportsCheckpoint",
+    "SupportsInternalStepping",
     "SupportsXarray",
     "TimeAxis",
     "nested_carry",
