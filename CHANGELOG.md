@@ -332,7 +332,12 @@ Breaking changes are marked; everything else is additive.
   record's own bounds or labels, whatever `subsample` drops) and carrying
   `cell_methods = "time: mean"` — with a CF comment appended instead of a
   bare repeat when `subsample > 1`, since the mean then covers only the
-  records the stride kept while the label still spans the whole chunk. Files
+  records the stride kept while the label still spans the whole chunk.
+  Integer and boolean time series are categorical, so, as in jcm's own
+  interval means, they are left out of a chunk mean and listed in the
+  `omitted_interval_mean_variables` attribute; with `earth-slab` that is
+  jcm's `convection.iptop`, `shortwave_rad.compute_shortwave`,
+  `shortwave_rad.icltop` and `shortwave_rad.step`. Files
   are `<component>-<first step:08d>.nc`: the component first so a listing groups
   a component's files, and the **coupled step the chunk starts at** second,
   zero-padded so the listing sorts in run order. The step rather than a chunk

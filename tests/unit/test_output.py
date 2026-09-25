@@ -909,3 +909,27 @@ def test_a_chunked_run_writes_one_file_per_component_per_chunk(
         combine="by_coords",
     ) as combined:
         assert combined.sizes["time"] == 4
+
+
+def test_postprocess_omits_categorical_variables_from_a_chunk_mean():
+    """Integer and boolean time series are categorical, so they are not averaged.
+
+    jax-gcm's own interval-mean output drops them and names them in the
+    ``omitted_interval_mean_variables`` attribute; a chunk mean does the same,
+    adding to any names the dataset already lists there.
+    """
+    dataset = simple_dataset(4)
+    dataset["inner_step"] = (("time",), np.array([48, 96, 144, 192], dtype=np.int32))
+    dataset["is_raining"] = (("time", "lon"), np.array([[True, False]] * 4))
+    dataset.attrs["omitted_interval_mean_variables"] = "ktype"
+
+    averaged = postprocess(dataset, output_averages=True)
+
+    assert "inner_step" not in averaged.data_vars
+    assert "is_raining" not in averaged.data_vars
+    assert averaged.attrs["omitted_interval_mean_variables"] == "inner_step,is_raining,ktype"
+    assert averaged.sizes["time"] == 1
+    assert "temperature" in averaged.data_vars
+    # A snapshot chunk, not averaged, keeps them unchanged.
+    kept = postprocess(dataset, output_averages=False)
+    assert kept["inner_step"].dtype == np.int32

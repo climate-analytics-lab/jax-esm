@@ -82,6 +82,11 @@ per coupling step, so the same idea one level up: the coupler's output
 interval is the **chunk**, and ``output_averages=True`` replaces a chunk's
 records with their time mean -- one record, labelled at the *chunk's own*
 midpoint, carrying the CF ``cell_methods = "time: mean"`` that says so.
+As in JCM's own interval means, an integer or boolean time series (a step
+counter, a convection type, a flag) is categorical and has no meaningful
+mean, so it is left out of the chunk mean and named in the dataset's
+``omitted_interval_mean_variables`` attribute alongside any names JCM itself
+already put there; snapshot output keeps it.
 
 For a dataset that itself carries ``time_bounds`` (JCM's, read off its
 ``time`` coordinate's CF ``bounds`` attribute rather than assumed by name),
@@ -151,6 +156,11 @@ TIME_DIMENSION = "time"
 
 #: CF cell method :func:`postprocess` stamps on an averaged variable.
 TIME_MEAN_CELL_METHOD = f"{TIME_DIMENSION}: mean"
+
+#: The dataset attribute naming the categorical (integer or boolean) time
+#: series left out of an interval mean -- jax-gcm's own name for it, so a
+#: chunk mean of JCM output and JCM's own interval-mean output agree.
+OMITTED_INTERVAL_MEAN_ATTRIBUTE = "omitted_interval_mean_variables"
 
 # Characters allowed in the component part of an output file name. A dataset
 # name is a component name, which a user chooses, and a nested coupler's
@@ -693,6 +703,13 @@ def postprocess(
         return dataset
 
     timed = _timed_variables(dataset)  # excludes `bounds_name`, if any
+    # An integer or boolean time series is categorical (a step counter, a
+    # convection type, a flag), and its mean is not a meaningful value of
+    # it. jax-gcm's own interval-mean output drops such variables and names
+    # them in `omitted_interval_mean_variables`; a chunk mean follows the
+    # same convention, adding to any names the dataset already lists there.
+    categorical = [name for name in timed if _is_categorical(dataset[name])]
+    timed = [name for name in timed if name not in categorical]
     # `Dataset.mean` drops the dimension it reduces, so the label -- the
     # chunk's own true midpoint, computed exactly either way (see above) --
     # has to be put back by hand.
@@ -737,7 +754,8 @@ def postprocess(
     for name in timed:
         averaged[name].attrs = _with_cell_method(dataset[name].attrs, method)
     for variable in dataset.data_vars:
-        if str(variable) not in timed and str(variable) != bounds_name:
+        if (str(variable) not in timed and str(variable) not in categorical
+                and str(variable) != bounds_name):
             averaged[variable] = dataset[variable]
     if bounds_name is not None:
         # `chunk_bounds` is set together with `bounds_name` above (both None
@@ -757,7 +775,22 @@ def postprocess(
         )
         averaged[bounds_name].attrs = dict(dataset[bounds_name].attrs)
     averaged.attrs = dict(dataset.attrs)
+    if categorical:
+        already = averaged.attrs.get(OMITTED_INTERVAL_MEAN_ATTRIBUTE, "")
+        names = {name for name in str(already).split(",") if name}
+        averaged.attrs[OMITTED_INTERVAL_MEAN_ATTRIBUTE] = ",".join(
+            sorted(names | set(categorical)))
     return averaged
+
+
+def _is_categorical(variable: xr.DataArray) -> bool:
+    """Return whether ``variable`` holds integer or boolean values.
+
+    The same test jax-gcm's ``ModelPredictions.to_xarray`` applies when it
+    omits a variable from an interval mean.
+    """
+    return bool(np.issubdtype(variable.dtype, np.integer)
+                or np.issubdtype(variable.dtype, np.bool_))
 
 
 def output_file_name(name: str, first_step: int) -> str:
