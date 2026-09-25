@@ -648,6 +648,59 @@ Breaking changes are marked; everything else is additive.
 
 ### Changed
 
+- **`JCM_SUPPORTED_REV` moves to jax-gcm `dev` at the PR 877 merge commit**
+  (`46eb3fc1efc3d16fde5458736d80a3491698f3ed`) — the first `dev` revision
+  carrying the package-independent `SurfaceExchange` struct (jax-gcm#754), the
+  prescribed-flux door (#301) and the declared forcing-alignment rule (#884).
+  The merge commit is pinned rather than the `dev` tip, since later unrelated
+  `dev` commits have not been checked against this branch.
+  `JCM_SUPPORTED_VERSION` is unchanged (`jcm.__version__` still reports
+  `3.0.0rc1`).
+- **`jem/components/jcm/exchange_fields.py` collapses to a single reader**
+  (jax-gcm#754, closed by PR 877): `from_diagnostics()` reads jax-gcm's new
+  package-independent `SurfaceExchange` struct
+  (`diagnostics["surface_exchange"]`, published identically by every physics
+  package that resolves a surface), replacing the old per-package
+  `speedy()`/`echam()`/`detect()` readers. ECHAM now *publishes* the same
+  grid-mean heat and water fluxes, but **an ECHAM-composed coupled run still
+  cannot complete a step**: `from_diagnostics()` also reads the near-surface
+  wind vector, eagerly, and ECHAM has none (see below), so
+  `JCMComponent.step()` raises `NotImplementedError` on the first coupled step
+  for every ECHAM configuration, not only Veros ones. That is unchanged from
+  before the collapse (the old `echam()` reader raised unconditionally);
+  making the wind optional through `JCMDerived`, the carry and the output is
+  jax-esm#129. SPEEDY's translated values are
+  numerically unchanged (verified against the pre-#754 adapter on a real
+  model step: the sign flip on the net heat flux is the same transform, and
+  the evaporation/precipitation unit conversion the old adapter applied is
+  simply no longer needed, because the published contract is already in
+  JEM's units). One package-specific read remains and is **not** expected to
+  disappear with a future jax-gcm update: the published contract has no
+  near-surface wind *vector* (only the scalar `wind_speed`), so
+  `jem.fluxes.bulk_wind_stress` (used only by `jem.fluxes.VerosExchange`)
+  still reads SPEEDY's private `_surface_flux.u0`/`.v0` directly — ECHAM has
+  no wind vector anywhere in its own diagnostics either, so this is not a
+  regression from the collapse. See the module's docstring for the full
+  field-by-field derivation.
+- **`jem.runners.build_atmosphere` calls
+  `model.physics.require_surface_exchange()`** right after building the
+  atmosphere Model, so a physics package that cannot publish the
+  surface-exchange struct (Held-Suarez, which resolves no surface fluxes at
+  all) fails at composition, naming the composed terms, rather than at the
+  first coupled step.
+- **`forcing.align` may now be required for a from-file atmosphere forcing**
+  (jax-gcm#884, PR 877's v3 breaking change): `auto` no longer infers
+  climatology-vs-transient from a file's time axis — it resolves only a
+  jax-gcm data-mirror or packaged product (from the kind its manifest
+  records) and raises for any other file, naming the knob. Checked
+  empirically against all three from-file atmosphere-forcing configurations:
+  `earth-slab`'s forcing file is jax-gcm's own packaged T30 climatology,
+  which the manifest records, so it still resolves under `auto` with no
+  config change; `veros-double-drake`/`veros-earth` do not set
+  `forcing@atmosphere.forcing` by default (an idle knob until a user
+  overrides it), so neither is affected as shipped — but their comments
+  documenting that override now say a user who points it at their own file
+  also needs `atmosphere.forcing.align` set explicitly.
 - **The Veros setup factories default `dt_mom`/`dt_tracer` to `3600.0` s**
   — the value the examples' `run.sh` validated, not the `1800.0` the copied
   files carried — and take their layer count as `layer_thicknesses` (a

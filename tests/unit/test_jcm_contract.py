@@ -10,6 +10,7 @@ rather than on the class.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.resources
 import re
@@ -19,11 +20,10 @@ import jcm
 import pytest
 from jcm.model import Model
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
-from jcm.physics.surface.echam.surface_physics import EchamSurface
+from jcm.physics.surface.surface_exchange import SurfaceExchange as JcmSurfaceExchange
 from jcm.predictions import ModelPredictions
 from jcm.terrain import TerrainData
 
-from jem.components.jcm import exchange_fields
 from jem.components.jcm.contract import (
     JCM_INTEGRATION_POINTS,
     JCM_SUPPORTED_REV,
@@ -154,14 +154,34 @@ def test_jcm_attribute_still_exists(point: IntegrationPoint, model: Model):
 
 
 @pytest.mark.parametrize("point", _DIAGNOSTICS_POINTS, ids=_ids(_DIAGNOSTICS_POINTS))
-def test_speedy_diagnostics_field_still_exists(
+def test_diagnostics_field_still_exists(
     point: IntegrationPoint, speedy_diagnostics: dict
 ):
-    """Check every SPEEDY diagnostics field the surface exchange reads exists."""
+    """Check every diagnostics field the surface exchange reads still exists.
+
+    Two kinds of entry share this parametrization since jax-gcm#754 (PR 877):
+
+    - ``target == "speedy"`` is SPEEDY's own private, non-contract wind-
+      vector key (``_surface_flux.u0``/``.v0``) --
+      ``jem.components.jcm.exchange_fields``'s one remaining package-specific
+      read (see its module docstring) -- checked against a real SPEEDY
+      diagnostics template, exactly as before #754.
+    - ``target == "surface_exchange"`` is jax-gcm's package-independent
+      contract struct, checked directly against its own field names
+      (:func:`dataclasses.fields`). This needs no model build and no
+      per-package branch: every physics package that resolves a surface
+      fills the SAME struct, which is the entire point of #754.
+    """
+    if point.target == "surface_exchange":
+        names = {f.name for f in dataclasses.fields(JcmSurfaceExchange)}
+        assert point.attribute in names, _missing(
+            point, f"; SurfaceExchange's fields are {sorted(names)}"
+        )
+        return
     assert point.target == "speedy", (
         f"{point.target!r} diagnostics are not covered by this test; only"
-        " SPEEDY's are read field by field (ECHAM's surface exchange is not"
-        " implemented -- jax-gcm#754)."
+        " 'speedy' (a private key) and 'surface_exchange' (the #754"
+        " contract) are."
     )
     key, _, field = point.attribute.partition(".")
     assert key in speedy_diagnostics, _missing(
@@ -181,30 +201,6 @@ def test_jcm_package_data_still_shipped(point: IntegrationPoint):
     for part in point.attribute.split("/"):
         resource = resource / part
     assert resource.is_file() or resource.is_dir(), _missing(point)
-
-
-def test_surface_exchange_keys_match_jcm(speedy_diagnostics: dict):
-    """Check ``exchange_fields``' detection keys are jax-gcm's own keys.
-
-    Those two keys are the only thing separating a SPEEDY run from an ECHAM
-    one in :func:`exchange_fields.detect`, so each is checked against jax-gcm's
-    source of truth for it: SPEEDY's against the diagnostics template SPEEDY
-    physics builds, ECHAM's against the ``provides`` declaration on its
-    surface term.
-    """
-    assert exchange_fields.SPEEDY_SURFACE_KEY in speedy_diagnostics, (
-        f"SPEEDY physics no longer writes {exchange_fields.SPEEDY_SURFACE_KEY!r}"
-        f" (it writes {sorted(speedy_diagnostics)}); JAX-ESM supports jax-gcm"
-        f" at {JCM_SUPPORTED_REV}. exchange_fields.detect() would fall through"
-        " to its KeyError on every SPEEDY run."
-    )
-    assert exchange_fields.ECHAM_SURFACE_KEY in EchamSurface.provides, (
-        "The ECHAM surface term no longer provides"
-        f" {exchange_fields.ECHAM_SURFACE_KEY!r} (it provides"
-        f" {EchamSurface.provides}); JAX-ESM supports jax-gcm at"
-        f" {JCM_SUPPORTED_REV}. exchange_fields.detect() would no longer"
-        " recognise an ECHAM run."
-    )
 
 
 def test_workflow_pins_the_supported_revision():

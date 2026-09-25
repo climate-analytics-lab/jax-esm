@@ -39,13 +39,16 @@ would later store, which both cost a full model step per run and started
 the atmosphere one interval ahead of the coupler's clock.
 
 Every JCM *attribute* this wrapper touches is public at the pinned revision
-(``jem.components.jcm.contract``), apart from the underscore-prefixed
-diagnostics keys the surface exchange reads (jax-gcm#754 is the issue that
-will publish the same surface-exchange struct from every physics package).
-That is why the initial state comes from ``bootstrap_state``'s return value
-and a stacked prediction is repaired with ``ModelPredictions.with_context``:
-an adapter that reached into JCM's internals would break on a JCM refactor
-that broke nothing else.
+(``jem.components.jcm.contract``), apart from one underscore-prefixed
+diagnostics key: SPEEDY's private ``_surface_flux.u0``/``.v0``, which
+``jem.components.jcm.exchange_fields`` still reads directly for the
+near-surface wind *vector* jax-gcm#754's package-independent contract does
+not publish (see that module's docstring). Every other field of the surface
+exchange comes from the published ``diagnostics["surface_exchange"]``
+struct. That is why the initial state comes from ``bootstrap_state``'s
+return value and a stacked prediction is repaired with
+``ModelPredictions.with_context``: an adapter that reached into JCM's
+internals would break on a JCM refactor that broke nothing else.
 """
 
 from __future__ import annotations
@@ -571,7 +574,7 @@ class JCMComponent:
         # trajectory has a length-1 leading axis; the derived fields are
         # per-step maps, not trajectories.
         diagnostics = jax.tree.map(lambda leaf: leaf[0], predictions.physics)
-        exchange = exchange_fields.detect(diagnostics)(diagnostics)
+        exchange = exchange_fields.from_diagnostics(diagnostics)
         # ``tree_math.struct`` builds the dataclass at runtime, so mypy
         # cannot see the generated __init__ signature.
         derived = JCMDerived(  # type: ignore[call-arg]

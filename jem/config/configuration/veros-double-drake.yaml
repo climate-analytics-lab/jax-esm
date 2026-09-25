@@ -41,6 +41,17 @@
 #    cycle. `forcing@atmosphere.forcing=from_file` gives a PRESCRIBED land
 #    surface instead (declare in `coupling.exchanged_forcing` any field an
 #    exchanger also writes, as this configuration already does for the SST).
+#    A user following this override also has to set `atmosphere.forcing.file`
+#    AND, in most cases, `atmosphere.forcing.align` explicitly (jax-gcm#884,
+#    jax-gcm PR 877): `forcing.align` defaults to `auto`, which resolves ONLY
+#    a jax-gcm data-mirror or packaged product (from the kind its manifest
+#    records) and RAISES for any other file, naming the knob -- a one-year
+#    transient archive and a monthly climatology have identical timestamps,
+#    so jax-gcm does not guess which one a user's own file is. Pointing
+#    `atmosphere.forcing.file` at jax-gcm's OWN packaged T30 climatology
+#    (`${jcm_data:bc/t30/clim/forcing.nc}`, the same file `+configuration=
+#    earth-slab` uses) needs no `align` -- it resolves via the manifest, like
+#    `earth-slab`'s forcing does. Any other file does.
 #    A RESPONDING one is not available here: composing `land=slab_speedy`
 #    would build and step a land model, but a hand-written
 #    `coupling.exchanger` replaces the declarative table entirely and

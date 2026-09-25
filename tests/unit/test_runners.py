@@ -541,6 +541,53 @@ def test_earth_slab_couples_its_file_forcing(caplog):
     assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
 
 
+def test_forcing_align_auto_raises_for_an_undeclared_user_file():
+    """jax-gcm#884 (PR 877): `auto` no longer infers a file's kind, ever.
+
+    `earth-slab`'s own forcing file resolves under `auto` because it is
+    jax-gcm's packaged T30 climatology, which the data-mirror manifest
+    records as `alignment: climatology` (see the previous test and
+    `jem/components/jcm/contract.py`'s note on jax-gcm#884). This test is the
+    other half: a *user's* file -- anything the manifest does not
+    recognise -- must raise jax-gcm's own named error rather than silently
+    guessing, so a user who copies `+configuration=veros-double-drake
+    forcing@atmosphere.forcing=from_file` (as its own comment documents) and
+    points `atmosphere.forcing.file` at their own archive is told to declare
+    `atmosphere.forcing.align` explicitly, not handed a silently mis-phased
+    forcing.
+
+    The file used here does not need to exist or even be a real netCDF: the
+    manifest lookup (`jcm.data.input_resolution.manifest_alignment_for_paths`)
+    only pattern-matches the *path*, and `resolve_align` raises before
+    jax-gcm ever tries to open it.
+    """
+    cfg = composed([
+        "+configuration=veros-double-drake",
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jem_data:terrain_double_drake_T31.nc}",
+    ])
+    with pytest.raises(ValueError, match="forcing.align=auto cannot resolve"):
+        runners.build_atmosphere(cfg)
+
+
+def test_forcing_align_auto_resolves_jcms_own_packaged_climatology():
+    """The positive case for the same rule: a manifest-known file needs no align.
+
+    Pointing the SAME `from_file` override at jax-gcm's own packaged T30
+    climatology (`${jcm_data:bc/t30/clim/forcing.nc}`, the file
+    `+configuration=earth-slab` uses) resolves under `auto` with no
+    `atmosphere.forcing.align` override -- proving the failure above is about
+    the file, not about composing `from_file` onto a Veros configuration.
+    """
+    cfg = composed([
+        "+configuration=veros-double-drake",
+        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
+    ])
+    atm = runners.build_atmosphere(cfg)
+    assert atm.forcing is not None
+
+
 def test_an_unexchanged_climatology_stays_a_climatology():
     """With no land model nothing supplies the land surface, so it keeps varying.
 

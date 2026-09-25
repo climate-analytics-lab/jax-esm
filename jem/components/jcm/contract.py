@@ -22,9 +22,25 @@ the CI workflow checks out is this one, so the pin and the workflow cannot
 drift apart.
 
 Why a ``dev`` revision rather than a release
---------------------------------------------
-``JCM_SUPPORTED_REV`` is jax-gcm ``dev`` as it stood on 2026-09-21, and carries
-four things JAX-ESM is written against:
+-------------------------------------------
+``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **877**,
+``46eb3fc1efc3d16fde5458736d80a3491698f3ed``. jax-gcm has no 3.x tag yet --
+``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
+``dev`` sha is the most precise thing there is to name. It is the merge
+commit itself rather than whatever ``dev`` happened to be at bump time,
+because later, unrelated ``dev`` commits are not revisions this branch has
+been checked against.
+
+PR 877 closes jax-gcm#754 (the package-independent ``SurfaceExchange``
+coupling struct every physics package now publishes identically), #301
+(prescribed surface fluxes) and #884 (the declared forcing-alignment rule,
+``jcm.forcing.resolve_align``) -- the first and last of which this revision
+of JAX-ESM is written against (``jem/components/jcm/exchange_fields.py`` and
+the ``forcing.align`` knobs in ``jem/config/configuration/*.yaml``).
+
+The revision this pin replaced was jax-gcm ``dev`` as it stood on
+2026-09-21, and carried four things JAX-ESM was written against (all still
+true here, since PR 877 was merged on top of that ``dev`` commit):
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
@@ -52,7 +68,20 @@ four things JAX-ESM is written against:
   coupled step (:mod:`jem.components.jcm.component`), and that call resolves
   the public name internally, not the alias. JEM ships no such override
   today; a perpetual-season (frozen seasonal cycle) hook, which would be
-  exactly this pattern, is tracked as jax-esm#120.
+  exactly this pattern, is tracked as jax-esm#120;
+* **#754/#301/#884 (PR 877 itself)** -- the package-independent
+  ``SurfaceExchange`` coupling struct, published identically under
+  ``diagnostics["surface_exchange"]`` by every physics package that resolves
+  a surface (SPEEDY, ECHAM; Held-Suarez opts out), replacing the per-package
+  private-diagnostics readers ``jem/components/jcm/exchange_fields.py`` used
+  to carry (git history, commit 756cc2c has the old readers). Also #884, the
+  declared forcing-alignment rule (``jcm.forcing.resolve_align``): ``auto``
+  no longer infers climatology-vs-transient from a file's time axis, so a
+  from-file atmosphere-forcing configuration must either point at a
+  mirror/packaged product (whose kind the manifest records) or declare
+  ``forcing.align`` explicitly -- see the ``forcing.align`` comments in
+  ``jem/config/configuration/{earth-slab,veros-double-drake,veros-earth}
+  .yaml``.
 
 jax-gcm reports ``3.0.0rc1`` here -- its first 3.0 release candidate -- but the
 tag is not cut, so a commit sha is still what is pinned. The ``jcm>=3.0.0rc1``
@@ -73,17 +102,26 @@ How to bump the pin
 
 When a tagged jax-gcm release finally contains all of the above, replace the
 sha with the tag and raise the ``pyproject.toml`` floor to match.
+
+Always pin to the ``dev`` commit that *contains* the change JAX-ESM needs,
+not to whatever ``dev`` happens to be at the time of the bump: the tip may
+carry unrelated commits this branch has never been run against.
 """
 
 from __future__ import annotations
 
 from typing import NamedTuple
 
-#: The jax-gcm revision JAX-ESM is developed, tested and supported against:
-#: ``dev`` as of 2026-09-21. The full 40-character sha, not an abbreviation,
-#: because that is what ``actions/checkout`` needs and what ``git rev-parse``
-#: in a jax-gcm checkout can be compared against directly.
-JCM_SUPPORTED_REV = "9e399ab2840bb02eff3a5ea60a86072ab37da495"
+#: The jax-gcm revision JAX-ESM is developed, tested and supported against.
+#: The full 40-character sha, not an abbreviation, because that is what
+#: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
+#: can be compared against directly.
+#:
+#: This is jax-gcm ``dev`` at the merge of PR 877 on 2026-09-23
+#: (``feat(coupling): surface-exchange contract + forced-flux mode``), which
+#: closes jax-gcm#754, #301 and #884 -- see "Why a ``dev`` revision rather
+#: than a release" above.
+JCM_SUPPORTED_REV = "46eb3fc1efc3d16fde5458736d80a3491698f3ed"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -382,37 +420,59 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     # diagnostics dict.
     # ------------------------------------------------------------------
     IntegrationPoint(
-        "speedy", "_surface_flux.hfluxn", "diagnostics",
-        "Net surface heat flux, W m-2, downward-positive in jax-gcm; negated"
-        " at the component boundary to JAX-ESM's upward-positive convention.",
-    ),
-    IntegrationPoint(
-        "speedy", "_surface_flux.evap", "diagnostics",
-        "Evaporation, g m-2 s-1 upward; converted to kg m-2 s-1.",
-    ),
-    IntegrationPoint(
         "speedy", "_surface_flux.u0", "diagnostics",
-        "Near-surface zonal wind, m s-1, exchanged with surface components.",
+        "Near-surface zonal wind, m s-1: SPEEDY's private, non-contract"
+        " wind VECTOR (an artefact of its bulk-formula surface"
+        " extrapolation), which jem.components.jcm.exchange_fields still"
+        " reads directly because jax-gcm's #754 surface-exchange contract"
+        " publishes only the scalar wind_speed, not a vector -- see that"
+        " module's docstring. Feeds jem.fluxes.bulk_wind_stress via"
+        " JCMDerived.u0.",
     ),
     IntegrationPoint(
         "speedy", "_surface_flux.v0", "diagnostics",
-        "Near-surface meridional wind, m s-1.",
+        "Near-surface meridional wind, m s-1; same note as _surface_flux.u0.",
     ),
     IntegrationPoint(
-        "speedy", "_convection.precnv", "diagnostics",
-        "Convective precipitation, g m-2 s-1 downward; half of the total"
-        " precipitation JAX-ESM exchanges.",
+        "surface_exchange", "net_heat_flux", "diagnostics",
+        "Net downward heat flux into the surface, W m-2 (jax-gcm#754's"
+        " package-independent SurfaceExchange struct, published identically"
+        " by every physics package under diagnostics['surface_exchange']);"
+        " negated at the component boundary to JAX-ESM's upward-positive"
+        " convention. Checked directly against"
+        " jcm.physics.surface.surface_exchange.SurfaceExchange's own field"
+        " names -- unlike the SPEEDY-only diagnostics above, this needs no"
+        " model build, because the struct is the same for every package.",
     ),
     IntegrationPoint(
-        "speedy", "_condensation.precls", "diagnostics",
-        "Large-scale precipitation, g m-2 s-1 downward; the other half.",
+        "surface_exchange", "evaporation", "diagnostics",
+        "Evaporation, kg m-2 s-1 upward -- already JAX-ESM's units, unlike"
+        " the pre-#754 per-package diagnostics this contract superseded.",
     ),
     IntegrationPoint(
-        "jcm.physics.surface.echam.surface_physics.EchamSurface", "provides",
+        "surface_exchange", "precipitation", "diagnostics",
+        "Total precipitation (convective + large-scale/stratiform),"
+        " kg m-2 s-1 downward -- already the total, computed once by the"
+        " publisher; JAX-ESM no longer assembles it from two separate"
+        " per-package diagnostics entries.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.surface.surface_exchange", "surface_exchange_from",
         "public",
-        "jax-gcm's own declaration that the ECHAM surface term writes the"
-        " 'surface' diagnostics key -- the key exchange_fields.detect uses to"
-        " tell an ECHAM run from a SPEEDY one.",
+        "The single, package-independent surface-exchange reader"
+        " (jax-gcm#754/#301): jem.components.jcm.exchange_fields."
+        "from_diagnostics is a thin sign/unit translation on top of this,"
+        " replacing the old per-package speedy()/echam()/detect() readers.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.composable_physics.ComposablePhysics",
+        "require_surface_exchange", "public",
+        "Composition-time check that the composed physics package publishes"
+        " the surface-exchange struct, called from"
+        " jem.runners.build_atmosphere right after the model is built --"
+        " so a package that cannot publish (Held-Suarez, which resolves no"
+        " surface fluxes) fails at composition with a named error, not at"
+        " the first coupled step.",
     ),
     # ------------------------------------------------------------------
     # Package data. Shipped inside the `jcm` wheel, so it is reachable with

@@ -1594,15 +1594,25 @@ which is what makes it possible to decide whether an entry may be deleted.
 so a jax-gcm rename fails as "jax-gcm renamed or removed X, which JAX-ESM used
 for Y, at revision Z" — at the cheapest possible moment, rather than mid-run.
 The pin is a `dev` sha because no tagged jax-gcm release carries the changes
-JAX-ESM is written against — #750's one run schema and `configuration` group,
+JAX-ESM is written against. It is the `dev` commit that merged jax-gcm PR 877
+(`46eb3fc1`) — the merge commit itself rather than whatever `dev` was at bump
+time, since later unrelated `dev` commits have not been checked against this
+code. That revision carries #750's one run schema and `configuration` group,
 #763's input-resolution engine, #819's removal of jax-gcm's own logging
-configuration and #824's public resumable state and date conversion;
-`pyproject.toml`'s `jcm>=3.0.0rc1` is the loosest true statement of the same
-thing, since jax-gcm bumps its version only at release. Every required CI job
-checks that revision out through a workflow-level `JCM_REV`, which the test
-asserts equals `JCM_SUPPORTED_REV`, and a non-blocking `canary-jcm-dev` job
-keeps tracking `dev` so drift stays visible without blocking a pull request.
-`contract.py`'s docstring is the procedure for bumping the pin.
+configuration and #824's public resumable state and date conversion, plus PR
+877's own two changes: jax-gcm#754, the package-independent `SurfaceExchange`
+struct (see "The JCM adapter" below), and #884's declared forcing-alignment
+rule. Under that rule, `jcm.forcing.resolve_align`'s `auto` no longer infers
+climatology-vs-transient from a file's time axis, and raises for any file it
+cannot resolve from jax-gcm's own data-mirror manifest — see the
+`forcing.align` comments in `jem/config/configuration/{earth-slab,
+veros-double-drake,veros-earth}.yaml`. `pyproject.toml`'s `jcm>=3.0.0rc1` is the
+loosest true statement of the version, since jax-gcm bumps its version string
+only at release. Every required CI job checks that revision out through a
+workflow-level `JCM_REV`, which the test asserts equals `JCM_SUPPORTED_REV`,
+and a non-blocking `canary-jcm-dev` job keeps tracking `dev` so drift stays
+visible without blocking a pull request. `contract.py`'s docstring is the
+procedure for bumping the pin.
 
 ## The JCM adapter
 
@@ -1629,22 +1639,53 @@ both `save_interval` and `total_time`, so JCM sub-steps internally at its own
 timestep and returns exactly one saved record per coupling step, then reads the
 surface exchange out of the returned physics diagnostics.
 
-That read is isolated in `jem/components/jcm/exchange_fields.py`, which is the
-single place JCM's package-specific diagnostics layout is translated into JEM's
-conventions — heat flux **positive upward** (JCM publishes `hfluxn` downward
-positive, so it is negated exactly here), water fluxes in `kg m-2 s-1` (JCM's
-SPEEDY reports `g m-2 s-1`), wind in `m s-1`. `detect()` picks the reader from
-the diagnostics keys; the ECHAM reader raises `NotImplementedError` naming
-jax-gcm#754, the issue that will have every JCM physics package publish the same
-surface-exchange struct.
+That read is isolated in `jem/components/jcm/exchange_fields.py`, which since
+jax-gcm#754 (PR 877) is a single reader,
+`from_diagnostics()`, off jax-gcm's own package-independent
+`diagnostics["surface_exchange"]` struct — published identically by every
+physics package that resolves a surface (SPEEDY, ECHAM; Held-Suarez opts out).
+It replaces the pre-#754 `speedy()`/`echam()`/`detect()` readers (git history,
+commit `756cc2c`), which reached into each package's own private diagnostics
+by hand and could not build a struct for ECHAM at all — its reader always
+raised `NotImplementedError`. Translating jax-gcm's contract to JEM's
+conventions is now a two-line sign flip and nothing else: heat flux
+**positive upward** (jax-gcm's `net_heat_flux` is positive *down*, so it is
+negated exactly here), while `evaporation`/`precipitation` and wind need no
+unit conversion any more — the published contract is already `kg m-2 s-1` and
+already the convective+large-scale/stratiform total, computed once by the
+publisher rather than assembled here from two package-specific diagnostics
+entries. The module's own docstring has the full field-by-field derivation and
+the evidence for it (verified against a real SPEEDY step, not just read off
+the source).
+
+One package-specific read remains, and is not expected to go away with a
+mechanical jax-gcm update: jax-gcm's contract publishes only the *scalar*
+`wind_speed`, never a near-surface wind *vector*, so
+`jem.fluxes.bulk_wind_stress` (the independent bulk-drag law
+`jem.fluxes.VerosExchange` applies for a Veros ocean) still reads SPEEDY's
+private `_surface_flux.u0`/`.v0` directly. ECHAM has no wind vector anywhere
+in its own diagnostics either (its boundary layer scheme diagnoses only a
+speed), so this is not a regression from the #754 collapse — it predates it,
+and is the reason the pre-#754 `echam()` reader could never have supplied a
+wind vector either, even if it had had a heat/water struct to read.
+
+The consequence is wider than the Veros exchanger, though. `from_diagnostics`
+reads the wind *eagerly*, and `JCMComponent.step()` calls it on every coupled
+step to fill `JCMDerived.u0`/`.v0`. So **no ECHAM-composed coupled model can
+complete a step, whatever it is coupled to** — a slab ocean as much as Veros.
+ECHAM *publishes* the grid-mean heat and water fluxes; it is the wind read
+that fails. Every shipped JAX-ESM configuration composes SPEEDY, so nothing
+shipped is affected. Making the wind optional — through `JCMDerived`, the
+coupled carry and the output — is tracked in jax-esm#129.
 
 Every JCM *attribute* the wrapper touches is public at the pinned revision,
-apart from the underscore-prefixed diagnostics keys the surface exchange reads
-(jax-gcm#754, above): the initial state and physics carry are the pair
-`Model.bootstrap_state()` returns, and a stacked `ModelPredictions` is repaired
-with `ModelPredictions.with_context(model)`. jax-gcm#824 is what made both
-public, and each is a `JCM_INTEGRATION_POINTS` entry, so a JCM refactor that
-moved one fails the contract test by name instead of inside somebody's run.
+apart from that one underscore-prefixed diagnostics key
+(`_surface_flux.u0`/`.v0`, above): the initial state and physics carry are the
+pair `Model.bootstrap_state()` returns, and a stacked `ModelPredictions` is
+repaired with `ModelPredictions.with_context(model)`. jax-gcm#824 is what made
+both public, and each is a `JCM_INTEGRATION_POINTS` entry, so a JCM refactor
+that moved one fails the contract test by name instead of inside somebody's
+run.
 The same state and carry are also installed on the model as
 `Model.dycore_state` / `Model.physics_carry`; the wrapper takes them from
 `bootstrap_state`'s return value and never reads those attributes, so they are
