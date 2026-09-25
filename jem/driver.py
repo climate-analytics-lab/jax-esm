@@ -896,11 +896,28 @@ def _max_element_rate(coupler: Any) -> int:
     step * m + call``, which is what overflows before the coupled step
     counter itself does whenever ``m > 1``).
 
-    This is exactly what bounds every RAW step/substep counter in the
-    coupled hierarchy against int32, independent of calendar: a component
-    run ``n`` times ``r`` levels of nesting deep sees a counter that grows
-    ``n`` times faster than the outermost coupled step, so ``n`` times fewer
-    outer steps are safe.
+    This is exactly what bounds every raw step/substep counter **the coupler
+    hierarchy itself owns** against int32, independent of calendar: a
+    component run ``n`` times ``r`` levels of nesting deep sees a counter
+    that grows ``n`` times faster than the outermost coupled step, so ``n``
+    times fewer outer steps are safe.
+
+    **Scope: the coupler hierarchy, not a component's own internals.** This
+    walks ``coupler.multiplicities()`` and nested ``Coupler``s -- the
+    workflow structure JEM itself builds and owns. A component can keep raw
+    counters of its own that this function has no way to see: a private
+    step field in its carry, sub-cycled some number of times per coupled
+    step for reasons internal to that component (not expressed as a JEM
+    workflow multiplicity or a nested ``Coupler``). Such a counter is not
+    covered by this rate, by :func:`_max_safe_coupled_steps`, or by
+    :func:`_check_step_counters_fit_int32` -- keeping its own raw counters
+    int32-safe is that component's own responsibility, the same way keeping
+    its own physics numerically stable is. (2026-09 review, round 3, finding
+    7: an earlier version of this docstring read as if this rate bounded
+    *every* counter anywhere in a run, which is not true of a component's
+    private ones -- see e.g. ``jem.components.jcm.component
+    ._report_authoritative_clock_drift``'s own docstring for a concrete
+    example this module intentionally does not know about.)
 
     Parameters
     ----------
@@ -1063,6 +1080,10 @@ def _check_step_counters_fit_int32(
     24x6x5 coupler resumed at coupled step 1,000,000, even though its true
     last step was still well inside the limit (2026-09 review, round 3,
     finding 1; ``rr/c5.py``).
+
+    Like :func:`_max_element_rate`, this covers only the counters the
+    coupler hierarchy itself owns (see that function's own **Scope** note)
+    -- not a counter private to one component's own implementation.
 
     Parameters
     ----------

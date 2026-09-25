@@ -857,6 +857,31 @@ class JCMComponent:
         Reported rather than raised, and through ``jax.debug.callback`` for
         the same reason as :meth:`_report_clock_drift` -- this runs inside
         the coupled ``lax.scan``.
+
+        **A known gap this component's own, not the coupler's.**
+        ``expected_step`` below is ``time.step * self._inner_steps()`` -- a
+        raw int32 product of the *coupled* step and this component's own,
+        finer JCM-timestep count, which is exactly the shape of counter
+        :func:`jem.driver._max_element_rate` bounds for a workflow
+        multiplicity or a nested ``Coupler`` -- but this one is neither: it
+        (and JCM's own ``RunState.step``, threaded through this component's
+        carry every call) is private to this component's own implementation,
+        invisible to ``jem.driver``'s int32 checks by design (its own
+        **Scope** note: a component's private counters are its own
+        responsibility, and the driver is deliberately kept ignorant of any
+        one component's internals, JCM's included). For a representative
+        daily coupling timestep against JCM's own default ~30-minute physics
+        timestep (``self._inner_steps() == 48``), ``expected_step`` itself
+        wraps at a coupled step count of about ``2**31 / 48``, roughly
+        122,000 simulated years -- thousands of times short of the coupler
+        hierarchy's own, much larger limit (:func:`jem.driver
+        ._max_safe_coupled_steps`) for the same configuration. Nothing in
+        this codebase currently refuses a run past this JCM-internal bound;
+        it is a real, currently-unprotected limit of this component
+        specifically (2026-09 review, round 3, finding 7), not fixed here
+        since it would need either a check added to this wrapper (comparing
+        against JCM's own int32 range) or an upstream change in jax-gcm
+        itself, neither of which this review round asked for.
         """
         expected_step = time.step * self._inner_steps()
         record_seconds = round(time.dt)
