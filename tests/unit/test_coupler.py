@@ -443,6 +443,65 @@ def test_year_fraction_uses_the_exact_gregorian_year_length():
     )
 
 
+def test_year_fraction_stays_below_one_at_a_leap_years_last_second():
+    """The documented ``[0, 1)`` range must hold even a second before New Year.
+
+    ``2000-12-31T23:59:59`` on ``"gregorian"``, one second before a leap
+    year ends, is the float32 edge case this range promise cannot naively
+    keep: the exact fraction is ``(365*86400 + 86399) / (366*86400)``, which
+    is ``1`` short of exactly ``1`` by only ``1 / (366*86400)`` -- well under
+    float32's own precision at 1.0 (ULP ``2**-24``), so the *correctly
+    rounded* float32 value of that exact fraction is ``1.0`` itself. No
+    amount of reordering the arithmetic changes that (this is a
+    representable-range limit, not a computation bug), so ``year_fraction``
+    clamps against it explicitly.
+    """
+    coupler = Coupler(
+        {"clock": ClockWatcher()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime("2000-12-31T23:59:59"),
+        calendar="gregorian",
+    )
+    fraction = coupler.coupling_time(0).year_fraction
+    assert fraction.dtype == jnp.float32
+    assert float(fraction) < 1.0
+    # Still (to float32 precision) the instant it actually is -- clamping
+    # must not visibly move a value that was never going to round to 1.0.
+    assert float(fraction) == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    "start", ["1900-02-15", "2000-02-29", "2000-12-31", "2100-03-01"]
+)
+def test_year_fraction_matches_jcm_date_across_century_years(start):
+    """Cross-check against ``jcm.date.fraction_of_year_elapsed`` directly.
+
+    1900 and 2100 are Gregorian centuries that are NOT leap years (divisible
+    by 100 but not 400); 2000 is a century that IS one (divisible by 400).
+    ``2000-02-29`` only exists because 2000 is leap, and is itself the exact
+    date a wrong century rule would get wrong.
+    """
+    jcm_date = pytest.importorskip(
+        "jcm.date", reason="jax-gcm not installed; only the jem-internal checks apply"
+    )
+    coupler = Coupler(
+        {"clock": ClockWatcher()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=jdt.to_datetime(start),
+        calendar="gregorian",
+    )
+    for step in range(0, 40, 7):  # a handful of steps, spanning several weeks
+        time = coupler.coupling_time(step)
+        got = float(time.year_fraction)
+        want = float(
+            jcm_date.fraction_of_year_elapsed(
+                jdt.to_datetime(start) + coupler.coupling_timestep * step
+            )
+        )
+        assert got == pytest.approx(want, abs=1e-6), (start, step)
+        assert 0.0 <= got < 1.0
+
+
 def test_clock_facts_are_exposed():
     # Explicit calendar: this test is about the specific 365-day numbers
     # (`days_per_year == 365.0` exactly), not about the coupler's own default

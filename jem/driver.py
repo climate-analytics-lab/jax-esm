@@ -841,8 +841,14 @@ def _whole_steps(
 ) -> int:
     """Return ``duration`` as a whole number of coupled steps, or raise.
 
-    The duration is parsed on the *coupler's* calendar, so "1 year" is as long
-    as the atmosphere's year rather than as long as a Gregorian one.
+    The duration is parsed on the *coupler's own* calendar
+    (``jem.base.component.parse_duration_days`` /
+    ``jem.base.component.days_per_year``), which for ``"gregorian"`` -- the
+    coupler's own default, and the only calendar a real atmosphere accepts --
+    is JEM's own fixed-average year, ``365.2425`` days: "1 year" is that many
+    days exactly, not the number of days whatever real calendar year the
+    run's own dates happen to fall in actually has (365 or 366). On
+    ``"365_day"`` it is ``365`` days flat, with no such distinction to draw.
     """
     days = float(parse_duration_days(duration, coupler.calendar))
     steps = days / coupling_days

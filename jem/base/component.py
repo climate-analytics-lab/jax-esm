@@ -510,6 +510,17 @@ class CouplingTime:
     def year_fraction(self) -> jax.Array:
         """Position in the annual cycle in ``[0, 1)`` at the *start* of this step.
 
+        The upper bound is enforced explicitly, not just arithmetically: an
+        instant a single second before a year boundary can be exactly ``1``
+        short of the excluded value by less than the array's own float32
+        precision at ``1.0`` (its ULP, ``2**-24``), so the correctly rounded
+        float32 result of the true, sub-``1`` fraction is ``1.0`` itself --
+        confirmed at ``2000-12-31T23:59:59`` on ``"gregorian"``. No
+        reordering of the arithmetic below avoids this (it is a
+        representable-range limit of the dtype, not a computation bug), so
+        the very end of this property clamps against it once, for both
+        branches.
+
         Zero is 00:00 on 1 January. This is what a monthly climatology is
         interpolated with (``jem.utils.cycles.evaluate_cyclic_linear``) -- the
         slab ocean's ``sst_climatology``/``q_flux``, the sea-ice model's
@@ -562,29 +573,49 @@ class CouplingTime:
         simulated time -- see the note in its own branch) still applies.
         """
         if self.days_per_year == 365.2425:
-            return self._gregorian_year_fraction()
-
-        steps_per_year = self.seconds_per_year / self.dt
-        if float(steps_per_year).is_integer():
-            # Precision note: `sim_time` is a float32 array unless x64 is
-            # enabled, and float32 resolves only ~7 digits, so after a
-            # century of simulated time (3e9 s) it is quantised to hundreds
-            # of seconds. When the coupling step divides the year exactly
-            # (the usual case: daily steps in a 365-day year) the step count
-            # is reduced modulo the steps per year in exact integer
-            # arithmetic first, so the fraction keeps full float32 precision
-            # (a few seconds) for runs of any length. Otherwise the seconds
-            # are used directly and precision degrades with run length.
-            seconds_into_year = self.year_offset_seconds + (
-                jnp.mod(self.step, int(steps_per_year)) * self.dt
-            )
+            fraction = self._gregorian_year_fraction()
         else:
-            seconds_into_year = self.year_offset_seconds + self.sim_time
-        # Reduce in seconds before dividing: the modulo of a quotient near 1.0
-        # keeps only the absolute float32 precision of that quotient (~1e-7),
-        # whereas the remainder in seconds is exact for whole-second steps and
-        # the division then has full relative precision.
-        return jnp.mod(seconds_into_year, self.seconds_per_year) / self.seconds_per_year
+            steps_per_year = self.seconds_per_year / self.dt
+            if float(steps_per_year).is_integer():
+                # Precision note: `sim_time` is a float32 array unless x64 is
+                # enabled, and float32 resolves only ~7 digits, so after a
+                # century of simulated time (3e9 s) it is quantised to hundreds
+                # of seconds. When the coupling step divides the year exactly
+                # (the usual case: daily steps in a 365-day year) the step count
+                # is reduced modulo the steps per year in exact integer
+                # arithmetic first, so the fraction keeps full float32 precision
+                # (a few seconds) for runs of any length. Otherwise the seconds
+                # are used directly and precision degrades with run length.
+                seconds_into_year = self.year_offset_seconds + (
+                    jnp.mod(self.step, int(steps_per_year)) * self.dt
+                )
+            else:
+                seconds_into_year = self.year_offset_seconds + self.sim_time
+            # Reduce in seconds before dividing: the modulo of a quotient near
+            # 1.0 keeps only the absolute float32 precision of that quotient
+            # (~1e-7), whereas the remainder in seconds is exact for
+            # whole-second steps and the division then has full relative
+            # precision.
+            fraction = (
+                jnp.mod(seconds_into_year, self.seconds_per_year)
+                / self.seconds_per_year
+            )
+        # Clamp against the one edge float32 (the dtype throughout, unless
+        # x64 is enabled) cannot represent: an instant a single second before
+        # a year boundary can be `< 1` by less than float32's own precision
+        # at 1.0 (ULP `2**-24`), so the CORRECTLY ROUNDED float32 value of
+        # the true fraction is `1.0` even though the exact fraction never
+        # reaches it (confirmed: `2000-12-31T23:59:59` on `"gregorian"`,
+        # `(365*86400 + 86399) / (366*86400)` is `1` short of `1` by
+        # `1 / (366*86400)`, well under half a ULP at 1.0). No reordering of
+        # the arithmetic above changes this -- it is a representable-range
+        # limit of the dtype, not a computation bug -- so it is clamped
+        # explicitly here, in the one place both branches return through,
+        # rather than chased separately in each. `nextafter` rather than a
+        # fixed epsilon so this is exact for the array's own dtype, float32
+        # or float64 alike.
+        one = jnp.asarray(1.0, dtype=fraction.dtype)
+        return jnp.minimum(fraction, jnp.nextafter(one, jnp.zeros_like(one)))
 
     def _gregorian_year_fraction(self) -> jax.Array:
         """Return the exact Gregorian ``year_fraction``; see that property.

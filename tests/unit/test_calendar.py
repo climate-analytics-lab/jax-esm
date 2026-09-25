@@ -5,7 +5,7 @@ rather than importing it (see that module's docstring for why), so the one
 thing this file must prove is that the vendored copy and the original never
 disagree -- and that both agree with an independent implementation
 (``pandas``'s own proleptic-Gregorian arithmetic), century leap-year rules
-included, over a run long enough to matter (jax-esm#907's review round asked
+included, over a run long enough to matter (jax-gcm#907's review round asked
 for at least 400 years: long enough to see three of the four `%100`
 non-leap centuries and the one `%400` exception that puts them back in).
 """

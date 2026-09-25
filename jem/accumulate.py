@@ -562,12 +562,16 @@ def _gregorian_month_rule(
 def _duration_to_seconds(duration: str | float, calendar: str, what: str) -> int:
     """Return ``duration`` as a whole positive number of seconds.
 
-    The duration is parsed on the *coupler's* calendar, so ``"1 year"`` is as
-    long as the model's year rather than as long as a Gregorian one, and is
-    must be a whole number of seconds: everything downstream of here is
-    integer arithmetic on seconds, because a float32 count of seconds since
-    the start of a run stops being exact within a few decades of simulated
-    time, and a fractional second is refused rather than rounded away.
+    The duration is parsed on the *coupler's own* calendar
+    (:func:`jem.base.component.parse_duration_days` /
+    :func:`jem.base.component.days_per_year`), which for ``"gregorian"`` is
+    JEM's own fixed-average year, ``365.2425`` days -- so ``"1 year"`` is
+    that many days exactly, not the number of days whatever real calendar
+    year the run's own dates happen to fall in actually has. It must also be
+    a whole number of seconds: everything downstream of here is integer
+    arithmetic on seconds, because a float32 count of seconds since the
+    start of a run stops being exact within a few decades of simulated time,
+    and a fractional second is refused rather than rounded away.
     """
     days = float(parse_duration_days(duration, calendar))
     seconds = _exact_seconds(days * _SECONDS_PER_DAY, f"{what}={duration!r}")
