@@ -427,13 +427,13 @@ def _midpoint_month_rule(
     accumulator's ``boundaries``, which extends the last one to the next
     whole coupled step, "by less than one step" -- a coupling step that does
     not itself divide a day exactly leaves a fractional day there). A
-    record's own midpoint is always *strictly* before ``period`` seconds (the
-    reduction above guarantees it), so its day can equal
-    ``floor(period / 86400)`` when the last boundary has a fractional day
-    left over -- rounding that boundary *up* instead keeps the record's day
-    strictly less than it, so ``searchsorted`` can never place a record past
-    the last valid bin (an off-by-one this function would otherwise commit
-    only in that specific edge case).
+    record's own midpoint, once reduced into ``[0, period)`` (see "Reducing
+    the phase" below), is always *strictly* before ``period`` seconds, so its
+    day can equal ``floor(period / 86400)`` when the last boundary has a
+    fractional day left over -- rounding that boundary *up* instead keeps the
+    record's day strictly less than it, so ``searchsorted`` can never place a
+    record past the last valid bin (an off-by-one this function would
+    otherwise commit only in that specific edge case).
 
     **The half-second floor.** ``record_seconds // 2`` truncates a
     midpoint's fractional half-second down for a record of odd length. Every
@@ -451,19 +451,44 @@ def _midpoint_month_rule(
     own start date sits in the pattern, added on top of every record's
     midpoint -- is not itself bounded by ``period``: a run starting midway
     through the pattern (a twelve-bin climatology starting any month but
-    January, or a sequential accumulator resumed partway through its span)
-    carries a nonzero, unreduced phase, and once ``record_mod`` climbs high
-    enough that ``record_mod * record_seconds + offset_seconds +
-    record_seconds // 2`` exceeds ``period``, the resulting ``day`` lands
-    past every entry in ``boundary_days`` even though ``record_mod`` itself
-    never left ``[0, records_per_period)``. ``bin_of_record`` must be total
-    (see :func:`_build_binned_mean`'s own docstring), so ``day`` is reduced
-    modulo ``period_days`` immediately before the ``searchsorted`` call, not
-    just ``record`` before it: this is exact, since ``gregorian_instant``'s
-    own decomposition already bounds ``day`` to a small, known multiple of
-    ``period_days`` (it is only ever asked to resolve one pattern's worth of
-    elapsed time, per the reduction above), well within int32 regardless of
-    how long the run itself runs.
+    January, or a sequential accumulator whose start date falls partway
+    through its own first bin) carries a nonzero, unreduced phase, and once
+    ``record_mod`` climbs high enough that ``record_mod * record_seconds +
+    offset_seconds + record_seconds // 2`` exceeds ``period``, the resulting
+    instant lands past every entry in ``boundary_days`` even though
+    ``record_mod`` itself never left ``[0, records_per_period)``.
+    ``bin_of_record`` must be total (see :func:`_build_binned_mean`'s own
+    docstring), so the instant is reduced back into ``[0, period)`` -- exact,
+    in true elapsed seconds, not merely in whole days -- before the
+    ``searchsorted`` call, not just ``record`` before it.
+
+    This reduction cannot be a plain ``day mod period_days``: ``period_days``
+    is ``period`` rounded **up** to a whole day (see above), so whenever
+    ``period`` itself is not a whole number of days (the sequential form's
+    own last boundary, again), a day that is genuinely past ``period`` --
+    but not yet past ``period_days`` -- would pass through unreduced, binned
+    into the pattern's last bin instead of wrapping into its first. Reducing
+    is instead done on the exact ``(day, second)`` pair ``gregorian_instant``
+    returns, against the period's own exact ``(period_days_exact,
+    period_extra_seconds) = divmod(period, 86400)``: the pair is past the
+    period exactly when
+    ``day > period_days_exact``, or ``day == period_days_exact`` and
+    ``second >= period_extra_seconds`` (the same comparison
+    ``day * 86400 + second >= period`` would make, since both ``second`` and
+    ``period_extra_seconds`` are proper seconds-of-day residues in
+    ``[0, 86400)``); when it is, subtracting ``period_days_exact`` days (and,
+    if ``second`` alone is short of ``period_extra_seconds``, one further day
+    borrowed the way any day/second subtraction borrows) leaves the exact
+    remainder. Only ``day`` is needed afterwards -- ``second`` never enters
+    ``searchsorted`` -- so the borrow only has to correct ``day``, not
+    reconstruct ``second`` too. A single such reduction is exact because the
+    unreduced instant is bounded to less than two periods: ``record_mod``'s
+    own contribution is already strictly less than one period (the reduction
+    above guarantees it), and every caller's ``offset_seconds`` is itself
+    less than one period (:func:`monthly_mean`'s own construction of both the
+    climatology and the sequential forms), so their sum is bounded by ``2 *
+    period`` regardless of how long the run's pattern spans or how far into
+    it the run starts.
 
     """
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
@@ -474,7 +499,13 @@ def _midpoint_month_rule(
     # `boundaries_int32` (SECONDS) array this replaces, which is what
     # overflowed for a multi-decade sequential accumulator.
     boundary_days = jnp.asarray(-(-boundaries // _SECONDS_PER_DAY), dtype=jnp.int32)
-    period_days = int(boundary_days[-1])
+    # The period's own exact length as a (whole days, remaining seconds)
+    # pair -- unlike `boundary_days[-1]` (`period` rounded UP to a whole
+    # day), this is `period` itself, unrounded, and is what an instant is
+    # actually reduced against below; see the "Reducing the phase" Notes
+    # above for why the two are not interchangeable whenever `period` is not
+    # itself a whole number of days.
+    period_days_exact, period_extra_seconds = divmod(period, _SECONDS_PER_DAY)
 
     def bin_of_record(record: jnp.ndarray, record_seconds: int) -> jnp.ndarray:
         records_per_period, remainder = divmod(period, record_seconds)
@@ -508,7 +539,7 @@ def _midpoint_month_rule(
                 "long, or its records too long, to bin exactly."
             )
         record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
-        day, _ = gregorian_instant(
+        day, second = gregorian_instant(
             record_mod, record_seconds, 0, 0,
             offset_seconds=offset_seconds + record_seconds // 2,
         )
@@ -519,19 +550,36 @@ def _midpoint_month_rule(
         # offset_seconds + record_seconds // 2` can therefore reach past
         # `period` even though `record_mod` itself never does (a run
         # starting mid-year, once it reaches the months before its own start
-        # date again). `day` is then past every real boundary in
+        # date again). The instant is then past every real boundary in
         # `boundary_days`, and `searchsorted` returns the one index past the
         # table's end -- silently dropped by the accumulator's `.at[].add`
         # rather than landing in any of its bins (see `_build_binned_mean`'s
-        # own docstring on why `bin_of_record` must be total). Reducing `day`
-        # by the pattern's own length in days brings it back into the table
-        # regardless of how far the phase alone would have pushed it, and is
-        # exact: `record_mod`'s own contribution is already strictly less
-        # than one period in seconds, so the day this reduces is bounded
-        # (comfortably within int32, since `record_mod` itself was already
-        # checked against `gregorian_instant`'s own resolution above)
-        # regardless of how long the run's pattern spans.
-        day = jnp.mod(day, period_days)
+        # own docstring on why `bin_of_record` must be total).
+        #
+        # Reducing `day` alone by `period_days` (`boundary_days[-1]`, the
+        # pattern's length rounded UP to a whole day) is not exact whenever
+        # `period` itself is not a whole number of days: a `day` that is
+        # past the true `period` but not yet past its ceiling would pass
+        # through unwrapped. Comparing the exact `(day, second)` pair against
+        # the period's own exact `(period_days_exact, period_extra_seconds)`
+        # is what "past the period" actually means (the same comparison
+        # `day * 86400 + second >= period` would make, since both `second`
+        # and `period_extra_seconds` are proper seconds-of-day residues in
+        # `[0, 86400)`); only `day` is needed once that comparison is made,
+        # since `second` never reaches `searchsorted`, so the borrow below
+        # only has to correct `day`, not reconstruct `second` too. This is
+        # exact, not merely conservative, because the unreduced instant is
+        # bounded to less than two periods (see the Notes above), so at most
+        # one such reduction is ever needed.
+        needs_wrap = (day > period_days_exact) | (
+            (day == period_days_exact) & (second >= period_extra_seconds)
+        )
+        borrows_a_day = second < period_extra_seconds
+        day = jnp.where(
+            needs_wrap,
+            day - period_days_exact - jnp.where(borrows_a_day, 1, 0),
+            day,
+        )
         return jnp.searchsorted(boundary_days, day, side="right").astype(jnp.int32)
 
     return bin_of_record

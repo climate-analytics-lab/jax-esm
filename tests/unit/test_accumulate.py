@@ -677,6 +677,57 @@ def test_a_century_sequential_monthly_mean_is_exact_past_68_years(climatology_fi
     del new_sums  # only the bin placement is under test here
 
 
+@pytest.mark.parametrize(
+    "record_seconds, n_months, offset_days, offset_hours",
+    [
+        (262800, 5, 20, 1),   # 73 h records, 5 months: the period is 152 5/6 days
+        (262800, 1, 0, 0),
+        (262800, 7, 5, 3),
+        (216000, 5, 10, 0),   # 60 h records: the period is a whole number of days
+        (262800, 2, 25, 2),
+    ],
+)
+def test_midpoint_month_rule_matches_an_exact_seconds_reference_when_the_period_is_not_a_whole_day(
+    record_seconds, n_months, offset_days, offset_hours,
+):
+    """The sequential form's period need not be a whole number of days -- the reduction must still be exact.
+
+    Reducing a record's day count modulo ``period_days`` (the period rounded
+    UP to a whole day) is only correct when the period itself already is a
+    whole number of days: a 73 h coupling step's 5-month pattern is not (the
+    last boundary, extended to a whole step, leaves a period of 152 5/6
+    days), so a record whose day is past the true period but not yet past
+    its rounded-up ceiling would, under that reduction, land in the
+    pattern's last bin instead of wrapping into its first. Comparing against
+    the reference below -- ``searchsorted(boundaries, t % period,
+    side="right")`` computed in unbounded-precision Python seconds, with no
+    day/second decomposition to get subtly wrong -- catches exactly that.
+    """
+    seconds_per_day = 86400
+    offset_seconds = offset_days * seconds_per_day + offset_hours * 3600
+
+    month_seconds = np.asarray(month_lengths("365_day"), dtype=np.int64) * seconds_per_day
+    boundaries = np.cumsum([month_seconds[i % 12] for i in range(n_months)])
+    # `monthly_mean`'s own construction of a sequential accumulator's last
+    # boundary: extended up to the next whole coupled step (see
+    # `_midpoint_month_rule`'s own docstring), which is what leaves the
+    # period a fractional number of days for a record length that does not
+    # itself divide a day.
+    boundaries[-1] = -(-int(boundaries[-1]) // record_seconds) * record_seconds
+    period = int(boundaries[-1])
+
+    rule = _midpoint_month_rule(boundaries, offset_seconds)
+    records = np.arange(0, 40 * period // record_seconds, dtype=np.int64)
+    got = np.asarray(
+        jax.jit(lambda r: rule(r, record_seconds))(jnp.asarray(records, dtype=jnp.int32))
+    )
+
+    midpoints = records * record_seconds + offset_seconds + record_seconds // 2
+    expected = np.searchsorted(boundaries, midpoints % period, side="right")
+
+    np.testing.assert_array_equal(got, expected)
+
+
 def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve():
     """A pattern too long for its own record length is refused, not silently wrong.
 
