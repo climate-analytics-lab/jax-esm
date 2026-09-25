@@ -677,10 +677,10 @@ Breaking changes are marked; everything else is additive.
   collapse. See the module's docstring for the full field-by-field
   derivation, and the jax-esm#129 entry below for what changed since about
   the wind vector's absence.
-- **jax-esm#129: an ECHAM-composed coupled model can now complete a step.**
-  Immediately after the #754 collapse above, `from_diagnostics()` still read
-  the near-surface wind vector *eagerly*, and since ECHAM has none,
-  `JCMComponent.step()` raised `NotImplementedError` on the very first
+- **jax-esm#129: an ECHAM-composed coupled model can now complete a step**
+  (breaking). Immediately after the #754 collapse above, `from_diagnostics()`
+  still read the near-surface wind vector *eagerly*, and since ECHAM has
+  none, `JCMComponent.step()` raised `NotImplementedError` on the very first
   coupled step of every ECHAM configuration, whatever the exchanger — even
   one that never touches the wind at all. `from_diagnostics()` now returns
   `u0=None`/`v0=None` for such a package instead of raising, and
@@ -698,9 +698,21 @@ Breaking changes are marked; everything else is additive.
   `jem.runners._validate_exchangers` now calls at **composition time** — the
   same slot `ComposablePhysics.require_surface_exchange` already fills for
   the surface struct itself — so building a Veros-coupled model on a
-  windless atmosphere fails immediately, naming jax-esm#129, rather than
-  mid-run or with a silently wrong stress; `__call__` repeats the same check
-  for a hand-built `Coupler` that skips `_validate_exchangers`.
+  windless atmosphere fails immediately, naming the composed physics and
+  jax-esm#132 (choosing this exchanger's wind-stress source for a windless
+  atmosphere, not #129, which closes only the eager-read failure), rather
+  than mid-run or with a silently wrong stress; `__call__` repeats the same
+  check for a hand-built `Coupler` that skips `_validate_exchangers`.
+  **What breaks**: `JCMDerived.zeros()`'s two positional arguments are
+  swapped, `(shape, physics)` → `(physics, nodal_shape)` (a legacy call now
+  raises `TypeError` naming the new order, rather than failing opaquely
+  several calls deep) — `JCMDerived` is exported from
+  `jem.components.jcm`, so this is public API, not a private helper;
+  `JCMDerived.u0`/`.v0` and `SurfaceExchange.u0`/`.v0` are now
+  `jax.Array | None` rather than always an array; and `from_diagnostics()`
+  no longer raises `NotImplementedError` for a windless package — a caller
+  that relied on that raise to detect "no wind vector" must check
+  `is None` instead.
   Fixing #129 surfaced a second, independent bug that no fabricated-diagnostics
   test caught, only a real ECHAM model run: `ComposablePhysics(
   vectorize_columns=True)` (ECHAM) flattens the horizontal `(ix, il)` grid to
@@ -718,11 +730,11 @@ Breaking changes are marked; everything else is additive.
   `_unflatten_to_nodal_shape` helper — the exact inverse of jax-gcm's own
   flatten, mirroring the reshape `ComposablePhysics.data_struct_to_dict`
   already applies for xarray output — which is a no-op for SPEEDY and fixes
-  ECHAM; `JCMDerived.zeros()`'s signature is now `zeros(physics, nodal_shape,
-  **overrides)` (was `zeros(shape, physics, **overrides)`; `nodal_shape` still
-  means the atmosphere's own `(ix, il)`, but the arguments are reordered and
-  read differently now that `physics` alone also decides every field's
-  starting shape and whether `u0`/`v0` are `None`).
+  ECHAM (see `JCMDerived.zeros()`'s new signature under "What breaks" above).
+  It raises `ValueError`, naming the field and its shape, for anything that
+  is neither the flattened nor the gridded case, rather than passing an
+  unrecognised shape through silently to fail later as an opaque broadcast
+  error.
   A third, again real-model-only bug surfaced serializing that same run's
   output: ECHAM's aerosol diagnostics carry a per-species axis of length 0
   with no aerosol species configured (jax-gcm's own uncoupled `to_xarray`
@@ -736,6 +748,11 @@ Breaking changes are marked; everything else is additive.
   the save axis, which is always exactly 1) instead of inferred by `-1`,
   which needs no division and reshapes every non-zero-sized leaf (SPEEDY's
   included) exactly as before.
+  Code review also caught `JCMDerived.zeros()` giving `-0.0` (a distinct
+  float bit pattern from `+0.0`, invisible to `==`/`allclose`) wherever it
+  negates a template's `total_heat_flux`: it now canonicalises every field
+  to positive zero, restoring "SPEEDY's `zeros()` is bit-for-bit unchanged"
+  literally rather than only up to sign.
 - **`jem.runners.build_atmosphere` calls
   `model.physics.require_surface_exchange()`** right after building the
   atmosphere Model, so a physics package that cannot publish the

@@ -413,11 +413,16 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " revision, so its disappearance must be noticed here.",
     ),
     # ------------------------------------------------------------------
-    # Physics diagnostics. jax-gcm has no package-independent surface
-    # exchange contract yet (jax-gcm#754), so jem/components/jcm/
-    # exchange_fields.py reads each package's own struct. `target` is the
-    # physics package; `attribute` is the dotted path into one step's
-    # diagnostics dict.
+    # Physics diagnostics. jax-gcm#754 (closed by PR 877, this pin) publishes
+    # a package-independent SurfaceExchange contract every physics package
+    # that resolves a surface fills identically, which jem/components/jcm/
+    # exchange_fields.py's from_diagnostics() reads generically -- entered
+    # below as the "surface_exchange" IntegrationPoints further down. The one
+    # read that is still package-specific is the near-surface wind *vector*
+    # (the contract publishes only the scalar wind_speed): SPEEDY's private
+    # `_surface_flux.u0`/`.v0`, entered here. `target` is the physics
+    # package; `attribute` is the dotted path into one step's diagnostics
+    # dict.
     # ------------------------------------------------------------------
     IntegrationPoint(
         "speedy", "_surface_flux.u0", "diagnostics",

@@ -125,14 +125,14 @@ FORCING_VARIABLE_NAMES = (
 
 @overload
 def _unflatten_to_nodal_shape(
-    value: jnp.ndarray, nodal_shape: tuple[int, int]
+    value: jnp.ndarray, nodal_shape: tuple[int, int], field_name: str
 ) -> jnp.ndarray: ...
 @overload
 def _unflatten_to_nodal_shape(
-    value: None, nodal_shape: tuple[int, int]
+    value: None, nodal_shape: tuple[int, int], field_name: str
 ) -> None: ...
 def _unflatten_to_nodal_shape(
-    value: jnp.ndarray | None, nodal_shape: tuple[int, int]
+    value: jnp.ndarray | None, nodal_shape: tuple[int, int], field_name: str
 ) -> jnp.ndarray | None:
     """Reshape a column-vectorized ``(ncols,)`` field back to ``(ix, il)``.
 
@@ -184,6 +184,8 @@ def _unflatten_to_nodal_shape(
     nodal_shape : tuple of int
         The atmosphere's horizontal nodal shape, ``(ix, il)``
         (:attr:`JCMComponent.nodal_shape`).
+    field_name : str
+        The field's name, used only to name it in the error message below.
 
     Returns
     -------
@@ -192,13 +194,35 @@ def _unflatten_to_nodal_shape(
         ``(ncols,)`` array, else ``value`` unchanged (already ``(ix, il)``,
         as every SPEEDY field already is).
 
+    Raises
+    ------
+    ValueError
+        If ``value`` is neither shape ``(ncols,)`` (the column-vectorized
+        case this function exists to fix) nor already ``nodal_shape`` (the
+        SPEEDY case, a no-op) -- e.g. a future package publishing a
+        per-column field with an extra trailing axis, such as ``(ncols, 1)``.
+        Silently passing such a shape through, as the pre-review version of
+        this function did, would leave it to fail downstream as an opaque
+        broadcast error naming neither this field nor why it is malformed.
+
     """
     if value is None:
         return None
     ncols = nodal_shape[0] * nodal_shape[1]
+    if value.shape == nodal_shape:
+        return value
     if value.ndim == 1 and value.shape[0] == ncols:
         return value.reshape(nodal_shape)
-    return value
+    raise ValueError(
+        f"{field_name!r} has shape {value.shape}, which is neither the "
+        f"atmosphere's nodal shape {nodal_shape!r} nor a flattened "
+        f"(ncols,) = ({ncols},) column-vectorized field. "
+        "_unflatten_to_nodal_shape only knows how to reshape those two "
+        "cases (jax-esm#129); a physics package publishing surface exchange "
+        "on some other layout needs this function taught the new shape "
+        "explicitly, not a silent pass-through that fails later as an "
+        "opaque broadcast error."
+    )
 
 
 def _surface_exchange_on_nodal_grid(
@@ -215,11 +239,13 @@ def _surface_exchange_on_nodal_grid(
     exchange = exchange_fields.from_diagnostics(diagnostics)
     return exchange_fields.SurfaceExchange(
         total_heat_flux=_unflatten_to_nodal_shape(
-            exchange.total_heat_flux, nodal_shape),
-        evaporation=_unflatten_to_nodal_shape(exchange.evaporation, nodal_shape),
-        precipitation=_unflatten_to_nodal_shape(exchange.precipitation, nodal_shape),
-        u0=_unflatten_to_nodal_shape(exchange.u0, nodal_shape),
-        v0=_unflatten_to_nodal_shape(exchange.v0, nodal_shape),
+            exchange.total_heat_flux, nodal_shape, "total_heat_flux"),
+        evaporation=_unflatten_to_nodal_shape(
+            exchange.evaporation, nodal_shape, "evaporation"),
+        precipitation=_unflatten_to_nodal_shape(
+            exchange.precipitation, nodal_shape, "precipitation"),
+        u0=_unflatten_to_nodal_shape(exchange.u0, nodal_shape, "u0"),
+        v0=_unflatten_to_nodal_shape(exchange.v0, nodal_shape, "v0"),
     )
 
 
@@ -304,15 +330,47 @@ class JCMDerived:
         **overrides
             Named fields to use instead of the template-derived defaults.
 
+        Raises
+        ------
+        TypeError
+            If ``physics`` is a tuple -- the signature was ``zeros(shape,
+            physics, **overrides)`` before jax-esm#129 swapped the argument
+            order (and what the first one means); a legacy positional call
+            passes its old ``shape`` tuple where ``physics`` now goes, which
+            otherwise fails several calls deep, as an opaque ``TypeError:
+            tuple indices must be integers or slices, not str`` out of
+            ``exchange_fields.from_diagnostics``'s ``dict.get`` -- naming
+            neither this method nor the argument order that actually changed.
+
         """
+        if isinstance(physics, tuple):
+            raise TypeError(
+                "JCMDerived.zeros(physics, nodal_shape, **overrides) takes "
+                "the diagnostics template first and the atmosphere's nodal "
+                f"shape second; got a tuple ({physics!r}) as the first "
+                "argument. jax-esm#129 swapped both the order and the "
+                "meaning of zeros()'s first two arguments (it used to be "
+                "zeros(shape, physics, **overrides)) -- swap them at this "
+                "call site."
+            )
         exchange = _surface_exchange_on_nodal_grid(physics, nodal_shape)
+        # `zeros_like`, not the exchange's own values: `physics` is an
+        # all-zero template, so every field below is already mathematically
+        # zero, but `total_heat_flux = -net_heat_flux`'s negation turns a
+        # template's `+0.0` into `-0.0` (a distinct float bit pattern, code
+        # review finding) -- and a SPEEDY run's `zeros()` used to give `+0.0`
+        # unconditionally (`jnp.zeros(shape)`, no negation involved), so a
+        # signed zero here would be a real, if invisible, regression against
+        # the "SPEEDY bit-for-bit unchanged" guarantee. `zeros_like` keeps
+        # every field's shape (already put on `nodal_shape` above) and dtype
+        # while canonicalising the value to positive zero.
         defaults = {
-            "total_heat_flux": exchange.total_heat_flux,
-            "total_freshwater_flux": exchange.evaporation - exchange.precipitation,
-            "evaporation": exchange.evaporation,
-            "precipitation": exchange.precipitation,
-            "u0": exchange.u0,
-            "v0": exchange.v0,
+            "total_heat_flux": jnp.zeros_like(exchange.total_heat_flux),
+            "total_freshwater_flux": jnp.zeros_like(exchange.evaporation),
+            "evaporation": jnp.zeros_like(exchange.evaporation),
+            "precipitation": jnp.zeros_like(exchange.precipitation),
+            "u0": None if exchange.u0 is None else jnp.zeros_like(exchange.u0),
+            "v0": None if exchange.v0 is None else jnp.zeros_like(exchange.v0),
         }
         fields = {name: overrides.get(name, value) for name, value in defaults.items()}
         return cls(physics, **fields)

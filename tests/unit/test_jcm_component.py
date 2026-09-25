@@ -237,10 +237,9 @@ def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
     }
 
 
-def _fake_column_vectorized_echam_diagnostics(
-    net_heat_flux=7.0, evaporation=0.001, precipitation=0.004
-):
-    """Build a diagnostics dict shaped like a REAL ECHAM step's, not a fixture.
+def _fake_column_vectorized_echam_diagnostics():
+    """Build column-vectorized ECHAM diagnostics whose ``surface_exchange``
+    fields encode their own ``(lon, lat)`` index, not a uniform value.
 
     ``ComposablePhysics(vectorize_columns=True)`` (ECHAM) flattens the
     horizontal ``(ix, il)`` grid to a single ``ncols`` axis before iterating
@@ -254,23 +253,47 @@ def _fake_column_vectorized_echam_diagnostics(
     model (``tests/unit/test_coupled.py``), which is why this fixture exists
     as a second, deliberately different one: an all-``GRID_SHAPE`` fixture
     cannot catch a reshape bug that a real column-vectorized step hits.
+
+    Code review finding: a *uniform* flattened fixture (``jnp.full``, the
+    fixture's first version) cannot tell a correct unflatten from a
+    transposed or reversed one -- swapping ``_unflatten_to_nodal_shape`` for
+    ``value.reshape((il, ix)).T`` or ``value[::-1].reshape(nodal_shape)``
+    still passed every test built on it. Each cell's value here is
+    ``1000 * i_lon + i_lat`` (``GRID_SHAPE`` is deliberately non-square, so
+    even a same-shape transpose changes which value lands where), flattened
+    with a plain ``.reshape(-1)`` of the ``(ix, il)`` code array -- C order,
+    the same convention jax-gcm's own column flatten uses (see
+    ``_unflatten_to_nodal_shape``'s docstring; also verified directly against
+    jax-gcm's REAL flatten below, in
+    ``test_unflatten_agrees_with_a_real_jax_gcm_column_flatten``).
+
+    Returns
+    -------
+    tuple[dict, numpy.ndarray]
+        The diagnostics dict, and the ``(ix, il)`` code array itself, so a
+        test can compare cell by cell without re-deriving it.
+
     """
-    ncols = GRID_SHAPE[0] * GRID_SHAPE[1]
-    field = lambda value: jnp.full((ncols,), value)  # noqa: E731
-    return {
+    ix, il = GRID_SHAPE
+    lon_index, lat_index = np.meshgrid(np.arange(ix), np.arange(il), indexing="ij")
+    code = (1000 * lon_index + lat_index).astype(np.float64)
+    flat = jnp.asarray(code.reshape(-1))
+    zero = jnp.zeros_like(flat)
+    diagnostics = {
         "surface_exchange": JcmSurfaceExchange(
-            net_heat_flux=field(net_heat_flux),
-            sensible_heat_flux=field(0.0),
-            latent_heat_flux=field(0.0),
-            evaporation=field(evaporation),
-            precipitation=field(precipitation),
-            stress_u=field(0.0),
-            stress_v=field(0.0),
-            wind_speed=field(3.0),
-            air_density=field(1.2),
-            air_potential_temperature=field(290.0),
+            net_heat_flux=flat,
+            sensible_heat_flux=zero,
+            latent_heat_flux=zero,
+            evaporation=flat,
+            precipitation=zero,
+            stress_u=zero,
+            stress_v=zero,
+            wind_speed=jnp.full_like(flat, 3.0),
+            air_density=jnp.full_like(flat, 1.2),
+            air_potential_temperature=jnp.full_like(flat, 290.0),
         ),
     }
+    return diagnostics, code
 
 
 def test_speedy_exchange_shapes_and_signs():
@@ -363,25 +386,50 @@ def test_jcm_derived_zeros_is_windless_for_a_template_with_no_wind_key():
 
 
 def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
-    """The unchanged SPEEDY path: an all-zero template that carries the
-    wind-vector key still builds zero-filled ``u0``/``v0`` arrays of the
-    right shape, exactly as before #129. ``_diagnostics_template`` builds a
-    genuinely all-zero template in production; the fixture is passed
-    all-zero values here for the same reason (``zeros()`` now reads the
-    template's own values through ``from_diagnostics`` rather than
-    hard-coding zero, so a non-zero fixture would no longer read back as
-    zero -- see ``test_has_wind_vector_is_true_only_for_the_speedy_key``
-    for that same fixture used non-zero, to check translation instead).
+    """The unchanged SPEEDY path: a template that carries the wind-vector key
+    still builds zero-filled ``u0``/``v0`` arrays of the right shape, exactly
+    as before #129.
+
+    Deliberately the SAME non-zero fixture
+    ``test_has_wind_vector_is_true_only_for_the_speedy_key`` reads for
+    translation, not a special all-zero variant: ``zeros()`` derives every
+    field's shape/dtype from a real translated exchange but always
+    canonicalises the *value* to positive zero (code review finding -- see
+    the ``signbit`` assertion below), so a non-zero template reading back as
+    all-zero here is the stronger proof that ``zeros()`` truly ignores the
+    template's values rather than merely happening to be handed zeros.
     """
-    zero_template = _fake_speedy_diagnostics(
-        net_heat_flux=0.0, evaporation=0.0, precipitation=0.0, u0=0.0, v0=0.0
-    )
-    derived = JCMDerived.zeros(zero_template, GRID_SHAPE)
+    derived = JCMDerived.zeros(_fake_speedy_diagnostics(), GRID_SHAPE)
 
     assert derived.u0.shape == GRID_SHAPE
     assert derived.v0.shape == GRID_SHAPE
     np.testing.assert_allclose(derived.u0, 0.0)
     np.testing.assert_allclose(derived.v0, 0.0)
+    np.testing.assert_allclose(derived.total_heat_flux, 0.0)
+    np.testing.assert_allclose(derived.total_freshwater_flux, 0.0)
+    # `-0.0 == 0.0` and `np.allclose(-0.0, 0.0)` are both True, so the sign
+    # bit needs its own check: `total_heat_flux = -net_heat_flux`'s negation
+    # would otherwise leave a template's `+0.0` as `-0.0` here -- a real, if
+    # invisible, regression against "SPEEDY's zeros() is bit-for-bit
+    # unchanged" (code review finding).
+    for name in ("u0", "v0", "total_heat_flux", "total_freshwater_flux",
+                 "evaporation", "precipitation"):
+        field = np.asarray(getattr(derived, name))
+        assert not bool(np.signbit(field).any()), name
+
+
+def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call():
+    """A pre-#129 call, ``zeros(shape, physics)``, fails with a message
+    naming the new signature, not an opaque ``TypeError`` several calls deep.
+
+    ``zeros()``'s argument order was ``(shape, physics, **overrides)``
+    before #129; it is now ``(physics, nodal_shape, **overrides)``. Passing
+    the old order -- a tuple where ``physics`` now goes -- used to fail as
+    ``TypeError: tuple indices must be integers or slices, not str`` out of
+    ``exchange_fields.from_diagnostics``'s ``dict.get`` (code review finding).
+    """
+    with pytest.raises(TypeError, match="zeros\\(physics, nodal_shape"):
+        JCMDerived.zeros(GRID_SHAPE, _fake_speedy_diagnostics())
 
 
 def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
@@ -396,10 +444,17 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     diagnostics``) can catch, only ``_fake_column_vectorized_echam_
     diagnostics`` (built flattened, like a real step) or a real model
     (``tests/unit/test_coupled.py``'s slow ECHAM regression test).
+
+    Shape and the windless decision only: ``zeros()`` canonicalises every
+    value to zero regardless of what the template carries (code review
+    finding -- see ``test_jcm_derived_zeros_has_wind_for_a_template_with_the_
+    speedy_key``'s docstring on the ``-0.0``/``+0.0`` fix), so it cannot be
+    used to check *placement* -- ``test_unflatten_places_each_cell_correctly``
+    and ``test_unflatten_agrees_with_a_real_jax_gcm_column_flatten`` below,
+    which read the reshape directly off ``_surface_exchange_on_nodal_grid``,
+    do that.
     """
-    template = _fake_column_vectorized_echam_diagnostics(
-        net_heat_flux=0.0, evaporation=0.0, precipitation=0.0
-    )
+    template, _ = _fake_column_vectorized_echam_diagnostics()
     derived = JCMDerived.zeros(template, GRID_SHAPE)
 
     assert derived.total_heat_flux.shape == GRID_SHAPE
@@ -407,16 +462,123 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     assert derived.precipitation.shape == GRID_SHAPE
     assert derived.u0 is None
     assert derived.v0 is None
+    np.testing.assert_array_equal(np.asarray(derived.total_heat_flux), 0.0)
 
-    # Values, not just shape: reshaping must not shuffle or drop any of them.
-    live = _fake_column_vectorized_echam_diagnostics(
-        net_heat_flux=7.0, evaporation=0.001, precipitation=0.004
+
+def test_unflatten_places_each_cell_correctly():
+    """jax-esm#129 code review finding: a uniform fixture cannot catch a
+    transposed or reversed unflatten -- this one can, and is checked to
+    actually do so (teeth verified by hand: swapping
+    ``_unflatten_to_nodal_shape`` for ``value.reshape((il, ix)).T`` or
+    ``value[::-1].reshape(nodal_shape)`` makes this test fail; see the
+    commit message for the exact before/after).
+    """
+    from jem.components.jcm.component import _surface_exchange_on_nodal_grid
+
+    diagnostics, code = _fake_column_vectorized_echam_diagnostics()
+    exchange = _surface_exchange_on_nodal_grid(diagnostics, GRID_SHAPE)
+
+    actual = np.asarray(exchange.total_heat_flux)  # = -net_heat_flux = -code
+    assert actual.shape == GRID_SHAPE
+    np.testing.assert_array_equal(actual, -code)
+    # A handful of individual cells, spelled out, so a placement bug is
+    # visible in the assertion itself rather than only in an array diff.
+    for i, j in ((0, 0), (1, 0), (0, 1), (7, 13), (63, 31)):
+        assert actual[i, j] == -code[i, j], (i, j)
+
+    evaporation = np.asarray(exchange.evaporation)  # = evaporation = code
+    np.testing.assert_array_equal(evaporation, code)
+
+
+def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
+    """The unflatten is checked against jax-gcm's REAL column-vectorized
+    flatten, not a hand-rolled stand-in for it: a genuine
+    ``ComposablePhysics(vectorize_columns=True)`` runs a probe term (which
+    seeds the column-vectorized state with the same position code) and the
+    real ``EchamSurfaceExchange`` publisher, and the branch's own
+    ``_surface_exchange_on_nodal_grid`` must recover the code at the right
+    ``(lon, lat)`` cell from the resulting diagnostics dict -- and agree with
+    jax-gcm's own ``data_struct_to_dict`` reshape (the one it uses for xarray
+    output) on the same diagnostics. This is the ~1 s script the code review
+    wrote to prove the fix on jax-gcm's own machinery, adapted into a
+    permanent regression test.
+    """
+    from typing import ClassVar
+
+    from jcm.physics.composable_physics import ComposablePhysics
+    from jcm.physics.physics_term import PhysicsTerm
+    from jcm.physics_interface import PhysicsTendency
+
+    from jem.components.jcm.component import _surface_exchange_on_nodal_grid
+
+    nlon, nlat, nlev = 6, 4, 2  # deliberately non-square, and small
+    ncols = nlon * nlat
+    lon_index, lat_index = np.meshgrid(
+        np.arange(nlon), np.arange(nlat), indexing="ij"
     )
-    exchange = exchange_fields.from_diagnostics(live)
-    live_derived = JCMDerived.zeros(live, GRID_SHAPE)
-    np.testing.assert_allclose(
-        np.asarray(live_derived.total_heat_flux).ravel(),
-        np.asarray(exchange.total_heat_flux),
+    code = (1000.0 * lon_index + lat_index).astype(np.float64)
+
+    class _Probe(PhysicsTerm):
+        """Publish the level-bottom temperature and the forced SST as
+        diagnostics ``EchamSurfaceExchange`` reads, so the position code
+        travels through a REAL column-vectorized state, not a diagnostics
+        dict built by hand.
+        """
+
+        name: ClassVar[str] = "probe"
+        category: ClassVar[str] = "surface"
+        provides: ClassVar[tuple[str, ...]] = (
+            "surface", "vertical_diffusion", "pressure_full")
+
+        def __call__(self, state, diagnostics, forcing, terrain):
+            assert state.temperature.shape == (nlev, ncols), state.temperature.shape
+            t_bot = state.temperature[-1]  # (ncols,), jax-gcm's own flatten order
+            sst = forcing.sea_surface_temperature.reshape(ncols)
+            zero = jnp.zeros(ncols)
+            diagnostics = {
+                **diagnostics,
+                "surface": SimpleNamespace(
+                    sensible_heat_flux=t_bot, latent_heat_flux=zero,
+                    evaporation=sst, momentum_flux_u=zero, momentum_flux_v=zero,
+                ),
+                "vertical_diffusion": SimpleNamespace(wind_10m=zero),
+                "pressure_full": jnp.full((nlev, ncols), 95000.0),
+            }
+            return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+    physics = ComposablePhysics(
+        [_Probe(), EchamSurfaceExchange()],
+        checkpoint_terms=False, vectorize_columns=True,
+    )
+    temperature = np.zeros((nlev, nlon, nlat))
+    temperature[-1] = code  # the level EchamSurfaceExchange reads from
+    state = PhysicsState(
+        temperature=jnp.asarray(temperature),
+        specific_humidity=jnp.zeros((nlev, nlon, nlat)),
+        u_wind=jnp.zeros((nlev, nlon, nlat)),
+        v_wind=jnp.zeros((nlev, nlon, nlat)),
+        geopotential=jnp.zeros((nlev, nlon, nlat)),
+        normalized_surface_pressure=jnp.ones((nlon, nlat)),
+    )
+    forcing = SimpleNamespace(sea_surface_temperature=jnp.asarray(code + 0.5))
+    _tendency, diagnostics = physics._compute_tendencies_columns(state, forcing, None)
+    published = diagnostics["surface_exchange"]
+    assert published.net_heat_flux.shape == (ncols,)
+
+    exchange = _surface_exchange_on_nodal_grid(diagnostics, (nlon, nlat))
+    # JEM's total_heat_flux = -net_heat_flux; the probe set
+    # sensible_heat_flux = t_bot = code with lhf/radiation/precip all zero,
+    # so net_heat_flux = -code and total_heat_flux = +code.
+    np.testing.assert_array_equal(np.asarray(exchange.total_heat_flux), code)
+    np.testing.assert_array_equal(np.asarray(exchange.evaporation), code + 0.5)
+
+    # Agrees with jax-gcm's OWN xarray-serialization reshape on the same
+    # diagnostics dict, not just with this branch's own code.
+    as_grid = physics.data_struct_to_dict(
+        {"surface_exchange": published}, nodal_shape=(nlon, nlat)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(as_grid["surface_exchange.net_heat_flux"]), -code
     )
 
 

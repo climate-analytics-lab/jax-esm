@@ -960,15 +960,20 @@ def _coupling_timestep(cfg: DictConfig, calendar: str) -> jdt.Timedelta:
 
 
 def _validate_exchangers(coupler: Coupler) -> None:
-    """Check every declarative exchange against the model's real carries.
+    """Call every exchanger's own ``validate()`` against the model's real carries.
 
-    :meth:`jem.exchangers.Exchange.validate` turns a mistyped component,
-    section, field or regridder into an error naming the spec, before the
-    coupled step is traced. It needs real carries, so this pays for one
+    Runs any exchanger's ``validate(components)``, not only
+    :meth:`jem.exchangers.Exchange.validate` for a declarative table (which
+    turns a mistyped component, section, field or regridder into an error
+    naming the spec): a hand-written exchanger with its own ``validate``
+    method -- :meth:`jem.fluxes.VerosExchange.validate`, checking the
+    near-surface wind vector its bulk drag law needs -- is called the exact
+    same way. It needs real carries, so this pays for one
     ``coupler.initialize()`` -- the same call the run makes, whose compiled
-    pieces the run then reuses -- to catch a broken coupling table before a
-    model is integrated at all. Exchangers that are plain functions have
-    nothing to check and are skipped.
+    pieces the run then reuses -- to catch a broken coupling table, or a
+    composed atmosphere an exchanger cannot work with, before a model is
+    integrated at all. Exchangers with no ``validate`` method (a plain
+    function) have nothing to check and are skipped.
 
     An exchanger the workflow does not run is skipped too, because its rows
     describe a coupling this coupled model never executes. Left out of

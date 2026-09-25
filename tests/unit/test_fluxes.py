@@ -156,6 +156,12 @@ class _AtmDerived:
     v0: jnp.ndarray
     total_heat_flux: jnp.ndarray
     total_freshwater_flux: jnp.ndarray
+    # Static (not a pytree leaf): stands in for the real `JCMDerived.physics`
+    # passthrough -- the composed atmosphere's own per-step diagnostics dict
+    # -- which `VerosExchange`'s wind-vector check reads to name the composed
+    # physics in its error message (jax-esm#132) the way
+    # `ComposablePhysics.require_surface_exchange` names its `terms`.
+    physics: dict = struct.field(pytree_node=False, default_factory=dict)
 
 
 @struct.dataclass
@@ -183,7 +189,9 @@ def _fake_components(windless: bool = False):
     ``jem.components.jcm.exchange_fields.from_diagnostics`` now returns for a
     composed physics package with no near-surface wind *vector* (jax-esm#129,
     e.g. ECHAM) -- rather than a value that only a real ``jcm`` model could
-    produce, since nothing here needs one built.
+    produce, since nothing here needs one built. ``derived.physics`` is a
+    stand-in diagnostics dict naming a plausible composed term either way,
+    for ``VerosExchange``'s wind-vector error message (jax-esm#132) to read.
     """
     shape = (4,)
     atm = {
@@ -192,6 +200,8 @@ def _fake_components(windless: bool = False):
             v0=None if windless else jnp.full(shape, -3.0),
             total_heat_flux=jnp.full(shape, 20.0),
             total_freshwater_flux=jnp.full(shape, 1e-6),
+            physics={"echam_surface_exchange": True} if windless
+            else {"speedy_surface_flux": True},
         ),
         "forcing": _AtmForcing(sea_surface_temperature=jnp.full(shape, 290.0)),
     }
@@ -371,21 +381,25 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
 
 
 # ---------------------------------------------------------------------------
-# jax-esm#129: no wind vector -- build-time failure, not a silent bad stress
+# jax-esm#132: no wind vector -- build-time failure, not a silent bad stress
 # ---------------------------------------------------------------------------
 #
 # `jem.components.jcm.exchange_fields.from_diagnostics` returns
 # `derived.u0`/`.v0` as `None`, not a value, for a composed atmosphere physics
 # package that publishes no near-surface wind vector (today: everything but
-# SPEEDY, e.g. ECHAM). `VerosExchange` is the one production consumer of that
-# vector (`bulk_wind_stress`), so it -- not `bulk_wind_stress` itself, which
-# has no carry to inspect -- is where the absence has to be caught, and it
-# must be caught before a coupled run starts, not by computing a stress from
-# `None` mid-step.
+# SPEEDY, e.g. ECHAM) -- jax-esm#129. `VerosExchange` is the one production
+# consumer of that vector (`bulk_wind_stress`), so it -- not
+# `bulk_wind_stress` itself, which has no carry to inspect -- is where the
+# absence has to be caught, and it must be caught before a coupled run
+# starts, not by computing a stress from `None` mid-step. Choosing this
+# exchanger's wind-stress source for a windless atmosphere is jax-esm#132,
+# not #129 (which only made the absence a value instead of an unconditional
+# raise for every ECHAM-composed step, wind-consuming or not).
 
 
 def test_veros_exchange_validate_rejects_a_windless_atmosphere():
-    """Build-time failure: `validate()` names jax-esm#129 for a windless atmosphere.
+    """Build-time failure: `validate()` names jax-esm#132 and the composed
+    physics for a windless atmosphere.
 
     This is the check `jem.runners._validate_exchangers` runs, right after
     `Coupler.initialize()` and before a coupled run is ever compiled, for
@@ -394,8 +408,9 @@ def test_veros_exchange_validate_rejects_a_windless_atmosphere():
     """
     components = _fake_components(windless=True)
 
-    with pytest.raises(ValueError, match="jax-esm#129"):
+    with pytest.raises(ValueError, match="jax-esm#132") as excinfo:
         VerosExchange().validate(components)
+    assert "echam_surface_exchange" in str(excinfo.value)
 
 
 def test_veros_exchange_validate_passes_for_a_windy_atmosphere():
@@ -418,5 +433,5 @@ def test_veros_exchange_call_also_rejects_a_windless_atmosphere():
     """
     components = _fake_components(windless=True)
 
-    with pytest.raises(ValueError, match="jax-esm#129"):
+    with pytest.raises(ValueError, match="jax-esm#132"):
         VerosExchange()(components, TIME)

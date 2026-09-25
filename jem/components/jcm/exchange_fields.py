@@ -134,10 +134,18 @@ and it is checked at **composition time**: :meth:`jem.fluxes.VerosExchange.
 validate` (invoked by :func:`jem.runners._validate_exchangers`, inside
 :func:`jem.runners.build_coupler`, in the same slot
 ``ComposablePhysics.require_surface_exchange`` fills for the surface struct
-itself -- see :func:`jem.runners.build_atmosphere`) raises, naming jax-esm#129,
-if the atmosphere it is coupled to publishes no wind vector -- so an
-ECHAM/Veros combination fails at build time, before a coupled run is even
-compiled, rather than mid-run or with a value that quietly means nothing.
+itself -- see :func:`jem.runners.build_atmosphere`) raises, naming the
+composed atmosphere's physics and jax-esm#132, if the atmosphere it is
+coupled to publishes no wind vector -- so an ECHAM/Veros combination is
+**refused at build time**, before a coupled run is even compiled, rather
+than mid-run or with a value that quietly means nothing. This is reachable
+through a shipped command, not only a hand-built coupler: ``python -m
+jem.main +configuration=veros-earth physics@atmosphere.physics=echam``
+reaches ``build_coupler`` too, since JAX-ESM reuses jax-gcm's own ``physics``
+config group and jax-gcm ships ``echam.yaml``. Choosing this exchanger's
+wind-stress source for a windless atmosphere is the decision jax-esm#132
+tracks; jax-esm#129 (this collapse) closes only the eager-read failure
+above.
 
 What this replaces
 -------------------
@@ -226,12 +234,14 @@ def has_wind_vector(diagnostics: dict[str, Any]) -> bool:
     "Why the near-surface wind is still a narrow exception" section) --
     today, SPEEDY only. This is a **structural** question -- it can be
     answered from a diagnostics *template* (all-zero leaves, the right keys)
-    just as well as from a real step's output, which is what lets
-    :meth:`~jem.components.jcm.component.JCMDerived.zeros` decide, once, at
-    carry-construction time, whether ``u0``/``v0`` are going to be arrays or
-    ``None`` for the whole run -- the same static decision
-    :func:`_near_surface_wind_vector` then repeats every step from the real
-    diagnostics dict.
+    just as well as from a real step's output. It is the single tested
+    predicate the absence decision is made from: :func:`_near_surface_wind_vector`
+    calls it directly (rather than duplicating the ``dict.get`` check), so
+    both :meth:`~jem.components.jcm.component.JCMComponent.step` (a real
+    diagnostics dict) and :meth:`~jem.components.jcm.component.JCMDerived.zeros`
+    (a structural template, through the same :func:`from_diagnostics` call)
+    decide ``u0``/``v0``'s presence the exact same way, once each, rather
+    than through two predicates that could in principle disagree.
 
     Parameters
     ----------
@@ -270,9 +280,9 @@ def _near_surface_wind_vector(
     at composition time (:meth:`~jem.fluxes.VerosExchange.validate`) and
     again, defensively, wherever it is actually used.
     """
-    speedy_flux = diagnostics.get(_SPEEDY_WIND_VECTOR_KEY)
-    if speedy_flux is None:
+    if not has_wind_vector(diagnostics):
         return None, None
+    speedy_flux = diagnostics[_SPEEDY_WIND_VECTOR_KEY]
     return speedy_flux.u0, speedy_flux.v0
 
 
