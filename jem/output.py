@@ -539,12 +539,13 @@ def postprocess(
         averaged (skipped if that exact text is already the trailing entry --
         a JCM variable already carries it from JCM's own per-step average --
         see :func:`_with_cell_method`). When ``subsample > 1`` the appended
-        text instead carries an explicit CF comment saying the mean was
-        computed from only the kept records while the label/``time_bounds``
-        above still span the chunk's whole interval, so the two do not get
+        text instead carries an explicit, nesting-free CF comment saying the
+        mean was computed from only the kept records while the recorded time
+        still spans the chunk's whole interval, so the two do not get
         conflated into one misleadingly plain "time: mean" (2026-09 review,
-        round 2, finding N3). See the module docstring for why the chunk is
-        the averaging interval.
+        round 2, finding N3; comment wording corrected for valid CF and to
+        not assume a ``time_bounds`` exists, round 3, finding 2). See the
+        module docstring for why the chunk is the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
         from its start, with all of the records that step produced; ``1``
@@ -706,19 +707,32 @@ def postprocess(
     if subsample > 1:
         # Honesty fix (2026-09 review, round 2, finding N3's second half): the
         # label and, for a `time_bounds`-carrying dataset, the bound itself
-        # (see above) span the chunk's WHOLE interval regardless of
-        # `subsample` -- computed from the chunk's records as given, before
-        # the stride removed any -- but the mean just below is only over the
-        # records the stride *kept*. A bare "time: mean" would then read as
-        # "the mean of the whole interval named above", which is not quite
-        # what happened. Say so explicitly with a CF comment rather than
-        # silently letting the label overstate what fed the average; this
-        # also never collides with an already-present bare "time: mean" (see
-        # `_with_cell_method`), since it is a different, more specific string.
+        # (computed earlier in this function) span the chunk's WHOLE interval
+        # regardless of `subsample` -- computed from the chunk's records as
+        # given, before the stride removed any -- but the mean just below is
+        # only over the records the stride *kept*. A bare "time: mean" would
+        # then read as "the mean of the whole interval this record is
+        # labelled with", which is not quite what happened. Say so explicitly
+        # with a CF comment rather than silently letting the label overstate
+        # what fed the average; this also never collides with an
+        # already-present bare "time: mean" (see `_with_cell_method`), since
+        # it is a different, more specific string.
+        #
+        # The comment must itself be valid CF (2026-09 review, round 3,
+        # finding 2): CF's own `(comment: ...)` extra-info block does not
+        # nest, so it must contain no parenthesis of its own -- an earlier
+        # version said "coupled step(s)", whose inner "(s)" closed the block
+        # early, silently dropping everything written after it from what any
+        # CF reader would parse as the comment. It also must not refer to
+        # "the label above" (an attribute string has no "above" to point at)
+        # or assume every dataset has a `time_bounds` (a non-JCM component's
+        # never does) -- so it names only what is true unconditionally: the
+        # record's own label spans the whole chunk, whatever this dataset
+        # does or does not also carry as an explicit bound.
         method = (
-            f"{TIME_MEAN_CELL_METHOD} (comment: subsampled to every "
-            f"{subsample} coupled step(s) before averaging; the label/"
-            "time_bounds above still span the chunk's whole interval)"
+            f"{TIME_MEAN_CELL_METHOD} (comment: mean of one coupled step in "
+            f"every {subsample}; the recorded time still spans the whole "
+            "chunk, not just the steps that fed this mean)"
         )
     else:
         method = TIME_MEAN_CELL_METHOD

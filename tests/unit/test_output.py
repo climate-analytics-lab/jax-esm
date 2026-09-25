@@ -178,21 +178,24 @@ def test_postprocess_does_not_duplicate_an_identical_cell_method_already_present
 def test_postprocess_annotates_cell_methods_honestly_when_subsampled():
     """N3's second half: a subsampled mean's ``cell_methods`` says so.
 
-    With ``subsample > 1`` the recorded label/``time_bounds`` still spans the
-    chunk's *whole* interval (see
+    With ``subsample > 1`` the recorded label (and, for a dataset that has
+    one, ``time_bounds``) still spans the chunk's *whole* interval (see
     ``test_postprocess_time_bounds_survive_a_subsample_then_average``) while
     the mean itself is only over the records the stride *kept* -- so a bare,
     unannotated "time: mean" would overstate what interval actually informed
     the number (the metadata would read as if every record of the chunk had
     been averaged). :func:`postprocess` instead appends an explicit CF
-    comment saying so.
+    comment saying so -- one that is valid CF (see
+    ``test_postprocess_subsample_comment_is_valid_cf``) and does not assume
+    this dataset has a ``time_bounds`` to point at, since ``simple_dataset``
+    (every non-JCM component) never carries one.
     """
     dataset = simple_dataset(4)
     averaged = postprocess(dataset, output_averages=True, subsample=2)
     cell_methods = averaged["temperature"].attrs["cell_methods"]
     assert cell_methods.startswith("time: mean (comment:")
-    assert "subsampl" in cell_methods
-    assert "time_bounds" in cell_methods
+    assert "subsampl" in cell_methods or "every" in cell_methods
+    assert "chunk" in cell_methods
 
     # This annotated text is never textually identical to a bare, upstream
     # "time: mean" -- so unlike the plain (subsample=1) case, both entries
@@ -202,6 +205,29 @@ def test_postprocess_annotates_cell_methods_honestly_when_subsampled():
     dataset2["temperature"].attrs["cell_methods"] = "time: mean"
     averaged2 = postprocess(dataset2, output_averages=True, subsample=2)
     assert averaged2["temperature"].attrs["cell_methods"] == f"time: mean {cell_methods}"
+
+
+def test_postprocess_subsample_comment_is_valid_cf():
+    """2026-09 review, round 3, finding 2: the subsample comment must parse as CF.
+
+    CF's ``(comment: ...)`` extra-info block does not nest -- a stray, inner
+    ``(``/``)`` pair (the previous wording's "step(s)") closes the block
+    early, so anything written after it is not actually inside the comment
+    any CF reader would parse. The comment also used to say "the label/
+    time_bounds above", which points at nothing meaningful from inside an
+    attribute string, and claimed a ``time_bounds`` exists on every dataset,
+    which a non-JCM component's (``simple_dataset``'s) never does.
+    """
+    dataset = simple_dataset(4)
+    averaged = postprocess(dataset, output_averages=True, subsample=2)
+    cell_methods = averaged["temperature"].attrs["cell_methods"]
+    # Exactly one parenthesised extra-info block: a second, inner pair would
+    # close CF's own block early rather than nest inside it.
+    assert cell_methods.count("(") == 1
+    assert cell_methods.count(")") == 1
+    assert cell_methods.endswith(")")
+    assert "above" not in cell_methods
+    assert "time_bounds" not in cell_methods
 
 
 def test_postprocess_averages_time_bounds_correctly():

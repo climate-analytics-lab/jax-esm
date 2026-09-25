@@ -1243,15 +1243,21 @@ is itself responsible for.
 
 `output_averages=True` is defined against jcm's meaning of the same word
 rather than beside it: jcm replaces each saved record with the mean over its
-save interval, labelled at the
-interval's end, and the coupler's records are already one per coupling step — so
-the coupler's output interval is the **chunk**, and the flag replaces a chunk's
-records with their time mean, labelled with the chunk's last time and carrying
-the CF `cell_methods = "time: mean"` that says so. That label is the end of the
-chunk whether or not `subsample` kept the record sitting there, so a run that
-sets both still writes one evenly spaced mean per chunk; what varies is how
-many records went into each one, since the number of a chunk's steps the
-run-global stride keeps depends on where the chunk falls in the stride period.
+save interval, labelled at the interval's **midpoint** and carrying an exact
+`time_bounds` naming the interval itself (jax-gcm v3, PR 878) — and the
+coupler's records are already one per coupling step, so the coupler's output
+interval is the **chunk**: the flag replaces a chunk's records with their time
+mean, labelled at the *chunk's own* midpoint (computed exactly, from the first
+and last record's own `time_bounds` when the dataset carries one, otherwise
+from the average of their own midpoint labels — see `jem.output.postprocess`'s
+own docstring for the derivation) and carrying the CF `cell_methods = "time:
+mean"` that says so, with a comment appended instead of a bare repeat whenever
+`subsample` thinned the records that actually fed the mean (see
+`jem.output._with_cell_method`). That label is the chunk's own midpoint
+whether or not `subsample` kept every record of it, so a run that sets both
+still writes one evenly spaced mean per chunk; what varies is how many records
+went into each one, since the number of a chunk's steps the run-global stride
+keeps depends on where the chunk falls in the stride period.
 
 The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
