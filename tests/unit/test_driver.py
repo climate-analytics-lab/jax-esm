@@ -2003,6 +2003,25 @@ def step_labels(*steps):
     return [start + step * day + half_day for step in steps]
 
 
+def chunk_midpoint_labels(*step_ranges):
+    """Return the label ``postprocess(output_averages=True)`` gives a chunk mean.
+
+    A chunk's own true midpoint is the average of its first and last
+    record's own (midpoint) label -- exact for equal-length, contiguous
+    records regardless of the record length itself (``jem.output.postprocess``'s
+    own derivation, in its body, for the no-``time_bounds`` case every
+    non-JCM component's dataset takes). ``step_ranges`` is ``(first_step,
+    last_step)`` pairs of the coupled steps each chunk covers.
+    """
+    first_steps, last_steps = zip(*step_ranges, strict=True)
+    first_labels = step_labels(*first_steps)
+    last_labels = step_labels(*last_steps)
+    return [
+        first + (last - first) // 2
+        for first, last in zip(first_labels, last_labels, strict=True)
+    ]
+
+
 def test_subsample_keeps_the_same_records_however_the_run_is_chunked(tmp_path):
     """The stride is the run's, so `chunk` is free to be chosen for memory.
 
@@ -2082,7 +2101,7 @@ def test_a_thinned_run_reads_back_as_one_series(tmp_path):
         )
 
 
-def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
+def test_a_chunk_mean_is_labelled_at_the_chunk_midpoint_however_it_is_thinned(
     tmp_path,
 ):
     """`output_averages` with `subsample` keeps one evenly spaced mean a chunk.
@@ -2091,9 +2110,15 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
     are 0, 3, 6, 9, 12, 15 and 18, which fall 2, 1, 1, 2, 1 to a chunk -- so
     the means are over different numbers of records, which the same run
     without the averaging shows file by file. Each mean still covers its own
-    chunk and is labelled at that chunk's end, four days apart; labelling
-    with the last record the stride happened to keep would make the series
-    jump about instead.
+    chunk -- steps 0-3, 4-7, 8-11, 12-15, 16-19 -- and is labelled at that
+    chunk's own true MIDPOINT (the average of the chunk's first and last
+    record's own label; see `jem.output.postprocess`'s module docstring and
+    `chunk_midpoint_labels` above), four days apart; labelling with the last
+    record the stride happened to keep would make the series jump about
+    instead, and (2026-09 migration review, item 1's second half) labelling
+    with the chunk's own last record's label -- this test's own pre-fix
+    expectation -- is neither the chunk's end nor its midpoint once every
+    record's own label is itself a midpoint (jax-gcm PR 878).
     """
     settings = {"total_time": "20 days", "chunk": "4 days", "subsample": 3}
     thinned = tmp_path / "thinned"
@@ -2109,8 +2134,12 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
     assert [records.sizes["time"] for records in kept] == [2, 1, 1, 2, 1]
 
     # And each mean is over exactly those records, labelled at its chunk's
-    # end -- five means, four days apart, whatever went into them.
-    assert written_labels(averaged) == step_labels(3, 7, 11, 15, 19)
+    # own true midpoint -- five means, four days apart, whatever went into
+    # them (the stride chooses what is AVERAGED, never what interval the
+    # mean's own label covers).
+    assert written_labels(averaged) == chunk_midpoint_labels(
+        (0, 3), (4, 7), (8, 11), (12, 15), (16, 19)
+    )
     for path, records in zip(sorted(averaged.glob("ocn-*.nc")), kept, strict=True):
         with xr.open_dataset(path) as mean:
             assert mean.sizes["time"] == 1
