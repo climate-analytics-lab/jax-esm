@@ -74,26 +74,41 @@ What ``output_averages`` means here
 -----------------------------------
 JCM's ``run.output_averages`` switches each saved record from an
 instantaneous snapshot at the end of its save interval to the **mean over
-that interval**, still labelled at its end (``jcm.model``'s averaged outer
-step; ``jcm/config/run/default.yaml``). The coupler's records are already one
+that interval**, labelled at the interval's **midpoint** and carrying an
+exact ``time_bounds`` variable naming the interval itself (jax-gcm v3, PR 878,
+``jcm.predictions.ModelPredictions.to_xarray``; ``jcm/config/run/default.yaml``
+is where a bare jcm run turns this on). The coupler's records are already one
 per coupling step, so the same idea one level up: the coupler's output
 interval is the **chunk**, and ``output_averages=True`` replaces a chunk's
-records with their time mean -- one record, labelled with the chunk's last
-time (its own, whether or not ``subsample`` kept the record sitting there),
-carrying the CF ``cell_methods = "time: mean"`` that says so.
+records with their time mean -- one record, labelled at the *chunk's own*
+midpoint, carrying the CF ``cell_methods = "time: mean"`` that says so.
+
+For a dataset that itself carries ``time_bounds`` (JCM's, read off its
+``time`` coordinate's CF ``bounds`` attribute rather than assumed by name),
+that chunk midpoint and the chunk's own ``time_bounds`` are computed exactly,
+from the first and last (pre-``subsample``) record's own bounds, and
+``time_bounds`` is carried through as the bound it is rather than averaged
+like a sampled quantity (:func:`postprocess`, 2026-09 migration review, item
+1 -- a real bug this fixed: a chunk's `time_bounds`/label used to be built by
+naively treating `time_bounds` as an ordinary variable to average and
+labelling the mean with the chunk's *last* record's own midpoint, neither the
+chunk's true midpoint nor its end). A dataset with no such bounds (every
+non-JCM component today) has no exact chunk interval to read, so it keeps the
+long-standing approximation: the chunk's last (pre-``subsample``) record's own
+label.
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
-labelled at its end") rather than inventing a second meaning for the same
+labelled at its midpoint") rather than inventing a second meaning for the same
 word, and it is the reduction a long run actually needs: one record per chunk
 rather than one per coupling step. The bins are the **chunks**, so a 30-day
 chunk gives 30-day-window means and not calendar months -- on a 365-day
 calendar those windows drift about five days a year against the months. A
 calendar-month mean is :func:`jem.accumulate.monthly_mean`, which bins every
-record by the month of its own output label whatever the chunking. Note that
-in a coupled run the atmosphere's per-step
-records are *already* step means -- the JCM wrapper integrates each coupling
-step with ``output_averages=True`` -- so averaging a chunk of them is the
-chunk mean exactly, with no double counting.
+record against its own interval (its midpoint, to match the label -- see that
+function's docstring) whatever the chunking. Note that in a coupled run the
+atmosphere's per-step records are *already* step means -- the JCM wrapper
+integrates each coupling step with ``output_averages=True`` -- so averaging a
+chunk of them is the chunk mean exactly, with no double counting.
 """
 
 from __future__ import annotations
@@ -150,12 +165,36 @@ def _safe_name(name: str) -> str:
 
 
 def _timed_variables(dataset: xr.Dataset) -> list[str]:
-    """Return the data variables that have a time dimension."""
+    """Return the data variables that have a time dimension.
+
+    Excludes the CF bounds variable the ``time`` coordinate's own ``bounds``
+    attribute names, if any (jax-gcm's ``time_bounds``): it is a *bound* on
+    the interval a record covers, not a sampled quantity, so it must not be
+    averaged like one -- see :func:`_chunk_time_bounds`, which recomputes it
+    for the chunk as a whole instead.
+    """
+    excluded = _time_bounds_name(dataset)
     return [
         str(name)
         for name, variable in dataset.data_vars.items()
-        if TIME_DIMENSION in variable.dims
+        if TIME_DIMENSION in variable.dims and str(name) != excluded
     ]
+
+
+def _time_bounds_name(dataset: xr.Dataset) -> str | None:
+    """Return the name of ``dataset``'s CF time-bounds variable, if it has one.
+
+    Read from the ``time`` coordinate's own ``bounds`` attribute (the CF
+    convention jax-gcm's ``ModelPredictions.to_xarray`` sets,
+    ``time.attrs["bounds"] == "time_bounds"``) rather than a hardcoded name,
+    so a component that names its bounds variable something else, or has
+    none at all (every non-JCM component today), is handled correctly either
+    way.
+    """
+    name = dataset[TIME_DIMENSION].attrs.get("bounds")
+    if name is None or name not in dataset.data_vars:
+        return None
+    return str(name)
 
 
 def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
@@ -316,28 +355,36 @@ def postprocess(
 
     Asking for both is legal but unusual, and a run normally sets one or the
     other, because the mean is then over the **kept** records only. It is
-    still the mean of one chunk, labelled at that chunk's end, so the series
-    of means stays one record per chunk, evenly spaced with the chunks. What
-    it is not is evenly *weighted*: how many of a chunk's coupled steps the
-    run-global stride keeps depends on where the chunk falls in the stride
-    period, so successive means can average different numbers of records, and
-    a chunk that keeps none yields no mean at all (and, through
-    :func:`write_chunk`, no file).
+    still the mean of one chunk, labelled at that chunk's own midpoint (or, on
+    a dataset with no ``time_bounds`` to compute one from, the chunk's last
+    record's own label -- see the module docstring), so the series of means
+    stays one record per chunk, evenly spaced with the chunks. What it is not
+    is evenly *weighted*: how many of a chunk's coupled steps the run-global
+    stride keeps depends on where the chunk falls in the stride period, so
+    successive means can average different numbers of records, and a chunk
+    that keeps none yields no mean at all (and, through :func:`write_chunk`,
+    no file).
 
     Variables without a time dimension (grid masks, layer thicknesses) are
-    passed through untouched by both reductions.
+    passed through untouched by both reductions. A ``time_bounds`` variable
+    (identified by the ``time`` coordinate's own CF ``bounds`` attribute, not
+    by name) is a third case: it has a time dimension but is a *bound*, not a
+    sampled quantity, so it is neither averaged nor stamped with
+    ``cell_methods`` -- it is recomputed for the chunk as a whole instead (see
+    the module docstring's **item 1** note).
 
     Parameters
     ----------
     dataset : xarray.Dataset
         One component's chunk of output, from ``Coupler.to_xarray``.
     output_averages : bool
-        Replace the records with their time mean: one record, labelled with
-        the last time in the chunk **as it was given** -- the end of the
-        interval the mean covers, whether or not ``subsample`` dropped that
-        record from the mean itself -- with ``cell_methods = "time: mean"``
-        on every variable that was averaged. See the module docstring for why
-        the chunk is the averaging interval.
+        Replace the records with their time mean: one record, labelled at the
+        chunk's own midpoint (exactly, from ``time_bounds``, when the dataset
+        carries one; otherwise approximated by the chunk's last record's own
+        label -- see the module docstring), whether or not ``subsample``
+        dropped a record from the mean itself, with ``cell_methods =
+        "time: mean"`` on every variable that was averaged. See the module
+        docstring for why the chunk is the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
         from its start, with all of the records that step produced; ``1``
@@ -378,14 +425,59 @@ def postprocess(
             f"dimension (it has {sorted(map(str, dataset.dims))!r})."
         )
 
-    # The end of the interval the mean covers is the end of the CHUNK, which
-    # is the whole point of the label: one record per output interval,
-    # labelled at its end. So it is read before the stride removes records --
-    # the stride chooses what goes INTO the mean, not what interval the mean
-    # covers, and labelling with the last kept record instead would make the
-    # chunk-mean series unevenly spaced whenever the stride's phase falls
+    # What the averaged record's label -- and, if this dataset carries one,
+    # its `time_bounds` -- has to be computed from is the chunk's records AS
+    # GIVEN, before the stride removes any: the stride chooses what goes INTO
+    # the mean, not what interval the mean covers, and computing either from
+    # the kept records instead would make the chunk-mean series unevenly
+    # spaced (and, for `time_bounds`, wrong) whenever the stride's phase falls
     # differently in successive chunks.
-    chunk_end = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: slice(-1, None)})
+    bounds_name = _time_bounds_name(dataset)
+    if bounds_name is not None:
+        # Exact: the CHUNK's own true interval is
+        # [the first record's own interval start, the last record's own
+        # interval end], read directly from their `time_bounds` rather than
+        # approximated from the (midpoint-labelled) `time` coordinate. This is
+        # the fix for a genuine bug (2026-09 migration review, item 1): before
+        # it, `postprocess` fell through to the `chunk_end`-only path below
+        # for every dataset, including one with `time_bounds` -- averaging
+        # `time_bounds` itself like any other sampled variable (nonsense for a
+        # bound) and labelling the mean with the LAST record's own midpoint
+        # (neither the chunk's true midpoint nor its end). A real 3-day chunk
+        # starting 2000-02-02 used to come back labelled `02-04T12:00` (not
+        # the correct midpoint, `02-03T12:00`, nor the end, `02-05`) with
+        # `time_bounds=[02-03, 02-04]` -- a false one-day interval for a
+        # 3-day mean.
+        bounds_dim = next(
+            d for d in dataset[bounds_name].dims if d != TIME_DIMENSION
+        )
+        interval_start = dataset[bounds_name].isel(
+            {TIME_DIMENSION: 0, bounds_dim: 0}
+        )
+        interval_end = dataset[bounds_name].isel(
+            {TIME_DIMENSION: -1, bounds_dim: 1}
+        )
+        # Exact integer-millisecond midpoint, the same halving
+        # `jem.base.component.TimeAxis.datetimes` uses for a single record's
+        # midpoint, applied here to the whole chunk's interval instead.
+        start_ms = interval_start.values.astype("datetime64[ms]").astype("int64")
+        end_ms = interval_end.values.astype("datetime64[ms]").astype("int64")
+        chunk_label = np.atleast_1d(
+            np.asarray(start_ms + (end_ms - start_ms) // 2, dtype="datetime64[ms]")
+        )
+        chunk_bounds = np.array(
+            [interval_start.values, interval_end.values]
+        ).astype(dataset[bounds_name].dtype)
+    else:
+        # No `time_bounds`: every non-JCM component's dataset today. There is
+        # no exact chunk interval to read here, so this keeps the
+        # pre-existing approximation -- the chunk's own last (pre-stride)
+        # record's own label -- rather than inventing bounds this dataset
+        # does not carry the information to compute exactly.
+        chunk_label = dataset[TIME_DIMENSION].isel(
+            {TIME_DIMENSION: slice(-1, None)}
+        ).values
+        chunk_bounds = None
 
     if subsample > 1:
         n_records = int(dataset.sizes[TIME_DIMENSION])
@@ -408,15 +500,15 @@ def postprocess(
         # not ask for -- and `write_chunk` writes no file for it.
         return dataset
 
-    timed = _timed_variables(dataset)
+    timed = _timed_variables(dataset)  # excludes `bounds_name`, if any
     # `Dataset.mean` drops the dimension it reduces, so the label -- the
-    # chunk's last time, JCM's convention, and the one `TimeAxis.datetimes`
-    # already applied to the records being averaged -- has to be put back by
-    # hand.
+    # chunk's own true midpoint (or, with no `time_bounds` to compute one
+    # from, the chunk's last record's own label -- see above) -- has to be
+    # put back by hand.
     averaged = (
         dataset[timed]
         .mean(dim=TIME_DIMENSION, keep_attrs=True)
-        .expand_dims({TIME_DIMENSION: chunk_end.values})
+        .expand_dims({TIME_DIMENSION: chunk_label})
     )
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
     for name in timed:
@@ -424,8 +516,25 @@ def postprocess(
             dataset[name].attrs, TIME_MEAN_CELL_METHOD
         )
     for variable in dataset.data_vars:
-        if str(variable) not in timed:
+        if str(variable) not in timed and str(variable) != bounds_name:
             averaged[variable] = dataset[variable]
+    if bounds_name is not None:
+        # `chunk_bounds` is set together with `bounds_name` above (both None
+        # or both not), so this is always an `ndarray` here.
+        assert chunk_bounds is not None
+        # Set explicitly, at the new single-record shape -- copying the
+        # chunk's own (still multi-record) `time_bounds` through unchanged,
+        # as the loop above does for an ordinary time-invariant variable,
+        # would leave it the wrong length for the one averaged record, and
+        # averaging it like a sampled quantity is the bug this branch exists
+        # to not repeat (see above). Not stamped with `cell_methods`: a bound
+        # is not a sampled quantity that was averaged, so CF's "time: mean"
+        # would misdescribe it.
+        averaged[bounds_name] = (
+            (TIME_DIMENSION, bounds_dim),
+            chunk_bounds.reshape(1, 2),
+        )
+        averaged[bounds_name].attrs = dict(dataset[bounds_name].attrs)
     averaged.attrs = dict(dataset.attrs)
     return averaged
 

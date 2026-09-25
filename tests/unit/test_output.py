@@ -56,6 +56,44 @@ def simple_dataset(n_records: int = 6) -> xr.Dataset:
     )
 
 
+def bounded_dataset(start: str, n_records: int = 3) -> xr.Dataset:
+    """Return a dataset shaped like a JCM component's chunk, ``time_bounds`` included.
+
+    One daily record per day from ``start``, labelled at each interval's
+    midpoint and carrying the CF ``time_bounds`` jax-gcm's own
+    ``ModelPredictions.to_xarray`` publishes for an averaged trajectory --
+    exactly the shape :func:`postprocess`'s ``time_bounds``-aware branch reads.
+    """
+    starts = np.datetime64(start) + np.arange(n_records).astype("timedelta64[D]")
+    ends = starts + np.timedelta64(1, "D")
+    midpoints = (
+        starts.astype("datetime64[ms]")
+        + (ends - starts).astype("timedelta64[ms]") // 2
+    )
+    bounds = np.stack(
+        [starts.astype("datetime64[ms]"), ends.astype("datetime64[ms]")], axis=1
+    )
+    return xr.Dataset(
+        data_vars={
+            "temperature": (
+                ("time", "lon"),
+                np.arange(n_records * 2, dtype=np.float64).reshape(n_records, 2),
+                {"units": "K", "jem_role": "state"},
+            ),
+            "time_bounds": (
+                ("time", "bounds"),
+                bounds,
+                {"long_name": "time interval bounds"},
+            ),
+        },
+        coords={
+            "time": ("time", midpoints, {"standard_name": "time", "bounds": "time_bounds"}),
+            "lon": ("lon", np.array([0.0, 180.0])),
+        },
+        attrs={"title": "a chunk"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # postprocess
 # ---------------------------------------------------------------------------
@@ -88,8 +126,9 @@ def test_postprocess_averages_the_chunk_and_labels_it_at_the_end():
     averaged = postprocess(dataset, output_averages=True)
 
     assert averaged.sizes["time"] == 1
-    # Labelled with the end of the interval it covers, as JCM labels an
-    # averaged record.
+    # This dataset carries no `time_bounds` (see `simple_dataset`), so there
+    # is no exact chunk interval to compute a true midpoint from; the
+    # approximation is the chunk's own last record's label.
     assert averaged["time"].values[0] == dataset["time"].values[-1]
     np.testing.assert_allclose(
         averaged["temperature"].values[0],
@@ -112,6 +151,68 @@ def test_postprocess_appends_to_an_existing_cell_methods():
     dataset["temperature"].attrs["cell_methods"] = "area: mean"
     averaged = postprocess(dataset, output_averages=True)
     assert averaged["temperature"].attrs["cell_methods"] == "area: mean time: mean"
+
+
+def test_postprocess_averages_time_bounds_correctly():
+    """The 2026-09 migration review's item 1: the exact bug, reproduced and fixed.
+
+    A real 3-day chunk starting 2000-02-02 used to come back labelled
+    ``02-04T12:00`` (neither the correct midpoint, ``02-03T12:00``, nor the
+    end, ``02-05``) with ``time_bounds=[02-03, 02-04]`` -- a false one-day
+    interval for what was actually a 3-day mean, because `time_bounds` was
+    averaged like an ordinary variable (mean of the three 1-day bounds) and
+    the record was labelled with the chunk's *last* record's own midpoint
+    instead of the chunk's own.
+    """
+    dataset = bounded_dataset("2000-02-02", n_records=3)
+    averaged = postprocess(dataset, output_averages=True)
+
+    assert averaged.sizes["time"] == 1
+    assert averaged["time"].values[0] == np.datetime64("2000-02-03T12:00", "ms")
+    np.testing.assert_array_equal(
+        averaged["time_bounds"].values,
+        np.array(
+            [[np.datetime64("2000-02-02", "ms"), np.datetime64("2000-02-05", "ms")]]
+        ),
+    )
+    # `time_bounds` is a bound, not a sampled quantity: no `cell_methods`.
+    assert "cell_methods" not in averaged["time_bounds"].attrs
+    assert averaged["time_bounds"].attrs["long_name"] == "time interval bounds"
+    # The data variable is still the plain mean, and still stamped.
+    np.testing.assert_allclose(
+        averaged["temperature"].values[0],
+        dataset["temperature"].values.mean(axis=0),
+    )
+    assert averaged["temperature"].attrs["cell_methods"] == "time: mean"
+
+
+def test_postprocess_time_bounds_survive_a_subsample_then_average():
+    """The chunk's own bounds, not the kept records', even when subsample thins."""
+    dataset = bounded_dataset("2000-02-02", n_records=4)
+    averaged = postprocess(dataset, output_averages=True, subsample=2)
+
+    assert averaged.sizes["time"] == 1
+    # The chunk is still all 4 days, 2 Feb through 6 Feb, whether or not the
+    # stride kept every record of it.
+    np.testing.assert_array_equal(
+        averaged["time_bounds"].values,
+        np.array(
+            [[np.datetime64("2000-02-02", "ms"), np.datetime64("2000-02-06", "ms")]]
+        ),
+    )
+    assert averaged["time"].values[0] == np.datetime64("2000-02-04T00:00", "ms")
+    np.testing.assert_allclose(
+        averaged["temperature"].values[0],
+        dataset["temperature"].values[::2].mean(axis=0),
+    )
+
+
+def test_postprocess_with_no_time_bounds_is_unaffected():
+    """A dataset with no `time_bounds` at all keeps the pre-existing behaviour."""
+    dataset = simple_dataset(4)
+    assert "time_bounds" not in dataset.variables
+    averaged = postprocess(dataset, output_averages=True)
+    assert averaged["time"].values[0] == dataset["time"].values[-1]
 
 
 def test_postprocess_composes_subsample_then_average():
