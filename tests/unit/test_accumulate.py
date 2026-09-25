@@ -34,11 +34,13 @@ import pytest
 
 from jem.accumulate import (
     MONTHS_PER_YEAR,
+    _midpoint_month_rule,
     fold_records,
     month_lengths,
     monthly_mean,
     windowed_mean,
 )
+from jem.base.calendar import max_safe_record
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabAtmosphereModel,
@@ -675,6 +677,32 @@ def test_a_century_sequential_monthly_mean_is_exact_past_68_years(climatology_fi
     np.testing.assert_array_equal(np.flatnonzero(got_counts), [expected_bin])
     assert got_counts[expected_bin] == 1
     del new_sums  # only the bin placement is under test here
+
+
+def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve():
+    """A pattern too long for its own record length is refused, not silently wrong.
+
+    ``gregorian_instant`` cannot resolve an arbitrarily large number of
+    records exactly for a long enough ``record_seconds`` (see
+    ``jem.base.calendar.max_safe_record``); ``_midpoint_month_rule`` knows,
+    in plain Python and before any bin is ever computed, exactly how many
+    records of the pattern it is about to ask that function to resolve
+    (``records_per_period``), so it is expected to raise here rather than
+    let a real run silently drift into wrong bins the way the pre-fix
+    version of this reduction did for a century-scale accumulator (see
+    ``test_a_century_sequential_monthly_mean_is_exact_past_68_years``, which
+    is the same failure mode this construction-time check exists to catch
+    before it happens).
+    """
+    record_seconds = 2_629_746  # a "1 month" Gregorian coupling step
+    bound = max_safe_record(record_seconds, offset_seconds=record_seconds // 2)
+    # One bin, deliberately sized to need ten more records per cycle than
+    # `gregorian_instant` can resolve for this record length.
+    period = record_seconds * (bound + 11)
+    rule = _midpoint_month_rule(np.array([period], dtype=np.int64), 0)
+
+    with pytest.raises(ValueError, match="too long"):
+        rule(jnp.int32(0), record_seconds)
 
 
 def test_a_wrapped_sequential_month_straddles_two_bins(coupler):

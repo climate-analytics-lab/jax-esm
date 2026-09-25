@@ -55,7 +55,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jem.base.calendar import gregorian_instant, gregorian_ymd_from_days
+from jem.base.calendar import gregorian_instant, gregorian_ymd_from_days, max_safe_record
 from jem.base.component import (
     CouplingTime,
     Diagnostics,
@@ -455,6 +455,28 @@ def _midpoint_month_rule(
             f"a period of {period} s is not a whole number of "
             f"{record_seconds} s records"
         )
+        # `record_mod` ranges over `[0, records_per_period)`, and both that
+        # bound and `record_seconds` are plain Python ints here (not
+        # traced), so -- unlike `gregorian_instant`'s own `record` argument,
+        # which is traced and open-ended (a run's length is not known in
+        # advance) -- this IS a case where the maximum value
+        # `gregorian_instant` will ever be asked to resolve for this pattern
+        # is knowable up front. Checking it here, in plain Python, is what
+        # "raise a clear error at construction" means for this reduction:
+        # `monthly_mean`'s caller finds out its pattern does not fit BEFORE
+        # a bin index is ever silently wrong, rather than after.
+        bound = max_safe_record(
+            record_seconds, offset_seconds=offset_seconds + record_seconds // 2
+        )
+        if records_per_period - 1 > bound:
+            raise ValueError(
+                f"This monthly_mean's pattern needs {records_per_period} "
+                f"{record_seconds} s records per cycle ({period} s total), "
+                f"but gregorian_instant can only resolve up to {bound} of "
+                f"them exactly for a record this long (see "
+                "jem.base.calendar.max_safe_record) -- this pattern is too "
+                "long, or its records too long, to bin exactly."
+            )
         record_mod = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
         day, _ = gregorian_instant(
             record_mod, record_seconds, 0, 0,
