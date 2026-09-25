@@ -373,6 +373,35 @@ def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupl
         _check_step_counters_fit_int32(coupler, 1_000_000, limit + 2)
 
 
+def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment():
+    """2026-09 review, round 3, finding 4: `carry.step` itself must survive its own +1.
+
+    A coupled step's own counter is incremented and persisted AFTER it runs
+    (`Coupler.step`'s own body: ``step=carry.step + 1``), so the largest safe
+    coupled step to reach is not simply the largest one a raw counter can be
+    COMPUTED at -- it is one less than that, so the resulting ``carry.step``
+    (the computed step's index plus one) is itself still representable.
+    ``"365_day"`` has no calendar-derived (day-count) limit at all, so with no
+    sub-stepped element (``rate == 1``) its raw-counter limit used to come out
+    as exactly ``2**31 - 1``: reaching that coupled step is fine on its own,
+    but the ``carry.step`` this run would then persist, ``2**31``, silently
+    wraps -- an int32 cannot hold it.
+    """
+    from jem.driver import _max_element_rate, _max_safe_coupled_steps
+
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    coupler = Coupler(
+        components, default_exchangers(components), coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE, calendar="365_day",
+    )
+    assert _max_element_rate(coupler) == 1  # no sub-stepping: the floor case
+
+    limit = _max_safe_coupled_steps(coupler)
+    assert limit == 2**31 - 2  # one short of int32's own max, not the max itself
+    assert limit + 1 <= 2**31 - 1  # the post-increment `carry.step` still fits
+
+
 def test_run_chunked_writes_nothing_when_the_run_is_already_done(coupler, tmp_path):
     """A carry already at `total_time` completes with no chunks and no files."""
     carry = coupler.initialize()

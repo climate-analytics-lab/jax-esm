@@ -945,7 +945,24 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
       any step/substep counter in the coupled hierarchy counts, relative to
       ``coupler``'s own coupled step, bounds how many of *those* the counter
       itself (an ``int32``, however it is eventually used) can hold before
-      it, not the outer coupled step, is what overflows first.
+      it, not the outer coupled step, is what overflows first. A counter
+      that runs at ``rate`` per outer coupled step, and is itself persisted
+      (either the outer ``carry.step`` at ``rate == 1``, or a nested
+      coupler's own step counter at whatever ``rate`` its nesting works out
+      to -- see :func:`_max_element_rate`'s own docstring), is incremented
+      and stored again *after* the last coupled step this run reaches
+      (:meth:`~jem.base.coupler.Coupler.step`'s own body: ``step=carry.step
+      + 1``). So reaching coupled step ``L`` needs not just the raw value
+      *computed while processing* ``L`` to fit (``(L + 1) * rate - 1``, the
+      value at the last substep of the last step), but the counter's own
+      *next, persisted* value to fit too (``(L + 1) * rate``) -- one more
+      than the first, and the one that actually binds: the largest safe
+      ``L`` is ``floor(_STEP_INT32_MAX / rate) - 1``, not
+      ``floor((_STEP_INT32_MAX - rate + 1) / rate)`` (2026-09 review, round
+      3, finding 4 -- the previous formula was the weaker, transient-value
+      bound and could be exactly 1 too generous, e.g. ``rate == 1`` gave
+      exactly ``2**31 - 1``: correct as the last *computed* step, but the
+      ``carry.step`` this run would then persist, ``2**31``, silently wraps).
     - **The exact int32 day-count limit** (:func:`jem.base.calendar
       .max_safe_record`) of ``coupler``'s own clock, on ``"gregorian"``
       only -- the calendar whose ``CouplingTime.year_fraction`` and
@@ -965,6 +982,14 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
       ever multiplying it, bounded by one year's own length in seconds
       (always small) regardless of run length.
 
+      This day-count limit does **not** need its own ``+1``-style
+      reservation the way the raw counter limit above does: it bounds the
+      OUTER coupled step (``record == coupler``'s own ``carry.step``)
+      directly, at ``rate == 1``, and the raw counter limit above is *always*
+      at most ``_STEP_INT32_MAX // 1 - 1 == 2**31 - 2`` for any ``rate >=
+      1`` -- so the ``min`` of the two can never exceed that ceiling either,
+      whichever one binds.
+
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
@@ -980,7 +1005,7 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
     from jem.base.calendar import max_safe_record
 
     rate = _max_element_rate(coupler)
-    counter_limit = (_STEP_INT32_MAX - (rate - 1)) // rate
+    counter_limit = _STEP_INT32_MAX // rate - 1
     if coupler.calendar != "gregorian":
         return counter_limit
     start = coupler.start_date
