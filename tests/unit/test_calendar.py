@@ -5,9 +5,9 @@ rather than importing it (see that module's docstring for why), so the one
 thing this file must prove is that the vendored copy and the original never
 disagree -- and that both agree with an independent implementation
 (``pandas``'s own proleptic-Gregorian arithmetic), century leap-year rules
-included, over a run long enough to matter (jax-gcm#907's review round asked
-for at least 400 years: long enough to see three of the four `%100`
-non-leap centuries and the one `%400` exception that puts them back in).
+included, over a run long enough to matter: at least 400 years (see
+jax-gcm#907), long enough to see three of the four `%100` non-leap
+centuries and the one `%400` exception that puts them back in.
 """
 
 import datetime as pydt
@@ -138,9 +138,10 @@ def test_gregorian_instant_matches_python_ints_up_to_max_safe_record(
     ``max_safe_record`` is a *guaranteed-safe* bound, proven exact in its own
     docstring; this checks that proof empirically, at the bound itself, just
     below it, at 0 and 1, and at a dense band around it (where a
-    reduce-before-multiply bug is most likely to show up first -- see the
-    2026-09 migration review, item 2, whose "1 month" case broke as early as
-    record 817).
+    reduce-before-multiply bug is most likely to show up first -- see
+    `test_gregorian_instant_one_month_step_survives_far_past_its_old_817_break`,
+    whose "1 month" case broke as early as record 817 under the block-based
+    decomposition `gregorian_instant` replaced).
     """
     bound = max_safe_record(
         record_seconds, offset_seconds=offset_seconds, start_seconds=start_seconds
@@ -211,9 +212,9 @@ def test_gregorian_instant_one_month_step_survives_far_past_its_old_817_break(
 ):
     """The "1 month" Gregorian coupling step: exact for tens of thousands of years.
 
-    Before the fix, ``gregorian_instant`` silently wrapped past record 817 of
-    a 2629746 s ("1 month") coupling step -- about 68 records short of even a
-    century (2026-09 migration review, item 2; ``jem/base/calendar.py``'s own
+    The block-based decomposition ``gregorian_instant`` replaced silently
+    wrapped past record 817 of a 2629746 s ("1 month") coupling step -- about
+    68 records short of even a century (see ``jem/base/calendar.py``'s own
     History note). This checks a record count far beyond that break --
     50,000 records is over 4,100 years of monthly output -- against exact
     Python ``int`` arithmetic.
@@ -231,23 +232,24 @@ def test_gregorian_instant_one_month_step_survives_far_past_its_old_817_break(
 
 
 def test_gregorian_instant_exact_at_and_near_2_31_for_every_adversarial_record_seconds():
-    """2026-09 migration review, round 2, finding B1's own reproduction, fixed.
+    """Exact at and near int32's own limit, for every adversarial `record_seconds`.
 
-    The block-based decomposition that shipped after round 1's fix (git
-    history) was still only int32-safe up to a computed
-    ``max_safe_record`` that could itself be as small as about 68 simulated
+    A block-based decomposition (reducing modulo a single static "block"
+    sized from ``record_seconds`` alone) is only int32-safe up to a computed
+    ``max_safe_record`` that can itself be as small as about 68 simulated
     years (e.g. this test's own ``73453`` s coupling step), and nothing but
-    ``jem.accumulate._midpoint_month_rule`` ever checked it -- a
-    ``year_fraction`` or ``monthly_mean`` bin past that point was silently
-    wrong with no error (confirmed: a daily ``year_fraction`` at step 58471
-    of a 73453 s coupling from 2000-01-01 came back ``0.9969`` against an
-    exact ``0.0988``). ``gregorian_instant`` is now a limb (schoolbook)
-    decomposition, proven exact up to the one limit no algorithm can move --
-    an int32 day count's own range -- so ``max_safe_record`` for every one
-    of these record lengths is now within the full ``int32`` record range
-    (some exactly ``2**31 - 1``; the rest -- record lengths that do not
-    divide evenly into a day -- are the exact day-count limit itself, still
-    around 5.87 million years' worth of records). Checked densely around
+    ``jem.accumulate._midpoint_month_rule`` checks it -- a
+    ``year_fraction`` or ``monthly_mean`` bin past that point would be
+    silently wrong with no error (e.g. a daily ``year_fraction`` at step
+    58471 of a 73453 s coupling from 2000-01-01 comes back ``0.9969``
+    against an exact ``0.0988``). ``gregorian_instant`` is instead a limb
+    (schoolbook) decomposition, proven exact up to the one limit no
+    algorithm can move -- an int32 day count's own range -- so
+    ``max_safe_record`` for every one of these record lengths is within the
+    full ``int32`` record range (some exactly ``2**31 - 1``; the rest --
+    record lengths that do not divide evenly into a day -- are the exact
+    day-count limit itself, still around 5.87 million years' worth of
+    records). Checked densely around
     ``2**31 - 1`` and around each ``record_seconds``'s own bound, not just
     at a handful of spot values, and against plain Python ``int``
     arithmetic throughout -- no algorithm this test trusts to be correct.
@@ -275,7 +277,7 @@ def test_gregorian_instant_exact_at_and_near_2_31_for_every_adversarial_record_s
 
 
 def test_gregorian_instant_is_exact_even_when_the_loops_own_days_accumulator_overflows_int32():
-    """2026-09 review, round 3, finding 8: the "every intermediate" claim, precisely.
+    """Exact even when the loop's own days accumulator overflows int32.
 
     The limb-processing loop's own running ``days`` accumulator is computed
     with no ``start_days`` in it at all (that is added only once, at the very
@@ -287,8 +289,7 @@ def test_gregorian_instant_is_exact_even_when_the_loops_own_days_accumulator_ove
     ``2**32`` (two's complement), so the final sum is correct regardless of
     whether the loop's own running total needed to wrap through ``2**32`` to
     get there -- verified here directly against exact Python ``int``
-    arithmetic, reproducing the review's own example
-    (``record_seconds=172800, start_days=-10**9``).
+    arithmetic, for ``record_seconds=172800, start_days=-10**9``.
     """
     record_seconds = 172800  # 2 days
     start_days = -10**9
@@ -312,19 +313,19 @@ def test_gregorian_instant_is_exact_even_when_the_loops_own_days_accumulator_ove
 
 
 def test_max_safe_record_reserves_start_days_against_the_same_day_budget():
-    """N1: ``start_days`` must be charged against the ``2**31 - 1`` day budget too.
+    """``start_days`` must be charged against the ``2**31 - 1`` day budget too.
 
-    Before this fix ``max_safe_record`` had no ``start_days`` parameter at
-    all, so a nonzero ``start_days`` was not reserved -- the returned bound
-    could itself already be past the true edge (confirmed with these exact
-    values, ``record_seconds=86400``, ``offset_seconds=43200``,
-    ``start_days=10957`` -- 2000-01-01 -- ``start_seconds=86399``: calling
-    ``gregorian_instant`` at the old, ``start_days``-blind bound already
-    gave a negative, wrapped day count). The true edge is checked here
-    directly against exact Python ``int`` arithmetic -- the definition of
-    "the largest record keeping the day count in int32 range" -- rather
-    than against one specific number, since the exact value is a consequence
-    of the derivation, not the definition.
+    Leaving ``start_days`` unreserved -- not charging it against the same
+    day budget every other term is -- would make the returned bound itself
+    already past the true edge (confirmed with these exact values,
+    ``record_seconds=86400``, ``offset_seconds=43200``, ``start_days=10957``
+    -- 2000-01-01 -- ``start_seconds=86399``: calling ``gregorian_instant``
+    at the ``start_days``-blind bound computed below already gives a
+    negative, wrapped day count). The true edge is checked here directly
+    against exact Python ``int`` arithmetic -- the definition of "the
+    largest record keeping the day count in int32 range" -- rather than
+    against one specific number, since the exact value is a consequence of
+    the derivation, not the definition.
     """
     record_seconds, offset, start_days, start_seconds = 86400, 43200, 10957, 86399
     bound = max_safe_record(
@@ -355,17 +356,16 @@ def test_max_safe_record_reserves_start_days_against_the_same_day_budget():
 
 
 def test_max_safe_record_raises_rather_than_silently_return_zero_when_even_record_0_is_unsafe():
-    """2026-09 review, round 3, finding 3: a promised raise, not a lying ``0``.
+    """A promised raise, not a lying ``0``.
 
     ``max_safe_record``'s docstring promises a raise when there is "no safe
-    record, not even 0" -- but it only actually checked ``start_days`` alone
-    for that; a large ``offset_seconds`` (or ``start_seconds``) can just as
-    well push the day count for record 0 itself past int32, and the old code
-    clamped the resulting negative bound up to ``0`` with ``max(0, ...)``
-    instead, silently claiming record 0 was safe. Reproduction from the
-    review: ``record_seconds=1``, ``offset_seconds=400*86400`` (400 days),
-    ``start_days=2**31-6`` -- record 0 alone already lands 400 days past
-    int32's own range.
+    record, not even 0" -- checking only ``start_days`` for that would miss
+    a large ``offset_seconds`` (or ``start_seconds``) that can just as well
+    push the day count for record 0 itself past int32; clamping the
+    resulting negative bound up to ``0`` with ``max(0, ...)`` instead would
+    silently claim record 0 is safe. For example: ``record_seconds=1``,
+    ``offset_seconds=400*86400`` (400 days), ``start_days=2**31-6`` --
+    record 0 alone already lands 400 days past int32's own range.
     """
     with pytest.raises(ValueError, match="no safe record, not even 0"):
         max_safe_record(1, offset_seconds=400 * 86400, start_days=2**31 - 6)

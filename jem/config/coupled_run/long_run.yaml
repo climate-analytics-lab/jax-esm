@@ -23,17 +23,15 @@ chunk: "30 days"
 # chunk, so its boundaries drift against the real Gregorian calendar (about
 # five days a year) and a bin spans parts of two months. For true calendar
 # months instead, use `jem.accumulate.monthly_mean(coupler, total_time=...)`
-# with `run_chunked(..., accumulate=monthly)` -- since the 2026-09 migration
-# review it works exactly and in-scan on `calendar="gregorian"` (real leap
-# years, no fixed month-length table needed), which is the calendar this
-# coupled run's atmosphere always uses. (An earlier version of this comment
-# said monthly_mean could not do this and pointed at
-# `ds.groupby("time.year").groupby("time.month")` as the host-side fallback --
-# that recipe does not even run (`AttributeError`: a `DataArray`/`Dataset` has
-# no `.groupby` on the *result* of a `groupby`); the working host-side
-# equivalent, if the whole trajectory in memory is preferred anyway, is
-# `ds.resample(time="MS").mean()` or `ds.groupby(["time.year", "time.month"])`
-# in one call.)
+# with `run_chunked(..., accumulate=monthly)` -- it works exactly and
+# in-scan on `calendar="gregorian"` (real leap years, no fixed month-length
+# table needed), which is the calendar this coupled run's atmosphere always
+# uses. A host-side equivalent, if the whole trajectory in memory is
+# preferred anyway, is `ds.resample(time="MS").mean()` or
+# `ds.groupby(["time.year", "time.month"])` in one call --
+# `ds.groupby("time.year").groupby("time.month")` does NOT work
+# (`AttributeError`: a `DataArray`/`Dataset` has no `.groupby` on the
+# *result* of a `groupby`).
 output_averages: true
 # Nothing about checkpointing is set here: a run this long outlives a queue
 # slot and must checkpoint, and `default.yaml` already does -- repeating the

@@ -570,8 +570,7 @@ def run_chunked(
     # -- the coupled one, a sub-stepped element's, a nested coupler's own, or
     # the day count `gregorian` calendar math derives from one -- past what
     # int32 can hold is refused here rather than left to silently wrap deep
-    # inside a traced step (2026-09 migration review, round 2, finding B1's
-    # remaining half; see `_max_safe_coupled_steps`'s own docstring).
+    # inside a traced step (see `_max_safe_coupled_steps`'s own docstring).
     _check_step_counters_fit_int32(coupler, int(carry.step), total_steps)
     # One line, always, whatever the run does next: a modeller reading a log
     # has to be able to see at a glance whether the state being integrated is
@@ -907,7 +906,7 @@ def _max_element_rate(coupler: Any) -> int:
     that grows ``n`` times faster than the outermost coupled step, so ``n``
     times fewer outer steps are safe.
 
-    **Now also covers a component's own internal counters, if it reports
+    **Also covers a component's own internal counters, when it reports
     them.** A plain (non-nested) element additionally contributes its own
     :meth:`~jem.base.component.SupportsInternalStepping.internal_steps_per_call`
     (optional; a component that does not implement it is rate 1, as before
@@ -919,12 +918,10 @@ def _max_element_rate(coupler: Any) -> int:
     ._report_authoritative_clock_drift`` computes from it) is covered by this
     rate, by :func:`_max_safe_coupled_steps` and by
     :func:`_check_step_counters_fit_int32`, exactly like a workflow
-    multiplicity or a nested ``Coupler`` is (2026-09 review, round 3
-    follow-up, finding 7: an earlier version of this docstring said such a
-    counter could never be covered at all; ``jem.driver`` still carries no
-    jcm-specific knowledge -- ``SupportsInternalStepping`` is a generic,
+    multiplicity or a nested ``Coupler`` is. ``jem.driver`` still carries no
+    jcm-specific knowledge here -- ``SupportsInternalStepping`` is a generic,
     optional capability any component may implement, the same way
-    :class:`~jem.base.component.SupportsBind` is). A component that keeps
+    :class:`~jem.base.component.SupportsBind` is. A component that keeps
     such a counter but does not implement the capability is still not
     covered -- reporting it accurately is that component's own
     responsibility, the same way agreeing to :class:`SupportsBind`'s clock
@@ -996,12 +993,11 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
       value at the last substep of the last step), but the counter's own
       *next, persisted* value to fit too (``(L + 1) * rate``) -- one more
       than the first, and the one that actually binds: the largest safe
-      ``L`` is ``floor(_STEP_INT32_MAX / rate) - 1``, not
-      ``floor((_STEP_INT32_MAX - rate + 1) / rate)`` (2026-09 review, round
-      3, finding 4 -- the previous formula was the weaker, transient-value
-      bound and could be exactly 1 too generous, e.g. ``rate == 1`` gave
-      exactly ``2**31 - 1``: correct as the last *computed* step, but the
-      ``carry.step`` this run would then persist, ``2**31``, silently wraps).
+      ``L`` is ``floor(_STEP_INT32_MAX / rate) - 1``. The weaker,
+      transient-value bound ``floor((_STEP_INT32_MAX - rate + 1) / rate)``
+      would be exactly 1 too generous -- e.g. ``rate == 1`` gives exactly
+      ``2**31 - 1``: correct as the last *computed* step, but the
+      ``carry.step`` this run would then persist, ``2**31``, silently wraps.
     - **The exact int32 day-count limit** (:func:`jem.base.calendar
       .max_safe_record`) of ``coupler``'s own clock, on ``"gregorian"``
       only -- the calendar whose ``CouplingTime.year_fraction`` and
@@ -1039,9 +1035,9 @@ def _max_safe_coupled_steps(coupler: "Coupler") -> int:
       caller is free to label at the record's END too (``offset_seconds =
       dt_seconds``, one whole record later than the start) --
       :func:`~jem.base.calendar.max_safe_record`'s bound only ever *shrinks*
-      as ``offset_seconds`` grows, so checking at ``0`` can accept a coupled
-      step count that a midpoint- or end-offset caller downstream would
-      silently get wrong (2026-09 review, round 3, finding 5). Checking at
+      as ``offset_seconds`` grows, so checking at ``0`` would accept a
+      coupled step count that a midpoint- or end-offset caller downstream
+      could silently get wrong. Checking at
       ``dt_seconds`` -- the largest offset any offset *within one record* can
       be -- is conservative enough to cover every smaller offset a caller
       anywhere in this codebase actually uses, present or future, without
@@ -1084,10 +1080,10 @@ def _check_step_counters_fit_int32(
     Checked once, up front (as soon as ``first_step`` is known from the
     starting carry, before any trajectory is compiled), against
     :func:`_max_safe_coupled_steps` -- rather than discovered from a wrong
-    date deep inside a traced step, which is what a run past this bound used
-    to do silently (2026-09 migration review, round 2, finding B1): a daily
-    ``year_fraction`` of a 73453 s coupling from 2000-01-01 was found wrong
-    at step 58471 (about 25 years in) with no error at all.
+    date deep inside a traced step: without this check, a run past this
+    bound fails silently (a daily ``year_fraction`` of a 73453 s coupling
+    from 2000-01-01 goes wrong at step 58471, about 25 years in, with no
+    error at all).
 
     ``total_steps`` is ``run_chunked``'s and :func:`~jem.checkpoint
     .remaining_batches`'s own ``total_steps``: the ABSOLUTE coupled-step
@@ -1096,12 +1092,11 @@ def _check_step_counters_fit_int32(
     from ``first_step``. The last coupled step this run reaches is therefore
     ``total_steps - 1`` regardless of where a resume starts (a resume only
     changes how much of ``0 .. total_steps - 1`` THIS CALL still has to
-    integrate, not the run's own target). A round 2 version of this check
-    computed ``first_step + total_steps - 1``, double-counting ``first_step``
-    -- which refused a real, legitimate 6000-year run of a doubly nested
-    24x6x5 coupler resumed at coupled step 1,000,000, even though its true
-    last step was still well inside the limit (2026-09 review, round 3,
-    finding 1; ``rr/c5.py``).
+    integrate, not the run's own target). Computing
+    ``first_step + total_steps - 1`` instead would double-count
+    ``first_step`` -- refusing a real, legitimate 6000-year run of a doubly
+    nested 24x6x5 coupler resumed at coupled step 1,000,000, even though its
+    true last step is still well inside the limit.
 
     Like :func:`_max_element_rate`, this covers only the counters the
     coupler hierarchy itself owns (see that function's own **Scope** note)

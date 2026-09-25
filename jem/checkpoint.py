@@ -263,8 +263,8 @@ def _leaf_count_mismatch_hint(
     one cause this module can actually name: a checkpoint written before the
     jax-gcm PR 878 migration has no ``"time"``/``"step"`` entry in the
     atmosphere's carry (:class:`~jem.components.jcm.component.JCMComponent`
-    gained them, threaded exactly like the pre-existing ``"physics"`` key --
-    see the 2026-09 migration review, item 7), so loading such a file into a
+    gained them, threaded exactly like the pre-existing ``"physics"`` key),
+    so loading such a file into a
     post-migration template is short by exactly the LEAVES those two entries
     add -- **three**, not two: ``"step"`` is one leaf, but a real
     ``jax_datetime.Datetime`` (``"time"``) is itself two (its ``Timedelta``'s
@@ -299,12 +299,11 @@ def _leaf_count_mismatch_hint(
     # real `jax_datetime.Datetime` is TWO pytree leaves (its `Timedelta`'s
     # `days` and `seconds`), both of which render a path containing `'time'`
     # (e.g. `['components']['atm']['time'][<flat index 0>][<flat index 0>]`)
-    # -- so counting fragments rather than leaves undercounts a `"time"`
-    # field by one and can never match a real deficit (this is what made an
-    # earlier version of this function, and the test that modelled `"time"`
-    # as a single `jnp.int32`, unable to ever fire on a real checkpoint).
-    # `not in saved_path_set` is checked per LEAF, which is also what keeps
-    # this from being confused by a coupled carry's own top-level `"step"`
+    # -- so counting fragments rather than leaves would undercount a
+    # `"time"` field by one and could never match a real deficit: a real
+    # checkpoint always has `"time"` as two leaves, never one. `not in
+    # saved_path_set` is checked per LEAF, which is also what keeps this
+    # from being confused by a coupled carry's own top-level `"step"`
     # -- present, and so not missing, in both an old and a new checkpoint --
     # matching the same `'step'` fragment as the atmosphere's own, genuinely
     # missing, component-level `"step"`.

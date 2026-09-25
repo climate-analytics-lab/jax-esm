@@ -118,30 +118,29 @@ def test_component_satisfies_protocols(component):
 
 
 def test_internal_steps_per_call_matches_inner_steps(component):
-    """2026-09 review, round 3 follow-up (finding 7): the capability is wired up.
+    """``SupportsInternalStepping`` is wired up correctly.
 
     ``internal_steps_per_call`` is what lets ``jem.driver._max_element_rate``
     see JCM's own internal sub-cycling; it must report exactly
     ``self._inner_steps()``, not a stand-in or a stale cached value. For this
     module's T21/5-layer aquaplanet config -- a 1 day coupling timestep over
-    JCM's own 30-minute physics timestep -- that is 48, the same figure the
-    2026-09 review's own reproduction used.
+    JCM's own 30-minute physics timestep -- that is 48.
     """
     assert component.internal_steps_per_call() == component._inner_steps() == 48
 
 
 def test_run_chunked_accepts_a_10000_year_earth_slab_style_run(model):
-    """2026-09 review, round 3 follow-up (finding 7): a realistic configuration.
+    """A realistic configuration: JCM's own internal counter sets the limit.
 
     An otherwise ordinary earth-slab-style coupler (atm+ocn+seaice, no
     workflow multiplicity, no nesting) has JCM's own
     ``internal_steps_per_call`` (48, this module's 30-minute-physics/
     daily-coupling config) as its fastest raw counter -- exactly the number
-    ``jem.driver._max_element_rate`` now finds, with no jcm-specific
-    knowledge added to ``jem.driver`` itself (:class:`SupportsInternalStepping`
-    is generic). A 10,000-year run (about 3,652,425 daily coupled steps,
-    ``rr/c3.py``'s own sanity figure) is comfortably inside the resulting
-    limit, and one that overflows the (now much smaller) limit is refused.
+    ``jem.driver._max_element_rate`` finds, with no jcm-specific knowledge
+    added to ``jem.driver`` itself (:class:`SupportsInternalStepping` is
+    generic). A 10,000-year run (about 3,652,425 daily coupled steps) is
+    comfortably inside the resulting limit, and one that overflows the
+    (much smaller) limit is refused.
     Checked directly against ``_check_step_counters_fit_int32`` /
     ``_max_safe_coupled_steps`` rather than the whole of ``run_chunked``,
     which would then have to build and run a multi-million-step trajectory
@@ -263,8 +262,8 @@ def test_the_threaded_clock_advances_across_steps(stepped, model):
 
     ``test_initialize_does_not_integrate`` only pins the carry's clock at
     step 0; nothing before this test ever checked that it actually advances,
-    which is the one thing that matters about a *threaded* clock (2026-09
-    migration review, item 6). One coupled day must move ``carry["time"]``
+    which is the one thing that matters about a *threaded* clock. One
+    coupled day must move ``carry["time"]``
     by exactly one day and ``carry["step"]`` by exactly one JCM timestep's
     worth of coupling -- the same fact :meth:`JCMComponent
     ._report_authoritative_clock_drift` now checks on every step, so a bug
@@ -291,10 +290,10 @@ def test_the_threaded_clock_advances_across_steps(stepped, model):
 def test_authoritative_clock_drift_is_reported(model, caplog):
     """A carry whose own clock disagrees with the coupler's is caught.
 
-    Confirms :meth:`JCMComponent._report_authoritative_clock_drift` (2026-09
-    migration review, item 6) fires when ``carry["time"]``/``carry["step"]``
-    do not match what the coupler's own step count and start date say they
-    should be -- the case ``_report_clock_drift`` (which only ever compared
+    Confirms :meth:`JCMComponent._report_authoritative_clock_drift` fires
+    when ``carry["time"]``/``carry["step"]`` do not match what the
+    coupler's own step count and start date say they should be -- the case
+    ``_report_clock_drift`` (which only ever compared
     the dycore's own derived ``sim_time``) could not catch: a checkpoint's
     carry restored as-is into a coupler bound to a different start date.
     """

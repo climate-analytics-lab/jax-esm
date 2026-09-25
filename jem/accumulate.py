@@ -178,15 +178,14 @@ def _variable_window_rule(
     as long as the run lasts, a record belonging to the bin its interval's
     *end* falls in (in elapsed run-time, independent of what instant the
     record is actually labelled with -- see :func:`windowed_mean`'s own
-    docstring for why the two are kept independent). This was also
-    :func:`monthly_mean`'s bin rule before the 2026-09 migration review moved
-    that function to bin by a record's **midpoint** instead
+    docstring for why the two are kept independent). :func:`monthly_mean`
+    cannot share this rule: it bins by a record's **midpoint** instead
     (:func:`_midpoint_month_rule`, :func:`_gregorian_month_rule`), to keep
-    pace with :class:`~jem.base.component.TimeAxis`'s own move to a
-    midpoint output label -- a half-record shift this function's own
+    pace with :class:`~jem.base.component.TimeAxis`'s own midpoint output
+    label -- a half-record shift this function's own
     boundaries-to-record-counts conversion (see the Notes below) cannot
-    express, which is why that rebinding needed a new function rather than a
-    third ``inclusive`` mode here.
+    express, which is why that binning needs a separate function rather than
+    a third ``inclusive`` mode here.
 
     Parameters
     ----------
@@ -392,15 +391,15 @@ def _midpoint_month_rule(
 
     Notes
     -----
-    **Int32 safety.** Comparing directly in seconds -- as this function did
-    before the 2026-09 migration review's item 2 -- bounds the traced
+    **Int32 safety.** Comparing directly in seconds would bound the traced
     arithmetic by ``period`` (the pattern's own span: a year for the
     twelve-bin form, or the whole ``n_months``/``total_time`` span for the
     sequential one), which is fine for a year but **not** for a sequential
     accumulator spanning decades: a 100-year, 365-day-calendar
     ``monthly_mean`` has ``period`` around 3.15e9 s, already past ``2**31``,
-    so building ``boundaries_int32`` at all raised ``OverflowError`` past
-    about 68 years of sequential bins. The fix compares in **days** instead:
+    so building ``boundaries_int32`` would raise ``OverflowError`` past
+    about 68 years of sequential bins. Comparing in **days** instead avoids
+    this:
     every month boundary but (possibly) the pattern's very last -- see
     below -- falls exactly at midnight, so a boundary comparison needs no
     finer resolution than a day, and a day count stays int32-safe up to
@@ -1302,9 +1301,9 @@ def monthly_mean(
     this reduction deliberately keeps; see **Sub-steps** below.)
 
     This is a **breaking change** from the binning this function used before
-    the 2026-09 jax-gcm-878 migration review, which counted a record in the
-    month its interval's *end* fell in (to match the *pre-878* end-of-interval
-    output label). Once ``TimeAxis`` itself moved to midpoint labels, keeping
+    jax-gcm PR 878: it counted a record in the month its interval's *end*
+    fell in (to match the *pre-878* end-of-interval output label). Once
+    ``TimeAxis`` itself moved to midpoint labels, keeping
     the old end-of-interval bin rule would have made ``monthly_mean`` disagree
     with a ``groupby`` of its own coupler's written output at every month
     boundary -- exactly the disagreement this rebinding exists to prevent --
@@ -1666,10 +1665,9 @@ def _gregorian_monthly_mean(
         # will ever ask for" this module already does for the fixed
         # calendars' own `_midpoint_month_rule` -- see that check's own
         # comment -- extended here to the calendar whose sequential form
-        # this branch builds (2026-09 migration review, round 2, finding
-        # B1's `run_chunked` refusal, mirrored here since `monthly_mean` is
-        # its own construction site with its own known record count, not
-        # something `run_chunked`'s check can see).
+        # this branch builds, mirroring `run_chunked`'s own refusal since
+        # `monthly_mean` is its own construction site with its own known
+        # record count, not something `run_chunked`'s check can see.
         last_record = n_steps - 1
         bound = max_safe_record(
             dt_seconds, offset_seconds=dt_seconds // 2,
@@ -1690,9 +1688,9 @@ def _gregorian_monthly_mean(
         # (thousands of years away from binding for any realistic coupling,
         # vs. `max_safe_record`'s millions): a `total_time` whose last
         # record's midpoint falls past it (`"3000000 days"` from 2000-01-01,
-        # about 8219 years, does) used to raise a raw `OverflowError: date
-        # value out of range` from this line instead of a clear refusal
-        # (2026-09 review, round 3, finding 6).
+        # about 8219 years, does) raises a raw `OverflowError: date value out
+        # of range` from this line if left unguarded, so it is caught below
+        # and turned into a clear refusal instead.
         try:
             last_midpoint = start + step * (n_steps - 1) + step / 2
         except OverflowError as error:

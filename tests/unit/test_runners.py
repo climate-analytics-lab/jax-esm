@@ -704,17 +704,17 @@ def test_an_explicit_declaration_with_no_active_exchanger_leaves_forcing_unfroze
 
 
 def test_a_declared_time_varying_field_with_no_writer_is_rejected():
-    """Codex round 20 (P2): a declared field the active table never writes.
+    """A declared field the active coupling table never writes must be rejected.
 
     Declaring `sice_am` for an atmosphere/ocean coupling that has no
-    sea-ice component reproduces the reported gap exactly: `sice_am` really
-    is time-varying (with `forcing=from_file`), so the `pinned` warning above
-    cannot catch it -- that check only fires for a declared name that is
-    *not* time-varying. Before the fix this fell through both safety nets
-    and `atm.initialize()` silently collapsed `sice_am` to its start-date
-    value for the rest of the run; only `sea_surface_temperature` is ever
-    written here (the standalone `Exchange` below has no `seaice` row), so
-    this must now be rejected outright rather than warned about.
+    sea-ice component is a genuine gap: `sice_am` really is time-varying
+    (with `forcing=from_file`), so the `pinned` warning above cannot catch
+    it -- that check only fires for a declared name that is *not*
+    time-varying. Left unchecked, `atm.initialize()` would silently collapse
+    `sice_am` to its start-date value for the rest of the run; only
+    `sea_surface_temperature` is ever written here (the standalone
+    `Exchange` below has no `seaice` row), so this must be rejected outright
+    rather than warned about.
     """
     cfg = composed([
         "forcing@atmosphere.forcing=from_file",
@@ -723,16 +723,16 @@ def test_a_declared_time_varying_field_with_no_writer_is_rejected():
     ])
     atm = runners.build_atmosphere(cfg)
     # A fully inspectable table -- an `Exchange`, not a hand-written function
-    # -- that only ever writes `sea_surface_temperature`, standing in for the
-    # atmosphere/ocean-only coupling (`seaice=none`) the finding names.
+    # -- that only ever writes `sea_surface_temperature`, standing in for an
+    # atmosphere/ocean-only coupling (`seaice=none`).
     exchangers = {"exchange": Exchange([
         {"src": "ocn.state.sea_surface_temperature",
          "dst": "atm.forcing.sea_surface_temperature"},
     ])}
 
     # Deliberately not a bare `pytest.raises` block: if the guard regresses,
-    # the failure here has to show the actual silent freeze (what the
-    # reported bug looked like in practice), not just "no exception raised".
+    # the failure here has to show the actual silent freeze in practice, not
+    # just "no exception raised".
     from jcm.forcing import TimeSeries
 
     try:
@@ -753,8 +753,8 @@ def test_a_declared_time_varying_field_with_no_writer_is_rejected():
             f"atm.exchanged_forcing = {atm.exchanged_forcing!r} and "
             "atm.initialize()['forcing'].sice_am is now "
             f"{type(atm.initialize()['forcing'].sice_am).__name__} instead "
-            f"of {TimeSeries.__name__} -- the exact silent freeze the "
-            "Codex round 20 finding reported."
+            f"of {TimeSeries.__name__} -- the exact silent freeze this test "
+            "guards against."
         )
 
 

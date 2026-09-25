@@ -168,20 +168,19 @@ def test_a_different_leaf_count_is_refused(tmp_path):
 def test_a_pre_878_checkpoint_names_the_cause(tmp_path):
     """A carry missing exactly 'time'/'step' gets a specific hint, not just a count.
 
-    2026-09 migration review, item 7: a checkpoint saved before jax-gcm PR
-    878 added `"time"`/`"step"` to the atmosphere's carry fails the generic
-    leaf-count check like any other composition mismatch, but the message
-    now also names the likely cause and says there is no migration path.
+    A checkpoint saved before jax-gcm PR 878 added `"time"`/`"step"` to the
+    atmosphere's carry fails the generic leaf-count check like any other
+    composition mismatch, but the message also names the likely cause and
+    says there is no migration path.
 
-    A real ``jax_datetime.Datetime`` is what the fix actually has to count
+    A real ``jax_datetime.Datetime`` is what the hint actually has to count
     right: it is TWO pytree leaves (its ``Timedelta``'s ``days`` and
     ``seconds``), not one, so a real pre-878 carry loaded into a real
     post-878 template is short by **three** leaves (two for ``"time"``, one
-    for ``"step"``) -- modelling ``"time"`` as a single ``jnp.int32`` (as an
-    earlier version of this test did) is short by only two and never
-    exercises that count at all, which is why that version had no teeth
-    (the hint's own leaf-count check was hard-coded to ``2`` and could never
-    fire for a real checkpoint). The carry also nests both the pre-existing,
+    for ``"step"``). Modelling ``"time"`` as a single ``jnp.int32`` here
+    instead would be short by only two and would never exercise that count
+    at all, since the hint's own leaf-count check would then never fire for
+    a real checkpoint. The carry also nests both the pre-existing,
     always-present coupled-carry ``"step"`` (a plain ``CoupledCarry.step``,
     unrelated to jax-gcm and present in both an old and a new checkpoint)
     alongside the atmosphere's own new ``"step"``, so this also exercises the

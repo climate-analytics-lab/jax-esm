@@ -241,7 +241,7 @@ def test_component_satisfies_protocols(component):
 
 
 def test_internal_steps_per_call_matches_steps_per_coupling_step(component):
-    """2026-09 review, round 3 follow-up (finding 7, extended to Veros).
+    """``SupportsInternalStepping`` extended to Veros.
 
     ``internal_steps_per_call`` is what lets ``jem.driver._max_element_rate``
     see Veros' own ``itt`` sub-cycling (see ``VerosComponent

@@ -689,8 +689,8 @@ def map_plot(
         exactly the number of bands (ordinary bins plus any ``extend`` adds),
         so pairing it with a ``BoundaryNorm`` over exactly that many colours
         never hits ``BoundaryNorm``'s "fewer bins than colours" interpolation
-        (the bug an earlier version of this fix had -- see :func:`_map_plot`
-        for why a small discrete ``cmap`` made that visible). An integer
+        (see :func:`_map_plot` for why a small discrete ``cmap`` would make
+        that artifact visible). An integer
         ``levels`` (a band *count* rather than explicit boundary values) is
         expanded into boundaries first, over the field's own
         ``[nanmin, nanmax]``, by :func:`_expand_level_count` -- the same
@@ -741,10 +741,10 @@ def map_plot(
         ``pcolormesh`` (regardless of whether ``levels`` is present, since
         leaving it behind raises the same ``AttributeError`` either way).
         With ``levels``, it *is* passed on to the ``BoundaryNorm`` built from
-        them -- unlike an earlier version of this fix, this is now safe
-        because that norm's colour count is always built to match exactly
-        (see above), so ``BoundaryNorm``'s own requirement (enough colours
-        for the ordinary bins plus one per extended end) is met regardless of
+        them -- this is safe because that norm's colour count is always
+        built to match exactly (see above), so ``BoundaryNorm``'s own
+        requirement (enough colours for the ordinary bins plus one per
+        extended end) is met regardless of
         how many colours the caller's own colormap has. Either way (with or
         without ``levels``) ``extend`` itself reaches a colorbar through this
         function's own colorbar (``colorbar=True``) and :func:`animate_map`'s

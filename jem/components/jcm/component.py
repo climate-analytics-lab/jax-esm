@@ -842,8 +842,8 @@ class JCMComponent:
         mismatch would go undetected all the way to wrong forcing dates and
         wrong output labels.
 
-        The exact expected time is computed the same int32-safe way item
-        A/B's calendar arithmetic is (:func:`jem.base.calendar
+        The exact expected time is computed the same int32-safe way
+        :mod:`jem.base.calendar`'s own arithmetic is (:func:`jem.base.calendar
         .gregorian_instant`, a limb multiply-then-divide exact for any
         traced step counter an int32 can hold -- see that function's own
         docstring), from the coupler's own step count and coupling timestep
@@ -858,7 +858,7 @@ class JCMComponent:
         the same reason as :meth:`_report_clock_drift` -- this runs inside
         the coupled ``lax.scan``.
 
-        **``expected_step``'s own int32 safety is now covered, generically.**
+        **``expected_step``'s own int32 safety is covered generically.**
         ``expected_step`` below is ``time.step * self._inner_steps()`` -- a
         raw int32 product of the *coupled* step and this component's own,
         finer JCM-timestep count (the same counter JCM's own ``RunState
@@ -869,12 +869,11 @@ class JCMComponent:
         ``jem.driver._max_element_rate`` multiplies in exactly like a
         workflow multiplicity or a nested ``Coupler``'s own rate -- so
         ``jem.driver.run_chunked``'s up-front check
-        (``_check_step_counters_fit_int32``) now refuses any run before this
-        product, or ``RunState.step`` itself, could overflow (2026-09
-        review, round 3 follow-up, finding 7; a round 3 version of this
-        docstring said this gap could never be covered without adding
-        JCM-specific knowledge to the driver -- ``SupportsInternalStepping``
-        is what closes it generically instead).
+        (``_check_step_counters_fit_int32``) refuses any run before this
+        product, or ``RunState.step`` itself, could overflow.
+        ``SupportsInternalStepping`` closes this gap generically, without
+        adding JCM-specific knowledge to the driver -- any component with
+        its own internal counter can report it the same way.
 
         **The product itself is left as a plain multiplication, not made
         overflow-safe on its own.** Once ``run_chunked``'s refusal is in
@@ -950,9 +949,9 @@ class JCMComponent:
     def internal_steps_per_call(self) -> int:
         """Report how many of JCM's own timesteps happen inside one ``step()`` call.
 
-        Implements :class:`~jem.base.component.SupportsInternalStepping`
-        (2026-09 review, round 3 follow-up, finding 7): JCM's own
-        ``RunState.step`` (threaded through this component's carry) and
+        Implements :class:`~jem.base.component.SupportsInternalStepping`:
+        JCM's own ``RunState.step`` (threaded through this component's
+        carry) and
         :meth:`_report_authoritative_clock_drift`'s ``expected_step`` both
         advance ``self._inner_steps()`` times per coupled step -- a raw int32
         counter/product private to this component, which

@@ -13,11 +13,10 @@ as a nested hourly coupler. Those runs are 40 days from 1 January, so they
 cross a month boundary -- the case in which a coupled step's sub-steps do not
 all belong to the same month.
 
-A dedicated section near the end covers the ``"gregorian"`` calendar
-(2026-09 migration review, item A): real leap years, no fixed month table,
-cross-checked against `pandas`'s own Gregorian arithmetic rather than jem's
-own labelling function, so a bug shared between the two could not hide a
-disagreement.
+A dedicated section near the end covers the ``"gregorian"`` calendar: real
+leap years, no fixed month table, cross-checked against `pandas`'s own
+Gregorian arithmetic rather than jem's own labelling function, so a bug
+shared between the two could not hide a disagreement.
 
 Every test here compares the reduction computed *inside* the ``lax.scan``
 with the same reduction computed on the host from the stacked diagnostics,
@@ -148,10 +147,10 @@ def record_months(coupler):
     Taken **directly** from the ``datetime64`` labels ``Coupler.to_xarray``
     puts on the records (``coupler.time_axis(...).datetimes()``), with no
     correction -- since jax-gcm v3 (PR 878) moved the written label to each
-    interval's midpoint, and the 2026-09 migration review moved
-    ``monthly_mean``'s own bin rule to match (see that function's docstring's
-    Breaking-change paragraph), the two are now *the same instant* by
-    construction, for every calendar. This fixture, and every test built on
+    interval's midpoint, and ``monthly_mean``'s own bin rule matches it (see
+    that function's docstring's Breaking-change paragraph), the two are the
+    *same instant* by construction, for every calendar. This fixture, and
+    every test built on
     it, is therefore itself evidence of that equality: it is comparing
     ``monthly_mean``'s in-scan bins against a mean grouped by the plain,
     uncorrected written labels, which is exactly the user-facing claim
@@ -281,9 +280,9 @@ def test_monthly_means_match_an_xarray_groupby(coupler, stacked_year, accumulate
 
     A **plain** ``groupby("time.month")`` of the written time coordinate, with
     no correction: jax-gcm PR 878 labels an averaged record at its interval's
-    **midpoint**, and the 2026-09 migration review moved ``monthly_mean``'s own
-    bin rule to match it exactly (see ``jem.accumulate``'s "Which month a
-    record counts in"), so the two are the same instant by construction and
+    **midpoint**, and ``monthly_mean``'s own bin rule matches it exactly (see
+    ``jem.accumulate``'s "Which month a record counts in"), so the two are
+    the same instant by construction and
     this is the direct user-facing check of that claim -- they agree here
     (also) because a 2001 run's labels cross no Gregorian 29 February -- the
     one year in which the labels and the model calendar disagree *as well* is
@@ -637,15 +636,14 @@ def test_a_coupling_that_does_not_divide_a_month_still_bins_months(
 def test_a_century_sequential_monthly_mean_is_exact_past_68_years(climatology_file):
     """A 100-year sequential ``monthly_mean`` must still work on the 365_day calendar.
 
-    ``_midpoint_month_rule``'s bin rule used to compare in raw SECONDS
-    against a boundary table built from the pattern's own whole span; for a
-    sequential accumulator that span is ``n_months`` months of the run, which
-    for 100 years on this calendar is about 3.15e9 s -- already past
-    ``2**31`` -- so building the accumulator's bin boundaries raised
-    ``OverflowError`` calling ``update`` at all (2026-09 migration review,
-    item 2; the daily-coupling threshold is ``2**31 / 86400 / 365`` years,
-    about 68). The fix compares in DAYS instead (see that function's own
-    docstring), which stays int32-safe for millions of years. This is jitted,
+    ``_midpoint_month_rule``'s bin rule compares in DAYS, not raw SECONDS,
+    against a boundary table built from the pattern's own whole span;
+    comparing in seconds instead would overflow int32 for a sequential
+    accumulator, whose span is ``n_months`` months of the run -- for 100
+    years on this calendar that is about 3.15e9 s, already past ``2**31``
+    (the daily-coupling threshold is ``2**31 / 86400 / 365`` years, about
+    68). Comparing in days instead (see that function's own docstring) stays
+    int32-safe for millions of years. This is jitted,
     as a real trajectory would call it, and checked at the run's very last
     step -- the one a sequential accumulator sized exactly to the run
     actually reaches -- against the plain month arithmetic
@@ -688,8 +686,8 @@ def test_midpoint_month_rule_refuses_a_pattern_gregorian_instant_cannot_resolve(
     in plain Python and before any bin is ever computed, exactly how many
     records of the pattern it is about to ask that function to resolve
     (``records_per_period``), so it is expected to raise here rather than
-    let a real run silently drift into wrong bins the way the pre-fix
-    version of this reduction did for a century-scale accumulator (see
+    let a real run silently drift into wrong bins for a century-scale
+    accumulator (see
     ``test_a_century_sequential_monthly_mean_is_exact_past_68_years``, which
     is the same failure mode this construction-time check exists to catch
     before it happens).
@@ -710,18 +708,18 @@ def test_gregorian_monthly_mean_refuses_a_total_time_gregorian_instant_cannot_re
 ):
     """The Gregorian sequential form gets the same construction-time refusal.
 
-    2026-09 migration review, round 2, finding B1: `_midpoint_month_rule`
-    (the fixed-calendar path, see the test above) already checked this;
-    `_gregorian_monthly_mean`'s own sequential form did not, even though it
-    is exactly the same situation -- `total_time` fixes the number of
-    records `_gregorian_month_rule.bin_of_record` will be asked to resolve,
-    known here in plain Python before any bin is ever computed. Refused
-    rather than left to silently bin a too-long run wrong, exactly as
-    `run_chunked`'s own equivalent check (`_check_step_counters_fit_int32`)
-    is for a run of that length. `gregorian_instant`'s own limb-based fix
-    (same review round) makes this bound astronomically large for any
-    realistic coupling timestep (millions of years), so the run
-    `total_time` names here is deliberately far beyond even that.
+    `_midpoint_month_rule` (the fixed-calendar path, see the test above)
+    already checks this; `_gregorian_monthly_mean`'s own sequential form
+    must too, even though it is exactly the same situation -- `total_time`
+    fixes the number of records `_gregorian_month_rule.bin_of_record` will
+    be asked to resolve, known here in plain Python before any bin is ever
+    computed. Refused rather than left to silently bin a too-long run
+    wrong, exactly as `run_chunked`'s own equivalent check
+    (`_check_step_counters_fit_int32`) is for a run of that length.
+    `gregorian_instant`'s own limb-based decomposition makes this bound
+    astronomically large for any realistic coupling timestep (millions of
+    years), so the run `total_time` names here is deliberately far beyond
+    even that.
     """
     dt_seconds = int(round(gregorian_coupler.dt_seconds))
     start = gregorian_coupler.start_date
@@ -738,7 +736,7 @@ def test_gregorian_monthly_mean_refuses_a_total_time_gregorian_instant_cannot_re
 def test_gregorian_monthly_mean_refuses_cleanly_past_datetime_year_9999(
     gregorian_coupler,
 ):
-    """2026-09 review, round 3, finding 6: a raw ``OverflowError`` is not a refusal.
+    """A raw ``OverflowError`` is not a refusal.
 
     ``_gregorian_monthly_mean``'s ``total_time`` path counts the run's own
     span of calendar months on the host with Python's ``datetime`` (see the
@@ -746,9 +744,9 @@ def test_gregorian_monthly_mean_refuses_cleanly_past_datetime_year_9999(
     from, and astronomically larger than): ``datetime`` itself cannot
     represent a year past 9999, an ordinary Python limitation that binds
     thousands of years before ``max_safe_record``'s own int32 bound ever
-    would. Before this fix, a ``total_time`` whose last record's midpoint
-    fell past year 9999 -- ``"3000000 days"`` from 2000-01-01 is about 8219
-    years, well past it -- raised a raw ``OverflowError: date value out of
+    would. Left unguarded, a ``total_time`` whose last record's midpoint
+    falls past year 9999 -- ``"3000000 days"`` from 2000-01-01 is about 8219
+    years, well past it -- raises a raw ``OverflowError: date value out of
     range`` from ``datetime`` arithmetic instead of a clear ``ValueError``
     naming the actual limit.
     """
@@ -1765,9 +1763,9 @@ def test_calibrating_a_monthly_mean_against_a_target(climatology_file):
 def test_month_lengths_takes_the_calendar_from_whatever_it_is_given(coupler):
     """A coupler, a calendar name and a year length all name the same table.
 
-    The coupler is the form the reviewer's use needs -- `windowed_mean(coupler,
-    month_lengths(coupler), ...)` -- and the other two are what an analysis
-    script has when it has no coupler in hand.
+    The coupler is the form a caller with one in hand needs --
+    `windowed_mean(coupler, month_lengths(coupler), ...)` -- and the other
+    two are what an analysis script has when it has no coupler in hand.
     """
     expected = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 
@@ -1805,7 +1803,7 @@ def test_a_timestep_that_does_not_divide_the_year_is_refused(climatology_file):
 
 
 # ---------------------------------------------------------------------------
-# The "gregorian" calendar (2026-09 jax-gcm-878 migration review, item A)
+# The "gregorian" calendar
 # ---------------------------------------------------------------------------
 
 #: A run long enough to touch every one of the four Gregorian century cases
@@ -1857,11 +1855,11 @@ def test_gregorian_no_longer_needs_a_fixed_table_or_a_divides_the_year_check(
     (``days_per_year("gregorian") == 365.2425``), so it is ``3652.425`` days
     -- never a whole number of this coupler's daily coupling steps, whatever
     the real (leap or non-leap) Gregorian years the run's actual dates would
-    cross -- and ``monthly_mean`` now refuses a ``total_time`` that is not a
+    cross -- and ``monthly_mean`` refuses a ``total_time`` that is not a
     whole number of coupling steps, exactly as ``jem.driver.run_chunked``
-    already refuses the same duration for its own ``total_time``/``chunk``
-    (2026-09 migration review). ``"3650 days"`` is a plain, exact duration
-    that this daily-coupling ``gregorian_coupler`` can actually be run for.
+    already refuses the same duration for its own ``total_time``/``chunk``.
+    ``"3650 days"`` is a plain, exact duration that this daily-coupling
+    ``gregorian_coupler`` can actually be run for.
     """
     monthly_mean(gregorian_coupler)  # twelve-bin form: does not raise
     monthly_mean(gregorian_coupler, total_time="3650 days")  # sequential: does not raise

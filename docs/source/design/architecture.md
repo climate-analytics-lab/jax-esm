@@ -635,9 +635,9 @@ model = Coupler(
   carry's own `step` counter exactly as in a standalone run, so it is
   continuous across outer steps and survives a checkpoint; the outer `time` is
   only checked against it — the static fields of a `CouplingTime` (`dt`,
-  `days_per_year`, `year_offset_seconds`, and, since the 2026-09 migration
-  review's exact Gregorian `year_fraction`, `start_day`/`start_second`) are
-  comparable at trace time, the step counter is a traced array. Calling `step`
+  `days_per_year`, `year_offset_seconds`, and, for the exact Gregorian
+  `year_fraction`, `start_day`/`start_second`) are comparable at trace time,
+  the step counter is a traced array. Calling `step`
   before `bind` is a
   `RuntimeError`. For `r == 1` the inner step is run directly and the
   diagnostics gain no extra axis, mirroring multiplicity 1.
@@ -1357,13 +1357,12 @@ its own **midpoint** — the same instant `TimeAxis` labels the record with —
 which is what makes `monthly.finalize(...)` equal
 `to_xarray(...).groupby("time.month").mean()` of the same run **by
 construction**, for every calendar, rather than only for a run whose labels
-happen to agree with a fixed table (2026-09 jax-gcm-878 migration review, item
-A). This was **not** always true: before that review, this reduction bound a
-record by its interval's *end*, which was the pre-878 label too, but jax-gcm
-PR 878 moved `TimeAxis`'s own label to the midpoint without this reduction's
-bin rule following — so for one migration round the two genuinely disagreed at
-every month boundary, which the review caught and fixed rather than leaving as
-a documented gotcha. Two implementations share the underlying arithmetic:
+happen to agree with a fixed table. Binning by the interval's *end* instead
+(matching JCM's own pre-878 label convention) would disagree with
+`TimeAxis`'s midpoint label at every month boundary, since jax-gcm PR 878
+moved that label to the midpoint without changing what a "month" means for a
+record — so the bin rule has to track the label, not the interval it labels.
+Two implementations share the underlying arithmetic:
 `jem.accumulate._midpoint_month_rule` for the fixed-length calendar
 (`365_day` — the only fixed-length calendar a `Coupler` accepts; `month_lengths`
 can still build a 360-day table, but there is no `"360_day"` calendar name
@@ -1385,9 +1384,9 @@ used to be this reduction's sharpest limit: a `NotImplementedError` on *any*
 than a corner one (jax-gcm's own atmosphere clock is unconditionally Gregorian,
 so every `Coupler` built with a real `jcm.model.Model` must itself use
 `calendar="gregorian"`, and it is now `Coupler`'s own default too). The fix
-(the migration review's item A) was to stop trying to build a *table* of month
-lengths for a calendar whose year is not a fixed number of days, and instead
-read a record's real Gregorian `(year, month)` directly off its own midpoint,
+was to stop trying to build a *table* of month lengths for a calendar whose
+year is not a fixed number of days, and instead read a record's real
+Gregorian `(year, month)` directly off its own midpoint,
 via `jem.base.calendar.gregorian_instant` (jem's own int32-safe limb
 multiply-then-divide, exact for any traced record an int32 can hold — see
 that function's own docstring; not vendored from jax-gcm, which has no
@@ -1498,27 +1497,25 @@ a pattern handed to `windowed_mean`, and why `windowed_mean` has no `offset=`
 knob to fix it with: the builder that knows where in the calendar a run starts
 is the one that should own the phase.
 
-**The two bin rules are genuinely different arithmetic, on purpose, since the
-2026-09 migration review.** `windowed_mean` bins a record against its
-interval's **end**, in elapsed run-time — unrelated to, and independent of,
-whatever instant `TimeAxis` happens to write the record's label as (see that
-class's docstring: since jax-gcm v3, PR 878, that label is the interval's
-midpoint, not its end). `monthly_mean` bins a record by its own **midpoint**
-instead, because a monthly mean is required to equal `groupby("time.month")`
-of the *same* written output, which moved to the midpoint too — keeping
-`monthly_mean` on the old end-of-interval rule after `TimeAxis` moved would
-have made the two disagree at every month boundary rather than only across a
-Gregorian 29 February. A useful consequence: at any boundary both a window
-and a calendar month actually land on (a month-length window pattern from a 1
-January start, say), the two now agree exactly — a record ending precisely on
-the boundary has its midpoint half a record *before* it and the next record's
-midpoint half a record *after*, so "ends at or before" and "midpoint is
-before" give the same answer on both sides. Before this migration the two
-rules shared one convention (both bound by the interval's end) but closed a
-shared boundary in *opposite* directions, so a 31-day window and January
-differed by exactly the record on their shared boundary; that historical
-difference is what `windowed_mean`'s own `test_a_month_long_window_and_a_month
-_now_agree_at_their_shared_boundary` test used to pin, under its old name.
+**The two bin rules are genuinely different arithmetic, on purpose.**
+`windowed_mean` bins a record against its interval's **end**, in elapsed
+run-time — unrelated to, and independent of, whatever instant `TimeAxis`
+happens to write the record's label as (see that class's docstring: since
+jax-gcm v3, PR 878, that label is the interval's midpoint, not its end).
+`monthly_mean` bins a record by its own **midpoint** instead, because a
+monthly mean is required to equal `groupby("time.month")` of the *same*
+written output, which is also labelled at the midpoint — keeping
+`monthly_mean` on an end-of-interval rule while `TimeAxis` labels at the
+midpoint would make the two disagree at every month boundary rather than
+only across a Gregorian 29 February. A useful consequence: at any boundary
+both a window and a calendar month actually land on (a month-length window
+pattern from a 1 January start, say), the two agree exactly — a record
+ending precisely on the boundary has its midpoint half a record *before* it
+and the next record's midpoint half a record *after*, so "ends at or before"
+and "midpoint is before" give the same answer on both sides.
+`windowed_mean`'s own
+`test_a_month_long_window_and_a_month_now_agree_at_their_shared_boundary`
+test pins exactly this.
 
 `windowed_mean` is the private
 `_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins
@@ -1531,18 +1528,17 @@ both what wraps a long run and what keeps the arithmetic inside int32. The
 boundaries themselves are converted from seconds to record counts on the host,
 in int64, so nothing in the traced code multiplies a counter that grows with
 the run: a table of seconds would pass 2³¹ after 68 simulated years and wrap
-to nonsense. `monthly_mean` used this same function (`inclusive="left"`)
-before the 2026-09 migration review; it now uses two different rules instead
-(below), because a record's midpoint is a *half*-record shift from its end,
-which the record-count conversion above cannot express (it only supports a
-whole-record shift).
+to nonsense. `monthly_mean` cannot reuse this same function
+(`inclusive="left"`) as its own bin rule, because a record's midpoint is a
+*half*-record shift from its end, which the record-count conversion above
+cannot express (it only supports a whole-record shift); it uses two
+different rules instead (below).
 
 **`monthly_mean`'s own bin rules.** `_midpoint_month_rule` (the fixed
 calendar, `365_day`) compares a record's midpoint in **days**, not
-seconds or record counts (2026-09 migration review, round 2: comparing in
-seconds, as this rule first did, overflows int32 for a sequential
-accumulator's own boundary-seconds period past about 68 simulated years,
-regardless of the coupling step) — `jem.base.calendar.gregorian_instant`
+seconds or record counts: comparing in seconds instead overflows int32 for a
+sequential accumulator's own boundary-seconds period past about 68 simulated
+years, regardless of the coupling step — `jem.base.calendar.gregorian_instant`
 gives the record's own (day, second) exactly, and a `searchsorted` against
 the pattern's own boundaries, rounded up to the day (so a pattern's
 occasionally fractional-day last boundary can never place a record past the

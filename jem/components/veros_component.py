@@ -487,16 +487,15 @@ class VerosComponent:
     def internal_steps_per_call(self) -> int:
         """Report how many of Veros' own tracer steps happen inside one ``step()`` call.
 
-        Implements :class:`~jem.base.component.SupportsInternalStepping`
-        (2026-09 review, round 3 follow-up, finding 7, extended to Veros).
+        Implements :class:`~jem.base.component.SupportsInternalStepping`.
         Veros' own iteration counter, ``state.variables.itt``, is declared
         ``dtype="int32"`` in ``veros.variables`` and is a genuine traced
         pytree leaf carried through :meth:`step`'s ``jax.lax.fori_loop`` (not
-        a Python int or a float outside the carry) -- confirmed directly
-        (2026-09 review): ``model.state.variables.itt.dtype`` is
-        ``int32``, and ``veros.veros.py`` increments it with ``vs.itt =
-        vs.itt + 1`` once per internal Veros step, ``self
-        ._steps_per_coupling_step`` times per call to this method's caller.
+        a Python int or a float outside the carry) -- ``model.state
+        .variables.itt.dtype`` is ``int32``, and ``veros.veros.py``
+        increments it with ``vs.itt = vs.itt + 1`` once per internal Veros
+        step, ``self._steps_per_coupling_step`` times per call to this
+        method's caller.
         That is exactly the same shape of raw-counter risk as JCM's
         ``RunState.step`` (see ``JCMComponent.internal_steps_per_call``'s own
         docstring): for a representative double-drake configuration (this

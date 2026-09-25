@@ -88,11 +88,10 @@ For a dataset that itself carries ``time_bounds`` (JCM's, read off its
 that chunk midpoint and the chunk's own ``time_bounds`` are computed exactly,
 from the first and last (pre-``subsample``) record's own bounds, and
 ``time_bounds`` is carried through as the bound it is rather than averaged
-like a sampled quantity (:func:`postprocess`, 2026-09 migration review, item
-1 -- a real bug this fixed: a chunk's `time_bounds`/label used to be built by
-naively treating `time_bounds` as an ordinary variable to average and
-labelling the mean with the chunk's *last* record's own midpoint, neither the
-chunk's true midpoint nor its end). A dataset with no such bounds (every
+like a sampled quantity (:func:`postprocess`): treating `time_bounds` as an
+ordinary variable to average would be nonsense for a bound, and labelling
+the mean with the chunk's *last* record's own midpoint would give neither
+the chunk's true midpoint nor its end. A dataset with no such bounds (every
 non-JCM component today) has no bound to read, but its records are still
 labelled at their own interval's midpoint by the same shared ``TimeAxis``
 JCM's are, so the chunk's own midpoint is still computed exactly -- as the
@@ -102,11 +101,12 @@ contiguous run of records regardless of the per-record interval length (see
 :func:`postprocess`'s body for the derivation). Every component's averaged
 record is therefore labelled identically for the same chunk, which is what
 lets ``xr.merge(..., join="exact")`` of two components' averaged output
-succeed at all (2026-09 migration review, item 1's second half -- a real bug
-this fixed: a chunk's non-``time_bounds`` label used to be the chunk's *last*
-record's own label, which was an end-of-interval label before jax-gcm PR 878
-but a midpoint label after it, so it no longer approximated either the
-chunk's end or its midpoint, and two components' averaged chunks disagreed).
+succeed at all: labelling a chunk's non-``time_bounds`` mean with its *last*
+record's own label instead would tie the label's meaning to whichever
+per-record convention happens to be live (an end-of-interval label before
+jax-gcm PR 878, a midpoint label after it), so it would approximate neither
+the chunk's end nor its midpoint in general, and two components' averaged
+chunks could disagree with each other.
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
 labelled at its midpoint") rather than inventing a second meaning for the same
@@ -125,8 +125,8 @@ and :func:`postprocess` must not double-count *that*: appending the same bare
 text again would give the meaningless ``"time: mean time: mean"``, so it is
 skipped when the text is already identical to the tag already there, and
 otherwise (a subsampled chunk, see :func:`postprocess`'s own docstring)
-appended with a distinguishing comment instead of a bare repeat (2026-09
-review, round 2, finding N3; see :func:`_with_cell_method`).
+appended with a distinguishing comment instead of a bare repeat (see
+:func:`_with_cell_method`).
 """
 
 from __future__ import annotations
@@ -225,8 +225,7 @@ def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
     docstring) -- so a bare, unannotated call here would append the identical
     text a second time, giving ``"time: mean time: mean"``. Two indistinguishable
     entries say nothing a single one didn't already, so that is a duplicate to
-    suppress, not a description of a genuine second reduction (2026-09 review,
-    round 2, finding N3 -- reproduced in
+    suppress, not a description of a genuine second reduction (see
     ``test_postprocess_does_not_duplicate_an_identical_cell_method_already_present``).
 
     A *distinguishing* ``method`` -- the parenthetical
@@ -405,10 +404,11 @@ def _assert_contiguous_chunk(
     only the *first* and *last* record (see that function's own docstring's
     derivation), which is exact only when the records in between are their
     equal-length, gap-free continuation. Nothing upstream of
-    :func:`postprocess` enforced that before this check existed: a caller
-    handing it a record count that is not a whole number of ``steps``, or a
-    set of records with an irregular gap, used to get a label back anyway --
-    silently wrong rather than refused (2026-09 review, round 2, finding N4).
+    :func:`postprocess` enforces that on its own: a caller handing it a
+    record count that is not a whole number of ``steps``, or a set of
+    records with an irregular gap, would otherwise get a label back anyway
+    -- silently wrong rather than refused -- so this check refuses it here
+    instead.
 
     Every chunk :func:`datasets_for_chunk`/``Coupler.to_xarray`` actually
     produce is contiguous by construction, so this should never fire on a
@@ -523,7 +523,7 @@ def postprocess(
     by name) is a third case: it has a time dimension but is a *bound*, not a
     sampled quantity, so it is neither averaged nor stamped with
     ``cell_methods`` -- it is recomputed for the chunk as a whole instead (see
-    the module docstring's **item 1** note).
+    the module docstring).
 
     Parameters
     ----------
@@ -542,10 +542,10 @@ def postprocess(
         text instead carries an explicit, nesting-free CF comment saying the
         mean was computed from only the kept records while the recorded time
         still spans the chunk's whole interval, so the two do not get
-        conflated into one misleadingly plain "time: mean" (2026-09 review,
-        round 2, finding N3; comment wording corrected for valid CF and to
-        not assume a ``time_bounds`` exists, round 3, finding 2). See the
-        module docstring for why the chunk is the averaging interval.
+        conflated into one misleadingly plain "time: mean". The comment's
+        wording is deliberately valid CF and does not assume a
+        ``time_bounds`` exists. See the module docstring for why the chunk
+        is the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
         from its start, with all of the records that step produced; ``1``
@@ -609,17 +609,16 @@ def postprocess(
         # Exact: the CHUNK's own true interval is
         # [the first record's own interval start, the last record's own
         # interval end], read directly from their `time_bounds` rather than
-        # approximated from the (midpoint-labelled) `time` coordinate. This is
-        # the fix for a genuine bug (2026-09 migration review, item 1): before
-        # it, `postprocess` fell through to the `chunk_end`-only path below
-        # for every dataset, including one with `time_bounds` -- averaging
-        # `time_bounds` itself like any other sampled variable (nonsense for a
-        # bound) and labelling the mean with the LAST record's own midpoint
-        # (neither the chunk's true midpoint nor its end). A real 3-day chunk
-        # starting 2000-02-02 used to come back labelled `02-04T12:00` (not
-        # the correct midpoint, `02-03T12:00`, nor the end, `02-05`) with
-        # `time_bounds=[02-03, 02-04]` -- a false one-day interval for a
-        # 3-day mean.
+        # approximated from the (midpoint-labelled) `time` coordinate.
+        # Falling through to the no-`time_bounds` path below for a dataset
+        # that DOES carry one would instead average `time_bounds` itself
+        # like any other sampled variable (nonsense for a bound) and label
+        # the mean with the LAST record's own midpoint (neither the chunk's
+        # true midpoint nor its end) -- e.g. a real 3-day chunk starting
+        # 2000-02-02 would come back labelled `02-04T12:00` (not the correct
+        # midpoint, `02-03T12:00`, nor the end, `02-05`) with
+        # `time_bounds=[02-03, 02-04]`, a false one-day interval for a 3-day
+        # mean.
         bounds_dim = next(
             d for d in dataset[bounds_name].dims if d != TIME_DIMENSION
         )
@@ -652,17 +651,16 @@ def postprocess(
         # record's own midpoint labels -- the per-record interval length
         # cancels (`first_start = first_label - dt/2`,
         # `last_end = last_label + dt/2`, so their mean is
-        # `(first_label + last_label) / 2` whatever `dt` is). This used to
-        # instead take the chunk's last record's own label, which was the
-        # pre-878 convention's END-of-interval label and so approximated the
-        # chunk's own end -- but is a MIDPOINT under jax-gcm PR 878, so it
-        # approximated neither the chunk's end nor (except for a one-record
-        # chunk) its midpoint. That mismatch is what broke `xr.merge(...,
-        # join="exact")` across components after an average: a JCM (which
-        # carries `time_bounds`, so takes the branch above) plus slab-ocean
-        # (this branch) chunk disagreed on the shared record's label (2026-09
-        # migration review, item 1's second half; see also this function's
-        # docstring and `test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels`
+        # `(first_label + last_label) / 2` whatever `dt` is). Taking the
+        # chunk's last record's own label instead would be wrong under the
+        # current (post-jax-gcm-PR-878) MIDPOINT convention: it approximates
+        # neither the chunk's end nor (except for a one-record chunk) its
+        # midpoint, and it can disagree between components after an average
+        # -- a JCM dataset (which carries `time_bounds`, so takes the branch
+        # above) and a slab-ocean dataset (this branch) would then label the
+        # same chunk differently, breaking `xr.merge(..., join="exact")`
+        # across them (see this function's docstring and
+        # `test_postprocess_averages_jcm_and_slab_chunks_to_matching_labels`
         # in `tests/unit/test_coupled.py`).
         first_label = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: 0}).values
         last_label = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: -1}).values
@@ -705,25 +703,25 @@ def postprocess(
     )
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
     if subsample > 1:
-        # Honesty fix (2026-09 review, round 2, finding N3's second half): the
-        # label and, for a `time_bounds`-carrying dataset, the bound itself
-        # (computed earlier in this function) span the chunk's WHOLE interval
-        # regardless of `subsample` -- computed from the chunk's records as
-        # given, before the stride removed any -- but the mean just below is
-        # only over the records the stride *kept*. A bare "time: mean" would
-        # then read as "the mean of the whole interval this record is
-        # labelled with", which is not quite what happened. Say so explicitly
-        # with a CF comment rather than silently letting the label overstate
-        # what fed the average; this also never collides with an
-        # already-present bare "time: mean" (see `_with_cell_method`), since
-        # it is a different, more specific string.
+        # The label and, for a `time_bounds`-carrying dataset, the bound
+        # itself (computed earlier in this function) span the chunk's WHOLE
+        # interval regardless of `subsample` -- computed from the chunk's
+        # records as given, before the stride removed any -- but the mean
+        # just below is only over the records the stride *kept*. A bare
+        # "time: mean" would then read as "the mean of the whole interval
+        # this record is labelled with", which is not quite what happened.
+        # Say so explicitly with a CF comment rather than silently letting
+        # the label overstate what fed the average; this also never
+        # collides with an already-present bare "time: mean" (see
+        # `_with_cell_method`), since it is a different, more specific
+        # string.
         #
-        # The comment must itself be valid CF (2026-09 review, round 3,
-        # finding 2): CF's own `(comment: ...)` extra-info block does not
-        # nest, so it must contain no parenthesis of its own -- an earlier
-        # version said "coupled step(s)", whose inner "(s)" closed the block
-        # early, silently dropping everything written after it from what any
-        # CF reader would parse as the comment. It also must not refer to
+        # The comment must itself be valid CF: CF's own `(comment: ...)`
+        # extra-info block does not nest, so it must contain no parenthesis
+        # of its own -- e.g. "coupled step(s)" would not do, since its inner
+        # "(s)" would close the block early, silently dropping everything
+        # written after it from what any CF reader would parse as the
+        # comment. It also must not refer to
         # "the label above" (an attribute string has no "above" to point at)
         # or assume every dataset has a `time_bounds` (a non-JCM component's
         # never does) -- so it names only what is true unconditionally: the

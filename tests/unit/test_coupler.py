@@ -275,7 +275,7 @@ def test_a_360_day_calendar_is_refused():
 def test_repr_names_the_model():
     # Explicit calendar: this test is about what `repr` shows for whatever
     # calendar the coupler was given, not about the coupler's own default
-    # (which is `"gregorian"` since the 2026-09 migration review).
+    # (which is `"gregorian"`).
     text = repr(_coupler(calendar="365_day"))
     assert "source" in text
     assert "feed" in text
@@ -420,10 +420,10 @@ def test_year_fraction_wraps():
 def test_year_fraction_uses_the_exact_gregorian_year_length():
     """``year_fraction`` divides by the REAL year length, not the 365.2425 average.
 
-    2026-09 migration review, item B: dividing by the fixed average was found
-    to cause a real, confirmed seasonal-phase drift (up to +1.48 days over 400
-    years), so ``year_fraction`` now computes the exact day-of-year against
-    the *actual* length of the current year -- 365 here (``START_DATE``'s year,
+    Dividing by the fixed average would cause a real seasonal-phase drift
+    (up to +1.48 days over 400 years), so ``year_fraction`` computes the
+    exact day-of-year against the *actual* length of the current year --
+    365 here (``START_DATE``'s year,
     2001, is not a leap year) rather than the coupler's own
     :attr:`~jem.base.coupler.Coupler.days_per_year`, which still reports the
     365.2425 average (it is used elsewhere -- duration parsing, sizing an
@@ -504,8 +504,8 @@ def test_year_fraction_matches_jcm_date_across_century_years(start):
 
 def test_clock_facts_are_exposed():
     # Explicit calendar: this test is about the specific 365-day numbers
-    # (`days_per_year == 365.0` exactly), not about the coupler's own default
-    # (`"gregorian"` since the 2026-09 migration review).
+    # (`days_per_year == 365.0` exactly), not about the coupler's own
+    # default (`"gregorian"`).
     coupler = _coupler(calendar="365_day")
     assert coupler.dt_seconds == DAY
     assert coupler.calendar == "365_day"
@@ -515,7 +515,7 @@ def test_clock_facts_are_exposed():
 
 
 def test_clock_facts_default_to_gregorian():
-    """The coupler's own default calendar, since the 2026-09 migration review."""
+    """The coupler's own default calendar is ``"gregorian"``."""
     coupler = _coupler()
     assert coupler.calendar == "gregorian"
     assert coupler.days_per_year == pytest.approx(365.2425)
@@ -523,8 +523,7 @@ def test_clock_facts_default_to_gregorian():
 
 def test_time_axis_starts_at_the_requested_step():
     # Explicit calendar: this test is about the axis carrying the coupler's
-    # own calendar through, not about the default (`"gregorian"` since the
-    # 2026-09 migration review).
+    # own calendar through, not about the default (`"gregorian"`).
     axis = _coupler(calendar="365_day").time_axis(7, 3)
     assert isinstance(axis, TimeAxis)
     np.testing.assert_array_equal(axis.steps, [7, 8, 9])

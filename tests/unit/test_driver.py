@@ -47,15 +47,15 @@ def two_slabs() -> Coupler:
 
 
 def doubly_nested_coupler() -> Coupler:
-    """Return the reviewer's doubly nested 24x6x5 toy coupler (2026-09 review round 3).
+    """Return a doubly nested 24x6x5 toy coupler with three compounding rates.
 
     Three nested rates compound into one raw counter: an ``atm`` sub-stepped
     5 times inside a 10-minute-inside-1-hour nesting (rate 6), itself nested
     24x inside an outer daily coupler -- so the fastest raw counter anywhere
     in the hierarchy advances ``24 * 6 * 5 = 720`` times per outer coupled
-    step. This is `rr/c3.py`'s ``dnested()``, rebuilt here on the toy
-    ``Counter``/exchanger fixtures :mod:`tests.unit.test_nested_coupler`
-    already defines for exactly this kind of test, so a resume bug in
+    step. Built on the toy ``Counter``/exchanger fixtures
+    :mod:`tests.unit.test_nested_coupler` already defines for exactly this
+    kind of test, so a resume bug in
     ``_check_step_counters_fit_int32`` (which only shows up once
     ``first_step`` is non-zero) has a coupler with a small enough raw-counter
     limit to name a resume point inside it without an astronomical run.
@@ -259,7 +259,7 @@ class _FakeJCMLikeComponent:
 
 
 def test_max_element_rate_includes_a_components_own_internal_stepping_rate():
-    """2026-09 review, round 3 follow-up (finding 7): a component may opt in.
+    """A component may opt in to reporting its own internal stepping rate.
 
     A component that implements ``SupportsInternalStepping`` reports how many
     of its own internal timesteps happen inside one ``step()`` call; a plain
@@ -317,11 +317,11 @@ def test_check_step_counters_accepts_exactly_at_and_refuses_one_past_a_component
 ):
     """A JCM-like component's own internal rate is refused exactly at its boundary.
 
-    2026-09 review, round 3 follow-up: before this fix, `_max_element_rate`
-    had no way to see a component's own internal counter at all, so a run
-    long enough to overflow ``time.step * internal_rate`` (JCM's own
-    ``expected_step``, computed in ``_report_authoritative_clock_drift``) was
-    never refused by `run_chunked`. This is checked directly against
+    Without a way for `_max_element_rate` to see a component's own internal
+    counter, a run long enough to overflow ``time.step * internal_rate``
+    (JCM's own ``expected_step``, computed in
+    ``_report_authoritative_clock_drift``) would never be refused by
+    `run_chunked`. This is checked directly against
     `_check_step_counters_fit_int32` (not the whole of `run_chunked`, which
     would then have to build and run a multi-million-step trajectory) --
     exactly the pattern `test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit`
@@ -407,21 +407,19 @@ def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
 ):
     """The int32 day-count limit of ``gregorian`` calendar math is checked too.
 
-    2026-09 migration review, round 2, finding B1: before this check
-    existed, nothing outside `jem.accumulate._midpoint_month_rule` (which
-    only ever runs on the fixed calendars) ever checked this at all, so a
-    ``"gregorian"`` run past it -- which `gregorian_instant` is now exact
+    Without this check, nothing outside `jem.accumulate._midpoint_month_rule`
+    (which only ever runs on the fixed calendars) would check this at all,
+    so a ``"gregorian"`` run past it -- which `gregorian_instant` is exact
     for up to about 5.87 million years, but not beyond, an inherent int32
     limit no algorithm can move -- would silently derive a wrong seasonal
     phase (`CouplingTime.year_fraction`) with no error. This coupler has no
     sub-stepped element, so `_max_safe_coupled_steps` here is exactly
     `jem.base.calendar.max_safe_record` of its own coupling timestep and
-    start date, checked at `offset_seconds=dt_seconds` (round 3, finding 5:
-    conservative enough to cover every offset within one record a caller
-    downstream -- a midpoint or end label -- actually uses) -- checked
-    directly, so this test does not have to construct (or wait out) a
-    multi-million-year run to prove the refusal fires exactly where that
-    limit is.
+    start date, checked at `offset_seconds=dt_seconds` (conservative enough
+    to cover every offset within one record a caller downstream -- a
+    midpoint or end label -- actually uses) -- checked directly, so this
+    test does not have to construct (or wait out) a multi-million-year run
+    to prove the refusal fires exactly where that limit is.
     """
     from jem.base.calendar import max_safe_record
     from jem.driver import _max_safe_coupled_steps
@@ -452,18 +450,18 @@ def test_run_chunked_refuses_a_run_past_the_gregorian_day_count_limit(
 
 
 def test_max_safe_coupled_steps_day_limit_covers_an_end_of_interval_offset(coupler):
-    """2026-09 review, round 3, finding 5: the day limit must cover more than offset 0.
+    """The day limit must cover more than offset 0.
 
-    `_max_safe_coupled_steps` checked the day-count limit at ``offset_seconds
-    = 0`` -- the record's own START -- but `jem.accumulate`'s gregorian
+    Checking the day-count limit only at ``offset_seconds = 0`` -- the
+    record's own START -- would miss that `jem.accumulate`'s gregorian
     monthly-mean rules bin at the record's MIDPOINT
-    (``offset_seconds=dt_seconds // 2``), and a caller is free to label at the
-    record's END too (``offset_seconds=dt_seconds``). Since
-    `max_safe_record`'s bound only ever shrinks as ``offset_seconds`` grows, a
-    check at offset 0 can accept a coupled-step count that a midpoint- or
-    end-labelled caller downstream would silently get wrong: this coupler's
-    own last-safe-at-offset-0 record already wraps to a negative day count
-    once `gregorian_instant` is asked for its END instead
+    (``offset_seconds=dt_seconds // 2``), and a caller is free to label at
+    the record's END too (``offset_seconds=dt_seconds``). Since
+    `max_safe_record`'s bound only ever shrinks as ``offset_seconds`` grows,
+    a check at offset 0 would accept a coupled-step count that a midpoint-
+    or end-labelled caller downstream could silently get wrong: this
+    coupler's own last-safe-at-offset-0 record already wraps to a negative
+    day count once `gregorian_instant` is asked for its END instead
     (``offset_seconds=dt_seconds``).
     """
     from jem.base.calendar import gregorian_instant, max_safe_record
@@ -523,18 +521,18 @@ def test_run_chunked_accepts_a_run_at_exactly_the_day_count_limit(coupler):
 
 
 def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupler():
-    """2026-09 review, round 3: `total_steps` is absolute, not relative to `first_step`.
+    """`total_steps` is absolute, not relative to `first_step`.
 
     `run_chunked` passes `_check_step_counters_fit_int32` the same
     `total_steps` it passes `remaining_batches` -- the ABSOLUTE coupled-step
     count the *whole run* is asked to reach, never a count of steps still to
     integrate from `first_step` (`remaining_batches`'s own docstring: "Coupled
-    steps the whole run is asked for"). The check used to compute
-    ``last_step = first_step + total_steps - 1``, silently double-counting
-    `first_step` -- so a real, legitimate 6000-year run of the doubly nested
-    24x6x5 coupler above (`rr/c5.py`), resumed at coupled step 1,000,000,
-    used to be refused even though its true last step (`total_steps - 1`,
-    about 2.19 million) sits well inside the raw-counter limit (about 2.98
+    steps the whole run is asked for"). Computing
+    ``last_step = first_step + total_steps - 1`` instead would silently
+    double-count `first_step` -- refusing a real, legitimate 6000-year run
+    of the doubly nested 24x6x5 coupler above, resumed at coupled step
+    1,000,000, even though its true last step (`total_steps - 1`, about
+    2.19 million) sits well inside the raw-counter limit (about 2.98
     million here, since `rate = 720`).
     """
     from jem.driver import _check_step_counters_fit_int32, _max_safe_coupled_steps
@@ -554,18 +552,18 @@ def test_check_step_counters_accepts_a_realistic_resume_of_a_deeply_nested_coupl
 
 
 def test_max_safe_coupled_steps_leaves_room_for_carry_steps_own_post_increment():
-    """2026-09 review, round 3, finding 4: `carry.step` itself must survive its own +1.
+    """`carry.step` itself must survive its own +1.
 
     A coupled step's own counter is incremented and persisted AFTER it runs
     (`Coupler.step`'s own body: ``step=carry.step + 1``), so the largest safe
     coupled step to reach is not simply the largest one a raw counter can be
     COMPUTED at -- it is one less than that, so the resulting ``carry.step``
     (the computed step's index plus one) is itself still representable.
-    ``"365_day"`` has no calendar-derived (day-count) limit at all, so with no
-    sub-stepped element (``rate == 1``) its raw-counter limit used to come out
-    as exactly ``2**31 - 1``: reaching that coupled step is fine on its own,
-    but the ``carry.step`` this run would then persist, ``2**31``, silently
-    wraps -- an int32 cannot hold it.
+    ``"365_day"`` has no calendar-derived (day-count) limit at all, so with
+    no sub-stepped element (``rate == 1``) taking its raw-counter limit as
+    exactly ``2**31 - 1`` would be wrong: reaching that coupled step is fine
+    on its own, but the ``carry.step`` this run would then persist,
+    ``2**31``, silently wraps -- an int32 cannot hold it.
     """
     from jem.driver import _max_element_rate, _max_safe_coupled_steps
 
@@ -976,13 +974,12 @@ def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler)
 
     `total_time` must be a whole multiple of `chunk`. The docs spell the
     duration in days (`"2190 days"`), not `"6 years"`: on the coupler's
-    default `"gregorian"` calendar (the 2026-09 migration review) a
-    calendar-averaged year is 365.2425 days, so `"6 years"` is 2191.455 days
-    -- not even a whole number of days, let alone a whole multiple of a
-    30-day chunk -- which is exactly why the docs were fixed to spell this
-    duration in days instead of relying on a duration whose length depends on
-    the calendar. This pins both facts: the day-count example the docs use
-    now works, and the `"6 years"` spelling they used to use does not.
+    default `"gregorian"` calendar a calendar-averaged year is 365.2425
+    days, so `"6 years"` is 2191.455 days -- not even a whole number of
+    days, let alone a whole multiple of a 30-day chunk -- which is why the
+    docs spell this duration in days instead of relying on a duration whose
+    length depends on the calendar. This pins both facts: the day-count
+    example the docs use works, and the `"6 years"` spelling would not.
     """
     from jem.driver import _whole_steps
 
@@ -2540,10 +2537,9 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_midpoint_however_it_is_thinned(
     record's own label; see `jem.output.postprocess`'s module docstring and
     `chunk_midpoint_labels` above), four days apart; labelling with the last
     record the stride happened to keep would make the series jump about
-    instead, and (2026-09 migration review, item 1's second half) labelling
-    with the chunk's own last record's label -- this test's own pre-fix
-    expectation -- is neither the chunk's end nor its midpoint once every
-    record's own label is itself a midpoint (jax-gcm PR 878).
+    instead, and labelling with the chunk's own last record's label would be
+    neither the chunk's end nor its midpoint once every record's own label
+    is itself a midpoint (jax-gcm PR 878).
     """
     settings = {"total_time": "20 days", "chunk": "4 days", "subsample": 3}
     thinned = tmp_path / "thinned"

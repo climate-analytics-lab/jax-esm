@@ -534,8 +534,8 @@ class CouplingTime:
         Gregorian date of this step -- real leap years, not the 365.2425-day
         average -- via :func:`jem.base.calendar.gregorian_instant` and
         :func:`~jem.base.calendar.gregorian_day_of_year`. This closes a
-        confirmed phase-drift bug (the 2026-09 jax-gcm-878 migration review):
-        dividing elapsed seconds by the *average* year length, as every
+        confirmed phase-drift bug: dividing elapsed seconds by the *average*
+        year length, as every
         calendar here used to, is only ever exactly right at a handful of
         instants and drifts by up to a full day within the run (peaking at
         every year boundary, since the atmosphere's real Gregorian calendar
@@ -566,9 +566,9 @@ class CouplingTime:
         **On ``"365_day"``** (the only other calendar name a
         :class:`~jem.base.coupler.Coupler` accepts -- ``"360_day"`` is not,
         and never has been, a calendar any part of jem supports by name; see
-        :func:`days_per_year`) this is unchanged from before the 2026-09
-        review: that calendar has no leap day, so a fixed average-year-length
-        division was already exact, and the modular integer-step reduction
+        :func:`days_per_year`) that calendar has no leap day, so a fixed
+        average-year-length division is already exact, and the modular
+        integer-step reduction
         below (kept for its float32-precision benefit over many decades of
         simulated time -- see the note in its own branch) still applies.
         """
@@ -628,9 +628,8 @@ class CouplingTime:
         multiply-then-divide, exact for any ``step`` an int32 can hold, up to
         the exact int32 day-count limit its own docstring derives (about 5.87
         million simulated years) -- ``jem.driver.run_chunked`` refuses a run
-        past that limit before it ever reaches here (2026-09 migration
-        review, round 2, finding B1); this property itself has no run length
-        to check against, since ``step`` is traced.
+        past that limit before it ever reaches here; this property itself has
+        no run length to check against, since ``step`` is traced.
         """
         from jem.base.calendar import (
             gregorian_day_of_year,
@@ -881,8 +880,8 @@ class SupportsInternalStepping(Protocol):
     recursion -- a nested coupler's own substep rate), so
     :func:`jem.driver.run_chunked`'s up-front int32 check
     (``_check_step_counters_fit_int32``) covers it too, the same way it
-    covers a plain workflow multiplicity (2026-09 review, round 3 follow-up,
-    finding 7). A component that does not implement this capability is
+    covers a plain workflow multiplicity. A component that does not
+    implement this capability is
     assumed to advance no faster than the calls it receives (rate 1) -- the
     same as every component before this capability existed; a component that
     *does* keep such counters but does not report them here is simply not

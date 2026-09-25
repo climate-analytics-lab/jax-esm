@@ -3,9 +3,8 @@
 ``jem.base`` and ``jem.accumulate`` are deliberately jcm-free at import time
 (a Veros- or slab-only coupled run never imports jax-gcm at all), so the
 handful of Gregorian primitives both :func:`jem.accumulate.monthly_mean` (the
-in-scan monthly-bin rule, item A of the 2026-09 jax-gcm-878 migration review)
-and :class:`jem.base.component.CouplingTime` (the exact ``year_fraction``,
-item B of the same review) need are **vendored here** rather than imported
+in-scan monthly-bin rule) and :class:`jem.base.component.CouplingTime` (the
+exact ``year_fraction``) need are **vendored here** rather than imported
 from ``jcm.date`` -- the same reason ``jem.base.component.days_per_year``
 already keeps its own copy of the days-per-year table rather than importing
 jax-gcm's.
@@ -38,15 +37,14 @@ record) and :class:`~jem.base.component.CouplingTime` at the record's
 **start** (``year_fraction`` is defined at the start of a step, matching its
 pre-existing convention on the ``365_day`` calendar).
 
-**2026-09 review, round 2 (finding B1).** The version of this function that
-shipped after round 1's fix (see git history / the CHANGELOG) still had a
-*bound*, not a universal exactness proof: it multiplied by reducing the
-record counter modulo a single static "block" chosen from ``record_seconds``
-alone, which was int32-safe only up to a computed ``max_safe_record`` that
-could be as small as about 68 simulated years (e.g. a 73453 s coupling step)
--- smaller than several real coupled-run lengths -- and nothing outside
-:func:`jem.accumulate._midpoint_month_rule` ever checked it, so a run past it
-silently wrapped to a wrong instant with no error at all (confirmed: a daily
+Earlier approaches to this problem bounded the record counter's safe range
+rather than proving it exact for every value: reducing modulo a single
+static "block" sized from ``record_seconds`` alone keeps the arithmetic
+int32-safe only up to a computed ``max_safe_record`` that can be as small as
+about 68 simulated years (e.g. a 73453 s coupling step) -- smaller than
+several real coupled-run lengths -- and nothing outside
+:func:`jem.accumulate._midpoint_month_rule` checked it, so a run past that
+bound silently wrapped to a wrong instant with no error at all (a daily
 ``year_fraction`` at step 58471 of a 73453 s coupling from 2000-01-01 came
 back ``0.9969`` against an exact ``0.0988``, and a 400000-step Gregorian
 ``monthly_mean`` at the same step length mis-binned three records). The limb
@@ -161,10 +159,10 @@ def _digit_tables(record_seconds: int) -> tuple[np.ndarray, np.ndarray]:
     here instead of multiplying it live, which is what lets the traced
     computation stay in ``int32`` however large ``record_seconds`` is.
 
-    ``@functools.lru_cache``d (2026-09 review, round 3, finding 10, optional
-    but trivial): a pure function of one small, static Python ``int`` --
-    ``record_seconds`` is never traced (see :func:`gregorian_instant`'s own
-    docstring) -- so every call for the same coupling timestep (which
+    ``@functools.lru_cache``d because it is a pure function of one small,
+    static Python ``int`` -- ``record_seconds`` is never traced (see
+    :func:`gregorian_instant`'s own docstring) -- so every call for the
+    same coupling timestep (which
     ``gregorian_instant`` makes at least once per distinct trace: every new
     chunk length, every resumed run, every test) would otherwise rebuild two
     identical ``_LIMB_BASE``-entry arrays from scratch. The cache is
@@ -299,10 +297,10 @@ def gregorian_instant(
     loop's own ``days`` -- still exact arithmetic *mod* ``2**32``, just no
     longer within int32's own positive range -- can itself need more than an
     int32's worth of magnitude before the final ``+ start_days`` brings the
-    total back down (2026-09 review, round 3, finding 8; confirmed:
-    ``record_seconds=172800, start_days=-10**9`` reaches a loop ``days`` of
-    ``3147483646``, past ``2**31 - 1``, at :func:`max_safe_record`'s own
-    bound for that input). This is harmless, not merely "usually fine":
+    total back down (for example, ``record_seconds=172800,
+    start_days=-10**9`` reaches a loop ``days`` of ``3147483646``, past
+    ``2**31 - 1``, at :func:`max_safe_record`'s own bound for that input).
+    This is harmless, not merely "usually fine":
     ``jnp.int32`` addition and subtraction are two's-complement, i.e. exact
     modulo ``2**32``, so ``(loop_days mod 2**32) + start_days`` and
     ``(loop_days + start_days) mod 2**32`` are the *same* value -- and since
@@ -321,18 +319,17 @@ def gregorian_instant(
     ``start_days >= 0``; the arithmetic is exact modulo ``2**32``
     unconditionally.
 
-    **History.** Two earlier decompositions shipped and were superseded:
+    **History.** Two earlier decompositions were tried and superseded:
     reducing ``record`` modulo ``SECONDS_PER_DAY // gcd(record_seconds,
     SECONDS_PER_DAY)`` (int32-safe only up to ``D <= 24855``, i.e. as little
-    as 817 records for a "1 month" 2629746 s step -- 2026-09 review, round 1,
-    finding 2); then reducing modulo a single static "block" sized from
-    ``record_seconds`` alone (int32-safe up to a computed
-    ``max_safe_record``, but that bound could itself be as small as about 68
-    simulated years -- e.g. a 73453 s coupling step -- and nothing but
-    :func:`jem.accumulate._midpoint_month_rule` ever checked it, so a longer
-    run silently wrapped with no error; 2026-09 review, round 2, finding B1).
-    Both are corrected here rather than repeated, and neither is a
-    description of what this function does any more.
+    as 817 records for a "1 month" 2629746 s step); then reducing modulo a
+    single static "block" sized from ``record_seconds`` alone (int32-safe up
+    to a computed ``max_safe_record``, but that bound could itself be as
+    small as about 68 simulated years -- e.g. a 73453 s coupling step -- and
+    nothing but :func:`jem.accumulate._midpoint_month_rule` ever checked it,
+    so a longer run silently wrapped with no error). Both are corrected here
+    rather than repeated, and neither is a description of what this function
+    does any more.
 
     Parameters
     ----------
@@ -437,15 +434,14 @@ def max_safe_record(
                    - offset_seconds - start_seconds) / record_seconds
 
     floored, and clamped to ``[0, 2**31 - 1]`` (the ``record`` dtype's own
-    range). Unlike the bound this replaces (2026-09 review, round 2, finding
-    N1), ``start_days`` is charged against the same ``2**31 - 1`` day budget
-    every other term is, rather than left unreserved -- the earlier bound
-    could itself be wrong by exactly the amount a nonzero ``start_days``
-    left unaccounted for (confirmed: ``record_seconds=86400,
-    offset_seconds=43200, start_days=10957, start_seconds=86399`` -- 2000-01-01
-    -- computed a bound of 2147473170, one more than 2147473169, the actual
-    edge, and ``gregorian_instant`` at that (wrong) bound had already wrapped
-    to a negative day count).
+    range). ``start_days`` is charged against the same ``2**31 - 1`` day
+    budget every other term is, rather than left unreserved -- leaving it
+    unreserved makes the bound wrong by exactly the amount a nonzero
+    ``start_days`` leaves unaccounted for (for example,
+    ``record_seconds=86400, offset_seconds=43200, start_days=10957,
+    start_seconds=86399`` -- 2000-01-01 -- would compute a bound of
+    2147473170, one more than 2147473169, the actual edge, past which
+    ``gregorian_instant`` had already wrapped to a negative day count).
 
     Parameters
     ----------
@@ -493,15 +489,14 @@ def max_safe_record(
     # One check covers both ways this can happen: `start_days` alone past
     # int32 (`day_budget < 0`, which drives `seconds_budget` very negative on
     # its own), or `start_days` in range but `offset_seconds`/`start_seconds`
-    # alone big enough to push even record 0's day count past int32 (2026-09
-    # review, round 3, finding 3 -- the previous version only checked the
-    # first case, and `max(0, ...)` clamped the second's negative result up
-    # to a lying `0`, claiming record 0 was safe when it was not:
-    # `record_seconds=1, offset_seconds=400*86400, start_days=2**31-6` lands
-    # record 0 alone 400 days past int32's own range). Either way, a negative
-    # `seconds_budget` means there is no non-negative `record` -- not even
-    # 0 -- this is safe for, which is exactly what the docstring promises to
-    # raise on rather than silently answer.
+    # alone big enough to push even record 0's day count past int32.
+    # Clamping a negative `seconds_budget` up to `0` here would be wrong: it
+    # would claim record 0 is safe when it is not (e.g. `record_seconds=1,
+    # offset_seconds=400*86400, start_days=2**31-6` lands record 0 alone 400
+    # days past int32's own range). Either way, a negative `seconds_budget`
+    # means there is no non-negative `record` -- not even 0 -- this is safe
+    # for, which is exactly what the docstring promises to raise on rather
+    # than silently answer.
     if seconds_budget < 0:
         raise ValueError(
             f"start_days={start_days!r}, offset_seconds={offset_seconds!r} "

@@ -144,7 +144,7 @@ def test_layer_thicknesses_can_be_shortened():
 
 @pytest.mark.slow
 def test_double_drake_veros_component_declares_its_internal_stepping_rate():
-    """2026-09 review, round 3 follow-up (finding 7, extended to Veros).
+    """``SupportsInternalStepping`` extended to Veros.
 
     Veros' own ``itt`` iteration counter (``state.variables.itt``) is
     declared ``dtype="int32"`` in ``veros.variables`` and is a genuine

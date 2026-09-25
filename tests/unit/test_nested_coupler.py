@@ -326,10 +326,9 @@ def test_bind_refuses_a_different_start_date_or_calendar():
             start_date=jdt.to_datetime("2002-01-01"),
         )
     # `fast_coupler(calendar="365_day")` here, explicitly: the outer coupler
-    # below asks for "gregorian", which is also `Coupler`'s own default since
-    # the 2026-09 migration review, so the inner one has to be given a
-    # different calendar on purpose for this to still be the mismatch it
-    # tests.
+    # below asks for "gregorian", which is also `Coupler`'s own default, so
+    # the inner one has to be given a different calendar on purpose for this
+    # to still be the mismatch it tests.
     with pytest.raises(ValueError, match="Calendar mismatch"):
         Coupler(
             {"atm_lnd": fast_coupler(calendar="365_day")},
@@ -341,8 +340,8 @@ def test_bind_refuses_a_different_start_date_or_calendar():
 
 def test_rebinding_is_a_no_op_for_the_same_clock_and_refused_for_another():
     # Explicit calendar: `bind` below is called with "365_day", which must
-    # match this coupler's own -- `fast_coupler()`'s default is now
-    # "gregorian" (the 2026-09 migration review), not what this test is about.
+    # match this coupler's own -- `fast_coupler()`'s default is "gregorian",
+    # not what this test is about.
     coupler = fast_coupler(calendar="365_day")
     coupler.bind(
         coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar="365_day"

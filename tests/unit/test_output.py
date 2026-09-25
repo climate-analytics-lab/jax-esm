@@ -155,19 +155,19 @@ def test_postprocess_appends_to_an_existing_cell_methods():
 
 
 def test_postprocess_does_not_duplicate_an_identical_cell_method_already_present():
-    """N3 (2026-09 review, round 2): JCM's own per-step "time: mean" must not double up.
+    """JCM's own per-step "time: mean" must not double up.
 
     JCM writes each of its own per-coupling-step records already averaged
     over the physics sub-steps (``run.output_averages``, see the module
     docstring), so by the time :func:`postprocess` sees a JCM variable it
     *already* carries ``cell_methods = "time: mean"``. Appending the bare,
-    unannotated method text a second time used to give
-    ``"time: mean time: mean"`` -- a real bug, reproduced here, that showed up
-    on every atm variable of a real coupled earth-slab run (see
-    ``rr/run_e2e.sh`` / ``rr/b8.py`` in the 2026-09 review). Two identical,
-    unannotated entries carry no more information than one, so the second is
-    a duplicate rather than a description of a genuine further reduction --
-    see :func:`~jem.output._with_cell_method`'s own docstring.
+    unannotated method text a second time would give
+    ``"time: mean time: mean"``, which is what shows up on every atm
+    variable of a real coupled earth-slab run if left unguarded. Two
+    identical, unannotated entries carry no more information than one, so
+    the second is a duplicate rather than a description of a genuine
+    further reduction -- see :func:`~jem.output._with_cell_method`'s own
+    docstring.
     """
     dataset = simple_dataset(3)
     dataset["temperature"].attrs["cell_methods"] = "time: mean"
@@ -176,7 +176,7 @@ def test_postprocess_does_not_duplicate_an_identical_cell_method_already_present
 
 
 def test_postprocess_annotates_cell_methods_honestly_when_subsampled():
-    """N3's second half: a subsampled mean's ``cell_methods`` says so.
+    """A subsampled mean's ``cell_methods`` says so.
 
     With ``subsample > 1`` the recorded label (and, for a dataset that has
     one, ``time_bounds``) still spans the chunk's *whole* interval (see
@@ -208,15 +208,15 @@ def test_postprocess_annotates_cell_methods_honestly_when_subsampled():
 
 
 def test_postprocess_subsample_comment_is_valid_cf():
-    """2026-09 review, round 3, finding 2: the subsample comment must parse as CF.
+    """The subsample comment must parse as valid CF.
 
     CF's ``(comment: ...)`` extra-info block does not nest -- a stray, inner
-    ``(``/``)`` pair (the previous wording's "step(s)") closes the block
-    early, so anything written after it is not actually inside the comment
-    any CF reader would parse. The comment also used to say "the label/
+    ``(``/``)`` pair (e.g. "step(s)") would close the block early, so
+    anything written after it would not actually be inside the comment any
+    CF reader would parse. The comment also must not say "the label/
     time_bounds above", which points at nothing meaningful from inside an
-    attribute string, and claimed a ``time_bounds`` exists on every dataset,
-    which a non-JCM component's (``simple_dataset``'s) never does.
+    attribute string, and must not claim a ``time_bounds`` exists on every
+    dataset, since a non-JCM component's (``simple_dataset``'s) never does.
     """
     dataset = simple_dataset(4)
     averaged = postprocess(dataset, output_averages=True, subsample=2)
@@ -231,15 +231,14 @@ def test_postprocess_subsample_comment_is_valid_cf():
 
 
 def test_postprocess_averages_time_bounds_correctly():
-    """The 2026-09 migration review's item 1: the exact bug, reproduced and fixed.
+    """A `time_bounds`-carrying chunk gets the chunk's own exact midpoint and bound.
 
-    A real 3-day chunk starting 2000-02-02 used to come back labelled
+    Averaging `time_bounds` like an ordinary variable (mean of the three
+    1-day bounds) and labelling with the chunk's *last* record's own
+    midpoint would give a real 3-day chunk starting 2000-02-02 the label
     ``02-04T12:00`` (neither the correct midpoint, ``02-03T12:00``, nor the
     end, ``02-05``) with ``time_bounds=[02-03, 02-04]`` -- a false one-day
-    interval for what was actually a 3-day mean, because `time_bounds` was
-    averaged like an ordinary variable (mean of the three 1-day bounds) and
-    the record was labelled with the chunk's *last* record's own midpoint
-    instead of the chunk's own.
+    interval for what is actually a 3-day mean.
     """
     dataset = bounded_dataset("2000-02-02", n_records=3)
     averaged = postprocess(dataset, output_averages=True)
@@ -287,11 +286,10 @@ def test_postprocess_time_bounds_survive_a_subsample_then_average():
 def test_postprocess_with_no_time_bounds_still_finds_the_chunk_midpoint():
     """A dataset with no `time_bounds` gets the chunk's true midpoint too.
 
-    This replaces a test that used to pin the *inconsistent* pre-fix
-    behaviour (labelling with the chunk's last record's own label, an
-    approximation that was silently wrong once every record's own label
-    became a midpoint rather than an end-of-interval instant -- jax-gcm PR
-    878). The chunk's true midpoint is exact here too: it is the average of
+    Labelling with the chunk's last record's own label instead would be an
+    inconsistent approximation, since jax-gcm PR 878 made every record's own
+    label a midpoint rather than an end-of-interval instant. The chunk's
+    true midpoint is exact here too: it is the average of
     the first and last record's own midpoint labels, which equals the
     chunk's midpoint for any equal-length, contiguous run of records (see
     :func:`~jem.output.postprocess`'s body for the derivation) -- it does not
@@ -396,20 +394,20 @@ def test_postprocess_rejects_a_nonsensical_chunk(kwargs, message):
 
 
 def test_postprocess_refuses_to_average_a_chunk_that_does_not_divide_by_steps():
-    """N4 (2026-09 review, round 2): checked for averaging too, not just the stride.
+    """Averaging alone must be checked too, not just the stride.
 
-    ``_kept_records`` already refused this when ``subsample > 1`` triggered
-    it; ``output_averages`` on its own (``subsample=1``, the default) used to
-    skip that check entirely and label the chunk anyway, even though the
-    chunk-mean derivation equally assumes a whole number of equal-length
-    coupled steps.
+    ``_kept_records`` already refuses this when ``subsample > 1`` triggers
+    it; ``output_averages`` on its own (``subsample=1``, the default) must
+    not skip that check and label the chunk anyway, since the chunk-mean
+    derivation equally assumes a whole number of equal-length coupled
+    steps.
     """
     with pytest.raises(ValueError, match="cannot hold 5 record"):
         postprocess(simple_dataset(5), output_averages=True, steps=3)
 
 
 def test_postprocess_refuses_to_average_records_with_an_irregular_gap():
-    """N4: a non-contiguous set of records must not get a silently wrong label.
+    """A non-contiguous set of records must not get a silently wrong label.
 
     ``postprocess``'s chunk label -- the average of the first and last
     record's own midpoint -- is only exact for a contiguous run of
@@ -426,7 +424,7 @@ def test_postprocess_refuses_to_average_records_with_an_irregular_gap():
 
 
 def test_postprocess_refuses_to_average_time_bounds_with_a_gap():
-    """N4, the ``time_bounds`` variant: a gap between bounded intervals.
+    """The ``time_bounds`` variant: a gap between bounded intervals.
 
     Unlike the label-only case above, a ``time_bounds``-carrying dataset
     (JCM's) has an explicit per-record interval to check for contiguity
