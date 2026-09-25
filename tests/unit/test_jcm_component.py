@@ -59,8 +59,8 @@ GRID_SHAPE = (64, 32)
 
 # ---------------------------------------------------------------------------
 # Real (but minimal) ComposablePhysics objects for exchange_fields.
-# has_wind_vector, which since the jax-esm#129 review decides presence from
-# the composed physics's own TERMS rather than from a diagnostics-dict key
+# has_wind_vector, which decides presence from the composed physics's own
+# TERMS rather than from a diagnostics-dict key
 # (see that function's docstring) -- so a fixture built from real jcm terms,
 # not a stand-in, is what proves the check actually inspects them.
 # ---------------------------------------------------------------------------
@@ -346,8 +346,8 @@ def _fake_column_vectorized_echam_diagnostics():
     as a second, deliberately different one: an all-``GRID_SHAPE`` fixture
     cannot catch a reshape bug that a real column-vectorized step hits.
 
-    Code review finding: a *uniform* flattened fixture (``jnp.full``, the
-    fixture's first version) cannot tell a correct unflatten from a
+    The fixture is position-encoding because a *uniform* flattened fixture
+    (``jnp.full``) cannot tell a correct unflatten from a
     transposed or reversed one -- swapping ``_unflatten_to_nodal_shape`` for
     ``value.reshape((il, ix)).T`` or ``value[::-1].reshape(nodal_shape)``
     still passed every test built on it. Each cell's value here is
@@ -507,8 +507,7 @@ def test_echam_wind_vector_is_none_not_an_error():
 
 def test_has_wind_vector_is_true_only_when_speedy_surface_flux_is_composed():
     """The structural question ``JCMDerived.zeros`` decides composition-time
-    absence from. Since the jax-esm#129 review, this is decided from the
-    composed physics's own TERMS (real ``ComposablePhysics`` objects here),
+    absence from. It is decided from the composed physics's own TERMS (real ``ComposablePhysics`` objects here),
     not from a diagnostics-dict key -- see ``exchange_fields.has_wind_vector``.
     """
     assert exchange_fields.has_wind_vector(_speedy_physics_with_wind())
@@ -581,8 +580,8 @@ def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
     ``test_has_wind_vector_is_true_only_when_speedy_surface_flux_is_composed``
     reads for translation, not a special all-zero variant: ``zeros()`` derives
     every field's shape/dtype from a real translated exchange but always
-    canonicalises the *value* to positive zero (code review finding -- see
-    the ``signbit`` assertion below), so a non-zero template reading back as
+    canonicalises the *value* to positive zero (see the ``signbit``
+    assertion below), so a non-zero template reading back as
     all-zero here is the stronger proof that ``zeros()`` truly ignores the
     template's values rather than merely happening to be handed zeros.
     """
@@ -599,7 +598,7 @@ def test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key():
     # bit needs its own check: `total_heat_flux = -net_heat_flux`'s negation
     # would otherwise leave a template's `+0.0` as `-0.0` here -- a real, if
     # invisible, regression against "SPEEDY's zeros() is bit-for-bit
-    # unchanged" (code review finding).
+    # unchanged".
     for name in ("u0", "v0", "total_heat_flux", "total_freshwater_flux",
                  "evaporation", "precipitation"):
         field = np.asarray(getattr(derived, name))
@@ -617,10 +616,8 @@ def test_jcm_derived_zeros_names_the_new_signature_for_a_legacy_positional_call(
 ):
     """A pre-#129 call, ``zeros(shape, physics)``, fails with a message
     naming the new signature, not an opaque ``TypeError`` several calls deep
-    -- whichever of the ordinary ways a caller might spell a shape (a code
-    review finding: the original guard caught only the exact ``tuple``
-    spelling of ``shape``, so a ``list``/``numpy.ndarray``/``jax.Array`` call
-    site still fell through to an opaque, unrelated error).
+    -- whichever of the ordinary ways a caller might spell a shape: a
+    ``tuple``, ``list``, ``numpy.ndarray`` or ``jax.Array``.
 
     ``zeros()``'s argument order was ``(shape, physics, **overrides)`` before
     jax-esm#129; it is now ``(diagnostics_template, nodal_shape, physics,
@@ -661,9 +658,9 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
     (``tests/unit/test_coupled.py``'s slow ECHAM regression test).
 
     Shape and the windless decision only: ``zeros()`` canonicalises every
-    value to zero regardless of what the template carries (code review
-    finding -- see ``test_jcm_derived_zeros_has_wind_for_a_template_with_the_
-    speedy_key``'s docstring on the ``-0.0``/``+0.0`` fix), so it cannot be
+    value to zero regardless of what the template carries (see
+    ``test_jcm_derived_zeros_has_wind_for_a_template_with_the_speedy_key``'s
+    docstring on ``-0.0``/``+0.0``), so it cannot be
     used to check *placement* -- ``test_unflatten_places_each_cell_correctly``
     and ``test_unflatten_agrees_with_a_real_jax_gcm_column_flatten`` below,
     which read the reshape directly off ``_surface_exchange_on_nodal_grid``,
@@ -681,8 +678,8 @@ def test_jcm_derived_zeros_unflattens_a_column_vectorized_template():
 
 
 def test_unflatten_places_each_cell_correctly():
-    """jax-esm#129 code review finding: a uniform fixture cannot catch a
-    transposed or reversed unflatten -- this one can, and is checked to
+    """A uniform fixture cannot catch a transposed or reversed unflatten --
+    this position-encoding one can, and is checked to
     actually do so (teeth verified by hand: swapping
     ``_unflatten_to_nodal_shape`` for ``value.reshape((il, ix)).T`` or
     ``value[::-1].reshape(nodal_shape)`` makes this test fail; see the
@@ -751,9 +748,8 @@ def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
     ``_surface_exchange_on_nodal_grid`` must recover the code at the right
     ``(lon, lat)`` cell from the resulting diagnostics dict -- and agree with
     jax-gcm's own ``data_struct_to_dict`` reshape (the one it uses for xarray
-    output) on the same diagnostics. This is the ~1 s script the code review
-    wrote to prove the fix on jax-gcm's own machinery, adapted into a
-    permanent regression test.
+    output) on the same diagnostics, so the check runs on jax-gcm's own
+    machinery rather than on a stand-in.
     """
     from jem.components.jcm.component import _surface_exchange_on_nodal_grid
 
@@ -829,10 +825,8 @@ def test_unflatten_agrees_with_a_real_jax_gcm_column_flatten():
 
 
 def test_unflatten_to_nodal_shape_rejects_an_unexpected_shape_with_trailing_axis():
-    """jax-esm#129 review finding: a mutation that made
-    ``_unflatten_to_nodal_shape`` return the value UNCHANGED instead of
-    raising went unnoticed by the existing suite (41 tests still passed),
-    because nothing exercised the ``ValueError`` branch directly. A shape
+    """The ``ValueError`` branch of ``_unflatten_to_nodal_shape``, tested
+    directly because no other test reaches it. A shape
     that is neither ``nodal_shape`` nor a flattened ``(ncols,)`` -- here,
     ``(ncols, 1)``, e.g. a future package publishing a per-column field with
     a spurious trailing axis -- must raise, naming the field and both shapes

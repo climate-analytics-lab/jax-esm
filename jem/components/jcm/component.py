@@ -259,20 +259,16 @@ def _surface_exchange_on_nodal_grid(
 def _looks_like_a_shape(value: Any) -> bool:
     """Whether ``value`` looks like the pre-#129 ``shape`` positional argument.
 
-    ``JCMDerived.zeros``'s first argument used to be a shape (before
-    jax-esm#129 swapped both its order and its meaning, and before this
-    review added the required ``physics`` argument). A shape happens to be
-    written as a `tuple` most of the time -- the original guard checked only
-    that one spelling (a code-review finding) -- but a caller migrating a
-    call site by hand could just as easily reach for a `list`, a
-    `numpy.ndarray` or a `jax.Array` of a couple of ints, none of which is a
-    diagnostics-dict template (a `dict`) either. Each of the three untested
-    spellings previously fell through to fail several calls deep as an
+    ``JCMDerived.zeros``'s first argument was a shape before jax-esm#129,
+    which changed both its order and its meaning and added the required
+    ``physics`` argument. A caller migrating a call site by hand may spell
+    that shape as a `tuple`, a `list`, a `numpy.ndarray` or a `jax.Array` of
+    a couple of ints, none of which is a diagnostics-dict template (a
+    `dict`). Any of those spellings would otherwise fail several calls deep as an
     opaque, unrelated error (e.g. a plain array read as if it were a
     diagnostics dict inside ``exchange_fields.from_diagnostics``) rather
-    than naming this method or the argument that actually changed, so this
-    widens the check to all four rather than only the one jax-esm#129
-    happened to test.
+    than naming this method or the argument that actually changed, so the
+    check covers all four.
 
     A 1-D array of a couple of small integers is treated as a shape; a
     multi-dimensional or non-integer array is not one JCMDerived.zeros has
@@ -414,10 +410,9 @@ class JCMDerived:
         # is an all-zero template, so every field below is already
         # mathematically zero, but `total_heat_flux = -net_heat_flux`'s
         # negation turns a template's `+0.0` into `-0.0` (a distinct float
-        # bit pattern, code review finding) -- and a SPEEDY run's `zeros()`
-        # used to give `+0.0` unconditionally (`jnp.zeros(shape)`, no
-        # negation involved), so a signed zero here would be a real, if
-        # invisible, regression against the "SPEEDY bit-for-bit unchanged"
+        # bit pattern) -- and a SPEEDY run's `zeros()` must give `+0.0`, as
+        # `jnp.zeros(shape)` does, so a signed zero here would be a real, if
+        # invisible, break of the "SPEEDY bit-for-bit unchanged"
         # guarantee. `zeros_like` keeps every field's shape (already put on
         # `nodal_shape` above) and dtype while canonicalising the value to
         # positive zero.

@@ -333,9 +333,8 @@ def _near_surface_wind_vector(
     Before jax-esm#129 this raised ``NotImplementedError`` for any package
     other than SPEEDY, which made ``JCMComponent.step`` fail on *every*
     ECHAM-composed coupled step (it calls :func:`from_diagnostics`, which
-    calls this, unconditionally). #129 made the absence a value instead, and
-    the jax-esm#129 code review then made that value correct for a hybrid
-    composition too: :func:`has_wind_vector` decides from ``physics``'s
+    calls this, unconditionally). The absence is now a value instead, and
+    that value is correct for a hybrid composition too: :func:`has_wind_vector` decides from ``physics``'s
     composed terms, not from whether ``diagnostics`` happens to carry
     SPEEDY's private :data:`_SPEEDY_WIND_VECTOR_KEY` (present whenever any
     ``SpeedyTermBase`` term ran, real ``SpeedySurfaceFlux`` or not -- see that

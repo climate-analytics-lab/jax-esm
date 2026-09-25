@@ -201,10 +201,8 @@ def _require_wind_vector(
         message below: its top-level keys are what each composed term
         *published* to the diagnostics dict, which is not the same thing as
         the composed physics's *term names* (``ComposablePhysics.
-        require_surface_exchange`` names those instead, from ``term.name``)
-        -- named accurately as such in the message, since a code review
-        found the previous wording ("composed terms") claimed the stronger,
-        inaccurate thing.
+        require_surface_exchange`` names those instead, from ``term.name``),
+        so the message calls them diagnostics, not terms.
 
     Raises
     ------

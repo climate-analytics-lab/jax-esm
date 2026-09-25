@@ -489,10 +489,9 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " isinstance(term, SpeedySurfaceFlux)) to decide, faithfully,"
         " whether the composed physics actually computes a near-surface"
         " wind vector, rather than merely whether a diagnostics-dict key"
-        " shaped like one happens to be present (jax-esm#129 review: a"
-        " hybrid composition with some other SPEEDY-legacy term but no"
-        " SpeedySurfaceFlux still carries a zeroed"
-        " '_surface_flux' diagnostics key). Already read this way inside"
+        " shaped like one happens to be present (a hybrid composition with"
+        " some other SPEEDY-legacy term but no SpeedySurfaceFlux still"
+        " carries a zeroed '_surface_flux' diagnostics key). Already read this way inside"
         " jax-gcm itself (jcm.model.Model, e.g. `getattr(self.physics,"
         " \"terms\", ())`), so this is a stable, public attribute of"
         " ComposablePhysics, not an implementation detail.",

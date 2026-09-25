@@ -1704,10 +1704,8 @@ present whenever *any* `SpeedyTermBase` term ran, real wind or not. A
 hybrid composition with, say, `SpeedyHumidity` but no `SpeedySurfaceFlux`
 (no shipped configuration does this) therefore has a `_surface_flux` key
 whose `u0`/`v0` are SPEEDY's default zero, not a real wind — a diagnostics-
-dict-key check cannot tell the two apart, and an earlier version of
-`has_wind_vector()` reported a wind vector there that was never actually
-computed (a jax-esm#129 code-review finding, fixed here). `has_wind_vector()`
-instead asks the composed physics package's own **terms**,
+dict-key check cannot tell the two apart, and would report a wind vector
+there that is never actually computed. `has_wind_vector()` therefore asks the composed physics package's own **terms**,
 `any(isinstance(term, SpeedySurfaceFlux) for term in physics.terms)` —
 `SpeedySurfaceFlux` is the one term that fills `u0`/`v0` with a real
 bulk-formula wind. This is still a static, composition-time, jit-safe

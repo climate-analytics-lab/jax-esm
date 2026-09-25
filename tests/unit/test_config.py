@@ -592,9 +592,8 @@ def test_veros_atmosphere_with_no_wind_vector_is_refused_at_build_time(_veros_x6
     (`test_config_has_no_python_defaults`'s own parametrization already
     composes every `physics` option against every `configuration`, which is
     what makes this combination "shipped-reachable" rather than exotic).
-    `VerosExchange.validate`'s docstring used to claim this was reachable
-    only through a hand-built coupler -- a code review finding, since this
-    test proves otherwise.
+    This test is what shows the combination is reachable through the
+    ordinary CLI, not only through a hand-built coupler.
 
     ``grid@atmosphere.grid=echam_t42_l8_sigma`` (the coarsest packaged ECHAM
     grid) keeps this cheap: `_validate_exchangers` only needs
@@ -614,9 +613,9 @@ def test_veros_atmosphere_with_no_wind_vector_is_refused_at_build_time(_veros_x6
     # one, "aerosol", among them), not just "this atmosphere's composed
     # physics" -- issue #129 asked for this explicitly, in the same spirit as
     # `ComposablePhysics.require_surface_exchange`, which names its `terms`
-    # list for the surface struct itself (a code review later found the
-    # wording here claimed the stronger, inaccurate "composed terms" -- see
-    # `jem.fluxes._require_wind_vector`'s docstring).
+    # list for the surface struct itself. The listed names are published
+    # diagnostics, not term names -- see `jem.fluxes._require_wind_vector`'s
+    # docstring.
     assert "aerosol" in str(excinfo.value)
 
 
