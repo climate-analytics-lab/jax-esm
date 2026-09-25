@@ -264,6 +264,64 @@ def test_datetimes_gives_an_exact_half_second_midpoint():
     )
 
 
+def test_datetimes_wraps_a_365_day_axis_past_the_day_count_limit_if_unchecked():
+    """Reproduction: an unchecked int32 day count wraps a ``"365_day"`` axis's labels.
+
+    `TimeAxis`'s own labels are always proleptic Gregorian regardless of
+    ``self.calendar`` (the class docstring), so this axis's ``"365_day"``
+    calendar gives it no protection at all: at a step count that a raw int32
+    step COUNTER still holds exactly (`_STEP_INT32_MAX == 2**31 - 1`), the
+    Gregorian day count the label is built from has already wrapped, giving a
+    label almost six million years in the PAST instead of continuing forward
+    from 2001 -- the exact failure this codebase's own "jcm-878-clock"
+    finding describes. This pins the wrap itself, on a `TimeAxis` built with
+    ``calendar="gregorian"`` too, so the guard added below is not
+    accidentally scoped to one calendar only.
+    """
+    step_int32_max = 2**31 - 1  # the raw int32 range every step counter shares
+    start = jdt.to_datetime("2001-01-01")
+    dt = jdt.to_timedelta(1, "day")
+    for calendar in ("365_day", "gregorian"):
+        axis = TimeAxis(
+            start_date=start, steps=np.array([step_int32_max], dtype=np.int64),
+            dt=dt, calendar=calendar,
+        )
+        with pytest.raises(ValueError, match="would wrap"):
+            axis.datetimes()
+
+
+def test_datetimes_refuses_exactly_at_and_accepts_one_below_its_own_day_count_limit():
+    """The `TimeAxis` guard's own boundary is exact, on every calendar.
+
+    Mirrors `jem.driver`'s own "accepted at the limit, refused one past it"
+    pattern, but for the guard that lives in `TimeAxis.datetimes` itself (see
+    that method's own docstring for why it duplicates, rather than merely
+    relies on, `run_chunked`'s up-front check).
+    """
+    from jem.base.calendar import max_safe_record
+
+    start = jdt.to_datetime("2001-01-01")
+    dt = jdt.to_timedelta(1, "day")
+    dt_seconds = 86_400
+    limit = max_safe_record(
+        dt_seconds, offset_seconds=dt_seconds,
+        start_seconds=int(start.delta.seconds), start_days=int(start.delta.days),
+    )
+    for calendar in ("365_day", "gregorian"):
+        accepted = TimeAxis(
+            start_date=start, steps=np.array([limit], dtype=np.int64),
+            dt=dt, calendar=calendar,
+        )
+        accepted.datetimes()  # at the limit: fine
+
+        refused = TimeAxis(
+            start_date=start, steps=np.array([limit + 1], dtype=np.int64),
+            dt=dt, calendar=calendar,
+        )
+        with pytest.raises(ValueError, match="would wrap"):
+            refused.datetimes()
+
+
 def test_time_axis_attrs_is_a_fresh_dict_per_access():
     """Hand every caller its own dict, because xarray keeps what it is given.
 

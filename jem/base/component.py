@@ -628,8 +628,13 @@ class CouplingTime:
         multiply-then-divide, exact for any ``step`` an int32 can hold, up to
         the exact int32 day-count limit its own docstring derives (about 5.87
         million simulated years) -- ``jem.driver.run_chunked`` refuses a run
-        past that limit before it ever reaches here; this property itself has
-        no run length to check against, since ``step`` is traced.
+        past that limit before it ever reaches here, for THIS clock's own
+        step whether it belongs to the outermost coupler or to a nested one
+        (``jem.driver._check_step_counters_fit_int32`` checks each nested
+        coupler's own starting step against its own day-count bound
+        separately, since it is not guaranteed to stay in lockstep with the
+        outer coupler's); this property itself has no run length to check
+        against, since ``step`` is traced.
         """
         from jem.base.calendar import (
             gregorian_day_of_year,
@@ -749,12 +754,62 @@ class TimeAxis:
         it. The interval bounds are computed in exact int64 seconds (never a
         floating day count, and never an ``int32`` total that a
         many-thousand-record run could overflow) before being split back into
-        the whole day/second pair ``jax_datetime.Timedelta`` needs.
+        the whole day/second pair ``jax_datetime.Timedelta`` needs -- but
+        that split itself narrows to ``int32`` (:func:`jdt.Timedelta`'s own
+        storage dtype), so the days computed here must already fit int32
+        BEFORE that cast, which is checked explicitly below rather than left
+        to wrap silently.
+
+        This axis's labels are always proleptic Gregorian regardless of
+        ``self.calendar`` (the class docstring), so the int32 day-count limit
+        of :func:`jem.base.calendar.max_safe_record` applies here
+        unconditionally -- on ``"365_day"`` exactly as much as on
+        ``"gregorian"`` -- rather than only where the run's own seasonal-cycle
+        arithmetic (:class:`CouplingTime`'s ``year_fraction``) happens to read
+        real Gregorian dates too. :func:`jem.driver.run_chunked`'s own
+        up-front check (``_check_step_counters_fit_int32`` /
+        ``_max_safe_coupled_steps``) refuses, before anything is compiled, any
+        run whose records would ever reach this method past that same bound
+        (for every clock in the coupled hierarchy, not only the run's own
+        top-level one -- see that module's docstrings), which is the
+        practical way most runs meet this limit: refused early, not after
+        having integrated anything. But this method can also be reached
+        without going through ``run_chunked`` at all -- a hand-built
+        ``TimeAxis``, or ``Coupler.to_xarray()``/a component's own
+        ``to_xarray()`` called directly on a trajectory driven some other
+        way -- so the check belongs here too, at the one place the actual
+        int32 narrowing happens, as the guarantee that cannot be bypassed by
+        skipping ``run_chunked``.
         """
         from jcm.predictions import output_time_labels
 
+        from jem.base.calendar import max_safe_record
+
         dt_seconds = _timedelta_seconds(self.dt)
         steps = np.asarray(self.steps, dtype=np.int64)
+        if steps.size:
+            start = self.start_date
+            limit = max_safe_record(
+                dt_seconds,
+                offset_seconds=dt_seconds,
+                start_seconds=int(np.asarray(start.delta.seconds)),
+                start_days=int(np.asarray(start.delta.days)),
+            )
+            last_step = int(steps.max())
+            if last_step > limit:
+                raise ValueError(
+                    f"This time axis asks for a record at coupled step "
+                    f"{last_step}, past {limit}, the largest step this "
+                    "clock's own records can be labelled at before the "
+                    "Gregorian day count jax_datetime.Timedelta stores "
+                    "(int32) would wrap -- see "
+                    "jem.base.calendar.max_safe_record for exactly what is "
+                    "being checked, and this method's own docstring for why "
+                    "it is checked here (rather than, or as well as, in "
+                    "jem.driver.run_chunked, which refuses a run past this "
+                    "same bound before anything is compiled, but is not the "
+                    "only way to reach this method)."
+                )
         interval_start_seconds = steps * dt_seconds
         interval_end_seconds = interval_start_seconds + dt_seconds
 
