@@ -18,10 +18,11 @@ the things it couples. It is deliberately small:
   checkpoint restarts (the scan index restarts at zero on every call; the
   carry does not).
 - :class:`CouplingTime` is what every ``Component.step`` receives instead of
-  a bare step index: the step, the simulation time in seconds and the static
-  calendar facts needed to turn that into a position in the seasonal cycle.
-  Components therefore hold **no clock state of their own**; the coupler owns
-  the one clock, and two components can never disagree about the date.
+  a bare step index: the coupler's current ``jax_datetime.Datetime`` and the
+  coupling ``dt``. Components therefore hold **no clock state of their own**;
+  the coupler owns the one clock -- a carried, incrementally advanced
+  ``Datetime``, not a step count multiplied out -- and two components can
+  never disagree about the date.
 - :data:`Exchanger` is the type of the functions that move information
   between components. They were called "mappers" before v1.0; the name was
   changed because "mapper" reads as a regridding operation, whereas an
@@ -37,18 +38,17 @@ https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-
 from __future__ import annotations
 
 import dataclasses
-import datetime
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Literal, Protocol, get_args, runtime_checkable
+from typing import Any, Literal, Protocol, cast, get_args, runtime_checkable
 
 import jax
-import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 from flax import struct
-from jcm.date import days_per_year as jcm_days_per_year
+from jcm.date import fraction_of_year_elapsed
+from jcm.predictions import output_time_labels
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -60,10 +60,6 @@ Carry = Any
 Diagnostics = Any
 
 SECONDS_PER_DAY = 86400.0
-
-#: Nanoseconds in a day, as a float64 -- the exact factor JCM multiplies its
-#: float64 day counts by when it builds a ``datetime64[ns]`` time axis.
-NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
 
 #: Prefix on the output name of a field a component was *given*, as opposed to
 #: one it computed. See :func:`forcing_variable`.
@@ -182,171 +178,76 @@ def role_attrs(role: Role) -> dict[str, str]:
     return {ROLE_ATTRIBUTE: role}
 
 
-def seconds_since_new_year(start_date: jdt.Datetime, calendar: str) -> float:
-    """Return the seconds from 1 January of ``start_date``'s year to ``start_date``.
-
-    This offset is what turns simulation time (seconds since the start of the
-    run) into a position in the annual cycle, so a run that starts in July
-    reads the July record of a monthly climatology on its first step. The
-    coupler puts it on every :class:`CouplingTime` as ``year_offset_seconds``.
-
-    The day of year is counted in the *model* calendar. On a ``365_day``
-    calendar there is no 29 February, so a Gregorian date after it is one
-    day earlier in the model year than the real-calendar subtraction would
-    say (31 December is day 364, not day 365, so the seasonal cycle does
-    not wrap a day early); a date that does not exist in that calendar is
-    rejected. On the ``gregorian`` calendar the real subtraction applies.
-
-    Parameters
-    ----------
-    start_date : jax_datetime.Datetime
-        The run's start date.
-    calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
-
-    Raises
-    ------
-    ValueError
-        If ``start_date`` does not exist in ``calendar`` (29 February on a
-        365-day calendar), or the calendar is unknown to ``jcm.date``.
-
-    """
-    when = start_date.to_pydatetime()
-    if float(jcm_days_per_year(calendar)) == 365.0:
-        if when.month == 2 and when.day == 29:
-            raise ValueError(
-                f"{when.date()} does not exist in the {calendar!r} calendar, "
-                "which has no 29 February."
-            )
-        # Count the day of year in a year without a leap day: any non-leap
-        # reference year gives the same month/day -> day-of-year mapping.
-        reference = datetime.datetime(
-            2001, when.month, when.day, when.hour, when.minute, when.second,
-            when.microsecond,
-        )
-        return (reference - datetime.datetime(2001, 1, 1)).total_seconds()
-    new_year = jdt.to_datetime(f"{when.year:d}-01-01")
-    return float((start_date - new_year) / jdt.to_timedelta(1, "second"))
-
-
-def start_year_fraction(start_date: jdt.Datetime, calendar: str) -> float:
+def start_year_fraction(start_date: jdt.Datetime) -> float:
     """Return the position of ``start_date`` in the annual cycle, in ``[0, 1)``.
 
-    Zero is 00:00 on 1 January. This is the same quantity
-    :attr:`CouplingTime.year_fraction` reports at step 0, computed from the
-    same two facts (the offset into the year and the calendar's year length),
-    so a component that samples a climatology in ``initialize()`` and one that
+    The same quantity :attr:`CouplingTime.year_fraction` reports at step 0,
+    computed by the same function (``jcm.date.fraction_of_year_elapsed``), so
+    a component that samples a climatology in ``initialize()`` and one that
     samples it in ``step()`` cannot disagree about where the run starts.
-
-    Parameters
-    ----------
-    start_date : jax_datetime.Datetime
-        The run's start date.
-    calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
-
-    Returns
-    -------
-    float
-
     """
-    seconds_per_year = SECONDS_PER_DAY * float(jcm_days_per_year(calendar))
-    # `seconds_since_new_year` already counts in the model calendar, so this
-    # is strictly below 1; the modulo only guards the boundary against
-    # rounding.
-    return (seconds_since_new_year(start_date, calendar) / seconds_per_year) % 1.0
-
-
-def _timedelta_days(delta: Any) -> float:
-    """Return a ``jax_datetime`` days/seconds pair as a float64 count of days.
-
-    ``jdt.Timedelta`` (and the ``.delta`` of a ``jdt.Datetime``) stores whole
-    days and the seconds within the day separately. Dividing by a one-day
-    ``Timedelta`` would work but goes through jax; this stays in numpy so the
-    result is a plain float64 usable in the output-labelling arithmetic.
-    """
-    return (
-        float(np.asarray(delta.days))
-        + float(np.asarray(delta.seconds)) / SECONDS_PER_DAY
-    )
+    return float(fraction_of_year_elapsed(start_date))
 
 
 @struct.dataclass
 class CouplingTime:
     """The coupler's clock as seen by one component step.
 
+    There is one clock: a carried ``jax_datetime.Datetime`` that the coupler
+    advances by ``dt`` every step (:meth:`end_of_step`), never a step count
+    multiplied out. ``step`` and ``sim_time`` remain for the sub-step
+    indexing a component with an internal timestep or a health-check log line
+    needs; nothing derives ``time`` from either of them.
+
     Attributes
     ----------
     step : jax.Array
         int32 scalar; number of coupling steps completed before this one
         (0 on the first step). Copied from :attr:`CoupledCarry.step`.
+    time : jax_datetime.Datetime
+        The current model time -- the coupler's start date, advanced by
+        ``dt`` once per step it has taken.
     sim_time : jax.Array
-        Seconds since ``start_date``; equals ``step * dt``. Float64 when
-        ``jax_enable_x64`` is on, float32 otherwise.
+        Seconds since the run's start; equals ``step * dt``. Float64 when
+        ``jax_enable_x64`` is on, float32 otherwise. A convenience for a
+        clock-drift check against a wrapped model's own elapsed-seconds
+        counter (:mod:`jem.components.clock`); ``time`` is authoritative.
     dt : float
         Coupling timestep in seconds. Static (not a pytree leaf).
-    year_offset_seconds : float
-        Seconds from 1 January of the start year to ``start_date``. Static.
-    days_per_year : float
-        Length of the year in days for the run's calendar, from
-        ``jcm.date.days_per_year``. Static.
 
     """
 
     step: jax.Array
+    time: jdt.Datetime
     sim_time: jax.Array
     dt: float = struct.field(pytree_node=False)
-    year_offset_seconds: float = struct.field(pytree_node=False)
-    days_per_year: float = struct.field(pytree_node=False)
 
     def end_of_step(self) -> "CouplingTime":
         """Return the clock as it reads at the end of this step (one step later).
 
-        Both ``step`` and ``sim_time`` advance together; a component that
-        needs a boundary condition at both ends of a step (the slab models
-        measure an anomaly against the climatology at the start and add it
-        back at the end) must use this rather than adding ``dt`` to
-        ``sim_time`` by hand, because :attr:`year_fraction` is computed from
-        ``step`` whenever the step divides the year.
+        A component that needs a boundary condition at both ends of a step
+        (the slab models measure an anomaly against the climatology at the
+        start and add it back at the end) uses this rather than adding ``dt``
+        to ``time`` by hand.
         """
         advanced: CouplingTime = self.replace(  # type: ignore[attr-defined]
-            step=self.step + 1, sim_time=self.sim_time + self.dt
+            step=self.step + 1,
+            time=self.time + jdt.to_timedelta(int(self.dt), "second"),
+            sim_time=self.sim_time + self.dt,
         )
         return advanced
-
-    @property
-    def seconds_per_year(self) -> float:
-        """Length of the model year in seconds."""
-        return SECONDS_PER_DAY * self.days_per_year
 
     @property
     def year_fraction(self) -> jax.Array:
         """Position in the annual cycle in ``[0, 1)`` at the *start* of this step.
 
-        Zero is 00:00 on 1 January. This is what a monthly climatology is
-        interpolated with (``jem.utils.cycles.evaluate_cyclic_linear``).
-
-        Precision note: ``sim_time`` is a float32 array unless x64 is enabled,
-        and float32 resolves only ~7 digits, so after a century of simulated
-        time (3e9 s) it is quantised to hundreds of seconds. When the
-        coupling step divides the year exactly (the usual case: daily steps
-        in a 365-day year) the step count is reduced modulo the steps per
-        year in exact integer arithmetic first, so the fraction keeps full
-        float32 precision (a few seconds) for runs of any length. Otherwise
-        the seconds are used directly and precision degrades with run length.
+        Zero is 00:00 on 1 January. ``jcm.date.fraction_of_year_elapsed`` --
+        the same function the atmosphere's own seasonal physics uses -- so a
+        component's seasonal cycle and JCM's agree by construction. This is
+        what a monthly climatology is interpolated with
+        (``jem.utils.cycles.evaluate_cyclic_linear``).
         """
-        steps_per_year = self.seconds_per_year / self.dt
-        if float(steps_per_year).is_integer():
-            seconds_into_year = self.year_offset_seconds + (
-                jnp.mod(self.step, int(steps_per_year)) * self.dt
-            )
-        else:
-            seconds_into_year = self.year_offset_seconds + self.sim_time
-        # Reduce in seconds before dividing: the modulo of a quotient near 1.0
-        # keeps only the absolute float32 precision of that quotient (~1e-7),
-        # whereas the remainder in seconds is exact for whole-second steps and
-        # the division then has full relative precision.
-        return jnp.mod(seconds_into_year, self.seconds_per_year) / self.seconds_per_year
+        return cast(jax.Array, fraction_of_year_elapsed(self.time))
 
 
 @struct.dataclass
@@ -357,14 +258,20 @@ class CoupledCarry:
     ----------
     components : dict[str, Carry]
         One carry per component, keyed by component name.
+    time : jax_datetime.Datetime
+        The model's current time -- the coupler's one clock. Set to the
+        coupler's start date at :meth:`~jem.base.coupler.Coupler.initialize`
+        and advanced by the coupling ``dt`` every step; every component's
+        :class:`CouplingTime` is built from it.
     step : jax.Array
-        int32 scalar; number of coupling steps completed. The coupler
-        increments it once per coupled step and builds :class:`CouplingTime`
-        from it, so it is the single source of truth for the model clock.
+        int32 scalar; number of coupling steps completed. Kept for the
+        sub-step indexing workflow multiplicity needs and for a checkpoint's
+        step count; ``time`` is what the clock is.
 
     """
 
     components: dict[str, Carry]
+    time: jdt.Datetime
     step: jax.Array
 
 
@@ -377,53 +284,13 @@ class TimeAxis:
     with the same ``time`` coordinate and ``xr.merge`` of two components'
     datasets is an N-long join rather than a 2N-long union.
 
-    The labelling convention is JCM's: record ``k`` is the average over
-    ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with the
-    **end** of that interval, ``start_date + (k+1) dt``, as a
-    ``datetime64[ns]`` on the proleptic Gregorian calendar whatever the
-    model calendar is (a ``365_day`` run still writes real dates; the
-    calendar governs only the seasonal cycle and forcing selection).
-    :meth:`datetimes` implements exactly that and is the one place the
-    convention is written down. It reimplements JCM's arithmetic rather than
-    calling JCM, and at the pinned revision (``JCM_SUPPORTED_REV``) that is a
-    deliberate choice rather than a missing API: jax-gcm#824 made
-    ``Model.date_from_sim_time`` public, but that is JCM's *model clock*
-    conversion -- exact integer day/second arithmetic on the model calendar,
-    returning a ``jcm.date.DateData`` for forcing and physics -- and not the
-    conversion these labels have to match, which is the float64
-    days-since-epoch product in ``ModelPredictions._trajectory_dataset``
-    (still internal, and still what JCM's own output files are labelled with).
-    Calling the public one would give the exact nanosecond count where JCM's
-    own output gives a float64 product whose ulp at a 2000s date is 128 ns.
-    The two agree whenever the step is a power-of-two fraction of a day (every
-    configuration JAX-ESM ships, and hence today's tests), and part company
-    when it is not -- a 10- or 20-minute coupling step puts roughly half the
-    labels 128 ns off -- at which point a slab dataset stops aligning with the
-    atmosphere's on one time axis and ``xr.merge`` gives a 2N-long union
-    instead of an N-long join, which is the very thing this class exists to
-    prevent. Sharing one computation therefore needs JCM to publish its
-    *output* labelling, which is jax-gcm#862; jax-gcm#824 published the
-    clock, not the labelling, so adopting ``date_from_sim_time`` here on its
-    own would be a regression waiting for the first sub-hourly run.
-
-    The consequence to know about is at a leap day. The labels are
-    Gregorian, and a ``365_day`` year is a day shorter than a Gregorian leap
-    year, so from the first 29 February a run's labels reach, every label
-    falls one day *behind* the model-calendar date of the instant it stands
-    for -- one more day for every leap year the run passes. A run starting on
-    1 January 2000 labels the record whose instant the model calls 1 March
-    00:00 as ``2000-02-29``, and the one the model calls 1 April 00:00 as
-    ``2000-03-31``. Anything binning the output by its own labels
-    (``groupby("time.month")``) therefore parts company from that record on
-    with anything binning by the model calendar -- which is what
-    :func:`jem.accumulate.monthly_mean` does, and what the forcing and the
-    seasonal cycle follow; ``monthly_mean`` documents the difference where a
-    user meets it, under **Leap days**. The inconsistency is JCM's and is
-    recorded upstream as jax-gcm#449; JAX-ESM mirrors the convention rather
-    than diverging from it, because labels of its own would no longer merge
-    with the atmosphere's on one time axis. Emitting calendar-consistent
-    labels for every component, the atmosphere's included, is tracked as
-    #118.
+    The labelling convention is JCM's: record ``k`` covers the interval
+    ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with its
+    **midpoint**, as ``datetime64[ms]`` -- the same convention and the same
+    arithmetic as ``jcm.predictions.output_time_labels`` and
+    ``ModelPredictions.to_xarray``, computed here in whole milliseconds on the
+    host so the two are identical bit for bit and ``xr.merge`` joins them on
+    one time axis rather than unioning two.
 
     Attributes
     ----------
@@ -433,61 +300,44 @@ class TimeAxis:
         int array of coupled-step indices, one per record.
     dt : jdt.Timedelta
         Coupling timestep.
-    calendar : str
-        Calendar name as JCM spells it (``"365_day"``, ``"gregorian"``).
 
     """
 
     start_date: jdt.Datetime
     steps: Any
     dt: jdt.Timedelta
-    calendar: str
 
     def __len__(self) -> int:
         """Return the number of output records."""
         return len(self.steps)
 
+    def _bounds_ms(self) -> np.ndarray:
+        """Return each record's ``[start, end)`` bounds, as int64 milliseconds."""
+        start_ms = int(self.start_date.to_datetime64().astype("datetime64[ms]").astype(np.int64))
+        dt_seconds = int(np.asarray(self.dt.days)) * int(SECONDS_PER_DAY) + int(
+            np.asarray(self.dt.seconds)
+        )
+        dt_ms = dt_seconds * 1000
+        steps = np.asarray(self.steps, dtype=np.int64)
+        lower = start_ms + steps * dt_ms
+        return np.stack([lower, lower + dt_ms], axis=-1)
+
+    def bounds(self) -> np.ndarray:
+        """Return each record's interval bounds, as ``datetime64[ms]`` ``(n, 2)``."""
+        return self._bounds_ms().astype("datetime64[ms]")
+
     def datetimes(self) -> np.ndarray:
-        """Return the record labels as ``datetime64[ns]`` (end of each interval).
+        """Return the record labels as ``datetime64[ms]`` (each interval's midpoint).
 
-        The arithmetic, not just the answer, is JCM's
-        (``jcm.predictions.ModelPredictions._trajectory_dataset``)::
-
-            times = start_date.delta.days + save_interval * (arange(n) + 1)
-            time  = (times * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
-
-        that is: a float64 count of **days** since the 1970 epoch, multiplied
-        into nanoseconds at the end. That product overflows the exactly
-        representable range of float64 (a 2001 date is ~9.5e17 ns, whose ulp
-        is 128 ns), so the instants are not exact to the nanosecond -- but
-        they are *identically* inexact for every component that comes through
-        here, which is the property that makes ``xr.merge`` align two
-        components' output on one time axis. Computing the exact integer
-        nanosecond count instead would be more accurate and would merge with
-        nothing.
-
-        The count of days is a plain count, so the dates it lands on are
-        proleptic Gregorian and a ``365_day`` run's labels fall a day further
-        behind the model calendar at every Gregorian 29 February -- the
-        leap-day consequence the class docstring spells out. Making the labels
-        calendar-consistent is not a change this method can make alone
-        (jax-gcm#449): it would put JEM's output on a different time axis from
-        the JCM output it is written to merge with. Doing it for every
-        component at once is #118.
-
-        Sub-day start dates are the one deliberate difference from JCM's own
-        output path, which takes ``start_date.delta.days`` and drops
-        ``.seconds`` entirely, so a JCM run starting at 06:00 labels its
-        records from midnight. Reproducing that here would mislabel a slab
-        dataset by up to a day, so the seconds are kept. For a start date at
-        midnight -- every configuration JAX-ESM ships -- the two agree bit for
-        bit, because the added term is exactly 0.0.
+        ``lower + (upper - lower) // 2``, exactly
+        ``jcm.predictions.ModelPredictions.time_labels`` -- floor division in
+        integer milliseconds, so an odd-length interval's half-millisecond
+        midpoint matches JCM's rather than a naive float mean rounding it
+        differently.
         """
-        start_days = _timedelta_days(self.start_date.delta)
-        step_days = _timedelta_days(self.dt)
-        steps = np.asarray(self.steps, dtype=np.float64)
-        days = start_days + step_days * (steps + 1.0)
-        return (days * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
+        bounds = self._bounds_ms()
+        midpoints = bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
+        return cast(np.ndarray, output_time_labels(midpoints.astype("datetime64[ms]")))
 
     @property
     def attrs(self) -> dict[str, str]:
@@ -557,9 +407,9 @@ class SupportsBind(Protocol):
 
     A component that has its own internal timestep (JCM, Veros) needs to know
     the coupling timestep to decide how many internal steps make one coupled
-    step, and needs to agree with the coupler about the start date and
-    calendar. The coupler calls ``bind`` once, from its constructor, for
-    every component that provides it. Raise ``ValueError`` on a mismatch.
+    step, and needs to agree with the coupler about the start date. The
+    coupler calls ``bind`` once, from its constructor, for every component
+    that provides it. Raise ``ValueError`` on a mismatch.
     """
 
     def bind(
@@ -567,7 +417,6 @@ class SupportsBind(Protocol):
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str,
     ) -> None: ...
 
 
