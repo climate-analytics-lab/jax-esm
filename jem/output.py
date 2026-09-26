@@ -73,27 +73,28 @@ carry nothing and its zero-length dimension would make
 What ``output_averages`` means here
 -----------------------------------
 JCM's ``run.output_averages`` switches each saved record from an
-instantaneous snapshot at the end of its save interval to the **mean over
-that interval**, still labelled at its end (``jcm.model``'s averaged outer
-step; ``jcm/config/run/default.yaml``). The coupler's records are already one
-per coupling step, so the same idea one level up: the coupler's output
-interval is the **chunk**, and ``output_averages=True`` replaces a chunk's
-records with their time mean -- one record, labelled with the chunk's last
-time (its own, whether or not ``subsample`` kept the record sitting there),
-carrying the CF ``cell_methods = "time: mean"`` that says so.
+instantaneous snapshot to the **mean over its interval**, labelled at that
+interval's midpoint (``jcm.model``'s averaged outer step;
+``jcm/config/run/default.yaml``). The coupler's records are already one per
+coupling step, so the same idea one level up: the coupler's output interval
+is the **chunk**, and ``output_averages=True`` replaces a chunk's records
+with their time mean -- one record, labelled at the chunk's own midpoint
+(computed from its first and last record as given, whether or not
+``subsample`` kept either), carrying the CF ``cell_methods = "time: mean"``
+that says so, with any ``time_bounds`` replaced by the chunk's own outer
+bounds rather than averaged as data.
 
 That keeps JCM's rule ("one record per output interval, the mean over it,
-labelled at its end") rather than inventing a second meaning for the same
-word, and it is the reduction a long run actually needs: one record per chunk
-rather than one per coupling step. The bins are the **chunks**, so a 30-day
-chunk gives 30-day-window means and not calendar months -- on a 365-day
-calendar those windows drift about five days a year against the months. A
+labelled at its midpoint") rather than inventing a second meaning for the
+same word, and it is the reduction a long run actually needs: one record per
+chunk rather than one per coupling step. The bins are the **chunks**, so a
+30-day chunk gives 30-day-window means and not calendar months. A
 calendar-month mean is :func:`jem.accumulate.monthly_mean`, which bins every
-record by the month of its own output label whatever the chunking. Note that
-in a coupled run the atmosphere's per-step
-records are *already* step means -- the JCM wrapper integrates each coupling
-step with ``output_averages=True`` -- so averaging a chunk of them is the
-chunk mean exactly, with no double counting.
+record by the Gregorian month of its own midpoint whatever the chunking. Note
+that in a coupled run the atmosphere's per-step records are *already* step
+means -- the JCM wrapper integrates each coupling step with
+``output_averages=True`` -- so averaging a chunk of them is the chunk mean
+exactly, with no double counting.
 """
 
 from __future__ import annotations
@@ -102,7 +103,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import xarray as xr
@@ -149,13 +150,33 @@ def _safe_name(name: str) -> str:
     return safe
 
 
+#: Name of the interval-bounds variable JCM's output carries (and JEM's other
+#: components may). It is not data to average -- a mean of a lower and an
+#: upper bound is neither -- so :func:`postprocess` gives it its own,
+#: explicit chunk-mean handling instead of folding it into `_timed_variables`.
+TIME_BOUNDS_VARIABLE = "time_bounds"
+
+
 def _timed_variables(dataset: xr.Dataset) -> list[str]:
-    """Return the data variables that have a time dimension."""
+    """Return the data variables that have a time dimension, `time_bounds` excepted."""
     return [
         str(name)
         for name, variable in dataset.data_vars.items()
-        if TIME_DIMENSION in variable.dims
+        if TIME_DIMENSION in variable.dims and str(name) != TIME_BOUNDS_VARIABLE
     ]
+
+
+def _chunk_midpoint(time: xr.DataArray) -> np.datetime64:
+    """Return the chunk's own interval midpoint, from its first and last record.
+
+    Every record is already labelled at its own interval's midpoint
+    (:class:`jem.base.component.TimeAxis`), so for equally spaced records the
+    chunk's midpoint is exactly the mean of its first and last -- computed in
+    integer milliseconds, the precision every record's own label was built in.
+    """
+    first = time.values[0].astype("datetime64[ms]").astype(np.int64)
+    last = time.values[-1].astype("datetime64[ms]").astype(np.int64)
+    return cast(np.datetime64, (first + (last - first) // 2).astype("datetime64[ms]"))
 
 
 def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
@@ -316,8 +337,9 @@ def postprocess(
 
     Asking for both is legal but unusual, and a run normally sets one or the
     other, because the mean is then over the **kept** records only. It is
-    still the mean of one chunk, labelled at that chunk's end, so the series
-    of means stays one record per chunk, evenly spaced with the chunks. What
+    still the mean of one chunk, labelled at that chunk's own midpoint, so the
+    series of means stays one record per chunk, evenly spaced with the
+    chunks. What
     it is not is evenly *weighted*: how many of a chunk's coupled steps the
     run-global stride keeps depends on where the chunk falls in the stride
     period, so successive means can average different numbers of records, and
@@ -332,12 +354,14 @@ def postprocess(
     dataset : xarray.Dataset
         One component's chunk of output, from ``Coupler.to_xarray``.
     output_averages : bool
-        Replace the records with their time mean: one record, labelled with
-        the last time in the chunk **as it was given** -- the end of the
-        interval the mean covers, whether or not ``subsample`` dropped that
-        record from the mean itself -- with ``cell_methods = "time: mean"``
-        on every variable that was averaged. See the module docstring for why
-        the chunk is the averaging interval.
+        Replace the records with their time mean: one record, labelled at
+        the **chunk's own midpoint** -- computed from its first and last
+        record as they were given, whether or not ``subsample`` dropped
+        either from the mean itself -- with ``cell_methods = "time: mean"``
+        on every variable that was averaged, and ``time_bounds`` (if the
+        dataset carries one) replaced with the chunk's own outer bounds
+        rather than averaged as data. See the module docstring for why the
+        chunk is the averaging interval.
     subsample : int
         Keep every ``subsample``-th **coupled step** of the run, counting
         from its start, with all of the records that step produced; ``1``
@@ -378,14 +402,23 @@ def postprocess(
             f"dimension (it has {sorted(map(str, dataset.dims))!r})."
         )
 
-    # The end of the interval the mean covers is the end of the CHUNK, which
-    # is the whole point of the label: one record per output interval,
-    # labelled at its end. So it is read before the stride removes records --
-    # the stride chooses what goes INTO the mean, not what interval the mean
-    # covers, and labelling with the last kept record instead would make the
-    # chunk-mean series unevenly spaced whenever the stride's phase falls
-    # differently in successive chunks.
-    chunk_end = dataset[TIME_DIMENSION].isel({TIME_DIMENSION: slice(-1, None)})
+    # The interval the mean covers is the whole CHUNK, which is the whole
+    # point of the label: one record per output interval, labelled at ITS
+    # midpoint (JCM's convention -- see TimeAxis). So it is read before the
+    # stride removes records -- the stride chooses what goes INTO the mean,
+    # not what interval the mean covers, and a midpoint of the kept records
+    # instead would make the chunk-mean series unevenly spaced whenever the
+    # stride's phase falls differently in successive chunks.
+    chunk_mid = _chunk_midpoint(dataset[TIME_DIMENSION])
+    chunk_bounds = None
+    if TIME_BOUNDS_VARIABLE in dataset.variables:
+        bounds = dataset[TIME_BOUNDS_VARIABLE]
+        chunk_bounds = np.array(
+            [[
+                bounds.isel({TIME_DIMENSION: 0, "bounds": 0}).values,
+                bounds.isel({TIME_DIMENSION: -1, "bounds": 1}).values,
+            ]]
+        )
 
     if subsample > 1:
         n_records = int(dataset.sizes[TIME_DIMENSION])
@@ -410,21 +443,27 @@ def postprocess(
 
     timed = _timed_variables(dataset)
     # `Dataset.mean` drops the dimension it reduces, so the label -- the
-    # chunk's last time, JCM's convention, and the one `TimeAxis.datetimes`
-    # already applied to the records being averaged -- has to be put back by
-    # hand.
+    # chunk's own midpoint -- has to be put back by hand.
     averaged = (
         dataset[timed]
         .mean(dim=TIME_DIMENSION, keep_attrs=True)
-        .expand_dims({TIME_DIMENSION: chunk_end.values})
+        .expand_dims({TIME_DIMENSION: [chunk_mid]})
     )
     averaged[TIME_DIMENSION].attrs = dict(dataset[TIME_DIMENSION].attrs)
     for name in timed:
         averaged[name].attrs = _with_cell_method(
             dataset[name].attrs, TIME_MEAN_CELL_METHOD
         )
+    if chunk_bounds is not None:
+        averaged[TIME_BOUNDS_VARIABLE] = (
+            (TIME_DIMENSION, "bounds"), chunk_bounds
+        )
+        averaged[TIME_BOUNDS_VARIABLE].attrs = dict(
+            dataset[TIME_BOUNDS_VARIABLE].attrs
+        )
+    excluded = {*timed, TIME_BOUNDS_VARIABLE}
     for variable in dataset.data_vars:
-        if str(variable) not in timed:
+        if str(variable) not in excluded:
             averaged[variable] = dataset[variable]
     averaged.attrs = dict(dataset.attrs)
     return averaged
