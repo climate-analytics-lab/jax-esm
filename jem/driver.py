@@ -743,12 +743,15 @@ def run_chunked(
             carry, accumulator = trajectories[steps](carry, accumulator)
             written = "reduced into the accumulator, no files written"
 
-        elapsed_days = float(coupler.coupling_time(carry.step).sim_time) / SECONDS_PER_DAY
+        elapsed_days = (
+            float(coupler.coupling_time(carry.step, carry.time).sim_time)
+            / SECONDS_PER_DAY
+        )
         logger.info(
             "Chunk %d: %d coupled steps run, at step %d, %.4g simulated days "
-            "(%.4g years); %s.",
+            "(now %s); %s.",
             chunk_index, steps, int(carry.step), elapsed_days,
-            elapsed_days / coupler.days_per_year, written,
+            carry.time.to_pydatetime().isoformat(), written,
         )
 
         # `datasets` is None exactly when `accumulate` is given, and that
@@ -841,13 +844,14 @@ def _whole_steps(
 ) -> int:
     """Return ``duration`` as a whole number of coupled steps, or raise.
 
-    The duration is parsed on the *coupler's* calendar, so "1 year" is as long
-    as the atmosphere's year rather than as long as a Gregorian one.
+    ``duration`` is a fixed length ("10 days", "6 hours"); jax_datetime's
+    proleptic Gregorian clock has no calendar-dependent duration to parse it
+    against.
     """
     # Imported here rather than at module scope: see `default_health_check`.
     from jcm.date import parse_duration_days
 
-    days = float(parse_duration_days(duration, coupler.calendar))
+    days = float(parse_duration_days(duration))
     steps = days / coupling_days
     rounded = round(steps)
     if abs(steps - rounded) > STEP_TOLERANCE * max(1.0, abs(steps)) or rounded < 1:
