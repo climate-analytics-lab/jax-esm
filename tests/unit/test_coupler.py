@@ -183,12 +183,11 @@ class BindRecorder(SourceComponent):
         super().__init__(name=name)
         self.binds = []
 
-    def bind(self, *, coupling_timestep, start_date, calendar):
+    def bind(self, *, coupling_timestep, start_date):
         self.binds.append(
             {
                 "coupling_timestep": coupling_timestep,
                 "start_date": start_date,
-                "calendar": calendar,
             }
         )
 
@@ -255,7 +254,7 @@ def test_repr_names_the_model():
     text = repr(_coupler())
     assert "source" in text
     assert "feed" in text
-    assert "365_day" in text
+    assert "2001-01-01" in text
 
 
 # ---------------------------------------------------------------------------
@@ -376,43 +375,27 @@ def test_components_share_clock():
 
 def test_year_fraction_wraps():
     """The annual cycle wraps at the year end rather than running past 1."""
-    # A start date one day before the year end on a 365-day calendar: the run
-    # starts at 364/365 through the year and step 1 is New Year's Day. 2000 is
-    # a Gregorian leap year, so a real-calendar day count would say 365 days
-    # and wrap a day early; the offset is counted in the model calendar.
+    # 2000 is a Gregorian leap year (366 days): the run starts one day before
+    # the year end, at 365/366 through the year, and step 1 is New Year's Day.
+    start = jdt.to_datetime("2000-12-31")
     coupler = Coupler(
         {"clock": ClockWatcher()},
         coupling_timestep=COUPLING_TIMESTEP,
-        start_date=jdt.to_datetime("2000-12-31"),
-        calendar="365_day",
-    )
-    assert float(coupler.coupling_time(0).year_fraction) == pytest.approx(364 / 365)
-    assert float(coupler.coupling_time(1).year_fraction) == pytest.approx(0.0, abs=1e-6)
-    assert float(coupler.coupling_time(2).year_fraction) == pytest.approx(
-        1 / 365, rel=1e-6
+        start_date=start,
     )
 
+    def year_fraction(step):
+        time = start + jdt.to_timedelta(step, "day")
+        return float(coupler.coupling_time(step, time).year_fraction)
 
-def test_year_fraction_uses_the_calendar_year_length():
-    """The Gregorian calendar's 365.2425-day year is used when it is selected."""
-    coupler = Coupler(
-        {"clock": ClockWatcher()},
-        coupling_timestep=COUPLING_TIMESTEP,
-        start_date=START_DATE,
-        calendar="gregorian",
-    )
-    assert coupler.days_per_year == pytest.approx(365.2425)
-    assert float(coupler.coupling_time(1).year_fraction) == pytest.approx(
-        1 / 365.2425, rel=1e-5
-    )
+    assert year_fraction(0) == pytest.approx(365 / 366)
+    assert year_fraction(1) == pytest.approx(0.0, abs=1e-6)
+    assert year_fraction(2) == pytest.approx(1 / 365, rel=1e-6)
 
 
 def test_clock_facts_are_exposed():
     coupler = _coupler()
     assert coupler.dt_seconds == DAY
-    assert coupler.calendar == "365_day"
-    assert coupler.days_per_year == 365.0
-    assert coupler.year_offset_seconds == 0.0
     assert coupler.coupling_timestep == COUPLING_TIMESTEP
 
 
@@ -421,7 +404,6 @@ def test_time_axis_starts_at_the_requested_step():
     assert isinstance(axis, TimeAxis)
     np.testing.assert_array_equal(axis.steps, [7, 8, 9])
     assert len(axis) == 3
-    assert axis.calendar == "365_day"
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +635,11 @@ def test_gradient_through_a_trajectory_matches_finite_differences():
     initial = coupler.initialize()
 
     def objective(value):
-        carry = CoupledCarry(components={"damped": {"value": value}}, step=initial.step)
+        carry = CoupledCarry(
+            components={"damped": {"value": value}},
+            time=initial.time,
+            step=initial.step,
+        )
         final, _ = trajectory(carry)
         return jnp.sum(final.components["damped"]["value"])
 
@@ -825,7 +811,6 @@ def test_a_repeated_component_is_bound_with_its_own_timestep():
     assert len(fast.binds) == 1
     assert fast.binds[0]["coupling_timestep"] == jdt.to_timedelta(1, "hour")
     assert fast.binds[0]["start_date"] == START_DATE
-    assert fast.binds[0]["calendar"] == "365_day"
 
     assert len(slow.binds) == 1
     assert slow.binds[0]["coupling_timestep"] == COUPLING_TIMESTEP
@@ -873,14 +858,14 @@ def test_repr_collapses_a_repeated_block():
 
 
 def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
-    """24 hourly records per coupled step, stamped at the end of each hour."""
+    """24 hourly records per coupled step, each stamped at its own midpoint."""
     coupler = _hourly_coupler()
     _, diagnostics = coupler.generate_trajectory_function(2)(coupler.initialize())
 
     datasets = coupler.to_xarray(diagnostics)
 
-    hourly = np.datetime64("2001-01-01", "ns") + (
-        np.arange(1, 49) * np.timedelta64(1, "h")
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        (np.arange(48) * 60 + 30) * np.timedelta64(1, "m")
     )
     assert datasets["fast"].sizes["time"] == 48
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
@@ -892,7 +877,9 @@ def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
     assert datasets["slow"].sizes["time"] == 2
     np.testing.assert_array_equal(
         datasets["slow"].time.values,
-        np.array(["2001-01-02", "2001-01-03"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-01T12:00", "2001-01-02T12:00"], dtype="datetime64[ms]"
+        ),
     )
 
     axis = coupler.components["fast"].time_axes[-1]
@@ -907,13 +894,15 @@ def test_to_xarray_first_step_is_in_coupled_steps_for_every_component():
 
     datasets = coupler.to_xarray(diagnostics, first_step=2)
 
-    hourly = np.datetime64("2001-01-01", "ns") + (
-        np.arange(49, 97) * np.timedelta64(1, "h")
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        (np.arange(48, 96) * 60 + 30) * np.timedelta64(1, "m")
     )
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["slow"].time.values,
-        np.array(["2001-01-04", "2001-01-05"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-03T12:00", "2001-01-04T12:00"], dtype="datetime64[ms]"
+        ),
     )
 
 
@@ -952,13 +941,13 @@ def test_a_workflow_without_multiplicity_is_the_run_it_always_was():
 def test_the_substep_clock_of_a_single_element_is_the_coupled_clock():
     """`multiplicity == 1` is not a special case of the sub-step arithmetic."""
     coupler = _coupler()
-    coupled = coupler.coupling_time(3)
-    substep = coupler.coupling_time_at_substep(3, 0, 1)
+    time = START_DATE + jdt.to_timedelta(3, "day")
+    coupled = coupler.coupling_time(3, time)
+    substep = coupler.coupling_time_at_substep(3, time, 0, 1)
     assert int(substep.step) == int(coupled.step)
     assert float(substep.sim_time) == float(coupled.sim_time)
     assert substep.dt == coupled.dt
-    assert substep.year_offset_seconds == coupled.year_offset_seconds
-    assert substep.days_per_year == coupled.days_per_year
+    assert substep.time == coupled.time
 
 
 def test_a_repeated_exchanger_sees_the_sub_stepped_clock():

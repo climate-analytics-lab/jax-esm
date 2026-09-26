@@ -3,10 +3,10 @@
 Three properties are under test.
 
 *A round trip is lossless, including the clock and including the dtypes.*
-``CoupledCarry.step`` is the coupled model's only clock, so a checkpoint that
-dropped it would resume every run in January; and the JCM physics carry holds
-int and bool leaves whose meaning a silent cast to float would destroy, so
-every leaf has to come back with the dtype it went in with.
+``CoupledCarry.time`` is the coupled model's clock, so a checkpoint that
+dropped it would resume every run at the coupler's start date; and the JCM
+physics carry holds int and bool leaves whose meaning a silent cast to float
+would destroy, so every leaf has to come back with the dtype it went in with.
 
 *A mismatch is refused where it happens.* The format stores the leaves and a
 manifest of the tree they came from, and pours them back into a template, so a
@@ -30,6 +30,7 @@ import logging
 import flax.serialization
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 from flax import struct
@@ -44,6 +45,8 @@ from jem.checkpoint import (
     save,
     save_coupled_carry,
 )
+
+TIME = jdt.to_datetime("2001-01-01")
 
 
 def toy_coupled_carry(step=0):
@@ -67,6 +70,15 @@ def toy_coupled_carry(step=0):
                 "state": {"land_surface_temperature": jnp.array([[275.0, 276.0]])},
             },
         },
+        # `jnp.asarray` on every leaf, like `jnp.int32(step)` below: a bare
+        # `jax_datetime` value built outside any jax operation keeps its
+        # host-side int64 days/seconds, which round-trips through the
+        # checkpoint's own canonicalisation (`_canonical_leaf`) as int32 --
+        # the same canonical dtype every leaf gets, and what a carry that
+        # has been through `lax.scan` already has.
+        time=jax.tree_util.tree_map(
+            jnp.asarray, TIME + jdt.to_timedelta(int(step), "day")
+        ),
         step=jnp.int32(step),
     )
 
@@ -327,6 +339,7 @@ def test_checkpoint_roundtrip_restores_step(tmp_path):
     assert isinstance(loaded, CoupledCarry)
     assert int(loaded.step) == 365
     assert loaded.step.dtype == jnp.int32
+    assert loaded.time == carry.time
     assert_trees_equal(loaded, carry)
 
 
@@ -376,7 +389,7 @@ def test_a_renamed_component_with_an_empty_carry_is_refused(tmp_path):
     structure was recorded this resumed the wrong model at the saved step.
     """
     save_coupled_carry(
-        CoupledCarry(components={"old": {}}, step=jnp.int32(7)),
+        CoupledCarry(components={"old": {}}, time=TIME, step=jnp.int32(7)),
         tmp_path / "checkpoint",
     )
 
@@ -435,7 +448,8 @@ def test_a_component_that_gained_a_save_carry_is_refused(tmp_path):
     """
     checkpoint_dir = tmp_path / "checkpoint"
     save_coupled_carry(
-        CoupledCarry(components={"ocn": None}, step=jnp.int32(2)), checkpoint_dir
+        CoupledCarry(components={"ocn": None}, time=TIME, step=jnp.int32(2)),
+        checkpoint_dir,
     )
 
     with pytest.raises(ValueError, match="pytree structure"):

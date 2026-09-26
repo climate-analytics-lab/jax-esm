@@ -549,16 +549,16 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
 def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler):
     """The long-run snippet the docs show is one `run_chunked` accepts.
 
-    `total_time` must be a whole multiple of `chunk`, and on a 365-day
-    calendar "10 years" is 3650 days, which 30-day chunks do not divide -- so
-    the recipe every document repeated would have raised if anyone had run
-    it. Six years does divide, and this is what keeps the snippets honest
-    without integrating six years to find out.
+    `total_time` must be a whole multiple of `chunk`, and is a fixed
+    duration -- "years"/"months" are calendar units jax_datetime has no fixed
+    length for, which is why `jem/config/coupled_run/long_run.yaml` spells
+    its length in days ("2190 days", not "6 years"). This keeps the
+    documented recipe honest without integrating six years to find out.
     """
     from jem.driver import _whole_steps
 
     coupling_days = coupler.dt_seconds / 86400.0
-    total = _whole_steps("6 years", coupling_days, coupler, "total_time")
+    total = _whole_steps("2190 days", coupling_days, coupler, "total_time")
     per_chunk = _whole_steps("30 days", coupling_days, coupler, "chunk")
     assert total == 2190
     assert total % per_chunk == 0
@@ -1983,10 +1983,10 @@ def written_labels(output_dir, name="ocn"):
 
 def step_labels(*steps):
     """Return the output label of each coupled step, as a record carries it."""
-    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
-    start = np.datetime64("2001-01-01", "ns")
-    # Record k covers step k and is labelled at the END of it.
-    return [start + (step + 1) * day for step in steps]
+    day = np.timedelta64(1, "D").astype("timedelta64[ms]")
+    start = np.datetime64("2001-01-01", "ms")
+    # Record k covers step k and is labelled at its MIDPOINT.
+    return [start + step * day + day // 2 for step in steps]
 
 
 def test_subsample_keeps_the_same_records_however_the_run_is_chunked(tmp_path):
@@ -2068,7 +2068,7 @@ def test_a_thinned_run_reads_back_as_one_series(tmp_path):
         )
 
 
-def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
+def test_a_chunk_mean_is_labelled_at_the_chunk_midpoint_however_it_is_thinned(
     tmp_path,
 ):
     """`output_averages` with `subsample` keeps one evenly spaced mean a chunk.
@@ -2077,9 +2077,9 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
     are 0, 3, 6, 9, 12, 15 and 18, which fall 2, 1, 1, 2, 1 to a chunk -- so
     the means are over different numbers of records, which the same run
     without the averaging shows file by file. Each mean still covers its own
-    chunk and is labelled at that chunk's end, four days apart; labelling
-    with the last record the stride happened to keep would make the series
-    jump about instead.
+    chunk and is labelled at that chunk's own midpoint, four days apart;
+    labelling with the last record the stride happened to keep would make the
+    series jump about instead.
     """
     settings = {"total_time": "20 days", "chunk": "4 days", "subsample": 3}
     thinned = tmp_path / "thinned"
@@ -2094,9 +2094,14 @@ def test_a_chunk_mean_is_labelled_at_the_chunk_end_however_it_is_thinned(
             kept.append(records["sea_surface_temperature"].load())
     assert [records.sizes["time"] for records in kept] == [2, 1, 1, 2, 1]
 
-    # And each mean is over exactly those records, labelled at its chunk's
-    # end -- five means, four days apart, whatever went into them.
-    assert written_labels(averaged) == step_labels(3, 7, 11, 15, 19)
+    # And each mean is over exactly those records, labelled at its own
+    # 4-day chunk's midpoint -- chunk k covers steps [4k, 4k+3], whose first
+    # and last records are themselves midpoint-labelled at 4k+0.5 and
+    # 4k+3.5 days, so the chunk's own midpoint is 4k+2 days -- five means,
+    # four days apart, whatever went into them.
+    day = np.timedelta64(1, "D").astype("timedelta64[ms]")
+    start = np.datetime64("2001-01-01", "ms")
+    assert written_labels(averaged) == [start + (4 * k + 2) * day for k in range(5)]
     for path, records in zip(sorted(averaged.glob("ocn-*.nc")), kept, strict=True):
         with xr.open_dataset(path) as mean:
             assert mean.sizes["time"] == 1
@@ -2131,12 +2136,17 @@ def test_a_sub_stepped_component_is_thinned_by_coupled_step(tmp_path):
         output_dir=tmp_path, subsample=2,
     )
 
-    half_day = np.timedelta64(12, "h").astype("timedelta64[ns]")
-    # Coupled steps 0 and 2: the ocean's two half-day records for each of
-    # them, the sea ice's one.
-    assert written_labels(tmp_path, "ocn") == sorted(
-        step_labels(0, 2) + [label - half_day for label in step_labels(0, 2)]
-    )
+    # Coupled steps 0 and 2: the ocean's two half-day sub-records for each of
+    # them -- covering [s, s+0.5) and [s+0.5, s+1) days, so labelled at their
+    # own midpoints s+0.25 and s+0.75 -- and the sea ice's one whole-day
+    # record, labelled at its own midpoint s+0.5.
+    quarter_day = np.timedelta64(6, "h").astype("timedelta64[ms]")
+    ocean_labels = [
+        label + offset
+        for label in step_labels(0, 2)
+        for offset in (-quarter_day, quarter_day)
+    ]
+    assert written_labels(tmp_path, "ocn") == sorted(ocean_labels)
     assert written_labels(tmp_path, "seaice") == step_labels(0, 2)
 
 
@@ -2184,7 +2194,7 @@ def test_continuous_chunked_resumed_agree_with_jcm(tmp_path):
         model = jcm.model.Model(
             coords=coords,
             terrain=TerrainData.aquaplanet(coords),
-            start_date=START_DATE,
+            start_time=START_DATE,
         )
         atm = JCMComponent(model)
         components = {

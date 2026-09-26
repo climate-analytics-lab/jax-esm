@@ -249,17 +249,15 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
-#: The calendar every shipped configuration runs on -- JCM's default, and the
-#: one the driver parses a run's durations against. It is what makes "1 year"
-#: 365 days here, and so what decides which durations divide which.
-CALENDAR = "365_day"
-
-
 def _seconds(duration: str | float) -> int:
-    """Return a config duration in whole seconds, as the driver reads it."""
+    """Return a config duration in whole seconds, as the driver reads it.
+
+    Every shipped duration is fixed ("300 days", not "1 year") since
+    ``jcm.date.parse_duration_days`` has no calendar-dependent unit to parse.
+    """
     from jcm.date import parse_duration_days
 
-    return int(round(float(parse_duration_days(duration, CALENDAR)) * 86400))
+    return int(round(float(parse_duration_days(duration)) * 86400))
 
 
 @pytest.mark.parametrize("option", _options("coupled_run"))

@@ -83,14 +83,16 @@ def test_postprocess_subsample_keeps_every_kth_record():
     assert thinned.attrs == {"title": "a chunk"}
 
 
-def test_postprocess_averages_the_chunk_and_labels_it_at_the_end():
+def test_postprocess_averages_the_chunk_and_labels_it_at_its_midpoint():
     dataset = simple_dataset(4)
     averaged = postprocess(dataset, output_averages=True)
 
     assert averaged.sizes["time"] == 1
-    # Labelled with the end of the interval it covers, as JCM labels an
-    # averaged record.
-    assert averaged["time"].values[0] == dataset["time"].values[-1]
+    # Labelled at the chunk's own midpoint -- the mean of its first and last
+    # record, JCM's convention for an averaged record.
+    first, last = dataset["time"].values[0], dataset["time"].values[-1]
+    expected = first + (last - first) // 2
+    assert averaged["time"].values[0] == expected
     np.testing.assert_allclose(
         averaged["temperature"].values[0],
         dataset["temperature"].values.mean(axis=0),
@@ -117,10 +119,10 @@ def test_postprocess_appends_to_an_existing_cell_methods():
 def test_postprocess_composes_subsample_then_average():
     """Both together average the retained records, in that order.
 
-    The label stays the **chunk's** last time even though the stride dropped
-    that record from the mean: it says which interval the mean covers, which
-    is the chunk, so a run that sets both still writes one mean per chunk
-    evenly spaced with the chunks.
+    The label stays the **chunk's own midpoint** even though the stride
+    dropped some records from the mean: it says which interval the mean
+    covers, which is the whole chunk, so a run that sets both still writes
+    one mean per chunk evenly spaced with the chunks.
     """
     dataset = simple_dataset(6)
     result = postprocess(dataset, output_averages=True, subsample=2)
@@ -130,7 +132,8 @@ def test_postprocess_composes_subsample_then_average():
         result["temperature"].values[0],
         dataset["temperature"].values[::2].mean(axis=0),
     )
-    assert result["time"].values[0] == dataset["time"].values[-1]
+    first, last = dataset["time"].values[0], dataset["time"].values[-1]
+    assert result["time"].values[0] == first + (last - first) // 2
 
 
 def test_postprocess_stride_counts_coupled_steps_of_the_whole_run():
@@ -528,7 +531,9 @@ def test_datasets_for_chunk_labels_and_postprocesses(two_slab_coupler, tmp_path)
     )
     for name, dataset in averaged.items():
         assert dataset.sizes["time"] == 1, name
-        assert dataset["time"].values[0] == datasets[name]["time"].values[-1]
+        first = datasets[name]["time"].values[0]
+        last = datasets[name]["time"].values[-1]
+        assert dataset["time"].values[0] == first + (last - first) // 2
         np.testing.assert_allclose(
             dataset["sea_surface_temperature"].values[0]
             if name == "ocn"
@@ -600,11 +605,12 @@ def test_datasets_for_chunk_carries_the_chunk_through_to_the_stride(
         datasets_for_chunk(two_slab_coupler, second, first_step=3, steps=3,
                            subsample=2)["ocn"],
     ]
-    day = np.timedelta64(1, "D").astype("timedelta64[ns]")
-    start = np.datetime64("2001-01-01", "ns")
+    day = np.timedelta64(1, "D").astype("timedelta64[ms]")
+    start = np.datetime64("2001-01-01", "ms")
+    # Record for coupled step s is labelled at its own midpoint, s + 0.5 days.
     np.testing.assert_array_equal(
         np.concatenate([dataset["time"].values for dataset in kept]),
-        np.array([start + (step + 1) * day for step in (0, 2, 4)]),
+        np.array([start + step * day + day // 2 for step in (0, 2, 4)]),
     )
 
 

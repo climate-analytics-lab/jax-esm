@@ -12,7 +12,6 @@ from jem.base.coupler import Coupler
 from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE
 from jem.components.slab.slab_land_model import SlabLandModel, SlabLandParameters
 from tests.unit.slab_test_utils import (
-    DAYS_PER_YEAR,
     LATITUDE_DEGREES,
     LONGITUDE_DEGREES,
     TIMESTEP,
@@ -21,6 +20,12 @@ from tests.unit.slab_test_utils import (
     tree_signature,
     write_climatology,
 )
+
+# 2001, the year `coupling_time`'s default start date falls in, is not a leap
+# year, and every test using this constant stays within it -- so a fixed 365
+# reproduces `jcm.date.fraction_of_year_elapsed` exactly without hand-rolling
+# real calendar arithmetic in the test.
+DAYS_PER_YEAR = 365.0
 
 
 @pytest.fixture
@@ -286,7 +291,6 @@ def test_bind_sets_the_initial_climatology_month(half_land_grid):
             {"lnd": model},
             coupling_timestep=jdt.to_timedelta(1, "day"),
             start_date=jdt.to_datetime(start_date),
-            calendar="365_day",
         )
         assert model.start_year_fraction == pytest.approx(
             0.0 if start_date.endswith("01-01") else 181.0 / DAYS_PER_YEAR
@@ -308,19 +312,12 @@ def test_bind_sets_the_initial_climatology_month(half_land_grid):
 def test_rebinding_to_a_different_clock_is_rejected(half_land_grid):
     """One instance belongs to one coupled model; a conflicting second bind raises."""
     model = SlabLandModel(half_land_grid)
-    clock = dict(coupling_timestep=jdt.to_timedelta(1, "day"), calendar="365_day")
+    clock = dict(coupling_timestep=jdt.to_timedelta(1, "day"))
     Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-01-01"), **clock)
     # The same clock again is harmless (a second coupler over the same run).
     Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-01-01"), **clock)
     with pytest.raises(ValueError, match="already bound"):
         Coupler({"lnd": model}, start_date=jdt.to_datetime("2001-07-01"), **clock)
-    with pytest.raises(ValueError, match="already bound"):
-        Coupler(
-            {"lnd": model},
-            start_date=jdt.to_datetime("2001-01-01"),
-            coupling_timestep=jdt.to_timedelta(1, "day"),
-            calendar="gregorian",
-        )
     assert model.start_year_fraction == 0.0
 
 

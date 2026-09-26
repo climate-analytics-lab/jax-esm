@@ -19,32 +19,42 @@ from jem.components.slab.grid import SlabGrid
 LONGITUDE_DEGREES = np.array([0.0, 90.0, 180.0, 270.0])
 LATITUDE_DEGREES = np.array([-60.0, 0.0, 60.0])
 TIMESTEP = 86400.0
-DAYS_PER_YEAR = 365.0
+START_DATE = jdt.to_datetime("2001-01-01")
 
 
 def coupling_time(
     step: int,
     dt: float = TIMESTEP,
     year_offset_seconds: float = 0.0,
-    days_per_year: float = DAYS_PER_YEAR,
+    start_date: jdt.Datetime = START_DATE,
 ) -> CouplingTime:
-    """Build the clock the coupler would hand a component at `step`."""
+    """Build the clock the coupler would hand a component at `step`.
+
+    ``year_offset_seconds`` places the *first* step (``step=0``) that many
+    seconds into the year ``start_date`` falls in, so a test after a specific
+    ``year_fraction`` can ask for it directly without hand-building a date;
+    later steps advance for real from there, exactly as the coupler's own
+    carried clock does.
+    """
+    time = (
+        start_date
+        + jdt.to_timedelta(int(year_offset_seconds), "second")
+        + jdt.to_timedelta(int(step * dt), "second")
+    )
     return CouplingTime(
         step=jnp.int32(step),
+        time=time,
         sim_time=jnp.float32(step * dt),
         dt=dt,
-        year_offset_seconds=year_offset_seconds,
-        days_per_year=days_per_year,
     )
 
 
 def time_axis(n_records: int, dt: float = TIMESTEP) -> TimeAxis:
     """Build the output time axis the coupler would hand `to_xarray`."""
     return TimeAxis(
-        start_date=jdt.to_datetime("2001-01-01"),
+        start_date=START_DATE,
         steps=np.arange(n_records),
         dt=jdt.to_timedelta(int(dt), "second"),
-        calendar="365_day",
     )
 
 

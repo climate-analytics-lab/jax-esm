@@ -39,7 +39,6 @@ from jem.components.veros_component import (  # noqa: E402
 )
 
 START_DATE = jdt.to_datetime("2000-01-01")
-CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 
@@ -117,7 +116,6 @@ def _bound(model) -> VerosComponent:
     wrapper.bind(
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar=CALENDAR,
     )
     return wrapper
 
@@ -136,10 +134,9 @@ def _coupling_time(step: int) -> CouplingTime:
     """Build the clock the coupler hands a component on step ``step``."""
     return CouplingTime(
         step=jnp.int32(step),
+        time=START_DATE + jdt.to_timedelta(int(step), "day"),
         sim_time=jnp.float32(step * 86400.0),
         dt=86400.0,
-        year_offset_seconds=0.0,
-        days_per_year=365.0,
     )
 
 
@@ -280,7 +277,7 @@ def test_to_xarray_publishes_the_external_mode_outputs(
 
     dataset = component.to_xarray(
         diagnostics,
-        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
     )
 
     assert dataset.psi.dims == ("time", "lon", "lat")
@@ -322,7 +319,7 @@ def test_to_xarray_publishes_the_masks_psi_is_read_with(component):
     """
     dataset = component.to_xarray(
         _labelling_diagnostics(component, 1),
-        TimeAxis(START_DATE, np.arange(1), COUPLING_TIMESTEP, CALENDAR),
+        TimeAxis(START_DATE, np.arange(1), COUPLING_TIMESTEP),
     )
 
     assert dataset.mask_U.dims == ("lon", "lat", "depth")
@@ -426,7 +423,6 @@ def test_bind_rejects_non_multiple_timestep(veros_model):
         wrapper.bind(
             coupling_timestep=jdt.to_timedelta(tracer_seconds + 1, "second"),
             start_date=START_DATE,
-            calendar=CALENDAR,
         )
 
 
@@ -516,7 +512,7 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), first, second)
 
     dataset = component.to_xarray(
-        stacked, TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR))
+        stacked, TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP))
 
     assert dataset.sizes["time"] == 2
     assert dataset.sizes["lon"], dataset.sizes["lat"] == grid_shape
@@ -532,7 +528,7 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     assert "sea_surface_temperature" in dataset.data_vars
     # The one time coordinate of the run, not a bare 0..n-1 index: an ocean
     # dataset has to merge with the atmosphere's on the same instants.
-    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR)
+    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP)
     np.testing.assert_array_equal(dataset.time.values, time_axis.datetimes())
     assert dataset.time.attrs == time_axis.attrs
 
@@ -645,7 +641,7 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component):
     with pytest.raises(ValueError, match="output records"):
         component.to_xarray(
             stacked,
-            TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP, CALENDAR))
+            TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP))
 
 
 @pytest.mark.slow
@@ -669,14 +665,11 @@ def test_a_drifted_clock_is_reported_and_the_step_still_runs(component, caplog):
 
 def test_rebinding_to_a_different_timestep_is_rejected(component):
     """One instance belongs to one coupled model; a conflicting second bind raises."""
-    component.bind(
-        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar=CALENDAR
-    )
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
     with pytest.raises(ValueError, match="already bound"):
         component.bind(
             coupling_timestep=COUPLING_TIMESTEP * 2,
             start_date=START_DATE,
-            calendar=CALENDAR,
         )
 
 
