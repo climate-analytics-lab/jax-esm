@@ -729,14 +729,49 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     return coupler
 
 
-def run(cfg: DictConfig) -> driver.RunResult:
-    """Build the coupled model from ``cfg`` and run it.
+def build_run_kwargs(cfg: DictConfig) -> dict[str, Any]:
+    """Return the keyword arguments ``driver.run_chunked`` needs from ``cfg``.
 
     ``cfg.coupled_run`` is the keyword arguments of
     :func:`jem.driver.run_chunked`, one for one, minus ``log_level`` --- which
     belongs with the run's other command-line settings but configures
     :mod:`jem.main`'s logger rather than the run. No default is repeated here:
     every one of them lives on ``run_chunked``.
+
+    Factored out of :func:`run` (issue #131) so that
+    :func:`jem.configurations.load` -- the Python door onto a named
+    configuration -- can assemble the SAME ``run_kwargs`` the CLI would use
+    without duplicating this dict-building logic; a caller then reproduces
+    ``python -m jem.main +configuration=<name>``'s integration with
+    ``jem.run_chunked(exp.coupler, **exp.run_kwargs)``.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``; only
+        ``cfg.coupled_run`` is read.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments for :func:`jem.driver.run_chunked`.
+
+    """
+    kwargs = OmegaConf.to_container(cfg.coupled_run, resolve=True, throw_on_missing=True)
+    if not isinstance(kwargs, dict):
+        raise TypeError(
+            f"cfg.coupled_run must be a mapping of run settings; got "
+            f"{type(kwargs).__name__}."
+        )
+    settings = {str(key): value for key, value in kwargs.items()}
+    settings.pop("log_level", None)
+    if settings.get("output_dir") is None:
+        settings["output_dir"] = _default_output_dir()
+    return settings
+
+
+def run(cfg: DictConfig) -> driver.RunResult:
+    """Build the coupled model from ``cfg`` and run it.
 
     Parameters
     ----------
@@ -749,16 +784,7 @@ def run(cfg: DictConfig) -> driver.RunResult:
 
     """
     logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg))
-    kwargs = OmegaConf.to_container(cfg.coupled_run, resolve=True, throw_on_missing=True)
-    if not isinstance(kwargs, dict):
-        raise TypeError(
-            f"cfg.coupled_run must be a mapping of run settings; got "
-            f"{type(kwargs).__name__}."
-        )
-    settings = {str(key): value for key, value in kwargs.items()}
-    settings.pop("log_level", None)
-    if settings.get("output_dir") is None:
-        settings["output_dir"] = _default_output_dir()
+    settings = build_run_kwargs(cfg)
     logger.info("Writing output to %s", settings["output_dir"])
     return driver.run_chunked(build_coupler(cfg), **settings)
 

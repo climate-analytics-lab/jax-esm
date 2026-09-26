@@ -645,6 +645,88 @@ Breaking changes are marked; everything else is additive.
   its fast, CI-gated test, and executes the page's block end to end in its
   slow one, so the quick start that used to live in two places, only one of
   them tested, cannot silently drift apart.
+- **Five example notebooks build directly in Python or load a validated
+  configuration through `jem.configurations` — no Hydra in any notebook.**
+  (`03_non_geoscience/01_SpringSystem.ipynb` is deliberately untouched; issue
+  #131). `01_aquaplanet.ipynb` and `04_jcm_slabs_mixed_grid_aqua_planet.ipynb`
+  TEACH how a coupled model is put together, so each builds its components
+  directly — the same construction `docs/source/python_api.md` walks through
+  (01 adds the sea-ice component that page's atmosphere/ocean pair leaves out;
+  04 adds the displaced-pole SCRIP grid and the four ESMF weight files a
+  mixed-grid run needs, spelled out by hand for the same reason). Both also
+  pass `time_step=12` (minutes) explicitly to `jcm.model.Model`, matching
+  `+configuration=aquaplanet-slab`'s own `atmosphere.run.time_step` -- with no
+  `time_step`, `Model` instead adopts the physics' stable step (30 minutes for
+  SPEEDY T31L8), a materially different model than the one
+  each notebook claims to reproduce (a local review of this PR caught the
+  omission; `tests/unit/test_notebook_equivalence.py` now checks the claim
+  structurally, `dt` included).
+  `02_aquaplanet_customized_initial_condition.ipynb`,
+  `03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb` and
+  `02_experimental/01_earth.ipynb` instead RUN a validated configuration to
+  demonstrate something that has nothing to do with how it was assembled, so
+  each is one `jem.configurations.load(...)` call plus the thing that notebook
+  is actually about (`jem.replace_field`, `jax.jvp`, or nothing at all for
+  Earth-like, whose three tuned parameters are read back from `exp.config`
+  rather than ever copied into Python). No notebook builds its exchanger or
+  writes netCDF or an animation by hand either. `examples/README.md` is the
+  index of which command or notebook runs which example, and of which of the
+  two ways each notebook gets there.
+- **`jem.configurations` — the recipe door onto a validated configuration
+  (issue #131).** `jem.configurations.load(name, **overrides)` composes a
+  named `jem/config/configuration/*.yaml` through Hydra INTERNALLY and hands
+  back a frozen `LoadedConfiguration(coupler, run_kwargs, config)` — no
+  `DictConfig`/`omegaconf` object ever reaches the caller:
+
+  ```python
+  from jem import configurations, run_chunked
+
+  configurations.available()          # {name: one-line summary}
+  exp = configurations.load("earth-slab")
+  result = run_chunked(exp.coupler, **exp.run_kwargs)
+  ```
+
+  `load` builds through the exact same `jem.runners` builders
+  `python -m jem.main` does (`build_coupler`, and the new
+  `jem.runners.build_run_kwargs`, factored out of `jem.runners.run` so the two
+  callers cannot duplicate — and so drift — that assembly), so a recipe means
+  one thing whether it is composed from the shell or loaded from a notebook.
+  `**overrides` reaches both a dotted value (`load("earth-slab",
+  **{"coupled_run.total_time": "60 days"})`) and a config-group selection
+  (`load("aquaplanet-slab", seaice="none")`), the latter verified to compose
+  identically to the CLI's bare `seaice=none` despite the escape hatch's own
+  Hydra-grammar quoting (a dict or tuple value now raises `TypeError` naming
+  the key, rather than emitting a token Hydra's parser would reject). Every
+  value, at the top level and at any depth inside a list, is spelled by jem
+  from exact built-in types (`None`, `bool`, `int`, `float`, `str`, plain
+  lists), never by the object's own `str`/`repr`; anything else (a subclass
+  such as a numpy scalar or an enum member, a `Path`, a `list` subclass)
+  raises `TypeError` saying how to convert it, so an override composes to
+  exactly the value given. Quoting guards the override grammar only: a
+  `${...}` in a string override still resolves as an interpolation, as on
+  the CLI, which is how `${jcm_data:...}` names packaged data. An unknown
+  name raises `ValueError` listing what is available, and a host
+  application's own Hydra context (if any) survives a call unharmed.
+
+  `run_chunked(exp.coupler, **exp.run_kwargs)` reproduces the CLI's build and
+  its `coupled_run` settings exactly, but two things the CLI does around that
+  are NOT reproduced, and are documented as such on `load`: (1) when the
+  recipe names no `output_dir`, each `load()` call gets its own fresh
+  `outputs/<date>/<time>` directory (mirroring Hydra's own default, so two
+  `load()` calls in one process cannot collide or resume each other's
+  checkpoint) rather than the CLI's Hydra-managed one; (2) it does not set the
+  `jem` logger's level from `coupled_run.log_level`. (The CLI does NOT change
+  the process's working directory either way — `python -m jem.main
+  +configuration=... --cfg hydra` shows `chdir: null`, and Hydra's resolved
+  `version_base` here is 1.3, where a `null` `chdir` means no chdir at all —
+  so that is not a difference to list.) A `+atmosphere.constants.*` override
+  also reaches the door exactly as it reaches the CLI — jax-gcm's
+  `jcm.constants` singleton, which means it is process-global and outlives
+  the `load()` call that applied it, exactly as it does for the CLI.
+
+  `docs/source/python_api.md` and `docs/source/getting_started.rst` document
+  the door as the Python equivalent of `+configuration=`; see the entry above
+  for which notebooks now use it.
 
 ### Changed
 
@@ -800,18 +882,6 @@ Breaking changes are marked; everything else is additive.
   forced but mechanically at rest" limitation their own WHY comments used to
   record. `tests/examples/test_configurations.py` runs both (and every other
   named configuration) for two coupled days as its smoke test.
-- **Five example notebooks are rewritten against the configurations Phase 2
-  shipped** (`03_non_geoscience/01_SpringSystem.ipynb` is deliberately
-  untouched). The three ordinary ones (aquaplanet, mixed-grid aquaplanet,
-  Earth-like) are now one `python -m jem.main +configuration=...` run plus a
-  short plotting section built on `jem.plot`; the two bespoke ones (a
-  customized initial sea surface temperature, the `jax.jvp` response to an
-  SST bump) build their coupler with `jem.runners.build_coupler(compose(...))`
-  and customise only the one thing that is theirs, through
-  `jem.replace_field`. No notebook builds its components, its exchanger or
-  its coupler by hand any more, and none writes netCDF or an animation by
-  hand either. `examples/README.md` is the new index of which command or
-  notebook runs which example.
 - `tests/examples/test_examples.py` runs notebooks only, one test per
   notebook (`@pytest.mark.parametrize`, so a failure names the notebook that
   caused it) rather than one test per example group; the `run.sh` driver it

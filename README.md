@@ -451,12 +451,18 @@ contract.
 
 ## Examples
 
-Every example is either one `python -m jem.main +configuration=...` command
-or a notebook doing one thing the command line cannot (plotting, building a
-carry by hand); `examples/README.md` lists every one of them with the command
-or notebook that runs it. `examples/03_non_geoscience` couples a spring system
-rather than an atmosphere and an ocean, showing that the coupler is not
-specific to climate components.
+Every example is either one `python -m jem.main +configuration=...` command,
+or a notebook built entirely in Python with no Hydra anywhere in it: one that
+TEACHES how a coupled model is put together builds its components directly
+(the same construction `docs/source/python_api.md` walks through), and one
+that RUNS a validated configuration to demonstrate something else loads it
+through `jem.configurations` — the recipe door onto the same
+`jem/config/configuration/*.yaml` `+configuration=<name>` composes, with no
+Hydra visible to the caller. `examples/README.md` lists every example with
+the command or notebook that runs it, and which of the two ways each notebook
+gets there. `examples/03_non_geoscience` couples a spring system rather than
+an atmosphere and an ocean, showing that the coupler is not specific to
+climate components.
 
 ## Integration with JAX-GCM (JCM)
 JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean, land, and sea-ice models.
