@@ -45,9 +45,9 @@ the `accumulator` if the run was given a reduction.
 
 ## Chunking
 
-`total_time` and `chunk` are `jcm.date.parse_duration_days` strings or
-numbers of days — a fixed duration; `parse_duration_days` rejects a calendar
-unit such as `"year"` or `"month"` as not fixed. Both must be whole
+`total_time` and `chunk` are fixed durations — strings such as `"30 days"`
+or numbers of days — parsed by `jcm.date.parse_duration_seconds`, which
+rejects a calendar unit such as `"year"` or `"month"` as not fixed. Both must be whole
 multiples of the coupling timestep — a coupled step is the smallest thing
 the loop can integrate — and `total_time` must be a whole multiple of
 `chunk`. All three are checked before anything is built or compiled, and

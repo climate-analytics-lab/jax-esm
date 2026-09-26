@@ -24,7 +24,8 @@ record `s * n + k` being call *k* of step *s* — and the component is handed
 a `TimeAxis` spaced at `coupling_timestep / n` and starting at sub-step
 `first_step * n`. So `first_step` is always given in *coupled* steps,
 whatever rate a component runs at, and an hourly component in a daily
-coupler writes 24 records per coupled step stamped at the end of each hour.
+coupler writes 24 records per coupled step, each stamped at the midpoint of
+its hour (00:30, 01:30, ...).
 Components with `n == 1` are unchanged, and the datasets of a fast and a
 slow component are deliberately *not* on one time axis: they are different
 sampling rates of one run, and `xr.merge` of the two is an outer join by
