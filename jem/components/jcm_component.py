@@ -36,7 +36,7 @@ def make_jem_compatible(
         The atmosphere to wrap.
     coupling_timestep : jax_datetime.Timedelta
         Ignored. The coupler now supplies the coupling timestep, together
-        with the start date and calendar, through
+        with the start date, through
         :meth:`~jem.components.jcm.component.JCMComponent.bind`.
 
     Returns
