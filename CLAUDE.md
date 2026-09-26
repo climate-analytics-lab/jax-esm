@@ -146,8 +146,9 @@ The design in three sentences:
   trajectory function with `generate_trajectory_function(iterations)`, driven
   by `jax.lax.scan`.
 
-See `docs/source/design/architecture.md` for the carry layout, the contract
-and the steps to add a component.
+See `docs/source/design/carry_and_clock.md` for the carry layout and the
+component contract, and `docs/source/design/architecture.md` for the steps
+to add a component.
 
 ## Repository Structure
 

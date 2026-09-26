@@ -148,7 +148,7 @@ initial-condition parameter is varied by passing parameters to
 :code:`initialize` -- :code:`ocn.initialize(params)`, or
 :code:`coupler.initialize({"ocn": params})` for the coupled model -- which
 builds the initial state from them and carries them. See the *Parameters*
-section of :doc:`design/architecture` for the pattern in full.
+section of :doc:`design/carry_and_clock` for the pattern in full.
 
 
 A worked wrapper: JCMComponent
@@ -256,7 +256,7 @@ wiring):
 
 Write the function instead of the table when the exchange is something a
 table cannot express: a flux computed from two components' states, a unit
-conversion, a coupling that depends on the date. See :doc:`design/architecture`
+conversion, a coupling that depends on the date. See :doc:`design/exchange`
 for the standard table's rows, the regridding keys a mixed-grid run uses, and
 the one-step lag the default workflow implies.
 

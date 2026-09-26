@@ -1275,7 +1275,7 @@ def test_gradient_through_the_accumulated_mean(climatology_file, record_months):
 def test_calibrating_a_monthly_mean_against_a_target(climatology_file):
     """The calibration loop the design doc documents, run.
 
-    ``docs/source/design/architecture.md`` answers "how do I apply a gradient
+    ``docs/source/design/running.md`` answers "how do I apply a gradient
     to calibrate monthly values?" with a snippet: build the trajectory with
     ``accumulate=monthly``, take the squared error of
     ``monthly.finalize(...)``'s July mean against a target, differentiate it

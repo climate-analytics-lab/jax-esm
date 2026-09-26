@@ -31,7 +31,7 @@ compiled trajectory of whatever length suits the machine, and a fixed-size
 Both are ordinary JAX: the accumulator is a pytree in the scan carry, so
 ``jax.grad`` of a binned mean with respect to a component parameter flows
 through the reduction exactly as it flows through the trajectory. See the
-worked calibration example in ``docs/source/design/architecture.md``.
+worked calibration example in ``docs/source/design/running.md``.
 """
 
 from __future__ import annotations

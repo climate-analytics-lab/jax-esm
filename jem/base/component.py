@@ -26,9 +26,9 @@ the things it couples. It is deliberately small:
   simply copying a field. It is the *only* place where one component's carry
   is read by another.
 
-The design is recorded in ``docs/source/design/architecture.md`` and, for the
-task numbering (T1.1, T1.3), in the API hardening plan, which lives on the
-review branch rather than in this repository:
+The design is recorded in ``docs/source/design/carry_and_clock.md`` and, for
+the task numbering (T1.1, T1.3), in the API hardening plan, which lives on
+the review branch rather than in this repository:
 https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
 """
 
@@ -48,7 +48,7 @@ from jcm.date import fraction_of_year_elapsed
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
-# (see architecture.md), but the coupler never looks inside it.
+# (see carry_and_clock.md), but the coupler never looks inside it.
 Carry = Any
 # What a component returns per step for output; also an arbitrary pytree.
 # The coupler stacks it over the scanned steps, so every leaf gains a leading
