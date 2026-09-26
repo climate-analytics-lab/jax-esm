@@ -6,19 +6,17 @@ returns only the accumulator, never the stacked per-step output. This module
 packages the reductions a long run almost always wants -- a mean over each
 bin of a fixed set of bins -- as such a pair:
 
-- :func:`monthly_mean`, the Gregorian calendar months -- twelve bins that
-  composite a multi-year run into a climatology, or (``total_time=`` /
-  ``n_months=``) one bin per month the run passes through. Each record is
-  binned by ``jcm.date.gregorian_ymd_from_days`` of its own interval midpoint
-  -- the real calendar, so a February is 28 or 29 days exactly as the run's
-  actual dates say and no fixed-length month table or start-of-year phase is
-  needed;
+- :func:`monthly_mean`, the calendar months -- twelve bins that composite a
+  multi-year run into a climatology, or (``total_time=`` / ``n_months=``) one
+  bin per month the run passes through. A record belongs to the Gregorian
+  month its own interval midpoint (its output label) falls in;
 - :func:`windowed_mean`, ``n_windows`` windows measured from the run's own
   start date -- of one fixed length, which is what a sub-seasonal forecast is
-  scored on (pentads, weeks), or of a repeating *pattern* of lengths. Bins are
-  plain record counts from the start of the run, via :func:`_variable_window_rule`.
+  scored on (pentads, weeks), or of a repeating *pattern* of lengths. A
+  record belongs to the window its interval lies in, counted in records from
+  the start of the run.
 
-Both are :func:`_build_binned_mean` with a different step-to-bin rule, so
+Both are :func:`_build_binned_mean` with a different record-to-bin rule, so
 there is one running-sum-and-count implementation and one
 :meth:`BinnedMean.finalize`.
 
@@ -39,9 +37,7 @@ worked calibration example in ``docs/source/design/architecture.md``.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, Literal, NamedTuple
-
-import math
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -68,214 +64,65 @@ BinnedAccumulator = tuple[Any, Any]
 #: starts in.
 MONTHS_PER_YEAR = 12
 
-_SECONDS_PER_DAY = 86400
-
-
-def _variable_window_rule(
+def _window_rule(
     boundaries_seconds: np.ndarray,
-    offset_seconds: int,
-    inclusive: Literal["left", "right"],
 ) -> Callable[[jnp.ndarray, int, Any], jnp.ndarray]:
     """Return the ``bin_of_record`` rule :func:`windowed_mean` bins with.
 
-    Windows are laid end to end, cycling for as long as the run lasts, and a
-    record belongs to the window its own label falls in -- entirely by
-    record count and coupling timestep, with no reference to any calendar.
+    Windows are laid end to end from the start of the run, cycling for as
+    long as the run lasts, and a record belongs to the window its interval
+    lies in. Every boundary is a whole number of coupling steps and a record
+    is a whole division of one, so no record straddles a boundary.
 
     Parameters
     ----------
     boundaries_seconds : numpy.ndarray
         The **ends** of the windows, in whole seconds from the start of the
-        run: the cumulative sum of the window lengths, strictly increasing,
-        one entry per window. The last entry is where the windows end and the
-        period they repeat with, which is what makes a run longer than the
-        accumulator wrap.
-    offset_seconds : int
-        Always 0 for :func:`windowed_mean`, which measures every window from
-        the run's own start with no phase; kept as a parameter because the
-        arithmetic below is exact for any offset, not because a caller needs
-        one today.
-    inclusive : {"left", "right"}
-        Which end of a window is included in it, in the sense of
-        :func:`pandas.date_range`'s ``inclusive``. A record labelled exactly
-        on a boundary between two windows belongs to the window that includes
-        that end.
-
-        Take 5-day windows, counting record ``k`` as ending on day ``k + 1``
-        (this rule's own ordinal convention, independent of how a record's
-        output timestamp is labelled). ``inclusive="left"`` makes the first
-        window the records in ``[day 0, day 5)`` and the second
-        ``[day 5, day 10)``, so day 5 opens the second window.
-        ``inclusive="right"`` -- what :func:`windowed_mean` uses, so that the
-        first 5-day window reads as "the first pentad" -- makes the first
-        window ``(day 0, day 5]`` and the second ``(day 5, day 10]``, so the
-        first 5-day window is records 1 to 5 and day 5 closes it rather than
-        opening the next one.
+        run: the cumulative sum of the window lengths. The last entry is the
+        period after which the windows repeat.
 
     Returns
     -------
     callable
-        ``(record, record_seconds, record_time) -> int32 bin index``, total
-        by construction (see :func:`_build_binned_mean`). ``record_time`` is
-        accepted and ignored -- this rule bins by record count, not by date.
+        ``(record, record_seconds, record_time) -> int32 bin index``.
+        ``record`` counts records of ``record_seconds`` from the start of the
+        run; ``record_time`` is not needed.
 
     Notes
     -----
-    **Why the boundaries are converted to record counts.** Record ``k`` of
-    length ``r`` is labelled at ``(k + 1)·r`` seconds from the start of the
-    run, so the obvious rule -- multiply the record counter by ``r`` and look
-    the result up in a table of seconds -- costs one multiplication whose
-    product grows with the run. JAX indices are int32 by default, and a
-    product of seconds passes 2^31 after 68 years of simulated time, at which
-    point the bins would silently wrap to nonsense. Reducing the record
-    counter modulo the records in one period *before* multiplying bounds the
-    product by the period rather than by the run, which the previous
-    fixed-window arithmetic did too; converting the boundaries to record
-    counts on the host, in int64, removes the multiplication from the traced
-    code altogether and so bounds nothing by int32 but the record counter
-    itself. The conversion is exact because every boundary is a whole number
-    of coupling steps and a record is a whole division of one.
+    The boundaries are converted to record counts on the host rather than
+    the record counter to seconds in the traced code: a count of seconds
+    since the start of the run passes int32 after 68 simulated years, a
+    count of records modulo one period does not.
 
     """
-    if inclusive not in ("left", "right"):
-        # `Literal` is a promise to the type checker, not a runtime check, so a
-        # misspelling ("rigth") would otherwise be read as "left" by the
-        # comparison below and silently shift every bin boundary by a record.
-        raise ValueError(
-            f'inclusive must be "left" or "right"; got {inclusive!r}.'
-        )
     boundaries = np.asarray(boundaries_seconds, dtype=np.int64)
-    period = int(boundaries[-1])
-    # The two conventions differ by one second of this rule's own ordinal
-    # count, which treats record k as ending at day k + 1 regardless of how
-    # its output timestamp is labelled. `bin_of_record` counts how many
-    # boundaries lie at or before `label + shift_seconds`. With 5-day bins and
-    # daily records (record k counted as day k + 1):
-    #
-    #   inclusive="right": shift -1 s. A label of day 5 is looked up a second
-    #     before the first boundary, so no boundary precedes it -> bin 0; it
-    #     is the LAST record of (day 0, day 5]. Day 6 -> bin 1.
-    #   inclusive="left": no shift. A label of day 5 is looked up at the
-    #     boundary itself, which now counts -> bin 1; it is the FIRST record
-    #     of [day 5, day 10).
-    shift_seconds = -1 if inclusive == "right" else 0
 
     def bin_of_record(
         record: jnp.ndarray, record_seconds: int, record_time: Any = None
     ) -> jnp.ndarray:
-        """Return the 0-based bin a record of ``record_seconds`` counts in.
-
-        ``record_time`` is accepted and ignored, for the common call site in
-        :func:`_build_binned_mean`; this rule bins by record count alone.
-
-        ``record`` counts records of that length from the start of the run.
-        With daily records, 5-day bins and ``inclusive="right"``: record 0 is
-        labelled day 1 and lands in bin 0; record 4 (day 5) is the last of
-        bin 0; record 5 (day 6) is the first of bin 1; and in a 73-bin
-        accumulator record 365 -- labelled day 366, one year on -- wraps to
-        bin 0 again. Under ``inclusive="left"`` record 4 (day 5) is instead
-        the first of bin 1.
-        """
-        records_per_period, remainder = divmod(period, record_seconds)
-        # An invariant of the callers, not a user error: every builder checks
-        # that the bins' period is a whole number of coupling steps, and the
-        # coupler refuses a workflow whose sub-timestep is not a whole
-        # division of one (`Coupler._element_timestep`, re-checked in
-        # `_record_seconds`), so this division is exact. It is asserted rather
-        # than assumed because a silent rounding here would drift every bin
-        # boundary by a fraction of a record.
-        assert remainder == 0, (
-            f"a period of {period} s is not a whole number of "
-            f"{record_seconds} s records"
-        )
         del record_time
-        # Where the boundaries sit on this component's record grid. The run's
-        # offset into the pattern need not be a whole number of records, so it
-        # is split into whole records (`shifted`, folded into the counter) and
-        # a remainder (`phase`, folded into the boundaries); the ceiling is
-        # then the first record whose label reaches the boundary.
-        shifted, phase = divmod(offset_seconds + shift_seconds, record_seconds)
-        # The last entry lands exactly on `records_per_period`: the period is
-        # a whole number of records and `phase` is less than one, so the
-        # ceiling cannot overshoot it, and every wrapped record has a bin.
-        in_records = _ceil_div(boundaries - phase, record_seconds)
-        boundary_records = jnp.asarray(in_records, dtype=jnp.int32)
-        # `record + 1` because this rule counts record k as ending at day
-        # k + 1 (its own ordinal convention). The modulo is what wraps a run longer than the pattern
-        # and, with it, keeps the index inside the accumulator whatever the
-        # run's length; it is also what keeps the arithmetic in int32.
-        label = jnp.mod(
-            jnp.asarray(record, dtype=jnp.int32) + (1 + shifted), records_per_period
-        )
-        return jnp.searchsorted(boundary_records, label, side="right").astype(
+        # Record k covers [k r, (k + 1) r), so it is in window w exactly when
+        # boundary[w - 1] <= k r < boundary[w], i.e. when `side="right"`
+        # finds k among the boundaries counted in records.
+        boundary_records = jnp.asarray(boundaries // record_seconds, dtype=jnp.int32)
+        records_per_period = int(boundaries[-1]) // record_seconds
+        position = jnp.mod(jnp.asarray(record, dtype=jnp.int32), records_per_period)
+        return jnp.searchsorted(boundary_records, position, side="right").astype(
             jnp.int32
         )
 
     return bin_of_record
 
 
-def _ceil_div(numerator: Any, denominator: int) -> Any:
-    """Return ``ceil(numerator / denominator)`` in integer arithmetic.
-
-    Python's ``//`` rounds towards negative infinity, so negating the
-    numerator, floor-dividing, and negating the result rounds *up* instead:
-    ``ceil(7 / 2) == -((-7) // 2) == 4``. It stays exact for the int64 arrays
-    and Python ints this module works in, where ``math.ceil(a / b)`` would go
-    through a float and lose precision past 2**53.
-    """
-    return -((-numerator) // denominator)
-
-
-def _duration_to_seconds(duration: str | float, what: str) -> int:
-    """Return ``duration`` as a whole positive number of seconds.
-
-    ``duration`` must be a fixed length ("5 days", "12 hours"; jax_datetime
-    has no calendar-dependent duration to parse a 'year' or 'month' against)
-    and a whole number of seconds: everything downstream of here is integer
-    arithmetic on seconds, because a float32 count of seconds since the start
-    of a run stops being exact within a few decades of simulated time, and a
-    fractional second is refused rather than rounded away.
-    """
+def _duration_seconds(duration: str | float) -> int:
+    """Return a fixed duration ("5 days", "12 hours", or days) in whole seconds."""
     # Imported here rather than at module scope so that importing this module
-    # does not pull in jax-gcm (and with it dinosaur and the whole
-    # atmosphere); `jem.driver` imports it the same way and for the same
-    # reason.
-    from jcm.date import parse_duration_days
+    # does not pull in jax-gcm (and with it the whole atmosphere); `jem.driver`
+    # imports it the same way and for the same reason.
+    from jcm.date import parse_duration_seconds
 
-    days = float(parse_duration_days(duration))
-    seconds = _exact_seconds(days * _SECONDS_PER_DAY, f"{what}={duration!r}")
-    if seconds <= 0:
-        raise ValueError(
-            f"{what}={duration!r} is {seconds} s, which is not a positive "
-            "duration."
-        )
-    return seconds
-
-
-def _exact_seconds(value: float, what: str) -> int:
-    """Return ``value`` as an ``int``, refusing a fractional second.
-
-    Everything in this module is integer arithmetic on seconds, and the
-    coupler only ever builds whole-second clocks (``Coupler._element_timestep``
-    refuses a sub-timestep that is not), so a value that is not a whole
-    number of seconds is a broken invariant or a duration the bins cannot
-    represent. Either way it is refused rather than rounded: rounding would
-    silently move every bin boundary.
-
-    The comparison allows a float-rounding margin, because a duration given
-    in days reaches here through a float multiplication (``11 / 86400`` days
-    comes back as ``10.999999999999998`` s). A microsecond, plus a relative
-    part for durations of centuries, is far below anything a clock or a
-    duration can express and far above that rounding, so a genuine fraction
-    of a second is still refused.
-    """
-    seconds = round(value)
-    if not math.isclose(value, seconds, rel_tol=1e-12, abs_tol=1e-6):
-        raise ValueError(
-            f"{what} is {value!r} s, which is not a whole number of seconds; "
-            "the bins are laid out in whole seconds."
-        )
-    return int(seconds)
+    return int(parse_duration_seconds(duration))
 
 
 def _record_axes(coupler: Any) -> dict[str, Any]:
@@ -287,7 +134,7 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     steps per outer step stacks its inner components' diagnostics on a leading
     axis of length ``r`` -- so a step's diagnostics for such a component are
     not one record but several, each covering its own sub-interval and
-    labelled with the end of it.
+    labelled at its midpoint.
 
     This is the map of that: ``{name: axes}``, where ``axes`` is the tuple of
     leading axis lengths one coupled step puts in front of the diagnostic's
@@ -303,7 +150,7 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     The nested coupler is recognised by duck-typing rather than by an
     ``isinstance`` check, because importing :mod:`jem.base.coupler` here would
     pull in jax-gcm (and with it the whole atmosphere) just to import this
-    module; :func:`_duration_to_seconds` defers its import for the same reason.
+    module; :func:`_duration_seconds` defers its import for the same reason.
     """
     multiplicities = coupler.multiplicities()
     axes: dict[str, Any] = {}
@@ -346,25 +193,6 @@ def _record_counts(axes: Any) -> set[int]:
     if isinstance(axes, dict):
         return set().union(*(_record_counts(node) for node in axes.values()), set())
     return {_records(axes)}
-
-
-def _record_seconds(dt_seconds: int, records: int) -> int:
-    """Return the interval one of ``records`` records per coupled step covers.
-
-    The coupler refuses a workflow whose sub-timestep is not a whole number of
-    seconds (``Coupler._element_timestep``), so this cannot fail for a model
-    it built; it is checked again here because everything downstream is
-    integer arithmetic on seconds, and a silent rounding would drift a bin
-    boundary by a second per record.
-    """
-    seconds, remainder = divmod(dt_seconds, records)
-    if remainder != 0 or seconds < 1:
-        raise ValueError(
-            f"A component recording {records} times per coupled step records "
-            f"every {dt_seconds}/{records} s, which is not a whole number of "
-            "seconds, so its records cannot be labelled exactly."
-        )
-    return seconds
 
 
 def _zero_counts(axes: Any, n_bins: int) -> Any:
@@ -577,7 +405,7 @@ def _build_binned_mean(
     (:meth:`~jem.base.coupler.Coupler.coupling_time_at_substep`), which is the
     same instant :meth:`~jem.base.coupler.Coupler.to_xarray` labels that
     record with -- so binning agrees with a ``groupby`` of the written output
-    exactly, with no residual month-boundary disagreement to document.
+    exactly.
 
     The sub-step axis is **kept**, not folded: a component recording ``n``
     times per coupled step accumulates into ``(n_bins, n, ...)``, bin ``b``
@@ -590,8 +418,7 @@ def _build_binned_mean(
     Because components recording at different rates fill different bins as one
     step is folded in, the counts are then **per component** rather than the
     one shared ``(n_bins,)`` array of a model whose components all record once
-    per coupled step -- which keeps that (much more common) accumulator, and
-    the reduction that fills it, exactly what it was.
+    per coupled step.
 
     Parameters
     ----------
@@ -606,11 +433,7 @@ def _build_binned_mean(
         and the record's own :class:`~jax_datetime.Datetime` -- the coupled
         step counter/coupling timestep/time for a component recording once
         per coupled step, the sub-step counter/sub-timestep/time for one
-        recording more often. :func:`windowed_mean`'s rule
-        (:func:`_variable_window_rule`) bins by ``record``/``record_seconds``
-        alone and ignores ``record_time``; :func:`monthly_mean` does the
-        reverse, binning by the Gregorian month of ``record_time`` alone. It
-        must be total: an index outside the range would be clipped by
+        recording more often. It must be total: an index outside the range would be clipped by
         ``.at[].add`` and silently counted in the nearest bin.
     n_bins : int
         Length of the accumulator's leading axis. Static, so that one
@@ -634,19 +457,13 @@ def _build_binned_mean(
     # side effects on components that have them.
     _, diagnostics_shapes = jax.eval_shape(coupler.generate_step_function(), carry)
 
-    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
+    dt_seconds = int(coupler.dt_seconds)
     axes = _record_axes(coupler)
     # True for a model whose every component records once per coupled step,
     # which is every model without workflow multiplicity or a sub-stepping
     # nested coupler. The reduction then has one bin index and one count array
-    # for the whole step, as it did before rates could differ.
+    # for the whole step.
     flat = _all_flat(axes)
-    # Validated here, at build time, rather than inside the traced scan body,
-    # so that an impossible record rate is a construction error.
-    record_seconds = {
-        records: _record_seconds(dt_seconds, records)
-        for records in _record_counts(axes)
-    }
 
     def accumulator_dtype(dtype: Any) -> Any:
         """Return the dtype a running sum of ``dtype`` is kept in.
@@ -704,7 +521,7 @@ def _build_binned_mean(
                     lambda *leaves: jnp.stack(leaves), *(sub.time for sub in sub_times)
                 )
                 bins_by_rate[records] = bin_of_record(
-                    substeps, record_seconds[records], record_times
+                    substeps, dt_seconds // records, record_times
                 )
             return bins_by_rate[records]
 
@@ -785,61 +602,27 @@ def _build_binned_mean(
     return BinnedMean(init=init, update=update)
 
 
-def _record_month(
-    record_time: jdt.Datetime, record_seconds: int
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Return the Gregorian ``(year, month)`` of a record's own midpoint.
+def _month_index(record_time: jdt.Datetime, record_seconds: int) -> jnp.ndarray:
+    """Return the month of a record's midpoint, counted from January 1970.
 
     A record is labelled at the midpoint of the interval it covers
-    (``TimeAxis.datetimes``, JCM's convention), so binning by the same
-    instant is what makes ``monthly.finalize(accumulator)`` agree with
-    ``coupler.to_xarray(diagnostics).groupby("time.month")`` exactly, leaf for
-    leaf -- there is one calendar (jax_datetime's proleptic Gregorian), so
-    there is no model-calendar-vs-label reconciliation left to do.
-    ``record_seconds // 2`` is the same floor division jcm's own output
-    labels use (``jcm.predictions.output_time_labels``); only the midpoint's
-    *day* matters here, so the within-day remainder is never needed.
+    (``TimeAxis.datetimes``), so binning by the same instant is what makes
+    ``monthly.finalize(accumulator)`` equal a ``groupby("time.month")`` of the
+    written output. Only the midpoint's day matters, and a day boundary is a
+    whole second, so flooring the half-second of an odd-length record cannot
+    move it across one.
     """
     from jcm.date import gregorian_ymd_from_days
 
     midpoint = record_time + jdt.to_timedelta(record_seconds // 2, "second")
     year, month, _ = gregorian_ymd_from_days(midpoint.delta.days)
-    return year, month
+    return (year - 1970) * MONTHS_PER_YEAR + (month - 1)
 
 
-def _months_covering_gregorian(
-    start_date: jdt.Datetime, dt_seconds: int, total_seconds: int
-) -> int:
-    """Return how many distinct calendar months a run of ``total_seconds`` touches.
-
-    Host-side and exact, from the real Gregorian calendar: unlike a
-    fixed-length month table, ``total_seconds`` need not be a whole number of
-    months (or of years) for this to make sense. The count runs from the
-    start date's own month to the last record's midpoint's, inclusive.
-    """
-    from jcm.date import gregorian_ymd_from_days
-
-    if total_seconds % dt_seconds:
-        raise ValueError(
-            f"total_time is {total_seconds} s, which is not a whole number "
-            f"of coupling steps of {dt_seconds} s."
-        )
-    n_records = total_seconds // dt_seconds
-    last_midpoint_seconds = (n_records - 1) * dt_seconds + dt_seconds // 2
-    last_midpoint = start_date + jdt.to_timedelta(
-        int(last_midpoint_seconds), "second"
-    )
-    start_year, start_month, _ = gregorian_ymd_from_days(
-        np.asarray(start_date.delta.days)
-    )
-    end_year, end_month, _ = gregorian_ymd_from_days(
-        np.asarray(last_midpoint.delta.days)
-    )
-    return (
-        int(end_year - start_year) * MONTHS_PER_YEAR
-        + int(end_month - start_month)
-        + 1
-    )
+def _host_month_index(date: jdt.Datetime, offset_seconds: int = 0) -> int:
+    """Return :func:`_month_index` of ``date + offset_seconds``, on the host."""
+    instant = date.to_datetime64() + np.timedelta64(offset_seconds, "s")
+    return int(instant.astype("datetime64[M]").astype(np.int64))
 
 
 def monthly_mean(
@@ -853,13 +636,9 @@ def monthly_mean(
 
     Everything the reduction needs it takes from ``coupler``: the diagnostics
     a step produces (their structure, shapes and dtypes), the coupling
-    timestep, and the start date. Every bin is a real Gregorian calendar
-    month -- each record is binned by ``jcm.date.gregorian_ymd_from_days`` of
-    its own interval midpoint -- so February holds 28 or 29 records exactly
-    as the run's actual dates say, with no fixed-length month table and no
-    start-of-year phase to compute. The caller supplies nothing but the
-    coupler -- and, if the run's months are each to have a bin of their own,
-    how many::
+    timestep, and the start date. The caller supplies nothing but the coupler
+    -- and, if the run's months are each to have a bin of their own, how
+    many::
 
         monthly_mean(coupler)                          # (12, ...): a climatology
         monthly_mean(coupler, total_time="3650 days")  # (~121, ...): every month
@@ -874,10 +653,10 @@ def monthly_mean(
 
     **Which month a record counts in.** A record is labelled at its own
     interval's midpoint (``TimeAxis.datetimes``), and the bin is that
-    instant's real Gregorian month, so ``monthly.finalize(accumulator)`` is
+    instant's Gregorian month (``jcm.date.gregorian_ymd_from_days``), so
+    ``monthly.finalize(accumulator)`` is
     ``coupler.to_xarray(diagnostics).groupby("time.month").mean()`` of the
-    same run, leaf for leaf, exactly -- there being one calendar, a bin and
-    the label it corresponds to can never part company.
+    same run, leaf for leaf -- a leap February holds 29 daily records.
 
     **The twelve-bin form wraps at the year**: a three-year run's January bin
     holds all three Januaries.
@@ -917,10 +696,8 @@ def monthly_mean(
         climatology.
     total_time : str or float, optional
         Build the sequential form sized to cover a run of this fixed length
-        (a ``jcm.date.parse_duration_days`` string, or a number of days) --
-        need not be a whole number of months or of years; the bin count is
-        simply the number of distinct calendar months the run's records
-        touch.
+        (a ``jcm.date.parse_duration_seconds`` string, or a number of days):
+        one bin for every calendar month a record's midpoint falls in.
 
     Returns
     -------
@@ -931,12 +708,10 @@ def monthly_mean(
     Raises
     ------
     ValueError
-        If both ``n_months`` and ``total_time`` are given, if ``n_months`` is
-        not a positive integer, or if ``total_time`` is not positive or not a
-        whole number of coupling steps.
+        If both ``n_months`` and ``total_time`` are given, or if ``n_months``
+        is not a positive integer.
 
     """
-    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
     if n_months is not None and total_time is not None:
         raise ValueError(
             "Give at most one of n_months and total_time: n_months sets the "
@@ -945,52 +720,38 @@ def monthly_mean(
             f"n_months={n_months!r}, total_time={total_time!r})."
         )
 
-    def bin_of_month(
-        elapsed: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray], n_bins: int
-    ) -> Callable[[jnp.ndarray, int, jdt.Datetime], jnp.ndarray]:
-        def bin_of_record(record: jnp.ndarray, record_seconds: int,
-                          record_time: jdt.Datetime) -> jnp.ndarray:
-            del record
-            year, month = _record_month(record_time, record_seconds)
-            return jnp.mod(elapsed(year, month), n_bins).astype(jnp.int32)
-
-        return bin_of_record
-
     if n_months is None and total_time is None:
-        # Bin 0 is January, whatever year: a multi-year run composites its
-        # Januaries into it, which is what the fixed (12, ...) accumulator is
-        # for.
-        return _build_binned_mean(
-            coupler,
-            bin_of_month(lambda year, month: month - 1, MONTHS_PER_YEAR),
-            MONTHS_PER_YEAR,
-            carry,
-        )
-
-    # The sequential form: bin 0 is the month the run starts in.
-    from jcm.date import gregorian_ymd_from_days
-
-    start_year_arr, start_month_arr, _ = gregorian_ymd_from_days(
-        np.asarray(coupler.start_date.delta.days)
-    )
-    start_year, start_month = int(start_year_arr), int(start_month_arr)
-
-    if total_time is not None:
-        total_seconds = _duration_to_seconds(total_time, "total_time")
-        bins = _months_covering_gregorian(
-            coupler.start_date, dt_seconds, total_seconds
-        )
-    elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
-        # `bool` is an `int`, and `n_months=True` would silently build a
-        # one-month accumulator.
-        raise ValueError(f"n_months must be a positive integer; got {n_months!r}.")
+        # Bin 0 is January, whatever year: the month index counts from a
+        # January, so modulo twelve it is the calendar month.
+        first_bin, bins = 0, MONTHS_PER_YEAR
     else:
-        bins = n_months
+        # The sequential form: bin 0 is the month the run starts in.
+        first_bin = _host_month_index(coupler.start_date)
+        if total_time is not None:
+            # The last month any record's midpoint reaches is that of the last
+            # record of the component recording most often -- the latest
+            # midpoint before the end of the run.
+            dt_seconds = int(coupler.dt_seconds)
+            record_seconds = dt_seconds // max(_record_counts(_record_axes(coupler)))
+            last_midpoint = (
+                _duration_seconds(total_time) - record_seconds + record_seconds // 2
+            )
+            bins = _host_month_index(coupler.start_date, last_midpoint) - first_bin + 1
+        elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
+            # `bool` is an `int`, and `n_months=True` would silently build a
+            # one-month accumulator.
+            raise ValueError(f"n_months must be a positive integer; got {n_months!r}.")
+        else:
+            bins = n_months
 
-    def elapsed_months(year: jnp.ndarray, month: jnp.ndarray) -> jnp.ndarray:
-        return (year - start_year) * MONTHS_PER_YEAR + (month - start_month)
+    def bin_of_record(
+        record: jnp.ndarray, record_seconds: int, record_time: jdt.Datetime
+    ) -> jnp.ndarray:
+        del record
+        month = _month_index(record_time, record_seconds)
+        return jnp.mod(month - first_bin, bins).astype(jnp.int32)
 
-    return _build_binned_mean(coupler, bin_of_month(elapsed_months, bins), bins, carry)
+    return _build_binned_mean(coupler, bin_of_record, bins, carry)
 
 
 def windowed_mean(
@@ -1019,24 +780,11 @@ def windowed_mean(
                               total_time="30 days")
 
     **Every window, whatever its length, is measured from the run's start
-    date**, with no phase and no reference to the calendar -- windows are
-    plain fixed-length record counts, unlike :func:`monthly_mean`'s real
-    Gregorian months. A run starting on 1 July therefore has its first
-    30-day window span 1-30 July regardless of how long July itself is; use
-    :func:`monthly_mean` for bins that are calendar months. No ``offset=``
-    knob is offered here for the same reason ``inclusive=`` is not: a
-    window's meaning is "so many records into the run", and a bin that means
-    something else belongs to the builder that knows what.
-
-    **Which window a record counts in.** Purely by record count, closed at
-    the *end* of each window (:func:`_variable_window_rule`): record ``k``
-    (of length ``r``) is the ``(k+1)``-th record from the start of the run,
-    and window ``w`` is the records whose ordinal position falls in
-    ``(start of w, end of w]``, so with daily coupling the first 5-day window
-    is records 1 to 5, which is what a forecast means by "the first pentad".
-    This is a plain count of records, not a date -- unlike
-    :func:`monthly_mean`, which bins by each record's own real calendar
-    month.
+    date**, with no reference to the calendar: a record belongs to the window
+    its interval lies in, so with daily coupling the first 5-day window is
+    the first five records. A run starting on 1 July has its first 30-day
+    window span 1-30 July; use :func:`monthly_mean` for bins that are
+    calendar months.
 
     **A run longer than the accumulator wraps**, exactly as
     :func:`monthly_mean` wraps at a year (or at ``n_months``): window ``w``
@@ -1053,22 +801,17 @@ def windowed_mean(
     Sub-steps and nested couplers are accumulated exactly as
     :func:`monthly_mean` describes: a component recording ``n`` times per
     coupled step keeps that axis (``(n_windows, n, ...)``) and each of its
-    records is binned by its own label, so a window boundary falls between two
-    sub-steps of a coupled step wherever the labels say it does.
+    records is binned by its own interval, so a window boundary may fall
+    between two sub-steps of a coupled step.
 
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
         The coupled model the accumulator is for.
     window : str or float or sequence of str or float
-        Length of one window, as a ``jcm.date.parse_duration_days`` string
-        (``"5 days"``, ``"2 days"``, ``"12 hours"``) or a number of days --
-        a **fixed** duration; ``jcm.date`` has no calendar-dependent unit
-        ("1 month", "1 year") to parse, since those are not a fixed number of
-        seconds. No window is a calendar month, whatever its length: calendar
-        months come from :func:`monthly_mean`, which bins by the real
-        calendar instead of by a fixed length. Or a **sequence** of such
-        lengths, which is a pattern the windows cycle through (``["10 days",
+        Length of one window, as a ``jcm.date.parse_duration_seconds``
+        string (``"5 days"``, ``"12 hours"``) or a number of days. Or a
+        **sequence** of such lengths, which is a pattern the windows cycle through (``["10 days",
         "20 days"]``). Every length must be a whole number of coupling steps:
         a window that ended part-way through a step would have to attribute
         that step to one side or the other, and there is no defensible
@@ -1106,12 +849,7 @@ def windowed_mean(
         steps.
 
     """
-    dt_seconds = _exact_seconds(coupler.dt_seconds, "the coupling timestep")
-    if dt_seconds <= 0:
-        raise ValueError(
-            f"The coupling timestep is {dt_seconds} s; a windowed mean needs a "
-            "positive one to count steps per window."
-        )
+    dt_seconds = int(coupler.dt_seconds)
 
     # A string is iterable, and one is a single window rather than a pattern
     # of one-character ones; everything else iterable is a pattern.
@@ -1125,7 +863,7 @@ def windowed_mean(
     lengths_seconds = []
     for position, entry in enumerate(entries):
         what = f"window[{position}]" if pattern else "window"
-        length_seconds = _duration_to_seconds(entry, what)
+        length_seconds = _duration_seconds(entry)
         if length_seconds % dt_seconds:
             raise ValueError(
                 f"{what}={entry!r} is {length_seconds} s, which is not a whole "
@@ -1143,7 +881,7 @@ def windowed_mean(
             f"(got n_windows={n_windows!r}, total_time={total_time!r})."
         )
     if total_time is not None:
-        total_seconds = _duration_to_seconds(total_time, "total_time")
+        total_seconds = _duration_seconds(total_time)
         # Round *up*: a run that is not a whole number of windows ends inside
         # one, and that window has to exist to hold it. It is divided by its
         # own count like every other, so a short final window is the mean of
@@ -1180,11 +918,4 @@ def windowed_mean(
         [lengths_seconds[index % len(lengths_seconds)] for index in range(bins)],
         dtype=np.int64,
     )
-    # Offset 0: the windows are measured from the run's own start, purely by
-    # record count. Closed at the end: record k is the (k+1)-th record from
-    # the start of the run, and a window is a run of consecutive records, so
-    # the record landing exactly on a boundary is the last of the window it
-    # closes.
-    window_index = _variable_window_rule(boundaries, 0, "right")
-
-    return _build_binned_mean(coupler, window_index, bins, carry)
+    return _build_binned_mean(coupler, _window_rule(boundaries), bins, carry)
