@@ -13,7 +13,6 @@ from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
-    end_of_step,
     forcing_variable,
     load_monthly_climatology,
     role_attrs,
@@ -517,7 +516,7 @@ class SlabOceanModel(SlabModelBase):
         # time and only the selected term is ever compiled.
         if params.forcing_method == "relaxation":
             climatology_begin = self._climatology_at(time, ocean)
-            climatology_end = self._climatology_at(end_of_step(time), ocean)
+            climatology_end = self._climatology_at(time.end_of_step(), ocean)
             anomaly = state.sea_surface_temperature - climatology_begin
             time_factor = 1.0 / (1.0 + time.dt / params.relaxation_time)
         elif params.forcing_method == "qflux":

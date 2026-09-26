@@ -11,8 +11,7 @@ A ``Coupler`` is the whole definition of a coupled model:
 - **on what clock** -- the coupling timestep and start date. The coupler owns
   the only clock in the system: a ``jax_datetime.Datetime`` carried in
   :class:`~jem.base.component.CoupledCarry` and advanced by the coupling
-  timestep every step, never derived from a step count multiplied out.
-  Components hold no time state of their own; each ``step`` is handed a
+  timestep every step. Components hold no time state of their own; each ``step`` is handed a
   :class:`~jem.base.component.CouplingTime` built from that carried clock, so
   two components can never disagree about the date, and the date survives
   chunked runs and checkpoint restarts (a ``lax.scan`` index restarts at zero
@@ -383,8 +382,8 @@ class Coupler:
         of it). Only ``dt_seconds`` is used downstream, so accepting a float
         number of seconds would lift the limit: jax-esm#110.
     start_date : jdt.Datetime
-        Date of coupled step 0. The clock is ``jax_datetime``'s proleptic
-        Gregorian calendar, full stop -- there is no other calendar to choose.
+        Date of coupled step 0. The clock is a ``jax_datetime.Datetime``,
+        on the proleptic Gregorian calendar.
     name : str
         The coupler's own name, as the :class:`Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see
@@ -497,8 +496,8 @@ class Coupler:
         self._dt_seconds = float(coupling_timestep / jdt.to_timedelta(1, "second"))
         # Only components with an internal timestep (JCM, Veros) check the
         # coupling timestep in `bind`; a slab-only coupler would otherwise
-        # accept zero (year_fraction divides by dt; every record gets the
-        # same timestamp) or a negative value (slab physics integrated
+        # accept zero (the clock never advances; every record gets the same
+        # timestamp) or a negative value (slab physics integrated
         # backwards) without complaint.
         if not self._dt_seconds > 0.0:
             raise ValueError(
@@ -756,9 +755,7 @@ class Coupler:
         ``k`` of coupled step ``s`` is sub-step ``s * multiplicity + k``), and
         its time is ``time`` advanced by ``call`` sub-timesteps.
 
-        ``multiplicity == 1`` returns exactly :meth:`coupling_time`, so a
-        workflow without multiplicity is byte for byte the model it was
-        before multiplicity existed.
+        ``multiplicity == 1`` returns exactly :meth:`coupling_time`.
 
         Parameters
         ----------
@@ -774,12 +771,12 @@ class Coupler:
         """
         if multiplicity == 1:
             return self.coupling_time(step, time)
-        sub_timestep = self._element_timestep("<substep>", multiplicity)
         sub_dt = self._dt_seconds / multiplicity
         substep = jnp.asarray(step, dtype=jnp.int32) * multiplicity + call
         return CouplingTime(
             step=substep,
-            time=time + call * sub_timestep,
+            time=time
+            + jdt.to_timedelta(call * self._dt_total_seconds // multiplicity, "second"),
             sim_time=substep * sub_dt,
             dt=sub_dt,
         )
@@ -950,9 +947,7 @@ class Coupler:
         exchangers_by_name = dict(self.exchangers)
 
         def step(carry: CoupledCarry) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            # Built once and shared by every element of multiplicity 1, so a
-            # workflow without multiplicity traces exactly the operations it
-            # traced before there was any.
+            # Built once and shared by every element of multiplicity 1.
             coupled_time = self.coupling_time(carry.step, carry.time)
             components: dict[str, Carry] = dict(carry.components)
             # Typed as Any because `jax.tree_util.tree_structure` returns an

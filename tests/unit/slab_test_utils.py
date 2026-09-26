@@ -22,28 +22,11 @@ TIMESTEP = 86400.0
 START_DATE = jdt.to_datetime("2001-01-01")
 
 
-def coupling_time(
-    step: int,
-    dt: float = TIMESTEP,
-    year_offset_seconds: float = 0.0,
-    start_date: jdt.Datetime = START_DATE,
-) -> CouplingTime:
-    """Build the clock the coupler would hand a component at `step`.
-
-    ``year_offset_seconds`` places the *first* step (``step=0``) that many
-    seconds into the year ``start_date`` falls in, so a test after a specific
-    ``year_fraction`` can ask for it directly without hand-building a date;
-    later steps advance for real from there, exactly as the coupler's own
-    carried clock does.
-    """
-    time = (
-        start_date
-        + jdt.to_timedelta(int(year_offset_seconds), "second")
-        + jdt.to_timedelta(int(step * dt), "second")
-    )
+def coupling_time(step: int, dt: float = TIMESTEP) -> CouplingTime:
+    """Build the clock the coupler would hand a component at `step`."""
     return CouplingTime(
         step=jnp.int32(step),
-        time=time,
+        time=START_DATE + jdt.to_timedelta(int(step * dt), "second"),
         sim_time=jnp.float32(step * dt),
         dt=dt,
     )

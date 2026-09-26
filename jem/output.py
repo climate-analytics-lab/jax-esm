@@ -103,7 +103,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import xarray as xr
@@ -150,10 +150,10 @@ def _safe_name(name: str) -> str:
     return safe
 
 
-#: Name of the interval-bounds variable JCM's output carries (and JEM's other
-#: components may). It is not data to average -- a mean of a lower and an
-#: upper bound is neither -- so :func:`postprocess` gives it its own,
-#: explicit chunk-mean handling instead of folding it into `_timed_variables`.
+#: Name of the ``(time, bounds)`` interval-bounds variable JCM's output
+#: carries. It is not data to average -- a mean of a lower and an upper bound
+#: is neither -- so :func:`postprocess` replaces it with the chunk's own
+#: bounds.
 TIME_BOUNDS_VARIABLE = "time_bounds"
 
 
@@ -164,19 +164,6 @@ def _timed_variables(dataset: xr.Dataset) -> list[str]:
         for name, variable in dataset.data_vars.items()
         if TIME_DIMENSION in variable.dims and str(name) != TIME_BOUNDS_VARIABLE
     ]
-
-
-def _chunk_midpoint(time: xr.DataArray) -> np.datetime64:
-    """Return the chunk's own interval midpoint, from its first and last record.
-
-    Every record is already labelled at its own interval's midpoint
-    (:class:`jem.base.component.TimeAxis`), so for equally spaced records the
-    chunk's midpoint is exactly the mean of its first and last -- computed in
-    integer milliseconds, the precision every record's own label was built in.
-    """
-    first = time.values[0].astype("datetime64[ms]").astype(np.int64)
-    last = time.values[-1].astype("datetime64[ms]").astype(np.int64)
-    return cast(np.datetime64, (first + (last - first) // 2).astype("datetime64[ms]"))
 
 
 def _with_cell_method(attrs: Mapping[str, Any], method: str) -> dict[str, Any]:
@@ -409,16 +396,15 @@ def postprocess(
     # not what interval the mean covers, and a midpoint of the kept records
     # instead would make the chunk-mean series unevenly spaced whenever the
     # stride's phase falls differently in successive chunks.
-    chunk_mid = _chunk_midpoint(dataset[TIME_DIMENSION])
+    # Every record is labelled at its own midpoint and the records are evenly
+    # spaced, so the chunk's midpoint is midway between the first and last
+    # label, in the whole milliseconds the labels are built in.
+    times = dataset[TIME_DIMENSION].values.astype("datetime64[ms]")
+    chunk_mid = times[0] + (times[-1] - times[0]) // 2
     chunk_bounds = None
     if TIME_BOUNDS_VARIABLE in dataset.variables:
-        bounds = dataset[TIME_BOUNDS_VARIABLE]
-        chunk_bounds = np.array(
-            [[
-                bounds.isel({TIME_DIMENSION: 0, "bounds": 0}).values,
-                bounds.isel({TIME_DIMENSION: -1, "bounds": 1}).values,
-            ]]
-        )
+        bounds = dataset[TIME_BOUNDS_VARIABLE].values
+        chunk_bounds = np.array([[bounds[0, 0], bounds[-1, 1]]])
 
     if subsample > 1:
         n_records = int(dataset.sizes[TIME_DIMENSION])

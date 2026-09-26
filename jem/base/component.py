@@ -13,21 +13,18 @@ the things it couples. It is deliberately small:
   Protocol means "has these attributes"), never with ``hasattr`` at random
   call sites.
 - :class:`CoupledCarry` is the scanned state of the coupled model: one carry
-  per component plus the authoritative step counter. The counter lives in the
-  carry, not in the ``lax.scan`` index, so the clock survives chunked runs and
-  checkpoint restarts (the scan index restarts at zero on every call; the
-  carry does not).
-- :class:`CouplingTime` is what every ``Component.step`` receives instead of
-  a bare step index: the coupler's current ``jax_datetime.Datetime`` and the
-  coupling ``dt``. Components therefore hold **no clock state of their own**;
-  the coupler owns the one clock -- a carried, incrementally advanced
-  ``Datetime``, not a step count multiplied out -- and two components can
-  never disagree about the date.
+  per component plus the clock, a ``jax_datetime.Datetime`` advanced by the
+  coupling timestep every step. The clock lives in the carry, not in the
+  ``lax.scan`` index, so it survives chunked runs and checkpoint restarts
+  (the scan index restarts at zero on every call; the carry does not).
+- :class:`CouplingTime` is what every ``Component.step`` receives: the
+  coupler's current ``Datetime`` and the coupling ``dt``. Components hold
+  **no clock state of their own**, so two components can never disagree
+  about the date.
 - :data:`Exchanger` is the type of the functions that move information
-  between components. They were called "mappers" before v1.0; the name was
-  changed because "mapper" reads as a regridding operation, whereas an
-  exchanger may regrid, compute fluxes, convert units or simply copy a field.
-  It is the *only* place where one component's carry is read by another.
+  between components -- regridding, computing fluxes, converting units or
+  simply copying a field. It is the *only* place where one component's carry
+  is read by another.
 
 The design is recorded in ``docs/source/design/architecture.md`` and, for the
 task numbering (T1.1, T1.3), in the API hardening plan, which lives on the
@@ -48,7 +45,6 @@ import numpy as np
 import xarray as xr
 from flax import struct
 from jcm.date import fraction_of_year_elapsed
-from jcm.predictions import output_time_labels
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -58,8 +54,6 @@ Carry = Any
 # The coupler stacks it over the scanned steps, so every leaf gains a leading
 # time axis of length ``iterations``.
 Diagnostics = Any
-
-SECONDS_PER_DAY = 86400.0
 
 #: Prefix on the output name of a field a component was *given*, as opposed to
 #: one it computed. See :func:`forcing_variable`.
@@ -178,26 +172,13 @@ def role_attrs(role: Role) -> dict[str, str]:
     return {ROLE_ATTRIBUTE: role}
 
 
-def start_year_fraction(start_date: jdt.Datetime) -> float:
-    """Return the position of ``start_date`` in the annual cycle, in ``[0, 1)``.
-
-    The same quantity :attr:`CouplingTime.year_fraction` reports at step 0,
-    computed by the same function (``jcm.date.fraction_of_year_elapsed``), so
-    a component that samples a climatology in ``initialize()`` and one that
-    samples it in ``step()`` cannot disagree about where the run starts.
-    """
-    return float(fraction_of_year_elapsed(start_date))
-
-
 @struct.dataclass
 class CouplingTime:
     """The coupler's clock as seen by one component step.
 
-    There is one clock: a carried ``jax_datetime.Datetime`` that the coupler
-    advances by ``dt`` every step (:meth:`end_of_step`), never a step count
-    multiplied out. ``step`` and ``sim_time`` remain for the sub-step
-    indexing a component with an internal timestep or a health-check log line
-    needs; nothing derives ``time`` from either of them.
+    ``time`` is the clock. ``step`` and ``sim_time`` count the same progress
+    as an integer and in seconds, for the sub-step indexing a component with
+    an internal timestep needs and for a wrapped model's clock-drift check.
 
     Attributes
     ----------
@@ -205,13 +186,12 @@ class CouplingTime:
         int32 scalar; number of coupling steps completed before this one
         (0 on the first step). Copied from :attr:`CoupledCarry.step`.
     time : jax_datetime.Datetime
-        The current model time -- the coupler's start date, advanced by
-        ``dt`` once per step it has taken.
+        The model time at the start of this step.
     sim_time : jax.Array
-        Seconds since the run's start; equals ``step * dt``. Float64 when
-        ``jax_enable_x64`` is on, float32 otherwise. A convenience for a
-        clock-drift check against a wrapped model's own elapsed-seconds
-        counter (:mod:`jem.components.clock`); ``time`` is authoritative.
+        Seconds since the run's start, ``step * dt``: float64 when
+        ``jax_enable_x64`` is on, float32 otherwise. For a clock-drift check
+        against a wrapped model's own elapsed-seconds counter
+        (:mod:`jem.components.clock`).
     dt : float
         Coupling timestep in seconds. Static (not a pytree leaf).
 
@@ -225,10 +205,9 @@ class CouplingTime:
     def end_of_step(self) -> "CouplingTime":
         """Return the clock as it reads at the end of this step (one step later).
 
-        A component that needs a boundary condition at both ends of a step
-        (the slab models measure an anomaly against the climatology at the
-        start and add it back at the end) uses this rather than adding ``dt``
-        to ``time`` by hand.
+        For a component that needs a boundary condition at both ends of a
+        step (the slab models measure an anomaly against the climatology at
+        the start and add it back at the end).
         """
         advanced: CouplingTime = self.replace(  # type: ignore[attr-defined]
             step=self.step + 1,
@@ -242,10 +221,8 @@ class CouplingTime:
         """Position in the annual cycle in ``[0, 1)`` at the *start* of this step.
 
         Zero is 00:00 on 1 January. ``jcm.date.fraction_of_year_elapsed`` --
-        the same function the atmosphere's own seasonal physics uses -- so a
-        component's seasonal cycle and JCM's agree by construction. This is
-        what a monthly climatology is interpolated with
-        (``jem.utils.cycles.evaluate_cyclic_linear``).
+        the function the atmosphere's own seasonal physics uses -- so a
+        component's seasonal cycle and JCM's agree by construction.
         """
         return cast(jax.Array, fraction_of_year_elapsed(self.time))
 
@@ -259,14 +236,15 @@ class CoupledCarry:
     components : dict[str, Carry]
         One carry per component, keyed by component name.
     time : jax_datetime.Datetime
-        The model's current time -- the coupler's one clock. Set to the
-        coupler's start date at :meth:`~jem.base.coupler.Coupler.initialize`
-        and advanced by the coupling ``dt`` every step; every component's
+        The model's current time. Set to the coupler's start date at
+        :meth:`~jem.base.coupler.Coupler.initialize` and advanced by the
+        coupling timestep every step; every component's
         :class:`CouplingTime` is built from it.
     step : jax.Array
-        int32 scalar; number of coupling steps completed. Kept for the
-        sub-step indexing workflow multiplicity needs and for a checkpoint's
-        step count; ``time`` is what the clock is.
+        int32 scalar; number of coupling steps completed -- what the driver
+        chunks, resumes and names output files by, and what workflow
+        multiplicity counts sub-steps from. ``jcm.model.RunState`` carries
+        the same pair.
 
     """
 
@@ -284,13 +262,12 @@ class TimeAxis:
     with the same ``time`` coordinate and ``xr.merge`` of two components'
     datasets is an N-long join rather than a 2N-long union.
 
-    The labelling convention is JCM's: record ``k`` covers the interval
-    ``[start_date + k dt, start_date + (k+1) dt)`` and is labelled with its
-    **midpoint**, as ``datetime64[ms]`` -- the same convention and the same
-    arithmetic as ``jcm.predictions.output_time_labels`` and
-    ``ModelPredictions.to_xarray``, computed here in whole milliseconds on the
-    host so the two are identical bit for bit and ``xr.merge`` joins them on
-    one time axis rather than unioning two.
+    Record ``k`` covers ``[start_date + k dt, start_date + (k+1) dt)`` and is
+    labelled with its **midpoint** as ``datetime64[ms]``, floor-divided in
+    whole milliseconds -- the arithmetic of
+    ``jcm.predictions.ModelPredictions.time_labels``, so the atmosphere's
+    labels and every other component's are identical, an odd-second
+    interval's half-second midpoint included.
 
     Attributes
     ----------
@@ -311,33 +288,12 @@ class TimeAxis:
         """Return the number of output records."""
         return len(self.steps)
 
-    def _bounds_ms(self) -> np.ndarray:
-        """Return each record's ``[start, end)`` bounds, as int64 milliseconds."""
-        start_ms = int(self.start_date.to_datetime64().astype("datetime64[ms]").astype(np.int64))
-        dt_seconds = int(np.asarray(self.dt.days)) * int(SECONDS_PER_DAY) + int(
-            np.asarray(self.dt.seconds)
-        )
-        dt_ms = dt_seconds * 1000
-        steps = np.asarray(self.steps, dtype=np.int64)
-        lower = start_ms + steps * dt_ms
-        return np.stack([lower, lower + dt_ms], axis=-1)
-
-    def bounds(self) -> np.ndarray:
-        """Return each record's interval bounds, as ``datetime64[ms]`` ``(n, 2)``."""
-        return self._bounds_ms().astype("datetime64[ms]")
-
     def datetimes(self) -> np.ndarray:
-        """Return the record labels as ``datetime64[ms]`` (each interval's midpoint).
-
-        ``lower + (upper - lower) // 2``, exactly
-        ``jcm.predictions.ModelPredictions.time_labels`` -- floor division in
-        integer milliseconds, so an odd-length interval's half-millisecond
-        midpoint matches JCM's rather than a naive float mean rounding it
-        differently.
-        """
-        bounds = self._bounds_ms()
-        midpoints = bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
-        return cast(np.ndarray, output_time_labels(midpoints.astype("datetime64[ms]")))
+        """Return the record labels as ``datetime64[ms]`` (each interval's midpoint)."""
+        start = self.start_date.to_datetime64().astype("datetime64[ms]")
+        dt = self.dt.to_timedelta64().astype("timedelta64[ms]")
+        lower = start + np.asarray(self.steps, dtype=np.int64) * dt
+        return cast(np.ndarray, lower + dt // 2)
 
     @property
     def attrs(self) -> dict[str, str]:

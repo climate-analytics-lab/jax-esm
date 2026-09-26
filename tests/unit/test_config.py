@@ -250,14 +250,10 @@ def test_run_options_share_one_schema():
 
 
 def _seconds(duration: str | float) -> int:
-    """Return a config duration in whole seconds, as the driver reads it.
+    """Return a config duration in whole seconds, as the driver reads it."""
+    from jcm.date import parse_duration_seconds
 
-    Every shipped duration is fixed ("300 days", not "1 year") since
-    ``jcm.date.parse_duration_days`` has no calendar-dependent unit to parse.
-    """
-    from jcm.date import parse_duration_days
-
-    return int(round(float(parse_duration_days(duration)) * 86400))
+    return parse_duration_seconds(duration)
 
 
 @pytest.mark.parametrize("option", _options("coupled_run"))

@@ -557,9 +557,8 @@ def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler)
     """
     from jem.driver import _whole_steps
 
-    coupling_days = coupler.dt_seconds / 86400.0
-    total = _whole_steps("2190 days", coupling_days, coupler, "total_time")
-    per_chunk = _whole_steps("30 days", coupling_days, coupler, "chunk")
+    total = _whole_steps("2190 days", coupler, "total_time")
+    per_chunk = _whole_steps("30 days", coupler, "chunk")
     assert total == 2190
     assert total % per_chunk == 0
 

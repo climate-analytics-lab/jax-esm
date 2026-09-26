@@ -616,7 +616,7 @@ def _month_index(record_time: jdt.Datetime, record_seconds: int) -> jnp.ndarray:
 
     midpoint = record_time + jdt.to_timedelta(record_seconds // 2, "second")
     year, month, _ = gregorian_ymd_from_days(midpoint.delta.days)
-    return (year - 1970) * MONTHS_PER_YEAR + (month - 1)
+    return jnp.asarray((year - 1970) * MONTHS_PER_YEAR + (month - 1))
 
 
 def _host_month_index(date: jdt.Datetime, offset_seconds: int = 0) -> int:

@@ -109,6 +109,29 @@ def test_postprocess_averages_the_chunk_and_labels_it_at_its_midpoint():
     np.testing.assert_array_equal(averaged["lon"].values, dataset["lon"].values)
 
 
+def test_postprocess_replaces_time_bounds_with_the_chunk_bounds():
+    """JCM's ``time_bounds`` is not averaged: the mean covers the whole chunk.
+
+    Four records of 1801 s -- an odd length, as JCM writes them: midpoint
+    labels at half seconds, ``[start, end)`` bounds -- average to one record
+    whose bounds are the chunk's and whose label is the midpoint of those.
+    """
+    lower = np.datetime64("2001-01-01T00:00:00.000") + np.arange(4) * np.timedelta64(
+        1801, "s"
+    )
+    upper = lower + np.timedelta64(1801, "s")
+    dataset = simple_dataset(4).assign_coords(time=lower + (upper - lower) // 2)
+    dataset["time_bounds"] = (("time", "bounds"), np.stack([lower, upper], axis=-1))
+
+    averaged = postprocess(dataset, output_averages=True)
+
+    np.testing.assert_array_equal(
+        averaged["time_bounds"].values, [[lower[0], upper[-1]]]
+    )
+    assert averaged["time"].values[0] == lower[0] + (upper[-1] - lower[0]) // 2
+    assert "cell_methods" not in averaged["time_bounds"].attrs
+
+
 def test_postprocess_appends_to_an_existing_cell_methods():
     dataset = simple_dataset(3)
     dataset["temperature"].attrs["cell_methods"] = "area: mean"

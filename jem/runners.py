@@ -54,8 +54,6 @@ from jem.exchangers import (
 
 logger = logging.getLogger(__name__)
 
-SECONDS_PER_DAY = 86400
-
 #: Which config group builds which component, under which name. The names are
 #: the ones :func:`jem.exchangers.default_exchanges` wires; the atmosphere is
 #: not here because it is not optional and carries its own name
@@ -940,21 +938,10 @@ def _land_fraction(path: str) -> Any:
 
 
 def _coupling_timestep(cfg: DictConfig) -> jdt.Timedelta:
-    """Return ``cfg.coupling.timestep`` as the coupler's ``jdt.Timedelta``.
+    """Return ``cfg.coupling.timestep`` ("1 day", "12 hours") as a ``jdt.Timedelta``."""
+    from jcm.date import parse_duration_seconds
 
-    The config spells the interval the way a fixed run length is spelled
-    ("1 day", "12 hours"); the coupler holds whole seconds.
-    """
-    from jcm.date import parse_duration_days
-
-    spelling = cfg.coupling.timestep
-    seconds = float(parse_duration_days(spelling)) * SECONDS_PER_DAY
-    if abs(seconds - round(seconds)) > 1e-6 or round(seconds) < 1:
-        raise ValueError(
-            f"coupling.timestep={spelling!r} is {seconds:g} s, and a coupling "
-            "timestep is a whole positive number of seconds (jax-esm#110)."
-        )
-    return jdt.to_timedelta(int(round(seconds)), "second")
+    return jdt.to_timedelta(parse_duration_seconds(cfg.coupling.timestep), "second")
 
 
 def _validate_exchangers(coupler: Coupler) -> None:

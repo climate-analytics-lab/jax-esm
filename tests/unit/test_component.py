@@ -15,6 +15,7 @@ import jax_datetime as jdt
 import numpy as np
 import pytest
 from jcm.date import fraction_of_year_elapsed
+from jcm.predictions import output_time_labels
 
 from jem.base.component import (
     FORCING_VARIABLE_PREFIX,
@@ -195,26 +196,30 @@ def test_datetimes_label_each_interval_midpoint():
     assert axis.datetimes().dtype == np.dtype("datetime64[ms]")
 
 
-def test_datetimes_reproduce_jcm_arithmetic_bit_for_bit():
-    """The labels are JCM's floor-divided integer-millisecond midpoint.
+def test_datetimes_reproduce_jcm_labels_for_an_odd_second_interval():
+    """The labels are JCM's, to the millisecond, for an odd-length interval.
 
-    Both models have to be inexact in the SAME way for ``xr.merge`` to align
-    them, so this pins the arithmetic and not just the answer: an odd-length
-    interval's half-millisecond midpoint must round down, exactly as
-    ``jcm.predictions.ModelPredictions.time_labels`` does.
+    ``xr.merge(join="exact")`` of the atmosphere's output with any other
+    component's needs identical labels, so this computes the expected ones the
+    way ``jcm.predictions.ModelPredictions.time_labels`` does -- exact
+    ``datetime64[ms]`` bounds from the model clock, then ``lower + (upper -
+    lower) // 2`` -- for a 1801 s interval, whose midpoint is a half second.
     """
     start = jdt.to_datetime("2001-03-01")
+    dt = jdt.to_timedelta(1801, "second")
     steps = np.arange(5)
-    dt = jdt.to_timedelta(6, "hour")
     axis = TimeAxis(start, steps, dt)
 
-    start_ms = int(np.asarray(start.delta.days)) * 86_400_000
-    dt_ms = 6 * 3600 * 1000
-    lower = start_ms + steps.astype(np.int64) * dt_ms
-    upper = lower + dt_ms
-    expected = (lower + (upper - lower) // 2).astype("datetime64[ms]")
+    lower = output_time_labels(
+        jdt.Datetime(start.delta + jdt.to_timedelta(1801 * steps, "second"))
+    )
+    upper = output_time_labels(
+        jdt.Datetime(start.delta + jdt.to_timedelta(1801 * (steps + 1), "second"))
+    )
+    expected = lower + (upper - lower) // 2
 
     np.testing.assert_array_equal(axis.datetimes(), expected)
+    assert axis.datetimes()[0] == np.datetime64("2001-03-01T00:15:00.500")
 
 
 def test_time_axis_attrs_is_a_fresh_dict_per_access():
@@ -272,25 +277,6 @@ def test_year_fraction_equals_jcm_fraction_of_year_elapsed():
         assert float(coupling_time.year_fraction) == pytest.approx(
             float(fraction_of_year_elapsed(time))
         )
-
-
-def test_start_year_fraction_matches_year_fraction_at_step_zero():
-    """A slab's ``start_year_fraction`` and a step-0 ``CouplingTime`` agree.
-
-    Both read the run's position in the annual cycle from the same start
-    date, so a component that samples a climatology in ``initialize()`` and
-    one that samples it in ``step()`` cannot disagree about where the run
-    starts.
-    """
-    from jem.base.component import CouplingTime, start_year_fraction
-
-    start = jdt.to_datetime("2001-07-01")
-    coupling_time = CouplingTime(
-        step=jnp.int32(0), time=start, sim_time=jnp.float32(0.0), dt=86400.0
-    )
-    assert start_year_fraction(start) == pytest.approx(
-        float(coupling_time.year_fraction)
-    )
 
 
 def test_forcing_variable_prefixes_once():

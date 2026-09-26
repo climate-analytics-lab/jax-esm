@@ -350,6 +350,7 @@ def test_clock_persists_across_trajectory_calls():
     carry, second = trajectory(carry)
 
     assert int(carry.step) == 10
+    assert carry.time == START_DATE + jdt.to_timedelta(10, "day")
     np.testing.assert_allclose(first["clock"]["sim_time"], np.arange(0, 5) * DAY)
     np.testing.assert_allclose(second["clock"]["sim_time"], np.arange(5, 10) * DAY)
 
@@ -784,8 +785,8 @@ def test_a_repeated_component_runs_on_a_faster_clock():
         np.asarray(fast["sim_time"]).ravel(), np.arange(48) * HOUR
     )
     np.testing.assert_array_equal(np.asarray(fast["step"]).ravel(), np.arange(48))
-    # The seasonal cycle is still reduced in exact integer arithmetic at the
-    # sub-rate: an hour divides a 365-day year 8760 times.
+    # The sub-step clock advances an hour at a time through 2001, a
+    # 365-day year of 8760 hours.
     np.testing.assert_allclose(
         np.asarray(fast["year_fraction"]).ravel(), np.arange(48) / 8760, rtol=1e-6
     )

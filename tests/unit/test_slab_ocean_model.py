@@ -26,10 +26,7 @@ from tests.unit.slab_test_utils import (
     write_climatology,
 )
 
-# 2001, the year `coupling_time`'s default start date falls in, is not a leap
-# year, and every test using this constant stays within it -- so a fixed 365
-# reproduces `jcm.date.fraction_of_year_elapsed` exactly without hand-rolling
-# real calendar arithmetic in the test.
+#: The length of 2001, the year `coupling_time`'s start date falls in.
 DAYS_PER_YEAR = 365.0
 
 MONTHLY_SST = 285.0 + 10.0 * np.cos(2 * np.pi * np.arange(12) / 12.0)

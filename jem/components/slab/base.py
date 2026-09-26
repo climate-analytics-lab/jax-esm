@@ -4,12 +4,12 @@ What lives here is what every slab component needs and none of them should own
 a copy of: the grid, the monthly-climatology loader, and the conversion of a
 run's stacked diagnostics into a CF-labelled :class:`xarray.Dataset`.
 
-What deliberately does *not* live here any more is the clock. The coupler owns
+What deliberately does *not* live here is the clock. The coupler owns
 the one clock of a coupled run and hands it to every component as a
 :class:`~jem.base.component.CouplingTime`; a slab model holds no start date and
 no timestep of its own, so two components cannot disagree about the date and
 the seasonal cycle survives a chunked or restarted run unbroken. The one thing
-``initialize()`` still needs the date for -- which month of a climatology the
+``initialize()`` needs the date for -- which month of a climatology the
 run starts in -- reaches the model through
 :meth:`SlabModelBase.bind`, which the coupler calls at registration.
 """
@@ -23,12 +23,13 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 
+from jcm.date import fraction_of_year_elapsed
+
 from jem.base.component import (
     Carry,
     CouplingTime,
     Diagnostics,
     TimeAxis,
-    start_year_fraction,
 )
 # The forcing_ output-name convention belongs to the component contract, not to
 # the slab family -- every component that writes output follows it, the Veros
@@ -284,17 +285,6 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     )
 
 
-def end_of_step(time: CouplingTime) -> CouplingTime:
-    """Return the clock as it will read at the *end* of ``time``'s step.
-
-    Several slab models need a boundary condition at both ends of a step (the
-    climatology an anomaly is measured against at the start, and added back to
-    at the end). ``CouplingTime.end_of_step`` is the one definition of what
-    "one step later" means; this alias keeps the slab call sites short.
-    """
-    return time.end_of_step()
-
-
 class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
 
@@ -416,7 +406,7 @@ class SlabModelBase(ABC):
                 )
             return
         self._bound_start_date = start_date
-        self._start_year_fraction = start_year_fraction(start_date)
+        self._start_year_fraction = float(fraction_of_year_elapsed(start_date))
 
     @property
     def start_year_fraction(self) -> float:
