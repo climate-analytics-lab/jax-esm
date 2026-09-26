@@ -37,8 +37,8 @@ The directory layout is::
 ``CoupledCarry.time`` -- a carried ``jax_datetime.Datetime`` -- is the
 model's clock: every component's :class:`~jem.base.component.CouplingTime`,
 and with it its position in the seasonal cycle, is built from it.
-``CoupledCarry.step`` rides along for the sub-step indexing a component with
-an internal timestep needs. A checkpoint that saved only the component
+``CoupledCarry.step``, the steps taken, is saved with it: the driver resumes,
+chunks and names its output by it. A checkpoint that saved only the component
 carries would resume with the clock reset to the coupler's start date,
 restarting the seasonal cycle however far into the run it was written. A
 directory whose ``carry.msgpack`` does not hold the clock is refused with
