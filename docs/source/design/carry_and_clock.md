@@ -161,8 +161,8 @@ that differs from the model's own `start_time`. The slab models use it only
 for the start date: `initialize()` takes no argument, so `bind` is how a run
 starting on 1 July samples the July record of its climatology rather than
 January's, through `SlabModelBase.start_year_fraction` — computed by the
-same `jem.base.component.start_year_fraction(start_date)` function behind
-`CouplingTime.year_fraction`, so a climatology sampled in `initialize()` and
+same `jcm.date.fraction_of_year_elapsed` function that `CouplingTime.year_fraction`
+calls on the coupled clock, so a climatology sampled in `initialize()` and
 one sampled in `step()` cannot disagree about where the run starts. A model
 that was never registered with a coupler reads 1 January, which is what a
 bare `model.initialize()` in a test or notebook gets.

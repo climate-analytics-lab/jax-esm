@@ -215,13 +215,15 @@ the run's cadence does not call for.
 
 `output_averages=True` replaces each chunk's records with their time mean,
 labelled at the chunk's midpoint and carrying the CF `cell_methods = "time:
-mean"` plus a `time_bounds` variable — because the coupler's own output
-interval, absent this flag, is one record per coupling step, so this is
-literally jcm's own meaning of "averaged output" applied at the chunk
-granularity. The bins are the chunks: a 30-day chunk gives 30-day-*window*
-means, whose boundaries drift against the calendar months, not calendar
-monthly means — those come from `jem.accumulate.monthly_mean` (below). In a
-coupled run the atmosphere's per-step records are *already* step means
+mean"`, with any `time_bounds` variable (JCM's output carries one; the other
+components do not) replaced by the chunk's own outer bounds rather than
+averaged as data — because the coupler's own output interval, absent this
+flag, is one record per coupling step, so this is literally jcm's own
+meaning of "averaged output" applied at the chunk granularity. The bins are
+the chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries
+drift against the calendar months, not calendar monthly means — those come
+from `jem.accumulate.monthly_mean` (below). In a coupled run the atmosphere's
+per-step records are *already* step means
 (`JCMComponent` integrates with `output_averages=True`), so averaging a
 chunk of them is the chunk mean exactly, with no double counting.
 

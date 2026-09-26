@@ -358,7 +358,7 @@ conventions are JCM's, and every component follows them:
   `time_bounds` variable with each interval's start and end.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
-  `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
+  `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`,
   applied by `forcing_variable(name)`. Two components legitimately hold the
   same physical field — one produced it, the other received it — and without
   the prefix the merge of their datasets collides on the shared name. A new

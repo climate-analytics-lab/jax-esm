@@ -43,14 +43,16 @@ The conventions, which are JCM's:
 - **The time label is the MIDPOINT of the interval a record covers**, as an
   absolute `datetime64[ms]`: record *k* holds the average over `[start_date
   + k dt, start_date + (k+1) dt)` and is stamped at that interval's
-  midpoint, with a `time_bounds` variable carrying the interval's start and
-  end. `TimeAxis.datetimes()` computes those midpoints on host, in numpy
-  int64, identically to `jcm.predictions.output_time_labels`, so every
-  component's dataset merges with the atmosphere's on one exact time axis
+  midpoint. `TimeAxis.datetimes()` computes those midpoints on host with
+  plain `datetime64[ms]`/`timedelta64[ms]` arithmetic — the same arithmetic
+  as `jcm.predictions.ModelPredictions.time_labels` — so every component's
+  dataset merges with the atmosphere's on one exact time axis
   (`xr.merge(join="exact")`). Each `to_xarray` hands those values, plus
-  `TimeAxis.attrs`, straight to xarray. The dates are `jax_datetime`'s
-  proleptic Gregorian — there is one clock and one calendar, so no
-  component's labels can disagree with another's about what day it is.
+  `TimeAxis.attrs`, straight to xarray. JCM's own output additionally
+  carries a `time_bounds` variable with each interval's start and end; the
+  other components do not. The dates are `jax_datetime`'s proleptic
+  Gregorian — there is one clock and one calendar, so no component's labels
+  can disagree with another's about what day it is.
 - **Variable names**: state and derived quantities keep their plain names,
   and every variable that came from a component's *forcing* is written with
   a `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`,

@@ -177,7 +177,7 @@ default** — and resuming is the same call:
 ```python
 result = run_chunked(
     coupler,
-    total_time="6 years",        # 2190 days: a whole number of 30-day chunks
+    total_time="2190 days",      # 6 years: a whole number of 30-day chunks
     chunk="30 days",             # a health check, a file and a restart per chunk
     output_dir="output",
     output_averages=True,        # one record per chunk: its 30-day-window mean
