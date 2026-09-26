@@ -1339,8 +1339,8 @@ class Coupler:
         leading axes are folded into one -- they are already in time order --
         and the component is handed a time axis spaced at
         ``coupling_timestep / n`` and starting at sub-step
-        ``first_step * n``, so its records are stamped at the end of each
-        sub-step rather than all at the end of the coupled step.
+        ``first_step * n``, so each record is stamped at the midpoint of its
+        own sub-step rather than at the coupled step's.
 
         A component that is itself a :class:`Coupler` returns one dataset per
         *its* components, and they are flattened into this coupler's result
