@@ -9,9 +9,11 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
   `step(carry, time)` is a component (`jem.base.component.Component`, a
   `typing.Protocol`); there is no base class to inherit from, so an external model
   is adapted by a thin wrapper class
-- **One clock**: the `Coupler` owns the coupling timestep, start date and calendar and
-  hands every component the same `CouplingTime`, so components cannot disagree about
-  the date and the seasonal cycle survives chunked runs and restarts
+- **One clock**: the `Coupler` carries a single `jax_datetime.Datetime`, advanced by
+  the coupling timestep every step, and hands every component the same
+  `CouplingTime` built from it, so components cannot disagree about the date and
+  the seasonal cycle survives chunked runs and restarts. There is no calendar
+  option — the clock is `jax_datetime`'s proleptic Gregorian, full stop
 - **Efficient Time Integration**: `Coupler.generate_trajectory_function()` returns a
   pure `carry -> (carry, diagnostics)` function built on `jax.lax.scan`
 - **Differentiable parameters**: component parameters are `flax.struct` dataclasses that
@@ -75,7 +77,7 @@ start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 
 # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
-atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
 atm = JCMComponent(atm_model)
 
 # Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
@@ -276,23 +278,13 @@ carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
 
-The bins are the **model** calendar's months, so `monthly.finalize(...)` and
+Each record is binned by the real Gregorian calendar month of its own interval
+midpoint (`jcm.date.gregorian_ymd_from_days`), the same instant it is labelled
+with in the written output, so `monthly.finalize(...)` and
 `to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers for a run whose output labels cross no Gregorian 29 February. The
-labels are proleptic Gregorian whatever the model calendar is (JCM's
-convention, jax-gcm#449; calendar-consistent labels are tracked as #118), so a
-`365_day` run started on 1 January 2000 — where the shipped examples start —
-labels the record the model calls 1 March 00:00 as `2000-02-29` and
-accumulates it into March. `groupby("time.month")` of the written output
-therefore moves the first record of every month from March on into the month
-before it, gives February the record the model calls 1 March, and hands
-December the year's wrap record — the one the model calls 1 January of the
-next year — that the twelve bins count in January; the accumulated bin stays
-the model's month, which is the month the forcing and the seasonal cycle
-follow. To reproduce `finalize` from the written output across a leap day, bin
-on model day-of-year — each label's offset from the start date in whole days —
-rather than on `time.month`. A `gregorian` calendar is refused outright, since
-it has no fixed table of month lengths.
+numbers exactly — a leap February holds 29 records, not 28, with no separate
+model-calendar-vs-label reconciliation to make: there is one calendar, the
+proleptic Gregorian `jax_datetime` uses throughout.
 
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on
@@ -305,12 +297,11 @@ integrates.
 
 A component the workflow runs *n* times per coupled step keeps that axis —
 `(12, n, ...)`, the monthly mean of each sub-step slot — and each of its
-records is binned by the end of its own sub-interval, so the hourly records of
-31 January count in January even though the coupled step containing them ends
-on 1 February. A nested coupler's inner steps are treated the same way. Fold that
-axis away with `fold_records`, which weights each slot by its own count (a
-straight mean over the slots is right only where every slot holds the same
-number of records, which is what a month boundary breaks):
+records is binned by its own midpoint, not the coupled step's. A nested
+coupler's inner steps are treated the same way. Fold that axis away with
+`fold_records`, which weights each slot by its own count (a straight mean
+over the slots is right only where every slot holds the same number of
+records, which is what a month boundary breaks):
 
 ```python
 from jem.accumulate import fold_records
@@ -326,37 +317,28 @@ a climatology. Give it a size and it bins into the months the run passes
 through instead, in order, each with a bin of its own:
 
 ```python
-months = monthly_mean(coupler, total_time="10 years")   # or n_months=121
-means = months.finalize(accumulator)   # 121 bins: Jul 2001, Aug 2001, …
+months = monthly_mean(coupler, total_time="3650 days")   # or n_months=121
+means = months.finalize(accumulator)   # ~121 bins: Jul 2001, Aug 2001, …
 ```
 
-These are calendar months whatever day the run starts on — the month table is
-rotated to the month of the start date and phased to it — and they do not
-drift the way a fixed 30-day window does. Ten years gives 121 bins, not 120:
-the run's last record is labelled 00:00 on 1 January of the eleventh year,
-which belongs to that January, and a bin has to exist for it rather than have
-it wrap into the first. `total_time` is the spelling to prefer for that
-reason — a run longer than the accumulator wraps at the *span* of its bins, so
-a wrapped bin is a calendar month only when `n_months` is a multiple of twelve
-and otherwise holds parts of two.
+These are real calendar months whatever day the run starts on — read directly
+off each record's own date, with no month-length table and no start-of-year
+phase to compute — so they never drift, whatever the coupling timestep. A run
+longer than the accumulator wraps modulo `n_months`, compositing whole
+calendar months (never a part of one); size it with `total_time` (which
+counts the distinct months the run's records actually touch) to avoid the
+wrap entirely.
 
-`windowed_mean(coupler, window, n_windows=...)` is the same reduction over
-`n_windows` windows of a fixed length — the 5-day and 7-day means a
-sub-seasonal forecast is scored on — sized either by `n_windows` or by
-`total_time="1 year"`. A run longer than the accumulator wraps, so window *w*
-composites every *w*-th window, the way the monthly bins composite years.
-`window` may also be a **sequence** of lengths, which the windows cycle
-through (daily leads for a forecast's first week, then pentads).
-
-A window is **not** a calendar month, whatever its length: every window is
-measured from the run's own start date, with no reference to the calendar, and
-closes at its **end** (JEM labels a record at the end of the interval it
-covers, and a window is one such interval) while a calendar month closes at
-its **start** (which is what `groupby("time.month")` does). So a 31-day window
-started on 1 January takes the record labelled 00:00 on 1 February, which is
-February's month; and from a 1 July start a pattern of month lengths is not
-months at all. Calendar months come from `monthly_mean`, which knows where in
-the calendar the run began.
+`windowed_mean(coupler, window, n_windows=...)` is a different, simpler
+reduction: `n_windows` windows of a fixed length — the 5-day and 7-day means a
+sub-seasonal forecast is scored on — measured in whole records from the run's
+own start, with no reference to any calendar, sized either by `n_windows` or
+by `total_time`. A run longer than the accumulator wraps, so window *w*
+composites every *w*-th window. `window` may also be a **sequence** of
+lengths, which the windows cycle through (daily leads for a forecast's first
+week, then pentads). A window is never a calendar month, whatever its length
+and however it is phased — calendar months come from `monthly_mean`, which
+reads them off the real date instead of a length pattern.
 
 The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
@@ -396,8 +378,8 @@ A component is any object satisfying `jem.base.component.Component`:
 Three capabilities are optional and detected with `isinstance`:
 `SupportsXarray` (`to_xarray(diagnostics, time)`), `SupportsCheckpoint`
 (`save_carry`/`load_carry`) and `SupportsBind` (`bind(coupling_timestep=...,
-start_date=..., calendar=...)`, called once by the coupler at registration for
-components with an internal timestep, such as JCM and Veros).
+start_date=...)`, called once by the coupler at registration for components
+with an internal timestep, such as JCM and Veros).
 
 ### Component coupling
 
@@ -413,8 +395,10 @@ it was handed, and never change their pytree structure.
 - `Coupler.generate_step_function()` returns one coupled step;
   `Coupler.generate_trajectory_function(iterations, remat=..., jit=...)` drives it
   with `jax.lax.scan`.
-- The clock lives in the carry (`CoupledCarry.step`), not in the scan index, so
-  calling a trajectory function twice continues the run instead of restarting it.
+- The clock lives in the carry (`CoupledCarry.time`, a carried
+  `jax_datetime.Datetime` advanced by the coupling timestep every step — plus
+  `CoupledCarry.step`, a plain counter), not in the scan index, so calling a
+  trajectory function twice continues the run instead of restarting it.
 - Within a coupling timestep the `workflow` runs sequentially in the order given;
   by default that is every exchanger followed by every component. It may be
   written nested, and a name may appear more than once — an element listed *n*
@@ -543,9 +527,9 @@ Contributions are welcome! Please:
 
 - **Version**: single-sourced from `jem.__version__`
 - **Status**: Alpha. The next release is 1.0.0b0, "the driver and configuration
-  layer", described at the top of [CHANGELOG.md](CHANGELOG.md).
-- **API Stability**: subject to change without deprecation until 1.0; every
-  removal or rename is recorded in [CHANGELOG.md](CHANGELOG.md)
+  layer".
+- **API Stability**: subject to change without deprecation until 1.0; git
+  history is the record of every removal or rename.
 
 ## Miscellaneous
 

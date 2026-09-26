@@ -32,8 +32,10 @@ The three required members
    component by one coupling timestep.
 
    - :code:`time` is a :class:`jem.base.component.CouplingTime`: the coupler's
-     clock (step index, simulation time in seconds, and the static calendar
-     facts behind :code:`time.year_fraction`). The component keeps no clock of
+     clock (a step index, the current :code:`jax_datetime.Datetime`, and
+     :code:`time.year_fraction`, computed by calling
+     :code:`jcm.date.fraction_of_year_elapsed` on it -- the same function the
+     atmosphere's own seasonal physics uses). The component keeps no clock of
      its own.
    - The returned carry must have exactly the pytree structure, shapes and
      dtypes of the one :code:`initialize` produced -- that is what
@@ -71,7 +73,7 @@ simply skipped there, never broken:
      - Write and restore a carry that is not a plain pytree -- Veros' restart
        is an HDF5 file, not an array JAX can flatten.
    * - :class:`~jem.base.component.SupportsBind`
-     - ``bind(*, coupling_timestep, start_date, calendar)``
+     - ``bind(*, coupling_timestep, start_date)``
      - Called once, when the component is registered. The place to check the
        coupler's clock against the model's own and **refuse**, with
        ``ValueError``, a configuration that cannot work (a coupling timestep

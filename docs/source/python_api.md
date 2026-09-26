@@ -29,7 +29,7 @@ start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 
 # The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
-atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
 atm = JCMComponent(atm_model)
 
 # Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
@@ -65,8 +65,8 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 
 - **The wrapper** `JCMComponent` adapts a stock `jcm.model.Model` without
   touching it — no methods are attached to the model. The coupler calls its
-  `bind()` when it is registered, which is where the model's start date,
-  calendar and timestep are checked against the coupler's.
+  `bind()` when it is registered, which is where the model's start date and
+  timestep are checked against the coupler's.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
@@ -79,9 +79,10 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   `(dict[str, carry], CouplingTime) -> dict[str, carry]`; {doc}`adding_a_component`
   writes one out. Coupling is **lagged**: with the default workflow the
   exchanger at step *n* moves what each component produced during step *n-1*.
-- **The coupler** owns the clock: the coupling timestep, the start date and
-  the calendar live here and nowhere else, and every component's `step` is
-  handed the same `CouplingTime`.
+- **The coupler** owns the clock: a carried `jax_datetime.Datetime`, advanced
+  by the coupling timestep every step, lives here and nowhere else, and every
+  component's `step` is handed the same `CouplingTime` built from it. There is
+  no calendar to choose — the clock is `jax_datetime`'s proleptic Gregorian.
 - **The workflow** — printed by `repr(coupler)` — is the coupling scheme. It
   defaults to every exchanger followed by every component; pass
   `workflow=["atm", "exchange", "ocn"]` to reorder it. It may be nested, and a

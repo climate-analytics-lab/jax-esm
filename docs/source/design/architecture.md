@@ -103,9 +103,9 @@ holds one `carry.msgpack` — every component that does not write itself, plus t
 coupled step counter, plus the *name* of every component that does — beside one
 subdirectory per component that writes itself (`VerosComponent`, a nested
 `Coupler`). A directory with no `carry.msgpack` is
-refused with a `ValueError`: its position in the seasonal cycle is not
+refused with a `ValueError`: its position on the clock is not
 recoverable, and resuming at step 0 (or at a step reconstructed from a batch
-index) would silently move the run's calendar.
+index) would silently move the run's start date.
 
 The format is jax-gcm's: `jem.checkpoint.save(carry, path)` flattens any pytree
 to a list of typed arrays serialised with flax's **MessagePack** (`msgpack`)
@@ -297,7 +297,7 @@ at a random call site:
 | Protocol | Member | Who implements it |
 |---|---|---|
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
-| `SupportsBind` | `bind(*, coupling_timestep, start_date, calendar)` | `JCMComponent`, `VerosComponent`, the slab models |
+| `SupportsBind` | `bind(*, coupling_timestep, start_date)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
 
 `bind` is called by the coupler once per component, from `add_component` (hence
@@ -308,12 +308,12 @@ to the number of days it passes to JCM as `save_interval`/`total_time`,
 `VerosComponent` to a count of tracer timesteps — and it is where a disagreement
 about the clock is refused: both wrappers raise `ValueError` if the coupling
 timestep is not a whole multiple of the model's own, and `JCMComponent`
-additionally refuses a `start_date` or `calendar` that differs from the model's.
+additionally refuses a `start_date` that differs from the model's.
 The slab models use it for the start date alone: `initialize()` takes no
 argument, so `bind` is how a run starting on 1 July samples the July record of
 its climatology rather than the January one. It reaches them as
 `SlabModelBase.start_year_fraction`, computed by the shared
-`jem.base.component.start_year_fraction(start_date, calendar)` — the same
+`jem.base.component.start_year_fraction(start_date)` — the same
 function behind `CouplingTime.year_fraction`, so a climatology sampled in
 `initialize()` and one sampled in `step()` cannot disagree about where the run
 starts. A model that was never registered with a coupler reads 1 January, which
@@ -335,33 +335,28 @@ couplers*.
 
 The coupler owns the only clock. Components hold no start date, no timestep and
 no calendar of their own, so two of them cannot disagree about the date. Each
-`step` is handed a `CouplingTime` built from `CoupledCarry.step`:
+`step` is handed a `CouplingTime` built from the coupled carry's `time`, a
+carried `jax_datetime.Datetime`:
 
 ```python
 @struct.dataclass
 class CouplingTime:
     step: jax.Array          # int32, coupled steps completed before this one
+    time: jdt.Datetime       # the coupled clock at the start of this step
     sim_time: jax.Array      # seconds since start_date; equals step * dt
     dt: float                       # static: coupling timestep in seconds
-    year_offset_seconds: float      # static: 1 Jan of the start year -> start_date
-    days_per_year: float            # static: jcm.date.days_per_year(calendar)
 ```
 
 - `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
   *start* of the step; it is what a monthly climatology is interpolated with
-  (`jem.utils.cycles.evaluate_cyclic_linear`). When the coupling step divides
-  the year exactly — the usual case, daily steps in a 365-day year — the step
-  count is reduced modulo the steps per year in exact integer arithmetic before
-  the division, so a float32 `sim_time` cannot quantise the seasonal cycle away
-  in a century-long run.
-- `time.end_of_step()` returns the clock one step later, advancing `step` and
-  `sim_time` together. A model that needs a boundary condition at both ends of a
-  step (the slab models measure an anomaly against the climatology at the start
-  and add it back at the end) must use it rather than adding `dt` to `sim_time`
-  by hand, because `year_fraction` is derived from `step`.
-
-The static fields are resolved once, in the coupler's constructor, so no
-calendar arithmetic happens inside a traced function.
+  (`jem.utils.cycles.evaluate_cyclic_linear`), computed by calling
+  `jcm.date.fraction_of_year_elapsed` on `time.time` — the same function the
+  atmosphere itself uses, so JEM does not vendor any date arithmetic of its own.
+- `time.end_of_step()` returns the clock one step later, advancing `step`,
+  `time` and `sim_time` together. A model that needs a boundary condition at
+  both ends of a step (the slab models measure an anomaly against the
+  climatology at the start and add it back at the end) must use it rather than
+  advancing `sim_time` by hand, because `year_fraction` is derived from `time`.
 
 ### Exchangers
 
@@ -506,12 +501,14 @@ between them run hourly inside a daily ocean coupling — the GFDL-style
 - **Each call gets its own clock.** The loop over the workflow is ordinary
   Python, run once at trace time, so which call this is — *k* of *n* — is a
   static number: call *k* of coupled step *s* is handed
-  `Coupler.coupling_time_at_substep(s, k, n)`, whose `step` is the sub-step
-  `s * n + k` (exact integer arithmetic on the int32 counter), whose `dt` is the
-  sub-timestep and whose `sim_time` is `(s * n + k) * dt`. `year_fraction`
-  keeps its exact integer reduction at the sub-rate too — an hourly sub-step
-  still divides a 365-day year — so the seasonal cycle does not quantise away
-  in a long run. Exchangers may be repeated as well and see the same clock.
+  `Coupler.coupling_time_at_substep(s, time, k, n)`, whose `step` is the
+  sub-step `s * n + k` (exact integer arithmetic on the int32 counter), whose
+  `dt` is the sub-timestep, whose `sim_time` is `(s * n + k) * dt` and whose
+  `time` is the carried `jax_datetime.Datetime` advanced to that sub-step.
+  `year_fraction` is `jcm.date.fraction_of_year_elapsed(time)` at the sub-rate
+  too — an hourly sub-step's own `time` is a real instant on the real
+  calendar, so the seasonal cycle does not quantise away in a long run.
+  Exchangers may be repeated as well and see the same clock.
 - **`CoupledCarry.step` still counts coupled steps.** The sub-step count is
   derived from it, never stored, so checkpoints, resume and chunked runs are
   untouched: a checkpoint of a run with multiplicity restores the coupled
@@ -581,18 +578,17 @@ model = Coupler(
 ```
 
 - **`bind`** requires the outer timestep to be a whole multiple of the inner
-  one, and the start date and calendar to be equal; anything else is a
+  one, and the start date to be equal; anything else is a
   `ValueError`, as it is for any other component with an internal timestep. It
   records the ratio *r* (24 here). Binding again to the same clock is a no-op,
   to a different one a `ValueError`: one instance belongs to one coupled model.
 - **`step`** runs *r* of the inner coupler's own coupled steps, through an
   unjitted trajectory (`lax.scan`, so the inner step appears once in the outer
   jaxpr rather than *r* times unrolled). The inner clock comes from the inner
-  carry's own `step` counter exactly as in a standalone run, so it is
+  carry's own `time`/`step` exactly as in a standalone run, so it is
   continuous across outer steps and survives a checkpoint; the outer `time` is
-  only checked against it — the static fields of a `CouplingTime` (`dt`,
-  `days_per_year`, `year_offset_seconds`) are comparable at trace time, the
-  step counter is a traced array. Calling `step` before `bind` is a
+  only checked against it — `dt` is static and comparable at trace time, the
+  step counter and the carried `Datetime` are traced values. Calling `step` before `bind` is a
   `RuntimeError`. For `r == 1` the inner step is run directly and the
   diagnostics gain no extra axis, mirroring multiplicity 1.
 - **The carry** of the inner coupler is a `CoupledCarry` living inside the
@@ -670,8 +666,8 @@ the carry the trajectory started from — and defaults to 0. **Pass it when
 writing a chunked run**, or the second chunk is labelled with the first chunk's
 dates.
 
-Each component is handed a `TimeAxis` (start date, the record's step indices,
-the record interval and the calendar) so every dataset from one run shares one
+Each component is handed a `TimeAxis` (start date, the record's step indices
+and the record interval) so every dataset from one run shares one
 time coordinate; `TimeAxis.datetimes()` and `TimeAxis.attrs` are the
 `(values, attrs)` pair xarray wants, and every component's `to_xarray` calls
 them directly.
@@ -698,26 +694,17 @@ The conventions, which are JCM's:
   float64, which is character for character what `jcm.utils.data_to_xarray`
   does. A last-bit difference would be enough for `xr.merge` to treat two
   96-point longitude axes as different axes and produce a 119-point union.
-- **The time label is the END of the interval a record covers**, as an absolute
-  `datetime64[ns]`: record *k* holds the average over
-  `[start_date + k dt, start_date + (k+1) dt)` and is stamped
-  `start_date + (k+1) dt`. This is JCM's convention, and `TimeAxis.datetimes()`
-  is the one place it is written down — including the arithmetic, a float64
-  count of days since the epoch multiplied into nanoseconds at the end, which
-  is inexact but *identically* inexact for every component that goes through
-  it. Each `to_xarray` hands those values, plus `TimeAxis.attrs`, straight to
-  xarray. The dates are proleptic Gregorian whatever the model calendar is;
-  the calendar governs the seasonal cycle and forcing selection, not the
-  labels. The consequence is a leap day: a `365_day` year is a day shorter
-  than a Gregorian leap year, so the labels fall a day further behind the
-  model calendar at every Gregorian 29 February — a run started on 1 January
-  2000 labels the instant the model calls 1 March 00:00 as `2000-02-29`, and
-  everything downstream that bins by the *label* parts company there from
-  everything that bins by the *model calendar* (see the `accumulate` section
-  below). The inconsistency is JCM's, recorded upstream as jax-gcm#449; JEM
-  mirrors it rather than emitting labels of its own, which would no longer
-  merge with the atmosphere's on one time axis. Calendar-consistent labels for
-  every component, the atmosphere's included, are tracked as #118.
+- **The time label is the MIDPOINT of the interval a record covers**, as an
+  absolute `datetime64[ms]`: record *k* holds the average over
+  `[start_date + k dt, start_date + (k+1) dt)` and is stamped at that
+  interval's midpoint, with a `time_bounds` variable carrying the interval's
+  start and end. `TimeAxis.datetimes()` computes those midpoints on host, in
+  numpy int64, identically to `jcm.predictions.output_time_labels`, so every
+  component's dataset merges with the atmosphere's on one exact time axis
+  (`xr.merge(join="exact")`). Each `to_xarray` hands those values, plus
+  `TimeAxis.attrs`, straight to xarray. The dates are `jax_datetime`'s
+  proleptic Gregorian — there is one clock and one calendar, so no component's
+  labels can disagree with another's about what day it is.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`, applied by
@@ -956,7 +943,7 @@ from jem import run_chunked
 
 result = run_chunked(
     coupler,
-    total_time="6 years",        # 2190 days: a whole number of chunks
+    total_time="2190 days",       # a whole number of chunks
     chunk="30 days",
     output_dir="output",
     output_averages=True,        # one record per chunk: its 30-day-window mean
@@ -990,8 +977,8 @@ a checkpoint restored, not the number of steps this call integrated),
 `accumulator` if the run was given a reduction.
 
 **Chunking rules.** `total_time` and `chunk` are `jcm.date.parse_duration_days`
-strings or numbers of days, parsed on the *coupler's* calendar, so `"1 year"` is
-as long as the atmosphere's year. Both must be whole multiples of the coupling
+strings or numbers of days — a fixed duration; `parse_duration_days` rejects a
+calendar unit such as `"year"` or `"month"` as not fixed. Both must be whole multiples of the coupling
 timestep — a coupled step is the smallest thing the loop can integrate — and
 `total_time` must be a whole multiple of `chunk`. All three are checked before
 anything is built or compiled, and each message names both quantities. A final
@@ -1205,18 +1192,19 @@ is itself responsible for.
 `output_averages=True` is defined against jcm's meaning of the same word
 rather than beside it: jcm replaces each saved record with the mean over its
 save interval, labelled at the
-interval's end, and the coupler's records are already one per coupling step — so
-the coupler's output interval is the **chunk**, and the flag replaces a chunk's
-records with their time mean, labelled with the chunk's last time and carrying
-the CF `cell_methods = "time: mean"` that says so. That label is the end of the
-chunk whether or not `subsample` kept the record sitting there, so a run that
+interval's midpoint, and the coupler's records are already one per coupling
+step — so the coupler's output interval is the **chunk**, and the flag replaces
+a chunk's records with their time mean, labelled with the chunk's midpoint and
+carrying the CF `cell_methods = "time: mean"` that says so, plus a
+`time_bounds` variable spanning the chunk. That label is the chunk's midpoint
+whether or not `subsample` kept the record sitting there, so a run that
 sets both still writes one evenly spaced mean per chunk; what varies is how
 many records went into each one, since the number of a chunk's steps the
 run-global stride keeps depends on where the chunk falls in the stride period.
 
 The bins are therefore the
 chunks: a 30-day chunk gives 30-day-*window* means, whose boundaries drift about
-five days a year against the calendar on a 365-day year, not monthly means —
+five days a year against the calendar months, not monthly means —
 those are `jem.accumulate.monthly_mean(coupler)` (twelve bins, a climatology)
 or `monthly_mean(coupler, total_time=…)` (one bin per month of the run), both
 of which bin by each record's own label.
@@ -1255,7 +1243,7 @@ a chunk of diagnostics:
 ```python
 monthly = monthly_mean(coupler)
 result = run_chunked(
-    coupler, total_time="6 years", chunk="30 days",     # 73 whole chunks
+    coupler, total_time="2190 days", chunk="30 days",   # 73 whole chunks
     health_check=None,                 # required: see below
     accumulate=monthly,
 )
@@ -1286,65 +1274,33 @@ three consequences are chosen rather than inherited:
   in one call.
 
 `monthly_mean` takes only the coupler: the accumulator's shapes come from
-`jax.eval_shape` of one coupled step, and a record's month is a `searchsorted`
-in a static table of month boundaries, reached from the record counter reduced
-modulo the records in a year — exact integer arithmetic, and one compiled
-trajectory for a whole year. Which month a record counts in follows the *end*
-of the interval it covers — the instant JEM labels it with — read on the model
-calendar, so `monthly.finalize(...)` and
-`to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers for a run whose output labels cross no Gregorian 29 February — for a
-component that records once per coupled step directly, and for one that records
-more often after its kept sub-step axis is folded with `fold_records` (below).
-
-That condition is the labels' calendar, not the binning: the labels are
-proleptic Gregorian whatever the model calendar is (above, and jax-gcm#449),
-while the bins are the model calendar's months. On a `365_day` run started on
-1 January 2000 — where the shipped examples start — the record the model calls
-1 March 00:00 is labelled `2000-02-29` and is accumulated into March, the one
-the model calls 1 April 00:00 is labelled `2000-03-31`, and so on for the rest
-of the Gregorian year. `groupby("time.month")` of the written output therefore
-moves the first record of every month from March on into the month before it,
-gives February the record the model calls 1 March (29 records where the
-accumulator's February holds 28), and hands December the year's wrap record —
-the one the model calls 1 January of the next year — that the twelve-bin form
-counts in January, while the accumulated bin stays the model's month, which is
-the month the forcing and the seasonal cycle follow. Reproducing `finalize`
-from the written output across a leap day means binning on model day-of-year
-(each label's offset from the start date in whole days) rather than on
-`time.month`. On `gregorian` the question does not arise, because
-`monthly_mean` refuses that calendar. Nothing in the reduction depends on
-whether #118 (calendar-consistent labels on JEM's side) or jax-gcm#449 (the
-same inconsistency in JCM's own output, recorded there as tracking only) is
-ever taken up. A calendar with no fixed
-table of month lengths (gregorian, with its leap years) and a coupling step
-that does not divide the year are refused with a message saying why, rather
-than binned approximately. Without `accumulate`, the generated function is what
-it always was.
+`jax.eval_shape` of one coupled step, and a record's bin is
+`jcm.date.gregorian_ymd_from_days` of its own interval midpoint (the same
+midpoint `TimeAxis.datetimes()` labels it with) — exact integer arithmetic, and
+one compiled trajectory whatever length the run is. Because the bin and the
+label are read from the same instant on the same calendar, `monthly.finalize(...)`
+and `to_xarray(...).groupby("time.month").mean()` of the same run are the same
+numbers exactly, leaf for leaf, whether or not the run crosses a 29 February —
+for a component that records once per coupled step directly, and for one that
+records more often after its kept sub-step axis is folded with `fold_records`
+(below). Without `accumulate`, the generated function is what it always was.
 
 **Twelve bins or one per month of the run.** `monthly_mean(coupler)` bins into
 the twelve calendar months, so a ten-year run composites its ten Januaries into
 bin 0 — a climatology, and what a fixed `(12, …)` accumulator is for.
-`monthly_mean(coupler, total_time="10 years")` (or `n_months=`) instead gives
+`monthly_mean(coupler, total_time="3650 days")` (or `n_months=`) instead gives
 the months the run passes through, in order, each with a bin of its own: the
-same month table rotated to the month the run starts in and phased to the start
-date, so it is calendar months whatever day the run begins on. It is sized by
-counting the months the run's labels touch, which is why ten years gives 121
-bins and not 120 — the last record is labelled 00:00 on 1 January of the
-eleventh year, which is that January's record, and without a bin for it the
-accumulator would wrap it into bin 0 and quietly spoil the first January. A run
-longer than the accumulator wraps at the **span** of its bins, exactly as a
-windowed mean wraps at the span of its windows — so a wrapped bin lines up with
-a calendar month only when `n_months` is a multiple of twelve, and otherwise
-holds parts of two (six bins from 1 January span 181 days, and the second
-August of the run splits 28 records into the February bin and 3 into March's).
+months rotated to start at the month the run itself starts in, so it is
+calendar months whatever day the run begins on. It is sized by counting the
+distinct Gregorian months the run's records touch, which is why ten years
+(3650 days) gives 121 bins and not 120 — the last record's midpoint falls in
+January of the eleventh year, and without a bin for it the accumulator would
+wrap it into bin 0 and quietly spoil the first January. A run longer than the
+accumulator wraps at the **span** of its bins, exactly as a windowed mean wraps
+at the span of its windows — so a wrapped bin lines up with a calendar month
+only when `n_months` is a multiple of twelve, and otherwise holds parts of two.
 `total_time`, which sizes the accumulator so that it is never wrapped into, is
-the form to prefer. That span is rounded up to the next whole coupled step,
-because the record counter is reduced modulo it and a whole number of calendar
-months need not be a whole number of steps (a 5-day coupling divides the
-365-day year but not 59 days of January and February); the wrap moves by less
-than one step, every bin boundary stays exact, and nothing that is meaningful
-in the first place can see it.
+the form to prefer.
 
 **Any fixed set of bins, not only the months.** A calendar month is one binning
 of a run; a sub-seasonal forecast is scored on another — 5-day and 7-day means.
@@ -1354,18 +1310,19 @@ under two public builders, returning the same `BinnedMean` named tuple with the
 same `finalize`:
 
 ```python
-from jem.accumulate import month_lengths, monthly_mean, windowed_mean
+from jem.accumulate import monthly_mean, windowed_mean
 
-monthly = monthly_mean(coupler)                                  # 12 bins
-months  = monthly_mean(coupler, total_time="10 years")           # 121: every month
-pentads = windowed_mean(coupler, "5 days", n_windows=73)         # a year of them
-weeks   = windowed_mean(coupler, "7 days", total_time="1 year")  # 53: the last is short
-leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],    # a pattern, cycled
+monthly = monthly_mean(coupler)                                   # 12 bins
+months  = monthly_mean(coupler, total_time="3650 days")           # 121: every month
+pentads = windowed_mean(coupler, "5 days", n_windows=73)          # a year of them
+weeks   = windowed_mean(coupler, "7 days", total_time="365 days") # 53: the last is short
+leads   = windowed_mean(coupler, [1, 1, 1, 1, 1, 1, 1, 5, 5],     # a pattern, cycled
                         total_time="30 days")
 ```
 
-`window` is a `jcm.date.parse_duration_days` string or a number of days, parsed
-on the coupler's calendar, and must be a whole number of coupling steps — a
+`window` is a `jcm.date.parse_duration_days` string or a number of days — a
+fixed duration, not a calendar unit — and must be a whole number of coupling
+steps — a
 window ending part-way through a step could only be filled by splitting that
 step between two windows. The accumulator's size is `n_windows`, given directly
 or counted from `total_time` (rounding *up*, so a run that does not divide into
@@ -1382,52 +1339,49 @@ pattern.
 
 **A window is not a calendar month, whatever its length.** Every window is
 measured from the run's own start date, with no phase and no reference to the
-calendar, so the month lengths of `month_lengths()` — which are always
-January-first — are calendar months only for a run starting at 00:00 on 1
-January; from 1 July they would bin the first 31 days together, then 28. That
+calendar, so a 31-day window is calendar-month-length only by coincidence and
+never adapts to how long the *actual* month it overlaps is. That
 is why the per-month reduction is `monthly_mean(coupler, total_time=…)` and not
 a pattern handed to `windowed_mean`, and why `windowed_mean` has no `offset=`
 knob to fix it with: the builder that knows where in the calendar a run starts
-is the one that should own the phase. The two also close on opposite sides —
-a window at its end, a calendar month at its start (below) — so even from 1
-January a 31-day window and January differ by the record labelled 00:00 on 1
-February. No `inclusive=` knob is offered to mix them either: each convention is
-what makes its own builder agree with the thing it has to agree with (a
-forecast's first pentad is days 1–5; a monthly mean is `groupby("time.month")`
-of the written output, for a run whose labels cross no Gregorian 29 February).
+is the one that should own the phase. No `inclusive=` knob is offered on
+`monthly_mean` either: each builder is what makes its own convention agree with
+the thing it has to agree with (a
+forecast's first pentad is days 1–5; a monthly mean is exactly
+`groupby("time.month")` of the written output, for any run).
 
-Both binnings follow the **label** of the record a step produces — the end of
-the coupling interval — rather than where the interval starts. The boundaries
-close in opposite directions because the bins are defined by different things:
-window *w* is the labels in `(w·window, (w+1)·window]`, closed at the end
-because a window is itself an interval and JEM labels an interval at its end
-(so the first 5-day window with daily coupling is the records labelled day 1 to
-day 5, which is what a forecast means by the first pentad), while a calendar
-month is closed at its start because that is what `groupby("time.month")` does
-and a monthly mean has to agree with the written output — up to the leap-day
-difference above, which is a property of the labels' calendar rather than of
-which side a boundary closes on.
+`windowed_mean` and `monthly_mean` bin by different things, not by one shared
+rule. `windowed_mean` is `_variable_window_rule(boundaries_seconds,
+offset_seconds, inclusive)`: bins laid end to end as a cumulative sum of
+lengths, measured purely by ordinal record count from the run's start (record
+*k* is treated, for this count alone, as ending on day *k + 1*), closed at the
+end because a window is itself an interval (so the first 5-day window with
+daily coupling is "days 1 to 5", what a forecast means by the first pentad).
+Inside the scan it is a `searchsorted` in a static table, after the record
+counter is reduced modulo the records in one period of the bins — which is
+both what wraps a long run and what keeps the arithmetic inside int32. The
+boundaries themselves are converted from seconds to record counts on the host,
+in int64, so nothing in the traced code multiplies a counter that grows with
+the run: a table of seconds would pass 2³¹ after 68 simulated years and wrap to
+nonsense.
 
-Both rules are therefore one private
-`_variable_window_rule(boundaries_seconds, offset_seconds, inclusive)`: bins laid
-end to end as a cumulative sum of lengths, a phase (0 for windows the run
-defines; the run's offset into the calendar year for the twelve-month
-climatology, and into its own first month for the sequential form) and which
-side a boundary closes on. Inside the scan it is a `searchsorted` in a static table,
-after the record counter is reduced modulo the records in one period of the
-bins — which is both what wraps a long run and what keeps the arithmetic
-inside int32. The boundaries themselves are converted from seconds to record
-counts on the host, in int64, so nothing in the traced code multiplies a
-counter that grows with the run: a table of seconds would pass 2³¹ after 68
-simulated years and wrap to nonsense.
+`monthly_mean` bins by the record's own **midpoint label** instead — the same
+instant `TimeAxis.datetimes()` writes to the output — read as a real Gregorian
+`(year, month)` by `jcm.date.gregorian_ymd_from_days`
+(`_record_month`/`_months_covering_gregorian`); there is no fixed-length table
+or boundary-closing convention to choose, because a calendar month already has
+a real length and a real position in the year.
 
 **A coupled step is not always one record.** A component the workflow runs
-*n* times per coupled step emits *n* records, each labelled at the end of its
-own sub-interval, and a nested coupler's inner steps are records in the same
-way — so a coupled step's records need not all fall in the same bin. The 24
-hourly records of the daily step covering 31 January are labelled 01:00 on the
-31st through 00:00 on 1 February: 23 in January, one in February, exactly as
-`to_xarray` writes them. Each record is therefore binned by **its own** label,
+*n* times per coupled step emits *n* records, each labelled at its own
+sub-interval's midpoint, and a nested coupler's inner steps are records in the
+same way — so a coupled step's records need not all fall in the same bin. For
+a whole-day coupling step, a sub-hourly record's midpoint never crosses into
+the next calendar day, so the 24 hourly records of the daily step covering 31
+January are all labelled within 31 January and all bin into January; a step
+that straddles a month boundary some other way (a sub-daily component whose own
+step does not start at 00:00, say) can still split across two bins. Each
+record is therefore binned by **its own** label,
 from the coupler's own sub-step clock (`coupling_time_at_substep`), and the
 sub-step axis is kept rather than folded: that component accumulates into
 `(n_bins, n, …)`, bin *b* slot *j* holding the records of call *j* that fell in
@@ -1695,34 +1649,10 @@ note, which is the truthful record for a coupled run: the trajectory is traced
 once and scanned, so those parameter values are read from the live physics
 afterwards rather than captured at trace time.
 
-The atmosphere's output still keeps JCM's own `time` labelling, and
-`TimeAxis.datetimes()` still reproduces JCM's *output* arithmetic rather than
-calling JCM. That is now a decision, not a gap. jax-gcm#824 also made
-`Model.date_from_sim_time` public, but it is the **model clock** conversion —
-exact integer day/second arithmetic on the model calendar, returning a
-`DateData` for forcing and physics — whereas the labels have to match the
-float64 days-since-epoch product in `ModelPredictions._trajectory_dataset`,
-which is what JCM's own output files carry and is still internal. Adopting the
-clock conversion would give the exact nanosecond count where that product has
-a 128 ns ulp. The two agree for a coupling step that is a power-of-two
-fraction of a day — every configuration JAX-ESM ships — and disagree for one
-that is not: a 10- or 20-minute step puts about half the labels 128 ns off, at
-which point a slab dataset and the atmosphere's no longer share a time axis and
-`xr.merge` returns a 2N-long union. Sharing one computation needs JCM to
-publish its *output* labelling, which is jax-gcm#862 — jax-gcm#824 published
-the clock, not the labelling; the reasoning is recorded on `TimeAxis`.
-
-Each `step` also compares the dycore state's own `sim_time` with the coupler's
-and logs at ERROR if they have parted, which can only happen if the carry came
-from another run. The tolerance is `clock_tolerance_seconds(sim_time)` — one
-second, or eight float32 ulps of the elapsed time, whichever is larger — so the
-check neither fires on the rounding of a long run's float32 clock nor stops
-noticing a real disagreement.
-
-`VerosComponent.step` makes the same comparison against Veros'
-`variables.time`, from the same tolerance
-(`jem.components.clock.clock_tolerance_seconds`, which is where it lives so the
-two wrappers cannot answer the question differently). Veros has no calendar, so
+`VerosComponent.step` compares Veros' own `variables.time` against the
+coupler's clock, within `clock_tolerance_seconds`
+(:func:`jem.components.clock.clock_tolerance_seconds`) — one second, or eight
+float32 ulps of the elapsed time, whichever is larger. Veros has no calendar, so
 its counter is not seconds since the coupler's `start_date` but seconds since
 its setup's own start: `bind` records the reading the setup holds when the
 coupler adopts it, and the check compares `variables.time` minus that zero
