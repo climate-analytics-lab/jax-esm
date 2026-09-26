@@ -1563,11 +1563,28 @@ class Coupler:
         # See `save_carry` for why this import is not at module scope.
         from jem.checkpoint import load_coupled_carry
 
-        return load_coupled_carry(
+        carry = load_coupled_carry(
             directory,
             self._plain_component_templates(),
             component_loaders=self._component_loaders(),
         )
+        # Output labels are built from this coupler's start date and timestep,
+        # so a checkpoint whose clock does not sit on them (the start date or
+        # timestep was changed between runs) would be integrated on one clock
+        # and labelled on another.
+        step = int(carry.step)
+        saved = np.asarray(jax.device_get(carry.time).to_datetime64(), "datetime64[s]")
+        expected = np.asarray(
+            self._start_date.to_datetime64(), "datetime64[s]"
+        ) + np.timedelta64(step * int(self._dt_seconds), "s")
+        if saved != expected:
+            raise ValueError(
+                f"{self.name}: checkpoint {directory} is at {saved} after "
+                f"{step} steps, but this coupler's start date and timestep put "
+                f"step {step} at {expected}. Resume with the configuration the "
+                "run was started with."
+            )
+        return carry
 
     def __repr__(self) -> str:
         """Return a summary naming the components, exchangers, order and clock.

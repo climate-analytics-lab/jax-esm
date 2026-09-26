@@ -636,6 +636,34 @@ def test_a_coupled_run_resumes_from_its_own_checkpoint(tmp_path):
     assert_trees_equal(resumed, continuous)
 
 
+@pytest.mark.parametrize(
+    "start, days", [("2001-01-01", 2), ("2001-01-01", 1), ("2002-01-01", 1)]
+)
+def test_a_checkpoint_is_refused_by_a_coupler_on_another_clock(tmp_path, start, days):
+    """A resume with a changed start date or timestep is refused, not relabelled."""
+    import jax_datetime as jdt
+
+    from jem.base.coupler import Coupler
+
+    def build(start, days):
+        return Coupler(
+            {"ocn": DriftingCounter()},
+            coupling_timestep=jdt.to_timedelta(days, "day"),
+            start_date=jdt.to_datetime(start),
+        )
+
+    model = build("2001-01-01", 1)
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+    model.save_carry(carry, tmp_path / "checkpoint")
+
+    resumed = build(start, days)
+    if (start, days) == ("2001-01-01", 1):
+        assert int(resumed.load_carry(tmp_path / "checkpoint").step) == 2
+    else:
+        with pytest.raises(ValueError, match="configuration the run was started with"):
+            resumed.load_carry(tmp_path / "checkpoint")
+
+
 # ---------------------------------------------------------------------------
 # How much of a chunked run is left
 # ---------------------------------------------------------------------------
