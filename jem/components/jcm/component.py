@@ -75,12 +75,9 @@ from jem.base.component import (
     TimeAxis,
     role_attrs,
 )
-from jem.components.clock import clock_tolerance_seconds
 from jem.components.jcm import exchange_fields
 
 logger = logging.getLogger(__name__)
-
-SECONDS_PER_DAY = 86400.0
 
 #: Fields of :class:`jcm.forcing.ForcingData` that a coupled run's exchangers
 #: write -- the surface boundary conditions an uncoupled JCM run prescribes
@@ -190,14 +187,21 @@ def _with_model_context(predictions: ModelPredictions,
 def _diagnostics_template(model: Model) -> Any:
     """Structural template matching one step's saved physics diagnostics.
 
-    JCM's averaged output path accumulates the per-step diagnostics dict
-    into a float-cast zero template built from
-    ``Physics.get_empty_data(coords)``, minus the ``_sampler_state`` entry,
-    which stays in the integration carry but is never saved. Reproducing
-    both transforms here is what lets :meth:`JCMComponent.initialize` seed
-    ``JCMDerived.physics`` with the exact structure, shapes and dtypes step
-    1 will produce — without integrating a step to find out, which is what
-    the previous adapter did.
+    Built from ``Physics.get_empty_data(coords)``, minus the
+    ``_sampler_state`` entry, which stays in the integration carry but is
+    never saved. Reproducing both here is what lets
+    :meth:`JCMComponent.initialize` seed ``JCMDerived.physics`` with the
+    exact structure, shapes and dtypes step 1 will produce — without
+    integrating a step to find out, which is what the previous adapter did.
+
+    Only the **inexact** (float) leaves are cast to the default float dtype
+    (float64 under ``jax_enable_x64``, else float32): JCM's averaged output
+    path (``jcm.model._averaged_outer_step``) means every inexact leaf --
+    dividing by the number of inner steps -- but keeps an integer or boolean
+    diagnostic (a convection type flag, a cloud-top switch) at its own,
+    unaveraged dtype, which ``get_empty_data`` already reports correctly; a
+    blanket float cast would disagree with that leaf's real dtype from the
+    first coupled step on.
 
     A mismatch would surface as a ``lax.scan`` carry-structure error on the
     first coupled step, so it is checked directly by the component's tests
@@ -205,11 +209,14 @@ def _diagnostics_template(model: Model) -> Any:
     """
     template = model.physics.get_empty_data(model.coords)
     template = {k: v for k, v in template.items() if k != "_sampler_state"}
-    # ``dtype=float`` (the default float type, so float64 under
-    # jax_enable_x64) exactly mirrors JCM's own accumulator, which promotes
-    # every leaf — integer and boolean ones included — because it divides by
-    # the number of inner steps.
-    return jax.tree.map(lambda leaf: jnp.zeros_like(leaf, dtype=float), template)
+    return jax.tree.map(
+        lambda leaf: (
+            jnp.zeros_like(leaf, dtype=float)
+            if jnp.issubdtype(leaf.dtype, jnp.inexact)
+            else jnp.zeros_like(leaf)
+        ),
+        template,
+    )
 
 
 def _forcing_field_names() -> frozenset[str]:
@@ -226,7 +233,6 @@ def _collapse_exchanged_forcing(
     forcing: ForcingData,
     names: tuple[str, ...],
     date: jdt.Datetime,
-    calendar: str,
 ) -> ForcingData:
     """Return ``forcing`` with the ``names`` fields taken at ``date``.
 
@@ -258,9 +264,6 @@ def _collapse_exchanged_forcing(
         Fields of ``ForcingData`` the coupled model supplies.
     date : jax_datetime.Datetime
         The run's start date.
-    calendar : str
-        The model's calendar, which decides how a wrap-year climatology is
-        indexed.
 
     Returns
     -------
@@ -269,7 +272,7 @@ def _collapse_exchanged_forcing(
     """
     if not names:
         return forcing
-    at_date = forcing.select(DateData.set_date(date), calendar=calendar)
+    at_date = forcing.select(DateData.set_date(date))
     # ``tree_math.struct`` generates ``replace`` at runtime, so mypy cannot
     # see it on the struct.
     return forcing.replace(  # type: ignore[no-any-return]
@@ -280,12 +283,21 @@ def _collapse_exchanged_forcing(
 def _collapse_save_axis(leaf: jnp.ndarray) -> jnp.ndarray:
     """Merge a stacked leaf's ``(coupling step, save)`` axes into one time axis.
 
-    Each coupled step runs JCM for exactly one save interval, so every leaf
-    the coupler stacks is ``(iterations, 1, ...)``; JCM's own serialization
-    wants a single leading time axis.
+    Each coupled step runs JCM for exactly one save interval, so every
+    *per-record* leaf the coupler stacks is ``(iterations, 1, ...)``; JCM's
+    own serialization wants a single leading time axis.
+
+    A leaf that was already scalar per step -- ``time_cell_method``, set once
+    from the constant ``output_averages`` every ``JCMComponent.step`` passes
+    -- gains only the coupler's own leading axis, so it comes back
+    ``(iterations,)`` rather than ``(iterations, 1)``. It is collapsed to
+    that first (and, being constant for the run, only distinct) value here,
+    because ``ModelPredictions.time_labels``/``to_xarray`` read it with a
+    bare ``bool(...)`` and reject an array of more than one element.
     """
-    if getattr(leaf, "ndim", 0) < 2:
-        return leaf
+    ndim = getattr(leaf, "ndim", 0)
+    if ndim < 2:
+        return leaf[0] if ndim == 1 else leaf
     return leaf.reshape((-1, *leaf.shape[2:]))
 
 
@@ -299,8 +311,8 @@ class JCMComponent:
     Parameters
     ----------
     model : jcm.model.Model
-        A fully configured JCM model. Its ``start_date`` and ``calendar``
-        must match the coupler's; :meth:`bind` checks that.
+        A fully configured JCM model. Its ``start_time`` must match the
+        coupler's; :meth:`bind` checks that.
     forcing : jcm.forcing.ForcingData, optional
         Boundary conditions for the atmosphere. Defaults to JCM's
         :func:`~jcm.forcing.default_forcing` (prescribed SSTs) on the
@@ -435,7 +447,6 @@ class JCMComponent:
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str,
     ) -> None:
         """Adopt the coupler's clock, or refuse if the model disagrees with it.
 
@@ -447,34 +458,25 @@ class JCMComponent:
             timesteps and a coupling interval that is not a multiple of one
             would silently be rounded.
         start_date : jax_datetime.Datetime
-            The run's start date; must equal ``model.start_date``.
-        calendar : str
-            The run's calendar; must equal ``model.calendar``.
+            The run's start date; must equal ``model.start_time``.
 
         Raises
         ------
         ValueError
-            If the timestep does not divide, or either clock setting
-            differs. The message names both values: a mismatch here means
-            the atmosphere would date its own forcing and output
-            differently from every other component. Also if the component
-            is already bound to a different coupling timestep (binding it
-            again to the same clock is a no-op).
+            If the timestep does not divide, or the start date differs. The
+            message names both values: a mismatch here means the atmosphere
+            would date its own forcing and output differently from every
+            other component. Also if the component is already bound to a
+            different coupling timestep (binding it again to the same clock
+            is a no-op).
 
         """
-        if str(calendar) != str(self.model.calendar):
-            raise ValueError(
-                f"Calendar mismatch: the coupler runs {calendar!r} but"
-                f" {self.name!r} was built with"
-                f" {self.model.calendar!r}. Rebuild the model with"
-                " calendar=<coupler calendar>."
-            )
-        if start_date != self.model.start_date:
+        if start_date != self.model.start_time:
             raise ValueError(
                 f"Start-date mismatch: the coupler starts at {start_date!r}"
                 f" but {self.name!r} was built with"
-                f" {self.model.start_date!r}. Rebuild the model with"
-                " start_date=<coupler start date>."
+                f" {self.model.start_time!r}. Rebuild the model with"
+                " start_time=<coupler start date>."
             )
         model_timestep = jdt.to_timedelta(
             int(self.model.dt_si.to_timedelta().total_seconds()), "second")
@@ -513,6 +515,7 @@ class JCMComponent:
         -------
         dict
             ``{"state": dycore state, "physics": cross-step physics carry,
+            "time": jcm's own clock, "step": jcm's own step counter,
             "derived": JCMDerived, "forcing": ForcingData}``.
 
         """
@@ -520,13 +523,14 @@ class JCMComponent:
         return {
             "state": dycore_state,
             "physics": physics_carry,
+            "time": self.model.start_time,
+            "step": jnp.int32(0),
             "derived": JCMDerived.zeros(
                 self.nodal_shape, _diagnostics_template(self.model)),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
-                self.model.start_date,
-                self.model.calendar,
+                self.model.start_time,
             ),
         }
 
@@ -560,15 +564,17 @@ class JCMComponent:
                 " timestep: register it with a Coupler (which calls bind())"
                 " before stepping it."
             )
-        self._report_clock_drift(carry["state"], time)
+        self._report_clock_drift(carry["time"], time)
 
-        state, physics_carry, predictions = self.model.run_from_state_with_carry(
+        run_state, predictions = self.model.run_from_state_with_carry(
             initial_state=carry["state"],
             forcing=carry["forcing"],
             save_interval=self._coupling_days,
             total_time=self._coupling_days,
             output_averages=True,
             initial_physics_state=carry["physics"],
+            initial_time=carry["time"],
+            initial_step=carry["step"],
         )
         # One coupling step is exactly one save interval, so the saved
         # trajectory has a length-1 leading axis; the derived fields are
@@ -588,8 +594,10 @@ class JCMComponent:
         )
         return (
             {
-                "state": state,
-                "physics": physics_carry,
+                "state": run_state.dynamics,
+                "physics": run_state.physics,
+                "time": run_state.time,
+                "step": run_state.step,
                 "derived": derived,
                 "forcing": carry["forcing"],
             },
@@ -624,17 +632,14 @@ class JCMComponent:
         than guessed at, because JCM owns those names and their meaning.
 
         The ``time`` coordinate is JCM's, not the coupler's: JCM labels each
-        averaged record with the **end** of the interval it covers
-        (``datetime64[ns]``, absolute, from the model's own ``start_date``),
-        and JEM does not relabel it, because a coupled dataset in which the
-        atmosphere's time axis disagrees with the atmosphere's own output
-        files would be worse than one where two components label the same
-        interval differently. The labels the other components carry come from
-        ``TimeAxis.datetimes``, which reproduces JCM's *output* arithmetic
-        rather than calling ``Model.date_from_sim_time`` -- public since
-        jax-gcm#824, but a different conversion, for the reason set out on
-        :class:`jem.base.component.TimeAxis`. Publishing the labelling
-        itself is jax-gcm#862.
+        averaged record with its interval's **midpoint** (``datetime64[ms]``,
+        absolute, from the model's own ``start_time``), and JEM does not
+        relabel it, because a coupled dataset in which the atmosphere's time
+        axis disagrees with the atmosphere's own output files would be worse
+        than one where two components label the same interval differently.
+        The labels the other components carry come from
+        ``TimeAxis.datetimes``, the same convention computed independently on
+        the host so every component's dataset merges with the atmosphere's.
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)
@@ -656,20 +661,15 @@ class JCMComponent:
                 }
         return dataset
 
-    def _report_clock_drift(self, state: Any, time: CouplingTime) -> None:
-        """Log at ERROR if the dycore state's own clock has left the coupler's.
+    def _report_clock_drift(self, carry_time: jdt.Datetime, time: CouplingTime) -> None:
+        """Log at ERROR if the carry's own clock has left the coupler's.
 
-        The dycore state carries its own ``sim_time`` in seconds and JCM
-        advances it independently of the coupler's step counter, so the two
-        can only disagree if the carry did not come from this run: a
-        checkpoint restored into a coupler with a different start date, or a
-        carry threaded into the wrong component.
-
-        The tolerance grows with simulation time
-        (:func:`jem.components.clock.clock_tolerance_seconds`, shared with the
-        other wrappers that make this check), because both counters are
-        float32 by default and would otherwise disagree by float32 rounding
-        alone after a few decades.
+        ``carry_time`` is JCM's own clock, threaded through the carry from
+        its previous ``run_from_state_with_carry`` and fed back in as
+        ``initial_time`` on the next step; it can only disagree with the
+        coupler's if the carry did not come from this run: a checkpoint
+        restored into a coupler with a different start date, or a carry
+        threaded into the wrong component.
 
         Reported rather than raised, and through ``jax.debug.callback``
         rather than ``checkify``: the check runs inside the coupled
@@ -677,21 +677,23 @@ class JCMComponent:
         and where aborting the scan would throw away a run that may still be
         salvageable. The message is loud enough to find in a log.
         """
-        state_sim_time = self.model.dycore.sim_time(state)
         name = self.name
 
-        def _report(model_seconds, coupler_seconds) -> None:
-            drift = float(model_seconds) - float(coupler_seconds)
-            # The tolerance is set by the COUPLER's time: it is the one that
-            # is right by construction, so a model clock that is wildly wrong
-            # cannot widen the window that would catch it.
-            if abs(drift) > clock_tolerance_seconds(coupler_seconds):
+        def _report(model_days, model_seconds, coupler_days, coupler_seconds) -> None:
+            if int(model_days) != int(coupler_days) or int(model_seconds) != int(
+                coupler_seconds
+            ):
                 logger.error(
-                    "%s: model clock is %.6g s from the coupler's"
-                    " (model %.6g s, coupler %.6g s). The atmosphere will"
-                    " date its forcing and output differently from the rest"
-                    " of the coupled model.",
-                    name, drift, float(model_seconds), float(coupler_seconds),
+                    "%s: model clock (day %d, %d s) disagrees with the"
+                    " coupler's (day %d, %d s). The atmosphere will date its"
+                    " forcing and output differently from the rest of the"
+                    " coupled model.",
+                    name, int(model_days), int(model_seconds),
+                    int(coupler_days), int(coupler_seconds),
                 )
 
-        jax.debug.callback(_report, state_sim_time, time.sim_time)
+        jax.debug.callback(
+            _report,
+            carry_time.delta.days, carry_time.delta.seconds,
+            time.time.delta.days, time.time.delta.seconds,
+        )
