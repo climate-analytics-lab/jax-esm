@@ -192,7 +192,8 @@ def test_jcm_run_group_is_not_shadowed():
 
     cfg = composed(["+configuration@atmosphere=t63-echam-1m"])
     # JCM's own run/longrun.yaml, not anything of ours.
-    assert cfg.atmosphere.run.total_time == 365
+    longrun = OmegaConf.load(JCM_CONFIG_DIR / "run" / "longrun.yaml")
+    assert cfg.atmosphere.run.total_time == longrun.total_time
     assert "time_step" in cfg.atmosphere.run
     assert cfg.coupled_run.total_time == "30 days"
 
