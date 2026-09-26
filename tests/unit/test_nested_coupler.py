@@ -318,37 +318,25 @@ def test_bind_refuses_a_timestep_that_does_not_divide():
         )
 
 
-def test_bind_refuses_a_different_start_date_or_calendar():
+def test_bind_refuses_a_different_start_date():
     with pytest.raises(ValueError, match="Start-date mismatch"):
         Coupler(
             {"atm_lnd": fast_coupler()},
             coupling_timestep=COUPLING_TIMESTEP,
             start_date=jdt.to_datetime("2002-01-01"),
         )
-    with pytest.raises(ValueError, match="Calendar mismatch"):
-        Coupler(
-            {"atm_lnd": fast_coupler()},
-            coupling_timestep=COUPLING_TIMESTEP,
-            start_date=START_DATE,
-            calendar="gregorian",
-        )
 
 
 def test_rebinding_is_a_no_op_for_the_same_clock_and_refused_for_another():
     coupler = fast_coupler()
-    coupler.bind(
-        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar="365_day"
-    )
-    coupler.bind(
-        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar="365_day"
-    )
+    coupler.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
+    coupler.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
     assert coupler.outer_ratio == 24
 
     with pytest.raises(ValueError, match="already bound"):
         coupler.bind(
             coupling_timestep=jdt.to_timedelta(2, "day"),
             start_date=START_DATE,
-            calendar="365_day",
         )
     assert coupler.outer_ratio == 24
 
@@ -356,22 +344,20 @@ def test_rebinding_is_a_no_op_for_the_same_clock_and_refused_for_another():
 def test_stepping_an_unbound_coupler_as_a_component_is_an_error():
     coupler = fast_coupler()
     with pytest.raises(RuntimeError, match="has not been bound"):
-        coupler.step(coupler.initialize(), coupler.coupling_time(0))
+        coupler.step(coupler.initialize(), coupler.coupling_time(0, START_DATE))
 
 
 def test_a_clock_from_another_coupler_is_refused():
     """Only the static fields can be checked, and they are enough."""
     coupler = fast_coupler()
-    coupler.bind(
-        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar="365_day"
-    )
+    coupler.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
     other = Coupler(
         {"ocn": Counter("ocn")},
         coupling_timestep=jdt.to_timedelta(2, "day"),
         start_date=START_DATE,
     )
     with pytest.raises(ValueError, match="dt="):
-        coupler.step(coupler.initialize(), other.coupling_time(0))
+        coupler.step(coupler.initialize(), other.coupling_time(0, START_DATE))
 
 
 def test_a_nested_coupler_of_equal_timestep_adds_no_axis():
@@ -433,15 +419,17 @@ def test_to_xarray_flattens_the_inner_datasets_onto_the_inner_axis():
     # The nested coupler's own registered name does not appear; its
     # components' names do.
     assert set(datasets) == {"atm", "lnd", "ocn"}
-    hourly = np.datetime64("2001-01-01", "ns") + np.arange(1, 49) * np.timedelta64(
-        1, "h"
-    )
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(48) * 60 + 30
+    ) * np.timedelta64(1, "m")
     assert datasets["atm"].sizes["time"] == 48
     np.testing.assert_array_equal(datasets["atm"].time.values, hourly)
     np.testing.assert_array_equal(datasets["lnd"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["ocn"].time.values,
-        np.array(["2001-01-02", "2001-01-03"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-01T12:00", "2001-01-02T12:00"], dtype="datetime64[ms]"
+        ),
     )
 
 
@@ -451,13 +439,15 @@ def test_to_xarray_of_a_chunk_labels_the_inner_axis_from_the_outer_step():
 
     datasets = model.to_xarray(diagnostics, first_step=2)
 
-    hourly = np.datetime64("2001-01-01", "ns") + np.arange(49, 97) * np.timedelta64(
-        1, "h"
-    )
+    hourly = np.datetime64("2001-01-01", "ms") + (
+        np.arange(48, 96) * 60 + 30
+    ) * np.timedelta64(1, "m")
     np.testing.assert_array_equal(datasets["atm"].time.values, hourly)
     np.testing.assert_array_equal(
         datasets["ocn"].time.values,
-        np.array(["2001-01-04", "2001-01-05"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-03T12:00", "2001-01-04T12:00"], dtype="datetime64[ms]"
+        ),
     )
 
 

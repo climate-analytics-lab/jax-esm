@@ -49,7 +49,6 @@ from jem.exchangers import (
 from tests.unit.slab_test_utils import make_grid
 
 START_DATE = jdt.to_datetime("2001-01-01")
-CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 #: The standard wiring, written out here independently of the module under
@@ -270,7 +269,6 @@ def build_coupler(components, exchangers) -> Coupler:
         exchangers,
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar=CALENDAR,
     )
 
 
@@ -359,7 +357,7 @@ def test_exchange_roundtrip(components):
     incoming = dict(carry.components)
     leaves_before = jax.tree_util.tree_leaves(incoming)
 
-    exchanged = exchange(incoming, coupler.coupling_time(carry.step))
+    exchanged = exchange(incoming, coupler.coupling_time(carry.step, carry.time))
 
     # Values moved: each destination now holds the very array the source did.
     assert (
@@ -523,7 +521,7 @@ def test_regrid_spec_applies_the_named_regridder(components):
     coupler = build_coupler(components, {"exchange": exchange})
     carries = coupler.initialize().components
 
-    exchanged = exchange(dict(carries), coupler.coupling_time(0))
+    exchanged = exchange(dict(carries), coupler.coupling_time(0, coupler.start_date))
 
     assert len(calls) == 1
     np.testing.assert_allclose(
@@ -738,7 +736,7 @@ def test_exchange_unknown_field_raises_at_validate(components):
     # And the same failure at trace time, so a runner that skipped the
     # pre-flight still gets a message that names the spec.
     with pytest.raises(ValueError, match="ocn.state.surface_temperature"):
-        exchange(dict(carries), coupler.coupling_time(0))
+        exchange(dict(carries), coupler.coupling_time(0, coupler.start_date))
 
 
 def test_exchange_unknown_destination_field_raises(components):
@@ -750,7 +748,7 @@ def test_exchange_unknown_destination_field_raises(components):
     with pytest.raises(ValueError, match="atm.forcing.sst"):
         exchange.validate(carries)
     with pytest.raises(ValueError, match="atm.forcing.sst"):
-        exchange(dict(carries), coupler.coupling_time(0))
+        exchange(dict(carries), coupler.coupling_time(0, coupler.start_date))
 
 
 def test_exchange_unknown_component_raises(components):

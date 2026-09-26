@@ -8,13 +8,14 @@ A ``Coupler`` is the whole definition of a coupled model:
   namespace shared by exchangers and components. It may be nested, and a name
   may appear more than once, which is how a component runs on a faster clock
   than the coupled one;
-- **on what clock** -- the coupling timestep, start date and calendar. The
-  coupler owns the only clock in the system. Components hold no time state of
-  their own; each ``step`` is handed a :class:`~jem.base.component.CouplingTime`
-  built from the step counter that lives in the carry, so two components can
-  never disagree about the date, and the date survives chunked runs and
-  checkpoint restarts (a ``lax.scan`` index restarts at zero on every call; the
-  carry does not).
+- **on what clock** -- the coupling timestep and start date. The coupler owns
+  the only clock in the system: a ``jax_datetime.Datetime`` carried in
+  :class:`~jem.base.component.CoupledCarry` and advanced by the coupling
+  timestep every step. Components hold no time state of their own; each ``step`` is handed a
+  :class:`~jem.base.component.CouplingTime` built from that carried clock, so
+  two components can never disagree about the date, and the date survives
+  chunked runs and checkpoint restarts (a ``lax.scan`` index restarts at zero
+  on every call; the carry does not).
 
 A ``Coupler`` is itself a :class:`~jem.base.component.Component`: it has a
 ``name``, an ``initialize()`` and a ``step(carry, time)``, and it binds to a
@@ -55,7 +56,6 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import xarray as xr
-from jcm.date import days_per_year as jcm_days_per_year
 
 from jem.base.component import (
     Carry,
@@ -68,7 +68,6 @@ from jem.base.component import (
     SupportsCheckpoint,
     SupportsXarray,
     TimeAxis,
-    seconds_since_new_year,
 )
 
 logger = logging.getLogger(__name__)
@@ -383,10 +382,8 @@ class Coupler:
         of it). Only ``dt_seconds`` is used downstream, so accepting a float
         number of seconds would lift the limit: jax-esm#110.
     start_date : jdt.Datetime
-        Date of coupled step 0.
-    calendar : str
-        Calendar name as JCM spells it; determines the length of the year
-        used for the annual cycle (``jcm.date.days_per_year``).
+        Date of coupled step 0. The clock is a ``jax_datetime.Datetime``,
+        on the proleptic Gregorian calendar.
     name : str
         The coupler's own name, as the :class:`Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see
@@ -446,7 +443,7 @@ class Coupler:
                         workflow=["srf_ocn_exchange", "atm_lnd", "ocn"])
 
     The outer timestep must be a whole multiple of the inner one, and the two
-    must share a start date and calendar; :meth:`bind` refuses anything else.
+    must share a start date; :meth:`bind` refuses anything else.
     One outer step runs ``r = outer / inner`` inner coupled steps, driven by
     the inner carry's own step counter, so the inner clock is continuous
     across outer steps. Its diagnostics come back stacked on a leading axis
@@ -480,7 +477,6 @@ class Coupler:
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str = "365_day",
         name: str = "coupled",
         workflow: Sequence[Any] | None = None,
     ):
@@ -495,15 +491,13 @@ class Coupler:
 
         self._coupling_timestep = coupling_timestep
         self._start_date = start_date
-        self._calendar = calendar
-        # Resolved once, in the constructor: these are the static facts every
-        # CouplingTime is built from, and recomputing them per step would put
-        # calendar arithmetic inside a traced function.
+        # Resolved once, in the constructor: the static fact every
+        # CouplingTime is built from.
         self._dt_seconds = float(coupling_timestep / jdt.to_timedelta(1, "second"))
         # Only components with an internal timestep (JCM, Veros) check the
         # coupling timestep in `bind`; a slab-only coupler would otherwise
-        # accept zero (year_fraction divides by dt; every record gets the
-        # same timestamp) or a negative value (slab physics integrated
+        # accept zero (the clock never advances; every record gets the same
+        # timestamp) or a negative value (slab physics integrated
         # backwards) without complaint.
         if not self._dt_seconds > 0.0:
             raise ValueError(
@@ -514,8 +508,6 @@ class Coupler:
         # multiplicity is what decides whether an element's sub-timestep is
         # expressible as a `jdt.Timedelta` at all.
         self._dt_total_seconds = _timedelta_seconds(coupling_timestep)
-        self._year_offset_seconds = seconds_since_new_year(start_date, calendar)
-        self._days_per_year = float(jcm_days_per_year(calendar))
 
         for name, exchanger in (exchangers or {}).items():
             self.add_exchanger(name, exchanger)
@@ -566,8 +558,8 @@ class Coupler:
         """Hand ``component`` the clock it runs on, if it asks for one.
 
         Components with an internal timestep (JCM, Veros) need the coupling
-        timestep and must agree with the coupler about the start date and
-        calendar. The timestep they are given is the one *they* advance by,
+        timestep and must agree with the coupler about the start date. The
+        timestep they are given is the one *they* advance by,
         ``coupling_timestep / multiplicity``, not the coupled one: a
         component the workflow runs 24 times per coupled step advances an
         hour at a time in a daily coupler, and binding it with the day would
@@ -577,7 +569,6 @@ class Coupler:
             component.bind(
                 coupling_timestep=self._element_timestep(name, multiplicity),
                 start_date=self._start_date,
-                calendar=self._calendar,
             )
 
     def add_component(self, name: str, component: Component) -> None:
@@ -730,64 +721,48 @@ class Coupler:
         return self._start_date
 
     @property
-    def calendar(self) -> str:
-        """The run's calendar, as JCM spells it."""
-        return self._calendar
-
-    @property
     def dt_seconds(self) -> float:
         """The coupled timestep in seconds."""
         return self._dt_seconds
 
-    @property
-    def year_offset_seconds(self) -> float:
-        """Seconds from 1 January of the start year to :attr:`start_date`."""
-        return self._year_offset_seconds
-
-    @property
-    def days_per_year(self) -> float:
-        """Length of the year in days for :attr:`calendar`."""
-        return self._days_per_year
-
-    def coupling_time(self, step: Any) -> CouplingTime:
+    def coupling_time(self, step: Any, time: jdt.Datetime) -> CouplingTime:
         """Return the clock as a component sees it at coupled step ``step``.
 
         Parameters
         ----------
         step : int or jax.Array
             Number of coupled steps completed before the step in question.
+        time : jax_datetime.Datetime
+            The carried model time at that step (``CoupledCarry.time``).
 
         """
         step_array = jnp.asarray(step, dtype=jnp.int32)
         return CouplingTime(
             step=step_array,
+            time=time,
             sim_time=step_array * self._dt_seconds,
             dt=self._dt_seconds,
-            year_offset_seconds=self._year_offset_seconds,
-            days_per_year=self._days_per_year,
         )
 
     def coupling_time_at_substep(
-        self, step: Any, call: int, multiplicity: int
+        self, step: Any, time: jdt.Datetime, call: int, multiplicity: int
     ) -> CouplingTime:
         """Return the clock for call ``call`` of an element that runs ``multiplicity`` times.
 
         An element listed ``multiplicity`` times in the workflow runs on a
         clock ``multiplicity`` times faster than the coupled one, so its
-        ``dt`` is the sub-timestep and its step counter counts sub-steps:
-        call ``k`` of coupled step ``s`` is sub-step ``s * multiplicity + k``.
-        The arithmetic is on the int32 step counter, so it is exact, and
-        ``CouplingTime.year_fraction`` keeps its exact integer reduction at
-        the sub-rate too (an hourly sub-step still divides a 365-day year).
+        ``dt`` is the sub-timestep, its step counter counts sub-steps (call
+        ``k`` of coupled step ``s`` is sub-step ``s * multiplicity + k``), and
+        its time is ``time`` advanced by ``call`` sub-timesteps.
 
-        ``multiplicity == 1`` returns exactly :meth:`coupling_time`, so a
-        workflow without multiplicity is byte for byte the model it was
-        before multiplicity existed.
+        ``multiplicity == 1`` returns exactly :meth:`coupling_time`.
 
         Parameters
         ----------
         step : int or jax.Array
             Number of *coupled* steps completed before the step in question.
+        time : jax_datetime.Datetime
+            The carried model time at the start of that coupled step.
         call : int
             Which of the element's calls within the coupled step, from 0.
         multiplicity : int
@@ -795,15 +770,15 @@ class Coupler:
 
         """
         if multiplicity == 1:
-            return self.coupling_time(step)
+            return self.coupling_time(step, time)
         sub_dt = self._dt_seconds / multiplicity
         substep = jnp.asarray(step, dtype=jnp.int32) * multiplicity + call
         return CouplingTime(
             step=substep,
+            time=time
+            + jdt.to_timedelta(call * self._dt_total_seconds // multiplicity, "second"),
             sim_time=substep * sub_dt,
             dt=sub_dt,
-            year_offset_seconds=self._year_offset_seconds,
-            days_per_year=self._days_per_year,
         )
 
     def time_axis(self, first_step: int, n: int, *, multiplicity: int = 1) -> TimeAxis:
@@ -833,7 +808,6 @@ class Coupler:
             start_date=self._start_date,
             steps=np.arange(first_step, first_step + n),
             dt=dt,
-            calendar=self._calendar,
         )
 
     # -- the coupled model as a function -----------------------------------
@@ -888,6 +862,7 @@ class Coupler:
                     name: component.initialize()
                     for name, component in self.components.items()
                 },
+                time=self._start_date,
                 step=jnp.int32(0),
             )
         # A set difference, not an arithmetic one: this rejects only names
@@ -911,6 +886,7 @@ class Coupler:
                 )
                 for name, component in self.components.items()
             },
+            time=self._start_date,
             step=jnp.int32(0),
         )
 
@@ -971,10 +947,8 @@ class Coupler:
         exchangers_by_name = dict(self.exchangers)
 
         def step(carry: CoupledCarry) -> tuple[CoupledCarry, dict[str, Diagnostics]]:
-            # Built once and shared by every element of multiplicity 1, so a
-            # workflow without multiplicity traces exactly the operations it
-            # traced before there was any.
-            coupled_time = self.coupling_time(carry.step)
+            # Built once and shared by every element of multiplicity 1.
+            coupled_time = self.coupling_time(carry.step, carry.time)
             components: dict[str, Carry] = dict(carry.components)
             # Typed as Any because `jax.tree_util.tree_structure` returns an
             # opaque PyTreeDef that static analysis cannot compare.
@@ -989,7 +963,9 @@ class Coupler:
                 time = (
                     coupled_time
                     if runs == 1
-                    else self.coupling_time_at_substep(carry.step, call, runs)
+                    else self.coupling_time_at_substep(
+                        carry.step, carry.time, call, runs
+                    )
                 )
 
                 if name in exchangers_by_name:
@@ -1032,7 +1008,10 @@ class Coupler:
             # `dataclasses.replace` rather than a bare constructor so that a
             # field added to CoupledCarry later is carried through untouched.
             new_carry = dataclasses.replace(
-                carry, components=components, step=carry.step + 1
+                carry,
+                components=components,
+                time=carry.time + self._coupling_timestep,
+                step=carry.step + 1,
             )
             return new_carry, diagnostics
 
@@ -1129,10 +1108,10 @@ class Coupler:
             state: tuple[CoupledCarry, Any], _: None
         ) -> tuple[tuple[CoupledCarry, Any], None]:
             carry, accumulator = state
-            # The clock of the step about to run, rebuilt from the same step
-            # counter `step` itself reads, so `update` sees exactly the
+            # The clock of the step about to run, rebuilt from the same carry
+            # `step` itself reads, so `update` sees exactly the
             # `CouplingTime` the components of that step were handed.
-            time = self.coupling_time(carry.step)
+            time = self.coupling_time(carry.step, carry.time)
             new_carry, diagnostics = step(carry)
             return (new_carry, update_accumulator(accumulator, diagnostics, time)), None
 
@@ -1170,17 +1149,16 @@ class Coupler:
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str,
     ) -> None:
         """Adopt an outer coupler's clock (:class:`~jem.base.component.SupportsBind`).
 
         A nested coupled model keeps its own timestep and runs several of its
         own coupled steps per outer step, so what it needs from the outer
         coupler is the *ratio*. The two clocks must agree exactly otherwise:
-        a nested model that started on a different date, or counted a
-        different year, would date its own forcing and output differently
-        from every other component of the outer model, which is the one thing
-        the coupler's single clock exists to prevent.
+        a nested model that started on a different date would date its own
+        forcing and output differently from every other component of the
+        outer model, which is the one thing the coupler's single clock exists
+        to prevent.
 
         Parameters
         ----------
@@ -1190,22 +1168,15 @@ class Coupler:
             its own and a fractional outer step could only be rounded.
         start_date : jax_datetime.Datetime
             The outer run's start date; must equal :attr:`start_date`.
-        calendar : str
-            The outer run's calendar; must equal :attr:`calendar`.
 
         Raises
         ------
         ValueError
-            If the timestep does not divide, if either clock setting differs,
+            If the timestep does not divide, if the start date differs,
             or if this coupler is already bound to a different outer
             timestep. Binding it again to the same clock is a no-op.
 
         """
-        if str(calendar) != str(self._calendar):
-            raise ValueError(
-                f"Calendar mismatch: the outer coupler runs {calendar!r} but the "
-                f"nested coupler {self.name!r} runs {self._calendar!r}."
-            )
         if start_date != self._start_date:
             raise ValueError(
                 f"Start-date mismatch: the outer coupler starts at {start_date!r} "
@@ -1259,13 +1230,6 @@ class Coupler:
             raise ValueError(
                 f"The nested coupler {self.name!r} was bound to an outer step of "
                 f"{expected_dt:g} s but was handed a clock with dt={time.dt:g} s."
-            )
-        if time.days_per_year != self._days_per_year or (
-            time.year_offset_seconds != self._year_offset_seconds
-        ):
-            raise ValueError(
-                f"The nested coupler {self.name!r} was handed a clock from a "
-                "different calendar or start date than the one it was bound to."
             )
 
     def _report_inner_clock_drift(
@@ -1375,8 +1339,8 @@ class Coupler:
         leading axes are folded into one -- they are already in time order --
         and the component is handed a time axis spaced at
         ``coupling_timestep / n`` and starting at sub-step
-        ``first_step * n``, so its records are stamped at the end of each
-        sub-step rather than all at the end of the coupled step.
+        ``first_step * n``, so each record is stamped at the midpoint of its
+        own sub-step rather than at the coupled step's.
 
         A component that is itself a :class:`Coupler` returns one dataset per
         *its* components, and they are flattened into this coupler's result
@@ -1599,11 +1563,28 @@ class Coupler:
         # See `save_carry` for why this import is not at module scope.
         from jem.checkpoint import load_coupled_carry
 
-        return load_coupled_carry(
+        carry = load_coupled_carry(
             directory,
             self._plain_component_templates(),
             component_loaders=self._component_loaders(),
         )
+        # Output labels are built from this coupler's start date and timestep,
+        # so a checkpoint whose clock does not sit on them (the start date or
+        # timestep was changed between runs) would be integrated on one clock
+        # and labelled on another.
+        step = int(carry.step)
+        saved = np.asarray(jax.device_get(carry.time).to_datetime64(), "datetime64[s]")
+        expected = np.asarray(
+            self._start_date.to_datetime64(), "datetime64[s]"
+        ) + np.timedelta64(step * int(self._dt_seconds), "s")
+        if saved != expected:
+            raise ValueError(
+                f"{self.name}: checkpoint {directory} is at {saved} after "
+                f"{step} steps, but this coupler's start date and timestep put "
+                f"step {step} at {expected}. Resume with the configuration the "
+                "run was started with."
+            )
+        return carry
 
     def __repr__(self) -> str:
         """Return a summary naming the components, exchangers, order and clock.
@@ -1619,6 +1600,5 @@ class Coupler:
             f"exchangers={list(self.exchangers)}, "
             f"workflow=[{_compressed_workflow(self.workflow)}], "
             f"coupling_timestep={self._dt_seconds / _SECONDS_PER_DAY:g} days, "
-            f"start_date={self._start_date.to_pydatetime().isoformat()}, "
-            f"calendar={self._calendar!r})"
+            f"start_date={self._start_date.to_pydatetime().isoformat()!r})"
         )

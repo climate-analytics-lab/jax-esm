@@ -39,7 +39,6 @@ from jem.components.jcm import JCMComponent, exchange_fields
 from tests.unit import _pre754_exchange_reader
 
 START_DATE = jdt.to_datetime("2000-01-01")
-CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 # T21 on jcm's matching (64, 32) nodal grid; 5 levels is the fewest SPEEDY
@@ -54,8 +53,7 @@ def _build_model() -> Model:
     return Model(
         coords=coords,
         terrain=TerrainData.aquaplanet(coords),
-        start_date=START_DATE,
-        calendar=CALENDAR,
+        start_time=START_DATE,
     )
 
 
@@ -64,7 +62,6 @@ def _bound_component(model: Model) -> JCMComponent:
     component.bind(
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar=CALENDAR,
     )
     return component
 
@@ -73,10 +70,9 @@ def _coupling_time(step: int) -> CouplingTime:
     """Build the clock the coupler hands a component on step ``step``."""
     return CouplingTime(
         step=jnp.int32(step),
+        time=START_DATE + jdt.to_timedelta(int(step), "day"),
         sim_time=jnp.float32(step * 86400.0),
         dt=86400.0,
-        year_offset_seconds=0.0,
-        days_per_year=365.0,
     )
 
 
@@ -126,17 +122,6 @@ def test_bind_rejects_mismatched_start_date(model):
         component.bind(
             coupling_timestep=COUPLING_TIMESTEP,
             start_date=other,
-            calendar=CALENDAR,
-        )
-
-
-def test_bind_rejects_mismatched_calendar(model):
-    component = JCMComponent(model)
-    with pytest.raises(ValueError, match="Calendar mismatch"):
-        component.bind(
-            coupling_timestep=COUPLING_TIMESTEP,
-            start_date=START_DATE,
-            calendar="gregorian",
         )
 
 
@@ -148,7 +133,6 @@ def test_bind_rejects_non_multiple_timestep(model):
         component.bind(
             coupling_timestep=jdt.to_timedelta(model_seconds + 1, "second"),
             start_date=START_DATE,
-            calendar=CALENDAR,
         )
 
 
@@ -170,7 +154,9 @@ def test_initialize_does_not_integrate(model, monkeypatch):
     carry = component.initialize()
 
     assert calls == []
-    assert set(carry) == {"state", "physics", "derived", "forcing"}
+    assert set(carry) == {"state", "physics", "time", "step", "derived", "forcing"}
+    assert carry["time"] == model.start_time
+    assert int(carry["step"]) == 0
     assert carry["derived"].total_heat_flux.shape == GRID_SHAPE
 
 
@@ -490,21 +476,23 @@ def test_derived_fields_are_finite_and_consistent(stepped):
 def test_to_xarray_has_time_axis_of_length_n(component, stepped):
     """Stacked diagnostics serialize through jcm with one record per step.
 
-    Also pins how jcm labels that axis: absolute ``datetime64[ns]`` at the
-    END of each averaging interval. Any component whose output is merged
-    with the atmosphere's has to write the same representation.
+    Also pins how jcm labels that axis: absolute ``datetime64[ms]`` at the
+    MIDPOINT of each averaging interval. Any component whose output is
+    merged with the atmosphere's has to write the same representation.
     """
     _, _, _, diagnostics1, diagnostics2 = stepped
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), diagnostics1, diagnostics2)
-    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP, CALENDAR)
+    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP)
 
     dataset = component.to_xarray(stacked, time_axis)
 
     assert dataset.sizes["time"] == 2
-    assert dataset.time.dtype == np.dtype("datetime64[ns]")
+    assert dataset.time.dtype == np.dtype("datetime64[ms]")
     np.testing.assert_array_equal(
         dataset.time.values,
-        np.array(["2000-01-02", "2000-01-03"], dtype="datetime64[ns]"),
+        np.array(
+            ["2000-01-01T12:00", "2000-01-02T12:00"], dtype="datetime64[ms]"
+        ),
     )
     assert dataset.sizes["lon"], dataset.sizes["lat"] == GRID_SHAPE
 
@@ -514,7 +502,7 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component, stepped):
     """A time axis that does not match the records is a coupler-side bug."""
     _, _, _, diagnostics1, diagnostics2 = stepped
     stacked = jax.tree.map(lambda *xs: jnp.stack(xs), diagnostics1, diagnostics2)
-    time_axis = TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP, CALENDAR)
+    time_axis = TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP)
 
     with pytest.raises(ValueError, match="output records"):
         component.to_xarray(stacked, time_axis)
@@ -524,14 +512,11 @@ def test_rebinding_to_a_different_timestep_is_rejected(model):
     """One instance belongs to one coupled model; a conflicting second bind raises."""
     component = _bound_component(model)
     # The same clock again is a no-op.
-    component.bind(
-        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, calendar=CALENDAR
-    )
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
     with pytest.raises(ValueError, match="already bound"):
         component.bind(
             coupling_timestep=COUPLING_TIMESTEP * 2,
             start_date=START_DATE,
-            calendar=CALENDAR,
         )
 
 
@@ -622,7 +607,7 @@ def test_collapsed_forcing_is_the_climatology_at_the_start_date(
         model, forcing=file_forcing, exchanged_forcing=("sea_surface_temperature",),
     )
     expected = file_forcing.select(
-        DateData.set_date(START_DATE), calendar=CALENDAR
+        DateData.set_date(START_DATE)
     ).sea_surface_temperature
 
     collapsed = np.asarray(
@@ -632,7 +617,7 @@ def test_collapsed_forcing_is_the_climatology_at_the_start_date(
     # And it is that date's slice rather than any date's: a mid-year one
     # differs, so the start date is doing real work here.
     midyear = np.asarray(file_forcing.select(
-        DateData.set_date(jdt.to_datetime("2000-07-01")), calendar=CALENDAR
+        DateData.set_date(jdt.to_datetime("2000-07-01"))
     ).sea_surface_temperature)
     assert not np.allclose(collapsed, midyear)
 
@@ -698,7 +683,6 @@ def test_coupled_step_keeps_its_structure_with_file_forcing(model, file_forcing)
     coupler = Coupler(
         components, exchangers,
         coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
-        calendar=CALENDAR,
     )
     carry = coupler.initialize()
     final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
@@ -735,7 +719,6 @@ def test_undeclared_file_forcing_is_refused_by_the_structure_check(
     coupler = Coupler(
         components, default_exchangers(components),
         coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
-        calendar=CALENDAR,
     )
     with pytest.raises(RuntimeError, match="changed the structure"):
         jax.eval_shape(
@@ -768,7 +751,6 @@ def test_validate_names_the_spec_for_an_undeclared_file_forcing(
     coupler = Coupler(
         components, exchangers,
         coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
-        calendar=CALENDAR,
     )
 
     with pytest.raises(ValueError, match="atm.forcing.sea_surface_temperature"):
@@ -790,7 +772,6 @@ def test_validate_passes_once_the_forcing_is_declared(model, file_forcing):
     coupler = Coupler(
         components, exchangers,
         coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
-        calendar=CALENDAR,
     )
 
     exchangers["exchange"].validate(coupler.initialize().components)

@@ -14,7 +14,6 @@ from jem.base.coupler import Coupler
 from jem.components.slab.base import load_monthly_climatology
 from jem.components.slab.slab_ocean_model import SlabOceanModel, SlabOceanParameters
 from tests.unit.slab_test_utils import (
-    DAYS_PER_YEAR,
     LATITUDE_DEGREES,
     LONGITUDE_DEGREES,
     TIMESTEP,
@@ -27,6 +26,8 @@ from tests.unit.slab_test_utils import (
     write_climatology,
 )
 
+#: The length of 2001, the year `coupling_time`'s start date falls in.
+DAYS_PER_YEAR = 365.0
 
 MONTHLY_SST = 285.0 + 10.0 * np.cos(2 * np.pi * np.arange(12) / 12.0)
 
@@ -422,7 +423,6 @@ def test_bind_sets_the_initial_climatology_month(tmp_path, uniform_grid):
             {"ocn": model},
             coupling_timestep=jdt.to_timedelta(1, "day"),
             start_date=jdt.to_datetime(start_date),
-            calendar="365_day",
         )
         state = model.initialize()["state"]
         return float(np.asarray(state.sea_surface_temperature)[0, 0])

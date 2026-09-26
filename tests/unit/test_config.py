@@ -192,7 +192,8 @@ def test_jcm_run_group_is_not_shadowed():
 
     cfg = composed(["+configuration@atmosphere=t63-echam-1m"])
     # JCM's own run/longrun.yaml, not anything of ours.
-    assert cfg.atmosphere.run.total_time == 365
+    longrun = OmegaConf.load(JCM_CONFIG_DIR / "run" / "longrun.yaml")
+    assert cfg.atmosphere.run.total_time == longrun.total_time
     assert "time_step" in cfg.atmosphere.run
     assert cfg.coupled_run.total_time == "30 days"
 
@@ -249,17 +250,11 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
-#: The calendar every shipped configuration runs on -- JCM's default, and the
-#: one the driver parses a run's durations against. It is what makes "1 year"
-#: 365 days here, and so what decides which durations divide which.
-CALENDAR = "365_day"
-
-
 def _seconds(duration: str | float) -> int:
     """Return a config duration in whole seconds, as the driver reads it."""
-    from jcm.date import parse_duration_days
+    from jcm.date import parse_duration_seconds
 
-    return int(round(float(parse_duration_days(duration, CALENDAR)) * 86400))
+    return parse_duration_seconds(duration)
 
 
 @pytest.mark.parametrize("option", _options("coupled_run"))

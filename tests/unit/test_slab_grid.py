@@ -25,8 +25,8 @@ T31_SCRIP = DATA / "JCM_T31.SCRIP.nc"
 T31_TERRAIN = DATA / "terrain_JCM_T31.nc"
 DISPLACED_POLE_SCRIP = DATA / "DisplacedPoleGrid.SCRIP.nc"
 
-#: Nanoseconds in a day, as JCM computes the factor.
-NANOSECONDS_PER_DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
+#: Milliseconds in a day, as JCM's own output-label arithmetic uses it.
+MILLISECONDS_PER_DAY = 86_400_000
 
 
 @pytest.fixture(scope="module")
@@ -157,12 +157,13 @@ def test_mismatched_shapes_are_rejected():
 def _jcm_like_dataset(coords, start_days, n_records):
     """Build a dataset with JCM's own coordinate construction, for merging.
 
-    The values come from ``jcm.utils.data_to_xarray`` and the time axis from
-    the same expression ``jcm.predictions.ModelPredictions`` uses, so this is
-    the coordinate layout a real JCM run writes. The integration pass merges
+    The values come from ``jcm.utils.data_to_xarray``, and the time axis is
+    JCM's own labelling -- each record's interval midpoint, in whole
+    milliseconds (``bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2``,
+    ``jcm.predictions.ModelPredictions.time_labels``) -- so this is the
+    coordinate layout a real JCM run writes. The integration pass merges
     against genuine JCM output; this keeps the contract under test here.
     """
-    times = start_days + 1.0 * (np.arange(n_records) + 1)
     dataset = data_to_xarray(
         {
             "surface_pressure": np.zeros(
@@ -170,10 +171,13 @@ def _jcm_like_dataset(coords, start_days, n_records):
             )
         },
         coords=coords,
-        times=times - times[0],
+        times=1.0 * np.arange(n_records),
         serialize_coords_to_attrs=False,
     )
-    dataset["time"] = (times * NANOSECONDS_PER_DAY).astype("datetime64[ns]")
+    start_ms = round(start_days * MILLISECONDS_PER_DAY)
+    lower = start_ms + np.arange(n_records, dtype=np.int64) * MILLISECONDS_PER_DAY
+    midpoints = lower + MILLISECONDS_PER_DAY // 2
+    dataset["time"] = midpoints.astype("datetime64[ms]")
     return dataset
 
 
@@ -188,10 +192,10 @@ def test_to_xarray_dims_and_merge(t31_coords):
     assert dataset["sea_surface_temperature"].dims == ("time", "lon", "lat")
     assert dataset["lon"].dims == ("lon",) and dataset["lat"].dims == ("lat",)
     assert dataset["lon"].attrs["units"] == "degrees_east"
-    assert dataset["time"].dtype == np.dtype("datetime64[ns]")
-    # Record k covers step k and is stamped at its END, as JCM stamps its own
-    # saved frames.
-    assert str(dataset["time"].values[0]) == "2001-01-02T00:00:00.000000000"
+    assert dataset["time"].dtype == np.dtype("datetime64[ms]")
+    # Record k covers [start + k*dt, start + (k+1)*dt) and is stamped at its
+    # MIDPOINT, JCM's convention (jcm.predictions.output_time_labels).
+    assert str(dataset["time"].values[0]) == "2001-01-01T12:00:00.000"
 
     # 2001-01-01 is 11323 days after the epoch; JCM's own axis starts there.
     merged = xr.merge([dataset, _jcm_like_dataset(t31_coords, 11323.0, 3)], join="exact")

@@ -33,14 +33,16 @@ The directory layout is::
         carry.msgpack         every other component's carry, plus the clock,
                               plus the *name* of every delegated component
 
-**The coupled step counter is part of the checkpoint because it is part of
-the state.** ``CoupledCarry.step`` is the model's only clock: every
-component's :class:`~jem.base.component.CouplingTime` -- and therefore its
-position in the seasonal cycle -- is derived from it. A checkpoint that saved
-only the component carries would resume at step 0, restarting the seasonal
-cycle in January however far into the run it was written. A directory whose
-``carry.msgpack`` does not hold a step is refused with ``ValueError`` rather
-than resumed from a guess.
+**The clock is part of the checkpoint because it is part of the state.**
+``CoupledCarry.time`` -- a carried ``jax_datetime.Datetime`` -- is the
+model's clock: every component's :class:`~jem.base.component.CouplingTime`,
+and with it its position in the seasonal cycle, is built from it.
+``CoupledCarry.step``, the steps taken, is saved with it: the driver resumes,
+chunks and names its output by it. A checkpoint that saved only the component
+carries would resume with the clock reset to the coupler's start date,
+restarting the seasonal cycle however far into the run it was written. A
+directory whose ``carry.msgpack`` does not hold the clock is refused with
+``ValueError`` rather than resumed from a guess.
 
 **The carry file is the completion marker.** It is written last, and
 published by renaming a fully-flushed, fsynced temporary file over its final
@@ -66,6 +68,7 @@ from typing import Any
 import flax.serialization
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 
 from jem.base.component import Carry, CoupledCarry
@@ -453,7 +456,14 @@ def save_coupled_carry(
             # leaf.
             stored_components[name] = _delegated_marker()
 
-    save({"step": coupled_carry.step, "components": stored_components}, carry_file)
+    save(
+        {
+            "step": coupled_carry.step,
+            "time": coupled_carry.time,
+            "components": stored_components,
+        },
+        carry_file,
+    )
 
 
 def load_coupled_carry(
@@ -535,6 +545,10 @@ def load_coupled_carry(
     # tree structure before any loader is called.
     template = {
         "step": jnp.int32(0),
+        # Placeholder scalar Datetime: only its pytree structure (two int
+        # arrays) is used to pour the checkpoint's leaves back into shape --
+        # the value itself is discarded, like every other template leaf.
+        "time": jdt.to_datetime("1970-01-01"),
         "components": {
             **dict(component_templates),
             **{name: _delegated_marker() for name in component_loaders},
@@ -560,7 +574,9 @@ def load_coupled_carry(
         CARRY_FILENAME,
         _named(component_loaders),
     )
-    return CoupledCarry(components=components, step=stored["step"])
+    return CoupledCarry(
+        components=components, time=stored["time"], step=stored["step"]
+    )
 
 
 def latest_complete_checkpoint(

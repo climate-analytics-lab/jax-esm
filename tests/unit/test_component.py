@@ -14,6 +14,8 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+from jcm.date import fraction_of_year_elapsed
+from jcm.predictions import output_time_labels
 
 from jem.base.component import (
     FORCING_VARIABLE_PREFIX,
@@ -82,11 +84,10 @@ class ComponentWithBind(MinimalComponent):
         super().__init__(name=name)
         self.bound = None
 
-    def bind(self, *, coupling_timestep, start_date, calendar):
+    def bind(self, *, coupling_timestep, start_date):
         self.bound = {
             "coupling_timestep": coupling_timestep,
             "start_date": start_date,
-            "calendar": calendar,
         }
 
 
@@ -136,13 +137,11 @@ def test_bind_receives_clock():
         {"bound": component},
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar="365_day",
     )
 
     assert component.bound is not None
     assert component.bound["coupling_timestep"] == COUPLING_TIMESTEP
     assert component.bound["start_date"] == START_DATE
-    assert component.bound["calendar"] == "365_day"
 
 
 def test_bind_is_called_for_components_added_later():
@@ -176,38 +175,51 @@ def test_registered_component_is_the_object_passed_in():
 # ---------------------------------------------------------------------------
 
 
-def test_datetimes_label_the_end_of_each_interval():
-    """Record ``k`` holds the interval that ENDS at ``start + (k+1) dt``."""
+def test_datetimes_label_each_interval_midpoint():
+    """Record ``k`` holds the interval ``[start + k dt, start + (k+1) dt)``.
+
+    and is labelled at its MIDPOINT, JCM's convention
+    (``jcm.predictions.output_time_labels``).
+    """
     axis = TimeAxis(
         start_date=jdt.to_datetime("2001-01-01"),
         steps=np.arange(3),
         dt=COUPLING_TIMESTEP,
-        calendar="365_day",
     )
     np.testing.assert_array_equal(
         axis.datetimes(),
-        np.array(["2001-01-02", "2001-01-03", "2001-01-04"], dtype="datetime64[ns]"),
+        np.array(
+            ["2001-01-01T12:00", "2001-01-02T12:00", "2001-01-03T12:00"],
+            dtype="datetime64[ms]",
+        ),
     )
-    assert axis.datetimes().dtype == np.dtype("datetime64[ns]")
+    assert axis.datetimes().dtype == np.dtype("datetime64[ms]")
 
 
-def test_datetimes_reproduce_jcm_arithmetic_bit_for_bit():
-    """The labels are JCM's float64-days product, not an exact ns count.
+def test_datetimes_reproduce_jcm_labels_for_an_odd_second_interval():
+    """The labels are JCM's, to the millisecond, for an odd-length interval.
 
-    Both models have to be inexact in the SAME way for ``xr.merge`` to align
-    them, so this pins the arithmetic and not just the answer.
+    ``xr.merge(join="exact")`` of the atmosphere's output with any other
+    component's needs identical labels, so this computes the expected ones the
+    way ``jcm.predictions.ModelPredictions.time_labels`` does -- exact
+    ``datetime64[ms]`` bounds from the model clock, then ``lower + (upper -
+    lower) // 2`` -- for a 1801 s interval, whose midpoint is a half second.
     """
     start = jdt.to_datetime("2001-03-01")
+    dt = jdt.to_timedelta(1801, "second")
     steps = np.arange(5)
-    axis = TimeAxis(start, steps, jdt.to_timedelta(6, "hour"), "365_day")
+    axis = TimeAxis(start, steps, dt)
 
-    nanoseconds_per_day = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
-    start_days = float(np.asarray(start.delta.days))
-    expected = (
-        (start_days + 0.25 * (steps.astype(np.float64) + 1.0)) * nanoseconds_per_day
-    ).astype("datetime64[ns]")
+    lower = output_time_labels(
+        jdt.Datetime(start.delta + jdt.to_timedelta(1801 * steps, "second"))
+    )
+    upper = output_time_labels(
+        jdt.Datetime(start.delta + jdt.to_timedelta(1801 * (steps + 1), "second"))
+    )
+    expected = lower + (upper - lower) // 2
 
     np.testing.assert_array_equal(axis.datetimes(), expected)
+    assert axis.datetimes()[0] == np.datetime64("2001-03-01T00:15:00.500")
 
 
 def test_time_axis_attrs_is_a_fresh_dict_per_access():
@@ -216,7 +228,7 @@ def test_time_axis_attrs_is_a_fresh_dict_per_access():
     ``to_xarray`` passes ``attrs`` straight to :class:`xarray.Dataset`, so a
     shared dict would let one dataset's edit reach every other component's.
     """
-    axis = TimeAxis(START_DATE, np.arange(4), COUPLING_TIMESTEP, "365_day")
+    axis = TimeAxis(START_DATE, np.arange(4), COUPLING_TIMESTEP)
 
     assert axis.attrs == axis.attrs
     assert axis.attrs is not axis.attrs
@@ -225,8 +237,8 @@ def test_time_axis_attrs_is_a_fresh_dict_per_access():
 class ComponentRejectingClock(MinimalComponent):
     """A component whose ``bind`` refuses every clock, as JCM does on a mismatch."""
 
-    def bind(self, *, coupling_timestep, start_date, calendar):
-        del coupling_timestep, start_date, calendar
+    def bind(self, *, coupling_timestep, start_date):
+        del coupling_timestep, start_date
         raise ValueError("clock rejected")
 
 
@@ -248,21 +260,23 @@ def test_a_component_that_rejects_the_clock_is_not_registered():
     assert "ice" not in coupler.components
 
 
-def test_seconds_since_new_year_counts_in_the_model_calendar():
-    """The day of year follows the calendar: no leap day on ``365_day``."""
-    from jem.base.component import seconds_since_new_year
+def test_year_fraction_equals_jcm_fraction_of_year_elapsed():
+    """``CouplingTime.year_fraction`` is exactly ``jcm.date.fraction_of_year_elapsed``.
 
-    day = 86400.0
-    december_31_leap_year = jdt.to_datetime("2000-12-31")
-    assert seconds_since_new_year(december_31_leap_year, "365_day") == 364 * day
-    assert seconds_since_new_year(december_31_leap_year, "gregorian") == 365 * day
-    # 1 March is day 59 (31 + 28) without a leap day, day 60 with one.
-    assert seconds_since_new_year(jdt.to_datetime("2000-03-01"), "365_day") == 59 * day
-    assert seconds_since_new_year(jdt.to_datetime("2000-03-01"), "gregorian") == 60 * day
-    with pytest.raises(ValueError, match="29 February"):
-        seconds_since_new_year(jdt.to_datetime("2000-02-29"), "365_day")
-    with pytest.raises(ValueError, match="calendar"):
-        seconds_since_new_year(december_31_leap_year, "360_day")
+    Calling the same function the atmosphere's own seasonal physics does is
+    what makes a slab's seasonal cycle and JCM's agree by construction --
+    there is nothing of JEM's own to test beyond that delegation.
+    """
+    from jem.base.component import CouplingTime
+
+    for when in ("2000-03-01", "2000-12-31", "2001-07-04T18:00:00"):
+        time = jdt.to_datetime(when)
+        coupling_time = CouplingTime(
+            step=jnp.int32(0), time=time, sim_time=jnp.float32(0.0), dt=86400.0
+        )
+        assert float(coupling_time.year_fraction) == pytest.approx(
+            float(fraction_of_year_elapsed(time))
+        )
 
 
 def test_forcing_variable_prefixes_once():
