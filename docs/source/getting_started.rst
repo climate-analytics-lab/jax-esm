@@ -159,7 +159,7 @@ Hydra makes fresh each run. Point a second run at the first's output directory
 the coupled step the checkpoint holds, saying so in its log; an absolute
 ``coupled_run.checkpoint_path`` is used as given, and
 ``coupled_run.checkpoint_path=null`` turns checkpointing off. See the
-README's *Long runs* section and :doc:`design/architecture` for
+README's *Long runs* section and :doc:`design/running` for
 ``checkpoint_interval``, ``subsample``, ``output_averages`` and the in-scan
 reductions in ``jem.accumulate``.
 
@@ -172,5 +172,11 @@ Where next
 - :doc:`adding_a_component` -- wrapping an external model to join a coupled
   run.
 - :doc:`experimental` -- features still under development.
-- :doc:`design/architecture` -- the carry layout, the exchanger contract and
-  the checkpoint format, for anyone debugging or extending the coupler.
+- :doc:`design/architecture` -- the coupling core, and a map of the design
+  docs below.
+- :doc:`design/carry_and_clock` -- the carry layout and the component
+  contract.
+- :doc:`design/exchange` -- the exchanger contract and the declarative
+  exchange table.
+- :doc:`design/running` -- the checkpoint format, for anyone debugging or
+  extending the coupler.

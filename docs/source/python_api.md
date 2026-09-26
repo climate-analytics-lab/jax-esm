@@ -93,7 +93,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   coupling, and the hourly components write 24 output records per coupled
   step. The same model can be written as an hourly `Coupler` registered as a
   component of the daily one — a `Coupler` satisfies the component contract.
-  See {doc}`design/architecture` for both forms.
+  See {doc}`design/nesting` for both forms.
 - **The run loop** {func}`~jem.run_chunked` integrates in chunks: per
   chunk it writes one file per component, checkpoints if it was given a path,
   and runs a health check on the result, stopping the run if the atmosphere
@@ -155,7 +155,7 @@ sea-ice model registered under any other name is left unconnected, silently
 unless the name is one of the near-misses (`ice`, `sea_ice`, `sic`) the
 default wiring recognises and warns about.
 
-See {doc}`design/architecture` for the full table (including the Veros
+See {doc}`design/exchange` for the full table (including the Veros
 variant), the regridding keys a mixed-grid run uses, and the lag in full.
 
 ## Parameters: process and initial condition
@@ -182,7 +182,7 @@ coupled_carry = coupler.initialize({"ocn": ocn.params.replace(initial_sst=sst0)}
 ```
 
 Each `*Parameters` docstring says which of its fields are initial conditions.
-See {doc}`design/architecture`'s *Parameters* section for the pattern in
+See {doc}`design/carry_and_clock`'s *Parameters* section for the pattern in
 full, including why the distinction is not one the framework enforces.
 
 ## Long runs, checkpoints and reductions
@@ -193,7 +193,7 @@ reduction that must not cost memory proportional to the run length —
 instead of writing every step to disk, and is differentiable like everything
 else in the carry. Both are long enough that they are not duplicated here:
 see the README's *Long runs* section for the worked examples and
-{doc}`design/architecture` for the checkpoint format and the accumulator's
+{doc}`design/running` for the checkpoint format and the accumulator's
 binning rules.
 
 ## The same run from the command line

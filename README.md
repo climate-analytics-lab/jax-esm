@@ -344,7 +344,7 @@ The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
 reaches a component parameter through the reduction exactly as it does through
 the trajectory, which is what calibrating against monthly observations needs.
-See the worked example in `docs/source/design/architecture.md`.
+See the worked example in `docs/source/design/running.md`.
 
 ## Documentation
 
@@ -422,7 +422,7 @@ it was handed, and never change their pytree structure.
   `jem.with_nested_carry` are how an outer exchanger reaches an inner component,
   and the inner datasets come out of `to_xarray` under their own names, on the
   inner clock. The two forms produce identical runs — see
-  `docs/source/design/architecture.md`.
+  `docs/source/design/nesting.md`.
 - `model.save_carry(carry, directory)` / `model.load_carry(directory)`
   checkpoint the whole coupled model. The coupler derives each component's
   writer from the component itself, so a driver never lists them; a component
@@ -430,8 +430,8 @@ it was handed, and never change their pytree structure.
   restart file) writes its own subdirectory, and because a `Coupler` is one of
   those components, a nested model checkpoints by recursion.
 
-See `docs/source/design/architecture.md` for the carry layout and the full
-contract.
+See `docs/source/design/carry_and_clock.md` for the carry layout and the
+component contract.
 
 ## Examples
 
@@ -506,7 +506,7 @@ coupled_carry = coupled.initialize({"ocn": ocn.params.replace(initial_sst=sst0)}
 Both are differentiable: `jax.grad` of a trajectory reaches a process parameter
 through the carry and an initial condition through `initialize`. Each
 `*Parameters` docstring says which of its fields are initial conditions;
-`docs/source/design/architecture.md` has the full pattern.
+`docs/source/design/carry_and_clock.md` has the full pattern.
 
 ## Contributing
 
