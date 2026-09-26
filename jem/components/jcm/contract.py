@@ -31,28 +31,18 @@ commit itself rather than whatever ``dev`` happened to be at bump time,
 because later, unrelated ``dev`` commits are not revisions this branch has
 been checked against.
 
-PR 878 unifies jax-gcm's clock onto one exact ``jax_datetime.Datetime``:
-``Model(start_time=)`` replaces ``start_date=``, ``Model.calendar`` is gone
-(the clock is proleptic Gregorian, full stop), and output records are
-labelled at their interval **midpoint** as ``datetime64[ms]``
-(``jcm.predictions.output_time_labels``) rather than at the interval's end.
-JAX-ESM follows suit: :class:`~jem.base.coupler.Coupler` carries the same
-kind of ``Datetime`` and drops its own ``calendar`` argument entirely (see
-``jem.base.component.CoupledCarry.time``), and
+PR 878 puts jax-gcm's clock on one exact ``jax_datetime.Datetime``
+(``Model(start_time=)``, proleptic Gregorian) and labels output records at
+their interval **midpoint** as ``datetime64[ms]``
+(``jcm.predictions.output_time_labels``). JAX-ESM's
+:class:`~jem.base.coupler.Coupler` carries the same kind of ``Datetime``
+(``jem.base.component.CoupledCarry.time``), and
 :class:`~jem.components.jcm.component.JCMComponent` threads jax-gcm's own
 :class:`~jcm.model.RunState` (``time``/``step``) through
 ``run_from_state_with_carry(initial_time=, initial_step=)``.
 
-PR 877, merged just before it, closes jax-gcm#754 (the package-independent
-``SurfaceExchange`` coupling struct every physics package now publishes
-identically), #301 (prescribed surface fluxes) and #884 (the declared
-forcing-alignment rule, ``jcm.forcing.resolve_align``) -- the first and last
-of which this revision of JAX-ESM is written against
-(``jem/components/jcm/exchange_fields.py`` and the ``forcing.align`` knobs in
-``jem/config/configuration/*.yaml``).
-
-Earlier revisions this pin replaced carried four more things JAX-ESM was
-written against (all still true here):
+The revision also carries the earlier jax-gcm changes JAX-ESM is written
+against:
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
@@ -244,11 +234,11 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " -> tuple[bool, dict].",
     ),
     IntegrationPoint(
-        "jcm.date", "parse_duration_days", "public",
-        "Turn a human run length or coupling interval ('12 hours', '10 days')"
-        " into a fixed number of days; rejects calendar units ('years',"
-        " 'months') that are not a fixed duration."
-        " Signature: parse_duration_days(value) -> float.",
+        "jcm.date", "parse_duration_seconds", "public",
+        "Turn a run length, chunk, coupling interval or averaging window"
+        " ('12 hours', '10 days', or a number of days) into whole seconds;"
+        " refuses 'months'/'years' and fractional seconds."
+        " Signature: parse_duration_seconds(value) -> int.",
     ),
     IntegrationPoint(
         "jcm.date", "fraction_of_year_elapsed", "public",
@@ -262,8 +252,7 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "jcm.date", "gregorian_ymd_from_days", "public",
         "Exact Gregorian (year, month, day) from days since the 1970 epoch;"
         " jem.accumulate.monthly_mean bins each record's own interval"
-        " midpoint by the month this returns, rather than through any"
-        " fixed-length calendar table."
+        " midpoint by the month this returns."
         " Signature: gregorian_ymd_from_days(days_since_epoch) -> (year,"
         " month, day).",
     ),

@@ -351,12 +351,10 @@ conventions are JCM's, and every component follows them:
   the interval it covers. `TimeAxis.datetimes()` is the single definition, and
   every component's `to_xarray` calls it (with `TimeAxis.attrs` for the CF
   attributes) directly rather than through a helper; it computes the same
-  `datetime64[ms]` midpoints, on host, as `jcm.predictions.output_time_labels`,
+  `datetime64[ms]` midpoints as `jcm.predictions.ModelPredictions.time_labels`,
   so every component's dataset merges with the atmosphere's on one exact time
-  axis (`xr.merge(join="exact")`). A `time_bounds` variable carries each
-  interval's start and end. The coupled clock is a single carried
-  `jax_datetime.Datetime` — `jax_datetime`'s proleptic Gregorian, with no
-  calendar to choose.
+  axis (`xr.merge(join="exact")`). JCM's own output also carries a
+  `time_bounds` variable with each interval's start and end.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
   `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,

@@ -5,8 +5,8 @@
 # `null` everywhere else means "use the Python default", which is defined once,
 # in Python, for the set of components that were actually built.
 
-# Interval between exchanges, as a `jcm.date.parse_duration_days` string
-# ("1 day", "12 hours", "1 month"). It is also the step the atmosphere is
+# Interval between exchanges, as a `jcm.date.parse_duration_seconds` string
+# ("1 day", "12 hours"). It is also the step the atmosphere is
 # integrated over between exchanges, so it must be a whole number of the
 # atmosphere's own timesteps.
 timestep: "1 day"

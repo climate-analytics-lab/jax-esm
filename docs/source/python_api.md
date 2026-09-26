@@ -81,8 +81,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   exchanger at step *n* moves what each component produced during step *n-1*.
 - **The coupler** owns the clock: a carried `jax_datetime.Datetime`, advanced
   by the coupling timestep every step, lives here and nowhere else, and every
-  component's `step` is handed the same `CouplingTime` built from it. There is
-  no calendar to choose — the clock is `jax_datetime`'s proleptic Gregorian.
+  component's `step` is handed the same `CouplingTime` built from it.
 - **The workflow** — printed by `repr(coupler)` — is the coupling scheme. It
   defaults to every exchanger followed by every component; pass
   `workflow=["atm", "exchange", "ocn"]` to reorder it. It may be nested, and a

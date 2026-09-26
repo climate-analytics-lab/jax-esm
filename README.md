@@ -12,8 +12,7 @@ JAX-ESM is a JAX-based coupling framework for Earth system components, specifica
 - **One clock**: the `Coupler` carries a single `jax_datetime.Datetime`, advanced by
   the coupling timestep every step, and hands every component the same
   `CouplingTime` built from it, so components cannot disagree about the date and
-  the seasonal cycle survives chunked runs and restarts. There is no calendar
-  option — the clock is `jax_datetime`'s proleptic Gregorian, full stop
+  the seasonal cycle survives chunked runs and restarts
 - **Efficient Time Integration**: `Coupler.generate_trajectory_function()` returns a
   pure `carry -> (carry, diagnostics)` function built on `jax.lax.scan`
 - **Differentiable parameters**: component parameters are `flax.struct` dataclasses that
@@ -278,13 +277,10 @@ carry, accumulator = trajectory(coupler.initialize())
 means = monthly.finalize(accumulator)      # one (12, ...) record per variable
 ```
 
-Each record is binned by the real Gregorian calendar month of its own interval
-midpoint (`jcm.date.gregorian_ymd_from_days`), the same instant it is labelled
-with in the written output, so `monthly.finalize(...)` and
-`to_xarray(...).groupby("time.month").mean()` of the same run are the same
-numbers exactly — a leap February holds 29 records, not 28, with no separate
-model-calendar-vs-label reconciliation to make: there is one calendar, the
-proleptic Gregorian `jax_datetime` uses throughout.
+Each record is binned by the Gregorian month of its own interval midpoint —
+the instant it is labelled with in the written output — so
+`monthly.finalize(...)` and `to_xarray(...).groupby("time.month").mean()` of
+the same run are the same numbers, and a leap February holds 29 daily records.
 
 `run_chunked(..., accumulate=monthly, health_check=None)` does the same from
 the driver, threading the accumulator across the chunks and returning it on
@@ -321,24 +317,20 @@ months = monthly_mean(coupler, total_time="3650 days")   # or n_months=121
 means = months.finalize(accumulator)   # ~121 bins: Jul 2001, Aug 2001, …
 ```
 
-These are real calendar months whatever day the run starts on — read directly
-off each record's own date, with no month-length table and no start-of-year
-phase to compute — so they never drift, whatever the coupling timestep. A run
-longer than the accumulator wraps modulo `n_months`, compositing whole
-calendar months (never a part of one); size it with `total_time` (which
-counts the distinct months the run's records actually touch) to avoid the
-wrap entirely.
+These are calendar months whatever day the run starts on and whatever the
+coupling timestep. A run longer than the accumulator wraps modulo `n_months`,
+compositing whole calendar months; size it with `total_time` (one bin for
+every month a record falls in) to avoid the wrap.
 
-`windowed_mean(coupler, window, n_windows=...)` is a different, simpler
-reduction: `n_windows` windows of a fixed length — the 5-day and 7-day means a
+`windowed_mean(coupler, window, n_windows=...)` is the same reduction over
+`n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — measured in whole records from the run's
 own start, with no reference to any calendar, sized either by `n_windows` or
 by `total_time`. A run longer than the accumulator wraps, so window *w*
 composites every *w*-th window. `window` may also be a **sequence** of
 lengths, which the windows cycle through (daily leads for a forecast's first
 week, then pentads). A window is never a calendar month, whatever its length
-and however it is phased — calendar months come from `monthly_mean`, which
-reads them off the real date instead of a length pattern.
+— calendar months come from `monthly_mean`.
 
 The accumulator is an ordinary pytree in the scan carry, so **a binned mean is
 differentiable**: `jax.grad` of a loss on `monthly.finalize(accumulator)`
@@ -395,10 +387,10 @@ it was handed, and never change their pytree structure.
 - `Coupler.generate_step_function()` returns one coupled step;
   `Coupler.generate_trajectory_function(iterations, remat=..., jit=...)` drives it
   with `jax.lax.scan`.
-- The clock lives in the carry (`CoupledCarry.time`, a carried
-  `jax_datetime.Datetime` advanced by the coupling timestep every step — plus
-  `CoupledCarry.step`, a plain counter), not in the scan index, so calling a
-  trajectory function twice continues the run instead of restarting it.
+- The clock lives in the carry (`CoupledCarry.time`, a `jax_datetime.Datetime`
+  advanced by the coupling timestep every step, and `CoupledCarry.step`, the
+  number of steps taken), not in the scan index, so calling a trajectory
+  function twice continues the run instead of restarting it.
 - Within a coupling timestep the `workflow` runs sequentially in the order given;
   by default that is every exchanger followed by every component. It may be
   written nested, and a name may appear more than once — an element listed *n*
@@ -528,8 +520,7 @@ Contributions are welcome! Please:
 - **Version**: single-sourced from `jem.__version__`
 - **Status**: Alpha. The next release is 1.0.0b0, "the driver and configuration
   layer".
-- **API Stability**: subject to change without deprecation until 1.0; git
-  history is the record of every removal or rename.
+- **API Stability**: subject to change without deprecation until 1.0.
 
 ## Miscellaneous
 

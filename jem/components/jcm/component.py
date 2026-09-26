@@ -189,19 +189,16 @@ def _diagnostics_template(model: Model) -> Any:
 
     Built from ``Physics.get_empty_data(coords)``, minus the
     ``_sampler_state`` entry, which stays in the integration carry but is
-    never saved. Reproducing both here is what lets
-    :meth:`JCMComponent.initialize` seed ``JCMDerived.physics`` with the
-    exact structure, shapes and dtypes step 1 will produce — without
-    integrating a step to find out, which is what the previous adapter did.
+    never saved. That lets :meth:`JCMComponent.initialize` seed
+    ``JCMDerived.physics`` with the exact structure, shapes and dtypes step 1
+    will produce without integrating a step to find out.
 
     Only the **inexact** (float) leaves are cast to the default float dtype
     (float64 under ``jax_enable_x64``, else float32): JCM's averaged output
-    path (``jcm.model._averaged_outer_step``) means every inexact leaf --
-    dividing by the number of inner steps -- but keeps an integer or boolean
-    diagnostic (a convection type flag, a cloud-top switch) at its own,
-    unaveraged dtype, which ``get_empty_data`` already reports correctly; a
-    blanket float cast would disagree with that leaf's real dtype from the
-    first coupled step on.
+    path (``jcm.model._averaged_outer_step``) means every inexact leaf but
+    keeps an integer or boolean diagnostic (a convection type flag, a
+    cloud-top switch) at its own dtype, which ``get_empty_data`` already
+    reports.
 
     A mismatch would surface as a ``lax.scan`` carry-structure error on the
     first coupled step, so it is checked directly by the component's tests
@@ -631,15 +628,11 @@ class JCMComponent:
         attribute where they appear; everything else is left untagged rather
         than guessed at, because JCM owns those names and their meaning.
 
-        The ``time`` coordinate is JCM's, not the coupler's: JCM labels each
-        averaged record with its interval's **midpoint** (``datetime64[ms]``,
-        absolute, from the model's own ``start_time``), and JEM does not
-        relabel it, because a coupled dataset in which the atmosphere's time
-        axis disagrees with the atmosphere's own output files would be worse
-        than one where two components label the same interval differently.
-        The labels the other components carry come from
-        ``TimeAxis.datetimes``, the same convention computed independently on
-        the host so every component's dataset merges with the atmosphere's.
+        The ``time`` coordinate and ``time_bounds`` are JCM's own: each
+        averaged record labelled at its interval's **midpoint**
+        (``datetime64[ms]``). ``TimeAxis.datetimes`` gives every other
+        component the same labels, so their datasets merge with the
+        atmosphere's on one time axis.
 
         """
         collapsed = jax.tree.map(_collapse_save_axis, diagnostics)
