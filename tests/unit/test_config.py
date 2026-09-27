@@ -261,19 +261,21 @@ def _seconds(duration: str | float) -> int:
 def test_run_options_integrate_a_whole_number_of_chunks(option):
     """Every shipped ``coupled_run`` option is a run ``run_chunked`` accepts.
 
-    ``run_chunked`` refuses a ``total_time`` that is not a whole multiple of
-    ``chunk`` -- ``iterations`` is static, so a short final chunk would mean a
-    second compiled trajectory -- and refuses either if it is not a whole
-    number of coupling steps. A shipped option that cannot be run at all is a
-    trap whose first victim is whoever launches it, so the arithmetic is
+    ``run_chunked`` refuses a ``total_time``/``end_time`` or a ``chunk`` that
+    is not a whole number of coupling steps -- a shipped option that cannot be
+    run at all is a trap whose first victim is whoever launches it, so that is
     checked here, on the durations exactly as the driver parses them.
 
-    It is also what keeps a *documented* example honest: ``long_run``'s
+    ``total_time`` need not divide evenly into ``chunk`` any more -- the last
+    chunk is simply shorter when it does not -- but a shipped option that
+    divides evenly costs no extra compile for it, which is worth keeping as a
+    property of the defaults even though it is no longer a requirement. It is
+    also what keeps a *documented* example honest: ``long_run``'s
     ``total_time`` is spelled in days rather than years precisely because 30
-    days does not divide a 365-day year.
+    days does not divide a 365-day year (a calendar target instead uses
+    ``end_time``, which every shipped option leaves null).
     """
     cfg = composed([_group_override("coupled_run", option)])
-    total = _seconds(cfg.coupled_run.total_time)
     chunk = _seconds(cfg.coupled_run.chunk)
     coupling = _seconds(cfg.coupling.timestep)
 
@@ -281,9 +283,20 @@ def test_run_options_integrate_a_whole_number_of_chunks(option):
         f"coupled_run={option}: chunk={cfg.coupled_run.chunk!r} is not a whole "
         f"number of coupling steps of {cfg.coupling.timestep!r}."
     )
+    # Every shipped option gives a fixed total_time, not an end_time (which
+    # would need a start_time to resolve against): checked here rather than
+    # skipped, so an option that switched to end_time would be a deliberate
+    # edit to this test rather than a silent gap in it.
+    assert cfg.coupled_run.total_time is not None and cfg.coupled_run.end_time is None
+    total = _seconds(cfg.coupled_run.total_time)
+    assert total % coupling == 0, (
+        f"coupled_run={option}: total_time={cfg.coupled_run.total_time!r} is "
+        f"not a whole number of coupling steps of {cfg.coupling.timestep!r}."
+    )
     assert total % chunk == 0, (
         f"coupled_run={option}: total_time={cfg.coupled_run.total_time!r} is "
-        f"not a whole number of chunks of {cfg.coupled_run.chunk!r}."
+        f"not a whole number of chunks of {cfg.coupled_run.chunk!r} -- not "
+        "refused any more, but avoidable here, and worth avoiding."
     )
     # Vacuous while every shipped option leaves the interval null, which is the
     # point: the first option to set one is checked by the same arithmetic the
@@ -296,6 +309,23 @@ def test_run_options_integrate_a_whole_number_of_chunks(option):
             f"chunks of {cfg.coupled_run.chunk!r}; a checkpoint is only ever "
             "written at a chunk boundary."
         )
+
+
+def test_end_time_composes_and_nulls_total_time():
+    """``coupled_run.end_time`` overrides on the command line, alongside `total_time=null`.
+
+    Confirms the Hydra wiring for the feature described in
+    ``docs/source/design/running.md``: no ``+`` is needed because
+    ``end_time`` is already a key of ``default.yaml`` (the complete schema),
+    and setting it alongside ``total_time=null`` is exactly the override
+    ``jem/main.py``'s docstring shows.
+    """
+    cfg = composed([
+        "coupled_run.total_time=null",
+        "coupled_run.end_time=2011-01-01",
+    ])
+    assert cfg.coupled_run.total_time is None
+    assert cfg.coupled_run.end_time == "2011-01-01"
 
 
 # ---------------------------------------------------------------------------

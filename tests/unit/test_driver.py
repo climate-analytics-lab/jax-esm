@@ -107,11 +107,89 @@ def test_run_chunked_accepts_days_as_numbers(coupler, tmp_path):
     assert len(result.paths) == 4
 
 
-def test_run_chunked_rejects_partial_chunk(coupler, tmp_path):
-    """A run that is not a whole number of chunks is refused, naming both."""
-    with pytest.raises(ValueError, match="not a whole number of chunks"):
+def test_run_chunked_allows_a_short_final_chunk(tmp_path):
+    """A run whose length is not a whole number of chunks stops on time anyway.
+
+    Five days in two-day chunks is 2 + 2 + 1: the last chunk is short rather
+    than refused, so this run needs one extra compiled trajectory (for the
+    one-step batch) and nothing else. It must land on exactly the same carry
+    -- and write exactly the same records -- as the same five days run as a
+    single five-day chunk, which is the property a bug in the short-batch
+    handling (`remaining_batches`, the per-length trajectory cache) would
+    break while still stopping at step 5.
+    """
+    short_final = run_chunked(
+        two_slabs(), total_time="5 days", chunk="2 days",
+        output_dir=tmp_path / "short", checkpoint_path=None,
+    )
+    single_chunk = run_chunked(
+        two_slabs(), total_time="5 days", chunk="5 days",
+        output_dir=tmp_path / "single", checkpoint_path=None,
+    )
+    assert short_final.completed
+    assert short_final.steps_completed == 5
+    assert_carries_agree(short_final.final_carry, single_chunk.final_carry, atol=1e-12)
+
+    # One file per component per chunk -- three chunks (2, 2, 1 days) --
+    # named after the coupled step each starts at.
+    names = sorted(path.name for path in short_final.paths)
+    assert names == [
+        "ocn-00000000.nc", "ocn-00000002.nc", "ocn-00000004.nc",
+        "seaice-00000000.nc", "seaice-00000002.nc", "seaice-00000004.nc",
+    ]
+    with xr.open_mfdataset(
+        sorted((tmp_path / "short").glob("ocn-*.nc")), combine="by_coords"
+    ) as combined, xr.open_dataset(tmp_path / "single" / "ocn-00000000.nc") as single:
+        assert combined.sizes["time"] == single.sizes["time"] == 5
+        np.testing.assert_array_equal(
+            combined["time"].values, single["time"].values
+        )
+
+
+# ---------------------------------------------------------------------------
+# `end_time`: a calendar target instead of a fixed duration
+# ---------------------------------------------------------------------------
+
+
+def test_end_time_matches_the_equivalent_total_time(tmp_path):
+    """`end_time` and the `total_time` it works out to integrate identically."""
+    from_duration = run_chunked(
+        two_slabs(), total_time="5 days", chunk="2 days",
+        output_dir=tmp_path / "duration", checkpoint_path=None,
+    )
+    # START_DATE is 2001-01-01, so five days later is 2001-01-06.
+    from_end_date = run_chunked(
+        two_slabs(), end_time="2001-01-06", chunk="2 days",
+        output_dir=tmp_path / "end_date", checkpoint_path=None,
+    )
+    assert from_end_date.completed
+    assert from_end_date.steps_completed == from_duration.steps_completed == 5
+    assert_carries_agree(
+        from_end_date.final_carry, from_duration.final_carry, atol=1e-12
+    )
+
+
+def test_run_chunked_requires_exactly_one_of_total_time_and_end_time(coupler, tmp_path):
+    """Both or neither of `total_time`/`end_time` is a `ValueError`, not a guess."""
+    with pytest.raises(ValueError, match="exactly one of total_time and end_time"):
+        run_chunked(coupler, output_dir=tmp_path)
+    with pytest.raises(ValueError, match="at most one of total_time and end_time"):
         run_chunked(
-            coupler, total_time="5 days", chunk="2 days", output_dir=tmp_path
+            coupler, total_time="5 days", end_time="2001-01-06", output_dir=tmp_path
+        )
+
+
+def test_end_time_before_start_date_raises(coupler, tmp_path):
+    """An `end_time` that is not after the coupler's start_date is refused."""
+    with pytest.raises(ValueError, match="not after the coupler's start_date"):
+        run_chunked(coupler, end_time="2000-01-01", output_dir=tmp_path)
+
+
+def test_end_time_not_on_a_coupling_step_raises(coupler, tmp_path):
+    """`end_time` must resolve to a whole number of coupling steps, like `total_time`."""
+    with pytest.raises(ValueError, match="end_time="):
+        run_chunked(
+            coupler, end_time="2001-01-01T12:00:00", output_dir=tmp_path
         )
 
 
@@ -547,13 +625,17 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
 
 
 def test_the_documented_long_run_durations_are_a_whole_number_of_chunks(coupler):
-    """The long-run snippet the docs show is one `run_chunked` accepts.
+    """The long-run snippet the docs show divides evenly, so it costs no extra compile.
 
-    `total_time` must be a whole multiple of `chunk`, and is a fixed
+    `run_chunked` no longer requires `total_time` to be a whole multiple of
+    `chunk` -- the last chunk is simply shorter when it is not -- but the
+    documented recipe is still deliberately chosen to divide evenly, so a
+    reader following it gets the cheaper of the two. `total_time` is a fixed
     duration -- "years"/"months" are calendar units jax_datetime has no fixed
     length for, which is why `jem/config/coupled_run/long_run.yaml` spells
-    its length in days ("2190 days", not "6 years"). This keeps the
-    documented recipe honest without integrating six years to find out.
+    its length in days ("2190 days", not "6 years"), rather than `end_time`.
+    This keeps the documented recipe honest without integrating six years to
+    find out.
     """
     from jem.driver import _whole_steps
 
@@ -1221,6 +1303,35 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
         sorted(output.glob("ocn-*.nc")), combine="by_coords"
     ) as combined:
         assert combined.sizes["time"] == 8
+
+
+def test_resume_mid_way_through_a_run_with_a_short_final_chunk(tmp_path):
+    """A checkpoint from *before* the short final chunk resumes into it.
+
+    Seven days in three-day chunks is 3 + 3 + 1 -- the run's own length,
+    not a rechunked resume, gives the short last batch here. Checkpointing
+    after the first chunk and resuming with the SAME chunk puts the restart
+    exactly at the boundary before the short final chunk, so the resumed call
+    integrates only 3 + 1 days and must still land on the same carry as one
+    uninterrupted seven-day call.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    run_chunked(
+        two_slabs(), total_time="7 days", chunk="3 days",
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+    )
+    resumed = run_chunked(
+        two_slabs(), total_time="7 days", chunk="3 days",
+        output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+    )
+    assert resumed.completed
+    assert resumed.steps_completed == 7
+
+    continuous = run_chunked(
+        two_slabs(), total_time="7 days", chunk="7 days",
+        output_dir=tmp_path / "continuous", checkpoint_path=None,
+    )
+    assert_carries_agree(resumed.final_carry, continuous.final_carry, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------
