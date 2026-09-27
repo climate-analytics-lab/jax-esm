@@ -46,7 +46,7 @@ import jax_datetime as jdt
 import numpy as np
 
 from jem.base.component import CouplingTime, Diagnostics
-from jem.durations import resolve_duration_seconds
+from jem.driver import run_length_seconds
 
 #: The accumulator a :class:`BinnedMean` carries: an ``(n_bins, ...)`` running
 #: sum shaped like one step's diagnostics, and the count of records that
@@ -125,6 +125,15 @@ def _duration_seconds(duration: str | float) -> int:
     from jcm.date import parse_duration_seconds
 
     return int(parse_duration_seconds(duration))
+
+
+def _run_length_seconds(
+    coupler: Any, total_time: str | float | None, end_time: str | None
+) -> int | None:
+    """Return the run length ``run_chunked`` would integrate, or None if none is given."""
+    if total_time is None and end_time is None:
+        return None
+    return run_length_seconds(coupler, total_time, end_time)
 
 
 def _record_axes(coupler: Any) -> dict[str, Any]:
@@ -648,10 +657,8 @@ def monthly_mean(
         monthly_mean(coupler, end_time="2011-01-01")   # the same, from an end date
         monthly_mean(coupler, n_months=121)            # sized directly instead
 
-    ``total_time`` and ``end_time`` are the same two forms of a run length
-    that :func:`jem.driver.run_chunked` takes -- a fixed duration, or a
-    calendar end date for the same run a ``run_chunked(..., end_time=...)``
-    call is sizing its accumulator to.
+    ``total_time`` and ``end_time`` are the run length exactly as
+    :func:`jem.driver.run_chunked` takes it.
 
     The two forms bin by the same rule; they differ in what the accumulator
     *is*. Twelve bins are the calendar months, so a ten-year run composites
@@ -702,19 +709,14 @@ def monthly_mean(
         Build the **sequential** form with this many bins: the months the run
         passes through, in order, starting with the one the run starts in. At
         most one of this and a run length (``total_time`` or ``end_time``);
-        neither gives the twelve-bin climatology.
+        none of the three gives the twelve-bin climatology.
     total_time : str or float, optional
         Build the sequential form sized to cover a run of this fixed length
         (a ``jcm.date.parse_duration_seconds`` string, or a number of days):
-        one bin for every calendar month a record's midpoint falls in. At
-        most one of ``total_time`` and ``end_time``.
+        one bin for every calendar month a record's midpoint falls in.
     end_time : str, optional
-        The same sizing as ``total_time``, from an absolute ISO date/datetime
-        (``jcm.date.to_datetime``) instead of a fixed duration -- the run
-        length used is ``end_time - coupler.start_date``. This is the form to
-        use for the same run a ``run_chunked(..., end_time=...)`` call is
-        sizing its accumulator to. At most one of ``total_time`` and
-        ``end_time``.
+        The same, for a run to this ISO date/datetime. At most one of
+        ``total_time`` and ``end_time``.
 
     Returns
     -------
@@ -725,21 +727,18 @@ def monthly_mean(
     Raises
     ------
     ValueError
-        If ``n_months`` is given together with a run length (``total_time``
-        or ``end_time``), if ``total_time`` and ``end_time`` are both given,
-        or if ``n_months`` is not a positive integer.
+        If more than one of ``n_months``, ``total_time`` and ``end_time`` is
+        given, or if ``n_months`` is not a positive integer.
 
     """
-    duration_seconds = resolve_duration_seconds(
-        coupler, total_time, end_time, required=False
-    )
+    duration_seconds = _run_length_seconds(coupler, total_time, end_time)
     if n_months is not None and duration_seconds is not None:
         raise ValueError(
             "Give at most one of n_months and a run length (total_time or "
             "end_time): n_months sets the accumulator's size directly and a "
-            "run length counts it from the run, while giving none of the "
-            "three is the twelve-month climatology (got n_months="
-            f"{n_months!r}, total_time={total_time!r}, end_time={end_time!r})."
+            "run length counts it from the run, while giving none of them is "
+            f"the twelve-month climatology (got n_months={n_months!r}, "
+            f"total_time={total_time!r}, end_time={end_time!r})."
         )
 
     if n_months is None and duration_seconds is None:
@@ -790,11 +789,10 @@ def windowed_mean(
 
         pentads = windowed_mean(coupler, "5 days", n_windows=73)   # a year
         weeks = windowed_mean(coupler, "7 days", total_time="365 days")
-        weeks = windowed_mean(coupler, "7 days", end_time="2001-01-01")  # same run
+        weeks = windowed_mean(coupler, "7 days", end_time="2001-01-01")
 
-    ``total_time`` and ``end_time`` are the same two forms of a run length
-    that :func:`jem.driver.run_chunked` takes; at most one of the two may be
-    given.
+    ``total_time`` and ``end_time`` are the run length exactly as
+    :func:`jem.driver.run_chunked` takes it.
 
     The windows need not all be the same length. Give a **sequence** of
     lengths and it is a pattern the windows cycle through, repeating for as
@@ -854,15 +852,10 @@ def windowed_mean(
         which ``n_windows`` is counted: enough windows to cover the run, the
         last one short if the run does not end on a window boundary (its mean
         is then over the steps that did fall in it, because every bin is
-        divided by its own count). At most one of ``total_time`` and
-        ``end_time``.
+        divided by its own count).
     end_time : str, optional
-        The same sizing as ``total_time``, from an absolute ISO date/datetime
-        (``jcm.date.to_datetime``) instead of a fixed duration -- the run
-        length used is ``end_time - coupler.start_date``. This is the form to
-        use for the same run a ``run_chunked(..., end_time=...)`` call is
-        sizing its accumulator to. At most one of ``total_time`` and
-        ``end_time``.
+        The same, for a run to this ISO date/datetime. At most one of
+        ``total_time`` and ``end_time``.
     carry : CoupledCarry, optional
         A carry to take the diagnostics' shapes from; see
         :func:`_build_binned_mean`.
@@ -876,10 +869,9 @@ def windowed_mean(
     Raises
     ------
     ValueError
-        If ``window`` is an empty sequence, if both ``n_windows`` and a run
-        length (``total_time`` or ``end_time``) are given (or none of the
-        three, for a single window length), if ``total_time`` and
-        ``end_time`` are both given, if ``n_windows`` is not a positive
+        If ``window`` is an empty sequence, if more than one of
+        ``n_windows``, ``total_time`` and ``end_time`` is given (or none, for
+        a single window length), if ``n_windows`` is not a positive
         integer, if any duration is not positive, or if any window length is
         not a whole number of coupling steps.
 
@@ -909,9 +901,7 @@ def windowed_mean(
             )
         lengths_seconds.append(length_seconds)
 
-    duration_seconds = resolve_duration_seconds(
-        coupler, total_time, end_time, required=False
-    )
+    duration_seconds = _run_length_seconds(coupler, total_time, end_time)
     if n_windows is not None and duration_seconds is not None:
         raise ValueError(
             "Give exactly one of n_windows and a run length (total_time or "
@@ -933,11 +923,9 @@ def windowed_mean(
             raise ValueError(
                 "Give exactly one of n_windows and a run length (total_time "
                 "or end_time): n_windows sets the accumulator's size "
-                "directly, a run length counts it from the run (got "
-                f"n_windows=None, total_time={total_time!r}, "
-                f"end_time={end_time!r}). Only a sequence of window lengths "
-                "may be given none of the three, and then it is used once "
-                "through."
+                "directly, a run length counts it from the run (got none of "
+                "them). Only a sequence of window lengths may be given none, "
+                "and then it is used once through."
             )
         # One cycle of the pattern is the only size a pattern implies on its
         # own, and it is the useful one: a fortnight of alternating windows.

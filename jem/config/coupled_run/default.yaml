@@ -24,19 +24,12 @@
 # shadow jcm's (see the comment in `config.yaml`). Select an option with
 # `coupled_run=short_run`, set one key with `coupled_run.chunk=...`.
 
-# How far to integrate. Exactly one of `total_time` and `end_time` is set;
-# the other is null. `total_time` is a fixed duration, a
-# `jcm.date.parse_duration_seconds` string -- "years"/"months" are calendar
-# units it refuses, since a year is not a fixed number of seconds.
+# How far to integrate: exactly one of `total_time` and `end_time`, the other
+# null. `total_time` is a fixed duration (`jcm.date.parse_duration_seconds`,
+# which refuses "years" and "months"); `end_time` is an ISO date/datetime for
+# a calendar target, measured from the atmosphere's `start_time`
+# (`coupled_run.total_time=null coupled_run.end_time=2011-01-01`).
 total_time: "30 days"
-
-# `end_time` is the other way to say how far to integrate: an absolute ISO
-# date/datetime (`jcm.date.to_datetime`) instead of a fixed duration, for a
-# calendar target `total_time` cannot spell ("run to 2011-01-01" rather than
-# a day count worked out by hand). The run length is `end_time - the
-# coupler's start_date` (the atmosphere's `start_time`), so setting this also
-# requires `total_time=null`, e.g. `coupled_run.total_time=null
-# coupled_run.end_time=2011-01-01`.
 end_time: null
 
 # Simulated time integrated between health checks and output files. One chunk
