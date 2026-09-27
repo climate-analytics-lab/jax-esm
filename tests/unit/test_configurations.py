@@ -308,14 +308,17 @@ class TestLoad(unittest.TestCase):
         """A `load()` that raises has not applied `atmosphere.constants`.
 
         Building the atmosphere applies them process-wide, so `load()` resolves
-        the whole config and the run settings first. Covers a bad run setting
-        and an unresolvable key no builder reads.
+        the whole config and the run settings first, and restores the
+        constants if a component then fails to build. Covers a bad run
+        setting, an unresolvable key no builder reads, and a missing file.
         """
         import jcm.constants as c
 
         saved = c.physical_constants
         for bad in ({"coupled_run.output_dir": "${missing.key}"},
-                    {"+probe.value": "${missing.key}"}):
+                    {"+probe.value": "${missing.key}"},
+                    {"ocean": "slab_relax",
+                     "ocean.sst_clim_file": "/nonexistent/sst.nc"}):
             with self.subTest(bad=bad):
                 try:
                     with self.assertRaises(Exception):

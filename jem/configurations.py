@@ -506,6 +506,15 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     # `build_run_kwargs`'s non-door fallback.
     if cfg.coupled_run.get("output_dir") is None:
         run_kwargs["output_dir"] = _fresh_output_dir()
-    coupler = runners.build_coupler(cfg)
+    # A component can still fail while being built (a missing data file),
+    # after the atmosphere has applied the constants; put them back.
+    import jcm.constants as jcm_constants
+
+    saved_constants = jcm_constants.physical_constants
+    try:
+        coupler = runners.build_coupler(cfg)
+    except BaseException:
+        jcm_constants.set_constants(saved_constants)
+        raise
     return LoadedConfiguration(name=name, coupler=coupler,
                                run_kwargs=run_kwargs, config=config)
