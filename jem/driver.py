@@ -842,10 +842,8 @@ def _require_whole_number_of_chunks(
 ) -> None:
     """Raise unless ``total_steps`` is a whole number of ``steps_per_chunk``.
 
-    Factored out of :func:`run_chunked` (rather than left as an inline ``if``)
-    so a test can call the actual rule ``run_chunked`` enforces instead of
-    reimplementing the modulo check itself and silently drifting from it; no
-    behaviour change from when this was inline.
+    A function of its own so that a test can check a documented override
+    against the rule :func:`run_chunked` enforces, rather than a copy of it.
     """
     if total_steps % steps_per_chunk:
         raise ValueError(
