@@ -21,29 +21,44 @@ passes them through, so a default can only be changed in one place.
 
 Chunking rules
 --------------
-``total_time`` and ``chunk`` are fixed durations -- a
-``jcm.date.parse_duration_seconds`` string (``"30 days"``, ``"6 hours"``) or a
-plain number of days -- and both must
-be whole multiples of the coupling timestep, because a coupled step is the
-smallest thing this loop can integrate. ``total_time`` must in turn be a whole
-multiple of ``chunk``: a final short chunk would need a second compiled
-trajectory for one call, and a run whose length does not divide into chunks is
-much more often a mistake in the configuration than a deliberate request. All
-three are checked before anything is built or compiled, and the message names
-both quantities -- as is ``subsample``, which is otherwise not read until the
-first chunk has already been integrated. ``chunk`` is then free to be chosen
-for memory and restart granularity alone: neither what the files hold nor when
-the checkpoints fall depends on it, because ``subsample`` counts coupled steps
-from the start of the **run** (:mod:`jem.output`) and so does
-``checkpoint_interval``.
+A run's length is given exactly one of two ways: ``total_time``, a fixed
+duration -- a ``jcm.date.parse_duration_seconds`` string (``"30 days"``,
+``"6 hours"``) or a plain number of days -- or ``end_time``, an absolute
+ISO date/datetime (``jcm.date.to_datetime``), which this loop turns into a
+duration itself, ``end_time - coupler.start_date`` in whole seconds computed
+on the host (never as float days, which cannot represent an exact second
+count over a multi-year run). A fixed duration cannot spell a calendar
+target -- "10 years" is not a fixed number of seconds, since a year is 365 or
+366 days depending on which one, and ``jcm.date.parse_duration_seconds``
+refuses it for exactly that reason -- so ``end_time`` is how a run is given
+one instead: "run to 2011-01-01" rather than a day count worked out by hand.
+
+``chunk`` is a fixed duration in the same forms as ``total_time``, and it and
+the resolved run length must both be whole multiples of the coupling
+timestep, because a coupled step is the smallest thing this loop can
+integrate. The run length need **not** be a whole multiple of ``chunk``: the
+last chunk is simply shorter when it is not
+(:func:`jem.checkpoint.remaining_batches` returns its true length), at the
+cost of one extra compiled trajectory for that one short chunk. A calendar
+``end_time`` is exactly the case this matters for -- "2001-01-01" to
+"2011-01-01" is 3652 days, which almost no chunk length divides evenly, so
+refusing a non-dividing length would make ``end_time`` unusable in practice.
+All of this is checked before anything is built or compiled, and the message
+names the quantities involved -- as is ``subsample``, which is otherwise not
+read until the first chunk has already been integrated. ``chunk`` is then
+free to be chosen for memory and restart granularity alone: neither what the
+files hold nor when the checkpoints fall depends on it, because ``subsample``
+counts coupled steps from the start of the **run** (:mod:`jem.output`) and so
+does ``checkpoint_interval``.
 
 The trajectory is compiled **once**, for ``chunk`` worth of coupled steps, and
-called once per chunk. A resumed run is the one case that can need a second
-compile: a checkpoint written by a run with a different chunk length leaves the
-step counter part-way through a chunk, so what remains does not divide into
-whole chunks and :func:`jem.checkpoint.remaining_batches` makes the **last**
-batch a short one -- one extra compile, on that batch only, in exchange for the
-run stopping exactly at ``total_time``.
+called once per chunk -- except for the run's last batch when it is shorter,
+which costs one extra compile, on that batch only. A **resumed** run can need
+that same extra compile even when its own length divides evenly: a checkpoint
+written by a run with a different chunk length leaves the step counter
+part-way through a chunk, so what remains does not divide into whole chunks
+of the resuming run's length either, and :func:`jem.checkpoint.remaining_batches`
+makes the **last** batch of the resume a short one for the same reason.
 
 Resuming
 --------
@@ -105,7 +120,7 @@ output, or one at or past the end of this run, which nothing it writes reaches
 -- it **refuses** with a ``ValueError`` naming the files, grouped by which of
 the two they are, and the ways out:
 resume with the chunk they were written under (and, for those past the end,
-a ``total_time`` that reaches them), remove them, or write into another
+a ``total_time`` or ``end_time`` that reaches them), remove them, or write into another
 ``output_dir``. Deleting them instead would be a driver destroying a
 killed run's output on its own initiative, which is not its decision to take.
 
@@ -164,6 +179,7 @@ import xarray as xr
 
 from jem.base.component import CoupledCarry, SupportsXarray
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
+from jem.durations import resolve_duration_seconds
 from jem.output import (
     check_subsample,
     chunk_datasets,
@@ -309,7 +325,8 @@ def default_health_check(
 def run_chunked(
     coupler: "Coupler",
     *,
-    total_time: str | float,
+    total_time: str | float | None = None,
+    end_time: str | None = None,
     chunk: str | float = "30 days",
     initial_carry: CoupledCarry | None = None,
     output_dir: Path | str = "outputs",
@@ -321,17 +338,28 @@ def run_chunked(
     checkpoint_interval: str | float | None = None,
     accumulate: "Accumulator | None" = None,
 ) -> RunResult:
-    """Integrate ``coupler`` for ``total_time``, a chunk at a time.
+    """Integrate ``coupler`` for ``total_time`` or to ``end_time``, a chunk at a time.
 
     Parameters
     ----------
     coupler : jem.base.coupler.Coupler
         The coupled model. Its workflow, exchangers and clock are the run's;
         there is no second place to configure them.
-    total_time : str or float
+    total_time : str or float, optional
         How far to integrate, as a ``jcm.date.parse_duration_seconds``
-        string (``"90 days"``, ``"6 hours"``) or a number of days. Must be a whole
-        multiple of both the coupling timestep and ``chunk``.
+        string (``"90 days"``, ``"6 hours"``) or a number of days. Must be a
+        whole multiple of the coupling timestep. Exactly one of ``total_time``
+        and ``end_time`` must be given.
+    end_time : str, optional
+        How far to integrate, as an absolute ISO date/datetime
+        (``jcm.date.to_datetime``) instead of a fixed duration: the run
+        length is ``end_time - coupler.start_date``, in whole seconds, which
+        must be positive and a whole multiple of the coupling timestep. This
+        is how a run is given a calendar target ("run to 2011-01-01") that
+        ``total_time`` cannot express -- a year or a month is not a fixed
+        number of seconds, which is why ``jcm.date.parse_duration_seconds``
+        refuses "10 years" and why ``end_time`` exists alongside it. Exactly
+        one of ``total_time`` and ``end_time`` must be given.
     chunk : str or float
         Simulated time integrated between output files, checkpoints and
         health checks, in the same forms. Must be a whole multiple of the
@@ -465,10 +493,12 @@ def run_chunked(
     Raises
     ------
     ValueError
-        If ``chunk``, ``total_time`` or ``checkpoint_interval`` is not a
-        whole number of coupling steps, ``total_time`` is not a whole number
-        of chunks, ``checkpoint_interval`` is not a whole number of chunks or
-        was given without a ``checkpoint_path``, or ``subsample`` is not a positive
+        If ``chunk`` or ``checkpoint_interval`` is not a whole number of
+        coupling steps, if the run's length (``total_time`` or ``end_time``,
+        resolved to seconds) is not a whole number of coupling steps, if
+        ``total_time`` and ``end_time`` are both given or neither is,
+        ``checkpoint_interval`` is not a whole number of chunks or was given
+        without a ``checkpoint_path``, or ``subsample`` is not a positive
         integer, or if ``accumulate`` is given with a ``health_check``. All of
         them are checked before anything is compiled or integrated. Also if
         the run resumes from a checkpoint and ``output_dir`` already holds
@@ -520,16 +550,7 @@ def run_chunked(
     # that it was 0 would have cost a chunk of an atmosphere.
     check_subsample(subsample)
     steps_per_chunk = _whole_steps(chunk, coupler, "chunk")
-    total_steps = _whole_steps(total_time, coupler, "total_time")
-    if total_steps % steps_per_chunk:
-        raise ValueError(
-            f"total_time ({total_time!r}, {total_steps} coupled steps) is not a "
-            f"whole number of chunks of {chunk!r} ({steps_per_chunk} coupled "
-            "steps): a final partial chunk is not supported, because it would "
-            "need a second compiled trajectory for a single call. Choose a "
-            "chunk that divides the run, or a run length that is a multiple of "
-            "the chunk."
-        )
+    total_steps = _total_steps(coupler, total_time, end_time)
     steps_per_checkpoint = _checkpoint_steps(
         checkpoint_interval, checkpoint_path, chunk, steps_per_chunk, coupler,
     )
@@ -614,14 +635,19 @@ def run_chunked(
         # last chunk. It is still worth saying, because the interval is what
         # someone sizing a requeue reasons with, and the last gap is shorter
         # than the one they asked for.
+        length_repr = (
+            f"total_time ({total_time!r}, {total_steps} coupled steps)"
+            if end_time is None
+            else f"end_time ({end_time!r}, {total_steps} coupled steps)"
+        )
         logger.warning(
-            "total_time (%r, %d coupled steps) is not a whole number of "
+            "%s is not a whole number of "
             "checkpoint_interval (%r, %d coupled steps), so the run's last "
             "checkpoint falls at the end of the run rather than on an interval "
             "boundary -- the final gap between saves is shorter than the "
             "interval. Nothing is lost by it: a completed run always "
             "checkpoints its last chunk.",
-            total_time, total_steps, checkpoint_interval, steps_per_checkpoint,
+            length_repr, checkpoint_interval, steps_per_checkpoint,
         )
 
     # Built once and cached by length: every chunk but (at most) the first of
@@ -840,6 +866,36 @@ def _whole_steps(duration: str | float, coupler: "Coupler", what: str) -> int:
             f"coupling steps of {coupler.dt_seconds:g} s "
             f"({coupler.coupling_timestep!r}). A run is integrated in whole "
             "coupled steps."
+        )
+    return int(steps)
+
+
+def _total_steps(
+    coupler: "Coupler", total_time: str | float | None, end_time: str | None
+) -> int:
+    """Return the run's length -- ``total_time`` or ``end_time`` -- in whole coupled steps.
+
+    Exactly one of the two must be given (:func:`jem.durations.resolve_duration_seconds`
+    raises otherwise), and the resolved seconds must in turn be a whole
+    number of coupling steps, checked the same way -- and with the same
+    message style -- as every other duration :func:`run_chunked` takes
+    (:func:`_whole_steps`), except that the message names whichever of
+    ``total_time``/``end_time`` was actually given rather than a single fixed
+    argument name.
+    """
+    # `required=True` (the default) never returns None; it raises instead.
+    # Asserted rather than left implicit so mypy can narrow `int | None`.
+    seconds = resolve_duration_seconds(coupler, total_time, end_time)
+    assert seconds is not None
+    steps, remainder = divmod(seconds, int(coupler.dt_seconds))
+    if remainder or steps < 1:
+        source = (
+            f"total_time={total_time!r}" if end_time is None else f"end_time={end_time!r}"
+        )
+        raise ValueError(
+            f"{source} is {seconds} s, which is not a whole number of coupling "
+            f"steps of {coupler.dt_seconds:g} s ({coupler.coupling_timestep!r}). "
+            "A run is integrated in whole coupled steps."
         )
     return int(steps)
 
@@ -1099,8 +1155,9 @@ def _check_resumed_output_is_rewritable(
             f"(chunk={chunk!r}) up to step {total_steps}. "
             + ". ".join(reasons)
             + ". Resume with the chunk those files were written under (and, "
-            "for those past the end, a total_time that reaches them), or "
-            "remove them, or write this run into another output_dir. (The "
+            "for those past the end, a total_time or end_time that reaches "
+            "them), or remove them, or write this run into another "
+            "output_dir. (The "
             f"output before step {restored_step} is the run's history and is "
             "not in question.)"
         )
