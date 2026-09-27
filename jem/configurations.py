@@ -490,11 +490,14 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     overrides_list = [_override_str(k, v) for k, v in overrides.items()]
     cfg = _compose(name, overrides_list)
 
-    # Run settings first, as `runners.run` does: building the coupler applies
-    # `atmosphere.constants` process-globally, so a config that fails on its
-    # run settings must fail before that.
+    # Everything that can fail on the config is resolved before the coupler
+    # is built, because building it applies `atmosphere.constants`
+    # process-globally: a `load()` that raises must leave them untouched.
+    # `config` is the plain resolved dict for introspection; a still-unfilled
+    # ``???`` key stays a string rather than raising on this read-only copy.
+    config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
+    assert isinstance(config, dict)
     run_kwargs = runners.build_run_kwargs(cfg)
-    coupler = runners.build_coupler(cfg)
     # A fresh directory per call, UNLESS the recipe (or an override) named an
     # explicit one -- checked on the composed config itself, before
     # `build_run_kwargs` folded a `null` into its own "outputs" fallback, so
@@ -503,12 +506,6 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     # `build_run_kwargs`'s non-door fallback.
     if cfg.coupled_run.get("output_dir") is None:
         run_kwargs["output_dir"] = _fresh_output_dir()
-    # Plain resolved dict for introspection; a still-unfilled ``???`` key stays
-    # a string rather than raising on this read-only copy. `cfg` is always a
-    # mapping node (the whole composed config), so `to_container` always
-    # returns a dict here -- the broader union in its return type covers a
-    # list/leaf-valued *sub*-node, which this call never passes.
-    config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
-    assert isinstance(config, dict)
+    coupler = runners.build_coupler(cfg)
     return LoadedConfiguration(name=name, coupler=coupler,
                                run_kwargs=run_kwargs, config=config)

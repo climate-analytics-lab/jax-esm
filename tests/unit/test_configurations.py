@@ -304,24 +304,27 @@ class TestLoad(unittest.TestCase):
             # not just this one.
             c.set_constants(saved)
 
-    def test_a_bad_run_setting_fails_before_the_constants_are_applied(self):
-        """A config whose run settings cannot resolve leaves jcm.constants alone.
+    def test_a_config_that_fails_to_resolve_leaves_the_constants_alone(self):
+        """A `load()` that raises has not applied `atmosphere.constants`.
 
-        `runners.run` builds the run settings before the coupler, and so does
-        `load()`: the atmosphere applies `atmosphere.constants` process-wide.
+        Building the atmosphere applies them process-wide, so `load()` resolves
+        the whole config and the run settings first. Covers a bad run setting
+        and an unresolvable key no builder reads.
         """
         import jcm.constants as c
 
         saved = c.physical_constants
-        try:
-            with self.assertRaises(Exception):
-                configurations.load(
-                    "aquaplanet-slab",
-                    **{"+atmosphere.constants.grav": 9.7,
-                       "coupled_run.output_dir": "${missing.key}"})
-            self.assertEqual(c.physical_constants, saved)
-        finally:
-            c.set_constants(saved)
+        for bad in ({"coupled_run.output_dir": "${missing.key}"},
+                    {"+probe.value": "${missing.key}"}):
+            with self.subTest(bad=bad):
+                try:
+                    with self.assertRaises(Exception):
+                        configurations.load(
+                            "aquaplanet-slab",
+                            **{"+atmosphere.constants.grav": 9.7, **bad})
+                    self.assertEqual(c.physical_constants, saved)
+                finally:
+                    c.set_constants(saved)
 
 
 class TestOverrideStr(unittest.TestCase):
