@@ -311,8 +311,8 @@ def _override_str(key: str, value: Any) -> str:
     fine, see below), since "one dotted override per field" is meaningless
     for a tuple that is not naming nested config keys.
 
-    ``None`` spells ``null``, which is also how ``**overrides`` writes a
-    bare deletion: ``**{"~coupled_run.subsample": None}`` is the CLI's
+    ``None`` spells ``null``, except with a ``~`` key, where it writes a bare
+    deletion: ``**{"~coupled_run.subsample": None}`` is the CLI's
     ``~coupled_run.subsample``.
 
     A ``list`` follows the same rule at every depth: its elements compose to
@@ -354,6 +354,8 @@ def _override_str(key: str, value: Any) -> str:
             "override token that reproduces it faithfully; pass a list "
             f"instead, e.g. **{{{key!r}: [<value>, ...]}}."
         )
+    if key.startswith("~") and value is None:
+        return key
     return f"{key}={_hydra_literal(value, key)}"
 
 

@@ -331,6 +331,15 @@ class TestLoad(unittest.TestCase):
 
 
 class TestOverrideStr(unittest.TestCase):
+    def test_a_tilde_key_with_none_deletes_the_key(self):
+        """``{"~key": None}`` is Hydra's bare ``~key``, whatever the key holds."""
+        self.assertEqual(
+            configurations._override_str("~coupled_run.subsample", None),
+            "~coupled_run.subsample")
+        exp = configurations.load(
+            "aquaplanet-slab", **{"~coupled_run.subsample": None})
+        self.assertNotIn("subsample", exp.config["coupled_run"])
+
     def test_quotes_hydra_grammar_values(self):
         # F2: a string value carrying Hydra grammar characters (comma, '=',
         # braces -- ordinary in paths/filenames) must compose back verbatim
