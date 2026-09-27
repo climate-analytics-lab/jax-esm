@@ -96,9 +96,13 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 - **The run loop** {func}`~jem.run_chunked` integrates in chunks: per
   chunk it writes one file per component, checkpoints if it was given a path,
   and runs a health check on the result, stopping the run if the atmosphere
-  has gone unstable. Every run default lives on its signature. `total_time`
-  and `chunk` must both be whole multiples of the coupling timestep, and
-  `total_time` a whole multiple of `chunk`.
+  has gone unstable. Every run default lives on its signature. How far to
+  integrate is exactly one of `total_time` (a fixed duration) or `end_time`
+  (a calendar date, `end_time - coupler.start_date` in whole seconds) — both
+  must resolve to a whole multiple of the coupling timestep, and so must
+  `chunk`, but the run length need not divide evenly into `chunk`: the last
+  chunk is simply shorter when it does not, at the cost of one extra
+  compiled trajectory.
 
 ## Exchanges a table can express
 
