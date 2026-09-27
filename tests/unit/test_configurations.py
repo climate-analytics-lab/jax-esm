@@ -304,6 +304,25 @@ class TestLoad(unittest.TestCase):
             # not just this one.
             c.set_constants(saved)
 
+    def test_a_bad_run_setting_fails_before_the_constants_are_applied(self):
+        """A config whose run settings cannot resolve leaves jcm.constants alone.
+
+        `runners.run` builds the run settings before the coupler, and so does
+        `load()`: the atmosphere applies `atmosphere.constants` process-wide.
+        """
+        import jcm.constants as c
+
+        saved = c.physical_constants
+        try:
+            with self.assertRaises(Exception):
+                configurations.load(
+                    "aquaplanet-slab",
+                    **{"+atmosphere.constants.grav": 9.7,
+                       "coupled_run.output_dir": "${missing.key}"})
+            self.assertEqual(c.physical_constants, saved)
+        finally:
+            c.set_constants(saved)
+
 
 class TestOverrideStr(unittest.TestCase):
     def test_quotes_hydra_grammar_values(self):

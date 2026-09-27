@@ -490,8 +490,11 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     overrides_list = [_override_str(k, v) for k, v in overrides.items()]
     cfg = _compose(name, overrides_list)
 
-    coupler = runners.build_coupler(cfg)
+    # Run settings first, as `runners.run` does: building the coupler applies
+    # `atmosphere.constants` process-globally, so a config that fails on its
+    # run settings must fail before that.
     run_kwargs = runners.build_run_kwargs(cfg)
+    coupler = runners.build_coupler(cfg)
     # A fresh directory per call, UNLESS the recipe (or an override) named an
     # explicit one -- checked on the composed config itself, before
     # `build_run_kwargs` folded a `null` into its own "outputs" fallback, so
