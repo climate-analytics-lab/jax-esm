@@ -54,8 +54,6 @@ from jem.exchangers import (
 
 logger = logging.getLogger(__name__)
 
-SECONDS_PER_DAY = 86400
-
 #: Which config group builds which component, under which name. The names are
 #: the ones :func:`jem.exchangers.default_exchanges` wires; the atmosphere is
 #: not here because it is not optional and carries its own name
@@ -707,9 +705,8 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     coupler = Coupler(
         components,
         exchangers,
-        coupling_timestep=_coupling_timestep(cfg, atm.model.calendar),
-        start_date=atm.model.start_date,
-        calendar=atm.model.calendar,
+        coupling_timestep=_coupling_timestep(cfg),
+        start_date=atm.model.start_time,
         workflow=None if workflow is None else list(workflow),
     )
     # After the coupler, not before: what `declare_exchanged_forcing` needs is
@@ -940,23 +937,11 @@ def _land_fraction(path: str) -> Any:
     return field.to_numpy()[0].transpose()
 
 
-def _coupling_timestep(cfg: DictConfig, calendar: str) -> jdt.Timedelta:
-    """Return ``cfg.coupling.timestep`` as the coupler's ``jdt.Timedelta``.
+def _coupling_timestep(cfg: DictConfig) -> jdt.Timedelta:
+    """Return ``cfg.coupling.timestep`` ("1 day", "12 hours") as a ``jdt.Timedelta``."""
+    from jcm.date import parse_duration_seconds
 
-    The config spells the interval the way a run length is spelled ("1 day",
-    "12 hours"), on the atmosphere's calendar; the coupler holds whole
-    seconds.
-    """
-    from jcm.date import parse_duration_days
-
-    spelling = cfg.coupling.timestep
-    seconds = float(parse_duration_days(spelling, calendar)) * SECONDS_PER_DAY
-    if abs(seconds - round(seconds)) > 1e-6 or round(seconds) < 1:
-        raise ValueError(
-            f"coupling.timestep={spelling!r} is {seconds:g} s, and a coupling "
-            "timestep is a whole positive number of seconds (jax-esm#110)."
-        )
-    return jdt.to_timedelta(int(round(seconds)), "second")
+    return jdt.to_timedelta(parse_duration_seconds(cfg.coupling.timestep), "second")
 
 
 def _validate_exchangers(coupler: Coupler) -> None:

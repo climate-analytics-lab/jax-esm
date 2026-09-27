@@ -181,8 +181,7 @@ def test_build_coupler_default():
     assert set(coupler.components) == {"atm", "ocn", "seaice"}
     assert coupler.workflow == ("exchange", "atm", "ocn", "seaice")
     assert coupler.coupling_timestep == jdt.to_timedelta(1, "day")
-    assert coupler.calendar == coupler.components["atm"].model.calendar
-    assert coupler.start_date == coupler.components["atm"].model.start_date
+    assert coupler.start_date == coupler.components["atm"].model.start_time
     # The slabs were built on the atmosphere's grid, which is what
     # `regrid=same_grid` (no regridders) assumes.
     horizontal = coupler.components["atm"].model.coords.horizontal
@@ -208,7 +207,7 @@ def test_cli_and_python_construction_agree():
     from jem.components.slab import SlabGrid
 
     start_date = jdt.to_datetime("2000-01-01")
-    model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)
+    model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
     atm = JCMComponent(model)
     components = {
         "atm": atm,
@@ -231,7 +230,6 @@ def test_cli_and_python_construction_agree():
     assert from_config.workflow == by_hand.workflow
     assert from_config.coupling_timestep == by_hand.coupling_timestep
     assert from_config.start_date == by_hand.start_date
-    assert from_config.calendar == by_hand.calendar
     assert jax.tree_util.tree_structure(from_config.initialize()) == \
         jax.tree_util.tree_structure(by_hand.initialize())
 
@@ -822,7 +820,9 @@ def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     )
 
     # And it reaches the atmosphere: the exchange puts it in `sice_am`.
-    exchanged = coupler.exchangers["exchange"](dict(carries), coupler.coupling_time(0))
+    exchanged = coupler.exchangers["exchange"](
+        dict(carries), coupler.coupling_time(0, coupler.start_date)
+    )
     np.testing.assert_allclose(
         np.asarray(exchanged["atm"]["forcing"].sice_am), np.asarray(ice_fraction)
     )

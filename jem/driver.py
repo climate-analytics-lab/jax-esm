@@ -21,8 +21,9 @@ passes them through, so a default can only be changed in one place.
 
 Chunking rules
 --------------
-``total_time`` and ``chunk`` are durations -- a ``jcm.date.parse_duration_days``
-string (``"30 days"``, ``"1 year"``) or a plain number of days -- and both must
+``total_time`` and ``chunk`` are fixed durations -- a
+``jcm.date.parse_duration_seconds`` string (``"30 days"``, ``"6 hours"``) or a
+plain number of days -- and both must
 be whole multiples of the coupling timestep, because a coupled step is the
 smallest thing this loop can integrate. ``total_time`` must in turn be a whole
 multiple of ``chunk``: a final short chunk would need a second compiled
@@ -178,14 +179,6 @@ logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 86400.0
 
-#: Relative slack allowed when a duration is divided by the coupling timestep
-#: before being called a whole number of steps. The durations come from
-#: ``jcm.date.parse_duration_days``, which returns float days, so an exactly
-#: expressible request ("1 year" of daily steps) can still land a few ulps off
-#: an integer; anything a user would call "not a whole number of steps" is
-#: many orders of magnitude larger than this.
-STEP_TOLERANCE = 1e-9
-
 #: Where a run checkpoints when ``checkpoint_path`` is left at its default.
 #: Relative, so it lands inside ``output_dir`` -- see
 #: :func:`_checkpoint_directory`.
@@ -336,8 +329,8 @@ def run_chunked(
         The coupled model. Its workflow, exchangers and clock are the run's;
         there is no second place to configure them.
     total_time : str or float
-        How far to integrate, as a ``jcm.date.parse_duration_days`` string
-        (``"90 days"``, ``"1 year"``) or a number of days. Must be a whole
+        How far to integrate, as a ``jcm.date.parse_duration_seconds``
+        string (``"90 days"``, ``"6 hours"``) or a number of days. Must be a whole
         multiple of both the coupling timestep and ``chunk``.
     chunk : str or float
         Simulated time integrated between output files, checkpoints and
@@ -526,9 +519,8 @@ def run_chunked(
     # until the first chunk has already been written, and finding out then
     # that it was 0 would have cost a chunk of an atmosphere.
     check_subsample(subsample)
-    coupling_days = coupler.dt_seconds / SECONDS_PER_DAY
-    steps_per_chunk = _whole_steps(chunk, coupling_days, coupler, "chunk")
-    total_steps = _whole_steps(total_time, coupling_days, coupler, "total_time")
+    steps_per_chunk = _whole_steps(chunk, coupler, "chunk")
+    total_steps = _whole_steps(total_time, coupler, "total_time")
     if total_steps % steps_per_chunk:
         raise ValueError(
             f"total_time ({total_time!r}, {total_steps} coupled steps) is not a "
@@ -539,8 +531,7 @@ def run_chunked(
             "the chunk."
         )
     steps_per_checkpoint = _checkpoint_steps(
-        checkpoint_interval, checkpoint_path, chunk, steps_per_chunk,
-        coupling_days, coupler,
+        checkpoint_interval, checkpoint_path, chunk, steps_per_chunk, coupler,
     )
     if accumulate is not None and health_check is not None:
         raise ValueError(
@@ -743,12 +734,12 @@ def run_chunked(
             carry, accumulator = trajectories[steps](carry, accumulator)
             written = "reduced into the accumulator, no files written"
 
-        elapsed_days = float(coupler.coupling_time(carry.step).sim_time) / SECONDS_PER_DAY
+        elapsed_days = int(carry.step) * coupler.dt_seconds / SECONDS_PER_DAY
         logger.info(
             "Chunk %d: %d coupled steps run, at step %d, %.4g simulated days "
-            "(%.4g years); %s.",
+            "(model time %s); %s.",
             chunk_index, steps, int(carry.step), elapsed_days,
-            elapsed_days / coupler.days_per_year, written,
+            carry.time.to_pydatetime().isoformat(), written,
         )
 
         # `datasets` is None exactly when `accumulate` is given, and that
@@ -836,28 +827,21 @@ def run_chunked(
     return RunResult(carry, int(carry.step), True, reports, paths, accumulator)
 
 
-def _whole_steps(
-    duration: str | float, coupling_days: float, coupler: "Coupler", what: str
-) -> int:
-    """Return ``duration`` as a whole number of coupled steps, or raise.
-
-    The duration is parsed on the *coupler's* calendar, so "1 year" is as long
-    as the atmosphere's year rather than as long as a Gregorian one.
-    """
+def _whole_steps(duration: str | float, coupler: "Coupler", what: str) -> int:
+    """Return a fixed ``duration`` ("10 days", "6 hours") in whole coupled steps, or raise."""
     # Imported here rather than at module scope: see `default_health_check`.
-    from jcm.date import parse_duration_days
+    from jcm.date import parse_duration_seconds
 
-    days = float(parse_duration_days(duration, coupler.calendar))
-    steps = days / coupling_days
-    rounded = round(steps)
-    if abs(steps - rounded) > STEP_TOLERANCE * max(1.0, abs(steps)) or rounded < 1:
+    seconds = parse_duration_seconds(duration)
+    steps, remainder = divmod(seconds, int(coupler.dt_seconds))
+    if remainder or steps < 1:
         raise ValueError(
-            f"{what}={duration!r} is {days:g} days, which is {steps:g} coupling "
-            f"steps of {coupling_days:g} days ({coupler.coupling_timestep!r}). "
-            "A run is integrated in whole coupled steps, so it must be a whole "
-            "positive number of them."
+            f"{what}={duration!r} is {seconds} s, which is not a whole number of "
+            f"coupling steps of {coupler.dt_seconds:g} s "
+            f"({coupler.coupling_timestep!r}). A run is integrated in whole "
+            "coupled steps."
         )
-    return int(rounded)
+    return int(steps)
 
 
 def _checkpoint_steps(
@@ -865,7 +849,6 @@ def _checkpoint_steps(
     checkpoint_path: Path | str | None,
     chunk: str | float,
     steps_per_chunk: int,
-    coupling_days: float,
     coupler: "Coupler",
 ) -> int | None:
     """Return ``checkpoint_interval`` in coupled steps, or None for every chunk.
@@ -891,9 +874,7 @@ def _checkpoint_steps(
             "so there would be no saves for the interval to space out. Give a "
             "checkpoint_path, or drop the interval."
         )
-    steps = _whole_steps(
-        checkpoint_interval, coupling_days, coupler, "checkpoint_interval"
-    )
+    steps = _whole_steps(checkpoint_interval, coupler, "checkpoint_interval")
     if steps % steps_per_chunk:
         raise ValueError(
             f"checkpoint_interval ({checkpoint_interval!r}, {steps} coupled "

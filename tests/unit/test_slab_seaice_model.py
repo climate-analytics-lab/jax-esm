@@ -337,7 +337,6 @@ def _bind(model, start="2000-04-01"):
     model.bind(
         coupling_timestep=jdt.to_timedelta(1, "day"),
         start_date=jdt.to_datetime(start),
-        calendar="365_day",
     )
     return model
 

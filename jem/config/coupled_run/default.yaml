@@ -24,7 +24,7 @@
 # shadow jcm's (see the comment in `config.yaml`). Select an option with
 # `coupled_run=short_run`, set one key with `coupled_run.chunk=...`.
 
-# Total simulated time, as a `jcm.date.parse_duration_days` string.
+# Total simulated time, as a `jcm.date.parse_duration_seconds` string.
 total_time: "30 days"
 
 # Simulated time integrated between health checks and output files. One chunk
