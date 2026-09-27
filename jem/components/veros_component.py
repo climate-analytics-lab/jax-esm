@@ -413,7 +413,6 @@ class VerosComponent:
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str,
     ) -> None:
         """Adopt the coupler's clock and work out the internal step count.
 
@@ -441,9 +440,6 @@ class VerosComponent:
             The run's start date. Recorded for the output metadata, and (see
             above) taken to be the date Veros' current ``variables.time``
             stands for.
-        calendar : str
-            The run's calendar. Recorded for the output metadata; Veros has
-            no calendar of its own to reconcile with.
 
         Raises
         ------
@@ -454,7 +450,6 @@ class VerosComponent:
 
         """
         self.start_date = start_date
-        self.calendar = calendar
 
         model_timestep = jdt.to_timedelta(
             int(self.model.state.settings.dt_tracer), "second")
@@ -1187,8 +1182,7 @@ def make_jem_compatible(
         The ocean to wrap.
     coupling_timestep : jax_datetime.Timedelta
         Ignored. The coupler now supplies the coupling timestep, together
-        with the start date and calendar, through
-        :meth:`VerosComponent.bind`.
+        with the start date, through :meth:`VerosComponent.bind`.
 
     Returns
     -------

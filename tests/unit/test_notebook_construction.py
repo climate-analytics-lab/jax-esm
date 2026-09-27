@@ -78,7 +78,7 @@ _NEW_COMPONENTS = (
 )
 _OLD_MODEL = (
     "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
-    "atm_model = jcm.model.Model(coords=get_speedy_coords(), start_date=start_date)\n"
+    "atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)\n"
 )
 _NEW_MODEL = (
     "# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.\n"
@@ -89,7 +89,7 @@ _NEW_MODEL = (
     "# minutes for SPEEDY T31L8), a materially different model than the one\n"
     "# this notebook claims to reproduce.\n"
     "atm_model = jcm.model.Model(\n"
-    "    coords=get_speedy_coords(), start_date=start_date, time_step=12\n"
+    "    coords=get_speedy_coords(), start_time=start_date, time_step=12\n"
     ")\n"
 )
 _SUBSTITUTIONS = (

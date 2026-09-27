@@ -93,7 +93,6 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(exp.coupler.workflow, ref_coupler.workflow)
         self.assertEqual(exp.coupler.coupling_timestep, ref_coupler.coupling_timestep)
         self.assertEqual(exp.coupler.start_date, ref_coupler.start_date)
-        self.assertEqual(exp.coupler.calendar, ref_coupler.calendar)
         # The carry each coupler scans over has the identical pytree shape.
         self.assertEqual(jax.tree_util.tree_structure(exp.coupler.initialize()),
                          jax.tree_util.tree_structure(ref_coupler.initialize()))
@@ -164,12 +163,10 @@ class TestLoad(unittest.TestCase):
     def test_documented_total_time_override_is_a_whole_number_of_chunks(self):
         """The override example ``python_api.md`` documents actually runs.
 
-        A local review of #131 found the ORIGINAL example
-        (``load("earth-slab", **{"coupled_run.total_time": 10})``) actually
-        raised from ``run_chunked``, because every shipped recipe's own
-        ``coupled_run.chunk`` stays its 30-day default and 10 is not a
-        multiple of it. The corrected value is read straight out of
-        ``docs/source/python_api.md``'s door section -- not copied into this
+        Every shipped recipe's own ``coupled_run.chunk`` stays its 30-day
+        default, so the documented ``coupled_run.total_time`` override must be
+        a multiple of it or ``run_chunked`` raises. The value is read straight
+        out of ``docs/source/python_api.md``'s door section -- not copied into this
         test as a second literal -- so a future edit to the docs is what this
         test exercises, and a value that regresses back to something
         non-divisible fails here rather than only at a user's own
@@ -200,11 +197,10 @@ class TestLoad(unittest.TestCase):
 
         exp = configurations.load(
             "earth-slab", **{"coupled_run.total_time": documented_total_time})
-        coupling_days = exp.coupler.dt_seconds / 86400
         steps_per_chunk = driver._whole_steps(
-            exp.run_kwargs["chunk"], coupling_days, exp.coupler, "chunk")
+            exp.run_kwargs["chunk"], exp.coupler, "chunk")
         total_steps = driver._whole_steps(
-            exp.run_kwargs["total_time"], coupling_days, exp.coupler, "total_time")
+            exp.run_kwargs["total_time"], exp.coupler, "total_time")
         # Raises if not a whole number of chunks -- the actual rule
         # `run_chunked` enforces, not a reimplementation of it.
         driver._require_whole_number_of_chunks(
@@ -214,10 +210,10 @@ class TestLoad(unittest.TestCase):
     def test_output_dir_defaults_to_a_fresh_directory_per_call(self):
         """Two successive ``load()`` calls with no ``output_dir`` do not collide.
 
-        A local review of #131 found ``load()`` defaulting ``output_dir`` to
-        the literal ``"outputs"`` (``build_run_kwargs``'s own non-door
-        fallback): a second ``load()`` + ``run_chunked`` would then resume
-        the first's checkpoint rather than starting a fresh run.
+        ``load()`` must not default ``output_dir`` to the literal
+        ``"outputs"`` (``build_run_kwargs``'s own non-door fallback): a second
+        ``load()`` + ``run_chunked`` would then resume the first's checkpoint
+        rather than starting a fresh run.
         """
         exp1 = configurations.load("aquaplanet-slab")
         exp2 = configurations.load("aquaplanet-slab")

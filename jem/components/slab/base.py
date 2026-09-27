@@ -4,12 +4,12 @@ What lives here is what every slab component needs and none of them should own
 a copy of: the grid, the monthly-climatology loader, and the conversion of a
 run's stacked diagnostics into a CF-labelled :class:`xarray.Dataset`.
 
-What deliberately does *not* live here any more is the clock. The coupler owns
+What deliberately does *not* live here is the clock. The coupler owns
 the one clock of a coupled run and hands it to every component as a
-:class:`~jem.base.component.CouplingTime`; a slab model holds no start date, no
-timestep and no calendar, so two components cannot disagree about the date and
+:class:`~jem.base.component.CouplingTime`; a slab model holds no start date and
+no timestep of its own, so two components cannot disagree about the date and
 the seasonal cycle survives a chunked or restarted run unbroken. The one thing
-``initialize()`` still needs the date for -- which month of a climatology the
+``initialize()`` needs the date for -- which month of a climatology the
 run starts in -- reaches the model through
 :meth:`SlabModelBase.bind`, which the coupler calls at registration.
 """
@@ -23,12 +23,13 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 
+from jcm.date import fraction_of_year_elapsed
+
 from jem.base.component import (
     Carry,
     CouplingTime,
     Diagnostics,
     TimeAxis,
-    start_year_fraction,
 )
 # The forcing_ output-name convention belongs to the component contract, not to
 # the slab family -- every component that writes output follows it, the Veros
@@ -284,17 +285,6 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     )
 
 
-def end_of_step(time: CouplingTime) -> CouplingTime:
-    """Return the clock as it will read at the *end* of ``time``'s step.
-
-    Several slab models need a boundary condition at both ends of a step (the
-    climatology an anomaly is measured against at the start, and added back to
-    at the end). ``CouplingTime.end_of_step`` is the one definition of what
-    "one step later" means; this alias keeps the slab call sites short.
-    """
-    return time.end_of_step()
-
-
 class SlabModelBase(ABC):
     """Base class for slab models providing shared infrastructure.
 
@@ -365,24 +355,23 @@ class SlabModelBase(ABC):
         self.grid = grid
         # Where the run starts in the annual cycle; see `bind` and
         # `start_year_fraction`. An unbound model reads its climatologies at
-        # 1 January. The clock it was bound to is kept so a second, different
+        # 1 January. The date it was bound to is kept so a second, different
         # binding is refused rather than silently overwriting the first.
         self._start_year_fraction = 0.0
-        self._bound_clock: tuple[jdt.Datetime, str] | None = None
+        self._bound_start_date: jdt.Datetime | None = None
 
     def bind(
         self,
         *,
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
-        calendar: str,
     ) -> None:
         """Adopt the coupler's clock (:class:`~jem.base.component.SupportsBind`).
 
         A slab model has no internal timestep to reconcile -- it advances by
         exactly the ``dt`` on the :class:`~jem.base.component.CouplingTime` it
         is handed, so ``coupling_timestep`` is accepted (the coupler passes the
-        same three facts to every bindable component) and not used. What a slab
+        same two facts to every bindable component) and not used. What a slab
         model does need is the *date*: :meth:`initialize` samples monthly
         climatologies for the initial condition, and it receives no clock,
         because the clock lives in the carry and the carry does not exist yet.
@@ -394,33 +383,30 @@ class SlabModelBase(ABC):
         start_date : jax_datetime.Datetime
             The run's start date. Its position in the annual cycle is what
             :attr:`start_year_fraction` reports.
-        calendar : str
-            The run's calendar, which fixes the length of the year.
 
         Raises
         ------
         ValueError
-            If the model is already bound to a different start date or
-            calendar. Binding it again to the same clock is a no-op.
+            If the model is already bound to a different start date. Binding
+            it again to the same date is a no-op.
 
         """
         del coupling_timestep
-        if self._bound_clock is not None:
-            bound_start, bound_calendar = self._bound_clock
-            if start_date != bound_start or calendar != bound_calendar:
-                # One instance belongs to one coupled model: the clock it was
+        if self._bound_start_date is not None:
+            if start_date != self._bound_start_date:
+                # One instance belongs to one coupled model: the date it was
                 # bound to decides what `initialize()` samples, so a second
-                # coupler with another start date or calendar would silently
-                # change the initial state the first coupler builds.
+                # coupler with another start date would silently change the
+                # initial state the first coupler builds.
                 raise ValueError(
                     f"{type(self).__name__} {self.name!r} is already bound to a "
-                    f"coupler starting {bound_start!r} on the {bound_calendar!r} "
-                    f"calendar; it cannot also be bound to {start_date!r} on "
-                    f"{calendar!r}. Build a separate instance per coupled model."
+                    f"coupler starting {self._bound_start_date!r}; it cannot "
+                    f"also be bound to {start_date!r}. Build a separate "
+                    "instance per coupled model."
                 )
             return
-        self._bound_clock = (start_date, calendar)
-        self._start_year_fraction = start_year_fraction(start_date, calendar)
+        self._bound_start_date = start_date
+        self._start_year_fraction = float(fraction_of_year_elapsed(start_date))
 
     @property
     def start_year_fraction(self) -> float:

@@ -13,6 +13,7 @@ from importlib import resources
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import numpy as np
 import pytest
 from flax import struct
@@ -30,8 +31,10 @@ DATA = resources.files("jem.data")
 ROTATED_SCRIP_FILE = str(DATA / "RotatedGaussianLatLon.SCRIP.nc")
 
 TIME = CouplingTime(
-    step=jnp.int32(0), sim_time=jnp.float32(0.0), dt=86400.0,
-    year_offset_seconds=0.0, days_per_year=365.0,
+    step=jnp.int32(0),
+    time=jdt.to_datetime("2001-01-01"),
+    sim_time=jnp.float32(0.0),
+    dt=86400.0,
 )
 
 

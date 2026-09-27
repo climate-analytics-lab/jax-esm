@@ -7,10 +7,10 @@ executes each notebook's OWN construction cell (not a copy of it, so it
 cannot silently drift from what the notebook actually runs) and compares the
 resulting :class:`~jem.base.coupler.Coupler` against
 :func:`jem.runners.build_coupler` on the equivalent composed config:
-component names and types, workflow, coupling timestep, calendar, start date,
-the coupled carry's pytree structure, and -- the specific thing a local
-review of issue #131 found missing here -- the atmosphere's own physics
-timestep (``model.dt_si``). Building a plain ``jcm.model.Model`` with no
+component names and types, workflow, coupling timestep, start date, the
+coupled carry's pytree structure, and -- the specific field this test exists
+to guard -- the atmosphere's own physics timestep (``model.dt_si``). Building
+a plain ``jcm.model.Model`` with no
 explicit ``time_step`` silently adopts the physics' *stable* step (30 minutes
 for SPEEDY T31L8) rather than the 12 minutes
 ``+configuration=aquaplanet-slab`` actually runs at
@@ -71,7 +71,6 @@ def _assert_structurally_equivalent(coupler, ref_coupler) -> None:
     assert coupler.workflow == ref_coupler.workflow
     assert coupler.coupling_timestep == ref_coupler.coupling_timestep
     assert coupler.start_date == ref_coupler.start_date
-    assert coupler.calendar == ref_coupler.calendar
     # The atmosphere's own physics timestep -- not implied by anything else
     # checked here, and the specific field this test exists to guard.
     dt = float(coupler.components["atm"].model.dt_si.m)

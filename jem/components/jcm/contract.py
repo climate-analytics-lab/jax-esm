@@ -23,24 +23,26 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 -------------------------------------------
-``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **877**,
-``46eb3fc1efc3d16fde5458736d80a3491698f3ed``. jax-gcm has no 3.x tag yet --
+``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **878**,
+``808412a5dc9e5a6de86d02a3e4f054249a7572fe``. jax-gcm has no 3.x tag yet --
 ``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
 ``dev`` sha is the most precise thing there is to name. It is the merge
 commit itself rather than whatever ``dev`` happened to be at bump time,
 because later, unrelated ``dev`` commits are not revisions this branch has
 been checked against.
 
-PR 877 closes jax-gcm#754 (the package-independent ``SurfaceExchange``
-coupling struct every physics package now publishes identically), #301
-(prescribed surface fluxes) and #884 (the declared forcing-alignment rule,
-``jcm.forcing.resolve_align``) -- the first and last of which this revision
-of JAX-ESM is written against (``jem/components/jcm/exchange_fields.py`` and
-the ``forcing.align`` knobs in ``jem/config/configuration/*.yaml``).
+PR 878 puts jax-gcm's clock on one exact ``jax_datetime.Datetime``
+(``Model(start_time=)``, proleptic Gregorian) and labels output records at
+their interval **midpoint** as ``datetime64[ms]``
+(``jcm.predictions.output_time_labels``). JAX-ESM's
+:class:`~jem.base.coupler.Coupler` carries the same kind of ``Datetime``
+(``jem.base.component.CoupledCarry.time``), and
+:class:`~jem.components.jcm.component.JCMComponent` threads jax-gcm's own
+:class:`~jcm.model.RunState` (``time``/``step``) through
+``run_from_state_with_carry(initial_time=, initial_step=)``.
 
-The revision this pin replaced was jax-gcm ``dev`` as it stood on
-2026-09-21, and carried four things JAX-ESM was written against (all still
-true here, since PR 877 was merged on top of that ``dev`` commit):
+The revision also carries the earlier jax-gcm changes JAX-ESM is written
+against:
 
 * **#750** -- one ``run`` schema plus the ``configuration`` config group, which
   is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
@@ -117,11 +119,11 @@ from typing import NamedTuple
 #: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
 #: can be compared against directly.
 #:
-#: This is jax-gcm ``dev`` at the merge of PR 877 on 2026-09-23
-#: (``feat(coupling): surface-exchange contract + forced-flux mode``), which
-#: closes jax-gcm#754, #301 and #884 -- see "Why a ``dev`` revision rather
-#: than a release" above.
-JCM_SUPPORTED_REV = "46eb3fc1efc3d16fde5458736d80a3491698f3ed"
+#: This is jax-gcm ``dev`` at the merge of PR 878 on 2026-09-24
+#: (``v3: unify the real datetime clock and bounded monthly output``), which
+#: closes jax-gcm#754, #301, #884 (PR 877) and unifies the datetime clock
+#: (PR 878) -- see "Why a ``dev`` revision rather than a release" above.
+JCM_SUPPORTED_REV = "808412a5dc9e5a6de86d02a3e4f054249a7572fe"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -232,18 +234,27 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " -> tuple[bool, dict].",
     ),
     IntegrationPoint(
-        "jcm.date", "parse_duration_days", "public",
-        "Turn a human run length or coupling interval ('1 year', '10 days')"
-        " into days on the model's calendar."
-        " Signature: parse_duration_days(value, calendar='gregorian')"
-        " -> float.",
+        "jcm.date", "parse_duration_seconds", "public",
+        "Turn a run length, chunk, coupling interval or averaging window"
+        " ('12 hours', '10 days', or a number of days) into whole seconds;"
+        " refuses 'months'/'years' and fractional seconds."
+        " Signature: parse_duration_seconds(value) -> int.",
     ),
     IntegrationPoint(
-        "jcm.date", "days_per_year", "public",
-        "Calendar length used by jem.base.component.TimeAxis and"
-        " jem.base.coupler for the annual cycle, so every component's seasonal"
-        " forcing agrees with the atmosphere's calendar."
-        " Signature: days_per_year(calendar='gregorian') -> float.",
+        "jcm.date", "fraction_of_year_elapsed", "public",
+        "Position in the annual cycle in [0, 1), on the proleptic Gregorian"
+        " calendar. CouplingTime.year_fraction calls this directly, so a"
+        " component's seasonal cycle and the atmosphere's agree by"
+        " construction. Signature: fraction_of_year_elapsed(dt:"
+        " jax_datetime.Datetime) -> jax.Array.",
+    ),
+    IntegrationPoint(
+        "jcm.date", "gregorian_ymd_from_days", "public",
+        "Exact Gregorian (year, month, day) from days since the 1970 epoch;"
+        " jem.accumulate.monthly_mean bins each record's own interval"
+        " midpoint by the month this returns."
+        " Signature: gregorian_ymd_from_days(days_since_epoch) -> (year,"
+        " month, day).",
     ),
     # ------------------------------------------------------------------
     # The wrapped model (jem.components.jcm.component).
@@ -252,6 +263,13 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "jcm.model", "Model", "public",
         "The object JCMComponent wraps; also re-exported in JCMComponent's"
         " type hints.",
+    ),
+    IntegrationPoint(
+        "jcm.model", "RunState", "public",
+        "JCM's own resumable clock struct (dynamics, physics, time, step)."
+        " JCMComponent stores its 'time'/'step' fields in the atmosphere's"
+        " carry and threads them back into run_from_state_with_carry every"
+        " coupled step, exactly as jcm's own chunked runner does.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "bootstrap_state", "public",
@@ -273,16 +291,14 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " internally. An instance-level override of it -- the shape a"
         " perpetual-season (frozen seasonal cycle) hook would take, tracked"
         " as jax-esm#120 since JEM ships none today -- has to target this"
-        " public name: jax-gcm's own internal calls resolve it directly, not"
-        " the _date_from_sim_time alias jax-gcm#824 left behind, so patching"
-        " the alias would be a silent no-op from the start, and a future"
-        " rename of this public name would turn a correctly-targeted"
-        " override into the same silent no-op.",
+        " public name.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "run_from_state_with_carry", "public",
         "Advance the atmosphere by exactly one coupling interval, threading"
-        " the cross-step physics carry; the whole coupled step is this call.",
+        " the cross-step physics carry and jcm's own RunState clock"
+        " (initial_time=, initial_step=); the whole coupled step is this"
+        " call. Returns (RunState, ModelPredictions).",
     ),
     IntegrationPoint(
         "jcm.model.Model", "dt_si", "public",
@@ -290,13 +306,9 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " timestep in JCMComponent.bind().",
     ),
     IntegrationPoint(
-        "jcm.model.Model", "start_date", "public",
+        "jcm.model.Model", "start_time", "public",
         "Checked against the coupler's start date in JCMComponent.bind() so a"
         " mismatch is refused up front rather than drifting silently.",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "calendar", "public",
-        "Checked against the coupler's calendar in JCMComponent.bind().",
     ),
     IntegrationPoint(
         "jcm.model.Model", "coords", "public",
@@ -327,11 +339,6 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " produces -- without integrating a step to find out.",
     ),
     IntegrationPoint(
-        "jcm.dycore.base.DynamicalCore", "sim_time", "public",
-        "The dycore state's own clock, compared with the coupler's in"
-        " JCMComponent._report_clock_drift to catch a carry from another run.",
-    ),
-    IntegrationPoint(
         "jcm.forcing", "ForcingData", "public",
         "Type of the `forcing` entry of JCMComponent's carry, which"
         " exchangers overwrite (the SST an ocean component computes) every"
@@ -351,7 +358,7 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " JCMComponent.initialize() takes the fields the coupling supplies"
         " from the start-date slice, so they are the plain arrays an"
         " exchanger writes rather than time series."
-        " Signature: select(date: DateData, calendar=...) -> ForcingData.",
+        " Signature: select(date: DateData) -> ForcingData.",
     ),
     IntegrationPoint(
         "jcm.date", "DateData", "public",
@@ -361,8 +368,8 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     IntegrationPoint(
         "jcm.date.DateData", "set_date", "public",
         "Build a DateData at a given jax_datetime.Datetime."
-        " Signature: set_date(model_time, model_step=None, dt_seconds=None,"
-        " calendar=...) -> DateData.",
+        " Signature: set_date(model_time, model_step=None,"
+        " dt_seconds=None) -> DateData.",
     ),
     IntegrationPoint(
         "jcm.forcing", "default_forcing", "public",

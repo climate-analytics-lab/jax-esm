@@ -32,8 +32,10 @@ The three required members
    component by one coupling timestep.
 
    - :code:`time` is a :class:`jem.base.component.CouplingTime`: the coupler's
-     clock (step index, simulation time in seconds, and the static calendar
-     facts behind :code:`time.year_fraction`). The component keeps no clock of
+     clock (a step index, the current :code:`jax_datetime.Datetime`, and
+     :code:`time.year_fraction`, computed by calling
+     :code:`jcm.date.fraction_of_year_elapsed` on it -- the same function the
+     atmosphere's own seasonal physics uses). The component keeps no clock of
      its own.
    - The returned carry must have exactly the pytree structure, shapes and
      dtypes of the one :code:`initialize` produced -- that is what
@@ -71,7 +73,7 @@ simply skipped there, never broken:
      - Write and restore a carry that is not a plain pytree -- Veros' restart
        is an HDF5 file, not an array JAX can flatten.
    * - :class:`~jem.base.component.SupportsBind`
-     - ``bind(*, coupling_timestep, start_date, calendar)``
+     - ``bind(*, coupling_timestep, start_date)``
      - Called once, when the component is registered. The place to check the
        coupler's clock against the model's own and **refuse**, with
        ``ValueError``, a configuration that cannot work (a coupling timestep
@@ -146,7 +148,7 @@ initial-condition parameter is varied by passing parameters to
 :code:`initialize` -- :code:`ocn.initialize(params)`, or
 :code:`coupler.initialize({"ocn": params})` for the coupled model -- which
 builds the initial state from them and carries them. See the *Parameters*
-section of :doc:`design/architecture` for the pattern in full.
+section of :doc:`design/carry_and_clock` for the pattern in full.
 
 
 A worked wrapper: JCMComponent
@@ -254,7 +256,7 @@ wiring):
 
 Write the function instead of the table when the exchange is something a
 table cannot express: a flux computed from two components' states, a unit
-conversion, a coupling that depends on the date. See :doc:`design/architecture`
+conversion, a coupling that depends on the date. See :doc:`design/exchange`
 for the standard table's rows, the regridding keys a mixed-grid run uses, and
 the one-step lag the default workflow implies.
 

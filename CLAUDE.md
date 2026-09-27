@@ -146,8 +146,9 @@ The design in three sentences:
   trajectory function with `generate_trajectory_function(iterations)`, driven
   by `jax.lax.scan`.
 
-See `docs/source/design/architecture.md` for the carry layout, the contract
-and the steps to add a component.
+See `docs/source/design/carry_and_clock.md` for the carry layout and the
+component contract, and `docs/source/design/architecture.md` for the steps
+to add a component.
 
 ## Repository Structure
 
@@ -346,16 +347,18 @@ conventions are JCM's, and every component follows them:
   (`jem.components.slab.grid.to_degrees`), which is character for character what
   `jcm.utils.data_to_xarray` does. Any other route risks a last-bit difference,
   which is enough to turn two 96-point longitude axes into a 119-point union.
-- **The `time` coordinate** is an absolute `datetime64[ns]` axis — never
-  "hours since <start>" — and record *k* is labelled with the **end** of the
-  interval it covers, `start_date + (k+1)*dt`. `TimeAxis.datetimes()` is the
-  single definition, and every component's `to_xarray` calls it (with
-  `TimeAxis.attrs` for the CF attributes) directly rather than through a
-  helper.
-  The dates are proleptic Gregorian whatever the model calendar is.
+- **The `time` coordinate** is an absolute `datetime64[ms]` axis — never
+  "hours since <start>" — and record *k* is labelled with the **midpoint** of
+  the interval it covers. `TimeAxis.datetimes()` is the single definition, and
+  every component's `to_xarray` calls it (with `TimeAxis.attrs` for the CF
+  attributes) directly rather than through a helper; it computes the same
+  `datetime64[ms]` midpoints as `jcm.predictions.ModelPredictions.time_labels`,
+  so every component's dataset merges with the atmosphere's on one exact time
+  axis (`xr.merge(join="exact")`). JCM's own output also carries a
+  `time_bounds` variable with each interval's start and end.
 - **Variable names**: state and derived quantities keep their plain names, and
   every variable that came from a component's *forcing* is written with a
-  `forcing_` prefix — `jem.components.slab.base.FORCING_VARIABLE_PREFIX`,
+  `forcing_` prefix — `jem.base.component.FORCING_VARIABLE_PREFIX`,
   applied by `forcing_variable(name)`. Two components legitimately hold the
   same physical field — one produced it, the other received it — and without
   the prefix the merge of their datasets collides on the shared name. A new

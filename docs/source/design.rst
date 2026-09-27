@@ -9,3 +9,10 @@ implementation-specific details belong in the PR that introduced them.
    :maxdepth: 1
 
    design/architecture
+   design/carry_and_clock
+   design/exchange
+   design/nesting
+   design/output
+   design/running
+   design/configuration
+   design/jcm_adapter

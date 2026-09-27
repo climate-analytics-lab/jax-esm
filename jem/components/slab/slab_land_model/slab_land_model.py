@@ -27,7 +27,6 @@ from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
-    end_of_step,
     first_present_variable,
     forcing_variable,
     load_monthly_climatology,
@@ -407,7 +406,7 @@ class SlabLandModel(SlabModelBase):
             time.year_fraction, self.surface_temperature_climatology
         )
         climatology_end = evaluate_cyclic_linear(
-            end_of_step(time).year_fraction, self.surface_temperature_climatology
+            time.end_of_step().year_fraction, self.surface_temperature_climatology
         )
         snow_depth = evaluate_cyclic_linear(
             time.year_fraction, self.snow_depth_climatology

@@ -39,7 +39,6 @@ from jem.components.slab import (
 from jem.components.slab.grid import to_degrees
 
 START_DATE = jdt.to_datetime("2000-01-01")
-CALENDAR = "365_day"
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 
 LAYERS = 5
@@ -158,8 +157,7 @@ def jcm_model(speedy_coords) -> Model:
     return Model(
         coords=speedy_coords,
         terrain=TerrainData.aquaplanet(speedy_coords),
-        start_date=START_DATE,
-        calendar=CALENDAR,
+        start_time=START_DATE,
     )
 
 
@@ -172,7 +170,6 @@ def atmosphere_ocean(jcm_model) -> Coupler:
         {"exchange": atmosphere_ocean_exchange},
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar=CALENDAR,
     )
 
 
@@ -308,11 +305,11 @@ def test_component_datasets_merge_on_one_time_and_grid(atmosphere_ocean, two_ste
 
     ``join="exact"`` is the whole point: it refuses to align by taking a
     union, so it passes only if the two components wrote *identical*
-    coordinate values -- the same ``datetime64[ns]`` instants (labelled at the
-    end of each coupling interval, JCM's convention) and the same longitude
-    and latitude in degrees. Getting either subtly wrong turns a merged
-    coupled dataset into a mostly-empty outer join, which is what happens when
-    a component invents its own time or grid encoding.
+    coordinate values -- the same ``datetime64[ms]`` instants (labelled at
+    each coupling interval's midpoint, JCM's convention) and the same
+    longitude and latitude in degrees. Getting either subtly wrong turns a
+    merged coupled dataset into a mostly-empty outer join, which is what
+    happens when a component invents its own time or grid encoding.
     """
     _, _, diagnostics = two_steps
     datasets = atmosphere_ocean.to_xarray(diagnostics)
@@ -320,11 +317,13 @@ def test_component_datasets_merge_on_one_time_and_grid(atmosphere_ocean, two_ste
     atmosphere = datasets["atm"]
     ocean = datasets["ocn"]
 
-    assert atmosphere.time.dtype == np.dtype("datetime64[ns]")
+    assert atmosphere.time.dtype == np.dtype("datetime64[ms]")
     np.testing.assert_array_equal(atmosphere.time.values, ocean.time.values)
     np.testing.assert_array_equal(
         atmosphere.time.values,
-        np.array(["2000-01-02", "2000-01-03"], dtype="datetime64[ns]"),
+        np.array(
+            ["2000-01-01T12:00", "2000-01-02T12:00"], dtype="datetime64[ms]"
+        ),
     )
     np.testing.assert_array_equal(atmosphere.lon.values, ocean.lon.values)
     np.testing.assert_array_equal(atmosphere.lat.values, ocean.lat.values)
@@ -398,7 +397,6 @@ def slab_coupler(speedy_coords, tmp_path) -> Coupler:
         {"exchange": slab_exchange},
         coupling_timestep=COUPLING_TIMESTEP,
         start_date=START_DATE,
-        calendar=CALENDAR,
     )
 
 
