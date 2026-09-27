@@ -1331,6 +1331,34 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
         np.testing.assert_array_equal(combined["time"].values, single["time"].values)
 
 
+def test_an_extended_run_never_repeats_a_chunk_index(tmp_path):
+    """Chunk indices keep increasing across an extension that resumes off-grid.
+
+    7 steps in 4-step chunks are chunks 0 and 1 (the short one starts at step
+    4); the extension resumes at step 7 and must not report index 1 again.
+    """
+    seen: list[int] = []
+
+    def record(datasets, chunk_index, elapsed_days):
+        seen.append(chunk_index)
+        return True, {}
+
+    def coupler():
+        return two_slabs(
+            start_date=jdt.to_datetime("2001-01-01T06:00:00"),
+            coupling_timestep=jdt.to_timedelta(6, "hours"),
+        )
+
+    run = dict(
+        chunk="1 day", output_dir=tmp_path / "run",
+        checkpoint_path=tmp_path / "checkpoint", health_check=record,
+    )
+    run_chunked(coupler(), end_time="2001-01-03", **run)
+    run_chunked(coupler(), end_time="2001-01-05T12:00:00", **run)
+    assert seen == sorted(set(seen))
+    assert seen[:2] == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # Output left past the restart point by a killed run
 # ---------------------------------------------------------------------------

@@ -697,13 +697,14 @@ def run_chunked(
     for batch_index, steps in enumerate(batches):
         first_step = int(carry.step)
         # A counter for the health check and the log line only. It is
-        # run-global -- how many whole chunks of THIS run's length fit before
-        # `first_step` -- so a resumed run carries on numbering rather than
-        # starting again at 0, and two chunks of one run never report the same
-        # index. The output files are named after `first_step` instead,
-        # because a chunk index means different simulated time under a
-        # different chunk length.
-        chunk_index = first_step // steps_per_chunk
+        # run-global -- the number of chunk boundaries of THIS run's length
+        # at or before `first_step`, rounded up -- so a resumed run carries on
+        # numbering rather than starting again at 0, and a run resumed off the
+        # chunk grid (after a short final chunk, or under a different chunk
+        # length) still never repeats an index it has already reported. The
+        # output files are named after `first_step` instead, because a chunk
+        # index means different simulated time under a different chunk length.
+        chunk_index = -(-first_step // steps_per_chunk)
         if steps not in trajectories:
             trajectories[steps] = coupler.generate_trajectory_function(
                 steps, accumulate=accumulate
