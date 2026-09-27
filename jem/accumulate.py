@@ -7,9 +7,10 @@ packages the reductions a long run almost always wants -- a mean over each
 bin of a fixed set of bins -- as such a pair:
 
 - :func:`monthly_mean`, the calendar months -- twelve bins that composite a
-  multi-year run into a climatology, or (``total_time=`` / ``n_months=``) one
-  bin per month the run passes through. A record belongs to the Gregorian
-  month its own interval midpoint (its output label) falls in;
+  multi-year run into a climatology, or (``total_time=`` / ``end_time=`` /
+  ``n_months=``) one bin per month the run passes through. A record belongs
+  to the Gregorian month its own interval midpoint (its output label) falls
+  in;
 - :func:`windowed_mean`, ``n_windows`` windows measured from the run's own
   start date -- of one fixed length, which is what a sub-seasonal forecast is
   scored on (pentads, weeks), or of a repeating *pattern* of lengths. A
@@ -45,6 +46,7 @@ import jax_datetime as jdt
 import numpy as np
 
 from jem.base.component import CouplingTime, Diagnostics
+from jem.durations import resolve_duration_seconds
 
 #: The accumulator a :class:`BinnedMean` carries: an ``(n_bins, ...)`` running
 #: sum shaped like one step's diagnostics, and the count of records that
@@ -631,6 +633,7 @@ def monthly_mean(
     *,
     n_months: int | None = None,
     total_time: str | float | None = None,
+    end_time: str | None = None,
 ) -> BinnedMean:
     """Build the in-scan accumulator of a coupled run's monthly means.
 
@@ -642,7 +645,13 @@ def monthly_mean(
 
         monthly_mean(coupler)                          # (12, ...): a climatology
         monthly_mean(coupler, total_time="3650 days")  # (~121, ...): every month
+        monthly_mean(coupler, end_time="2011-01-01")   # the same, from an end date
         monthly_mean(coupler, n_months=121)            # sized directly instead
+
+    ``total_time`` and ``end_time`` are the same two forms of a run length
+    that :func:`jem.driver.run_chunked` takes -- a fixed duration, or a
+    calendar end date for the same run a ``run_chunked(..., end_time=...)``
+    call is sizing its accumulator to.
 
     The two forms bin by the same rule; they differ in what the accumulator
     *is*. Twelve bins are the calendar months, so a ten-year run composites
@@ -662,10 +671,10 @@ def monthly_mean(
     holds all three Januaries.
 
     **The sequential form wraps at ``n_months``**: a run that outlasts the
-    accumulator is folded back modulo it, so size it with ``total_time``
-    (which counts the calendar months the run actually touches) when every
-    month is meant to stand on its own rather than composite with a later
-    one ``n_months`` months on.
+    accumulator is folded back modulo it, so size it with ``total_time`` or
+    ``end_time`` (which count the calendar months the run actually touches)
+    when every month is meant to stand on its own rather than composite with
+    a later one ``n_months`` months on.
 
     **Sub-steps.** A component the workflow runs ``n > 1`` times per coupled
     step keeps that axis: its mean comes back as ``(12, n, ...)``, because
@@ -692,12 +701,20 @@ def monthly_mean(
     n_months : int, optional
         Build the **sequential** form with this many bins: the months the run
         passes through, in order, starting with the one the run starts in. At
-        most one of this and ``total_time``; neither gives the twelve-bin
-        climatology.
+        most one of this and a run length (``total_time`` or ``end_time``);
+        neither gives the twelve-bin climatology.
     total_time : str or float, optional
         Build the sequential form sized to cover a run of this fixed length
         (a ``jcm.date.parse_duration_seconds`` string, or a number of days):
-        one bin for every calendar month a record's midpoint falls in.
+        one bin for every calendar month a record's midpoint falls in. At
+        most one of ``total_time`` and ``end_time``.
+    end_time : str, optional
+        The same sizing as ``total_time``, from an absolute ISO date/datetime
+        (``jcm.date.to_datetime``) instead of a fixed duration -- the run
+        length used is ``end_time - coupler.start_date``. This is the form to
+        use for the same run a ``run_chunked(..., end_time=...)`` call is
+        sizing its accumulator to. At most one of ``total_time`` and
+        ``end_time``.
 
     Returns
     -------
@@ -708,34 +725,37 @@ def monthly_mean(
     Raises
     ------
     ValueError
-        If both ``n_months`` and ``total_time`` are given, or if ``n_months``
-        is not a positive integer.
+        If ``n_months`` is given together with a run length (``total_time``
+        or ``end_time``), if ``total_time`` and ``end_time`` are both given,
+        or if ``n_months`` is not a positive integer.
 
     """
-    if n_months is not None and total_time is not None:
+    duration_seconds = resolve_duration_seconds(
+        coupler, total_time, end_time, required=False
+    )
+    if n_months is not None and duration_seconds is not None:
         raise ValueError(
-            "Give at most one of n_months and total_time: n_months sets the "
-            "accumulator's size directly and total_time counts it from the "
-            "run, while giving neither is the twelve-month climatology (got "
-            f"n_months={n_months!r}, total_time={total_time!r})."
+            "Give at most one of n_months and a run length (total_time or "
+            "end_time): n_months sets the accumulator's size directly and a "
+            "run length counts it from the run, while giving none of the "
+            "three is the twelve-month climatology (got n_months="
+            f"{n_months!r}, total_time={total_time!r}, end_time={end_time!r})."
         )
 
-    if n_months is None and total_time is None:
+    if n_months is None and duration_seconds is None:
         # Bin 0 is January, whatever year: the month index counts from a
         # January, so modulo twelve it is the calendar month.
         first_bin, bins = 0, MONTHS_PER_YEAR
     else:
         # The sequential form: bin 0 is the month the run starts in.
         first_bin = _host_month_index(coupler.start_date)
-        if total_time is not None:
+        if duration_seconds is not None:
             # The last month any record's midpoint reaches is that of the last
             # record of the component recording most often -- the latest
             # midpoint before the end of the run.
             dt_seconds = int(coupler.dt_seconds)
             record_seconds = dt_seconds // max(_record_counts(_record_axes(coupler)))
-            last_midpoint = (
-                _duration_seconds(total_time) - record_seconds + record_seconds // 2
-            )
+            last_midpoint = duration_seconds - record_seconds + record_seconds // 2
             bins = _host_month_index(coupler.start_date, last_midpoint) - first_bin + 1
         elif isinstance(n_months, bool) or not isinstance(n_months, int) or n_months < 1:
             # `bool` is an `int`, and `n_months=True` would silently build a
@@ -760,6 +780,7 @@ def windowed_mean(
     *,
     n_windows: int | None = None,
     total_time: str | float | None = None,
+    end_time: str | None = None,
     carry: Any = None,
 ) -> BinnedMean:
     """Build the in-scan accumulator of a run's means over successive windows.
@@ -769,6 +790,11 @@ def windowed_mean(
 
         pentads = windowed_mean(coupler, "5 days", n_windows=73)   # a year
         weeks = windowed_mean(coupler, "7 days", total_time="365 days")
+        weeks = windowed_mean(coupler, "7 days", end_time="2001-01-01")  # same run
+
+    ``total_time`` and ``end_time`` are the same two forms of a run length
+    that :func:`jem.driver.run_chunked` takes; at most one of the two may be
+    given.
 
     The windows need not all be the same length. Give a **sequence** of
     lengths and it is a pattern the windows cycle through, repeating for as
@@ -793,10 +819,10 @@ def windowed_mean(
     composite of every *w*-th window of the run. That is the price of an
     accumulator whose size is fixed at trace time and does not grow with the
     run -- the whole point of reducing inside the scan. Size the accumulator
-    to the run (pass ``total_time``, or ``n_windows`` counted for the run) if
-    each window is meant to stand on its own; with a *pattern* of window
-    lengths the wrap is at the sum of all ``n_windows`` lengths rather than at
-    the end of one cycle of the pattern.
+    to the run (pass ``total_time`` or ``end_time``, or ``n_windows`` counted
+    for the run) if each window is meant to stand on its own; with a
+    *pattern* of window lengths the wrap is at the sum of all ``n_windows``
+    lengths rather than at the end of one cycle of the pattern.
 
     Sub-steps and nested couplers are accumulated exactly as
     :func:`monthly_mean` describes: a component recording ``n`` times per
@@ -820,15 +846,23 @@ def windowed_mean(
         How many windows the accumulator holds -- the length of the leading
         axis of everything ``finalize`` returns, and, when it exceeds the
         length of a pattern, how far the pattern is repeated. For a single
-        window length, exactly one of this and ``total_time`` must be given;
-        for a pattern, giving neither means one cycle of it
-        (``n_windows = len(window)``).
+        window length, exactly one of this and a run length (``total_time``
+        or ``end_time``) must be given; for a pattern, giving none of the
+        three means one cycle of it (``n_windows = len(window)``).
     total_time : str or float, optional
         The length of the run, in the same forms as a single ``window``, from
         which ``n_windows`` is counted: enough windows to cover the run, the
         last one short if the run does not end on a window boundary (its mean
         is then over the steps that did fall in it, because every bin is
-        divided by its own count).
+        divided by its own count). At most one of ``total_time`` and
+        ``end_time``.
+    end_time : str, optional
+        The same sizing as ``total_time``, from an absolute ISO date/datetime
+        (``jcm.date.to_datetime``) instead of a fixed duration -- the run
+        length used is ``end_time - coupler.start_date``. This is the form to
+        use for the same run a ``run_chunked(..., end_time=...)`` call is
+        sizing its accumulator to. At most one of ``total_time`` and
+        ``end_time``.
     carry : CoupledCarry, optional
         A carry to take the diagnostics' shapes from; see
         :func:`_build_binned_mean`.
@@ -842,11 +876,12 @@ def windowed_mean(
     Raises
     ------
     ValueError
-        If ``window`` is an empty sequence, if both ``n_windows`` and
-        ``total_time`` are given (or neither, for a single window length), if
-        ``n_windows`` is not a positive integer, if any duration is not
-        positive, or if any window length is not a whole number of coupling
-        steps.
+        If ``window`` is an empty sequence, if both ``n_windows`` and a run
+        length (``total_time`` or ``end_time``) are given (or none of the
+        three, for a single window length), if ``total_time`` and
+        ``end_time`` are both given, if ``n_windows`` is not a positive
+        integer, if any duration is not positive, or if any window length is
+        not a whole number of coupling steps.
 
     """
     dt_seconds = int(coupler.dt_seconds)
@@ -874,30 +909,35 @@ def windowed_mean(
             )
         lengths_seconds.append(length_seconds)
 
-    if n_windows is not None and total_time is not None:
+    duration_seconds = resolve_duration_seconds(
+        coupler, total_time, end_time, required=False
+    )
+    if n_windows is not None and duration_seconds is not None:
         raise ValueError(
-            "Give exactly one of n_windows and total_time: n_windows sets the "
-            "accumulator's size directly, total_time counts it from the run "
-            f"(got n_windows={n_windows!r}, total_time={total_time!r})."
+            "Give exactly one of n_windows and a run length (total_time or "
+            "end_time): n_windows sets the accumulator's size directly, a "
+            "run length counts it from the run (got n_windows="
+            f"{n_windows!r}, total_time={total_time!r}, end_time={end_time!r})."
         )
-    if total_time is not None:
-        total_seconds = _duration_seconds(total_time)
+    if duration_seconds is not None:
         # Round *up*: a run that is not a whole number of windows ends inside
         # one, and that window has to exist to hold it. It is divided by its
         # own count like every other, so a short final window is the mean of
         # what fell in it rather than a mean diluted by missing steps.
         bins, covered = 0, 0
-        while covered < total_seconds:
+        while covered < duration_seconds:
             covered += lengths_seconds[bins % len(lengths_seconds)]
             bins += 1
     elif n_windows is None:
         if not pattern:
             raise ValueError(
-                "Give exactly one of n_windows and total_time: n_windows sets "
-                "the accumulator's size directly, total_time counts it from "
-                "the run (got n_windows=None, total_time=None). Only a "
-                "sequence of window lengths may be given neither, and then it "
-                "is used once through."
+                "Give exactly one of n_windows and a run length (total_time "
+                "or end_time): n_windows sets the accumulator's size "
+                "directly, a run length counts it from the run (got "
+                f"n_windows=None, total_time={total_time!r}, "
+                f"end_time={end_time!r}). Only a sequence of window lengths "
+                "may be given none of the three, and then it is used once "
+                "through."
             )
         # One cycle of the pattern is the only size a pattern implies on its
         # own, and it is the useful one: a fortnight of alternating windows.
@@ -912,8 +952,8 @@ def windowed_mean(
     # The window boundaries: the cumulative sum of the `bins` lengths, the
     # pattern cycling for as long as the accumulator is. The last boundary is
     # the period the whole accumulator repeats with, so a run longer than it
-    # wraps -- and a pattern sized to the run (via `total_time`) does not
-    # wrap at all, which is the point of being able to size it.
+    # wraps -- and a pattern sized to the run (via `total_time` or `end_time`)
+    # does not wrap at all, which is the point of being able to size it.
     boundaries = np.cumsum(
         [lengths_seconds[index % len(lengths_seconds)] for index in range(bins)],
         dtype=np.int64,
