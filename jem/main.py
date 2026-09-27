@@ -13,8 +13,17 @@ Six Earth years in 30-day chunks, one 30-day mean per chunk::
     python -m jem.main +configuration=earth-slab coupled_run=long_run \
         coupled_run.total_time="2190 days"
 
-(2190 days is 73 whole chunks; ``total_time`` is a fixed duration and must be
-a whole multiple of ``coupled_run.chunk``.)
+(``total_time`` is a fixed duration -- "years"/"months" are calendar units a
+fixed duration cannot express -- and 2190 days happens to be 73 whole chunks;
+it need not be, since the last chunk is simply shorter when it is not.)
+
+The same run to a calendar date instead of a day count -- what
+``coupled_run.end_time`` is for, since "10 years" is not a fixed number of
+seconds for ``total_time`` to parse. Exactly one of ``coupled_run.total_time``
+and ``coupled_run.end_time`` may be set, so selecting one nulls the other::
+
+    python -m jem.main +configuration=earth-slab coupled_run=long_run \
+        coupled_run.total_time=null coupled_run.end_time=2010-01-01
 
 The atmosphere is configured by jax-gcm's own groups, re-rooted under
 ``atmosphere`` (so the group's package is spelled out), and everything else by
