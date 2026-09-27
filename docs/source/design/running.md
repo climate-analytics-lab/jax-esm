@@ -10,17 +10,13 @@ from jem import run_chunked
 
 result = run_chunked(
     coupler,
-    total_time="2190 days",       # a whole number of chunks; costs no extra compile
+    total_time="2190 days",       # a whole number of chunks
     chunk="30 days",
     output_dir="output",
     output_averages=True,         # one record per chunk: its 30-day-window mean
     checkpoint_path="checkpoint",
 )
 ```
-
-`total_time` is one of two mutually exclusive ways to say how far to
-integrate; `end_time`, an absolute date, is the other — see *Chunking*
-below.
 
 Per chunk it integrates, labels and writes the output, checkpoints, and
 checks the state is still healthy:
@@ -49,39 +45,22 @@ the `accumulator` if the run was given a reduction.
 
 ## Chunking
 
-A run's length is given exactly one of two ways. `total_time` is a fixed
-duration — a string such as `"30 days"` or a number of days — parsed by
-`jcm.date.parse_duration_seconds`, which rejects a calendar unit such as
-`"year"` or `"month"` because it is not fixed (a year is 365 or 366 days
-depending on which one). `end_time` is the other way: an absolute ISO
-date/datetime (`jcm.date.to_datetime`), which `run_chunked` turns into a
-duration itself — `end_time - coupler.start_date`, in whole seconds — so a
-run can be given a calendar target ("run to 2011-01-01") that a fixed
-duration cannot express. Setting both, or neither, is a `ValueError`.
+A run's length is exactly one of `total_time`, a fixed duration — a string
+such as `"30 days"` or a number of days, parsed by
+`jcm.date.parse_duration_seconds` — and `end_time`, an absolute ISO
+date/datetime, for which the length is `end_time - coupler.start_date` in
+whole seconds. `end_time` is how a run is given a calendar target:
+`parse_duration_seconds` rejects `"year"` and `"month"`, which are not fixed
+lengths.
 
-`chunk` is a fixed duration in the same forms as `total_time`. It and the
-resolved run length must both be whole multiples of the coupling timestep —
-a coupled step is the smallest thing the loop can integrate. The run length
-need **not** be a whole multiple of `chunk`: the last chunk is simply
-shorter when it is not, at the cost of one extra compiled trajectory for
-that one short chunk. A calendar `end_time` is exactly the case this
-matters for — "2001-01-01" to "2011-01-01" is 3652 days, which almost no
-chunk length divides evenly, so refusing a non-dividing length would make
-`end_time` unusable in practice. Everything above is checked before
-anything is built or compiled, and each message names the quantities
-involved.
-
-```python
-# ten years from a coupler started on 2001-01-01, to a calendar date instead
-# of a day count -- chunk="30 days" leaves the last chunk a couple of days
-# short, since 3652 days is not a whole number of 30-day chunks.
-result = run_chunked(
-    coupler,
-    total_time=None, end_time="2011-01-01",
-    chunk="30 days",
-    output_dir="output",
-)
-```
+`chunk` is a fixed duration in the same forms. It and the run length must
+both be whole multiples of the coupling timestep — a coupled step is the
+smallest thing the loop can integrate. The run length need **not** be a
+whole multiple of `chunk`: the last chunk is then shorter, at the cost of one
+extra compiled trajectory. A calendar `end_time` rarely divides evenly —
+2001-01-01 to 2011-01-01 is 3652 days, so 30-day chunks end with a 22-day
+one. Everything is checked before anything is built or compiled, and each
+message names the quantities involved.
 
 ## The health gate
 
@@ -291,11 +270,9 @@ than a year composites its Januaries into bin 0);
 `monthly_mean(coupler, total_time=...)` (or `end_time=...`, or `n_months=`)
 instead gives one bin per calendar month the run passes through, sized by
 counting the distinct Gregorian months the run's records touch — a run
-length (`total_time` or `end_time`, the same two forms `run_chunked` takes)
-is the form to prefer, since a hand-counted `n_months` can under-size the
-accumulator by one and silently wrap a run's last partial year into its
-first. `windowed_mean` takes the same two run-length forms for the same
-reason. Each record is binned by its own interval **midpoint**
+length is the form to prefer, since a hand-counted `n_months` can under-size
+the accumulator by one and silently wrap a run's last partial year into its
+first. Each record is binned by its own interval **midpoint**
 (`jcm.date.gregorian_ymd_from_days`), the same instant `TimeAxis.datetimes()`
 labels it with, so `monthly.finalize(...)` and
 `to_xarray(...).groupby("time.month").mean()` of the same run agree exactly.

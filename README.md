@@ -186,21 +186,16 @@ result = run_chunked(
 )
 ```
 
-`total_time` is a fixed duration, so "years"/"months" ("6 years" above) has to
-be spelled out in days -- `end_time` is the other way to say how far to
-integrate, an absolute date instead of a duration, for exactly the runs a
-fixed duration cannot express:
+`total_time` is a fixed duration, so "6 years" has to be spelled out in days.
+For a calendar target give `end_time` instead (exactly one of the two):
 
 ```python
-result = run_chunked(
-    coupler, total_time=None, end_time="2011-01-01", chunk="30 days",
-    output_dir="output",
-)
+result = run_chunked(coupler, end_time="2011-01-01", chunk="30 days",
+                     output_dir="output")
 ```
 
-Exactly one of `total_time` and `end_time` is given; the run length need not
-be a whole number of `chunk`s either way -- the last chunk is simply shorter
-when it is not, at the cost of one extra compiled trajectory.
+The run length need not be a whole number of chunks: the last chunk is then
+shorter, at the cost of one extra compiled trajectory.
 
 Run it again with the same `output_dir` (or the same `checkpoint_path`) and it
 continues from the coupled step the checkpoint holds —
@@ -256,8 +251,8 @@ of, remove. Anything else and it **refuses**, with a `ValueError` naming the
 files it would leave behind, grouped by which of the two they are (an overlap,
 or past the end of this run), plus the step, the chunk and the ways out (resume
 with the chunk those files were written under and, for those past the end, a
-`total_time` or `end_time` that reaches them; remove them; or write into
-another `output_dir`). It never deletes a file it is not going to write: which of the
+run length that reaches them; remove them; or write into another
+`output_dir`). It never deletes a file it is not going to write: which of the
 two passes to keep is the user's call, not the driver's. The one thing it does
 remove is a name it is itself responsible for and keeps no record for — a chunk
 the `subsample` stride lands on none of, whose output from this pass is
@@ -343,8 +338,7 @@ compositing whole calendar months; size it with `total_time` or `end_time`
 `n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — measured in whole records from the run's
 own start, with no reference to any calendar, sized either by `n_windows` or
-by `total_time`/`end_time` (the same two run-length forms `run_chunked`
-takes). A run longer than the accumulator wraps, so window *w*
+by `total_time`/`end_time`. A run longer than the accumulator wraps, so window *w*
 composites every *w*-th window. `window` may also be a **sequence** of
 lengths, which the windows cycle through (daily leads for a forecast's first
 week, then pentads). A window is never a calendar month, whatever its length

@@ -120,11 +120,9 @@ Several things worth knowing:
   ``coupled_run/default.yaml`` is the complete schema, so every key is
   overridable without a ``+``.
 - **Exactly one of** ``coupled_run.total_time`` **and** ``coupled_run.end_time``
-  **is set; the other is** ``null``. ``total_time`` is a fixed duration
-  (``jcm.date.parse_duration_seconds`` refuses "years"/"months", since a year
-  is not a fixed number of seconds); ``end_time`` is an absolute date for a
-  calendar target that a duration cannot express, so setting it means also
-  setting ``coupled_run.total_time=null``.
+  **is set.** ``total_time`` is a fixed duration ("years" and "months" are
+  refused); ``end_time`` is an ISO date for a calendar target, and setting it
+  needs ``coupled_run.total_time=null`` too.
 - **Single-quote a** ``${...}`` **resolver.** ``'${jcm_data:bc/t30/clim/forcing.nc}'``
   is a resolver Hydra expands when the config is composed; unquoted, the shell
   expands ``${...}`` to nothing first, so the override arrives empty.
