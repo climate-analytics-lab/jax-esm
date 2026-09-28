@@ -192,10 +192,10 @@ Hydra makes fresh each run. Point a second run at the first's output directory
 (``coupled_run.output_dir=outputs/2026-09-16/11-04-02``) and it continues from
 the coupled step the checkpoint holds, saying so in its log; an absolute
 ``coupled_run.checkpoint_path`` is used as given, and
-``coupled_run.checkpoint_path=null`` turns checkpointing off. See the
-README's *Long runs* section and :doc:`design/running` for
-``checkpoint_interval``, ``subsample``, ``output_averages`` and the in-scan
-reductions in ``jem.accumulate``.
+``coupled_run.checkpoint_path=null`` turns checkpointing off. See
+:doc:`design/running` for the worked examples, ``checkpoint_interval``,
+``subsample``, ``output_averages`` and the in-scan reductions in
+``jem.accumulate``.
 
 
 Where next

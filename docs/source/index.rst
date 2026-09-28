@@ -13,6 +13,10 @@ built on ``jax.lax.scan``.
 - Integrating your own model? Follow :doc:`adding_a_component`.
 - Looking for a specific class or function? See :doc:`api_superset`.
 
+JEM is Alpha software: its API is subject to change without deprecation
+until 1.0. The version shown throughout these docs is read from
+``jem.__version__``, the single source of truth pyproject.toml's own
+version metadata reads from in turn.
 
 .. toctree::
    :maxdepth: 2
