@@ -134,6 +134,18 @@ def bulk_wind_stress(
     ocean's wind stress this same independent way rather than reusing
     SPEEDY's.
 
+    ``u``/``v`` sit at whichever reference the composed physics package's own
+    surface closure diagnoses -- SPEEDY's ``fwind0``-scaled lowest model
+    level, ECHAM's stability-corrected 10 m wind (``jcm.physics.surface.
+    surface_exchange.SurfaceExchange.wind_reference`` names which; see
+    ``jem.components.jcm.exchange_fields``). This bulk law applies the same
+    ``drag_coefficient``/``air_density`` regardless of that reference height
+    -- it was already an independent computation, not a physically matched
+    one, so it neither gains nor loses fidelity from which package supplied
+    the wind. A drag law that DID depend on the reference height (a
+    neutral-log profile calibrated to a specific height, say) would need to
+    branch on ``wind_reference`` and does not exist here.
+
     """
     speed = jnp.sqrt(jnp.maximum(u**2 + v**2, min_speed**2))
     scale = drag_coefficient * air_density * speed

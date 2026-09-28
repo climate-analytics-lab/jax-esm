@@ -1,15 +1,10 @@
 """Surface exchange fields, read off jax-gcm's package-independent contract.
 
-Until jax-gcm#754, each JCM physics package wrote its own struct into the
-threaded diagnostics dict, under its own key, with its own names, units and
-sign conventions, so this module had to carry a reader per package plus a
-``detect()`` dispatch to tell them apart. jax-gcm#754 (jax-gcm PR 877) closes
-that gap with :class:`jcm.physics.surface.surface_exchange.SurfaceExchange`,
-published identically under ``diagnostics["surface_exchange"]`` by every
-physics package that resolves a surface (SPEEDY and ECHAM; Held-Suarez opts
-out because it has no surface fluxes at all). This module therefore collapses
-to :func:`from_diagnostics`, the single reader :func:`jcm.physics.surface.
-surface_exchange.surface_exchange_from` reads that struct through.
+:class:`jcm.physics.surface.surface_exchange.SurfaceExchange` is published
+identically under ``diagnostics["surface_exchange"]`` by every physics
+package that resolves a surface (SPEEDY and ECHAM; Held-Suarez opts out
+because it has no surface fluxes at all), so this module has exactly one
+reader, :func:`from_diagnostics`, and no per-package branch.
 
 Sign and unit reconciliation
 -----------------------------
@@ -19,129 +14,85 @@ field, against ``docs/source/design/surface_exchange.md`` (jax-gcm) and this
 repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
 
 ============================  =================================  ========================================  ========================
-Contract field (jax-gcm 877)  jax-gcm sign / units                JEM field                                  JEM sign / units
+Contract field (jax-gcm)      jax-gcm sign / units                JEM field                                  JEM sign / units
 ============================  =================================  ========================================  ========================
 ``net_heat_flux``             W m-2, **positive down** (into the  ``total_heat_flux``                        W m-2, **positive up**
                                surface medium)
 ``evaporation``                kg m-2 s-1, positive up            ``evaporation``                            kg m-2 s-1, positive up
 ``precipitation``              kg m-2 s-1, positive down, >= 0     ``precipitation``                          kg m-2 s-1, positive down
+``wind_u``/``wind_v``          m s-1, at the package's own         ``u0``/``v0``                              m s-1, unchanged
+                               reference (``wind_reference``)
 ``sensible_heat_flux``        (not exchanged -- folded into        --                                         --
 ``latent_heat_flux``           jem's own ``total_heat_flux``)
 ``stress_u``/``stress_v``     (not exchanged -- JEM's own          --                                         --
                                Veros coupling computes its own
                                stress independently, see below)
-``wind_speed``                m s-1, scalar                        (not exchanged -- see the wind-vector
-                                                                     note below)
+``wind_speed``                m s-1, scalar                        (not exchanged -- ``wind_u``/``wind_v``
+                                                                     already carry the direction)
 ============================  =================================  ========================================  ========================
 
 - **``total_heat_flux = -net_heat_flux``.** The only sign flip needed: jax-gcm
   publishes the net downward flux into the surface medium (SPEEDY's
   ``hfluxn`` convention, SW_net + LW_net - SHF - LHF); JEM's convention is the
   net flux leaving the surface into the atmosphere, i.e. exactly the
-  negative. This is the same transform the pre-#754 SPEEDY-only reader
-  applied to ``_surface_flux.hfluxn`` (see the numeric-equivalence test in
-  ``tests/unit/test_jcm_component.py``), so a SPEEDY run's translated value
-  is unchanged by this collapse -- only where it comes from changed (the
-  published contract rather than a private diagnostics key), and the same
-  transform now also applies, for the first time, to ECHAM (whose old
-  reader always raised ``NotImplementedError``, precisely for lack of this
-  contract -- see "What this replaces" below).
-- **``evaporation`` and ``precipitation`` need no unit conversion.** The
-  pre-#754 SPEEDY reader divided SPEEDY's *private* ``g m-2 s-1`` diagnostics
-  by 1000 to reach JEM's ``kg m-2 s-1``; the *published* contract fields are
-  already ``kg m-2 s-1`` (jax-gcm normalises them once, in the publisher, to
-  the contract's units -- see ``SpeedySurfaceFlux._publish_surface_exchange``
-  and ``EchamSurfaceExchange.__call__``), so no conversion happens here any
-  more. **Verified empirically, not just read off the source**: stepping a
-  real SPEEDY model, ``diagnostics["surface_exchange"].evaporation`` is
-  exactly ``1/1000`` of the same step's private ``_surface_flux.evap`` (g
-  m-2 s-1) -- keeping the old division would have made evaporation 1000x too
-  small, silently, and the numeric equivalence test below (which compares
-  the OLD adapter's g/1000 arithmetic against this module's un-converted
-  read of the SAME diagnostics dict, on precipitation too, once it is
-  non-zero a few steps into a real run) is what actually catches either
-  direction of that mistake rather than trusting either the source or a
-  one-line reading of it. Similarly, ``precipitation`` was previously
-  assembled by hand from two SPEEDY-only diagnostics entries
-  (``_convection.precnv + _condensation.precls``); the contract's
-  ``precipitation`` is already that same total (convective + large-scale for
-  SPEEDY, convective + stratiform for ECHAM), computed once, in the
-  publisher, from whichever precipitation-producing terms are actually
-  composed -- so this module no longer needs to know which terms those are,
-  or that they differ between the two packages.
-- **``sensible_heat_flux``/``latent_heat_flux``/``stress_u``/``stress_v`` are
-  on the contract but JEM does not exchange them separately**: the slab
-  ocean/land/sea-ice models and ``jem.exchangers`` couple on the *net*
-  ``total_heat_flux`` (matching the pre-#754 behaviour, which also only ever
-  exchanged the net), and momentum is not exchanged through this struct at
-  all -- see the wind-vector note below.
+  negative.
+- **``evaporation``, ``precipitation``, ``wind_u``/``wind_v`` need no unit
+  conversion or reshape.** The published contract fields are already in
+  JEM's units and already on the physics package's nodal horizontal layout
+  -- ECHAM's column-vectorized diagnostics are un-flattened back to
+  ``(ix, il)`` by ``ComposablePhysics`` before this module ever sees them
+  (the same un-flattening every other published field, including the heat
+  and water fluxes, goes through), so no reshape happens here for the wind
+  either.
+- **``sensible_heat_flux``/``latent_heat_flux``/``stress_u``/``stress_v``/
+  ``wind_speed`` are on the contract but JEM does not exchange them
+  separately**: the slab ocean/land/sea-ice models and ``jem.exchangers``
+  couple on the *net* ``total_heat_flux``, and momentum is not exchanged
+  through this struct at all -- :class:`jem.fluxes.VerosExchange` derives its
+  own stress from ``u0``/``v0`` with an independent bulk drag law rather than
+  reusing ``stress_u``/``stress_v`` (see that module's docstring for why).
+  ``wind_speed`` is redundant once the vector is available
+  (``hypot(wind_u, wind_v) == wind_speed`` is a contract invariant).
 
-Why the near-surface wind is still a narrow exception
--------------------------------------------------------
+The near-surface wind's reference height is package-specific
+-----------------------------------------------------------------
 :attr:`~jem.components.jcm.exchange_fields.SurfaceExchange.u0`/``v0`` are the
 near-surface wind's true-east/true-north *components*, needed by
 :func:`jem.fluxes.bulk_wind_stress` (the independent bulk-drag law
-:class:`jem.fluxes.VerosExchange` applies for a Veros ocean, deliberately
-**not** reusing jax-gcm's own delivered stress -- see that module's
-docstring). jax-gcm's #754 contract does **not** publish a wind vector, only
-the scalar ``wind_speed`` -- a direction cannot be recovered from a
-magnitude, so ``wind_speed`` cannot stand in for ``u0``/``v0`` here.
-
-This is not a gap #754 could have closed and didn't: SPEEDY happens to still
-carry a true wind vector internally, as an artefact of its bulk-formula
-extrapolation to the surface layer, in its own *private*, non-contract
-diagnostics key (``_surface_flux.u0``/``.v0``,
-``jcm/physics/surface/speedy_surface_flux.py`` -- the same source
-``SpeedySurfaceFlux._publish_surface_exchange`` reads to build the
-contract's ``wind_speed = sqrt(u0**2 + v0**2)``). ECHAM has no vector wind
-anywhere in its diagnostics to publish, contract or no contract: its
-boundary-layer scheme diagnoses only a wind *speed*
-(``vertical_diffusion.wind_10m``, ``jcm/physics/vertical_diffusion/tte_tke/
-vertical_diffusion_types.py``: ``|U(10 m)|``, a scalar). So this asymmetry
-between the two packages predates #754 and is not introduced by this
-collapse: the pre-#754 ``echam()`` reader could not have supplied a wind
-vector either, which is one of the two reasons (the other being the missing
-grid-mean heat/water fluxes) it always raised ``NotImplementedError``.
-
-:func:`from_diagnostics` therefore keeps exactly one package-specific read
-after the collapse -- for ``u0``/``v0`` only, off SPEEDY's private key -- and
-raises when no physics package's diagnostics publish a wind vector
-(currently: anything other than SPEEDY). It reads the wind *eagerly*, so it
-raises for such a package even though the heat and water fluxes above are
-available from the published contract. And because
-:meth:`jem.components.jcm.component.JCMComponent.step` calls it on every
-coupled step to fill ``JCMDerived`` (whose ``u0``/``v0`` this feeds), **no
-ECHAM-composed coupled model can complete a step** -- whatever the exchanger,
-not only :class:`jem.fluxes.VerosExchange`. No shipped JAX-ESM configuration
-composes ECHAM, so nothing shipped is affected. This is an unchanged
-limitation, not a new one: the pre-#754 ``echam()`` reader raised
-unconditionally. Making the wind optional -- through ``JCMDerived``, the
-coupled carry and the output -- is a design change tracked in jax-esm#129;
-publishing a wind vector from every package upstream would remove the need.
+:class:`jem.fluxes.VerosExchange` applies for a Veros ocean). They are read
+verbatim from the contract's ``wind_u``/``wind_v``, which sit at whichever
+reference the *publishing* package's own surface closure defines -- ECHAM's
+stability-corrected 10 m wind, SPEEDY's ``fwind0``-scaled lowest-level wind
+-- recorded in the struct's static ``wind_reference`` field
+(``jcm.physics.surface.surface_exchange.WIND_REFERENCES``). JAX-ESM does not
+read ``wind_reference`` today: :func:`jem.fluxes.bulk_wind_stress` applies
+the same bulk law regardless of which reference the wind it is handed sits
+at (it was already an independent computation from SPEEDY's own bulk
+formula, not a lookup of it -- see that function's docstring), so there is
+no reference-dependent branch to drive with it. A consumer that DOES need to
+know the height reads ``diagnostics["surface_exchange"].wind_reference``
+directly off the opaque ``JCMDerived.physics`` passthrough.
 
 What this replaces
 -------------------
 Before jax-gcm#754, this module read SPEEDY's private ``_surface_flux``/
-``_convection``/``_condensation`` diagnostics keys by hand (negating
-``hfluxn``, dividing g m-2 s-1 fields by 1000, summing two precipitation
-terms) and could not build a grid-mean struct for ECHAM at all -- its
-``echam()`` reader always raised ``NotImplementedError``, naming jax-gcm#754
-as the fix, with "Use SPEEDY physics for coupled runs until then." A
-``detect()`` function picked between the two readers by which package-marker
-key was present in the diagnostics dict. All three -- ``speedy()``,
-``echam()``, ``detect()`` -- are gone: the heat and water fluxes both
-packages deliver are now read identically, off the one contract. ECHAM's
-grid-mean heat and water fluxes are therefore published and translatable for
-the first time -- but an ECHAM coupled step still fails on the wind vector,
-as described above (jax-esm#129). The old ``speedy()`` reader's source
-(commit ``756cc2c``, the last commit before this collapse) is vendored,
-frozen, as
+``_convection``/``_condensation`` diagnostics keys by hand and could not
+build a grid-mean struct for ECHAM at all. #754 (jax-gcm PR 877) collapsed
+the heat and water fluxes onto one published struct but left the near-surface
+wind a private, SPEEDY-only read (``_surface_flux.u0``/``.v0``), because the
+contract published only the scalar ``wind_speed`` -- a direction cannot be
+recovered from a magnitude, and ECHAM's boundary-layer scheme diagnosed only
+a wind *speed*, nothing else. jax-gcm#911/#914 closes that gap by adding
+``wind_u``/``wind_v`` to the published contract for every package, so this
+module's read of SPEEDY's private diagnostics key is gone along with the
+per-package branch it required: ``from_diagnostics`` needs no physics-package
+knowledge at all any more, for the wind or anything else, and an
+ECHAM-composed coupled model completes a step for the first time (closing
+jax-esm#129). The old ``speedy()`` reader's source (commit ``756cc2c``, the
+last commit before the #754 collapse) is vendored, frozen, as
 ``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
 historical baseline, by the numeric old-vs-new equivalence test in
-``tests/unit/test_jcm_component.py`` -- vendored rather than loaded from git
-history at test time (as an earlier version of that test did) because CI's
-shallow ``actions/checkout`` does not have commit ``756cc2c`` in its object
-store.
+``tests/unit/test_jcm_component.py``.
 """
 
 from __future__ import annotations
@@ -150,15 +101,6 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 from jcm.physics.surface.surface_exchange import surface_exchange_from
-
-#: SPEEDY's private, non-contract diagnostics key that still carries the
-#: near-surface wind *vector* (see the module docstring's wind-vector note).
-#: Not a "physics package marker" in the old ``detect()`` sense -- the
-#: heat/water fluxes above never look at this key, and a package that does
-#: not write it (ECHAM, or any future package) still gets a valid
-#: :class:`SurfaceExchange` from :func:`from_diagnostics`, just without
-#: ``u0``/``v0``.
-_SPEEDY_WIND_VECTOR_KEY = "_surface_flux"
 
 
 class SurfaceExchange(NamedTuple):
@@ -179,11 +121,10 @@ class SurfaceExchange(NamedTuple):
         Total precipitation (convective plus large-scale/stratiform)
         reaching the surface, ``kg m-2 s-1``, positive downward.
     u0 : jax.Array
-        Near-surface zonal wind, ``m s-1``. Only available where the
-        composed physics package publishes a wind *vector* -- today, SPEEDY
-        only; see the module docstring.
+        Near-surface zonal wind, ``m s-1``, at the publishing package's own
+        reference (see the module docstring's "near-surface wind" section).
     v0 : jax.Array
-        Near-surface meridional wind, ``m s-1``. Same caveat as ``u0``.
+        Near-surface meridional wind, ``m s-1``. Same reference as ``u0``.
 
     """
 
@@ -194,45 +135,14 @@ class SurfaceExchange(NamedTuple):
     v0: jnp.ndarray
 
 
-def _near_surface_wind_vector(diagnostics: dict[str, Any]) -> tuple[Any, Any]:
-    """Return ``(u0, v0)``, or raise if this physics package has none.
-
-    See the module docstring's "Why the near-surface wind is still a narrow
-    exception" section: jax-gcm's #754 contract has no wind vector, only the
-    scalar ``wind_speed``, so this is the one read left that is not off the
-    published struct.
-    """
-    speedy_flux = diagnostics.get(_SPEEDY_WIND_VECTOR_KEY)
-    if speedy_flux is not None:
-        return speedy_flux.u0, speedy_flux.v0
-    raise NotImplementedError(
-        "No near-surface wind VECTOR in this physics package's diagnostics "
-        f"(no {_SPEEDY_WIND_VECTOR_KEY!r} entry). jax-gcm's package-"
-        "independent surface-exchange contract (jax-gcm#754) publishes only "
-        "the scalar 'wind_speed', from which a direction cannot be "
-        "recovered; SPEEDY carries a true wind vector internally as an "
-        "artefact of its bulk-formula surface extrapolation "
-        "(jcm/physics/surface/speedy_surface_flux.py), which is what this "
-        f"key is. ECHAM has none anywhere in its diagnostics (its vdiff "
-        "diagnoses only |U(10m)|), so this is not a regression from the "
-        "#754 collapse -- the pre-#754 echam() reader could not have "
-        "supplied a wind vector either. JCMComponent needs it on every "
-        "coupled step (it fills JCMDerived.u0/v0), so any coupled run on "
-        "this physics package fails here, whatever the exchanger: use "
-        "SPEEDY physics for coupled runs until the wind is made optional "
-        "(jax-esm#129) or jax-gcm publishes one from every package."
-    )
-
-
 def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
     """Read the surface exchange out of one step's physics diagnostics.
 
-    The single reader jax-gcm#754 (jax-gcm PR 877) makes possible: every
-    guaranteed field of :class:`jcm.physics.surface.surface_exchange.
+    Every guaranteed field of :class:`jcm.physics.surface.surface_exchange.
     SurfaceExchange` is filled identically by every physics package that
-    resolves a surface, so this function no longer needs to know which
-    package produced ``diagnostics``. See the module docstring for the
-    field-by-field sign/unit mapping.
+    resolves a surface, so this function needs no knowledge of which package
+    produced ``diagnostics``. See the module docstring for the field-by-field
+    sign/unit mapping.
 
     Parameters
     ----------
@@ -243,7 +153,7 @@ def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
     Returns
     -------
     SurfaceExchange
-        The fluxes translated to JEM's sign and unit conventions.
+        The fluxes and wind translated to JEM's sign and unit conventions.
 
     Raises
     ------
@@ -257,26 +167,13 @@ def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
         :meth:`~jcm.physics.composable_physics.ComposablePhysics.require_surface_exchange`
         at composition time (see ``jem.runners.build_atmosphere``) so this
         is caught before the first coupled step rather than during it.
-    NotImplementedError
-        If the composed physics package publishes no near-surface wind
-        *vector* -- see :func:`_near_surface_wind_vector` and the module
-        docstring's wind-vector note. The wind is read eagerly, so this
-        raises for such a package even when the caller wants only the heat
-        and water fluxes, which #754 now does publish for it. That is not a
-        regression (the pre-#754 ``echam()`` reader raised unconditionally),
-        but it does leave a capability #754 unlocked unclaimed: making the
-        wind optional means making it optional all the way through
-        :class:`~jem.components.jcm.component.JCMDerived`, the coupled carry
-        and the output, which is a design change rather than part of this
-        migration. Tracked in jax-esm#129.
 
     """
     exchange = surface_exchange_from(diagnostics)
-    u0, v0 = _near_surface_wind_vector(diagnostics)
     return SurfaceExchange(
         total_heat_flux=-exchange.net_heat_flux,
         evaporation=exchange.evaporation,
         precipitation=exchange.precipitation,
-        u0=u0,
-        v0=v0,
+        u0=exchange.wind_u,
+        v0=exchange.wind_v,
     )
