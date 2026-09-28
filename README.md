@@ -9,27 +9,27 @@ A fully differentiable Earth-system coupler in JAX.
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 
 JAX-ESM (`jem`) does not implement a climate model of its own: it couples
-independently-developed components — the JCM spectral atmosphere from the
-sibling project [jax-gcm](https://github.com/climate-analytics-lab/jax-gcm),
-JEM's own slab ocean/land/sea-ice models, and the
+independently-developed components — the JCM spectral atmosphere from
+[jax-gcm](https://github.com/climate-analytics-lab/jax-gcm) (SPEEDY or
+ICON/ECHAM physics), JEM's own slab ocean, land and sea-ice models, and the
 [Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM — into
 one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory. Every
-component's physical parameters travel in the scan carry as `flax.struct`
-pytrees, so `jax.grad` reaches them through a whole coupled run — for
-calibration against observations, hybrid physics-ML, and sensitivity studies
-that would otherwise need a model rewritten around an adjoint.
+component's physical parameters travel in the scan carry as pytrees, so
+`jax.grad` reaches them through a whole coupled run: calibration against
+observations, hybrid physics-ML and sensitivity studies, with no adjoint
+model to write ([example](examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb)).
 
 - **Any model plugs in.** A component is any object with a `name`,
-  `initialize()` and `step(carry, time)` — a runtime-checkable protocol, no base class.
-- **Differentiable parameters** travel in the carry, so gradients of a
-  coupled trajectory reach them with no special casing.
-- **One clock.** Every component shares the same `jax_datetime` clock, so the
-  seasonal cycle survives chunked runs and restarts.
+  `initialize()` and `step(carry, time)` — a protocol, not a base class.
+- **Explicit coupling.** Components exchange fields only through exchangers:
+  plain functions that regrid, convert units or compute a flux.
+- **One clock.** Every component steps on the same `jax_datetime` clock, and
+  every component's output merges onto one time axis.
 - **One run loop.** `run_chunked` handles chunking, output, checkpoint/resume
-  and a health gate, plus in-scan monthly/windowed-mean reductions for runs
-  too long to write every step to disk.
-- **One command line.** `python -m jem.main` composes a coupled model from
-  Hydra config groups, including jax-gcm's own physics groups re-rooted under `atmosphere`.
+  and a health gate, with in-scan monthly means for long runs.
+- **One command.** `python -m jem.main` composes a coupled model from Hydra
+  config groups, with named configurations from an aquaplanet slab ocean to
+  a Veros Earth.
 
 ![Surface specific humidity from a coupled JCM/slab-ocean run](gallery/JCM_SOM_demo.gif)
 
