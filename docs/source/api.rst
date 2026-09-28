@@ -17,6 +17,10 @@ Running a model
 
 ``jem.driver`` is the run loop a Python user calls; ``jem.runners`` and
 ``jem.main`` are the same loop reached from a composed Hydra config.
+``jem.configurations`` is the recipe door onto a validated
+``jem/config/configuration/*.yaml`` -- ``jem.configurations.load(name)`` builds
+the SAME objects ``+configuration=<name>`` composes, through ``jem.runners``,
+with no Hydra visible to the caller (issue #131; see :doc:`python_api`).
 ``jem.checkpoint`` and ``jem.accumulate`` are module-level APIs -- they are not
 re-exported from ``jem``, because a run reaches them through
 ``Coupler.save_carry`` and ``generate_trajectory_function(accumulate=...)``.
@@ -32,6 +36,7 @@ re-exported from ``jem``, because a run reaches them through
    jem.regrid
    jem.config
    jem.runners
+   jem.configurations
    jem.main
 
 Components
