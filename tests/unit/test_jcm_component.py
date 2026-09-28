@@ -23,7 +23,6 @@ from jcm.physics.surface.echam.surface_exchange_publisher import (
 from jcm.physics.surface.surface_exchange import (
     SurfaceExchange as JcmSurfaceExchange,
 )
-from jcm.physics.surface.surface_exchange import surface_exchange_from
 from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
 
@@ -95,6 +94,52 @@ def stepped(component):
     return carry0, carry1, carry2, diagnostics1, diagnostics2
 
 
+def _build_echam_model() -> Model:
+    """Build the smallest real ECHAM configuration jax-gcm's own tests use.
+
+    T21 with ECHAM's standard 47-level hybrid table --
+    ``jcm/checkpoint_test.py``'s ``test_echam_round_trip_and_condensate_metadata``
+    is the same combination -- and a 30-minute step, the validated ECHAM
+    default; one coupling day (``COUPLING_TIMESTEP``) is a whole 48 of them.
+    """
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.physics.echam.echam_terms import echam_physics
+    from jcm.utils import get_coords
+
+    coords = get_coords(get_echam_levels(47), spectral_truncation=TRUNCATION)
+    return Model(
+        coords=coords,
+        terrain=TerrainData.aquaplanet(coords),
+        time_step=30,
+        physics=echam_physics(),
+        start_time=START_DATE,
+    )
+
+
+@pytest.fixture(scope="module")
+def echam_model() -> Model:
+    return _build_echam_model()
+
+
+@pytest.fixture(scope="module")
+def echam_component(echam_model) -> JCMComponent:
+    return _bound_component(echam_model)
+
+
+@pytest.fixture(scope="module")
+def echam_stepped(echam_component):
+    """One real coupled ECHAM step -- expensive, computed once per module.
+
+    A single step is enough to exercise ``JCMDerived``/the surface exchange;
+    the two-step scan requirement (CLAUDE.md's "Testing" section) is
+    exercised separately, through a real ``Coupler``, by
+    ``test_echam_two_coupled_steps_through_a_slab_ocean`` below.
+    """
+    carry0 = echam_component.initialize()
+    carry1, diagnostics1 = echam_component.step(carry0, _coupling_time(0))
+    return carry0, carry1, diagnostics1
+
+
 # --------------------------------------------------------------------------
 # Fast tests: no integration.
 # --------------------------------------------------------------------------
@@ -161,8 +206,8 @@ def test_initialize_does_not_integrate(model, monkeypatch):
 
 
 def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
-                          wind_speed=3.0):
-    """Build a real jax-gcm ``SurfaceExchange`` (#754) with hand-chosen values.
+                          u0=1.5, v0=-2.5, wind_reference="lowest_level"):
+    """Build a real jax-gcm ``SurfaceExchange`` with hand-chosen values.
 
     The other guaranteed fields (``sensible_heat_flux``, ``latent_heat_flux``,
     ``stress_u``/``stress_v``, ``air_density``, ``air_potential_temperature``)
@@ -179,7 +224,10 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
         precipitation=field(precipitation),
         stress_u=field(0.0),
         stress_v=field(0.0),
-        wind_speed=field(wind_speed),
+        wind_speed=field(float(np.hypot(u0, v0))),
+        wind_u=field(u0),
+        wind_v=field(v0),
+        wind_reference=wind_reference,
         air_density=field(1.2),
         air_potential_temperature=field(290.0),
     )
@@ -187,46 +235,41 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
 
 def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
                              precipitation=0.008, u0=1.5, v0=-2.5):
-    """Build a diagnostics dict shaped like SPEEDY's post-#754 output.
+    """Build a diagnostics dict shaped like SPEEDY's post-#754/#914 output.
 
-    Carries both the published ``surface_exchange`` contract struct and
-    SPEEDY's private wind-vector key (``_surface_flux.u0``/``.v0`` --
-    ``exchange_fields``'s one remaining package-specific read; see its module
-    docstring). The values are already in the contract's units (kg m-2 s-1,
-    positive up/down) -- unlike the pre-#754 fixture this replaces, which
-    used SPEEDY's private g m-2 s-1 diagnostics and needed a /1000 conversion.
+    The values are already in the contract's units (kg m-2 s-1, positive
+    up/down); the wind sits at SPEEDY's own ``wind_reference="lowest_level"``
+    (its bulk-formula closure's ``u0``/``v0`` -- see ``exchange_fields``'s
+    module docstring).
     """
-    field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
     return {
-        "_surface_flux": SimpleNamespace(u0=field(u0), v0=field(v0)),
         "surface_exchange": _jcm_surface_exchange(
             net_heat_flux, evaporation, precipitation,
-            wind_speed=float(np.hypot(u0, v0)),
+            u0=u0, v0=v0, wind_reference="lowest_level",
         ),
     }
 
 
 def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
-                            precipitation=0.004):
-    """Build a diagnostics dict shaped like ECHAM's post-#754 output.
+                            precipitation=0.004, u0=4.0, v0=1.0):
+    """Build a diagnostics dict shaped like ECHAM's post-#754/#914 output.
 
-    No ``_surface_flux`` key: ECHAM never carries a near-surface wind
-    *vector* anywhere in its diagnostics, contract or no contract (see
-    ``exchange_fields``'s module docstring), so this is what an ECHAM run's
-    diagnostics genuinely look like from ``from_diagnostics``'s point of
-    view -- not a stripped-down fixture.
+    The wind sits at ECHAM's own ``wind_reference="10m"`` (its
+    stability-corrected 10 m reduction -- see ``exchange_fields``'s module
+    docstring).
     """
     return {
         "surface_exchange": _jcm_surface_exchange(
             net_heat_flux, evaporation, precipitation,
+            u0=u0, v0=v0, wind_reference="10m",
         ),
     }
 
 
 def test_speedy_exchange_shapes_and_signs():
-    """Sign flip only: evaporation/precipitation need no unit conversion any
-    more, because the #754 contract already publishes them in JEM's units
-    (kg m-2 s-1) -- see the module docstring's derivation table.
+    """Sign flip only: evaporation/precipitation/wind need no unit conversion
+    or reshape, because the contract already publishes them in JEM's units
+    and on JEM's grid -- see the module docstring's derivation table.
     """
     diagnostics = _fake_speedy_diagnostics()
     exchange = exchange_fields.from_diagnostics(diagnostics)
@@ -244,38 +287,25 @@ def test_speedy_exchange_shapes_and_signs():
         assert field.shape == GRID_SHAPE
 
 
-def test_echam_heat_and_water_fluxes_use_the_same_translation_as_speedy():
-    """#754 closes: ECHAM's heat/water fluxes now translate identically to
-    SPEEDY's, with no per-package code -- where the pre-#754 ``echam()``
-    reader always raised ``NotImplementedError`` (git history, commit
-    756cc2c), because there was no package-independent struct to read.
-
-    This checks the translation directly against jax-gcm's own public
-    reader (:func:`jcm.physics.surface.surface_exchange.surface_exchange_from`)
-    rather than against ``from_diagnostics`` end to end, because
-    ``from_diagnostics`` raises for ECHAM at the *separate* wind-vector step
-    (checked below) before it would return -- the heat/water translation
-    itself does not depend on the wind vector being available.
+def test_echam_exchange_translates_identically_to_speedy():
+    """ECHAM's fluxes AND wind translate through the exact same code path as
+    SPEEDY's, with no per-package branch anywhere in ``from_diagnostics``
+    (jax-gcm#754 for the fluxes, #911/#914 for the wind) -- only the values
+    (and, off the atmosphere's own diagnostics, the ``wind_reference``) tell
+    the two packages apart.
     """
     diagnostics = _fake_echam_diagnostics()
-    contract = surface_exchange_from(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics)
+
     # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is the
     # negative of it (positive UP) -- same sign flip as the SPEEDY case above.
-    np.testing.assert_allclose(-contract.net_heat_flux, -7.0)
-    np.testing.assert_allclose(contract.evaporation, 0.001)
-    np.testing.assert_allclose(contract.precipitation, 0.004)
-
-
-def test_echam_wind_vector_not_implemented_names_the_reason():
-    """ECHAM has no near-surface wind *vector* anywhere (only a speed), which
-    predates and is independent of #754 -- see the module docstring's
-    wind-vector note. The heat/water fluxes above are unaffected; only a
-    caller that also needs ``u0``/``v0`` (today: ``jem.fluxes.VerosExchange``)
-    is.
-    """
-    diagnostics = _fake_echam_diagnostics()
-    with pytest.raises(NotImplementedError, match="wind VECTOR"):
-        exchange_fields.from_diagnostics(diagnostics)
+    np.testing.assert_allclose(exchange.total_heat_flux, -7.0)
+    np.testing.assert_allclose(exchange.evaporation, 0.001)
+    np.testing.assert_allclose(exchange.precipitation, 0.004)
+    # ECHAM's wind sits at its own reference (10 m); the value passes through
+    # exactly as SPEEDY's lowest-level wind does above.
+    np.testing.assert_allclose(exchange.u0, 4.0)
+    np.testing.assert_allclose(exchange.v0, 1.0)
 
 
 def test_missing_surface_exchange_raises_jcms_own_key_error():
@@ -324,19 +354,17 @@ def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
 
 
 def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
-    """The new reader against a REAL ``EchamSurfaceExchange`` step's output.
-
-    There is no historical baseline for ECHAM (the pre-#754 ``echam()``
-    reader always raised), so this is not an old-vs-new diff -- it is
-    evidence that the translation is correct: the diagnostics dict is built
-    by actually calling jax-gcm's own ``EchamSurfaceExchange`` term (not a
-    reimplementation of it) on hand-chosen inputs, and the expected
-    heat/water values are derived by hand from those SAME inputs, following
-    the ECHAM energy balance ``EchamSurfaceExchange`` itself documents
-    (net radiation minus the turbulent fluxes; stratiform plus convective
-    precipitation).
+    """``from_diagnostics`` against a REAL ``EchamSurfaceExchange`` step's
+    output -- evidence that the translation is correct end to end, wind
+    included: the diagnostics dict is built by actually calling jax-gcm's own
+    ``EchamSurfaceExchange`` term (not a reimplementation of it) on
+    hand-chosen inputs, and the expected heat/water/wind values are derived
+    by hand from those SAME inputs, following the ECHAM energy balance
+    ``EchamSurfaceExchange`` itself documents (net radiation minus the
+    turbulent fluxes; stratiform plus convective precipitation; the grid-mean
+    10 m wind as the fraction-weighted sum of its tiles).
     """
-    ncols = 4
+    ncols, nsfc_type = 4, 3  # water, sea ice, land -- EchamSurfaceExchange's tile order
     shape_3d = (2, ncols)
     state = PhysicsState(
         temperature=jnp.full(shape_3d, 290.0),
@@ -350,6 +378,12 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
     sw_down, sw_up, lw_down, lw_up = 200.0, 40.0, 300.0, 350.0
     precip_rain, precip_snow, precip_conv = 2e-5, 0.0, 1e-5
     evaporation = 3e-5
+    wind_10m_u, wind_10m_v = 4.0, -1.5
+    wind_10m = float(np.hypot(wind_10m_u, wind_10m_v))
+    # Uniform per-tile wind trivially satisfies the tile invariant
+    # (sum(tile_fraction * wind_u_tile) == wind_u) for any fractions that sum
+    # to 1 -- the fractions themselves are not otherwise exercised here.
+    tile_fraction = jnp.tile(jnp.array([0.6, 0.1, 0.3]), (ncols, 1))
     diagnostics = {
         "surface": SimpleNamespace(
             sensible_heat_flux=jnp.full((ncols,), sensible_heat_flux),
@@ -359,7 +393,14 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
             momentum_flux_v=jnp.full((ncols,), -0.01),
         ),
         "vertical_diffusion": SimpleNamespace(
-            wind_10m=jnp.full((ncols,), 5.0)),
+            wind_10m=jnp.full((ncols,), wind_10m),
+            wind_10m_u=jnp.full((ncols,), wind_10m_u),
+            wind_10m_v=jnp.full((ncols,), wind_10m_v),
+            surface_fraction=tile_fraction,
+            wind_10m_u_tile=jnp.full((ncols, nsfc_type), wind_10m_u),
+            wind_10m_v_tile=jnp.full((ncols, nsfc_type), wind_10m_v),
+            wind_10m_tile=jnp.full((ncols, nsfc_type), wind_10m),
+        ),
         "radiation": SimpleNamespace(
             surface_sw_down=jnp.full((ncols,), sw_down),
             surface_sw_up=jnp.full((ncols,), sw_up),
@@ -383,14 +424,14 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
     )
     expected_precipitation = precip_rain + precip_snow + precip_conv
 
-    with pytest.raises(NotImplementedError, match="wind VECTOR"):
-        exchange_fields.from_diagnostics(diagnostics)
-    contract = surface_exchange_from(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics)
     # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is its
     # negative (positive UP).
-    np.testing.assert_allclose(-contract.net_heat_flux, -expected_net_heat_flux)
-    np.testing.assert_allclose(contract.evaporation, evaporation)
-    np.testing.assert_allclose(contract.precipitation, expected_precipitation)
+    np.testing.assert_allclose(exchange.total_heat_flux, -expected_net_heat_flux)
+    np.testing.assert_allclose(exchange.evaporation, evaporation)
+    np.testing.assert_allclose(exchange.precipitation, expected_precipitation)
+    np.testing.assert_allclose(exchange.u0, wind_10m_u)
+    np.testing.assert_allclose(exchange.v0, wind_10m_v)
 
 
 def test_make_jem_compatible_is_deprecated(model):
@@ -506,6 +547,89 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component, stepped):
 
     with pytest.raises(ValueError, match="output records"):
         component.to_xarray(stacked, time_axis)
+
+
+@pytest.mark.slow
+def test_derived_wind_matches_the_published_contract_speedy(stepped):
+    """``JCMDerived.u0``/``.v0`` are exactly the contract's ``wind_u``/``wind_v``.
+
+    Checked against the published struct directly rather than trusting
+    ``exchange_fields.from_diagnostics``'s own claim -- a regression that
+    read the wrong diagnostics field (say, a stale wind or the geostrophic
+    one) would still produce *some* finite u0/v0 and pass a bare
+    finiteness check, but would not equal
+    ``diagnostics["surface_exchange"].wind_u``/``.wind_v``.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    _, carry1, _, _, _ = stepped
+    contract = surface_exchange_from(carry1["derived"].physics)
+
+    assert contract.wind_reference == "lowest_level"
+    np.testing.assert_array_equal(
+        np.asarray(carry1["derived"].u0), np.asarray(contract.wind_u))
+    np.testing.assert_array_equal(
+        np.asarray(carry1["derived"].v0), np.asarray(contract.wind_v))
+
+
+@pytest.mark.slow
+def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
+    """Same check as the SPEEDY test above, on a real ECHAM step.
+
+    Before jax-gcm#911/#914 this was untestable: ECHAM's diagnostics carried
+    no wind vector at all (see ``exchange_fields``'s module docstring), so
+    ``from_diagnostics`` raised on any ECHAM step. It also pins that
+    ``JCMComponent`` completes a real ECHAM coupled step end to end -- the
+    concrete evidence for jax-esm#129 being closed, alongside the fake-carry
+    test ``test_echam_exchange_translates_identically_to_speedy`` above.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    _, carry1, _ = echam_stepped
+    derived = carry1["derived"]
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
+
+    contract = surface_exchange_from(derived.physics)
+    assert contract.wind_reference == "10m"
+    np.testing.assert_array_equal(np.asarray(derived.u0), np.asarray(contract.wind_u))
+    np.testing.assert_array_equal(np.asarray(derived.v0), np.asarray(contract.wind_v))
+
+
+@pytest.mark.slow
+def test_echam_two_coupled_steps_through_a_slab_ocean(echam_model):
+    """Two real steps through ``Coupler.generate_trajectory_function(2)``.
+
+    CLAUDE.md's "Testing" section: a coupling change is not tested until two
+    steps through the scan exercise it, because a single component's
+    ``step()`` does not catch a carry-structure mismatch -- only
+    ``lax.scan`` does. This is also the first real evidence that an
+    ECHAM-composed atmosphere couples to a *receiving* component end to end
+    (a slab ocean reading ``derived.u0``/``.v0`` indirectly through
+    ``total_heat_flux``/``total_freshwater_flux``; ECHAM's wind itself is not
+    consumed by the default slab exchange table, only by
+    ``jem.fluxes.VerosExchange`` -- see ``test_echam_veros_earth_configuration_builds``
+    in ``tests/unit/test_veros_setups.py`` for that coupling instead), not
+    only that it completes a bare step in isolation.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    atm = _bound_component(echam_model)
+    grid = SlabGrid.from_coords(echam_model.coords.horizontal)
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    coupler = Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+    carry = coupler.initialize()
+    final, _diagnostics = coupler.generate_trajectory_function(2)(carry)
+
+    derived = final.components["atm"]["derived"]
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
 
 
 def test_rebinding_to_a_different_timestep_is_rejected(model):
