@@ -8,10 +8,11 @@ Install JEM
 
 .. code-block:: bash
 
-    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install its dev branch from source FIRST
+    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install it from source FIRST,
+    # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
+    git checkout 0eef9b3a88982886241622fde6530513d025192c
     pip install -e "."
     cd ..
 
