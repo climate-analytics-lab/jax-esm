@@ -250,52 +250,14 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
-def _seconds(duration: str | float) -> int:
-    """Return a config duration in whole seconds, as the driver reads it."""
-    from jcm.date import parse_duration_seconds
-
-    return parse_duration_seconds(duration)
-
-
-@pytest.mark.parametrize("option", _options("coupled_run"))
-def test_run_options_integrate_a_whole_number_of_chunks(option):
-    """Every shipped ``coupled_run`` option is a run ``run_chunked`` accepts.
-
-    ``run_chunked`` refuses a ``total_time`` that is not a whole multiple of
-    ``chunk`` -- ``iterations`` is static, so a short final chunk would mean a
-    second compiled trajectory -- and refuses either if it is not a whole
-    number of coupling steps. A shipped option that cannot be run at all is a
-    trap whose first victim is whoever launches it, so the arithmetic is
-    checked here, on the durations exactly as the driver parses them.
-
-    It is also what keeps a *documented* example honest: ``long_run``'s
-    ``total_time`` is spelled in days rather than years precisely because 30
-    days does not divide a 365-day year.
-    """
-    cfg = composed([_group_override("coupled_run", option)])
-    total = _seconds(cfg.coupled_run.total_time)
-    chunk = _seconds(cfg.coupled_run.chunk)
-    coupling = _seconds(cfg.coupling.timestep)
-
-    assert chunk % coupling == 0, (
-        f"coupled_run={option}: chunk={cfg.coupled_run.chunk!r} is not a whole "
-        f"number of coupling steps of {cfg.coupling.timestep!r}."
-    )
-    assert total % chunk == 0, (
-        f"coupled_run={option}: total_time={cfg.coupled_run.total_time!r} is "
-        f"not a whole number of chunks of {cfg.coupled_run.chunk!r}."
-    )
-    # Vacuous while every shipped option leaves the interval null, which is the
-    # point: the first option to set one is checked by the same arithmetic the
-    # driver applies, instead of failing at launch.
-    if cfg.coupled_run.checkpoint_interval is not None:
-        interval = _seconds(cfg.coupled_run.checkpoint_interval)
-        assert interval % chunk == 0, (
-            f"coupled_run={option}: checkpoint_interval="
-            f"{cfg.coupled_run.checkpoint_interval!r} is not a whole number of "
-            f"chunks of {cfg.coupled_run.chunk!r}; a checkpoint is only ever "
-            "written at a chunk boundary."
-        )
+def test_end_time_composes_and_nulls_total_time():
+    """``coupled_run.end_time`` is a schema key, so it overrides without a ``+``."""
+    cfg = composed([
+        "coupled_run.total_time=null",
+        "coupled_run.end_time=2011-01-01",
+    ])
+    assert cfg.coupled_run.total_time is None
+    assert cfg.coupled_run.end_time == "2011-01-01"
 
 
 # ---------------------------------------------------------------------------

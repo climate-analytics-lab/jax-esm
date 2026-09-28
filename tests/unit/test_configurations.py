@@ -160,22 +160,12 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(exp.run_kwargs["total_time"], "4 days")
         self.assertEqual(exp.run_kwargs["chunk"], "2 days")
 
-    def test_documented_total_time_override_is_a_whole_number_of_chunks(self):
-        """The override example ``python_api.md`` documents actually runs.
+    def test_documented_total_time_override_is_a_whole_number_of_steps(self):
+        """The ``coupled_run.total_time`` override ``python_api.md`` documents runs.
 
-        Every shipped recipe's own ``coupled_run.chunk`` stays its 30-day
-        default, so the documented ``coupled_run.total_time`` override must be
-        a multiple of it or ``run_chunked`` raises. The value is read straight
-        out of ``docs/source/python_api.md``'s door section -- not copied into this
-        test as a second literal -- so a future edit to the docs is what this
-        test exercises, and a value that regresses back to something
-        non-divisible fails here rather than only at a user's own
-        ``run_chunked`` call. It is validated against the same rule
-        ``run_chunked`` itself enforces
-        (:func:`jem.driver._require_whole_number_of_chunks`, factored out of
-        ``run_chunked`` so this calls the real rule rather than a
-        reimplementation of it) rather than actually integrating the run, so
-        this test stays fast.
+        The value is read out of the doc's door section, so an edit to the
+        docs is what this checks: it must be a whole number of coupling steps,
+        the one rule ``run_chunked`` places on a run's length.
         """
         import re
 
@@ -193,19 +183,9 @@ class TestLoad(unittest.TestCase):
             f"no `coupled_run.total_time` override example found in "
             f"{PYTHON_API}'s door section"
         )
-        documented_total_time = match.group(1)
-
         exp = configurations.load(
-            "earth-slab", **{"coupled_run.total_time": documented_total_time})
-        steps_per_chunk = driver._whole_steps(
-            exp.run_kwargs["chunk"], exp.coupler, "chunk")
-        total_steps = driver._whole_steps(
-            exp.run_kwargs["total_time"], exp.coupler, "total_time")
-        # Raises if not a whole number of chunks -- the actual rule
-        # `run_chunked` enforces, not a reimplementation of it.
-        driver._require_whole_number_of_chunks(
-            exp.run_kwargs["total_time"], exp.run_kwargs["chunk"],
-            total_steps, steps_per_chunk)
+            "earth-slab", **{"coupled_run.total_time": match.group(1)})
+        driver._whole_steps(exp.run_kwargs["total_time"], exp.coupler, "total_time")
 
     def test_output_dir_defaults_to_a_fresh_directory_per_call(self):
         """Two successive ``load()`` calls with no ``output_dir`` do not collide.

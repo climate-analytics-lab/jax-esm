@@ -472,6 +472,30 @@ def test_n_months_and_total_time_size_the_same_accumulator(climatology_file):
         np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
 
+def test_end_time_sizes_the_same_accumulator_as_total_time(climatology_file):
+    """`end_time` is the other way to size the sequential form, from a date."""
+    coupler = build_coupler(
+        climatology_file, start_date=jdt.to_datetime("2001-07-01")
+    )
+    # 100 days from 1 July lands on 9 October -- the same run as
+    # total_time="100 days" below, said as a calendar date instead.
+    from_total = monthly_mean(coupler, total_time="100 days")
+    from_end_date = monthly_mean(coupler, end_time="2001-10-09")
+
+    _, first = coupler.generate_trajectory_function(100, accumulate=from_total)(
+        coupler.initialize()
+    )
+    _, second = coupler.generate_trajectory_function(100, accumulate=from_end_date)(
+        coupler.initialize()
+    )
+    for got, want in zip(
+        jax.tree_util.tree_leaves(from_total.finalize(first)),
+        jax.tree_util.tree_leaves(from_end_date.finalize(second)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
 def test_more_months_than_the_run_leaves_them_nan(coupler):
     """Bins past the end of the run are empty, and empty is NaN, not zero."""
     monthly = monthly_mean(coupler, n_months=6)
@@ -514,7 +538,7 @@ def test_the_climatology_is_what_neither_argument_gives(coupler):
 
 def test_n_months_and_total_time_are_mutually_exclusive(coupler):
     """Two answers to one question."""
-    with pytest.raises(ValueError, match="at most one of n_months and total_time"):
+    with pytest.raises(ValueError, match="at most one of n_months and a run length"):
         monthly_mean(coupler, n_months=12, total_time="365 days")
 
 
@@ -780,6 +804,29 @@ def test_total_time_and_n_windows_agree(coupler):
         np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
 
+def test_end_time_and_total_time_size_the_same_accumulator(coupler):
+    """`end_time` sizes the accumulator identically to the `total_time` it works out to.
+
+    ``coupler`` starts on 2001-01-01 (``START_DATE``), so a 365-day run ends
+    on 2002-01-01 -- the same calendar target `run_chunked(...,
+    end_time=...)` would be given for the same run.
+    """
+    from_total = windowed_mean(coupler, "5 days", total_time="365 days")
+    from_end_date = windowed_mean(coupler, "5 days", end_time="2002-01-01")
+
+    trajectory = coupler.generate_trajectory_function(50, accumulate=from_total)
+    _, first = trajectory(coupler.initialize())
+    _, second = coupler.generate_trajectory_function(50, accumulate=from_end_date)(
+        coupler.initialize()
+    )
+    for got, want in zip(
+        jax.tree_util.tree_leaves(from_total.finalize(first)),
+        jax.tree_util.tree_leaves(from_end_date.finalize(second)),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
 def test_a_window_that_is_not_whole_coupling_steps_is_refused(coupler):
     """Half a step cannot be attributed to either side of the boundary."""
     with pytest.raises(ValueError, match="whole number of coupling steps"):
@@ -792,7 +839,7 @@ def test_a_window_that_is_not_whole_coupling_steps_is_refused(coupler):
 )
 def test_exactly_one_of_n_windows_and_total_time_is_required(coupler, kwargs):
     """Neither is unanswerable and both is two answers to one question."""
-    with pytest.raises(ValueError, match="exactly one of n_windows and total_time"):
+    with pytest.raises(ValueError, match="exactly one of n_windows and a run length"):
         windowed_mean(coupler, "5 days", **kwargs)
 
 
@@ -928,7 +975,7 @@ def test_an_empty_pattern_is_refused(coupler):
 
 def test_a_pattern_cannot_be_given_both_sizes(coupler):
     """Two answers to one question, sequence or not."""
-    with pytest.raises(ValueError, match="exactly one of n_windows and total_time"):
+    with pytest.raises(ValueError, match="exactly one of n_windows and a run length"):
         windowed_mean(coupler, ["10 days"], n_windows=4, total_time="20 days")
 
 

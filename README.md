@@ -144,6 +144,7 @@ python -m jem.main +configuration=earth-slab --cfg job   # compose, print, don't
 | Set a component parameter | `+ocean.params.relaxation_time=1e6` |
 | Override a physical constant, for every component | `+atmosphere.constants.grav=9.7` |
 | Choose the run settings | `coupled_run=short_run`, or `coupled_run.total_time="90 days"` |
+| Run to a calendar end date instead | `coupled_run.total_time=null coupled_run.end_time=2011-01-01` |
 
 Things worth knowing:
 
@@ -184,6 +185,17 @@ result = run_chunked(
     # checkpoint_path="checkpoint" is the default, relative to output_dir
 )
 ```
+
+`total_time` is a fixed duration, so "6 years" has to be spelled out in days.
+For a calendar target give `end_time` instead (exactly one of the two):
+
+```python
+result = run_chunked(coupler, end_time="2011-01-01", chunk="30 days",
+                     output_dir="output")
+```
+
+The run length need not be a whole number of chunks: the last chunk is then
+shorter, at the cost of one extra compiled trajectory.
 
 Run it again with the same `output_dir` (or the same `checkpoint_path`) and it
 continues from the coupled step the checkpoint holds —
@@ -239,7 +251,7 @@ of, remove. Anything else and it **refuses**, with a `ValueError` naming the
 files it would leave behind, grouped by which of the two they are (an overlap,
 or past the end of this run), plus the step, the chunk and the ways out (resume
 with the chunk those files were written under and, for those past the end, a
-`total_time` that reaches them; remove them; or write into another
+run length that reaches them; remove them; or write into another
 `output_dir`). It never deletes a file it is not going to write: which of the
 two passes to keep is the user's call, not the driver's. The one thing it does
 remove is a name it is itself responsible for and keeps no record for — a chunk
@@ -313,20 +325,20 @@ a climatology. Give it a size and it bins into the months the run passes
 through instead, in order, each with a bin of its own:
 
 ```python
-months = monthly_mean(coupler, total_time="3650 days")   # or n_months=121
+months = monthly_mean(coupler, total_time="3650 days")   # or end_time=..., or n_months=121
 means = months.finalize(accumulator)   # ~121 bins: Jul 2001, Aug 2001, …
 ```
 
 These are calendar months whatever day the run starts on and whatever the
 coupling timestep. A run longer than the accumulator wraps modulo `n_months`,
-compositing whole calendar months; size it with `total_time` (one bin for
-every month a record falls in) to avoid the wrap.
+compositing whole calendar months; size it with `total_time` or `end_time`
+(one bin for every month a record falls in) to avoid the wrap.
 
 `windowed_mean(coupler, window, n_windows=...)` is the same reduction over
 `n_windows` windows of a fixed length — the 5-day and 7-day means a
 sub-seasonal forecast is scored on — measured in whole records from the run's
 own start, with no reference to any calendar, sized either by `n_windows` or
-by `total_time`. A run longer than the accumulator wraps, so window *w*
+by `total_time`/`end_time`. A run longer than the accumulator wraps, so window *w*
 composites every *w*-th window. `window` may also be a **sequence** of
 lengths, which the windows cycle through (daily leads for a forecast's first
 week, then pentads). A window is never a calendar month, whatever its length

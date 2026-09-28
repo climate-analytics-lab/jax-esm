@@ -102,6 +102,8 @@ package spelled out.
      - ``+atmosphere.constants.grav=9.7``
    * - Choose the run settings
      - ``coupled_run=short_run``, or ``coupled_run.total_time="90 days"``
+   * - Run to a calendar end date instead of a duration
+     - ``coupled_run.total_time=null coupled_run.end_time=2011-01-01``
 
 Several things worth knowing:
 
@@ -117,6 +119,10 @@ Several things worth knowing:
   ``run/longrun.yaml`` would otherwise be picked up in its place.
   ``coupled_run/default.yaml`` is the complete schema, so every key is
   overridable without a ``+``.
+- **Exactly one of** ``coupled_run.total_time`` **and** ``coupled_run.end_time``
+  **is set.** ``total_time`` is a fixed duration ("years" and "months" are
+  refused); ``end_time`` is an ISO date for a calendar target, and setting it
+  needs ``coupled_run.total_time=null`` too.
 - **Single-quote a** ``${...}`` **resolver.** ``'${jcm_data:bc/t30/clim/forcing.nc}'``
   is a resolver Hydra expands when the config is composed; unquoted, the shell
   expands ``${...}`` to nothing first, so the override arrives empty.
