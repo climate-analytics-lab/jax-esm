@@ -199,3 +199,77 @@ def test_earth_setup_coriolis_uses_the_true_latitude():
     assert not np.allclose(
         np.asarray(vs.coriolis_t)[2:-2, 2:-2], rotated_guess, atol=1e-6
     )
+
+
+@pytest.mark.slow
+def test_echam_veros_earth_configuration_builds():
+    """`+configuration=veros-earth physics@atmosphere.physics=echam` builds.
+
+    jax-gcm#911/#914's promise made good on JAX-ESM's most demanding shipped
+    Veros configuration: the full coupled model -- a real ECHAM atmosphere,
+    the earth Veros ocean on its rotated grid, the ESMF regridders, and
+    `jem.fluxes.VerosExchange` -- composes and builds with no
+    configuration-group change beyond the physics override. ECHAM couples to
+    Veros exactly the way SPEEDY does (both publish `wind_u`/`wind_v`
+    identically; see `docs/source/design/jcm_adapter.md`), so nothing about
+    `VerosExchange` or the exchange table is ECHAM-specific.
+
+    This does not go on to STEP the coupled model:
+    `test_echam_veros_bootstrap_hits_the_known_x64_convection_bug` below pins
+    the reason (a pre-existing, unrelated jax-gcm bug), so it is not repeated
+    here.
+    """
+    from hydra import compose, initialize_config_module
+
+    import jem.config  # noqa: F401
+    import jem.runners as runners
+
+    with initialize_config_module(config_module="jem.config", version_base="1.3"):
+        cfg = compose(config_name="config", overrides=[
+            "+configuration=veros-earth",
+            "physics@atmosphere.physics=echam",
+        ])
+    coupler = runners.build_coupler(cfg)
+    assert set(coupler.components) == {"atm", "ocn"}
+
+
+@pytest.mark.slow
+def test_echam_veros_bootstrap_hits_the_known_x64_convection_bug():
+    """Pins a pre-existing jax-gcm bug that blocks stepping ECHAM + Veros.
+
+    `Coupler.initialize()` calls `Model.bootstrap_state()`, which traces
+    ECHAM's Tiedtke-Nordeng convection to build the diagnostics template
+    (`Physics.get_empty_data`) -- and that trace fails under
+    `jax_enable_x64=True` (which importing `veros` always flips process-wide,
+    since Veros runs double precision internally): the scheme's
+    `lax.cond(conv_type > 0, ...)` guard re-casts its FLOAT outputs to a
+    common dtype but not its integer ones, so `ConvectionState.ktop` (a
+    cloud-top level index) comes back `int32` from one branch and `int64`
+    from the other. Filed as jax-gcm#927, with the exact `_pin` helper and
+    line named.
+
+    This is independent of the surface-exchange/wind-vector contract this
+    migration is about: the failure is at trace/shape-inference time, before
+    a single physics term or exchanger runs, and reproduces for ANY
+    ECHAM-composed atmosphere under x64 -- i.e. any Veros coupling of ECHAM
+    at all, not something particular to the `veros-earth` configuration or
+    its grid size. Pinning the exact failure here means jax-gcm#927 being
+    fixed upstream turns this test into an unexpected pass (a failure,
+    `DID NOT RAISE`) rather than a silent gap -- at which point this test
+    should be deleted and
+    `test_echam_veros_earth_configuration_builds` above extended to actually
+    step the coupled model.
+    """
+    from hydra import compose, initialize_config_module
+
+    import jem.config  # noqa: F401
+    import jem.runners as runners
+
+    with initialize_config_module(config_module="jem.config", version_base="1.3"):
+        cfg = compose(config_name="config", overrides=[
+            "+configuration=veros-earth",
+            "physics@atmosphere.physics=echam",
+        ])
+    coupler = runners.build_coupler(cfg)
+    with pytest.raises(TypeError, match=r"cond branches must have equal output types"):
+        coupler.initialize()
