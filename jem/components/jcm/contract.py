@@ -23,102 +23,43 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 -------------------------------------------
-``JCM_SUPPORTED_REV`` is ``0eef9b3a88982886241622fde6530513d025192c``, the
-``dev`` tip this bump validated JAX-ESM against. jax-gcm has no 3.x tag yet --
-``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
-``dev`` sha is the most precise thing there is to name. Pinning to the tip
-rather than only the merge commit of the PR that motivated the bump is safe
-here specifically because every gate in this repository has been run against
-this exact sha (not assumed compatible from reading the intervening diffs) --
-the general rule still holds for the *next* bump: pin to the commit that
-*contains* the needed change, not to whatever ``dev`` happens to be, unless
-the tip itself has been validated the same way.
+``JCM_SUPPORTED_REV`` is ``0eef9b3a88982886241622fde6530513d025192c``, a
+``dev`` commit. jax-gcm has no 3.x tag yet -- ``3.0.0rc1`` is reported from
+the source tree, not cut as a release -- so a sha is the most precise thing
+there is to name; ``pyproject.toml``'s ``jcm>=3.0.0rc1`` floor is the loosest
+true statement of the same fact, since jax-gcm's version string is bumped
+only at release and a release-candidate floor is satisfied by every later
+3.x release too. The policy, stated once here: pin to a ``dev`` commit that
+has actually been validated as a whole against this repository's own gates
+-- not to the merge commit of one motivating pull request, and not to
+whatever ``dev`` happens to be at bump time, either of which can carry
+commits this branch has never been run against. When a tagged jax-gcm
+release finally contains this revision, replace the sha with the tag and
+raise the ``pyproject.toml`` floor to match.
 
-The change this bump is *for* is jax-gcm **#911/#914** -- the near-surface
-wind vector joins the package-independent ``SurfaceExchange`` contract as
-``wind_u``/``wind_v`` (with a static ``wind_reference`` field naming each
-package's own reference: ``"10m"`` for ECHAM, ``"lowest_level"`` for
-SPEEDY). :func:`~jem.components.jcm.exchange_fields.from_diagnostics` reads
-the wind off the contract for every package now, so
-:class:`~jem.components.jcm.component.JCMDerived` has no package-specific
-read left at all, and an ECHAM-composed coupled model completes a step for
-the first time (closing jax-esm#129). See
-:mod:`jem.components.jcm.exchange_fields`'s module docstring for the
-translation and ``docs/source/design/jcm_adapter.md``.
+This revision is needed because jax-gcm's package-independent
+``SurfaceExchange`` contract (``diagnostics["surface_exchange"]``) publishes
+a near-surface wind vector, ``wind_u``/``wind_v``, identically from every
+physics package (jax-gcm#911/#914); see
+:mod:`jem.components.jcm.exchange_fields` for the translation and
+``docs/source/design/jcm_adapter.md`` for the full adapter design.
 
-The revision also carries every jax-gcm commit between the two merges, most
-of which touch no JAX-ESM integration point at all -- pure physics fidelity
-fixes (ECHAM albedo #893, Tiedtke half-level fluxes #886, pre-calibration
-fixes #894, a conserving grey two-stream shortwave #916), dycore/diagnostics
-features (Eulerian tracer-free transport #899, AeroCom diagnostics #919,
-calendar-month CLI means #909), and docs (#910, #922). Two are worth naming
-because they touch how jax-gcm is *used*, not just what it computes:
+Current behaviour a JEM user must know:
 
-* **#913** -- importing ``jcm`` no longer initializes the JAX backend or
-  touches the GPU; the backend is configured the first time something
-  actually needs it (building a ``Model``, stepping one). JAX-ESM already
-  sets ``JAX_PLATFORMS``/``jax_enable_x64`` before building anything, so
-  this changes nothing JAX-ESM does, only when jax-gcm used to do it (at
-  ``import jcm``, before JAX-ESM's own configuration had a chance to run) --
-  a latent ordering hazard this closes rather than one JAX-ESM had to work
-  around;
-* **#900/#906** -- every dated forcing input (not a climatology) now
-  declares a ``persist`` policy (``strict`` by default: the input must
-  cover the run window) rather than silently holding its end samples.
-  JAX-ESM's own shipped configurations force the atmosphere from a
-  ``wrap_year`` climatology (see the ``forcing.align`` note below, #884),
-  which this rule does not touch; a from-file transient boundary condition a
-  user points ``atmosphere.forcing.file`` at is where it would apply.
-
-The revision also carries the earlier jax-gcm changes JAX-ESM is written
-against:
-
-* **#750** -- one ``run`` schema plus the ``configuration`` config group, which
-  is what lets ``jem/config/config.yaml`` compose jax-gcm's own Hydra groups
-  under an ``atmosphere`` key instead of restating them;
-* **#763** -- the input-resolution engine, which is how boundary-condition and
-  initial-condition inputs are located at build time;
-* **#819** -- jax-gcm configures no logging of its own. Importing ``jcm`` no
-  longer calls ``logging.basicConfig``, and ``Model.__init__`` no longer takes
-  a ``log_level`` keyword (``jcm.runners`` sets the ``jcm`` logger from
-  ``run.log_level`` instead). JAX-ESM never wanted jax-gcm to configure the
-  root logger -- ``jem.main`` sets the level of the ``jem`` logger alone -- so
-  this is the removal of a conflict, and the ``log_level=50`` the test
-  fixtures used to pass purely to silence that ``basicConfig`` is gone with
-  it;
-* **#824** -- the resumable model state and the date conversion are public.
-  ``Model.bootstrap_state()`` returns its ``(dycore_state, physics_carry)``
-  pair, ``ModelPredictions.with_context(model)`` re-attaches the context a
-  pytree round trip drops, and ``Model._date_from_sim_time`` is now
-  ``Model.date_from_sim_time`` (the old name kept only as a delegating
-  alias). ``JCMComponent`` is built on all three, so it reaches for no private
-  jax-gcm attribute at all; and because the old private date name only
-  delegates, an instance-level override of ``date_from_sim_time`` has to
-  target the public name or it silently stops taking effect --
-  ``JCMComponent.step`` calls ``Model.run_from_state_with_carry`` every
-  coupled step (:mod:`jem.components.jcm.component`), and that call resolves
-  the public name internally, not the alias. JEM ships no such override
-  today; a perpetual-season (frozen seasonal cycle) hook, which would be
-  exactly this pattern, is tracked as jax-esm#120;
-* **#754/#301/#884 (PR 877 itself)** -- the package-independent
-  ``SurfaceExchange`` coupling struct, published identically under
-  ``diagnostics["surface_exchange"]`` by every physics package that resolves
-  a surface (SPEEDY, ECHAM; Held-Suarez opts out), replacing the per-package
-  private-diagnostics readers ``jem/components/jcm/exchange_fields.py`` used
-  to carry (git history, commit 756cc2c has the old readers). Also #884, the
-  declared forcing-alignment rule (``jcm.forcing.resolve_align``): ``auto``
-  no longer infers climatology-vs-transient from a file's time axis, so a
-  from-file atmosphere-forcing configuration must either point at a
-  mirror/packaged product (whose kind the manifest records) or declare
-  ``forcing.align`` explicitly -- see the ``forcing.align`` comments in
+* ``jcm.forcing.resolve_align``'s ``auto`` resolves a boundary condition's
+  alignment (climatology vs. transient) only for a known mirror/packaged
+  product; any other from-file atmosphere forcing needs
+  ``atmosphere.forcing.align`` set explicitly -- see the ``forcing.align``
+  comments in
   ``jem/config/configuration/{earth-slab,veros-double-drake,veros-earth}
   .yaml``.
-
-jax-gcm reports ``3.0.0rc1`` here -- its first 3.0 release candidate -- but the
-tag is not cut, so a commit sha is still what is pinned. The ``jcm>=3.0.0rc1``
-floor in ``pyproject.toml`` is the loosest statement of the same thing: by
-PEP 440 a release candidate satisfies a floor naming it, so ``3.0.0rc1`` and
-every later 3.x pass, whereas this module says *which one* was verified.
+* jax-gcm configures no logging of its own; ``jem.main`` sets the ``jem``
+  logger's level, and ``jcm.runners`` sets the ``jcm`` logger's level from
+  ``run.log_level``.
+* ``JCMComponent`` threads jax-gcm's own :class:`~jcm.model.RunState`
+  (``time``, ``step``) through ``carry["time"]``/``carry["step"]`` and
+  ``Model.run_from_state_with_carry(initial_time=, initial_step=)`` every
+  coupled step, separately from the coupler's own clock.
 
 How to bump the pin
 -------------------
@@ -130,13 +71,6 @@ How to bump the pin
 3. Run ``pytest tests/unit/test_jcm_contract.py``; any integration point the
    new revision renamed or removed fails there, with the name, before it can
    fail inside a run. Fix the adapter and update the entry in the same change.
-
-When a tagged jax-gcm release finally contains all of the above, replace the
-sha with the tag and raise the ``pyproject.toml`` floor to match.
-
-Always pin to the ``dev`` commit that *contains* the change JAX-ESM needs,
-not to whatever ``dev`` happens to be at the time of the bump: the tip may
-carry unrelated commits this branch has never been run against.
 """
 
 from __future__ import annotations
@@ -148,10 +82,8 @@ from typing import NamedTuple
 #: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
 #: can be compared against directly.
 #:
-#: This is jax-gcm ``dev`` at commit 0eef9b3a on 2026-09-27, validated as a
-#: whole against this repository's gates. It closes jax-gcm#911/#914 (the
-#: wind vector joining the ``SurfaceExchange`` contract) -- see "Why a
-#: ``dev`` revision rather than a release" above.
+#: This ``dev`` commit is validated as a whole against this repository's own
+#: gates -- see "Why a ``dev`` revision rather than a release" above.
 JCM_SUPPORTED_REV = "0eef9b3a88982886241622fde6530513d025192c"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's

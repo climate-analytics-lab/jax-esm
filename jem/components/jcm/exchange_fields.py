@@ -53,71 +53,23 @@ Column-vectorized packages publish flat, not gridded
 Every guaranteed field's horizontal layout is whatever the *publishing*
 physics package's ``ComposablePhysics`` was built with -- ``(ix, il)`` for a
 grid-hosted package (SPEEDY's default), or a flat ``(ncols,)`` for one built
-with ``vectorize_columns=True`` (ECHAM's default:
-:func:`jcm.physics.echam.echam_terms.echam_physics` passes it). Only the
-accumulated *tendencies* ``ComposablePhysics.compute_tendencies`` returns are
-un-flattened back to the grid before the caller ever sees them; the
-diagnostics dict -- everything under ``diagnostics["surface_exchange"]``
-included -- is returned exactly as the terms built it, flat columns and all
-(see ``jcm.physics.composable_physics.ComposablePhysics.compute_tendencies``,
-whose ``_reshape_tendencies_to_3d`` call is scoped to the tendency
-accumulator, not ``diagnostics``). :func:`from_diagnostics` therefore takes
-the atmosphere's nodal ``(ix, il)`` shape and reshapes every guaranteed field
-onto it, unconditionally: a field already gridded reshapes to itself
-(no-op), and a flat one is recovered exactly, because jax-gcm's own flatten
-is a plain C-order ``reshape(ncols)`` of an ``(ix, il)`` array with longitude
-as the major axis (``jcm.physics.composable_physics._flattened_column_sharding``'s
-docstring) -- the exact inverse of ``reshape(ix, il)``, so no transpose or
-column-order bookkeeping is needed on this side either. This one reshape is
-what makes an ECHAM-composed (column-vectorized) atmosphere's surface
-exchange usable at all: before jax-gcm#911/#914 unblocked the wind, no
-coupled ECHAM step ran far enough to reach this, so the shape mismatch
-between the flat diagnostics and JEM's gridded ``JCMDerived`` carry -- a
-``lax.scan`` carry-structure error identical in kind to (but distinct from)
-jax-esm#129's wind-vector block -- was never exercised.
+with ``vectorize_columns=True`` (ECHAM's default). Only the accumulated
+*tendencies* ``ComposablePhysics.compute_tendencies`` returns are
+un-flattened back to the grid; the diagnostics dict, including
+``diagnostics["surface_exchange"]``, is returned exactly as the terms built
+it. :func:`from_diagnostics` therefore reshapes every guaranteed field onto
+the atmosphere's nodal ``(ix, il)`` shape unconditionally -- a no-op for an
+already-gridded field, and the exact inverse of jax-gcm's own flatten
+(a plain C-order ``reshape(ncols)``, longitude-major) for a flat one, so no
+transpose or column-order bookkeeping is needed here.
 
 The near-surface wind's reference height is package-specific
 -----------------------------------------------------------------
-:attr:`~jem.components.jcm.exchange_fields.SurfaceExchange.u0`/``v0`` are the
-near-surface wind's true-east/true-north *components*, needed by
-:func:`jem.fluxes.bulk_wind_stress` (the independent bulk-drag law
-:class:`jem.fluxes.VerosExchange` applies for a Veros ocean). They are read
-verbatim from the contract's ``wind_u``/``wind_v``, which sit at whichever
-reference the *publishing* package's own surface closure defines -- ECHAM's
-stability-corrected 10 m wind, SPEEDY's ``fwind0``-scaled lowest-level wind
--- recorded in the struct's static ``wind_reference`` field
-(``jcm.physics.surface.surface_exchange.WIND_REFERENCES``). JAX-ESM does not
-read ``wind_reference`` today: :func:`jem.fluxes.bulk_wind_stress` applies
-the same bulk law regardless of which reference the wind it is handed sits
-at (it was already an independent computation from SPEEDY's own bulk
-formula, not a lookup of it -- see that function's docstring), so there is
-no reference-dependent branch to drive with it. A consumer that DOES need to
-know the height reads ``diagnostics["surface_exchange"].wind_reference``
-directly off the opaque ``JCMDerived.physics`` passthrough.
-
-What this replaces
--------------------
-Before jax-gcm#754, this module read SPEEDY's private ``_surface_flux``/
-``_convection``/``_condensation`` diagnostics keys by hand and could not
-build a grid-mean struct for ECHAM at all. #754 (jax-gcm PR 877) collapsed
-the heat and water fluxes onto one published struct but left the near-surface
-wind a private, SPEEDY-only read (``_surface_flux.u0``/``.v0``), because the
-contract published only the scalar ``wind_speed`` -- a direction cannot be
-recovered from a magnitude, and ECHAM's boundary-layer scheme diagnosed only
-a wind *speed*, nothing else. jax-gcm#911/#914 closes that gap by adding
-``wind_u``/``wind_v`` to the published contract for every package, so this
-module's read of SPEEDY's private diagnostics key is gone along with the
-per-package branch it required: ``from_diagnostics`` needs no physics-package
-knowledge at all any more, for the wind or anything else. That is what makes
-an ECHAM-composed coupled model reach its first real step (closing
-jax-esm#129) -- reaching it is also what surfaced the column-vectorization
-reshape above, a second, independent gap the wind block had been hiding.
-
-The old ``speedy()`` reader's source (commit ``756cc2c``, the
-last commit before the #754 collapse) is vendored, frozen, as
-``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
-historical baseline, by the numeric old-vs-new equivalence test in
-``tests/unit/test_jcm_component.py``.
+:attr:`~jem.components.jcm.exchange_fields.SurfaceExchange.u0`/``v0`` are read
+verbatim from the contract's ``wind_u``/``wind_v`` (the reference height is
+named in the struct's static ``wind_reference`` field); see
+:func:`jem.fluxes.bulk_wind_stress`'s docstring for what that means for the
+stress a bulk drag law derived from them.
 """
 
 from __future__ import annotations
@@ -210,14 +162,10 @@ def from_diagnostics(
 
     """
     exchange = surface_exchange_from(diagnostics)
-
-    def _gridded(field: jnp.ndarray) -> jnp.ndarray:
-        return field.reshape(nodal_shape)
-
     return SurfaceExchange(
-        total_heat_flux=_gridded(-exchange.net_heat_flux),
-        evaporation=_gridded(exchange.evaporation),
-        precipitation=_gridded(exchange.precipitation),
-        u0=_gridded(exchange.wind_u),
-        v0=_gridded(exchange.wind_v),
+        total_heat_flux=(-exchange.net_heat_flux).reshape(nodal_shape),
+        evaporation=exchange.evaporation.reshape(nodal_shape),
+        precipitation=exchange.precipitation.reshape(nodal_shape),
+        u0=exchange.wind_u.reshape(nodal_shape),
+        v0=exchange.wind_v.reshape(nodal_shape),
     )

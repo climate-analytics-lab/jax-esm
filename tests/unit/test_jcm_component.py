@@ -35,7 +35,6 @@ from jem.base.component import (
 )
 from jem import constants
 from jem.components.jcm import JCMComponent, exchange_fields
-from tests.unit import _pre754_exchange_reader
 
 START_DATE = jdt.to_datetime("2000-01-01")
 COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
@@ -209,11 +208,8 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
                           u0=1.5, v0=-2.5, wind_reference="lowest_level"):
     """Build a real jax-gcm ``SurfaceExchange`` with hand-chosen values.
 
-    The other guaranteed fields (``sensible_heat_flux``, ``latent_heat_flux``,
-    ``stress_u``/``stress_v``, ``air_density``, ``air_potential_temperature``)
-    are filled with placeholders: JEM's translation does not read them (see
-    ``jem/components/jcm/exchange_fields.py``'s module docstring), so their
-    values are irrelevant to what is being tested here.
+    The other guaranteed fields are filled with placeholders: JEM's
+    translation does not read them (see ``exchange_fields``'s docstring).
     """
     field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
     return JcmSurfaceExchange(
@@ -235,12 +231,10 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
 
 def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
                              precipitation=0.008, u0=1.5, v0=-2.5):
-    """Build a diagnostics dict shaped like SPEEDY's post-#754/#914 output.
+    """Build a diagnostics dict shaped like SPEEDY's real ``surface_exchange`` output.
 
     The values are already in the contract's units (kg m-2 s-1, positive
-    up/down); the wind sits at SPEEDY's own ``wind_reference="lowest_level"``
-    (its bulk-formula closure's ``u0``/``v0`` -- see ``exchange_fields``'s
-    module docstring).
+    up/down); the wind sits at SPEEDY's own ``wind_reference="lowest_level"``.
     """
     return {
         "surface_exchange": _jcm_surface_exchange(
@@ -252,11 +246,10 @@ def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
 
 def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
                             precipitation=0.004, u0=4.0, v0=1.0):
-    """Build a diagnostics dict shaped like ECHAM's post-#754/#914 output.
+    """Build a diagnostics dict shaped like ECHAM's real ``surface_exchange`` output.
 
     The wind sits at ECHAM's own ``wind_reference="10m"`` (its
-    stability-corrected 10 m reduction -- see ``exchange_fields``'s module
-    docstring).
+    stability-corrected 10 m reduction).
     """
     return {
         "surface_exchange": _jcm_surface_exchange(
@@ -289,10 +282,7 @@ def test_speedy_exchange_shapes_and_signs():
 
 def test_echam_exchange_translates_identically_to_speedy():
     """ECHAM's fluxes AND wind translate through the exact same code path as
-    SPEEDY's, with no per-package branch anywhere in ``from_diagnostics``
-    (jax-gcm#754 for the fluxes, #911/#914 for the wind) -- only the values
-    (and, off the atmosphere's own diagnostics, the ``wind_reference``) tell
-    the two packages apart.
+    SPEEDY's, with no per-package branch anywhere in ``from_diagnostics``.
     """
     diagnostics = _fake_echam_diagnostics()
     exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
@@ -351,43 +341,6 @@ def test_missing_surface_exchange_raises_jcms_own_key_error():
     with pytest.raises(KeyError, match="surface_exchange"):
         exchange_fields.from_diagnostics(
             {"radiation": None, "clouds": None}, nodal_shape=GRID_SHAPE)
-
-
-@pytest.mark.slow
-def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
-    """The #754 collapse must not change what a SPEEDY run exchanges.
-
-    Runs one real coupled step (the ``stepped`` fixture) and reads the SAME
-    diagnostics dict two ways: through the pre-#754 adapter and through the
-    new single reader. Agreement to floating-point tolerance is the decisive
-    check the migration asked for -- not just that the two *formulas* look
-    equivalent on paper, but that they give the same numbers on a real model
-    step.
-
-    The pre-#754 adapter is ``tests/unit/_pre754_exchange_reader.py``, a
-    frozen vendored copy of ``jem/components/jcm/exchange_fields.py`` as it
-    stood at commit 756cc2c (the last commit before the #754 migration) --
-    see that module's docstring. It is vendored rather than loaded from git
-    history (as this test used to do, with ``git show 756cc2c:...``) because
-    CI's ``actions/checkout`` is a shallow clone: commit 756cc2c is not in
-    the runner's object store, so ``git show`` failed there with exit status
-    128 even though the test passed locally, where a full-history
-    development checkout hid the problem. Vendoring the old reader once
-    makes this test hermetic -- no dependency on git history, checkout
-    depth, or the repository at all.
-    """
-    _, carry1, _, _, _ = stepped
-    diagnostics = carry1["derived"].physics
-
-    old_exchange = _pre754_exchange_reader.speedy(diagnostics)
-    new_exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
-
-    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
-        np.testing.assert_allclose(
-            np.asarray(getattr(new_exchange, name)),
-            np.asarray(getattr(old_exchange, name)),
-            rtol=1e-6, atol=1e-9, err_msg=name,
-        )
 
 
 def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
@@ -594,14 +547,11 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component, stepped):
 
 @pytest.mark.slow
 def test_derived_wind_matches_the_published_contract_speedy(stepped):
-    """``JCMDerived.u0``/``.v0`` are exactly the contract's ``wind_u``/``wind_v``.
+    """``JCMDerived.u0``/``.v0`` equal the published contract's ``wind_u``/``wind_v``.
 
-    Checked against the published struct directly rather than trusting
-    ``exchange_fields.from_diagnostics``'s own claim -- a regression that
-    read the wrong diagnostics field (say, a stale wind or the geostrophic
-    one) would still produce *some* finite u0/v0 and pass a bare
-    finiteness check, but would not equal
-    ``diagnostics["surface_exchange"].wind_u``/``.wind_v``.
+    Checked against the struct directly rather than trusting
+    ``from_diagnostics``'s own claim, so a regression reading the wrong
+    diagnostics field would not pass a bare finiteness check.
     """
     from jcm.physics.surface.surface_exchange import surface_exchange_from
 
@@ -610,11 +560,8 @@ def test_derived_wind_matches_the_published_contract_speedy(stepped):
     contract = surface_exchange_from(derived.physics)
 
     assert contract.wind_reference == "lowest_level"
-    # SPEEDY is grid-hosted (not vectorize_columns), so contract.wind_u is
-    # already derived.u0's (ix, il) shape; the reshape is a no-op here and
-    # exercises the exact same comparison the ECHAM test below needs for
-    # real (see exchange_fields.from_diagnostics's "Column-vectorized
-    # packages publish flat, not gridded" docstring section).
+    # SPEEDY is grid-hosted, so contract.wind_u is already derived.u0's
+    # (ix, il) shape and the reshape below is a no-op.
     np.testing.assert_array_equal(
         np.asarray(derived.u0),
         np.asarray(contract.wind_u).reshape(derived.u0.shape))
@@ -627,12 +574,8 @@ def test_derived_wind_matches_the_published_contract_speedy(stepped):
 def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
     """Same check as the SPEEDY test above, on a real ECHAM step.
 
-    Before jax-gcm#911/#914 this was untestable: ECHAM's diagnostics carried
-    no wind vector at all (see ``exchange_fields``'s module docstring), so
-    ``from_diagnostics`` raised on any ECHAM step. It also pins that
-    ``JCMComponent`` completes a real ECHAM coupled step end to end -- the
-    concrete evidence for jax-esm#129 being closed, alongside the fake-carry
-    test ``test_echam_exchange_translates_identically_to_speedy`` above.
+    Also pins that ``JCMComponent`` completes a real ECHAM coupled step end
+    to end.
     """
     from jcm.physics.surface.surface_exchange import surface_exchange_from
 
@@ -644,10 +587,9 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
     contract = surface_exchange_from(derived.physics)
     assert contract.wind_reference == "10m"
     # ECHAM's default composition is vectorize_columns=True, so
-    # contract.wind_u/.wind_v come back flat (ix * il,); derived.u0/.v0 are
-    # already reshaped onto the grid by exchange_fields.from_diagnostics
-    # (see its docstring), so the comparison reshapes the raw contract value
-    # the same way rather than assuming it is already gridded.
+    # contract.wind_u/.wind_v come back flat and derived.u0/.v0 are already
+    # reshaped onto the grid -- the comparison reshapes the raw contract
+    # value the same way.
     np.testing.assert_array_equal(
         np.asarray(derived.u0),
         np.asarray(contract.wind_u).reshape(derived.u0.shape))
@@ -660,17 +602,13 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
 def test_echam_two_coupled_steps_through_a_slab_ocean(echam_model):
     """Two real steps through ``Coupler.generate_trajectory_function(2)``.
 
-    CLAUDE.md's "Testing" section: a coupling change is not tested until two
-    steps through the scan exercise it, because a single component's
-    ``step()`` does not catch a carry-structure mismatch -- only
-    ``lax.scan`` does. This is also the first real evidence that an
-    ECHAM-composed atmosphere couples to a *receiving* component end to end
-    (a slab ocean reading ``derived.u0``/``.v0`` indirectly through
-    ``total_heat_flux``/``total_freshwater_flux``; ECHAM's wind itself is not
-    consumed by the default slab exchange table, only by
-    ``jem.fluxes.VerosExchange`` -- see ``test_echam_veros_earth_configuration_builds``
-    in ``tests/unit/test_veros_setups.py`` for that coupling instead), not
-    only that it completes a bare step in isolation.
+    Per CLAUDE.md's "Testing" section: only ``lax.scan`` catches a
+    carry-structure mismatch, not a single component's ``step()`` in
+    isolation. The default slab exchange table couples on
+    ``total_heat_flux``/``total_freshwater_flux`` alone; it does not read
+    ``derived.u0``/``.v0`` (only ``jem.fluxes.VerosExchange`` does -- see
+    ``test_echam_veros_earth_configuration_steps`` in
+    ``tests/unit/test_veros_setups.py``).
     """
     from jem.base.coupler import Coupler
     from jem.components import SlabOceanModel
