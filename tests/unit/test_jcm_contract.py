@@ -47,21 +47,6 @@ def model() -> Model:
     return Model(coords=coords, terrain=TerrainData.aquaplanet(coords))
 
 
-@pytest.fixture(scope="module")
-def speedy_diagnostics(model: Model) -> dict:
-    """Return jax-gcm's own template of one step's SPEEDY diagnostics dict.
-
-    ``Physics.get_empty_data`` is what jcm itself uses to build the zero
-    accumulator an averaged run adds into, so its keys and struct fields are
-    exactly the ones a real step produces -- without paying for a step. The
-    keys themselves are written as dict literals in
-    ``jcm/physics/speedy/speedy_terms.py`` (``_diagnostics_from_data``), so
-    this template is the closest thing jax-gcm has to an importable
-    declaration of them.
-    """
-    return model.physics.get_empty_data(model.coords)
-
-
 def _resolve(target: str):
     """Import ``target`` as a module, or as an attribute of its parent module.
 
@@ -154,41 +139,22 @@ def test_jcm_attribute_still_exists(point: IntegrationPoint, model: Model):
 
 
 @pytest.mark.parametrize("point", _DIAGNOSTICS_POINTS, ids=_ids(_DIAGNOSTICS_POINTS))
-def test_diagnostics_field_still_exists(
-    point: IntegrationPoint, speedy_diagnostics: dict
-):
-    """Check every diagnostics field the surface exchange reads still exists.
+def test_diagnostics_field_still_exists(point: IntegrationPoint):
+    """Check every surface-exchange field JAX-ESM reads still exists.
 
-    Two kinds of entry share this parametrization since jax-gcm#754 (PR 877):
-
-    - ``target == "speedy"`` is SPEEDY's own private, non-contract wind-
-      vector key (``_surface_flux.u0``/``.v0``) --
-      ``jem.components.jcm.exchange_fields``'s one remaining package-specific
-      read (see its module docstring) -- checked against a real SPEEDY
-      diagnostics template, exactly as before #754.
-    - ``target == "surface_exchange"`` is jax-gcm's package-independent
-      contract struct, checked directly against its own field names
-      (:func:`dataclasses.fields`). This needs no model build and no
-      per-package branch: every physics package that resolves a surface
-      fills the SAME struct, which is the entire point of #754.
+    Every physics package that resolves a surface (SPEEDY, ECHAM) fills the
+    SAME package-independent ``SurfaceExchange`` struct (jax-gcm#754,
+    #911/#914), so this needs no model build and no per-package branch:
+    every ``"diagnostics"`` entry names one of its field names, checked
+    directly (:func:`dataclasses.fields`).
     """
-    if point.target == "surface_exchange":
-        names = {f.name for f in dataclasses.fields(JcmSurfaceExchange)}
-        assert point.attribute in names, _missing(
-            point, f"; SurfaceExchange's fields are {sorted(names)}"
-        )
-        return
-    assert point.target == "speedy", (
+    assert point.target == "surface_exchange", (
         f"{point.target!r} diagnostics are not covered by this test; only"
-        " 'speedy' (a private key) and 'surface_exchange' (the #754"
-        " contract) are."
+        " 'surface_exchange' (the package-independent contract) is."
     )
-    key, _, field = point.attribute.partition(".")
-    assert key in speedy_diagnostics, _missing(
-        point, f"; the diagnostics dict holds {sorted(speedy_diagnostics)}"
-    )
-    assert hasattr(speedy_diagnostics[key], field), _missing(
-        point, f"; the {key!r} struct is a {type(speedy_diagnostics[key]).__name__}"
+    names = {f.name for f in dataclasses.fields(JcmSurfaceExchange)}
+    assert point.attribute in names, _missing(
+        point, f"; SurfaceExchange's fields are {sorted(names)}"
     )
 
 

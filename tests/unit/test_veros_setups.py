@@ -199,3 +199,35 @@ def test_earth_setup_coriolis_uses_the_true_latitude():
     assert not np.allclose(
         np.asarray(vs.coriolis_t)[2:-2, 2:-2], rotated_guess, atol=1e-6
     )
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True, raises=TypeError,
+    reason="jax-gcm#927: Tiedtke-Nordeng ktop int32/int64 lax.cond mismatch"
+    " under jax_enable_x64",
+)
+def test_echam_veros_earth_configuration_steps():
+    """`+configuration=veros-earth physics@atmosphere.physics=echam` builds,
+    initializes and steps twice.
+
+    `Coupler.initialize()` traces ECHAM's Tiedtke-Nordeng convection, whose
+    `lax.cond` dtype guard pins its float outputs but not
+    `ConvectionState.ktop` (an integer level index), so it raises under
+    `jax_enable_x64=True` -- which importing `veros` always sets
+    process-wide.
+    """
+    from hydra import compose, initialize_config_module
+
+    import jem.config  # noqa: F401
+    import jem.runners as runners
+
+    with initialize_config_module(config_module="jem.config", version_base="1.3"):
+        cfg = compose(config_name="config", overrides=[
+            "+configuration=veros-earth",
+            "physics@atmosphere.physics=echam",
+        ])
+    coupler = runners.build_coupler(cfg)
+    assert set(coupler.components) == {"atm", "ocn"}
+    carry = coupler.initialize()
+    coupler.generate_trajectory_function(2)(carry)
