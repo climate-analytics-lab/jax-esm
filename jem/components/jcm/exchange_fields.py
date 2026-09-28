@@ -37,13 +37,7 @@ Contract field (jax-gcm)      jax-gcm sign / units                JEM field     
   net flux leaving the surface into the atmosphere, i.e. exactly the
   negative.
 - **``evaporation``, ``precipitation``, ``wind_u``/``wind_v`` need no unit
-  conversion or reshape.** The published contract fields are already in
-  JEM's units and already on the physics package's nodal horizontal layout
-  -- ECHAM's column-vectorized diagnostics are un-flattened back to
-  ``(ix, il)`` by ``ComposablePhysics`` before this module ever sees them
-  (the same un-flattening every other published field, including the heat
-  and water fluxes, goes through), so no reshape happens here for the wind
-  either.
+  conversion**, only the same reshape ``total_heat_flux`` needs -- see below.
 - **``sensible_heat_flux``/``latent_heat_flux``/``stress_u``/``stress_v``/
   ``wind_speed`` are on the contract but JEM does not exchange them
   separately**: the slab ocean/land/sea-ice models and ``jem.exchangers``
@@ -53,6 +47,34 @@ Contract field (jax-gcm)      jax-gcm sign / units                JEM field     
   reusing ``stress_u``/``stress_v`` (see that module's docstring for why).
   ``wind_speed`` is redundant once the vector is available
   (``hypot(wind_u, wind_v) == wind_speed`` is a contract invariant).
+
+Column-vectorized packages publish flat, not gridded
+------------------------------------------------------
+Every guaranteed field's horizontal layout is whatever the *publishing*
+physics package's ``ComposablePhysics`` was built with -- ``(ix, il)`` for a
+grid-hosted package (SPEEDY's default), or a flat ``(ncols,)`` for one built
+with ``vectorize_columns=True`` (ECHAM's default:
+:func:`jcm.physics.echam.echam_terms.echam_physics` passes it). Only the
+accumulated *tendencies* ``ComposablePhysics.compute_tendencies`` returns are
+un-flattened back to the grid before the caller ever sees them; the
+diagnostics dict -- everything under ``diagnostics["surface_exchange"]``
+included -- is returned exactly as the terms built it, flat columns and all
+(see ``jcm.physics.composable_physics.ComposablePhysics.compute_tendencies``,
+whose ``_reshape_tendencies_to_3d`` call is scoped to the tendency
+accumulator, not ``diagnostics``). :func:`from_diagnostics` therefore takes
+the atmosphere's nodal ``(ix, il)`` shape and reshapes every guaranteed field
+onto it, unconditionally: a field already gridded reshapes to itself
+(no-op), and a flat one is recovered exactly, because jax-gcm's own flatten
+is a plain C-order ``reshape(ncols)`` of an ``(ix, il)`` array with longitude
+as the major axis (``jcm.physics.composable_physics._flattened_column_sharding``'s
+docstring) -- the exact inverse of ``reshape(ix, il)``, so no transpose or
+column-order bookkeeping is needed on this side either. This one reshape is
+what makes an ECHAM-composed (column-vectorized) atmosphere's surface
+exchange usable at all: before jax-gcm#911/#914 unblocked the wind, no
+coupled ECHAM step ran far enough to reach this, so the shape mismatch
+between the flat diagnostics and JEM's gridded ``JCMDerived`` carry -- a
+``lax.scan`` carry-structure error identical in kind to (but distinct from)
+jax-esm#129's wind-vector block -- was never exercised.
 
 The near-surface wind's reference height is package-specific
 -----------------------------------------------------------------
@@ -86,9 +108,12 @@ a wind *speed*, nothing else. jax-gcm#911/#914 closes that gap by adding
 ``wind_u``/``wind_v`` to the published contract for every package, so this
 module's read of SPEEDY's private diagnostics key is gone along with the
 per-package branch it required: ``from_diagnostics`` needs no physics-package
-knowledge at all any more, for the wind or anything else, and an
-ECHAM-composed coupled model completes a step for the first time (closing
-jax-esm#129). The old ``speedy()`` reader's source (commit ``756cc2c``, the
+knowledge at all any more, for the wind or anything else. That is what makes
+an ECHAM-composed coupled model reach its first real step (closing
+jax-esm#129) -- reaching it is also what surfaced the column-vectorization
+reshape above, a second, independent gap the wind block had been hiding.
+
+The old ``speedy()`` reader's source (commit ``756cc2c``, the
 last commit before the #754 collapse) is vendored, frozen, as
 ``tests/unit/_pre754_exchange_reader.py`` and used directly, as the
 historical baseline, by the numeric old-vs-new equivalence test in
@@ -109,7 +134,10 @@ class SurfaceExchange(NamedTuple):
     Every field is a ``(ix, il)`` horizontal map on the atmosphere's nodal
     grid (the grid-cell mean over land and sea -- jax-gcm's contract
     guarantees only the grid mean; see
-    ``docs/source/design/surface_exchange.md``).
+    ``docs/source/design/surface_exchange.md``), reshaped onto it by
+    :func:`from_diagnostics` if the publishing package built it flat (see the
+    module docstring's "Column-vectorized packages publish flat, not
+    gridded" section).
 
     Attributes
     ----------
@@ -135,25 +163,37 @@ class SurfaceExchange(NamedTuple):
     v0: jnp.ndarray
 
 
-def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
+def from_diagnostics(
+    diagnostics: dict[str, Any], *, nodal_shape: tuple[int, int],
+) -> SurfaceExchange:
     """Read the surface exchange out of one step's physics diagnostics.
 
     Every guaranteed field of :class:`jcm.physics.surface.surface_exchange.
     SurfaceExchange` is filled identically by every physics package that
     resolves a surface, so this function needs no knowledge of which package
-    produced ``diagnostics``. See the module docstring for the field-by-field
-    sign/unit mapping.
+    produced ``diagnostics`` beyond the grid it is on. See the module
+    docstring for the field-by-field sign/unit mapping and for why every
+    field is reshaped onto ``nodal_shape`` unconditionally.
 
     Parameters
     ----------
     diagnostics : dict
         One coupling step's physics diagnostics dict, with the length-1
         save axis already stripped.
+    nodal_shape : tuple of int
+        The atmosphere's horizontal nodal shape, ``(ix, il)``
+        (``jcm.model.Model.coords.nodal_shape[1:]``, the same value
+        :class:`~jem.components.jcm.component.JCMComponent` caches as
+        ``self.nodal_shape``). Required, not inferred: a package built
+        ``vectorize_columns=True`` (ECHAM's default) publishes every field
+        flat, ``(ix * il,)``, and there is no reliable way to recover the
+        grid shape from a 1-D array alone.
 
     Returns
     -------
     SurfaceExchange
-        The fluxes and wind translated to JEM's sign and unit conventions.
+        The fluxes and wind translated to JEM's sign and unit conventions,
+        each field shaped ``nodal_shape``.
 
     Raises
     ------
@@ -170,10 +210,14 @@ def from_diagnostics(diagnostics: dict[str, Any]) -> SurfaceExchange:
 
     """
     exchange = surface_exchange_from(diagnostics)
+
+    def _gridded(field: jnp.ndarray) -> jnp.ndarray:
+        return field.reshape(nodal_shape)
+
     return SurfaceExchange(
-        total_heat_flux=-exchange.net_heat_flux,
-        evaporation=exchange.evaporation,
-        precipitation=exchange.precipitation,
-        u0=exchange.wind_u,
-        v0=exchange.wind_v,
+        total_heat_flux=_gridded(-exchange.net_heat_flux),
+        evaporation=_gridded(exchange.evaporation),
+        precipitation=_gridded(exchange.precipitation),
+        u0=_gridded(exchange.wind_u),
+        v0=_gridded(exchange.wind_v),
     )

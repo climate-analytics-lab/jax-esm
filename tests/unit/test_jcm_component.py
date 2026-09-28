@@ -272,7 +272,7 @@ def test_speedy_exchange_shapes_and_signs():
     and on JEM's grid -- see the module docstring's derivation table.
     """
     diagnostics = _fake_speedy_diagnostics()
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
 
     assert exchange.total_heat_flux.shape == GRID_SHAPE
     # jax-gcm's net_heat_flux is positive DOWN into the surface; JEM is up.
@@ -295,7 +295,7 @@ def test_echam_exchange_translates_identically_to_speedy():
     the two packages apart.
     """
     diagnostics = _fake_echam_diagnostics()
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
 
     # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is the
     # negative of it (positive UP) -- same sign flip as the SPEEDY case above.
@@ -308,12 +308,49 @@ def test_echam_exchange_translates_identically_to_speedy():
     np.testing.assert_allclose(exchange.v0, 1.0)
 
 
+def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
+    """A column-vectorized package's flat fields land on the right grid cell.
+
+    ECHAM's default composition (``vectorize_columns=True``) publishes every
+    guaranteed field flat, ``(ix * il,)`` (see the module docstring's
+    "Column-vectorized packages publish flat, not gridded" section) -- this
+    pins the reshape against DISTINCT per-column values on a non-square grid,
+    so a transpose or a wrong major axis would show up as values landing at
+    the wrong ``(ix, il)`` cell, not merely as a shape that happens to have
+    the right total size (the fixed-value fake diagnostics elsewhere in this
+    module could not tell such a bug apart from a correct reshape).
+    """
+    ix, il = 3, 2
+    ncols = ix * il
+    flat = jnp.arange(ncols, dtype=jnp.float32)  # 0, 1, ..., 5
+    zeros = jnp.zeros(ncols)
+    diagnostics = {
+        "surface_exchange": JcmSurfaceExchange(
+            net_heat_flux=zeros, sensible_heat_flux=zeros, latent_heat_flux=zeros,
+            evaporation=zeros, precipitation=zeros,
+            stress_u=zeros, stress_v=zeros,
+            wind_speed=jnp.hypot(flat, flat), wind_u=flat, wind_v=-flat,
+            air_density=zeros, air_potential_temperature=zeros,
+            wind_reference="lowest_level",
+        ),
+    }
+    # jax-gcm's own flatten is a plain C-order reshape(ncols) of an (ix, il)
+    # array (lon-major); .reshape(ix, il) is its exact inverse, so the
+    # expected grid is this same arange reshaped the same way.
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=(ix, il))
+
+    assert exchange.u0.shape == (ix, il)
+    np.testing.assert_array_equal(np.asarray(exchange.u0), flat.reshape(ix, il))
+    np.testing.assert_array_equal(np.asarray(exchange.v0), (-flat).reshape(ix, il))
+
+
 def test_missing_surface_exchange_raises_jcms_own_key_error():
     """A package that publishes no ``surface_exchange`` at all (Held-Suarez)
     fails with jax-gcm's own pointed error, not a bare ``KeyError``.
     """
     with pytest.raises(KeyError, match="surface_exchange"):
-        exchange_fields.from_diagnostics({"radiation": None, "clouds": None})
+        exchange_fields.from_diagnostics(
+            {"radiation": None, "clouds": None}, nodal_shape=GRID_SHAPE)
 
 
 @pytest.mark.slow
@@ -343,7 +380,7 @@ def test_speedy_new_reader_agrees_with_the_pre_754_reader(stepped):
     diagnostics = carry1["derived"].physics
 
     old_exchange = _pre754_exchange_reader.speedy(diagnostics)
-    new_exchange = exchange_fields.from_diagnostics(diagnostics)
+    new_exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
 
     for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
         np.testing.assert_allclose(
@@ -424,7 +461,13 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
     )
     expected_precipitation = precip_rain + precip_snow + precip_conv
 
-    exchange = exchange_fields.from_diagnostics(diagnostics)
+    # nodal_shape=(2, 2) stands in for the real (ix, il) grid this flat,
+    # column-vectorized diagnostics dict would come from; every value here is
+    # uniform across columns, so this checks the translation, not the
+    # reshape's index correspondence -- see
+    # test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose
+    # for that.
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=(2, 2))
     # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is its
     # negative (positive UP).
     np.testing.assert_allclose(exchange.total_heat_flux, -expected_net_heat_flux)
@@ -563,13 +606,21 @@ def test_derived_wind_matches_the_published_contract_speedy(stepped):
     from jcm.physics.surface.surface_exchange import surface_exchange_from
 
     _, carry1, _, _, _ = stepped
-    contract = surface_exchange_from(carry1["derived"].physics)
+    derived = carry1["derived"]
+    contract = surface_exchange_from(derived.physics)
 
     assert contract.wind_reference == "lowest_level"
+    # SPEEDY is grid-hosted (not vectorize_columns), so contract.wind_u is
+    # already derived.u0's (ix, il) shape; the reshape is a no-op here and
+    # exercises the exact same comparison the ECHAM test below needs for
+    # real (see exchange_fields.from_diagnostics's "Column-vectorized
+    # packages publish flat, not gridded" docstring section).
     np.testing.assert_array_equal(
-        np.asarray(carry1["derived"].u0), np.asarray(contract.wind_u))
+        np.asarray(derived.u0),
+        np.asarray(contract.wind_u).reshape(derived.u0.shape))
     np.testing.assert_array_equal(
-        np.asarray(carry1["derived"].v0), np.asarray(contract.wind_v))
+        np.asarray(derived.v0),
+        np.asarray(contract.wind_v).reshape(derived.v0.shape))
 
 
 @pytest.mark.slow
@@ -592,8 +643,17 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
 
     contract = surface_exchange_from(derived.physics)
     assert contract.wind_reference == "10m"
-    np.testing.assert_array_equal(np.asarray(derived.u0), np.asarray(contract.wind_u))
-    np.testing.assert_array_equal(np.asarray(derived.v0), np.asarray(contract.wind_v))
+    # ECHAM's default composition is vectorize_columns=True, so
+    # contract.wind_u/.wind_v come back flat (ix * il,); derived.u0/.v0 are
+    # already reshaped onto the grid by exchange_fields.from_diagnostics
+    # (see its docstring), so the comparison reshapes the raw contract value
+    # the same way rather than assuming it is already gridded.
+    np.testing.assert_array_equal(
+        np.asarray(derived.u0),
+        np.asarray(contract.wind_u).reshape(derived.u0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.v0),
+        np.asarray(contract.wind_v).reshape(derived.v0.shape))
 
 
 @pytest.mark.slow

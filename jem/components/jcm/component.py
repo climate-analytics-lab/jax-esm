@@ -574,7 +574,8 @@ class JCMComponent:
         # trajectory has a length-1 leading axis; the derived fields are
         # per-step maps, not trajectories.
         diagnostics = jax.tree.map(lambda leaf: leaf[0], predictions.physics)
-        exchange = exchange_fields.from_diagnostics(diagnostics)
+        exchange = exchange_fields.from_diagnostics(
+            diagnostics, nodal_shape=self.nodal_shape)
         # ``tree_math.struct`` builds the dataclass at runtime, so mypy
         # cannot see the generated __init__ signature.
         derived = JCMDerived(  # type: ignore[call-arg]

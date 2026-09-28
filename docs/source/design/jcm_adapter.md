@@ -26,21 +26,22 @@ so the pin and the workflow cannot drift apart. A non-blocking
 `canary-jcm-dev` job separately tracks jax-gcm's `dev` branch, so drift stays
 visible without blocking a pull request.
 
-The pin is a `dev` commit — the merge commit of the jax-gcm pull request that
-introduced the change JAX-ESM needs, rather than whatever `dev` happens to be
-at bump time, since later unrelated `dev` commits are not revisions this
-branch has been checked against. jax-gcm has no tagged 3.x release yet, so a
-sha is the most precise thing there is to name; `pyproject.toml`'s
-`jcm>=3.0.0rc1` is the loosest true statement of the same fact, since
-jax-gcm's version string is bumped only at release and a release candidate
-floor is satisfied by every later 3.x release too. The current pin carries
-jax-gcm's unification onto one exact `jax_datetime.Datetime` clock
-(`Model(start_time=)`, no separate `calendar`, output records labelled at
-their interval midpoint) and the package-independent surface-exchange
-contract every physics package that resolves a surface now publishes
-identically (see *The JCM adapter* below); the module's own docstring is the
-procedure for bumping the pin, and is kept current as later revisions are
-adopted.
+The pin is a `dev` commit, chosen so it has actually been validated (every
+gate in this repository run against it), rather than the merge commit of one
+motivating pull request plus an untested tail of later, unrelated commits.
+jax-gcm has no tagged 3.x release yet, so a sha is the most precise thing
+there is to name; `pyproject.toml`'s `jcm>=3.0.0rc1` is the loosest true
+statement of the same fact, since jax-gcm's version string is bumped only at
+release and a release candidate floor is satisfied by every later 3.x
+release too. The current pin carries jax-gcm's unification onto one exact
+`jax_datetime.Datetime` clock (`Model(start_time=)`, no separate `calendar`,
+output records labelled at their interval midpoint), the package-independent
+surface-exchange contract every physics package that resolves a surface
+publishes identically, and — as of this pin — that contract's near-surface
+wind vector (`wind_u`/`wind_v`, jax-gcm#911/#914), which is what lets JAX-ESM
+read the wind the same way for every package (see *The JCM adapter* below);
+the module's own docstring is the procedure for bumping the pin, and is kept
+current as later revisions are adopted.
 
 **One consequence a coupled configuration has to set explicitly.**
 `jcm.forcing.resolve_align`'s `auto` resolves a boundary condition's
@@ -89,31 +90,66 @@ silently continuing.
 `from_diagnostics()` is the single reader off jax-gcm's own
 package-independent `diagnostics["surface_exchange"]` struct, published
 identically by every physics package that resolves a surface (SPEEDY, ECHAM;
-Held-Suarez opts out because it has no surface fluxes at all). Translating
-that contract to JEM's conventions is a sign flip and nothing else:
+Held-Suarez opts out because it has no surface fluxes at all) — the heat and
+water fluxes AND the near-surface wind vector. Translating that contract to
+JEM's conventions is a sign flip, plus one reshape every field takes:
 
 | jax-gcm field | jax-gcm convention | JEM field | JEM convention |
 |---|---|---|---|
 | `net_heat_flux` | W m⁻², positive **down** | `total_heat_flux` | W m⁻², positive **up** (negated here) |
 | `evaporation` | kg m⁻² s⁻¹, positive up | `evaporation` | unchanged |
 | `precipitation` | kg m⁻² s⁻¹, positive down | `precipitation` | unchanged |
+| `wind_u` | m s⁻¹, package's own reference | `u0` | unchanged |
+| `wind_v` | m s⁻¹, package's own reference | `v0` | unchanged |
+
+**Every field is also reshaped onto the atmosphere's `(ix, il)` nodal grid.**
+A physics package built `vectorize_columns=True` (ECHAM's default) publishes
+every diagnostics field flat, `(ix * il,)` — only the accumulated
+*tendencies* `ComposablePhysics.compute_tendencies` returns are un-flattened
+before the caller sees them, not the diagnostics dict. `from_diagnostics`
+takes the atmosphere's `nodal_shape` and reshapes every guaranteed field onto
+it unconditionally (a no-op for a grid-hosted package like SPEEDY); jax-gcm's
+own flatten is a plain C-order `reshape(ncols)` of an `(ix, il)` array
+(longitude-major), so `reshape(ix, il)` recovers it exactly, no transpose
+needed. This was unreachable before jax-gcm#911/#914: no coupled ECHAM step
+ran far enough to hit the shape mismatch it causes, since the wind-vector
+raise stopped every one first.
 
 `evaporation` and `precipitation` are already the convective+large-scale (or
 convective+stratiform) total, computed once by the publisher, so no
-package-specific arithmetic happens here at all.
+package-specific arithmetic happens here at all beyond the reshape.
+`wind_u`/`wind_v` sit at
+whichever reference the *publishing* package's own surface closure defines —
+ECHAM's stability-corrected 10 m wind, SPEEDY's `fwind0`-scaled lowest-level
+wind — named in the contract's static `wind_reference` field
+(`"10m"`/`"lowest_level"`); `jem.fluxes.bulk_wind_stress` applies the same
+bulk drag law regardless of which reference it is handed (see that
+function's docstring), so JAX-ESM reads no package-specific wind diagnostic
+at all any more, and **an ECHAM-composed coupled model completes a step like
+any other package** (jax-gcm#911/#914 closed jax-esm#129) — coupled to a slab
+surface. Coupled to **Veros**, the composition still builds
+(`tests/unit/test_veros_setups.py::test_echam_veros_earth_configuration_builds`)
+but cannot yet step: `Model.bootstrap_state()` traces ECHAM's Tiedtke-Nordeng
+convection, whose `lax.cond` x64 dtype guard pins its float outputs but not
+`ConvectionState.ktop` (an integer level index), so it raises under
+`jax_enable_x64=True` — which importing `veros` always sets process-wide, so
+this reproduces for any Veros coupling of any ECHAM composition, independent
+of this contract or of `veros-earth` specifically. Filed as jax-gcm#927;
+`test_echam_veros_bootstrap_hits_the_known_x64_convection_bug` pins the exact
+failure so a fix upstream is noticed here.
 
-**One package-specific read remains, and is not expected to go away with a
-routine jax-gcm update.** jax-gcm's contract publishes only the *scalar*
-`wind_speed`, never a near-surface wind *vector*, so
-`jem.fluxes.bulk_wind_stress` (the bulk-drag law `jem.fluxes.VerosExchange`
-applies for a Veros ocean) still reads SPEEDY's private
-`_surface_flux.u0`/`.v0` directly; ECHAM has no wind vector anywhere in its
-own diagnostics either, only a diagnosed speed. `from_diagnostics` reads the
-wind *eagerly* to fill `JCMDerived.u0`/`.v0` on every coupled step, so **no
-ECHAM-composed coupled model can complete a step**, whatever it is coupled
-to — a slab ocean as much as Veros. No shipped JAX-ESM configuration composes
-ECHAM, so nothing shipped is affected. Making the wind optional — through
-`JCMDerived`, the coupled carry and the output — is tracked in jax-esm#129.
+**Physics note for a Veros bulk drag law (jax-esm#132).** SPEEDY's published
+`wind_u`/`wind_v` are its lowest model level scaled by `fwind0`; ECHAM's are
+a stability-corrected 10 m reduction. `jem.fluxes.bulk_wind_stress` applies
+one `drag_coefficient`/`air_density` regardless, so switching
+`VerosExchange`'s atmosphere from SPEEDY to ECHAM changes the wind stress
+Veros receives for a reason that has nothing to do with the ocean or the
+exchanger: a slower, near-surface 10 m wind against the same drag law gives a
+systematically different stress than a faster lowest-level one would, for
+the same underlying flow. This is worth knowing before comparing a
+SPEEDY-Veros and an ECHAM-Veros run's ocean forcing side by side; it is not
+a bug in the migration (both packages report their own wind faithfully) and
+is not fixed here.
 
 **Public surface.** Every JCM attribute the wrapper touches is public at the
 pinned revision, apart from that one underscore-prefixed diagnostics key: the
