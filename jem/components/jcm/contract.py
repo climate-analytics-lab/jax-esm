@@ -23,23 +23,52 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 -------------------------------------------
-``JCM_SUPPORTED_REV`` is the ``dev`` commit that merged jax-gcm PR **878**,
-``808412a5dc9e5a6de86d02a3e4f054249a7572fe``. jax-gcm has no 3.x tag yet --
+``JCM_SUPPORTED_REV`` is ``0eef9b3a88982886241622fde6530513d025192c``, the
+``dev`` tip this bump validated JAX-ESM against. jax-gcm has no 3.x tag yet --
 ``3.0.0rc1`` is reported from the source tree, not cut as a release -- so a
-``dev`` sha is the most precise thing there is to name. It is the merge
-commit itself rather than whatever ``dev`` happened to be at bump time,
-because later, unrelated ``dev`` commits are not revisions this branch has
-been checked against.
+``dev`` sha is the most precise thing there is to name. Pinning to the tip
+rather than only the merge commit of the PR that motivated the bump is safe
+here specifically because every gate in this repository has been run against
+this exact sha (not assumed compatible from reading the intervening diffs) --
+the general rule still holds for the *next* bump: pin to the commit that
+*contains* the needed change, not to whatever ``dev`` happens to be, unless
+the tip itself has been validated the same way.
 
-PR 878 puts jax-gcm's clock on one exact ``jax_datetime.Datetime``
-(``Model(start_time=)``, proleptic Gregorian) and labels output records at
-their interval **midpoint** as ``datetime64[ms]``
-(``jcm.predictions.output_time_labels``). JAX-ESM's
-:class:`~jem.base.coupler.Coupler` carries the same kind of ``Datetime``
-(``jem.base.component.CoupledCarry.time``), and
-:class:`~jem.components.jcm.component.JCMComponent` threads jax-gcm's own
-:class:`~jcm.model.RunState` (``time``/``step``) through
-``run_from_state_with_carry(initial_time=, initial_step=)``.
+The change this bump is *for* is jax-gcm **#911/#914** -- the near-surface
+wind vector joins the package-independent ``SurfaceExchange`` contract as
+``wind_u``/``wind_v`` (with a static ``wind_reference`` field naming each
+package's own reference: ``"10m"`` for ECHAM, ``"lowest_level"`` for
+SPEEDY). :func:`~jem.components.jcm.exchange_fields.from_diagnostics` reads
+the wind off the contract for every package now, so
+:class:`~jem.components.jcm.component.JCMDerived` has no package-specific
+read left at all, and an ECHAM-composed coupled model completes a step for
+the first time (closing jax-esm#129). See
+:mod:`jem.components.jcm.exchange_fields`'s module docstring for the
+translation and ``docs/source/design/jcm_adapter.md``.
+
+The revision also carries every jax-gcm commit between the two merges, most
+of which touch no JAX-ESM integration point at all -- pure physics fidelity
+fixes (ECHAM albedo #893, Tiedtke half-level fluxes #886, pre-calibration
+fixes #894, a conserving grey two-stream shortwave #916), dycore/diagnostics
+features (Eulerian tracer-free transport #899, AeroCom diagnostics #919,
+calendar-month CLI means #909), and docs (#910, #922). Two are worth naming
+because they touch how jax-gcm is *used*, not just what it computes:
+
+* **#913** -- importing ``jcm`` no longer initializes the JAX backend or
+  touches the GPU; the backend is configured the first time something
+  actually needs it (building a ``Model``, stepping one). JAX-ESM already
+  sets ``JAX_PLATFORMS``/``jax_enable_x64`` before building anything, so
+  this changes nothing JAX-ESM does, only when jax-gcm used to do it (at
+  ``import jcm``, before JAX-ESM's own configuration had a chance to run) --
+  a latent ordering hazard this closes rather than one JAX-ESM had to work
+  around;
+* **#900/#906** -- every dated forcing input (not a climatology) now
+  declares a ``persist`` policy (``strict`` by default: the input must
+  cover the run window) rather than silently holding its end samples.
+  JAX-ESM's own shipped configurations force the atmosphere from a
+  ``wrap_year`` climatology (see the ``forcing.align`` note below, #884),
+  which this rule does not touch; a from-file transient boundary condition a
+  user points ``atmosphere.forcing.file`` at is where it would apply.
 
 The revision also carries the earlier jax-gcm changes JAX-ESM is written
 against:
@@ -119,11 +148,11 @@ from typing import NamedTuple
 #: ``actions/checkout`` needs and what ``git rev-parse`` in a jax-gcm checkout
 #: can be compared against directly.
 #:
-#: This is jax-gcm ``dev`` at the merge of PR 878 on 2026-09-24
-#: (``v3: unify the real datetime clock and bounded monthly output``), which
-#: closes jax-gcm#754, #301, #884 (PR 877) and unifies the datetime clock
-#: (PR 878) -- see "Why a ``dev`` revision rather than a release" above.
-JCM_SUPPORTED_REV = "808412a5dc9e5a6de86d02a3e4f054249a7572fe"
+#: This is jax-gcm ``dev`` at commit 0eef9b3a on 2026-09-27, validated as a
+#: whole against this repository's gates. It closes jax-gcm#911/#914 (the
+#: wind vector joining the ``SurfaceExchange`` contract) -- see "Why a
+#: ``dev`` revision rather than a release" above.
+JCM_SUPPORTED_REV = "0eef9b3a88982886241622fde6530513d025192c"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -420,56 +449,48 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " revision, so its disappearance must be noticed here.",
     ),
     # ------------------------------------------------------------------
-    # Physics diagnostics. jax-gcm has no package-independent surface
-    # exchange contract yet (jax-gcm#754), so jem/components/jcm/
-    # exchange_fields.py reads each package's own struct. `target` is the
-    # physics package; `attribute` is the dotted path into one step's
-    # diagnostics dict.
+    # Physics diagnostics. Every physics package that resolves a surface
+    # (SPEEDY, ECHAM; Held-Suarez opts out) publishes the SAME
+    # package-independent SurfaceExchange struct under
+    # diagnostics["surface_exchange"] (jax-gcm#754/#911/#914), so `target`
+    # is always "surface_exchange" and `attribute` is one of its field
+    # names -- checked directly against SurfaceExchange's own fields
+    # (dataclasses.fields), which needs no model build at all.
     # ------------------------------------------------------------------
     IntegrationPoint(
-        "speedy", "_surface_flux.u0", "diagnostics",
-        "Near-surface zonal wind, m s-1: SPEEDY's private, non-contract"
-        " wind VECTOR (an artefact of its bulk-formula surface"
-        " extrapolation), which jem.components.jcm.exchange_fields still"
-        " reads directly because jax-gcm's #754 surface-exchange contract"
-        " publishes only the scalar wind_speed, not a vector -- see that"
-        " module's docstring. Feeds jem.fluxes.bulk_wind_stress via"
-        " JCMDerived.u0.",
-    ),
-    IntegrationPoint(
-        "speedy", "_surface_flux.v0", "diagnostics",
-        "Near-surface meridional wind, m s-1; same note as _surface_flux.u0.",
-    ),
-    IntegrationPoint(
         "surface_exchange", "net_heat_flux", "diagnostics",
-        "Net downward heat flux into the surface, W m-2 (jax-gcm#754's"
-        " package-independent SurfaceExchange struct, published identically"
-        " by every physics package under diagnostics['surface_exchange']);"
-        " negated at the component boundary to JAX-ESM's upward-positive"
-        " convention. Checked directly against"
-        " jcm.physics.surface.surface_exchange.SurfaceExchange's own field"
-        " names -- unlike the SPEEDY-only diagnostics above, this needs no"
-        " model build, because the struct is the same for every package.",
+        "Net downward heat flux into the surface, W m-2; negated at the"
+        " component boundary to JAX-ESM's upward-positive convention.",
     ),
     IntegrationPoint(
         "surface_exchange", "evaporation", "diagnostics",
-        "Evaporation, kg m-2 s-1 upward -- already JAX-ESM's units, unlike"
-        " the pre-#754 per-package diagnostics this contract superseded.",
+        "Evaporation, kg m-2 s-1 upward -- already JAX-ESM's units.",
     ),
     IntegrationPoint(
         "surface_exchange", "precipitation", "diagnostics",
         "Total precipitation (convective + large-scale/stratiform),"
         " kg m-2 s-1 downward -- already the total, computed once by the"
-        " publisher; JAX-ESM no longer assembles it from two separate"
-        " per-package diagnostics entries.",
+        " publisher from whichever precipitation-producing terms are"
+        " actually composed.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "wind_u", "diagnostics",
+        "Near-surface eastward wind, m s-1, at the package's own reference"
+        " (jax-gcm#911/#914; the reference is named in the struct's static"
+        " wind_reference field -- '10m' for ECHAM, 'lowest_level' for"
+        " SPEEDY). Feeds jem.fluxes.bulk_wind_stress via JCMDerived.u0.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "wind_v", "diagnostics",
+        "Near-surface northward wind, m s-1; same note as wind_u. Feeds"
+        " JCMDerived.v0.",
     ),
     IntegrationPoint(
         "jcm.physics.surface.surface_exchange", "surface_exchange_from",
         "public",
-        "The single, package-independent surface-exchange reader"
-        " (jax-gcm#754/#301): jem.components.jcm.exchange_fields."
-        "from_diagnostics is a thin sign/unit translation on top of this,"
-        " replacing the old per-package speedy()/echam()/detect() readers.",
+        "The single, package-independent surface-exchange reader:"
+        " jem.components.jcm.exchange_fields.from_diagnostics is a thin"
+        " sign/unit translation on top of this.",
     ),
     IntegrationPoint(
         "jcm.physics.composable_physics.ComposablePhysics",
