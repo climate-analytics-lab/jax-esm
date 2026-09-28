@@ -41,7 +41,11 @@ from jem.output import (
 
 # The run loop sits on those in turn. `jem.runners` (config -> objects) is
 # deliberately NOT here: it imports Hydra and the component packages, which is
-# most of what `import jem` avoids.
+# most of what `import jem` avoids. `jem.configurations` -- the recipe door
+# onto a validated `jem/config/configuration/*.yaml` (issue #131) -- sits on
+# `jem.runners` in turn and is left out for the same reason: `import
+# jem.configurations` when a caller actually wants it, not on every `import
+# jem`.
 from jem.driver import RunResult, default_health_check, run_chunked
 
 __all__ = [
