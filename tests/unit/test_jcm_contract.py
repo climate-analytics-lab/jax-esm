@@ -195,7 +195,8 @@ def test_workflow_pins_the_supported_revision():
 
 
 @pytest.mark.parametrize(
-    "doc", ["README.md", "docs/source/getting_started.rst"]
+    "doc",
+    ["README.md", "docs/source/getting_started.rst", "docs/source/developers.rst"],
 )
 def test_install_instructions_check_out_the_supported_revision(doc):
     """Check the documented jax-gcm install checks out the pinned revision.
@@ -204,7 +205,7 @@ def test_install_instructions_check_out_the_supported_revision(doc):
     not whatever ``dev`` has moved to since.
     """
     text = (WORKFLOW.parents[2] / doc).read_text()
-    assert f"git checkout {JCM_SUPPORTED_REV}" in text, (
+    assert f"checkout {JCM_SUPPORTED_REV}" in text, (
         f"{doc} does not install jax-gcm at {JCM_SUPPORTED_REV}, the revision"
         " jem/components/jcm/contract.py supports. Bump it with the pin."
     )
