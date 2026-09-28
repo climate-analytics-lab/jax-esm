@@ -24,8 +24,13 @@
 # shadow jcm's (see the comment in `config.yaml`). Select an option with
 # `coupled_run=short_run`, set one key with `coupled_run.chunk=...`.
 
-# Total simulated time, as a `jcm.date.parse_duration_seconds` string.
+# How far to integrate: exactly one of `total_time` and `end_time`, the other
+# null. `total_time` is a fixed duration (`jcm.date.parse_duration_seconds`,
+# which refuses "years" and "months"); `end_time` is an ISO date/datetime for
+# a calendar target, measured from the atmosphere's `start_time`
+# (`coupled_run.total_time=null coupled_run.end_time=2011-01-01`).
 total_time: "30 days"
+end_time: null
 
 # Simulated time integrated between health checks and output files. One chunk
 # per run by default; a long run splits so a NaN is caught (and a checkpoint

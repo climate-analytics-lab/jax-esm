@@ -102,6 +102,8 @@ package spelled out.
      - ``+atmosphere.constants.grav=9.7``
    * - Choose the run settings
      - ``coupled_run=short_run``, or ``coupled_run.total_time="90 days"``
+   * - Run to a calendar end date instead of a duration
+     - ``coupled_run.total_time=null coupled_run.end_time=2011-01-01``
 
 Several things worth knowing:
 
@@ -117,6 +119,10 @@ Several things worth knowing:
   ``run/longrun.yaml`` would otherwise be picked up in its place.
   ``coupled_run/default.yaml`` is the complete schema, so every key is
   overridable without a ``+``.
+- **Exactly one of** ``coupled_run.total_time`` **and** ``coupled_run.end_time``
+  **is set.** ``total_time`` is a fixed duration ("years" and "months" are
+  refused); ``end_time`` is an ISO date for a calendar target, and setting it
+  needs ``coupled_run.total_time=null`` too.
 - **Single-quote a** ``${...}`` **resolver.** ``'${jcm_data:bc/t30/clim/forcing.nc}'``
   is a resolver Hydra expands when the config is composed; unquoted, the shell
   expands ``${...}`` to nothing first, so the override arrives empty.
@@ -143,6 +149,34 @@ The configuration layer is a thin wiring layer over exactly the objects it
 builds -- :doc:`python_api` gives the complete construction, in the order the
 pieces above come from: the wrapper, the grid, the exchanger, the coupler and
 the run loop.
+
+``+configuration=<name>``'s Python equivalent is :func:`jem.configurations.load`
+(issue #131) -- the *recipe door* onto the same
+``jem/config/configuration/*.yaml`` this section's ``+configuration=`` composes,
+built through the same ``jem.runners`` the CLI uses, with no Hydra visible to
+the caller:
+
+.. code-block:: python
+
+    from jem import configurations, run_chunked
+
+    exp = configurations.load("earth-slab")
+    exp.coupler                                       # the built Coupler
+    result = run_chunked(exp.coupler, **exp.run_kwargs)
+
+``run_chunked(exp.coupler, **exp.run_kwargs)`` reproduces the CLI's build and
+its ``coupled_run`` settings exactly, but NOT everything ``python -m
+jem.main`` does around that build -- see :func:`jem.configurations.load`'s
+own docstring for the precise, short list (a fresh ``output_dir`` of the
+door's own rather than the CLI's Hydra-managed one, no logger-level change)
+and for why a ``+atmosphere.constants.*`` override outlives the call that
+applied it.
+
+See :doc:`python_api`'s *Validated configurations from Python* section for
+the escape hatch onto an override (a dotted key or a config-group selection
+such as ``seaice="none"``) and why a notebook that runs a shipped
+configuration should load it through this door rather than rebuilding it by
+hand.
 
 
 Long runs: checkpoints and resume

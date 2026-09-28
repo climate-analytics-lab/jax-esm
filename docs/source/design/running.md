@@ -45,16 +45,22 @@ the `accumulator` if the run was given a reduction.
 
 ## Chunking
 
-`total_time` and `chunk` are fixed durations — strings such as `"30 days"`
-or numbers of days — parsed by `jcm.date.parse_duration_seconds`, which
-rejects a calendar unit such as `"year"` or `"month"` as not fixed. Both must be whole
-multiples of the coupling timestep — a coupled step is the smallest thing
-the loop can integrate — and `total_time` must be a whole multiple of
-`chunk`. All three are checked before anything is built or compiled, and
-each message names both quantities. A final partial chunk is refused rather
-than accommodated: it would need a second compiled trajectory for one call,
-and a run length that does not divide into chunks is far more often a
-mistake in the configuration than a request.
+A run's length is exactly one of `total_time`, a fixed duration — a string
+such as `"30 days"` or a number of days, parsed by
+`jcm.date.parse_duration_seconds` — and `end_time`, an absolute ISO
+date/datetime, for which the length is `end_time - coupler.start_date` in
+whole seconds. `end_time` is how a run is given a calendar target:
+`parse_duration_seconds` rejects `"year"` and `"month"`, which are not fixed
+lengths.
+
+`chunk` is a fixed duration in the same forms. It and the run length must
+both be whole multiples of the coupling timestep — a coupled step is the
+smallest thing the loop can integrate. The run length need **not** be a
+whole multiple of `chunk`: the last chunk is then shorter, at the cost of one
+extra compiled trajectory. A calendar `end_time` rarely divides evenly —
+2001-01-01 to 2011-01-01 is 3652 days, so 30-day chunks end with a 22-day
+one. Everything is checked before anything is built or compiled, and each
+message names the quantities involved.
 
 ## The health gate
 
@@ -261,11 +267,11 @@ combining them, or by running the span in one call.
 
 `monthly_mean(coupler)` bins into the twelve calendar months (a run longer
 than a year composites its Januaries into bin 0);
-`monthly_mean(coupler, total_time=...)` (or `n_months=`) instead gives one
-bin per calendar month the run passes through, sized by counting the
-distinct Gregorian months the run's records touch — `total_time` is the
-form to prefer, since a hand-counted `n_months` can under-size the
-accumulator by one and silently wrap a run's last partial year into its
+`monthly_mean(coupler, total_time=...)` (or `end_time=...`, or `n_months=`)
+instead gives one bin per calendar month the run passes through, sized by
+counting the distinct Gregorian months the run's records touch — a run
+length is the form to prefer, since a hand-counted `n_months` can under-size
+the accumulator by one and silently wrap a run's last partial year into its
 first. Each record is binned by its own interval **midpoint**
 (`jcm.date.gregorian_ymd_from_days`), the same instant `TimeAxis.datetimes()`
 labels it with, so `monthly.finalize(...)` and

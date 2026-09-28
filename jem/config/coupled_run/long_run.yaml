@@ -3,10 +3,9 @@ defaults:
   - default
   - _self_
 
-# 3600 days = 120 whole chunks. `total_time` must be a whole multiple of
-# `chunk`, and a fixed duration (`jcm.date.parse_duration_seconds` refuses
-# "months" and "years"). Override it with another multiple of 30 days
-# ("2190 days", "300 days").
+# 3600 days = 120 whole chunks, so no chunk is short. `total_time` is a fixed
+# duration ("months" and "years" are refused); for a calendar end date set
+# `total_time=null` and `end_time=...`.
 total_time: "3600 days"
 # 30-day chunks: short enough that an unhealthy state is caught (and the run
 # restarts) without losing much, long enough that the per-chunk output and
