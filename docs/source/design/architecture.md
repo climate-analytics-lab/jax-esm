@@ -19,7 +19,8 @@ linked below.
 - A **component** is any object satisfying the `Component` protocol in
   `jem/base/component.py`: a `name`, an `initialize() -> carry` and a
   `step(carry, time) -> (new_carry, diagnostics)`, plus the optional
-  capabilities `SupportsXarray`, `SupportsBind` and `SupportsCheckpoint`.
+  capabilities `SupportsXarray`, `SupportsBind`, `SupportsCheckpoint` and
+  `SupportsClockReset`.
   There is no base class to inherit from — `Component` is a
   runtime-checkable `typing.Protocol` — so an external model (JCM, Veros) is
   adapted by a thin wrapper class rather than being rewritten or

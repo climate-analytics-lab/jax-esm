@@ -146,6 +146,19 @@ one is visible in the line the run always prints. :meth:`jem.base.coupler.Couple
 by naming each component's own source -- the shared carry file or its own
 ``load_carry`` -- so no part of a resumed model's carry is unaccounted for.
 
+Reusing a spun-up state as the initial condition of a run with a **different
+start date** is supported, but explicitly. Such a carry's clock is not this
+coupler's, and integrating it as it stands would label, name and checkpoint it
+on the wrong dates, so ``initial_carry`` is refused -- with a message naming the
+way in -- unless its clock is this coupler's
+(:meth:`~jem.base.coupler.Coupler.require_consistent_clock`, the check
+:meth:`~jem.base.coupler.Coupler.load_carry` applies to a checkpoint, so the two
+ways in cannot disagree about what a consistent clock is).
+:meth:`~jem.base.coupler.Coupler.restart_clock` is the way in: it puts the
+coupled clock, and every component's own, back at this coupler's start date, and
+its result is passed as ``initial_carry``. A checkpoint is reused the same way:
+``Coupler.load_carry(directory, check_clock=False)``, then ``restart_clock``.
+
 ``CoupledCarry.step`` restored from the checkpoint is the only source of truth
 for how far the run has got. Nothing is derived from the chunk index or from a
 file name -- and, for the same reason, each chunk's output files are named
@@ -351,7 +364,13 @@ def run_chunked(
     initial_carry : jem.base.component.CoupledCarry, optional
         Where to start. Defaults to ``coupler.initialize()``. A complete
         checkpoint found at ``checkpoint_path`` takes precedence over it, and
-        the run says so.
+        the run says so. Its clock must be this coupler's
+        (:meth:`~jem.base.coupler.Coupler.require_consistent_clock`): to use
+        a state from a run with another start date as this run's initial
+        condition, pass it through
+        :meth:`~jem.base.coupler.Coupler.restart_clock` first, which puts the
+        coupled clock and every component's own clock at this coupler's
+        ``start_date``.
     output_dir : path-like
         Directory the chunk files are written into, created if absent.
     output_averages : bool
@@ -482,7 +501,9 @@ def run_chunked(
         and ``end_time`` is given, if ``end_time`` is not after the start
         date, ``checkpoint_interval`` is not a whole number of chunks or was given
         without a ``checkpoint_path``, or ``subsample`` is not a positive
-        integer, or if ``accumulate`` is given with a ``health_check``. All of
+        integer, or if ``accumulate`` is given with a ``health_check``, or if
+        ``initial_carry`` is at a time this coupler's start date and timestep
+        do not put its step at (its message names ``restart_clock``). All of
         them are checked before anything is compiled or integrated. Also if
         the run resumes from a checkpoint and ``output_dir`` already holds
         output at or after the restored step that this run will not write
@@ -1209,6 +1230,12 @@ def _starting_carry(
         ), True
 
     if initial_carry is not None:
+        # The same clock check a loaded checkpoint gets: a carry whose time is
+        # not this coupler's start date plus `step` timesteps would be
+        # integrated on one clock and labelled, named and checkpointed on
+        # another. Only a carry that is actually used is checked -- one a
+        # restored checkpoint has superseded is never integrated.
+        coupler.require_consistent_clock(initial_carry, source="initial_carry")
         carry = initial_carry
         provenance = (
             "Starting from the initial_carry argument at coupled step "

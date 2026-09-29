@@ -204,8 +204,9 @@ class VerosComponent:
 
     Satisfies :class:`~jem.base.component.Component`,
     :class:`~jem.base.component.SupportsBind`,
-    :class:`~jem.base.component.SupportsXarray` and
-    :class:`~jem.base.component.SupportsCheckpoint`.
+    :class:`~jem.base.component.SupportsXarray`,
+    :class:`~jem.base.component.SupportsCheckpoint` and
+    :class:`~jem.base.component.SupportsClockReset`.
 
     Parameters
     ----------
@@ -830,7 +831,8 @@ class VerosComponent:
         setup integrated behind the coupler's back, or a carry threaded into
         the wrong component. The coupler and every other component would go on
         dating this ocean's fields by ``time.time``, silently assigning them
-        to the wrong simulated date.
+        to the wrong simulated date. (A state deliberately reused under a new
+        start date is put back in step by :meth:`restart_clock`.)
 
         Veros' counter is not seconds since the coupler's ``start_date`` but
         seconds since the setup's own start, so it is compared in the
@@ -884,6 +886,62 @@ class VerosComponent:
                 )
 
         jax.debug.callback(_report, model_seconds, elapsed.days, elapsed.seconds)
+
+    def restart_clock(self, carry: Carry) -> Carry:
+        """Return ``carry`` with Veros' clock at the reading the run starts from.
+
+        (:class:`~jem.base.component.SupportsClockReset`.) Veros' counter is
+        ``variables.time``, in seconds from whatever the setup treated as its
+        own start, and :meth:`_report_clock_drift` measures it against the
+        coupler's clock from the reading :meth:`bind` recorded. A state reused
+        as the initial condition of a run with another start date carries the
+        donor run's reading, so it is put back at the recorded one: the ocean
+        then reads zero elapsed seconds when the coupled clock does.
+
+        ``variables.time`` is the only thing changed, and that is faithful
+        because nothing in the coupled integration consumes it: the setup's
+        ``set_forcing`` -- the one place a setup dates its forcing by
+        ``time`` -- is replaced by a no-op in the constructor, and the
+        diagnostics that read it (output and snapshot schedules) are not run
+        by the stepping this wrapper drives. The iteration counter ``itt`` is
+        deliberately left alone. It is not a clock: ``solve_pressure`` takes
+        ``itt == 0`` to mean "first ever step" and re-initialises every time
+        level of the pressure/streamfunction, so zeroing it would overwrite
+        the state's own time-level history with a new solve -- a
+        discontinuity, not a restart.
+
+        Parameters
+        ----------
+        carry : dict
+            An ocean carry, from :meth:`initialize`, a step or
+            :meth:`load_carry`.
+
+        Returns
+        -------
+        dict
+            A new carry. The ``VerosState`` is copied through its pytree
+            registration, so the state ``carry`` holds -- which for a carry
+            straight from :meth:`initialize` or :meth:`load_carry` is
+            ``self.model.state`` itself -- is not modified.
+
+        Raises
+        ------
+        RuntimeError
+            If the component has not been bound to a coupler clock, so there
+            is no reading to reset to.
+
+        """
+        zero = self._veros_time_zero
+        if zero is None:
+            raise RuntimeError(
+                f"{type(self).__name__} {self.name!r} has no clock reading to"
+                " reset to: register it with a Coupler (which calls bind())"
+                " before restarting its clock."
+            )
+        state = jax.tree_util.tree_map(lambda leaf: leaf, carry["state"])
+        with state.variables.unlock():
+            state.variables.time = jnp.full_like(state.variables.time, zero)
+        return {**carry, "state": state}
 
     def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
         """Label the stacked per-step diagnostics as an ``xarray.Dataset``.

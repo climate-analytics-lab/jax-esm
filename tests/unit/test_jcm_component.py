@@ -30,6 +30,7 @@ from jem.base.component import (
     Component,
     CouplingTime,
     SupportsBind,
+    SupportsClockReset,
     SupportsXarray,
     TimeAxis,
 )
@@ -147,7 +148,87 @@ def test_component_satisfies_protocols(component):
     assert isinstance(component, Component)
     assert isinstance(component, SupportsBind)
     assert isinstance(component, SupportsXarray)
+    assert isinstance(component, SupportsClockReset)
     assert component.name == "atm"
+
+
+def _advanced_carry(component, carry):
+    """Return ``carry`` as a run three days in would hold it, built without stepping.
+
+    JCM's own clock (``time`` and ``step``) and the dycore's native elapsed
+    counter are what a run advances and what a reset has to put back.
+    """
+    dycore = component.model.dycore
+    state = carry["state"]
+    state = dycore.with_sim_time(
+        state, dycore.sim_time(state) + jnp.asarray(3 * 86400.0)
+    )
+    return dict(
+        carry,
+        state=state,
+        time=START_DATE + jdt.to_timedelta(3, "day"),
+        step=jnp.int32(144),
+    )
+
+
+def test_restart_clock_puts_jcms_clock_back_at_the_start(component):
+    """Time, step and the dycore's own counter are those `initialize` builds."""
+    fresh = component.initialize()
+    advanced = _advanced_carry(component, fresh)
+
+    reset = component.restart_clock(advanced)
+
+    assert reset["time"] == START_DATE
+    assert int(reset["step"]) == 0
+    np.testing.assert_array_equal(
+        component.model.dycore.sim_time(reset["state"]),
+        component.model.dycore.sim_time(fresh["state"]),
+    )
+    # Functional: the carry it was given still holds the advanced clock.
+    assert int(advanced["step"]) == 144
+
+
+def test_restart_clock_keeps_the_atmospheres_memory(component):
+    """Only the clock moves: dycore state, physics carry, derived and forcing stay."""
+    fresh = component.initialize()
+    advanced = _advanced_carry(component, fresh)
+    reset = component.restart_clock(advanced)
+
+    assert jax.tree_util.tree_structure(reset) == jax.tree_util.tree_structure(fresh)
+    for key in ("physics", "derived", "forcing"):
+        assert reset[key] is advanced[key]
+    dycore = component.model.dycore
+    # Every leaf of the dycore state but the native elapsed counter is the
+    # advanced carry's own.
+    zeroed = dycore.with_sim_time(
+        advanced["state"], jnp.zeros_like(dycore.sim_time(advanced["state"]))
+    )
+    for left, right in zip(
+        jax.tree_util.tree_leaves(reset["state"]),
+        jax.tree_util.tree_leaves(zeroed),
+    ):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+    for left, right in zip(
+        jax.tree_util.tree_leaves(reset), jax.tree_util.tree_leaves(fresh)
+    ):
+        assert jnp.shape(left) == jnp.shape(right)
+        assert jnp.result_type(left) == jnp.result_type(right)
+
+
+def test_restart_clock_resets_to_the_date_the_model_was_bound_to():
+    """The start is the coupler's start date, which `bind` made the model's own."""
+    july = jdt.to_datetime("2000-07-01")
+    coords = get_speedy_coords(layers=LAYERS, spectral_truncation=TRUNCATION)
+    model = Model(
+        coords=coords, terrain=TerrainData.aquaplanet(coords), start_time=july
+    )
+    component = JCMComponent(model)
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=july)
+
+    reset = component.restart_clock(_advanced_carry(component, component.initialize()))
+
+    assert reset["time"] == july
+    assert int(reset["step"]) == 0
 
 
 def test_step_before_bind_raises(model):

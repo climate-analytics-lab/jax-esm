@@ -200,6 +200,24 @@ directory an interrupted save left without its carry file is a WARNING (a
 run died and its last chunk is gone); a path with nothing at it is INFO
 (what every first run into a fresh output directory sees).
 
+**A spun-up state as the initial condition of a run with another start
+date.** `initial_carry` must have this coupler's clock -- `time` equal to
+`start_date + step * dt` -- exactly as a resumed checkpoint must
+(`Coupler.require_consistent_clock`, applied by `load_carry` and by
+`run_chunked` before anything is compiled). A carry from a run with a
+different start date fails that check with a message naming
+`Coupler.restart_clock`, which is the explicit way in: it returns the carry
+with the coupled clock at this coupler's `start_date` and `step` 0, and asks
+every component that keeps a clock of its own (JCM, Veros, a nested coupler)
+to reset it too. A checkpoint is reused the same way --
+`coupler.load_carry(directory, check_clock=False)`, then `restart_clock` --
+and goes in as `initial_carry` with a `checkpoint_path` of its own, because
+pointing `checkpoint_path` at the spun-up checkpoint is a resume, which is
+refused under another start date. After the reset the seasonal cycle, the
+output labels and file names, `checkpoint_interval` and `subsample` all count
+from the new start; see *Reusing a state under another start date* in
+{doc}`carry_and_clock` for what each component resets and why.
+
 ## Output files and reductions
 
 **Output files.** One file per component per chunk,

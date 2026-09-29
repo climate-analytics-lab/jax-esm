@@ -294,6 +294,19 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " simulation clock (see DynamicalCore.sim_time).",
     ),
     IntegrationPoint(
+        "jcm.dycore.base.DynamicalCore", "sim_time", "public",
+        "Read the dycore state's native elapsed-seconds counter, which"
+        " JCMComponent.restart_clock zeroes when a state is reused under a"
+        " new start date. Returns None for a dycore with no such counter.",
+    ),
+    IntegrationPoint(
+        "jcm.dycore.base.DynamicalCore", "with_sim_time", "public",
+        "Replace the dycore state's native elapsed-seconds counter;"
+        " JCMComponent.restart_clock uses it to put the counter back at zero,"
+        " the way jax-gcm's own as_initial_condition import and"
+        " Model._at_fresh_clock do.",
+    ),
+    IntegrationPoint(
         "jcm.physics_interface.Physics", "get_empty_data", "public",
         "Zero template of one step's physics diagnostics dict, used to seed"
         " JCMDerived with the exact structure, shapes and dtypes step 1"

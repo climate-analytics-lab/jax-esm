@@ -7,11 +7,11 @@ the things it couples. It is deliberately small:
   with a ``name``, an ``initialize()`` and a ``step(carry, time)``. There is
   no base class to inherit from, so an external model (JCM, Veros) is adapted
   by a thin wrapper class rather than by monkey-patching methods onto it.
-- :class:`SupportsXarray`, :class:`SupportsCheckpoint` and
-  :class:`SupportsBind` are *optional* capabilities. The coupler tests for
-  them with ``isinstance`` (the protocols are runtime-checkable, which for a
-  Protocol means "has these attributes"), never with ``hasattr`` at random
-  call sites.
+- :class:`SupportsXarray`, :class:`SupportsCheckpoint`,
+  :class:`SupportsBind` and :class:`SupportsClockReset` are *optional*
+  capabilities. The coupler tests for them with ``isinstance`` (the protocols
+  are runtime-checkable, which for a Protocol means "has these attributes"),
+  never with ``hasattr`` at random call sites.
 - :class:`CoupledCarry` is the scanned state of the coupled model: one carry
   per component plus the clock, a ``jax_datetime.Datetime`` advanced by the
   coupling timestep every step. The clock lives in the carry, not in the
@@ -370,6 +370,39 @@ class SupportsBind(Protocol):
         coupling_timestep: jdt.Timedelta,
         start_date: jdt.Datetime,
     ) -> None: ...
+
+
+@runtime_checkable
+class SupportsClockReset(Protocol):
+    """Optional: put a carry's own clock back at the start of the run.
+
+    The coupler owns the run's clock, but a component that wraps a model with
+    a clock of its own keeps a copy of it in its carry (JCM's ``time`` and
+    ``step``, Veros' ``variables.time``) and checks it against the coupler's.
+    A carry that is reused as the initial condition of a run with a *different*
+    start date -- a spun-up state carried into an experiment that starts in
+    another season -- therefore has a clock that does not agree with the
+    coupled one. :meth:`jem.base.coupler.Coupler.restart_clock` resets the
+    coupled clock and asks every component that implements this to reset its
+    own, so the coupler never special-cases a component type.
+
+    A component that keeps **no** clock in its carry (the slab models read
+    the season from ``CouplingTime`` on every step) has nothing to reset and
+    does not implement it. A component that does keep one and does not
+    implement this cannot be reused under another start date.
+    """
+
+    def restart_clock(self, carry: Carry) -> Carry:
+        """Return ``carry`` with its clock at the run's start, as after ``initialize``.
+
+        The clock is the *only* thing that changes: the state, and anything
+        else that is part of the model's physical memory, is kept. "The run's
+        start" is the start date the component was bound to
+        (:class:`SupportsBind`), so this is only meaningful for a component
+        registered with a coupler. Must be pure, and must return a carry with
+        exactly the structure, shapes and dtypes it was given.
+        """
+        ...
 
 
 # An exchanger moves information between components. It receives the mapping

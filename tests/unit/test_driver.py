@@ -2303,6 +2303,238 @@ def test_output_options_reach_the_files(coupler, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# A spun-up state as the initial condition of a run with another start date
+# ---------------------------------------------------------------------------
+
+JULY_START = jdt.to_datetime("2001-07-01")
+
+
+class SeasonProbe:
+    """Reports the position in the annual cycle every step is handed.
+
+    The slab models sample their climatologies at `time.year_fraction`, so
+    what this records is the seasonal phase they were driven at.
+    """
+
+    name = "probe"
+
+    def initialize(self):
+        return {"calls": jnp.int32(0)}
+
+    def step(self, carry, time):
+        return {"calls": carry["calls"] + 1}, {"year_fraction": time.year_fraction}
+
+
+def probed_slabs(start_date: jdt.Datetime) -> Coupler:
+    """Return the two-slab coupler with a season probe, starting on `start_date`."""
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    return Coupler(
+        {**components, "probe": SeasonProbe()},
+        default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=start_date,
+    )
+
+
+def spun_up_in_january(steps: int = 5):
+    """Return a carry that has integrated `steps` days from 1 January."""
+    coupler = probed_slabs(START_DATE)
+    carry, _ = coupler.generate_trajectory_function(steps)(coupler.initialize())
+    return carry
+
+
+def test_a_spun_up_state_is_reused_under_another_start_date(tmp_path, caplog):
+    """Spin up in January, reset onto 1 July, run two more days.
+
+    The reset carry runs through `run_chunked` and through a trajectory
+    function alike, on the July calendar: the coupled time and step, the
+    output labels and file names, and the seasonal phase the components were
+    driven at all count from the new start date, and the two routes end in the
+    same carry. The physical state is the January run's, untouched.
+    """
+    january = spun_up_in_january()
+    july = probed_slabs(JULY_START)
+    reset = july.restart_clock(january)
+    assert reset.time == JULY_START
+    assert int(reset.step) == 0
+    np.testing.assert_array_equal(
+        reset.components["ocn"]["state"].sea_surface_temperature,
+        january.components["ocn"]["state"].sea_surface_temperature,
+    )
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="1 day", initial_carry=reset,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+
+    assert "Starting from the initial_carry argument at coupled step 0" in caplog.text
+    assert result.completed
+    assert result.steps_completed == 2
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert sorted(path.name for path in result.paths) == [
+        "ocn-00000000.nc", "ocn-00000001.nc",
+        "seaice-00000000.nc", "seaice-00000001.nc",
+    ]
+    with xr.open_mfdataset(
+        sorted((tmp_path / "output").glob("ocn-*.nc")), combine="by_coords"
+    ) as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ns]"),
+        )
+
+    trajectory = july.generate_trajectory_function(2)
+    final, diagnostics = trajectory(reset)
+    # 1 July is day 181 of a 365-day year, and the January run's day 5 is
+    # nowhere in it.
+    np.testing.assert_allclose(
+        diagnostics["probe"]["year_fraction"], [181 / 365, 182 / 365], rtol=1e-6
+    )
+    assert_carries_agree(result.final_carry, final, atol=1e-12)
+
+
+def test_an_initial_carry_from_another_start_date_is_refused_with_the_way_in(
+    tmp_path, caplog
+):
+    """The un-reset carry is refused before anything is compiled or written."""
+    january = spun_up_in_january()
+
+    with pytest.raises(ValueError) as raised:
+        run_chunked(
+            probed_slabs(JULY_START), total_time="2 days", chunk="1 day",
+            initial_carry=january,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+
+    message = str(raised.value)
+    assert "initial_carry" in message
+    assert "after 5 steps" in message
+    assert "restart_clock" in message
+    assert not list((tmp_path / "output").glob("*.nc"))
+
+    # A carry of this coupler's own start date -- a continuation, mid-run --
+    # is not refused.
+    coupler = probed_slabs(START_DATE)
+    result = run_chunked(
+        coupler, total_time="7 days", chunk="1 day", initial_carry=january,
+        output_dir=tmp_path / "continued", checkpoint_path=None,
+    )
+    assert result.steps_completed == 7
+
+
+def test_a_checkpoint_from_another_start_date_is_reused_through_a_reset(tmp_path):
+    """Load without the check, reset, pass as `initial_carry`.
+
+    Pointing `checkpoint_path` at the spun-up checkpoint is a resume, and a
+    resume under another start date is refused, so the state goes in as an
+    `initial_carry` and the run checkpoints somewhere of its own.
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    july = probed_slabs(JULY_START)
+
+    with pytest.raises(ValueError, match="restart_clock"):
+        run_chunked(
+            july, total_time="2 days", chunk="1 day",
+            output_dir=tmp_path / "refused", checkpoint_path=spun_up,
+        )
+
+    reset = july.restart_clock(july.load_carry(spun_up, check_clock=False))
+    checkpoint = tmp_path / "experiment-checkpoint"
+    result = run_chunked(
+        july, total_time="2 days", chunk="1 day", initial_carry=reset,
+        output_dir=tmp_path / "experiment", checkpoint_path=checkpoint,
+    )
+
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    # The experiment's own checkpoint is on the new calendar, so it resumes.
+    resumed = july.load_carry(checkpoint)
+    assert int(resumed.step) == 2
+    assert resumed.time == JULY_START + jdt.to_timedelta(2, "day")
+
+
+@pytest.mark.slow
+def test_a_spun_up_atmosphere_is_reused_under_another_start_date(tmp_path, caplog):
+    """The reset reaches JCM's own clock, and the run on the new date is clean.
+
+    A real atmosphere keeps a clock of its own in its carry and checks it
+    against the coupler's every step. One coupled day from 1 January, reset
+    onto a coupler that starts on 1 July, and two more days through
+    `run_chunked`: JCM's clock and step counter count from July (the step
+    counter has advanced exactly twice as far as the day of spin-up took), its
+    clock-drift check against the coupler's stays silent, and the output is
+    labelled on the July calendar.
+    """
+    import jcm
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.terrain import TerrainData
+
+    from jem.components import JCMComponent
+    from jem.components.slab import SlabGrid
+
+    def build(start_date) -> Coupler:
+        coords = get_speedy_coords(layers=5, spectral_truncation=21)
+        model = jcm.model.Model(
+            coords=coords,
+            terrain=TerrainData.aquaplanet(coords),
+            start_time=start_date,
+        )
+        components = {
+            "atm": JCMComponent(model),
+            "ocn": SlabOceanModel(SlabGrid.from_coords(coords.horizontal)),
+        }
+        return Coupler(
+            components,
+            default_exchangers(components),
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=start_date,
+        )
+
+    january = build(START_DATE)
+    spun_up, _ = january.generate_trajectory_function(1)(january.initialize())
+    steps_per_day = int(spun_up.components["atm"]["step"])
+    assert steps_per_day > 0
+
+    july = build(JULY_START)
+    reset = july.restart_clock(spun_up)
+    atmosphere = reset.components["atm"]
+    assert atmosphere["time"] == JULY_START
+    assert int(atmosphere["step"]) == 0
+    np.testing.assert_array_equal(
+        july.components["atm"].model.dycore.sim_time(atmosphere["state"]), 0.0
+    )
+
+    drift = "disagrees with the coupler"
+    with caplog.at_level(logging.ERROR, logger="jem.components.jcm.component"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="2 days", initial_carry=reset,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+            health_check=None,
+        )
+        jax.effects_barrier()
+    assert drift not in caplog.text
+    final = result.final_carry
+    assert final.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert final.components["atm"]["time"] == final.time
+    assert int(final.components["atm"]["step"]) == 2 * steps_per_day
+    with xr.open_dataset(tmp_path / "output" / "atm-00000000.nc") as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ms]"),
+        )
+        # The seasonal cycle follows the new start date: the atmosphere was
+        # spun up in January, when the southern hemisphere has the stronger
+        # sun (by about 330 W m-2 over the hemispheres), and on 1 July it is
+        # the northern one.
+        incoming = written["shortwave_rad.fsol"]
+        northern = incoming.where(written["lat"] > 0).mean(("lon", "lat"))
+        southern = incoming.where(written["lat"] < 0).mean(("lon", "lat"))
+        assert bool(((northern - southern) > 100.0).all())
+
+
+# ---------------------------------------------------------------------------
 # The same properties with the real atmosphere
 # ---------------------------------------------------------------------------
 

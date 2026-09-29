@@ -206,6 +206,20 @@ else in the carry. Both are long enough that they are not duplicated here:
 see {doc}`design/running` for the worked examples, the checkpoint format and
 the accumulator's binning rules.
 
+A spun-up state can be the initial condition of a run with a **different start
+date**: build the coupler for the new run, put the carry's clock at *its*
+start date with `Coupler.restart_clock`, and pass the result as
+`initial_carry`. `run_chunked` refuses a carry whose clock is not its
+coupler's, and the message names this method:
+
+```python
+carry = july_coupler.restart_clock(spun_up_carry)     # or load_carry(..., check_clock=False)
+run_chunked(july_coupler, total_time="30 days", initial_carry=carry)
+```
+
+The seasonal cycle, output labels and file names then count from the new start
+date. See {doc}`design/carry_and_clock` for what each component resets.
+
 ## Validated configurations from Python
 
 The construction above builds a coupled model by hand -- the thing to do

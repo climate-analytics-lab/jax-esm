@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+import xarray as xr
 
 # Importing the adapter is what points Veros at its JAX backend, and it has
 # to happen before anything imports veros.core -- including the setup module
@@ -26,6 +27,7 @@ from jem.base.component import (  # noqa: E402
     CouplingTime,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsClockReset,
     SupportsXarray,
     TimeAxis,
     forcing_variable,
@@ -231,6 +233,7 @@ def test_component_satisfies_protocols(component):
     assert isinstance(component, SupportsBind)
     assert isinstance(component, SupportsXarray)
     assert isinstance(component, SupportsCheckpoint)
+    assert isinstance(component, SupportsClockReset)
     assert component.name == "ocn"
 
 
@@ -457,6 +460,87 @@ def test_clock_drift_is_silent_when_the_clocks_agree(component, caplog):
         component._report_clock_drift(carry, _coupling_time(1))
         jax.effects_barrier()
 
+    assert caplog.text == ""
+
+
+def _veros_clock_advanced(component, carry, seconds):
+    """Return ``carry`` with Veros' clock ``seconds`` into the run, state copied.
+
+    What a run that has integrated for a while holds, built without
+    integrating: the state goes through its pytree registration so the model's
+    own state (which an ``initialize()`` carry shares) is left alone.
+    """
+    state = jax.tree_util.tree_map(lambda leaf: leaf, carry["state"])
+    with state.variables.unlock():
+        state.variables.time = jnp.full_like(
+            state.variables.time, component._veros_time_zero + seconds
+        )
+    return dict(carry, state=state)
+
+
+def test_restart_clock_puts_veros_time_back_at_the_bound_reading(component):
+    """A state five days in reads zero elapsed seconds again, in the coupler's frame."""
+    carry = _veros_clock_advanced(component, component.initialize(), 5 * 86400.0)
+    zero = component._veros_time_zero
+
+    reset = component.restart_clock(carry)
+
+    assert float(reset["state"].variables.time) == zero
+    # Functional: the carry it was given still holds the advanced clock.
+    assert float(carry["state"].variables.time) == zero + 5 * 86400.0
+
+
+def test_restart_clock_changes_nothing_but_the_clock(component):
+    """The ocean's physical state, its iteration count and the carry layout are kept.
+
+    The iteration count is deliberately not a clock: Veros' pressure solve
+    re-initialises every time level when it reads zero, which would replace
+    the state's own history rather than restart it.
+    """
+    carry = _veros_clock_advanced(component, component.initialize(), 86400.0)
+    reset = component.restart_clock(carry)
+
+    assert jax.tree_util.tree_structure(reset) == jax.tree_util.tree_structure(carry)
+    before = jax.tree_util.tree_leaves(carry)
+    after = jax.tree_util.tree_leaves(reset)
+    differing = [
+        index for index, (left, right) in enumerate(zip(before, after))
+        if not np.array_equal(np.asarray(left), np.asarray(right))
+    ]
+    assert len(differing) == 1
+    assert jnp.result_type(after[differing[0]]) == jnp.result_type(before[differing[0]])
+    assert int(reset["state"].variables.itt) == int(carry["state"].variables.itt)
+    np.testing.assert_array_equal(
+        np.asarray(reset["state"].variables.temp),
+        np.asarray(carry["state"].variables.temp),
+    )
+    assert reset["derived"] is carry["derived"]
+    assert reset["forcing"] is carry["forcing"]
+
+
+def test_restart_clock_before_bind_names_the_fix(veros_model):
+    """There is no reading to reset to until the coupler has adopted the ocean."""
+    unbound = VerosComponent(veros_model)
+    with pytest.raises(RuntimeError, match="bind"):
+        unbound.restart_clock({"state": veros_model.state})
+
+
+def test_a_reset_carry_agrees_with_the_coupler_and_an_unreset_one_does_not(
+    component, caplog
+):
+    """The drift check is what a reset satisfies: silent after, loud before."""
+    advanced = _veros_clock_advanced(component, component.initialize(), 5 * 86400.0)
+    at_start = _coupling_time(0)
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(advanced, at_start)
+        jax.effects_barrier()
+    assert "model clock is" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(component.restart_clock(advanced), at_start)
+        jax.effects_barrier()
     assert caplog.text == ""
 
 
@@ -777,3 +861,70 @@ def test_load_carry_restores_force_overwrite_when_the_restart_is_missing(
     with pytest.raises(Exception):
         component.load_carry(tmp_path / "not-a-checkpoint")
     assert runtime_settings.force_overwrite is before
+
+
+@pytest.mark.slow
+def test_a_spun_up_ocean_is_reused_under_another_start_date(
+    veros_model, tmp_path, caplog
+):
+    """Spin up a day, reset onto 1 July, run two more days through the driver.
+
+    Each coupler wraps the same setup, bound to its own start date. The
+    carry spun up under January is refused by `run_chunked` as it stands; reset
+    onto the July coupler it runs with Veros' clock and the coupler's in
+    step (the drift report stays silent), and the output is labelled on the
+    July calendar. Run through the trajectory *without* the reset, the same
+    carry is reported as drifted, which is what the reset repairs.
+    """
+    from jem.base.coupler import Coupler
+    from jem.driver import run_chunked
+
+    def build(start_date):
+        return Coupler(
+            {"ocn": VerosComponent(veros_model)},
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=start_date,
+        )
+
+    january = build(START_DATE)
+    spun_up, _ = january.generate_trajectory_function(1)(january.initialize())
+    july_start = jdt.to_datetime("2000-07-01")
+    july = build(july_start)
+    zero = july.components["ocn"]._veros_time_zero
+    assert float(spun_up.components["ocn"]["state"].variables.time) == zero + 86400.0
+
+    with pytest.raises(ValueError, match="restart_clock"):
+        run_chunked(
+            july, total_time="2 days", chunk="2 days", initial_carry=spun_up,
+            output_dir=tmp_path / "refused", checkpoint_path=None,
+            health_check=None,
+        )
+
+    reset = july.restart_clock(spun_up)
+    assert float(reset.components["ocn"]["state"].variables.time) == zero
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="2 days", initial_carry=reset,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+            health_check=None,
+        )
+        jax.effects_barrier()
+    # (Constructing the wrappers logged a setup warning; the drift report is
+    # the message that must be absent.)
+    assert "model clock is" not in caplog.text
+    assert result.final_carry.time == july_start + jdt.to_timedelta(2, "day")
+    assert float(
+        result.final_carry.components["ocn"]["state"].variables.time
+    ) == zero + 2 * 86400.0
+    with xr.open_dataset(tmp_path / "output" / "ocn-00000000.nc") as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2000-07-01T12:00", "2000-07-02T12:00"], dtype="datetime64[ms]"),
+        )
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        july.generate_trajectory_function(1)(spun_up)
+        jax.effects_barrier()
+    assert "model clock is" in caplog.text
