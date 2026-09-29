@@ -209,9 +209,15 @@ Each `step` is handed a `CouplingTime` built from that carried clock:
 class CouplingTime:
     step: jax.Array          # int32, coupled steps completed before this one
     time: jdt.Datetime       # the coupled clock at the start of this step
-    sim_time: jax.Array      # seconds since start_date; equals step * dt
     dt: float                # static: coupling timestep in seconds
 ```
+
+`time` is the one statement of *when* the step happens; `step` and `dt` say
+how far along the run is and how long the step lasts. There is no second
+elapsed-seconds counter to keep in agreement with `time`: a component that
+needs the seconds since the run began takes them from the clock
+(`time.time - start_date` for a wrapped model's drift check, `step * dt` for
+a plain integrator's output label).
 
 - `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
   *start* of the step; it is what a monthly climatology is interpolated with
@@ -219,12 +225,11 @@ class CouplingTime:
   `jcm.date.fraction_of_year_elapsed` on `time.time` — the same function the
   atmosphere itself uses, so JEM does not vendor any date arithmetic of its
   own.
-- `time.end_of_step()` returns the clock one step later, advancing `step`,
-  `time` and `sim_time` together. A model that needs a boundary condition at
-  both ends of a step (the slab models measure an anomaly against the
-  climatology at the start and add it back at the end) must use it rather
-  than advancing `sim_time` by hand, because `year_fraction` is derived from
-  `time`.
+- `time.end_of_step()` returns the clock one step later, advancing `step`
+  and `time` together. A model that needs a boundary condition at both ends
+  of a step (the slab models measure an anomaly against the climatology at
+  the start and add it back at the end) must use it rather than advancing
+  `time` by hand, because `year_fraction` is derived from `time`.
 
 `coupling_timestep` itself is a `jdt.Timedelta`, which holds whole seconds —
 the shortest step expressible today is one second, which is no limit for a

@@ -176,9 +176,12 @@ def role_attrs(role: Role) -> dict[str, str]:
 class CouplingTime:
     """The coupler's clock as seen by one component step.
 
-    ``time`` is the clock. ``step`` and ``sim_time`` count the same progress
-    as an integer and in seconds, for the sub-step indexing a component with
-    an internal timestep needs and for a wrapped model's clock-drift check.
+    ``time`` is the clock: the one statement of *when* a step happens. A
+    component that needs the seconds elapsed since the run began (a wrapped
+    model's clock-drift check) subtracts the coupler's start date from it
+    instead of reading a second, redundant counter. ``step`` counts the same
+    progress as an integer, for the sub-step indexing a component with an
+    internal timestep needs.
 
     Attributes
     ----------
@@ -187,11 +190,6 @@ class CouplingTime:
         (0 on the first step). Copied from :attr:`CoupledCarry.step`.
     time : jax_datetime.Datetime
         The model time at the start of this step.
-    sim_time : jax.Array
-        Seconds since the run's start, ``step * dt``: float64 when
-        ``jax_enable_x64`` is on, float32 otherwise. For a clock-drift check
-        against a wrapped model's own elapsed-seconds counter
-        (:mod:`jem.components.clock`).
     dt : float
         Coupling timestep in seconds. Static (not a pytree leaf).
 
@@ -199,7 +197,6 @@ class CouplingTime:
 
     step: jax.Array
     time: jdt.Datetime
-    sim_time: jax.Array
     dt: float = struct.field(pytree_node=False)
 
     def end_of_step(self) -> "CouplingTime":
@@ -212,7 +209,6 @@ class CouplingTime:
         advanced: CouplingTime = self.replace(  # type: ignore[attr-defined]
             step=self.step + 1,
             time=self.time + jdt.to_timedelta(int(self.dt), "second"),
-            sim_time=self.sim_time + self.dt,
         )
         return advanced
 

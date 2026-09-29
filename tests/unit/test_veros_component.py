@@ -135,7 +135,6 @@ def _coupling_time(step: int) -> CouplingTime:
     return CouplingTime(
         step=jnp.int32(step),
         time=START_DATE + jdt.to_timedelta(int(step), "day"),
-        sim_time=jnp.float32(step * 86400.0),
         dt=86400.0,
     )
 
@@ -459,6 +458,29 @@ def test_clock_drift_is_silent_when_the_clocks_agree(component, caplog):
         jax.effects_barrier()
 
     assert caplog.text == ""
+
+
+def test_clock_drift_reads_the_coupler_side_off_the_datetime(component, caplog):
+    """The coupler's elapsed time is `time.time - start_date`, not `step * dt`.
+
+    A clock whose step counter says 0 while its datetime says one day in is
+    the datetime's business: the ocean at one day agrees with it, and an
+    ocean at zero is the one reported.
+    """
+    clock = CouplingTime(
+        step=jnp.int32(0), time=START_DATE + jdt.to_timedelta(1, "day"), dt=86400.0
+    )
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(_carry_at_veros_time(component, 86400.0), clock)
+        jax.effects_barrier()
+    assert caplog.text == ""
+
+    with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
+        component._report_clock_drift(_carry_at_veros_time(component, 0.0), clock)
+        jax.effects_barrier()
+    assert "model clock is" in caplog.text
+    assert "-86400" in caplog.text
 
 
 def test_clock_drift_of_a_day_is_reported(component, caplog):

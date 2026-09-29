@@ -44,6 +44,15 @@ FAST_TIMESTEP = jdt.to_timedelta(1, "hour")
 START_DATE = jdt.to_datetime("2001-01-01")
 
 
+def elapsed_seconds(time):
+    """Return the seconds since ``START_DATE`` that ``time``'s clock reads.
+
+    What a component that wants an elapsed-seconds label derives from the
+    clock it is handed: the clock has no second counter of its own.
+    """
+    return (time.time - START_DATE).total_seconds()
+
+
 class Counter:
     """Counts up by one plus what it was given, and reports its clock."""
 
@@ -58,7 +67,7 @@ class Counter:
         new_carry = dict(carry, value=carry["value"] + 1.0 + carry["received"])
         return new_carry, {
             "value": new_carry["value"],
-            "sim_time": time.sim_time,
+            "elapsed_seconds": elapsed_seconds(time),
             "dt": jnp.float32(time.dt),
         }
 
@@ -66,7 +75,7 @@ class Counter:
         return xr.Dataset(
             {
                 "value": ("time", np.asarray(diagnostics["value"])),
-                "sim_time": ("time", np.asarray(diagnostics["sim_time"])),
+                "elapsed_seconds": ("time", np.asarray(diagnostics["elapsed_seconds"])),
             },
             coords={"time": time.datetimes()},
         )
@@ -399,7 +408,7 @@ def test_the_inner_components_advance_once_per_inner_step():
     assert atmosphere["value"].shape == (2, 24)
     np.testing.assert_allclose(np.asarray(atmosphere["dt"]), np.full((2, 24), HOUR))
     np.testing.assert_allclose(
-        np.asarray(atmosphere["sim_time"]).ravel(), np.arange(48) * HOUR
+        np.asarray(atmosphere["elapsed_seconds"]).ravel(), np.arange(48) * HOUR
     )
     # The ocean is on the outer clock.
     np.testing.assert_allclose(np.asarray(diagnostics["ocn"]["dt"]), [DAY, DAY])
@@ -541,7 +550,7 @@ def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
     assert_trees_equal(resumed, continuous_carry)
     # The inner clock continues from hour 48, not from zero.
     np.testing.assert_allclose(
-        np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
+        np.asarray(diagnostics["atm_lnd"]["atm"]["elapsed_seconds"]).ravel(),
         np.arange(48, 96) * HOUR,
     )
 
@@ -617,7 +626,7 @@ def test_a_nested_run_resumed_from_load_carry_continues_identically(tmp_path):
     assert_trees_equal(resumed, continuous_carry)
     # The inner clock continues from hour 48, not from zero.
     np.testing.assert_allclose(
-        np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
+        np.asarray(diagnostics["atm_lnd"]["atm"]["elapsed_seconds"]).ravel(),
         np.arange(48, 96) * HOUR,
     )
 

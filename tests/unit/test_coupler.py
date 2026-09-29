@@ -28,6 +28,15 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 START_DATE = jdt.to_datetime("2001-01-01")
 
 
+def elapsed_seconds(time):
+    """Return the seconds since ``START_DATE`` that ``time``'s clock reads.
+
+    What a component that wants an elapsed-seconds label derives from the
+    clock it is handed: the clock has no second counter of its own.
+    """
+    return (time.time - START_DATE).total_seconds()
+
+
 # ---------------------------------------------------------------------------
 # Toy components and exchangers
 # ---------------------------------------------------------------------------
@@ -73,14 +82,14 @@ class ClockWatcher:
         self.name = name
 
     def initialize(self):
-        return {"sim_time": jnp.float32(0.0)}
+        return {"elapsed_seconds": jnp.float32(0.0)}
 
     def step(self, carry, time):
         del carry
         return (
-            {"sim_time": time.sim_time},
+            {"elapsed_seconds": elapsed_seconds(time)},
             {
-                "sim_time": time.sim_time,
+                "elapsed_seconds": elapsed_seconds(time),
                 "step": time.step,
                 "year_fraction": time.year_fraction,
             },
@@ -161,7 +170,7 @@ class ClockRecorder:
             {"calls": carry["calls"] + 1},
             {
                 "step": time.step,
-                "sim_time": time.sim_time,
+                "elapsed_seconds": elapsed_seconds(time),
                 "dt": jnp.float32(time.dt),
                 "year_fraction": time.year_fraction,
             },
@@ -170,7 +179,7 @@ class ClockRecorder:
     def to_xarray(self, diagnostics, time):
         self.time_axes.append(time)
         return xr.Dataset(
-            {"sim_time": ("time", np.asarray(diagnostics["sim_time"]))},
+            {"elapsed_seconds": ("time", np.asarray(diagnostics["elapsed_seconds"]))},
             coords={"time": time.datetimes()},
         )
 
@@ -351,12 +360,12 @@ def test_clock_persists_across_trajectory_calls():
 
     assert int(carry.step) == 10
     assert carry.time == START_DATE + jdt.to_timedelta(10, "day")
-    np.testing.assert_allclose(first["clock"]["sim_time"], np.arange(0, 5) * DAY)
-    np.testing.assert_allclose(second["clock"]["sim_time"], np.arange(5, 10) * DAY)
+    np.testing.assert_allclose(first["clock"]["elapsed_seconds"], np.arange(0, 5) * DAY)
+    np.testing.assert_allclose(second["clock"]["elapsed_seconds"], np.arange(5, 10) * DAY)
 
     # The next step - the one the persisted counter is for - sees 10 * dt.
     _, tenth = coupler.generate_step_function()(carry)
-    assert float(tenth["clock"]["sim_time"]) == pytest.approx(10 * DAY)
+    assert float(tenth["clock"]["elapsed_seconds"]) == pytest.approx(10 * DAY)
 
 
 def test_components_share_clock():
@@ -369,7 +378,7 @@ def test_components_share_clock():
     _, diagnostics = coupler.generate_trajectory_function(4)(coupler.initialize())
 
     np.testing.assert_array_equal(
-        diagnostics["first"]["sim_time"], diagnostics["second"]["sim_time"]
+        diagnostics["first"]["elapsed_seconds"], diagnostics["second"]["elapsed_seconds"]
     )
     np.testing.assert_array_equal(diagnostics["first"]["step"], np.arange(4))
 
@@ -778,11 +787,11 @@ def test_a_repeated_component_runs_on_a_faster_clock():
 
     fast = diagnostics["fast"]
     # The extra leading axis is the multiplicity, inside the scanned steps.
-    assert fast["sim_time"].shape == (2, 24)
+    assert fast["elapsed_seconds"].shape == (2, 24)
     np.testing.assert_allclose(np.asarray(fast["dt"]), np.full((2, 24), HOUR))
     # Hourly and continuous across the coupled step boundary.
     np.testing.assert_allclose(
-        np.asarray(fast["sim_time"]).ravel(), np.arange(48) * HOUR
+        np.asarray(fast["elapsed_seconds"]).ravel(), np.arange(48) * HOUR
     )
     np.testing.assert_array_equal(np.asarray(fast["step"]).ravel(), np.arange(48))
     # The sub-step clock advances an hour at a time through 2001, a
@@ -793,9 +802,9 @@ def test_a_repeated_component_runs_on_a_faster_clock():
 
     # A component listed once still gets the coupled daily clock.
     slow = diagnostics["slow"]
-    assert slow["sim_time"].shape == (2,)
+    assert slow["elapsed_seconds"].shape == (2,)
     np.testing.assert_allclose(np.asarray(slow["dt"]), [DAY, DAY])
-    np.testing.assert_allclose(np.asarray(slow["sim_time"]), [0.0, DAY])
+    np.testing.assert_allclose(np.asarray(slow["elapsed_seconds"]), [0.0, DAY])
 
 
 def test_a_repeated_component_is_bound_with_its_own_timestep():
@@ -872,7 +881,7 @@ def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
     # The records are in run order: the flattened sub-step clock.
     np.testing.assert_allclose(
-        datasets["fast"].sim_time.values, np.arange(48) * HOUR
+        datasets["fast"].elapsed_seconds.values, np.arange(48) * HOUR
     )
 
     assert datasets["slow"].sizes["time"] == 2
@@ -946,7 +955,6 @@ def test_the_substep_clock_of_a_single_element_is_the_coupled_clock():
     coupled = coupler.coupling_time(3, time)
     substep = coupler.coupling_time_at_substep(3, time, 0, 1)
     assert int(substep.step) == int(coupled.step)
-    assert float(substep.sim_time) == float(coupled.sim_time)
     assert substep.dt == coupled.dt
     assert substep.time == coupled.time
 
@@ -956,7 +964,7 @@ def test_a_repeated_exchanger_sees_the_sub_stepped_clock():
     seen = []
 
     def record(components, time):
-        seen.append((float(time.sim_time), time.dt, int(time.step)))
+        seen.append((float(elapsed_seconds(time)), time.dt, int(time.step)))
         return components
 
     coupler = Coupler(
@@ -998,5 +1006,5 @@ def test_checkpoint_round_trip_of_a_run_with_multiplicity(tmp_path):
     _assert_carries_close(resumed, continuous_carry)
     _assert_carries_close(_concatenate(first, second), continuous)
     np.testing.assert_allclose(
-        np.asarray(second["fast"]["sim_time"]).ravel(), np.arange(48, 96) * HOUR
+        np.asarray(second["fast"]["elapsed_seconds"]).ravel(), np.arange(48, 96) * HOUR
     )

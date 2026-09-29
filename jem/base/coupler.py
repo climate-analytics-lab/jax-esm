@@ -740,7 +740,6 @@ class Coupler:
         return CouplingTime(
             step=step_array,
             time=time,
-            sim_time=step_array * self._dt_seconds,
             dt=self._dt_seconds,
         )
 
@@ -777,7 +776,6 @@ class Coupler:
             step=substep,
             time=time
             + jdt.to_timedelta(call * self._dt_total_seconds // multiplicity, "second"),
-            sim_time=substep * sub_dt,
             dt=sub_dt,
         )
 

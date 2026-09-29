@@ -38,26 +38,26 @@ CLOCK_TOLERANCE_SECONDS = 1.0
 CLOCK_TOLERANCE_FLOAT32_ULPS = 8.0
 
 
-def clock_tolerance_seconds(sim_time: float) -> float:
-    """Return the drift, in seconds, tolerated at simulation time ``sim_time``.
+def clock_tolerance_seconds(elapsed_seconds: float) -> float:
+    """Return the drift, in seconds, tolerated after ``elapsed_seconds`` of a run.
 
     Parameters
     ----------
-    sim_time : float
-        The coupler's simulation time in seconds, i.e. the magnitude at which
-        the two clocks are being compared.
+    elapsed_seconds : float
+        Seconds the coupler's clock has advanced since the run's start date,
+        i.e. the magnitude at which the two clocks are being compared.
 
     Returns
     -------
     float
         ``max(CLOCK_TOLERANCE_SECONDS, CLOCK_TOLERANCE_FLOAT32_ULPS * eps32 *
-        |sim_time|)`` -- the constant floor for short runs, growing with the
-        float32 resolution of the clock for long ones.
+        |elapsed_seconds|)`` -- the constant floor for short runs, growing
+        with the float32 resolution of the clock for long ones.
 
     """
     relative = (
         CLOCK_TOLERANCE_FLOAT32_ULPS
         * float(np.finfo(np.float32).eps)
-        * abs(float(sim_time))
+        * abs(float(elapsed_seconds))
     )
     return max(CLOCK_TOLERANCE_SECONDS, relative)
