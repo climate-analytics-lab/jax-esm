@@ -203,9 +203,8 @@ reduction that must not cost memory proportional to the run length —
 `jem.accumulate.monthly_mean`, `windowed_mean` — runs *inside* the scan
 instead of writing every step to disk, and is differentiable like everything
 else in the carry. Both are long enough that they are not duplicated here:
-see the README's *Long runs* section for the worked examples and
-{doc}`design/running` for the checkpoint format and the accumulator's
-binning rules.
+see {doc}`design/running` for the worked examples, the checkpoint format and
+the accumulator's binning rules.
 
 ## Validated configurations from Python
 

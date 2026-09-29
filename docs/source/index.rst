@@ -13,6 +13,7 @@ built on ``jax.lax.scan``.
 - Integrating your own model? Follow :doc:`adding_a_component`.
 - Looking for a specific class or function? See :doc:`api_superset`.
 
+JEM is alpha software: its API may change without deprecation before 1.0.
 
 .. toctree::
    :maxdepth: 2

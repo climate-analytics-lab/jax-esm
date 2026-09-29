@@ -8,10 +8,11 @@ Install JEM
 
 .. code-block:: bash
 
-    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install its dev branch from source FIRST
+    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install it from source FIRST,
+    # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git switch dev                # then `git checkout <JCM_SUPPORTED_REV>` to pin it
+    git checkout 0eef9b3a88982886241622fde6530513d025192c
     pip install -e "."
     cd ..
 
@@ -192,10 +193,10 @@ Hydra makes fresh each run. Point a second run at the first's output directory
 (``coupled_run.output_dir=outputs/2026-09-16/11-04-02``) and it continues from
 the coupled step the checkpoint holds, saying so in its log; an absolute
 ``coupled_run.checkpoint_path`` is used as given, and
-``coupled_run.checkpoint_path=null`` turns checkpointing off. See the
-README's *Long runs* section and :doc:`design/running` for
-``checkpoint_interval``, ``subsample``, ``output_averages`` and the in-scan
-reductions in ``jem.accumulate``.
+``coupled_run.checkpoint_path=null`` turns checkpointing off. See
+:doc:`design/running` for the worked examples, ``checkpoint_interval``,
+``subsample``, ``output_averages`` and the in-scan reductions in
+``jem.accumulate``.
 
 
 Where next
