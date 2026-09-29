@@ -565,6 +565,23 @@ def test_parameters_outside_the_schemes_domain_are_rejected(grid, field, value):
         WintonSeaiceModel(grid, WintonSeaiceParameters(**{field: value}))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("dtheta", 0.0), ("dtheta", -1.0), ("chs", -1e-3), ("vgust", float("nan")), ("fstab", float("inf"))],
+)
+def test_surface_flux_parameters_outside_the_domain_are_rejected(grid, field, value):
+    sfp = IceSurfaceFluxParameters.default().replace(**{field: value})
+    with pytest.raises(ValueError, match=f"surface_flux.{field}"):
+        WintonSeaiceModel(grid, WintonSeaiceParameters(surface_flux=sfp))
+
+
+def test_initialize_refuses_a_different_ocean_mask_convention(grid):
+    model = WintonSeaiceModel(grid)
+    other = model.params.replace(ocean_mask_value=1 - model.params.ocean_mask_value)
+    with pytest.raises(ValueError, match="ocean_mask_value"):
+        model.initialize(other)
+
+
 def test_transport_metrics_must_match_the_grid(grid):
     wrong = IceTransportGrid(dx=jnp.ones((2, 2)), dy=jnp.ones((2, 2)))
     with pytest.raises(ValueError, match="dx"):

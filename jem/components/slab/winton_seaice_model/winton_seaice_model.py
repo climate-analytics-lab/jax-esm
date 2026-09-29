@@ -552,6 +552,16 @@ class WintonSeaiceModel(SlabModelBase):
 
         """
         params = self._initial_params(params)
+        # The ocean mask is a property of the grid the model was built on, and
+        # ``to_xarray`` masks its output with it; a run whose parameters named
+        # a different mask would integrate one set of cells and report another.
+        if params.ocean_mask_value != self.params.ocean_mask_value:
+            raise ValueError(
+                f"initialize(params) has ocean_mask_value="
+                f"{params.ocean_mask_value!r} but this model was built with "
+                f"{self.params.ocean_mask_value!r}; construct the model with the "
+                "mask convention the run uses."
+            )
         shape = self.grid.shape
         ocean = self._ocean_cells(params)
         thickness = jnp.where(ocean, jnp.asarray(params.initial_ice_thickness), 0.0)
@@ -841,6 +851,13 @@ def _validate_parameters(params: WintonSeaiceParameters) -> None:
     at_least("initial_ice_thickness", params.initial_ice_thickness, 0.0, strict=False)
     at_least("emissivity", params.emissivity, 0.0, strict=False)
     at_least("transport_diffusivity", params.transport_diffusivity, 0.0, strict=False)
+    # The bulk flux divides by ``dtheta`` in its stability correction, and a
+    # negative exchange coefficient or gust speed has no physical meaning.
+    sfp = params.surface_flux
+    at_least("surface_flux.chs", sfp.chs, 0.0, strict=False)
+    at_least("surface_flux.vgust", sfp.vgust, 0.0, strict=False)
+    at_least("surface_flux.dtheta", sfp.dtheta, 0.0, strict=True)
+    finite("surface_flux.fstab", sfp.fstab)
     for field in ("n_substeps", "n_flux_iterations", "transport_n_substeps"):
         count = getattr(params, field)
         if int(count) != count or int(count) < 1:
