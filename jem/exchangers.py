@@ -216,11 +216,14 @@ VEROS_COMPONENT_MODULE = "jem.components.veros_component"
 #: atmosphere's flux over the open sea) and the ice velocity: the atmosphere
 #: adapter does not publish them in a form a copy can move, and the design
 #: decisions behind that -- which flux plays the part of the atmosphere's
-#: open-sea flux now that no per-tile flux is published, and whether the
-#: atmosphere then sees the ice through its ice fraction or through an
-#: ice-weighted surface temperature -- are recorded in
-#: ``docs/source/design/winton_seaice.md``. :func:`default_exchanges` logs the
-#: fields left unsupplied.
+#: open-sea flux when no per-tile flux is published -- are recorded in
+#: ``docs/source/design/winton_seaice.md``, and the gap itself is tracked in
+#: https://github.com/climate-analytics-lab/jax-esm/issues/141. The atmosphere
+#: sees the ice through its ice fraction (``sice_am``, a standard row), not
+#: through an ice-weighted surface temperature. Called from Python,
+#: :func:`default_exchanges` logs the fields left unsupplied; with
+#: ``require_complete=True`` (what the Hydra runner passes) it raises instead
+#: when an atmosphere is coupled to the ice.
 WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.state.sea_surface_temperature",
      "seaice.forcing.sea_surface_temperature", "state"),
@@ -232,6 +235,9 @@ WINTON_SEAICE_VEROS_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.derived.sea_surface_temperature",
      "seaice.forcing.sea_surface_temperature", "state"),
 )
+
+#: The issue tracking the Winton ice's missing atmospheric forcing.
+WINTON_FORCING_ISSUE = "https://github.com/climate-analytics-lab/jax-esm/issues/141"
 
 #: Module holding the Winton sea-ice component, looked up in ``sys.modules``
 #: for the same reason as :data:`VEROS_COMPONENT_MODULE`: if it was never
@@ -701,6 +707,7 @@ class Exchange:
 def default_exchanges(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, str] | None = None,
+    require_complete: bool = False,
 ) -> list[ExchangeSpec]:
     """Return the standard coupling table, filtered to the components present.
 
@@ -743,6 +750,13 @@ def default_exchanges(
     sea surface temperature, which its basal heat flux depends on) to whichever
     table applies, and a warning names the forcing fields of that model that no
     row supplies -- the ones an exchanger of the coupled model's own has to.
+    With ``require_complete=True`` that warning is an error whenever an
+    ``"atm"`` component is also present: an atmosphere coupled to the ice
+    through a table that leaves the ice's atmospheric forcing at its initial
+    values is a run that looks coupled and is not (issue #141), so the
+    Hydra path refuses it unless the coupling is written out explicitly.
+    Without an atmosphere (a forced or standalone ice) the fields are the
+    caller's to write and only the warning applies.
 
     Regridding
     ----------
@@ -779,10 +793,19 @@ def default_exchanges(
         Regridder *names* per direction and kind, as above. The callables
         themselves are given to :class:`Exchange`; see
         :func:`default_exchangers` for the one-call form.
+    require_complete : bool, optional
+        Raise instead of warning when a Winton sea ice is coupled to an
+        ``"atm"`` component and the table leaves some of its forcing fields
+        unsupplied. Default False: the Python API stays permissive.
 
     Returns
     -------
     list[ExchangeSpec]
+
+    Raises
+    ------
+    ValueError
+        If ``require_complete`` and the condition above holds.
 
     """
     present = set(components)
@@ -845,13 +868,25 @@ def default_exchanges(
             for field in dataclasses.fields(winton.WintonForcing)
             if field.name not in supplied
         ]
+        if unsupplied and require_complete and "atm" in present:
+            raise ValueError(
+                "A Winton sea ice is coupled to an atmosphere through the "
+                "default coupling table, which does not supply the ice's "
+                f"forcing fields {', '.join(unsupplied)}: they would stay at "
+                "their initial values for the whole run, so the ice would "
+                "not respond to the atmosphere. Supply them with an exchanger "
+                "of your own (coupling.exchanger or coupling.exchangers) that "
+                "reads what your atmosphere publishes. See "
+                "docs/source/design/winton_seaice.md and "
+                f"{WINTON_FORCING_ISSUE}."
+            )
         if unsupplied:
             logger.warning(
                 "The default coupling does not supply the Winton sea ice's "
                 "forcing fields %s: they stay at their initial values unless "
                 "an exchanger of your own writes them (see "
-                "docs/source/design/winton_seaice.md).",
-                ", ".join(unsupplied),
+                "docs/source/design/winton_seaice.md and %s).",
+                ", ".join(unsupplied), WINTON_FORCING_ISSUE,
             )
     if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
         logger.warning(
@@ -919,6 +954,7 @@ def _grid_direction(src_component: str, dst_component: str) -> str | None:
 def default_exchangers(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, Callable[[Any], Any]] | None = None,
+    require_complete: bool = False,
 ) -> dict[str, Exchanger]:
     """Return the standard coupling as a coupler's ``exchangers=`` argument.
 
@@ -944,6 +980,10 @@ def default_exchangers(
                 "o2a_flux": ESMFRegridder(o2a_conservative_weights),
                 "o2a_state": ESMFRegridder(o2a_bilinear_weights),
             })
+    require_complete : bool, optional
+        Passed to :func:`default_exchanges`, which documents it: raise
+        rather than warn when the table leaves a coupled component's forcing
+        unsupplied.
 
     Returns
     -------
@@ -953,7 +993,7 @@ def default_exchangers(
     regridders = dict(regrid or {})
     names = {key: key for key in regridders}
     return {DEFAULT_EXCHANGER_NAME: Exchange(
-        default_exchanges(components, names), regridders
+        default_exchanges(components, names, require_complete), regridders
     )}
 
 

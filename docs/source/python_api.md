@@ -192,8 +192,12 @@ models'. The model has no timestep: it advances by the coupler's.
 `default_exchanges` wires what the ice can take from the ocean -- the
 freeze/melt potential and the sea surface temperature -- and logs the forcing
 fields it leaves unsupplied (surface radiation, air state, snowfall, the
-atmosphere's open-sea flux, the ice velocity). Those come from an exchanger of
-your own; {doc}`design/winton_seaice` states the contract for each.
+atmosphere's open-sea flux, the ice velocity). From Python that is a warning,
+so a forced or standalone ice works; the Hydra path raises instead when an
+atmosphere is coupled. Those fields come from an exchanger of your own
+([issue #141](https://github.com/climate-analytics-lab/jax-esm/issues/141));
+{doc}`design/winton_seaice` states the contract for each. The atmosphere sees
+the ice through the sea-ice fraction (`sice_am`).
 
 ## Parameters: process and initial condition
 

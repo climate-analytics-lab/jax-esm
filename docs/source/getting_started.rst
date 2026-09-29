@@ -131,10 +131,13 @@ Several things worth knowing:
   expands ``${...}`` to nothing first, so the override arrives empty.
 - **``seaice=winton`` couples less by default than ``seaice=slab``.** The
   default coupling gives the Winton ice what it can take from the ocean (the
-  freeze/melt potential and the sea surface temperature) and logs the forcing
-  fields left unsupplied -- its surface radiation, air state, snowfall and
-  the atmosphere's open-sea flux -- which an exchanger of the coupled model's own
-  writes. :doc:`design/winton_seaice` has the contract.
+  freeze/melt potential and the sea surface temperature). Its surface
+  radiation, air state, snowfall and the atmosphere's open-sea flux are not
+  supplied, so with an ``atm`` component and no ``coupling.exchanger`` or
+  ``coupling.exchangers`` the run **refuses to build**, naming those fields,
+  until an exchanger of the coupled model's own writes them (issue #141).
+  The atmosphere sees the ice through the sea-ice fraction (``sice_am``).
+  :doc:`design/winton_seaice` has the contract.
 - **A ``+`` prefixes a key that has no YAML entry to override**, such as
   ``+ocean.params.relaxation_time=1e6``: the component's physics defaults live
   on its Python class, not in a YAML file, so there is no key there for a

@@ -5,8 +5,10 @@
 #
 # The runner injects `grid=`. The default coupling fills only the fields this
 # model can take from the ocean; the atmosphere-side inputs need an exchanger
-# of their own (see docs/source/design/winton_seaice.md), and
-# `default_exchanges` logs which fields are left unsupplied.
+# of their own (see docs/source/design/winton_seaice.md and issue #141). With an
+# `atm` component and no `coupling.exchanger`/`coupling.exchangers`, building
+# the coupling raises naming the unsupplied fields rather than running an ice
+# that never sees the atmosphere.
 _target_: jem.components.WintonSeaiceModel
 params:
   _target_: jem.components.slab.WintonSeaiceParameters

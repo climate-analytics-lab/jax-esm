@@ -312,7 +312,10 @@ def build_exchangers(
       ``{src, dst, regrid}`` mappings.
     - neither (both ``null``, the default) --
       :func:`jem.exchangers.default_exchangers` for whichever components were
-      built, which is where the standard wiring is written down once.
+      built, which is where the standard wiring is written down once. It is
+      called with ``require_complete=True``: a table that leaves a coupled
+      component's forcing unsupplied (a sea ice's atmospheric forcing,
+      issue #141) raises here, where the Python API only warns.
 
     Parameters
     ----------
@@ -332,7 +335,9 @@ def build_exchangers(
     ValueError
         If both ``exchanger`` and ``exchangers`` are set; they are two answers
         to one question, and guessing which was meant is worse than asking.
-        Also if ``exchanger`` is a mapping with no ``_target_`` -- otherwise
+        Also if the default table cannot drive a component it couples
+        (``require_complete``, above), and if ``exchanger`` is a mapping with
+        no ``_target_`` -- otherwise
         ``hydra.utils.instantiate`` would silently return it as a plain
         ``dict``, a non-callable that only fails once the coupled step is
         traced, far from this call and naming nothing about the cause.
@@ -379,7 +384,9 @@ def build_exchangers(
         roles = {
             role: regridders[role] for role in REGRID_ROLES if role in regridders
         }
-        return default_exchangers(components, regrid=roles)
+        # A run from config has no Python caller to have read the warning, so
+        # a table that leaves a component's forcing unsupplied is an error.
+        return default_exchangers(components, regrid=roles, require_complete=True)
     table = OmegaConf.to_container(specs, resolve=True, throw_on_missing=True)
     if not isinstance(table, list):
         raise TypeError(
