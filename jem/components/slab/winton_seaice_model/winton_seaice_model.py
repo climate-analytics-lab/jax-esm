@@ -39,19 +39,45 @@ Provenance and licence: the thermodynamic core is a port of MITgcm pkg/thsice (M
 Flato and Hibler 1992). `tests/reference/thsice` rebuilds the Fortran oracle the port is checked against.
 """
 
+import dataclasses
+import logging
+import math
 from typing import Any
 
 import jax
 import jax.numpy as jnp
-import jax_datetime as jdt
+import jcm.constants as jcm_constants
 import tree_math
+from jcm.physics.speedy.params import ModRadConParameters, SurfaceFluxParameters
 
-from jem.components.slab.base import _DEFAULT_START_DATETIME, SlabModelBase
+from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.components.slab.base import (
+    MASKED_SURFACE_TEMPERATURE,
+    SlabModelBase,
+    forcing_variable,
+    role_attrs,
+)
 from jem.components.slab.grid import SlabGrid
-from jem.components.slab.winton_seaice_model.ice_transport import transport_fields
-from jem.utils.bulk_op import stack_objects
+from jem.components.slab.winton_seaice_model.ice_transport import (
+    IceTransportGrid,
+    transport_fields,
+)
+from jem.components.slab.winton_seaice_model.params import WintonSeaiceParameters
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- constants (Winton 2000 Table 1)
+# These are the constants of the thsice scheme itself, and they differ from
+# jcm.constants' where the two model families made different choices (ice
+# density 905 here against jcm's 917, heat of fusion 3.34e5 against 3.33e5).
+# They are kept module-level and fixed because the machine-precision comparison
+# against the Fortran oracle (tests/reference/thsice) is a comparison of *this*
+# parameter set, and because the ice and snow columns are integrated as a
+# closed enthalpy budget in these units: the ocean is charged in joules, so the
+# budget closes whichever value the atmosphere uses. Quantities the ice shares
+# with the atmosphere's surface-flux scheme (cpd, rd, p0, sbc, alhc) are read
+# from jcm.constants when the step is traced, so a set_constants(...) override
+# reaches the bulk fluxes over ice as it reaches the atmosphere.
 RHO_ICE = 905.0
 RHO_SNOW = 330.0
 RHO_SW = 1026.0          # seawater, for flooding
@@ -64,17 +90,18 @@ MU = 0.054
 S_ICE = 1.0
 T_MELT = -MU * S_ICE     # brine melting point used in the enthalpy (thsice Tmlt1)
 T_SURF_MELT = 0.0        # thsice clamps the melting surface at 0 degC (snow or bare ice)
+# Freezing point of the seawater under the ice (degC). It is the value of
+# jem.constants.seawater_freezing_point_K (271.35 K) expressed in the ice
+# model's degC; it is fixed here rather than read live because the layer
+# enthalpies and the oracle comparison are built on it.
 T_FREEZE = -1.8
 Q_SNOW = L_ICE           # thsice qsnow
 FLOOD_FAC = (RHO_SW - RHO_ICE) / RHO_SNOW
 B_MELT = 0.006           # thsice bMeltCoef
 USTAR_SLAB = 5.0e-3      # thsice ustar for zero ocean velocity: sqrt(25e-6)
-# Bulk-flux constants and parameters over ice come from JCM at call time (jcm.constants.physical_constants and the
-# SPEEDY SurfaceFluxParameters / ModRadConParameters the coupled atmosphere uses), so an override on the JCM side
-# is seen here too; the model constructor takes the parameter objects explicitly.
-from jcm import constants as jcm_constants
-from jcm.physics.speedy.params import ModRadConParameters, SurfaceFluxParameters
 
+# The Celsius-to-Kelvin offset of the ice model's degC state, a unit
+# conversion rather than a physical constant to override.
 KELVIN = 273.15
 
 
@@ -203,37 +230,59 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     the base. snowfall: kg/m2/s. Returns (h, hs, q1, q2, energy_to_ocean [J/m2], vanished),
     where energy_to_ocean is the melt surplus (positive) or, if the column vanished, minus
     the energy the ocean must supply to melt what was left (negative).
+
+    Every division whose denominator can be zero on a branch that a ``where`` later
+    discards uses the double-``where`` form (a safe stand-in denominator, then the
+    select). A floor such as ``maximum(x, 1e-300)`` underflows to exactly zero in
+    float32, the dtype of a JEM run, and reverse-mode AD then turns the discarded
+    branch's ``0 * inf`` into NaN.
     """
     h1 = h2 = 0.5 * h
     etop = jnp.maximum(M_s, 0.0) * dt
     ebot = (F_cb + F_b) * dt          # > 0 melts the base, < 0 freezes
     # --- top melt: snow, layer 1, layer 2
     rq = RHO_SNOW * Q_SNOW
-    d = jnp.minimum(etop / rq, hs); hs = hs - d; etop = etop - d * rq
+    d = jnp.minimum(etop / rq, hs)
+    hs = hs - d
+    etop = etop - d * rq
     rq = RHO_ICE * q1
-    d = jnp.minimum(etop / rq, h1); h1 = h1 - d; etop = etop - d * rq
+    d = jnp.minimum(etop / rq, h1)
+    h1 = h1 - d
+    etop = etop - d * rq
     rq = RHO_ICE * q2
-    d = jnp.minimum(etop / rq, h2); h2 = h2 - d; etop = etop - d * rq
+    d = jnp.minimum(etop / rq, h2)
+    h2 = h2 - d
+    etop = etop - d * rq
     # --- basal growth
     qbot = -C_ICE * T_FREEZE + L_ICE
     dhi = jnp.where(ebot < 0.0, -ebot / (qbot * RHO_ICE), 0.0)
-    q2 = jnp.where(h2 + dhi > 0.0, (h2 * q2 + dhi * qbot) / jnp.maximum(h2 + dhi, 1e-300), q2)
+    grown = h2 + dhi > 0.0
+    grown_thickness = jnp.where(grown, h2 + dhi, 1.0)
+    q2 = jnp.where(grown, (h2 * q2 + dhi * qbot) / grown_thickness, q2)
     h2 = h2 + dhi
     ebot = jnp.maximum(ebot, 0.0)
     # --- basal melt: layer 2, layer 1, snow
     rq = RHO_ICE * q2
-    d = jnp.minimum(ebot / rq, h2); h2 = h2 - d; ebot = ebot - d * rq
+    d = jnp.minimum(ebot / rq, h2)
+    h2 = h2 - d
+    ebot = ebot - d * rq
     rq = RHO_ICE * q1
-    d = jnp.minimum(ebot / rq, h1); h1 = h1 - d; ebot = ebot - d * rq
+    d = jnp.minimum(ebot / rq, h1)
+    h1 = h1 - d
+    ebot = ebot - d * rq
     rq = RHO_SNOW * Q_SNOW
-    d = jnp.minimum(ebot / rq, hs); hs = hs - d; ebot = ebot - d * rq
+    d = jnp.minimum(ebot / rq, hs)
+    hs = hs - d
+    ebot = ebot - d * rq
     surplus = etop + ebot
     # --- vanishing column: ocean supplies what is left
     h_tot = h1 + h2
     vanished = h_tot < h_min
     left = RHO_ICE * (h1 * q1 + h2 * q2) + RHO_SNOW * Q_SNOW * hs
     surplus = jnp.where(vanished, surplus - left, surplus)
-    h1 = jnp.where(vanished, 0.0, h1); h2 = jnp.where(vanished, 0.0, h2); hs = jnp.where(vanished, 0.0, hs)
+    h1 = jnp.where(vanished, 0.0, h1)
+    h2 = jnp.where(vanished, 0.0, h2)
+    hs = jnp.where(vanished, 0.0, hs)
     # --- snowfall (only on surviving ice)
     hs = hs + jnp.where(vanished, 0.0, snowfall * dt / RHO_SNOW)
     # --- flooding: snow below the waterline becomes ice in layer 1
@@ -241,12 +290,16 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     flood = (hs > h_tot * FLOOD_FAC) & (h_tot > 0.0)
     dhs = jnp.where(flood, (hs - h_tot * FLOOD_FAC) * RHO_ICE / RHO_SW, 0.0)
     dhi = dhs * RHO_SNOW / RHO_ICE
-    q1 = jnp.where(flood, (RHO_ICE * q1 * h1 + RHO_SNOW * Q_SNOW * dhs) / jnp.maximum(RHO_ICE * (h1 + dhi), 1e-300), q1)
-    h1 = h1 + dhi; hs = hs - dhs
+    flooded_mass = jnp.where(flood, RHO_ICE * (h1 + dhi), 1.0)
+    q1 = jnp.where(
+        flood, (RHO_ICE * q1 * h1 + RHO_SNOW * Q_SNOW * dhs) / flooded_mass, q1
+    )
+    h1 = h1 + dhi
+    hs = hs - dhs
     # --- re-equalise layers (thsice inlined THSICE_RESHAPE_LAYERS)
     h_tot = h1 + h2
     hlyr = 0.5 * h_tot
-    safe_hlyr = jnp.maximum(hlyr, 1e-300)
+    safe_hlyr = jnp.where(hlyr > 0.0, hlyr, 1.0)
     f1a = (h1 - hlyr) / safe_hlyr
     q2tmp = f1a * q1 + (1.0 - f1a) * q2
     q1_alt = (h1 * q1 + h2 * q2 - hlyr * q2) / safe_hlyr      # keep q2 if q2tmp <= L (T2 > 0 guard)
@@ -265,7 +318,8 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
 # ---------------------------------------------------------------- JEM component
 @tree_math.struct
 class WintonState:
-    sim_time: jnp.ndarray
+    """What the ice integrates. There is no clock: the coupler owns it."""
+
     ice_thickness: jnp.ndarray          # m, over the ice-covered fraction
     snow_thickness: jnp.ndarray         # m
     ice_fraction: jnp.ndarray
@@ -276,6 +330,14 @@ class WintonState:
 
 @tree_math.struct
 class WintonForcing:
+    """What the other components supply, one coupling step late.
+
+    ``snowfall`` is a liquid-phase mass flux whose latent heat of fusion the
+    supplier has **not** released: the ice charges the ocean the fusion enthalpy
+    of the snow that lands on it (thsice's convention), so a supplier that
+    already released it would have it counted twice.
+    """
+
     rsds: jnp.ndarray
     rlds: jnp.ndarray
     air_temperature: jnp.ndarray        # K
@@ -284,14 +346,48 @@ class WintonForcing:
     normalized_surface_pressure: jnp.ndarray
     snowfall: jnp.ndarray               # kg/m2/s
     sea_surface_temperature: jnp.ndarray   # K
-    ocean_frazil_melt_energy: jnp.ndarray  # J/m2 per coupling step, + = freezing potential
+    ice_frazil_melt_energy: jnp.ndarray    # J/m2 per coupling step, + = freezing potential (CESM frzmlt)
     atm_sea_heat_flux: jnp.ndarray         # W/m2 downward, atmosphere's flux over the sea fraction
-    ice_velocity_u: jnp.ndarray            # m/s along the grid's x (used only with transport enabled)
+    ice_velocity_u: jnp.ndarray            # m/s along the grid's x (used only with transport)
     ice_velocity_v: jnp.ndarray            # m/s along the grid's y
+
+    @classmethod
+    def initial(cls, shape):
+        """Return the forcing under which ice at the freezing point stays put.
+
+        Coupling is lagged, so the first step integrates whatever
+        :meth:`WintonSeaiceModel.initialize` leaves here. Air and sea at the
+        freezing point, a blackbody downward longwave flux at that temperature
+        and the saturation humidity over ice there leave no surface flux
+        of consequence, so the first step neither melts nor grows the ice for
+        want of a supplier. Wind and pressure are the exceptions that are not
+        zero: a zero surface pressure makes the air density infinite, and the
+        turbulent exchange velocity is built from the wind.
+        """
+        zeros = jnp.zeros(shape)
+        freezing = KELVIN + T_FREEZE
+        pressure = 1.0
+        humidity, _ = qsat_ice(freezing, jcm_constants.p0 * pressure)
+        return cls(
+            rsds=zeros,
+            rlds=zeros + jcm_constants.sbc * freezing**4,
+            air_temperature=zeros + freezing,
+            air_specific_humidity=zeros + humidity,
+            wind_speed=zeros + 5.0,
+            normalized_surface_pressure=zeros + pressure,
+            snowfall=zeros,
+            sea_surface_temperature=zeros + freezing,
+            ice_frazil_melt_energy=zeros,
+            atm_sea_heat_flux=zeros,
+            ice_velocity_u=zeros,
+            ice_velocity_v=zeros,
+        )
 
 
 @tree_math.struct
 class WintonDerived:
+    """What the ice diagnoses, for the other components and for output."""
+
     ice_fraction: jnp.ndarray
     effective_sea_surface_temperature: jnp.ndarray
     ocean_heat_flux_up: jnp.ndarray
@@ -305,98 +401,187 @@ class WintonDerived:
     ice_albedo: jnp.ndarray                 # effective albedo of the ice-covered part (snow-aware)
     ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; THERMODYNAMIC rate of change of the ice+snow enthalpy (relative to water at 0 C), i.e. the exchange with ocean and atmosphere; transport is excluded
     ice_energy_transport: jnp.ndarray       # W/m2 per cell area; change of ice+snow enthalpy by transport convergence (zero without transport)
+    ocean_frazil_heating: jnp.ndarray       # W/m2; latent heat of the frazil ice the ocean clamped at freezing, returned to the ocean top layer
+
+    @classmethod
+    def zeros(cls, shape, **overrides):
+        """Zero-filled derived fields on a ``shape`` grid, with ``overrides`` in place."""
+        zeros = jnp.zeros(shape)
+        return cls(**{
+            field.name: overrides.get(field.name, zeros)
+            for field in dataclasses.fields(cls)
+        })
 
 
 class WintonSeaiceModel(SlabModelBase):
-    """JEM component wrapping the Winton/thsice thermodynamics with a Hibler lead closure."""
+    """Three-layer thermodynamic sea ice: snow, two ice layers and a Hibler lead closure.
+
+    Each ocean cell holds an ice-covered fraction ``f`` with ice of thickness
+    ``h`` and snow of thickness ``hs`` over that fraction, two ice-layer
+    temperatures and the surface temperature. Every coupling step integrates
+    ``n_substeps`` thermodynamic substeps (an implicit surface-temperature
+    solve, surface and basal melt or growth, snowfall, flooding and layer
+    re-equalisation, then the lead closure for the fraction) and, if the model
+    was built with transport, one conservative advection-diffusion step of the
+    ice. Water and enthalpy diagnostics are exact for the thermodynamic state,
+    so a coupler can close the ice-ocean-atmosphere budget.
+
+    The numerics, provenance and sign conventions are in the module docstring;
+    the coupling contract -- which fields the ice needs, which it publishes and
+    what the default exchange fills -- is in ``docs/source/design/winton_seaice.md``.
+
+    The model advances by the coupler's ``time.dt``; it has no timestep or
+    clock of its own. Its tunables travel in ``carry["params"]`` as a
+    :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceParameters`.
+    """
 
     def __init__(
         self,
         grid: SlabGrid,
-        start_datetime: jdt.Datetime = _DEFAULT_START_DATETIME,
-        timestep: float = 86400.0,
-        n_substeps: int = 4,
-        n_flux_iterations: int = 3,
-        ice_albedo: float = 0.60,            # bare ice
-        snow_albedo: float | None = None,    # dry snow on ice (None: snow takes ice_albedo)
-        snow_melt_albedo: float | None = None,  # melting snow (surface at 0 C)
-        i0_fraction: float = 0.3,
-        ksolar: float = 1.5,
-        lead_closing_thickness: float = 0.5,
-        min_ice_thickness: float = 0.01,
-        min_ice_fraction: float = 0.01,
-        initial_ice_thickness: float = 0.0,
-        mask_value: float = 0.0,
-        calendar: str = "365_day",
-        transport: dict | None = None,
-        surface_flux_parameters: SurfaceFluxParameters | None = None,
-        emissivity=None,
+        params: WintonSeaiceParameters | None = None,
+        *,
+        name: str = "seaice",
+        transport: IceTransportGrid | bool = False,
     ):
-        """transport: None (thermodynamics only) or dict(dx=, dy= (m, cell centres, grid shape), cyclic_x=True,
-        diffusivity=2e4 m2/s, n_substeps=12): advect the ice with forcing.ice_velocity_{u,v} and diffuse it.
-        surface_flux_parameters / emissivity: the JCM SurfaceFluxParameters and longwave emissivity used for the
-        bulk fluxes over ice; pass the same objects the coupled atmosphere runs with (defaults: JCM's defaults)."""
-        self.surface_flux_parameters = SurfaceFluxParameters.default() if surface_flux_parameters is None else surface_flux_parameters
-        self.emissivity = ModRadConParameters.default().emisfc if emissivity is None else emissivity
-        self.n_substeps = n_substeps
-        self.n_flux_iterations = n_flux_iterations
-        self.ice_albedo = ice_albedo
-        self.snow_albedo = ice_albedo if snow_albedo is None else snow_albedo
-        self.snow_melt_albedo = self.snow_albedo if snow_melt_albedo is None else snow_melt_albedo
-        self.i0_fraction = i0_fraction
-        self.ksolar = ksolar
-        self.lead_closing_thickness = lead_closing_thickness
-        self.min_ice_thickness = min_ice_thickness
-        self.min_ice_fraction = min_ice_fraction
-        self.initial_ice_thickness = initial_ice_thickness
-        self.mask_value = mask_value
-        super().__init__(name="WintonSeaiceModel", grid=grid, start_datetime=start_datetime,
-                         timestep=timestep, calendar=calendar)
-        self.transport = None
-        if transport is not None:
-            self.transport = {"cyclic_x": True, "diffusivity": 2e4, "n_substeps": 12, **transport}
-            self.transport["dx"] = jnp.asarray(self.transport["dx"], dtype=float)
-            self.transport["dy"] = jnp.asarray(self.transport["dy"], dtype=float)
+        """Initialize the Winton sea-ice model.
 
-    def initialize(self):
+        Parameters
+        ----------
+        grid : SlabGrid
+            The model's grid.
+        params : WintonSeaiceParameters, optional
+            Tunable parameters; defaults to
+            :meth:`WintonSeaiceParameters.default`. They are what
+            :meth:`initialize` builds the initial state from unless it is
+            handed parameters of its own, and what the checks below are made
+            against: validation applies to these concrete, construction-time
+            values. ``initialize(params)`` is the differentiable entry point
+            for the initial condition and takes traced values, so it is
+            deliberately not re-validated there.
+        name : str
+            Component name in the coupler's workflow and carry. The default is
+            the name the standard coupling wires the sea ice under
+            (:func:`jem.exchangers.default_exchanges`).
+        transport : IceTransportGrid or bool
+            ``False`` (the default) integrates thermodynamics only. ``True``
+            also advects and diffuses the ice, with grid metrics derived from a
+            separable lon/lat ``grid`` (:meth:`IceTransportGrid.from_grid`);
+            pass an :class:`IceTransportGrid` for any other grid. The
+            diffusivity and substep count are in ``params``.
+
+        Raises
+        ------
+        ValueError
+            If a parameter is outside the range the scheme is defined on (a
+            non-finite value, a non-positive lead-closing thickness, a substep
+            or iteration count below one), or if the transport metrics do not
+            have the grid's shape.
+
+        """
+        super().__init__(name=name, grid=grid)
+        self.params = WintonSeaiceParameters.default() if params is None else params
+        _validate_parameters(self.params)
+
+        self.transport: IceTransportGrid | None
+        if isinstance(transport, IceTransportGrid):
+            self.transport = transport
+        elif transport:
+            self.transport = IceTransportGrid.from_grid(grid)
+        else:
+            self.transport = None
+        if self.transport is not None:
+            for metric_name in ("dx", "dy"):
+                metric = getattr(self.transport, metric_name)
+                if tuple(jnp.shape(metric)) != tuple(grid.shape):
+                    raise ValueError(
+                        f"Transport metric {metric_name} has shape "
+                        f"{tuple(jnp.shape(metric))} but the grid has shape "
+                        f"{tuple(grid.shape)}."
+                    )
+            logger.info("%s: ice transport enabled (cyclic_x=%s)", name, self.transport.cyclic_x)
+
+    def _ocean_cells(self, params: WintonSeaiceParameters) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates."""
+        return self.grid.binary_mask == params.ocean_mask_value
+
+    def initialize(self, params: WintonSeaiceParameters | None = None) -> Carry:
+        """Build the initial sea-ice carry.
+
+        Parameters
+        ----------
+        params : WintonSeaiceParameters, optional
+            Parameters to start from; defaults to the ones the model was
+            constructed with. ``initial_ice_thickness`` is read here and
+            nowhere else, so this is the entry point that makes it
+            differentiable. The same object goes into ``carry["params"]``, so
+            the process parameters ``step`` reads are the ones the initial
+            state was built from.
+
+        """
+        params = self._initial_params(params)
         shape = self.grid.shape
-        ocn = self.grid.binary_mask == self.mask_value
-        h = jnp.where(ocn, self.initial_ice_thickness, 0.0)
-        f = jnp.where(h > 0, 1.0, 0.0)
-        z = jnp.zeros(shape)
-        state = WintonState(jnp.zeros(()), h, z, f, z + T_FREEZE, z + T_FREEZE, z + T_FREEZE)
-        forcing = WintonForcing(z, z, z + 288.15, z + 1e-3, z + 5.0, z + 1.0, z, z + 288.15, z, z, z, z)
-        derived = WintonDerived(f, z + 288.15, z, z + KELVIN + T_FREEZE, h * f, z, z, z, z, z, z + self.ice_albedo, z, z)
-        return {"state": state, "forcing": forcing, "derived": derived}
+        ocean = self._ocean_cells(params)
+        thickness = jnp.where(ocean, jnp.asarray(params.initial_ice_thickness), 0.0)
+        fraction = jnp.where(thickness > 0, 1.0, 0.0)
+        zeros = jnp.zeros(shape)
+        # mypy cannot see the fields `tree_math.struct` gives the class.
+        state = WintonState(  # type: ignore[call-arg]
+            thickness, zeros, fraction,
+            zeros + T_FREEZE, zeros + T_FREEZE, zeros + T_FREEZE,
+        )
+        forcing = WintonForcing.initial(shape)
+        derived = _derived_from_state(
+            WintonDerived.zeros(shape), state, forcing, ocean, params
+        )
+        return {"params": params, "state": state, "forcing": forcing, "derived": derived}
 
-    def _create_step_function_body(self):
-        ocn = self.grid.binary_mask == self.mask_value
-        n = self.n_substeps
-        dt = self.timestep / n
-        h_min, f_min, h0 = self.min_ice_thickness, self.min_ice_fraction, self.lead_closing_thickness
+    def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
+        """Integrate the ice over one coupling step of ``time.dt`` seconds."""
+        params = carry["params"]
+        forcing = carry["forcing"]
+        new_state, derived = self._advance(params, carry["state"], forcing, time.dt)
+        diagnostics = {"state": new_state, "forcing": forcing, "derived": derived}
+        return {"params": params, **diagnostics}, diagnostics
+
+    def _advance(
+        self,
+        params: WintonSeaiceParameters,
+        state: WintonState,
+        forcing: WintonForcing,
+        coupling_dt: float,
+    ) -> tuple[WintonState, WintonDerived]:
+        """Advance ``state`` by one coupling step and diagnose the step's budgets."""
+        ocean = self._ocean_cells(params)
+        n = params.n_substeps
+        dt = coupling_dt / n
+        h_min, f_min, h0 = params.min_ice_thickness, params.min_ice_fraction, params.lead_closing_thickness
+        ice_albedo = params.ice_albedo
+        snow_albedo = ice_albedo if params.snow_albedo is None else params.snow_albedo
+        snow_melt_albedo = snow_albedo if params.snow_melt_albedo is None else params.snow_melt_albedo
         qbot = -C_ICE * T_FREEZE + L_ICE
+        fc = forcing
 
-        def substep(carry, _):
-            s, fc = carry
+        def flux_fn(Ts_c):
+            return ice_surface_flux(Ts_c, fc.rlds, fc.air_temperature, fc.air_specific_humidity,
+                                    fc.wind_speed, fc.normalized_surface_pressure,
+                                    sfp=params.surface_flux, emis=params.emissivity)
+
+        def substep(s, _):
             h, hs, f, T1, T2, Ts = (s.ice_thickness, s.snow_thickness, s.ice_fraction,
                                     s.upper_ice_temperature, s.lower_ice_temperature, s.ice_surface_temperature)
             icy = (h > h_min) & (f > f_min)
             h_safe = jnp.where(icy, h, 1.0)
 
-            def flux_fn(Ts_c):
-                return ice_surface_flux(Ts_c, fc.rlds, fc.air_temperature, fc.air_specific_humidity,
-                                        fc.wind_speed, fc.normalized_surface_pressure,
-                                        sfp=self.surface_flux_parameters, emis=self.emissivity)
-
-            albedo = jnp.where(hs > 1e-3, jnp.where(Ts > -0.1, self.snow_melt_albedo, self.snow_albedo), self.ice_albedo)
+            albedo = jnp.where(hs > 1e-3, jnp.where(Ts > -0.1, snow_melt_albedo, snow_albedo), ice_albedo)
             sw_abs = fc.rsds * (1.0 - albedo)
             T1n, T2n, Tsn, M_s, F_cb, sw_ocn = winton_temperature_step(
-                h_safe, hs, T1, T2, Ts, flux_fn, sw_abs, dt, self.i0_fraction, self.ksolar, self.n_flux_iterations)
+                h_safe, hs, T1, T2, Ts, flux_fn, sw_abs, dt, params.i0_fraction, params.ksolar,
+                params.n_flux_iterations)
             F_nonsw, _ = flux_fn(Tsn)
             F_ice_atm = F_nonsw + sw_abs
             sst_c = fc.sea_surface_temperature - KELVIN
             F_b_raw = jnp.maximum(RHO_SW * C_W * B_MELT * USTAR_SLAB * (sst_c - T_FREEZE), 0.0)
-            surplus_flux = jnp.maximum(-fc.ocean_frazil_melt_energy, 0.0) / self.timestep
+            surplus_flux = jnp.maximum(-fc.ice_frazil_melt_energy, 0.0) / coupling_dt
             F_b = jnp.minimum(F_b_raw, surplus_flux)
             hn, hsn, q1n, q2n, e_ocn, vanished = winton_mass_step(
                 h_safe, hs, q_from_T1(T1n), q_from_T2(T2n), M_s, F_b, F_cb, fc.snowfall, dt, h_min)
@@ -406,7 +591,7 @@ class WintonSeaiceModel(SlabModelBase):
             fn_t = f * (1.0 - 0.5 * dh_melt / h_safe)
             hn = jnp.where(fn_t > 0.0, f * hn / jnp.maximum(fn_t, 1e-12), hn)
             # frazil (per cell area, per substep): the ocean's freezing potential makes ice at enthalpy qbot
-            frazil = jnp.maximum(fc.ocean_frazil_melt_energy, 0.0) / n
+            frazil = jnp.maximum(fc.ice_frazil_melt_energy, 0.0) / n
             v_frazil = frazil / (RHO_ICE * qbot)
             alive_before = icy & ~vanished
             # ice below the thermodynamic thresholds (a sliver, e.g. diffused in by transport or freshly frozen):
@@ -443,103 +628,178 @@ class WintonSeaiceModel(SlabModelBase):
                     + jnp.where(icy, f * (sw_ocn + e_ocn / dt - F_b), 0.0)
                     + jnp.where(icy & ~vanished, f * fc.snowfall * L_ICE, 0.0)
                     - e_dispose / dt)
-            new_s = WintonState(s.sim_time + dt, hn * ocn, hsn * ocn, fn * ocn, T1n, T2n, Tsn)
+            new_s = WintonState(hn * ocean, hsn * ocean, fn * ocean, T1n, T2n, Tsn)
             intercepted = jnp.where(icy & ~vanished, f * fc.snowfall * dt, 0.0)   # snow mass that landed on ice, kg/m2
             diag = (jnp.where(icy, M_s, 0.0), jnp.where(icy, -(F_b + F_cb), 0.0), jnp.where(icy, F_ice_atm, 0.0), -down,
-                    intercepted, jnp.where(icy, albedo, self.ice_albedo))
-            return (new_s, fc), diag
+                    intercepted, jnp.where(icy, albedo, ice_albedo))
+            return new_s, diag
 
-        def apply_transport(s, fc):
-            """Move the conserved quantities (area, ice and snow volume, layer enthalpies, area-weighted Ts),
-            then rebuild the state; convergence beyond full cover ridges (thickness up, fraction capped)."""
-            tr = self.transport
-            f, h, hs = s.ice_fraction, s.ice_thickness, s.snow_thickness
-            V = f * h
-            # all transported quantities must be non-negative (the scheme clips at zero): Ts is in degC <= 0, so carry -Ts
-            fields = (f, V, f * hs, 0.5 * V * q_from_T1(s.upper_ice_temperature), 0.5 * V * q_from_T2(s.lower_ice_temperature),
-                      -f * s.ice_surface_temperature)
-            fn, Vn, Vsn, Q1n, Q2n, FTn = transport_fields(
-                fields, fc.ice_velocity_u, fc.ice_velocity_v, tr["dx"], tr["dy"], ocn, self.timestep,
-                tr["diffusivity"], tr["n_substeps"], tr["cyclic_x"], compact_threshold=0.98)
-            # Ice arriving in (nearly) empty cells comes with a diluted fraction; give it at least the lead-closing
-            # thickness h0 (fraction from volume) and a fraction above the thermodynamics' threshold. Nothing is
-            # discarded here: sub-threshold slivers are kept by the next thermodynamic step while the ocean freezes,
-            # or melted back into it with their enthalpy charged to the ocean, so nothing leaks.
-            diluted = fn < 2.0 * f_min
-            f_use = jnp.where(diluted, jnp.clip(jnp.minimum(1.0, Vn / h0), 2.0 * f_min, 1.0), jnp.minimum(fn, 1.0))
-            alive = Vn > 0.0
-            fs = jnp.where(alive, f_use, 1.0)
-            half_v = jnp.where(alive, 0.5 * Vn, 1.0)
-            Ts_avg = jnp.clip(-FTn / jnp.maximum(fn, 1e-12), -80.0, 0.0)    # transported area-weighted mean
-            return WintonState(
-                s.sim_time, jnp.where(alive, Vn / fs, 0.0), jnp.where(alive, Vsn / fs, 0.0), jnp.where(alive, f_use, 0.0),
-                jnp.where(alive, jnp.clip(T1_from_q(Q1n / half_v), -80.0, T_MELT), T_FREEZE),
-                jnp.where(alive, jnp.clip(T2_from_q(Q2n / half_v), -80.0, 0.0), T_FREEZE),
-                jnp.where(alive, Ts_avg, T_FREEZE))
+        new_state, diags = jax.lax.scan(substep, state, None, length=n)
+        m_s, growth, f_ice_atm, q_up, intercepted, albedo = (d.mean(axis=0) for d in diags)
 
-        def step_function(carry, step):
-            state, forcing = carry["state"], carry["forcing"]
-            (new_state, _), diags = jax.lax.scan(substep, (state, forcing), None, length=n)
-            m_s, growth, f_ice_atm, q_up, intercepted, albedo = (d.mean(axis=0) for d in diags)
-            f = new_state.ice_fraction
-            # water budget: ice+snow mass change minus snowfall intercepted by ice = water taken from the ocean
-            def mass(st):
-                return st.ice_fraction * (RHO_ICE * st.ice_thickness + RHO_SNOW * st.snow_thickness)
-            fw_up = (mass(new_state) - mass(state) - intercepted * n) / self.timestep
-            def energy(st):   # J/m2 per cell area, relative to liquid water at 0 C (ice/snow are negative)
-                return -st.ice_fraction * column_enthalpy_to_melt(st.ice_thickness, st.snow_thickness,
-                                                                   q_from_T1(st.upper_ice_temperature), q_from_T2(st.lower_ice_temperature))
-            de_dt = (energy(new_state) - energy(state)) / self.timestep     # thermodynamic tendency: exchange with ocean/atm
-            # transport after the local budgets above: it moves ice between cells and exchanges nothing with the ocean
-            thermo_state = new_state
-            if self.transport is not None:
-                new_state = apply_transport(new_state, forcing)
-            de_transport = (energy(new_state) - energy(thermo_state)) / self.timestep   # convergence of ice enthalpy
-            f = new_state.ice_fraction                                         # every derived field from the final state
-            Ts_K = new_state.ice_surface_temperature + KELVIN
-            derived = WintonDerived(
-                ice_fraction=f,
-                effective_sea_surface_temperature=(1.0 - f) * forcing.sea_surface_temperature + f * Ts_K,
-                ocean_heat_flux_up=q_up,
-                ice_surface_temperature_K=Ts_K,
-                ice_volume=f * new_state.ice_thickness,
-                snow_volume=f * new_state.snow_thickness,
-                surface_melt_flux=m_s,
-                basal_growth_flux=growth,
-                ice_atm_heat_flux=f_ice_atm,
-                ocean_freshwater_flux_up=fw_up,
-                ice_albedo=albedo,
-                ice_energy_tendency=de_dt,
-                ice_energy_transport=de_transport,
-            )
-            result = {"state": new_state, "forcing": forcing, "derived": derived}
-            return result, stack_objects([result])
+        # water budget: ice+snow mass change minus snowfall intercepted by ice = water taken from the ocean
+        def mass(st):
+            return st.ice_fraction * (RHO_ICE * st.ice_thickness + RHO_SNOW * st.snow_thickness)
+        fw_up = (mass(new_state) - mass(state) - intercepted * n) / coupling_dt
 
-        return step_function
+        def energy(st):   # J/m2 per cell area, relative to liquid water at 0 C (ice/snow are negative)
+            return -st.ice_fraction * column_enthalpy_to_melt(
+                st.ice_thickness, st.snow_thickness,
+                q_from_T1(st.upper_ice_temperature), q_from_T2(st.lower_ice_temperature))
+        de_dt = (energy(new_state) - energy(state)) / coupling_dt     # thermodynamic tendency: exchange with ocean/atm
+        # transport after the local budgets above: it moves ice between cells and exchanges nothing with the ocean
+        thermo_state = new_state
+        if self.transport is not None:
+            new_state = self._apply_transport(params, new_state, forcing, coupling_dt, ocean)
+        de_transport = (energy(new_state) - energy(thermo_state)) / coupling_dt   # convergence of ice enthalpy
 
-    def _create_xarray_data_vars(self, predictions) -> dict[str, Any]:
+        # every derived field from the final state
+        derived = _derived_from_state(
+            WintonDerived.zeros(self.grid.shape), new_state, forcing, ocean, params
+        ).replace(
+            ocean_heat_flux_up=q_up,
+            surface_melt_flux=m_s,
+            basal_growth_flux=growth,
+            ice_atm_heat_flux=f_ice_atm,
+            ocean_freshwater_flux_up=fw_up,
+            ice_albedo=albedo,
+            ice_energy_tendency=de_dt,
+            ice_energy_transport=de_transport,
+            ocean_frazil_heating=jnp.maximum(forcing.ice_frazil_melt_energy, 0.0) / coupling_dt,
+        )
+        return new_state, derived
+
+    def _apply_transport(
+        self,
+        params: WintonSeaiceParameters,
+        s: WintonState,
+        fc: WintonForcing,
+        coupling_dt: float,
+        ocean: jnp.ndarray,
+    ) -> WintonState:
+        """Move the conserved quantities (area, ice and snow volume, layer enthalpies, area-weighted Ts),
+        then rebuild the state; convergence beyond full cover ridges (thickness up, fraction capped).
+        """
+        assert self.transport is not None
+        tr = self.transport
+        h_min_frac, h0 = params.min_ice_fraction, params.lead_closing_thickness
+        f, h, hs = s.ice_fraction, s.ice_thickness, s.snow_thickness
+        V = f * h
+        # all transported quantities must be non-negative (the scheme clips at zero): Ts is in degC <= 0, so carry -Ts
+        fields = (f, V, f * hs, 0.5 * V * q_from_T1(s.upper_ice_temperature), 0.5 * V * q_from_T2(s.lower_ice_temperature),
+                  -f * s.ice_surface_temperature)
+        fn, Vn, Vsn, Q1n, Q2n, FTn = transport_fields(
+            fields, fc.ice_velocity_u, fc.ice_velocity_v, jnp.asarray(tr.dx), jnp.asarray(tr.dy), ocean, coupling_dt,
+            params.transport_diffusivity, params.transport_n_substeps, tr.cyclic_x, compact_threshold=0.98)
+        # Ice arriving in (nearly) empty cells comes with a diluted fraction; give it at least the lead-closing
+        # thickness h0 (fraction from volume) and a fraction above the thermodynamics' threshold. Nothing is
+        # discarded here: sub-threshold slivers are kept by the next thermodynamic step while the ocean freezes,
+        # or melted back into it with their enthalpy charged to the ocean, so nothing leaks.
+        diluted = fn < 2.0 * h_min_frac
+        f_use = jnp.where(diluted, jnp.clip(jnp.minimum(1.0, Vn / h0), 2.0 * h_min_frac, 1.0), jnp.minimum(fn, 1.0))
+        alive = Vn > 0.0
+        fs = jnp.where(alive, f_use, 1.0)
+        half_v = jnp.where(alive, 0.5 * Vn, 1.0)
+        Ts_avg = jnp.clip(-FTn / jnp.maximum(fn, 1e-12), -80.0, 0.0)    # transported area-weighted mean
+        return WintonState(  # type: ignore[call-arg]
+            jnp.where(alive, Vn / fs, 0.0), jnp.where(alive, Vsn / fs, 0.0), jnp.where(alive, f_use, 0.0),
+            jnp.where(alive, jnp.clip(T1_from_q(Q1n / half_v), -80.0, T_MELT), T_FREEZE),
+            jnp.where(alive, jnp.clip(T2_from_q(Q2n / half_v), -80.0, 0.0), T_FREEZE),
+            jnp.where(alive, Ts_avg, T_FREEZE))
+
+    def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
+        """Create xarray data variables for sea-ice output."""
         dims = ("time",) + tuple(self.grid.dims)
-        s, d = predictions["state"], predictions["derived"]
+        s, d, fc = diagnostics["state"], diagnostics["derived"], diagnostics["forcing"]
+        state, derived, forcing = role_attrs("state"), role_attrs("derived"), role_attrs("forcing")
         return {
-            "ice_thickness": (dims, s.ice_thickness, {"units": "m", "long_name": "thickness of ice-covered part"}),
-            "snow_thickness": (dims, s.snow_thickness, {"units": "m"}),
-            "ice_fraction": (dims, s.ice_fraction, {"units": "1"}),
-            "ice_volume": (dims, d.ice_volume, {"units": "m", "long_name": "cell-mean ice thickness"}),
-            "snow_volume": (dims, d.snow_volume, {"units": "m"}),
-            "ice_surface_temperature": (dims, d.ice_surface_temperature_K, {"units": "K"}),
-            "upper_ice_temperature": (dims, s.upper_ice_temperature + KELVIN, {"units": "K"}),
-            "lower_ice_temperature": (dims, s.lower_ice_temperature + KELVIN, {"units": "K"}),
-            "effective_sea_surface_temperature": (dims, d.effective_sea_surface_temperature, {"units": "K"}),
-            "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2"}),
-            "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2"}),
-            "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1"}),
-            "ice_albedo": (dims, d.ice_albedo, {"units": "1"}),
-            "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)"}),
-            "ice_energy_transport": (dims, d.ice_energy_transport, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area by transport convergence"}),
-            "ocean_frazil_heating": (dims, jnp.maximum(predictions["forcing"].ocean_frazil_melt_energy, 0.0) / self.timestep,
-                                     {"units": "W m-2", "long_name": "heat added to the ocean top layer by clamping it at the freezing point (frazil latent heat)"}),
-            "basal_growth_flux": (dims, d.basal_growth_flux, {"units": "W m-2"}),
-            "ice_atm_heat_flux": (dims, d.ice_atm_heat_flux, {"units": "W m-2"}),
-            "ice_velocity_u": (dims, predictions["forcing"].ice_velocity_u, {"units": "m s-1", "long_name": "ice drift along grid x"}),
-            "ice_velocity_v": (dims, predictions["forcing"].ice_velocity_v, {"units": "m s-1", "long_name": "ice drift along grid y"}),
+            "ice_thickness": (dims, s.ice_thickness, {"units": "m", "long_name": "thickness of ice-covered part", **state}),
+            "snow_thickness": (dims, s.snow_thickness, {"units": "m", "long_name": "thickness of snow on the ice-covered part", **state}),
+            "ice_fraction": (dims, s.ice_fraction, {"units": "1", "long_name": "ice-covered fraction of the cell", **state}),
+            "upper_ice_temperature": (dims, s.upper_ice_temperature + KELVIN, {"units": "K", "long_name": "upper ice layer temperature", **state}),
+            "lower_ice_temperature": (dims, s.lower_ice_temperature + KELVIN, {"units": "K", "long_name": "lower ice layer temperature", **state}),
+            "ice_surface_temperature": (dims, d.ice_surface_temperature_K, {"units": "K", "long_name": "ice surface temperature", **derived}),
+            "ice_volume": (dims, d.ice_volume, {"units": "m", "long_name": "cell-mean ice thickness", **derived}),
+            "snow_volume": (dims, d.snow_volume, {"units": "m", "long_name": "cell-mean snow thickness", **derived}),
+            "effective_sea_surface_temperature": (dims, d.effective_sea_surface_temperature, {"units": "K", "long_name": "ice-fraction-weighted sea surface temperature", **derived}),
+            "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2", "long_name": "heat flux from the ocean into the ice-covered cell (positive upward)", **derived}),
+            "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2", "long_name": "surface melt energy flux of the ice-covered part", **derived}),
+            "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1", "long_name": "freshwater removed from the ocean by ice growth (positive upward)", **derived}),
+            "ice_albedo": (dims, d.ice_albedo, {"units": "1", "long_name": "effective albedo of the ice-covered part", **derived}),
+            "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)", **derived}),
+            "ice_energy_transport": (dims, d.ice_energy_transport, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area by transport convergence", **derived}),
+            "ocean_frazil_heating": (dims, d.ocean_frazil_heating, {"units": "W m-2", "long_name": "heat added to the ocean top layer by clamping it at the freezing point (frazil latent heat)", **derived}),
+            "basal_growth_flux": (dims, d.basal_growth_flux, {"units": "W m-2", "long_name": "energy flux out of the ice base of the ice-covered part (positive grows ice)", **derived}),
+            "ice_atm_heat_flux": (dims, d.ice_atm_heat_flux, {"units": "W m-2", "long_name": "heat flux from the atmosphere into the ice-covered part (positive downward)", **derived}),
+            forcing_variable("ice_frazil_melt_energy"): (dims, fc.ice_frazil_melt_energy, {"units": "J m-2", "long_name": "Freeze/melt potential (frzmlt) this component was forced with: positive forms ice, negative melts ice", **forcing}),
+            forcing_variable("ice_velocity_u"): (dims, fc.ice_velocity_u, {"units": "m s-1", "long_name": "ice drift along grid x", **forcing}),
+            forcing_variable("ice_velocity_v"): (dims, fc.ice_velocity_v, {"units": "m s-1", "long_name": "ice drift along grid y", **forcing}),
         }
+
+
+def _derived_from_state(
+    derived: Any,
+    state: Any,
+    forcing: Any,
+    ocean: jnp.ndarray,
+    params: WintonSeaiceParameters,
+) -> Any:
+    """Fill the diagnostics that are pure functions of the final state.
+
+    Shared by ``initialize`` and ``step`` so the initial carry and the stepped
+    carry cannot diverge in how they are derived. Cells the model does not
+    integrate report ``MASKED_SURFACE_TEMPERATURE`` for the ice surface, as
+    every slab model does for a cell it does not integrate.
+    """
+    f = state.ice_fraction
+    surface_K = jnp.where(
+        ocean, state.ice_surface_temperature + KELVIN, MASKED_SURFACE_TEMPERATURE
+    )
+    return derived.replace(
+        ice_fraction=f,
+        effective_sea_surface_temperature=(1.0 - f) * forcing.sea_surface_temperature + f * surface_K,
+        ice_surface_temperature_K=surface_K,
+        ice_volume=f * state.ice_thickness,
+        snow_volume=f * state.snow_thickness,
+        ice_albedo=jnp.zeros_like(f) + params.ice_albedo,
+    )
+
+
+def _validate_parameters(params: WintonSeaiceParameters) -> None:
+    """Refuse parameters the scheme is undefined for, naming the offender.
+
+    Runs on the concrete construction-time values, which is why it can read
+    them as Python floats. Finiteness is checked as well as sign, because a NaN
+    compares False against every threshold and so fails quietly at run time.
+    """
+    def finite(field: str, value: Any) -> float:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{field} must be finite; got {number!r}.")
+        return number
+
+    def at_least(field: str, value: Any, floor: float, *, strict: bool) -> None:
+        number = finite(field, value)
+        if number < floor or (strict and number == floor):
+            relation = "greater than" if strict else "at least"
+            raise ValueError(f"{field} must be {relation} {floor:g}; got {number!r}.")
+
+    for field in ("ice_albedo", "i0_fraction"):
+        number = finite(field, getattr(params, field))
+        if not 0.0 <= number <= 1.0:
+            raise ValueError(f"{field} must lie in [0, 1]; got {number!r}.")
+    for field in ("snow_albedo", "snow_melt_albedo"):
+        value = getattr(params, field)
+        if value is not None and not 0.0 <= finite(field, value) <= 1.0:
+            raise ValueError(f"{field} must lie in [0, 1] or be None; got {value!r}.")
+    at_least("ksolar", params.ksolar, 0.0, strict=False)
+    at_least("lead_closing_thickness", params.lead_closing_thickness, 0.0, strict=True)
+    at_least("min_ice_thickness", params.min_ice_thickness, 0.0, strict=False)
+    at_least("min_ice_fraction", params.min_ice_fraction, 0.0, strict=False)
+    at_least("initial_ice_thickness", params.initial_ice_thickness, 0.0, strict=False)
+    at_least("emissivity", params.emissivity, 0.0, strict=False)
+    at_least("transport_diffusivity", params.transport_diffusivity, 0.0, strict=False)
+    for field in ("n_substeps", "n_flux_iterations", "transport_n_substeps"):
+        count = getattr(params, field)
+        if int(count) != count or int(count) < 1:
+            raise ValueError(f"{field} must be an integer of at least 1; got {count!r}.")

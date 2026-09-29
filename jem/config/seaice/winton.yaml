@@ -1,0 +1,12 @@
+# Winton (2000) three-layer thermodynamic sea ice -- snow, two ice layers, a
+# Hibler lead closure -- in place of the single-layer `slab` model.
+# Every parameter is at its Python default (`WintonSeaiceParameters`); ice
+# transport is a constructor choice, `+seaice.transport=true`.
+#
+# The runner injects `grid=`. The default coupling fills only the fields this
+# model can take from the ocean; the atmosphere-side inputs need an exchanger
+# of their own (see docs/source/design/winton_seaice.md), and
+# `default_exchanges` logs which fields are left unsupplied.
+_target_: jem.components.WintonSeaiceModel
+params:
+  _target_: jem.components.slab.WintonSeaiceParameters

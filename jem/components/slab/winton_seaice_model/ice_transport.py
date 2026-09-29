@@ -11,12 +11,97 @@ dynamics); Edwards and Marsh (2005), Clim. Dyn. 24, 415-433 (GENIE: ice advected
 Flato and Hibler (1992), J. Phys. Oceanogr. 22, 626-651 (cavitating fluid: no compressive convergence once the
 cover is compact, which the `compact` mask here reduces to a flux limiter). Original code; see the package NOTICE.
 """
+
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
+import jcm.constants as jcm_constants
+import numpy as np
+
+from jem.components.slab.grid import SlabGrid
+
+
+@dataclass(eq=False)
+class IceTransportGrid:
+    """Grid metrics of the ice transport step, and the one topology choice it needs.
+
+    Transport is a flux-form finite-volume step, so it needs the size of every
+    cell and the length of its faces. Those are properties of the grid, not
+    tunables, so they live on the model beside the :class:`SlabGrid` rather than
+    in the differentiable parameters; the diffusivity and the substep count,
+    which are tunables, are in
+    :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceParameters`.
+
+    The ice velocity that advects the ice (``forcing.ice_velocity_u/v``) is in
+    the **grid's own x and y** directions. On a separable lon/lat grid those are
+    eastward and northward; on a rotated or displaced-pole grid they are not,
+    and a velocity has to be rotated into the grid frame before it is supplied.
+    While the velocity forcing stays at its initial zero, the step is pure
+    diffusion of the ice thickness.
+
+    Attributes
+    ----------
+    dx, dy : jax.Array
+        Cell sizes in metres at the cell centres, shaped like the grid:
+        ``dx`` along the grid's first axis, ``dy`` along its second.
+    cyclic_x : bool
+        Whether the first axis wraps around (a global lon/lat grid does). The
+        second axis never wraps: its two edges are no-flux.
+
+    """
+
+    dx: jax.Array
+    dy: jax.Array
+    cyclic_x: bool = True
+
+    @classmethod
+    def from_grid(cls, grid: SlabGrid, *, cyclic_x: bool = True) -> "IceTransportGrid":
+        """Derive the metrics of a separable lon/lat grid.
+
+        Longitude is taken as uniformly spaced; latitude may be irregular (a
+        Gaussian axis is), so its spacing is the central difference of the
+        latitude axis. Cell sizes are ``dx = a cos(lat) dlon`` and
+        ``dy = a dlat`` with ``a`` the radius ``jcm.constants.rearth``.
+
+        Parameters
+        ----------
+        grid : SlabGrid
+            A separable lon/lat grid.
+        cyclic_x : bool
+            Whether longitude wraps around.
+
+        Raises
+        ------
+        ValueError
+            If the grid is curvilinear: its cell sizes cannot be recovered
+            from the coordinates, so the metrics must be given explicitly.
+
+        """
+        if (
+            not grid.is_separable
+            or grid.longitude_axis_radian is None
+            or grid.latitude_axis_radian is None
+        ):
+            raise ValueError(
+                "IceTransportGrid.from_grid needs a separable lon/lat grid; a "
+                "curvilinear grid's cell sizes cannot be derived from its "
+                "coordinates. Build IceTransportGrid(dx=..., dy=...) from the "
+                "grid's own metrics instead."
+            )
+        longitude = np.asarray(grid.longitude_axis_radian, dtype=np.float64)
+        latitude = np.asarray(grid.latitude_axis_radian, dtype=np.float64)
+        radius = jcm_constants.rearth
+        dlon = float(np.median(np.diff(longitude))) if longitude.size > 1 else 2 * np.pi
+        dlat = np.gradient(latitude) if latitude.size > 1 else np.array([np.pi])
+        shape = grid.shape
+        dx = radius * np.cos(latitude)[None, :] * dlon * np.ones(shape)
+        dy = radius * np.abs(dlat)[None, :] * np.ones(shape)
+        return cls(dx=jnp.asarray(dx), dy=jnp.asarray(dy), cyclic_x=cyclic_x)
 
 
 def _shift(x, axis, n, cyclic):
-    """x shifted so that result[i] = x[i - n]; beyond a non-cyclic edge the value is 0."""
+    """X shifted so that result[i] = x[i - n]; beyond a non-cyclic edge the value is 0."""
     y = jnp.roll(x, n, axis=axis)
     if cyclic:
         return y
