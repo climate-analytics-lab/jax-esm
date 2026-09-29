@@ -602,6 +602,22 @@ def test_transport_metrics_of_a_lon_lat_grid():
     assert metrics.cyclic_x
 
 
+
+def test_transport_metrics_are_positive_on_a_descending_longitude_axis():
+    import types
+
+    grid = global_grid(nx=24, ny=12)
+    flipped = types.SimpleNamespace(
+        is_separable=True,
+        longitude_axis_radian=np.asarray(grid.longitude_axis_radian)[::-1],
+        latitude_axis_radian=grid.latitude_axis_radian,
+        shape=grid.shape,
+    )
+    np.testing.assert_allclose(
+        np.asarray(IceTransportGrid.from_grid(flipped).dx),
+        np.asarray(IceTransportGrid.from_grid(grid).dx),
+    )
+
 def test_transport_metrics_cannot_be_derived_for_a_curvilinear_grid():
     longitude = np.deg2rad(np.array([0.0, 90.0, 180.0, 270.0])[:, None] + np.arange(3)[None, :])
     latitude = np.deg2rad(np.array([-60.0, 0.0, 60.0])[None, :] + np.arange(4)[:, None])

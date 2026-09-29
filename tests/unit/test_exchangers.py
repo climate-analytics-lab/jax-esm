@@ -682,6 +682,18 @@ def test_sea_ice_with_a_veros_ocean_is_warned_about(veros_components, caplog):
     assert "no freeze/melt potential" in caplog.text
 
 
+def test_winton_sea_ice_with_a_veros_ocean_is_warned_about(veros_components, caplog):
+    """The Winton rows extend the Veros table and must not hide the warning."""
+    from jem.components.slab import WintonSeaiceModel
+
+    components = dict(
+        veros_components, seaice=WintonSeaiceModel(half_land_grid(), name="seaice")
+    )
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        default_exchanges(components)
+    assert "no freeze/melt potential" in caplog.text
+
+
 def test_the_veros_table_is_the_documented_one():
     """The constant and the rows this module expects agree, deliberately."""
     assert tuple(

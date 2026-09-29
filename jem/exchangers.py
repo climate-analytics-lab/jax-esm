@@ -822,12 +822,13 @@ def default_exchanges(
         )
 
     table = _exchange_table(components)
+    # Decided before any rows are appended: the concatenation below makes a
+    # new tuple, which is never the Veros table itself.
+    veros_ocean = table is VEROS_OCEAN_EXCHANGES
     winton = _winton_module(components)
     if winton is not None:
         table = table + (
-            WINTON_SEAICE_VEROS_EXCHANGES
-            if table is VEROS_OCEAN_EXCHANGES
-            else WINTON_SEAICE_EXCHANGES
+            WINTON_SEAICE_VEROS_EXCHANGES if veros_ocean else WINTON_SEAICE_EXCHANGES
         )
     specs: list[ExchangeSpec] = []
     for src, dst, kind in table:
@@ -888,7 +889,7 @@ def default_exchanges(
                 "docs/source/design/winton_seaice.md and %s).",
                 ", ".join(unsupplied), WINTON_FORCING_ISSUE,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
+    if veros_ocean and "seaice" in present:
         logger.warning(
             "A sea-ice component is coupled to a Veros ocean, which publishes "
             "no freeze/melt potential (`ice_frazil_melt_energy`), so the "

@@ -92,7 +92,8 @@ class IceTransportGrid:
         longitude = np.asarray(grid.longitude_axis_radian, dtype=np.float64)
         latitude = np.asarray(grid.latitude_axis_radian, dtype=np.float64)
         radius = jcm_constants.rearth
-        dlon = float(np.median(np.diff(longitude))) if longitude.size > 1 else 2 * np.pi
+        # A metric width is positive whichever way the axis runs.
+        dlon = float(np.median(np.abs(np.diff(longitude)))) if longitude.size > 1 else 2 * np.pi
         dlat = np.gradient(latitude) if latitude.size > 1 else np.array([np.pi])
         shape = grid.shape
         dx = radius * np.cos(latitude)[None, :] * dlon * np.ones(shape)
