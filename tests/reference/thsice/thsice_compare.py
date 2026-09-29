@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -25,7 +24,7 @@ PARAMS = dict(rhoi=W.RHO_ICE, rhos=W.RHO_SNOW, rhosw=W.RHO_SW, cpice=W.C_ICE, cp
 
 
 def thsice_fbot(toce, fzmloc, tfrz=W.T_FREEZE):
-    """thsice basal flux (positive = ice loses heat to ocean), melting branch with soft max (kScal = 1)."""
+    """Thsice basal flux (positive = ice loses heat to ocean), melting branch with soft max (kScal = 1)."""
     if fzmloc >= 0.0:
         return fzmloc
     cpchr = W.C_W * W.RHO_SW * W.B_MELT
@@ -82,15 +81,22 @@ MASS_CASES = {
 
 
 def run_all():
+    """Run every case in float64 and return the (step, case, variable, jax, thsice) rows.
+
+    The comparison is to round-off, so it needs double precision. That is
+    scoped to this call with a context manager: the process-global flag would
+    promote every other test's float32 arrays once this module was imported.
+    """
     rows = []
-    for name, args in TEMPERATURE_CASES.items():
-        j, o = compare_temperature(*args)
-        for k in j:
-            rows.append(("temperature", name, k, j[k], o[k]))
-    for name, args in MASS_CASES.items():
-        j, o = compare_mass(*args)
-        for k in j:
-            rows.append(("mass", name, k, j[k], o[k]))
+    with jax.enable_x64(True):
+        for name, args in TEMPERATURE_CASES.items():
+            j, o = compare_temperature(*args)
+            for k in j:
+                rows.append(("temperature", name, k, j[k], o[k]))
+        for name, args in MASS_CASES.items():
+            j, o = compare_mass(*args)
+            for k in j:
+                rows.append(("mass", name, k, j[k], o[k]))
     return rows
 
 

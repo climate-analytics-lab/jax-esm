@@ -60,6 +60,7 @@ CORE_NAMES = (
 # with their parameter structs, the grid they share and the boundary-data
 # loader they read climatologies with.
 COMPONENT_NAMES = (
+    "IceTransportGrid",
     "JCMComponent",
     "SlabAtmosphereModel",
     "SlabAtmosphereParameters",
@@ -70,6 +71,8 @@ COMPONENT_NAMES = (
     "SlabOceanParameters",
     "SlabSeaiceModel",
     "SlabSeaiceParameters",
+    "WintonSeaiceModel",
+    "WintonSeaiceParameters",
     "load_monthly_climatology",
 )
 

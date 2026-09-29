@@ -34,6 +34,7 @@ from jem.components.slab import (
     SlabLandParameters,
     SlabOceanParameters,
     SlabSeaiceParameters,
+    WintonSeaiceParameters,
 )
 from jem.exchangers import Exchange
 
@@ -156,6 +157,7 @@ def test_runners_has_no_component_kwargs():
             SlabLandParameters,
             SlabSeaiceParameters,
             SlabAtmosphereParameters,
+            WintonSeaiceParameters,
         )
         for field in dataclasses.fields(parameters)
     }
