@@ -80,6 +80,23 @@ def x64():
         yield
 
 
+@pytest.fixture(autouse=True)
+def default_precision(request):
+    """Run every test that does not ask for ``x64`` in float32, the dtype of a JEM run.
+
+    Another test module in the same worker may have left the process-global
+    flag on (importing Veros sets it), and the float32 checks here -- the
+    carry's dtypes, the guards that only underflow in float32 -- mean nothing
+    if the flag is not pinned. Tests that choose their own precision
+    (``x64``, or the parametrized transport gradient) are left alone.
+    """
+    if "x64" in request.fixturenames or "dtype_x64" in request.fixturenames:
+        yield
+        return
+    with jax.enable_x64(False):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # The thermodynamic kernels
 # ---------------------------------------------------------------------------
