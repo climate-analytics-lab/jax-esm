@@ -27,15 +27,19 @@ Fortran that the port is compared with to round-off.
 
 ### Constants
 
-The scheme's own constants (`RHO_ICE = 905`, `L_ICE = 3.34e5`, the layer
-conductivities, ...) are module constants of
-`jem.components.slab.winton_seaice_model.winton_seaice_model`, and they differ
-from `jcm.constants` where the two model families chose differently (ice
-density 905 against 917, heat of fusion 3.34e5 against 3.33e5). They are kept
-because the oracle comparison is a comparison of that parameter set, and
-because the ice is a closed enthalpy budget in those units: the ocean is
-charged in joules, so the coupled budget closes whichever density or heat of
-fusion the atmosphere uses. What the ice shares with the atmosphere's
+The scheme's own constants (ice density `RHO_ICE = 905`, heat of fusion
+`L_ICE = 3.34e5`, freezing point `T_FREEZE = -1.8` degC, the layer
+conductivities, ...) are the MITgcm `thsice` values, and they are deliberately
+**module-local** to
+`jem.components.slab.winton_seaice_model.winton_seaice_model` rather than read
+from `jcm.constants`, where the two model families chose differently (ice
+density 905 against 917, heat of fusion 3.34e5 against 3.33e5). The reason is
+the oracle: the comparison against the unmodified Fortran is exact only
+against the `thsice` parameter set, so substituting the `jcm.constants` values
+would turn a round-off comparison into an approximate one. The ice is also a
+closed enthalpy budget in those units: the ocean is charged in joules, so the
+coupled budget closes whichever density or heat of fusion the atmosphere
+uses. What the ice shares with the atmosphere's
 surface-flux scheme -- `cpd`, `rd`, `p0`, `sbc` and `alhc` -- is read from
 `jcm.constants` when the step is traced, so `set_constants(...)` reaches the
 bulk fluxes over ice as it reaches the atmosphere. The freezing point of the
@@ -63,7 +67,13 @@ changed without touching the component.
 lead-closing thickness, thresholds, emissivity, the transport diffusivity and
 the nested JCM `SurfaceFluxParameters` used for the fluxes over ice) is a leaf
 that `jax.grad` reaches through the coupler. The substep and iteration counts
-and the mask convention are static. `snow_albedo` and `snow_melt_albedo`
+and the mask convention are static. The bulk-flux parameters are held in an
+`IceSurfaceFluxParameters` (`chs`, `vgust`, `dtheta`, `fstab`, all leaves, and
+the static flag `lscasym`) rather than as JCM's `SurfaceFluxParameters`, which
+also has boolean fields that make `jax.grad` over the whole parameter pytree
+fail without `allow_int`; passing JCM's object converts it, so the values the
+atmosphere runs with can still be handed over. Every leaf of the parameter
+pytree is a float. `snow_albedo` and `snow_melt_albedo`
 default to `None`, which makes snow take the ice albedo (and melting snow the
 dry-snow albedo), so a gradient with respect to `ice_albedo` also moves the
 snow albedo; giving a value decouples them. `initial_ice_thickness` is an
@@ -89,13 +99,30 @@ interface and degC inside the ice.
 | `atm_sea_heat_flux` | none |
 | `ice_velocity_u`, `ice_velocity_v` | none; zero, so transport is pure diffusion |
 
-Fields with no source stay at the value `initialize` gave them, which is the
-forcing under which ice at the freezing point neither melts nor grows (air and
-sea at the freezing point, blackbody downward longwave at that temperature,
-saturation humidity, 5 m/s wind, unit normalized pressure);
-`default_exchanges` logs the fields it leaves unsupplied. A coupled model that
-wants the ice forced by an atmosphere supplies them with an exchanger of its
-own, reading whatever its atmosphere publishes.
+Fields with no source stay at the value `initialize` gave them: air and sea at
+the freezing point, saturation humidity, 5 m/s wind, unit normalized pressure,
+and a downward longwave flux equal to what the ice itself emits there,
+`emissivity * sbc * T**4` with the parameters' emissivity. At that seed the net
+surface flux is zero, so ice at the freezing point has no surface forcing to
+melt or grow it for want of a supplier (the first step also runs on this
+forcing, because coupling is lagged).
+
+**The default coupling does not force the ice with an atmosphere.** No default
+row supplies the fields marked "none" above, so an ice coupled to an
+atmosphere through the default table would run on the seed values for the
+whole run. This gap is tracked in
+[issue #141](https://github.com/climate-analytics-lab/jax-esm/issues/141),
+which is where the atmospheric-forcing exchange (and the choice of which
+atmosphere flux stands in for the open-sea flux) will be settled. Until then:
+
+- **From Python**, `default_exchanges` / `default_exchangers` stay permissive,
+  because a forced or standalone ice is legitimate; they log a warning naming
+  the fields left unsupplied.
+- **From Hydra**, building the coupling raises an error naming those fields
+  when a Winton ice and an `atm` component are configured and neither
+  `coupling.exchanger` nor `coupling.exchangers` is set. Supply the forcing
+  with an exchanger of your own, reading whatever your atmosphere publishes,
+  and the check is out of the way.
 
 Three points of the contract belong to whoever writes that exchanger:
 
@@ -104,7 +131,7 @@ Three points of the contract belong to whoever writes that exchanger:
   the ice absorbed, so the ice-ocean-atmosphere energy budget closes. The JCM
   adapter publishes a grid-cell mean over land and sea only
   ({doc}`jcm_adapter`); which quantity stands in for the open-sea flux is not
-  settled by the adapter.
+  settled by the adapter (issue #141).
 - **`snowfall`** is a liquid-phase mass flux (kg m-2 s-1) whose latent heat of
   fusion the supplier has **not** released: the ice hands the ocean the fusion
   enthalpy of the snow that lands on it, as thsice does.
@@ -115,9 +142,14 @@ Three points of the contract belong to whoever writes that exchanger:
 `derived` carries `ice_fraction`, `effective_sea_surface_temperature` (the
 ice-fraction-weighted surface temperature), `ocean_heat_flux_up`,
 `ocean_freshwater_flux_up`, the ice-atmosphere flux, the surface-melt and basal
-fluxes, volumes, the albedo and the enthalpy tendencies. The default table
-consumes only `ice_fraction`, as the atmosphere's `sice_am`. The other
-ocean- and atmosphere-facing fields are published for an exchanger to use:
+fluxes, volumes, the albedo and the enthalpy tendencies.
+
+**The atmosphere sees the ice through the sea-ice fraction.** The default table
+consumes `ice_fraction` and writes it to the atmosphere's `sice_am`, which is
+how JCM's surface scheme accounts for ice; the atmosphere is *not* handed an
+effective sea surface temperature. The other ocean- and atmosphere-facing
+fields are published for an exchanger to use, and the default table consumes
+none of them:
 
 - `ocean_heat_flux_up` is the net heat flux leaving the ocean surface,
   positive upward, in the sign of the ocean's `total_heat_flux`: the
@@ -125,20 +157,28 @@ ocean- and atmosphere-facing fields are published for an exchanger to use:
   ice passes down to the ocean (transmitted shortwave, melt surplus, the fusion
   enthalpy of snow) less the basal heat the ice draws, all reversed in sign. It is
   the flux an ocean under ice is meant to be forced with in place of the
-  atmosphere's grid-mean flux.
-- `effective_sea_surface_temperature` is the surface temperature an atmosphere
-  that resolves one surface temperature per cell sees. An atmosphere handed it
-  as its sea surface temperature already sees the ice, so it must not also be
-  handed the ice fraction.
+  atmosphere's grid-mean flux. **The default coupling does not do this**: the
+  ocean receives the atmosphere's grid-mean `total_heat_flux`, and
+  `ocean_heat_flux_up` is published but consumed by nothing (issue #141).
+- `effective_sea_surface_temperature` is the ice-fraction-weighted surface
+  temperature, a diagnostic for an atmosphere that resolves one surface
+  temperature per cell. The default coupling does not use it: the atmosphere's
+  sea surface temperature is the ocean's, and it sees the ice through
+  `sice_am`. An atmosphere that were handed this as its sea surface
+  temperature would already see the ice and must not also be handed the ice
+  fraction.
 - `ocean_freshwater_flux_up` is positive when ice growth removes water from
   the ocean.
 
 ### Energy and water budgets
 
 The water and enthalpy budgets are exact for the thermodynamic state: the
-ocean receives what the ice returns to it, and snowfall, frazil ice,
-disposed slivers and melt-out are all charged so nothing is discarded without
-its energy. `derived.ice_energy_tendency` is the thermodynamic rate of change of
+ice diagnoses what it returns to the ocean (`ocean_heat_flux_up`,
+`ocean_freshwater_flux_up`), and snowfall, frazil ice, disposed slivers and
+melt-out are all charged so nothing is discarded without its energy. Whether
+the ocean *receives* that flux depends on the coupling: under the default
+table it does not (see above, issue #141), so the closure is a property of the
+ice's own diagnostics, not yet of the coupled run. `derived.ice_energy_tendency` is the thermodynamic rate of change of
 the ice and snow enthalpy and `derived.ice_energy_transport` the change by
 transport convergence, so
 `ice_energy_tendency - ocean_heat_flux_up + ocean_frazil_heating -

@@ -1,5 +1,5 @@
 from .ice_transport import IceTransportGrid
-from .params import WintonSeaiceParameters
+from .params import IceSurfaceFluxParameters, WintonSeaiceParameters
 from .winton_seaice_model import (
     WintonDerived,
     WintonForcing,
@@ -8,6 +8,7 @@ from .winton_seaice_model import (
 )
 
 __all__ = [
+    "IceSurfaceFluxParameters",
     "IceTransportGrid",
     "WintonDerived",
     "WintonForcing",

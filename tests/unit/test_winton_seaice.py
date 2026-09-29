@@ -34,6 +34,7 @@ from jem.base.coupler import Coupler
 from jem.components.slab import SlabGrid, SlabOceanModel, SlabOceanParameters
 from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE
 from jem.components.slab.winton_seaice_model import (
+    IceSurfaceFluxParameters,
     IceTransportGrid,
     WintonForcing,
     WintonSeaiceModel,
@@ -54,6 +55,7 @@ from jem.components.slab.winton_seaice_model.winton_seaice_model import (
     T_FREEZE,
     T_MELT,
     column_enthalpy_to_melt,
+    ice_surface_flux,
     q_from_T1,
     q_from_T2,
     winton_mass_step,
@@ -489,8 +491,36 @@ def test_the_initial_forcing_leaves_an_ice_cover_at_the_freezing_point_alone(gri
     change = jnp.abs(stepped["state"].ice_thickness - carry["state"].ice_thickness)
     assert float(change.max()) < 0.02, float(change.max())
     forcing = carry["forcing"]
+    # The seed forcing gives a zero net surface flux at the freezing point:
+    # the downward longwave equals what the ice emits, emissivity * sbc * T**4,
+    # and the turbulent terms vanish with air and sea at the same temperature
+    # and saturated air. A few W/m2 of imbalance (as a blackbody seed leaves
+    # against an emissivity below one) fails this.
+    net_flux, _ = ice_surface_flux(
+        T_FREEZE, forcing.rlds, forcing.air_temperature, forcing.air_specific_humidity,
+        forcing.wind_speed, forcing.normalized_surface_pressure,
+        sfp=carry["params"].surface_flux, emis=carry["params"].emissivity,
+    )
+    np.testing.assert_allclose(np.asarray(net_flux), 0.0, atol=0.1)
     np.testing.assert_allclose(np.asarray(forcing.air_temperature), FREEZING_K)
     np.testing.assert_allclose(np.asarray(forcing.sea_surface_temperature), FREEZING_K)
+
+
+@pytest.mark.parametrize("emissivity", [0.98, 0.85])
+def test_the_seed_longwave_uses_the_ice_emissivity(grid, emissivity):
+    """The seed `rlds` is `emissivity * sbc * T**4`, whatever the emissivity."""
+    params = WintonSeaiceParameters(initial_ice_thickness=1.0, emissivity=emissivity)
+    carry = WintonSeaiceModel(grid, params).initialize()
+    forcing = carry["forcing"]
+    np.testing.assert_allclose(
+        np.asarray(forcing.rlds), emissivity * jcm_constants.sbc * FREEZING_K**4, rtol=1e-5
+    )
+    net_flux, _ = ice_surface_flux(
+        T_FREEZE, forcing.rlds, forcing.air_temperature, forcing.air_specific_humidity,
+        forcing.wind_speed, forcing.normalized_surface_pressure,
+        sfp=params.surface_flux, emis=params.emissivity,
+    )
+    np.testing.assert_allclose(np.asarray(net_flux), 0.0, atol=0.1)
 
 
 def test_land_cells_carry_no_ice_and_report_the_masked_temperature(half_land_grid):
@@ -614,6 +644,36 @@ def test_the_surface_flux_parameters_are_differentiable_leaves(grid):
 
     gradient = jax.grad(loss)(carry["params"].surface_flux.chs)
     assert bool(jnp.isfinite(gradient)) and float(jnp.abs(gradient)) > 0.0
+
+
+def test_grad_over_the_whole_parameter_pytree_needs_no_allow_int(grid):
+    """Every leaf of the parameters is a float, so `jax.grad` takes the whole pytree.
+
+    The flags of the bulk-flux scheme are static, not boolean leaves.
+    """
+    model = WintonSeaiceModel(grid)
+    forcing = make_forcing(grid, rsds=150.0, rlds=250.0, air_temperature=260.0)
+    carry = with_state_and_forcing(model, ice_state(grid, 1.0), forcing)
+    leaves = jax.tree_util.tree_leaves(carry["params"])
+    assert all(jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating) for leaf in leaves)
+
+    def loss(params):
+        return _thickness_after_one_step(model, dict(carry, params=params))
+
+    gradients = jax.grad(loss)(carry["params"])
+    assert all(bool(jnp.isfinite(g)) for g in jax.tree_util.tree_leaves(gradients))
+    assert float(gradients.ice_albedo) != 0.0
+    assert float(gradients.surface_flux.chs) != 0.0
+
+
+def test_the_atmospheres_surface_flux_parameters_are_accepted_and_converted():
+    from jcm.physics.speedy.params import SurfaceFluxParameters
+
+    atmosphere = SurfaceFluxParameters.default().replace(chs=jnp.array(1.1e-3), lscasym=False)
+    params = WintonSeaiceParameters(surface_flux=atmosphere)
+    assert isinstance(params.surface_flux, IceSurfaceFluxParameters)
+    assert float(params.surface_flux.chs) == pytest.approx(1.1e-3)
+    assert params.surface_flux.lscasym is False
 
 
 def test_the_snow_albedo_follows_the_ice_albedo_unless_it_is_given(grid):
@@ -883,11 +943,14 @@ def test_gradient_through_transport_is_finite_and_nonzero(dtype_x64):
 
 @pytest.fixture(scope="module")
 def output_dataset():
-    grid = make_grid(fractional_mask=np.array([[0, 0, 0], [0, 0, 0], [1, 1, 1], [1, 1, 1]], dtype=float))
-    model = WintonSeaiceModel(grid, WintonSeaiceParameters(initial_ice_thickness=1.0), transport=True)
-    carry = with_state_and_forcing(model, forcing=make_forcing(grid, ice_velocity_u=0.1))
-    _, diagnostics = run_steps(model, carry, 3)
-    return model.to_xarray(diagnostics, time_axis(3))
+    # A module-scoped fixture is set up before the function-scoped autouse
+    # precision fixture, so it pins float32 itself (the dtype of a JEM run).
+    with jax.enable_x64(False):
+        grid = make_grid(fractional_mask=np.array([[0, 0, 0], [0, 0, 0], [1, 1, 1], [1, 1, 1]], dtype=float))
+        model = WintonSeaiceModel(grid, WintonSeaiceParameters(initial_ice_thickness=1.0), transport=True)
+        carry = with_state_and_forcing(model, forcing=make_forcing(grid, ice_velocity_u=0.1))
+        _, diagnostics = run_steps(model, carry, 3)
+        return model.to_xarray(diagnostics, time_axis(3))
 
 
 def test_every_output_variable_carries_a_role(output_dataset):
@@ -924,9 +987,12 @@ def test_output_follows_the_shared_coordinate_conventions(output_dataset):
     )
     land = np.asarray(output_dataset.ice_thickness.isel(lon=[2, 3]))
     assert not land.any()
-    np.testing.assert_allclose(
-        output_dataset.ice_surface_temperature.isel(lon=[2, 3]).values, MASKED_SURFACE_TEMPERATURE, rtol=1e-6
-    )
+    for name in ("ice_surface_temperature", "upper_ice_temperature", "lower_ice_temperature"):
+        np.testing.assert_allclose(
+            output_dataset[name].isel(lon=[2, 3]).values, MASKED_SURFACE_TEMPERATURE, rtol=1e-6, err_msg=name
+        )
+        # Ocean cells keep their real temperature.
+        assert bool((output_dataset[name].isel(lon=[0, 1]) < MASKED_SURFACE_TEMPERATURE).all()), name
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1127,50 @@ def test_the_default_coupling_grows_ice_on_the_oceans_freeze_potential(caplog):
     assert merged.sizes["time"] == 3
     assert "ice_thickness" in merged and "sea_surface_temperature" in merged
     assert "forcing_ice_frazil_melt_energy" in merged
+
+
+def _winton_components_with_an_atmosphere(with_atmosphere=True):
+    grid = global_grid(nx=12, ny=8, land_blocks=False)
+    components = {"ocn": SlabOceanModel(grid), "seaice": WintonSeaiceModel(grid)}
+    if with_atmosphere:
+        # Only its presence matters to the default table; no carry is read.
+        components["atm"] = None
+    return components
+
+
+def test_the_python_default_coupling_stays_permissive_with_an_atmosphere(caplog):
+    """From Python a Winton ice beside an atmosphere warns and still builds."""
+    from jem import default_exchangers
+
+    components = _winton_components_with_an_atmosphere()
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        specs = default_exchanges(components)
+        exchangers = default_exchangers(components)
+    assert specs and exchangers
+    assert "atm_sea_heat_flux" in caplog.text
+    assert "issues/141" in caplog.text
+
+
+def test_require_complete_refuses_a_winton_ice_the_atmosphere_cannot_force():
+    """`require_complete` turns the warning into an error naming the fields."""
+    from jem import default_exchangers
+
+    components = _winton_components_with_an_atmosphere()
+    for build in (default_exchanges, default_exchangers):
+        with pytest.raises(ValueError, match="winton_seaice.md") as excinfo:
+            build(components, require_complete=True)
+        message = str(excinfo.value)
+        for field in ("rsds", "rlds", "air_temperature", "atm_sea_heat_flux"):
+            assert field in message
+        assert "issues/141" in message
+        # What the table does supply is not reported as missing.
+        assert "ice_frazil_melt_energy" not in message
+
+
+def test_require_complete_leaves_a_forced_ice_alone():
+    """Without an atmosphere the ice's forcing is the caller's to write."""
+    components = _winton_components_with_an_atmosphere(with_atmosphere=False)
+    assert default_exchanges(components, require_complete=True)
 
 
 @pytest.mark.parametrize("overrides", [[], ["+seaice.transport=true"]])

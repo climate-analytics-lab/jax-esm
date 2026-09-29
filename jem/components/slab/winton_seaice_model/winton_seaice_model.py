@@ -21,11 +21,26 @@ part of the cell (``h`` is the thickness of that part).
 Surface fluxes over ice are computed here with SPEEDY-style bulk formulae (same
 coefficients as JCM's ``speedy_surface_flux``) from the atmosphere's near-surface
 state, so ``F(Ts)`` and ``dF/dTs`` are available inside the implicit solve. JCM
-computes its sea-fraction fluxes at a single surface temperature, so the mapper
-hands JCM an ice-fraction-weighted surface temperature, and the ocean receives
-JCM's sea flux minus what the ice absorbed (exact conservation of the
-atmosphere-side energy), plus what the ice passes down (transmitted shortwave,
-melt surplus) minus the basal heat the ice draws.
+computes its sea-fraction fluxes at a single surface temperature, so the atmosphere
+sees the ice only through the sea-ice fraction this component publishes
+(``derived.ice_fraction``, which the default coupling copies to JCM's ``sice_am``);
+it is not handed an ice-weighted surface temperature. ``derived.ocean_heat_flux_up``
+is the flux an ocean under ice should receive: the atmosphere's flux over the sea
+cell (``forcing.atm_sea_heat_flux``) minus what the ice absorbed, plus what the ice
+passes down (transmitted shortwave, melt surplus), minus the basal heat the ice
+draws. It is published, but the default coupling does not consume it (the ocean
+receives the atmosphere's grid-mean flux), and the default coupling does not supply
+the atmospheric forcing the ice reads either; both gaps are tracked in
+https://github.com/climate-analytics-lab/jax-esm/issues/141 and described in
+``docs/source/design/winton_seaice.md``.
+
+Constants: the ice and snow constants below (ice density 905 kg/m3, heat of fusion
+3.34e5 J/kg, freezing point -1.8 degC, ...) are the MITgcm thsice values. They are
+module-local on purpose and differ from ``jcm.constants`` (ice density 917, heat of
+fusion 3.33e5): the Fortran oracle comparison is exact against the thsice set, and
+the ice is a closed enthalpy budget in these units. Only what the ice shares with
+the atmosphere's surface-flux scheme (``cpd``, ``rd``, ``p0``, ``sbc``, ``alhc``) is
+read from ``jcm.constants``.
 
 Sign conventions: fluxes at the ice surface are positive downward (into ice);
 ``F_cb = 4 K (T2 - Tf)/h`` is the conductive flux toward the base (positive
@@ -48,7 +63,7 @@ import jax
 import jax.numpy as jnp
 import jcm.constants as jcm_constants
 import tree_math
-from jcm.physics.speedy.params import ModRadConParameters, SurfaceFluxParameters
+from jcm.physics.speedy.params import ModRadConParameters
 
 from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
@@ -62,7 +77,10 @@ from jem.components.slab.winton_seaice_model.ice_transport import (
     IceTransportGrid,
     transport_fields,
 )
-from jem.components.slab.winton_seaice_model.params import WintonSeaiceParameters
+from jem.components.slab.winton_seaice_model.params import (
+    IceSurfaceFluxParameters,
+    WintonSeaiceParameters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,12 +163,13 @@ def qsat_ice(T_kelvin, p):
 def ice_surface_flux(Ts_c, rlds, t_air, q_air, wind, p_air, sfp=None, emis=None):
     """SPEEDY-style non-solar surface flux over ice (positive downward) and its exact derivative dF/dTs.
 
-    sfp: JCM SurfaceFluxParameters (exchange coefficient chs, gust speed vgust, stability dtheta/fstab/lscasym);
+    sfp: IceSurfaceFluxParameters (exchange coefficient chs, gust speed vgust, stability dtheta/fstab and the static
+    lscasym flag; anything with those attributes, such as JCM's SurfaceFluxParameters, also works);
     emis: longwave emissivity (JCM ModRadConParameters.emisfc). Defaults are JCM's defaults; physical constants
     (cpd, rd, p0, sbc, alhc) are read from jcm.constants.physical_constants when the step is traced. The
     derivative is taken with forward-mode AD so it includes the stability dependence of the exchange velocity.
     """
-    sfp = SurfaceFluxParameters.default() if sfp is None else sfp
+    sfp = IceSurfaceFluxParameters.default() if sfp is None else sfp
     emis = ModRadConParameters.default().emisfc if emis is None else emis
     c = jcm_constants.physical_constants
     astab = jnp.where(sfp.lscasym, 0.5, 1.0)            # SPEEDY: asymmetric stability coefficient
@@ -352,25 +371,39 @@ class WintonForcing:
     ice_velocity_v: jnp.ndarray            # m/s along the grid's y
 
     @classmethod
-    def initial(cls, shape):
+    def initial(cls, shape, emissivity=None):
         """Return the forcing under which ice at the freezing point stays put.
 
         Coupling is lagged, so the first step integrates whatever
-        :meth:`WintonSeaiceModel.initialize` leaves here. Air and sea at the
-        freezing point, a blackbody downward longwave flux at that temperature
-        and the saturation humidity over ice there leave no surface flux
-        of consequence, so the first step neither melts nor grows the ice for
-        want of a supplier. Wind and pressure are the exceptions that are not
-        zero: a zero surface pressure makes the air density infinite, and the
+        :meth:`WintonSeaiceModel.initialize` leaves here. The downward
+        longwave flux is set to what the ice itself emits at the freezing
+        point, ``emissivity * sbc * T**4``, so the radiative part of the
+        surface flux is zero there; with air at the freezing point and the
+        saturation humidity over ice, the turbulent fluxes are zero too, so
+        the net surface flux at the seed state is zero and the first step
+        neither melts nor grows ice at the freezing point for want of a
+        supplier. Wind and pressure are the exceptions that are not zero: a
+        zero surface pressure makes the air density infinite, and the
         turbulent exchange velocity is built from the wind.
+
+        Parameters
+        ----------
+        shape : tuple of int
+            Shape of the horizontal grid.
+        emissivity : float or jnp.ndarray, optional
+            Longwave emissivity of the ice surface, normally
+            ``WintonSeaiceParameters.emissivity``. Defaults to JCM's surface
+            emissivity, the default of that parameter.
+
         """
         zeros = jnp.zeros(shape)
         freezing = KELVIN + T_FREEZE
         pressure = 1.0
+        emissivity = ModRadConParameters.default().emisfc if emissivity is None else emissivity
         humidity, _ = qsat_ice(freezing, jcm_constants.p0 * pressure)
         return cls(
             rsds=zeros,
-            rlds=zeros + jcm_constants.sbc * freezing**4,
+            rlds=zeros + emissivity * jcm_constants.sbc * freezing**4,
             air_temperature=zeros + freezing,
             air_specific_humidity=zeros + humidity,
             wind_speed=zeros + 5.0,
@@ -529,7 +562,7 @@ class WintonSeaiceModel(SlabModelBase):
             thickness, zeros, fraction,
             zeros + T_FREEZE, zeros + T_FREEZE, zeros + T_FREEZE,
         )
-        forcing = WintonForcing.initial(shape)
+        forcing = WintonForcing.initial(shape, params.emissivity)
         derived = _derived_from_state(
             WintonDerived.zeros(shape), state, forcing, ocean, params
         )
@@ -712,12 +745,21 @@ class WintonSeaiceModel(SlabModelBase):
         dims = ("time",) + tuple(self.grid.dims)
         s, d, fc = diagnostics["state"], diagnostics["derived"], diagnostics["forcing"]
         state, derived, forcing = role_attrs("state"), role_attrs("derived"), role_attrs("forcing")
+        # The layer temperatures of a cell the model does not integrate stay at
+        # the freezing point in the state; report them masked, as the surface
+        # temperature is, rather than as a temperature that looks physical.
+        # This changes the output only, not the state.
+        ocean = self._ocean_cells(self.params)
+
+        def layer_temperature(T):
+            return jnp.where(ocean, T + KELVIN, MASKED_SURFACE_TEMPERATURE)
+
         return {
             "ice_thickness": (dims, s.ice_thickness, {"units": "m", "long_name": "thickness of ice-covered part", **state}),
             "snow_thickness": (dims, s.snow_thickness, {"units": "m", "long_name": "thickness of snow on the ice-covered part", **state}),
             "ice_fraction": (dims, s.ice_fraction, {"units": "1", "long_name": "ice-covered fraction of the cell", **state}),
-            "upper_ice_temperature": (dims, s.upper_ice_temperature + KELVIN, {"units": "K", "long_name": "upper ice layer temperature", **state}),
-            "lower_ice_temperature": (dims, s.lower_ice_temperature + KELVIN, {"units": "K", "long_name": "lower ice layer temperature", **state}),
+            "upper_ice_temperature": (dims, layer_temperature(s.upper_ice_temperature), {"units": "K", "long_name": "upper ice layer temperature", **state}),
+            "lower_ice_temperature": (dims, layer_temperature(s.lower_ice_temperature), {"units": "K", "long_name": "lower ice layer temperature", **state}),
             "ice_surface_temperature": (dims, d.ice_surface_temperature_K, {"units": "K", "long_name": "ice surface temperature", **derived}),
             "ice_volume": (dims, d.ice_volume, {"units": "m", "long_name": "cell-mean ice thickness", **derived}),
             "snow_volume": (dims, d.snow_volume, {"units": "m", "long_name": "cell-mean snow thickness", **derived}),

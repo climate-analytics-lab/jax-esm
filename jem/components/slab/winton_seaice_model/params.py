@@ -6,6 +6,66 @@ from jcm.physics.speedy.params import ModRadConParameters, SurfaceFluxParameters
 
 
 @struct.dataclass
+class IceSurfaceFluxParameters:
+    """The bulk surface-flux parameters the ice uses, in the form ``jax.grad`` can take.
+
+    These are the four numeric leaves and the one flag of JCM's
+    ``SurfaceFluxParameters`` that the fluxes over ice read. JCM's own struct
+    is not nested in :class:`WintonSeaiceParameters` because it also holds
+    boolean fields (``lscasym``, ``lskineb``): a boolean leaf in
+    ``carry["params"]`` makes ``jax.grad`` over the whole parameter pytree
+    fail unless the caller passes ``allow_int``. Here the one flag the ice
+    reads, ``lscasym``, is static, so every leaf is a float and ``jax.grad``
+    over the whole ``WintonSeaiceParameters`` works. ``lskineb`` (skin
+    temperature from an energy balance) belongs to the atmosphere's land and
+    sea surface and plays no part in the ice, so it is not carried.
+
+    Use :meth:`from_jcm` to take the values a coupled atmosphere runs with.
+
+    Attributes
+    ----------
+    chs : float or jnp.ndarray
+        Heat exchange coefficient over sea (JCM ``chs``).
+    vgust : float or jnp.ndarray
+        Wind speed (m/s) of sub-grid-scale gusts, added in quadrature to the wind.
+    dtheta : float or jnp.ndarray
+        Potential temperature gradient of the stability correction.
+    fstab : float or jnp.ndarray
+        Amplitude of the stability correction (fraction).
+    lscasym : bool
+        Whether the stability correction is asymmetric. Static: it selects a
+        code path and is not a tunable.
+
+    """
+
+    chs: float | jnp.ndarray = 0.9e-3
+    vgust: float | jnp.ndarray = 5.0
+    dtheta: float | jnp.ndarray = 3.0
+    fstab: float | jnp.ndarray = 0.67
+    lscasym: bool = struct.field(pytree_node=False, default=True)
+
+    @classmethod
+    def from_jcm(cls, surface_flux: SurfaceFluxParameters) -> "IceSurfaceFluxParameters":
+        """Take the parameters the ice reads from JCM's ``SurfaceFluxParameters``.
+
+        ``lscasym`` must be concrete (a Python or NumPy bool) because it is
+        static here, so build the ice parameters outside ``jit``.
+        """
+        return cls(
+            chs=surface_flux.chs,
+            vgust=surface_flux.vgust,
+            dtheta=surface_flux.dtheta,
+            fstab=surface_flux.fstab,
+            lscasym=bool(surface_flux.lscasym),
+        )
+
+    @classmethod
+    def default(cls) -> "IceSurfaceFluxParameters":
+        """Return JCM's default surface-flux parameters, restricted to those the ice reads."""
+        return cls.from_jcm(SurfaceFluxParameters.default())
+
+
+@struct.dataclass
 class WintonSeaiceParameters:
     """Parameters of :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`.
 
@@ -55,12 +115,16 @@ class WintonSeaiceParameters:
     emissivity : float or jnp.ndarray
         Longwave emissivity of the ice surface. The default is JCM's surface
         emissivity, so ice and atmosphere agree unless one is overridden.
-    surface_flux : jcm.physics.speedy.params.SurfaceFluxParameters
-        The atmosphere's bulk surface-flux parameters (exchange coefficient
-        ``chs``, gust speed ``vgust`` and the stability correction ``dtheta``,
-        ``fstab`` and ``lscasym``) used for the fluxes over ice. The default is
-        JCM's; pass the same object the coupled atmosphere runs with. Its
-        leaves are differentiable like every other parameter.
+    surface_flux : IceSurfaceFluxParameters
+        The bulk surface-flux parameters (exchange coefficient ``chs``, gust
+        speed ``vgust`` and the stability correction ``dtheta``, ``fstab`` and
+        ``lscasym``) used for the fluxes over ice. The default is JCM's. To use
+        the values the coupled atmosphere runs with, pass its
+        ``SurfaceFluxParameters`` (converted with
+        :meth:`IceSurfaceFluxParameters.from_jcm` on construction). Its numeric
+        leaves are differentiable like every other parameter; the one flag
+        (``lscasym``) is static, so every leaf of this dataclass is a float and
+        ``jax.grad`` over the whole parameter pytree needs no ``allow_int``.
     transport_diffusivity : float or jnp.ndarray
         Lateral diffusivity (m2/s) of the ice transport step. Read only when
         the model was built with transport.
@@ -91,14 +155,25 @@ class WintonSeaiceParameters:
     emissivity: float | jnp.ndarray = struct.field(
         default_factory=lambda: ModRadConParameters.default().emisfc
     )
-    surface_flux: SurfaceFluxParameters = struct.field(
-        default_factory=SurfaceFluxParameters.default
+    surface_flux: IceSurfaceFluxParameters = struct.field(
+        default_factory=IceSurfaceFluxParameters.default
     )
     transport_diffusivity: float | jnp.ndarray = 2e4
     n_substeps: int = struct.field(pytree_node=False, default=4)
     n_flux_iterations: int = struct.field(pytree_node=False, default=3)
     transport_n_substeps: int = struct.field(pytree_node=False, default=12)
     ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
+
+    def __post_init__(self) -> None:
+        """Accept JCM's ``SurfaceFluxParameters`` for ``surface_flux``.
+
+        The atmosphere's own object is the natural thing to pass, so it is
+        converted here rather than making every caller do it.
+        """
+        if isinstance(self.surface_flux, SurfaceFluxParameters):
+            object.__setattr__(
+                self, "surface_flux", IceSurfaceFluxParameters.from_jcm(self.surface_flux)
+            )
 
     @classmethod
     def default(cls) -> "WintonSeaiceParameters":
