@@ -1,7 +1,10 @@
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def generate_jcm_forcing_and_topography_files(
@@ -24,7 +27,7 @@ def generate_jcm_forcing_and_topography_files(
 
         data_directory = data_directory / ".cache/jcm"
 
-        print(f'Using input data directory: "{data_directory!s}".')
+        logger.info('Using input data directory: "%s".', data_directory)
 
     raw_data_directory = Path(jcm.__file__).parent / "data/bc"
 
@@ -42,8 +45,9 @@ def generate_jcm_forcing_and_topography_files(
 
         if verbose:
             for file, result in file_status.items():
-                print(
-                    f"Check file: {file!s:s}...",
+                logger.info(
+                    "Check file: %s... %s",
+                    file,
                     "found." if result else "not found.",
                 )
 
@@ -52,7 +56,7 @@ def generate_jcm_forcing_and_topography_files(
     file_status = check_if_file_exist(files_to_check)
 
     if not all(list(file_status.values())):
-        print("Some files are missing. Need to generate them.")
+        logger.info("Some files are missing. Need to generate them.")
 
         data_directory.mkdir(parents=True, exist_ok=True)
         interpolation_code = (raw_data_directory / "interpolate.py").resolve()
@@ -66,7 +70,7 @@ def generate_jcm_forcing_and_topography_files(
                 cwd=data_directory,
             )
         except subprocess.CalledProcessError as e:
-            print("Error output:", e.stderr)
+            logger.error("Interpolation failed; its error output was: %s", e.stderr)
 
         new_file_status = check_if_file_exist(files_to_check)
         if not all(list(new_file_status.values())):

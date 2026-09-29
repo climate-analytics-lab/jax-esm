@@ -1,189 +1,135 @@
-# JAX-ESM: A JAX-based Earth System Model Coupler
+# JAX-ESM
 
-JAX-ESM is a JAX-based coupling framework for Earth system components, specifically designed for coupling JCM (JAX Climate Model) with ocean and flux models. It provides efficient time integration using `jax.lax.scan` and supports component-specific sub-stepping for numerical stability.
+A fully differentiable Earth-system coupler in JAX.
 
-## Features
+[![Tests](https://github.com/climate-analytics-lab/jax-esm/actions/workflows/tests.yml/badge.svg)](https://github.com/climate-analytics-lab/jax-esm/actions/workflows/tests.yml)
+[![Docs](https://img.shields.io/badge/docs-source-blue)](docs/source/index.rst)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 
-- **JAX-Native**: Fully JIT-compilable, GPU-ready, and differentiable
-- **Dynamic State Creation**: Factory functions for creating custom component states with arithmetic operations
-- **Efficient Time Integration**: Uses `jax.lax.scan` for vectorized time stepping with optional debug mode
-- **Component Sub-stepping**: Each component can use internal sub-steps for numerical stability
-- **Direct Component Coupling**: Components can directly access each other's state for tight integration
-- **xarray Integration**: Built-in conversion to xarray Datasets for analysis
+JAX-ESM (`jem`) does not implement a climate model of its own: it couples
+independently-developed components — the JCM spectral atmosphere from
+[jax-gcm](https://github.com/climate-analytics-lab/jax-gcm) (SPEEDY or
+ICON/ECHAM physics), JEM's own slab ocean, land and sea-ice models, and the
+[Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM — into
+one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory. Every
+component's physical parameters travel in the scan carry as pytrees, so
+`jax.grad` reaches them through a whole coupled run: calibration against
+observations, hybrid physics-ML and sensitivity studies, with no adjoint
+model to write ([example](examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb)).
 
-## Installation 
+- **Any model plugs in.** A component is any object with a `name`,
+  `initialize()` and `step(carry, time)` — a protocol, not a base class.
+- **Explicit coupling.** Components exchange fields only through exchangers:
+  plain functions that regrid, convert units or compute a flux.
+- **One clock.** Every component steps on the same `jax_datetime` clock, and
+  every component's output merges onto one time axis.
+- **One run loop.** `run_chunked` handles chunking, output, checkpoint/resume
+  and a health gate, with in-scan monthly means for long runs.
+- **One command.** `python -m jem.main` composes a coupled model from Hydra
+  config groups, with named configurations from an aquaplanet slab ocean to
+  a Veros Earth.
 
-```
-# Install JEM
+![Surface specific humidity from a coupled JCM/slab-ocean run](gallery/JCM_SOM_demo.gif)
+
+## Installation
+
+JAX-ESM is developed and tested against **one** jax-gcm revision, recorded in
+[`jem/components/jcm/contract.py`](jem/components/jcm/contract.py). jax-gcm
+`>=3.0` is not yet on PyPI, so install it from source first:
+
+```bash
+git clone https://github.com/climate-analytics-lab/jax-gcm
+cd jax-gcm && git checkout 0eef9b3a88982886241622fde6530513d025192c && pip install -e "." && cd ..
+
 git clone https://github.com/climate-analytics-lab/jax-esm
-cd jax-esm
-pip install -e "."
-cd ..
+cd jax-esm && pip install -e "." && cd ..
 
-# Install jittable Veros (temporary solution)
+# Optional: the jittable Veros fork, only needed for the Veros configurations
 git clone https://github.com/meteorologytoday/veros-jittable.git
-cd veros-jittable
-pip install -e "."
+cd veros-jittable && pip install -e "."
 ```
 
-## Quick Start
+See [`docs/source/getting_started.rst`](docs/source/getting_started.rst) for
+the full install and [`docs/source/developers.rst`](docs/source/developers.rst)
+for a development install and the test/lint gates.
 
-Here is an example to run an aquaplanet simulation coupling JCM and an slab ocean model.
+## Quick start
 
-```
-from pathlib import Path
+A complete, runnable aquaplanet simulation coupling the JCM atmosphere to
+JEM's slab ocean — a couple of minutes on a laptop CPU:
+
+```python
+import jax_datetime as jdt
 import jcm
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
-import jax_datetime as jdt
 
-from jem import Coupler
-from jem.components import JCM, SlabOceanModel
-from jem.mapping import BasicMapper
+from jem import Coupler, default_exchangers, run_chunked
+from jem.components import JCMComponent, SlabOceanModel
+from jem.components.slab import SlabGrid
 
-start_datetime = jdt.to_datetime("2000-01-01")
+start_date = jdt.to_datetime("2000-01-01")
 coupling_timestep = jdt.to_timedelta(1, "day")
 
-interaction_between_atm_and_ocn = BasicMapper()
-interaction_between_atm_and_ocn.add_mapping(
-    source = ("atm", "derived.total_heat_flux"),
-    target = ("ocn", "forcing.total_heat_flux"),
-)
-interaction_between_atm_and_ocn.add_mapping(
-    source = ("ocn", "state.sea_surface_temperature"),
-    target = ("atm", "forcing.sea_surface_temperature"),
-)
+# The JCM atmosphere: a plain jcm.model.Model, wrapped as a component.
+atm_model = jcm.model.Model(coords=get_speedy_coords(), start_time=start_date)
+atm = JCMComponent(atm_model)
 
-atm_model = jcm.model.Model(
-    start_date=start_datetime,
-    coords=get_speedy_coords(),
-)
+# Aquaplanet: the slab grid is built from the atmosphere's own horizontal grid,
+# and with no fractional mask every cell is ocean.
+grid = SlabGrid.from_coords(atm_model.coords.horizontal)
 
-atm_model = JCM.make_jem_compatible(
-    atm_model,
+# An exchanger is the only place where components exchange information.
+# `default_exchangers` is the standard wiring written down once — here, the
+# atmosphere's surface heat flux drives the ocean and the ocean's SST comes
+# back as the atmosphere's boundary condition — filtered to whichever of the
+# standard components (`atm`, `ocn`, `lnd`, `seaice`) are present.
+components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+coupler = Coupler(
+    components,
+    default_exchangers(components),
     coupling_timestep=coupling_timestep,
+    start_date=start_date,
 )
+print(repr(coupler))
 
-model = Coupler(
-    components=dict(
-        atm=atm_model,
-        ocn=SlabOceanModel(
-            start_datetime=start_datetime,
-            timestep=coupling_timestep / jdt.to_timedelta(1, "second"),
-        ),
-    ),
-    mappers=dict(interaction_between_atm_and_ocn=interaction_between_atm_and_ocn),
+# One run loop for every coupled run: integrate a chunk, write one file per
+# component, check the atmosphere is still healthy, repeat. Every run default
+# lives on `run_chunked` itself. Each file is named after the coupled step its
+# chunk starts at, so this writes `atm-00000000.nc` and `atm-00000005.nc`
+# (and the ocean's two) into `output/`.
+result = run_chunked(
+    coupler, total_time="10 days", chunk="5 days", output_dir="output"
 )
-
-simulation_interval = jdt.to_timedelta(60, "day")
-initial_state, final_state, predictions = model.run(
-    workflow=["interaction_between_atm_and_ocn", "atm", "ocn"],
-    iterations = int(simulation_interval / coupling_timestep),
-)
-
-output_dict = model.predictions_to_xarray(predictions)
-output_dir = Path("output")
-output_dir.mkdir(parents=True, exist_ok=True)
-for component_name, ds in output_dict.items():
-    output_file = output_dir / f"{component_name:s}.nc"
-    print(f"Saving: {component_name:s} => {str(output_file)}")
-    ds.to_netcdf(output_file)
+print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 ```
 
-![Surface specific humidity](gallery/JCM_SOM_demo.gif)
+The same run, composed from Hydra config groups instead of built by hand:
+
+```bash
+python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
+```
+
+See [`docs/source/getting_started.rst`](docs/source/getting_started.rst) for
+every override, and [`docs/source/python_api.md`](docs/source/python_api.md)
+for the complete construction (the declarative exchange table, parameters,
+long runs and checkpoints).
 
 ## Documentation
 
-For more details, build it locally with:
-
-```
-cd jax-esm/docs
-pip install -r requirements.txt
-make html
-```
-
-Then open `docs/build/html/index.html` in your browser.
-
-## Architecture
-
-### Component Interface
-
-Each component needs to provide two methods:
-
-- **`initialize()`**: Return initial component carry value, a pytree.
-- **`generate_step_function()`**: Return a JIT-compiled step function
-  - Signature: `step_function(component_carry, step) -> (new_component_carry, predictions)`
-
-### Component Coupling
-
-The current implementation uses direct coupling:
-- Coupler creates a dictionary of component carry values.
-- Coupler passes the carry value of each component to the corresponding component's `step_function`.
-- To exchange variables like fluxes, pass mapper functions to Coupler. A mapper function receives
-  the dictionary of component carry values and returns a new one. 
-
-### Time Integration
-
-- Uses `jax.lax.scan` for efficient time stepping
-- Components advance in parallel each coupling timestep
-- Debug mode available with `jitted=False` (uses Python loop)
-
-## Examples
-- `notebooks/01_basic`: Provide aquaplanet setup.
-- `notebooks/02_experimental`: Features under development, such as earth-like topography and JCM-Veros coupling
-
-## Integration with JAX-GCM (JCM)
-JAX-ESM is specifically designed for coupling JCM (JAX Climate Model) with ocean, land, and sea-ice models.
-
-### Included Components
-
-1. **JCM (Atmosphere)**
-   - Location: `jem/components/jcm_component.py`
-   - Wraps JCM atmosphere model from jax-gcm
-   - Handles conversion between Dinosaur dynamics states and physics states
-   - Supports internal sub-stepping
-
-2. **Veros (Ocean, full 3D)**
-   - Location: `jem/components/veros_component.py`
-   - Wraps the [jittable Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM
-   - Optional dependency; lazily imported so `jem.components` works without `veros` installed
-
-3. **SlabOceanModel**
-   - Location: `jem/components/slab/slab_ocean_model/`
-   - Mixed-layer ocean with climatological relaxation
-   - Anomaly-based SST evolution using Euler backward scheme
-   - Reports `ice_frazil_melt_energy`, a freeze/melt heat diagnostic for coupling to `SlabSeaiceModel`
-
-4. **SlabLandModel**
-   - Location: `jem/components/slab/slab_land_model/`
-   - One layer land with climatological relaxation
-   - Anomaly-based land surface temperature evolution using Euler backward scheme
-
-5. **SlabAtmosphereModel**
-   - Location: `jem/components/slab/slab_atmosphere_model/`
-   - Idealized slab atmosphere, used for testing and non-geoscience examples
-
-6. **SlabSeaiceModel**
-   - Location: `jem/components/slab/slab_seaice_model/`
-   - Basal-only sea-ice thickness model driven by `SlabOceanModel`'s freeze/melt potential
-   - Exposes a smooth thickness-to-fraction closure for an atmosphere model's ice-fraction boundary condition
+- [Getting started](docs/source/getting_started.rst) — install, your first coupled run, the command line
+- [Python API](docs/source/python_api.md) — the complete direct-Python construction
+- [Design notes](docs/source/design.rst) — the coupling core, carry and clock, exchangers, chunked runs and checkpoints, configuration
+- [Adding a component](docs/source/adding_a_component.rst) — wrapping an external model to join a coupled run
+- [Examples](docs/source/examples.rst) — every example notebook and configuration, and the command that runs it
 
 ## Contributing
 
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality (see `tests/` for examples)
-4. Ensure tests pass: `pytest`
-5. Follow existing code style
-6. Submit a pull request
+See [`docs/source/developers.rst`](docs/source/developers.rst) for a
+development install and the gates (`ruff`, `pytest`, `mypy`) that must pass
+before a pull request, and `CLAUDE.md` for the project's conventions.
 
-## Development Status
+## License
 
-- **Version**: 0.1.0 (Alpha)
-- **Status**: Prototype coupling framework
-- **Production Ready**: Core functionality stable
-- **API Stability**: Subject to change
-
-## Miscellaneous
-
-The regridding files are generated from repo [EarthSystemGrid.py](https://github.com/meteorologytoday/EarthSystemGrids.py). 
+MIT — see [LICENSE](LICENSE).

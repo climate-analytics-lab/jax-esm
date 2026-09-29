@@ -1,0 +1,32 @@
+# @package _global_
+#
+# Aquaplanet: SPEEDY T31L8 over a slab ocean with thermodynamic sea ice --
+# the README's quick start, plus the ice the quick start leaves out.
+#
+#   python -m jem.main +configuration=aquaplanet-slab
+#
+# Everything here is a config default already. It is restated as explicit
+# overrides on purpose: a named configuration has to keep meaning what it
+# meant when it was validated, even after a default moves.
+#
+# WHY each setting:
+#  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics on
+#    its native low resolution -- cheap enough to run on a laptop CPU, which
+#    is what makes this the first thing a new user runs.
+#  - terrain=aquaplanet: zero orography and an all-ocean mask, so the slab
+#    ocean covers the planet and no land component is needed.
+#  - forcing stays at `default` (an aquaplanet `ForcingData`): the SST the
+#    atmosphere sees comes from the coupled ocean, not from a boundary file.
+#  - ocean=slab with no forcing term: the mixed layer responds to the coupled
+#    surface heat flux alone. Nothing pins it, which is the point -- the
+#    coupled system finds its own equilibrium.
+#  - seaice=slab: the ocean reports the energy its freezing clamp removed, and
+#    something has to turn that into ice or it is silently lost.
+#  - land=none: there is no land.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: aquaplanet
+  - override /ocean: slab
+  - override /seaice: slab
+  - override /land: none

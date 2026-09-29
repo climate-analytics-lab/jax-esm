@@ -8,4 +8,3 @@ API Reference
 .. automodule:: jem.utils
    :members:
    :imported-members:
-

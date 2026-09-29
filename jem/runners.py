@@ -1,0 +1,1023 @@
+"""From a composed Hydra config to a built coupled model, and a run of it.
+
+This is the only module that reads the configuration. Everything it builds is
+an ordinary Python object that could have been built by hand -- the point of
+keeping it in one place is that the *config* layer stays a thin wiring layer:
+
+- the YAML says which class, which required input files and which non-default
+  choices define a named configuration, and nothing else;
+- the objects that come from *other* objects -- a slab component's grid, the
+  regridders an exchange needs, the coupling timestep -- are injected here,
+  because no configuration file can name a live Python object;
+- every physics default stays on the Python class that owns it.
+
+Nothing in this module names a component's parameters. It knows that
+``cfg.ocean`` builds something and that the something needs a grid; it does
+not know what a mixed layer is. ``test_runners_has_no_component_kwargs``
+enforces exactly that, by failing if any slab parameter's field name appears
+in this source at all -- so a new component is configured by adding a group
+file, never by adding a branch here.
+
+The one table is :data:`GROUP_TO_NAME`: which config group becomes which
+component name in the coupler, and so which rows of
+:func:`jem.exchangers.default_exchanges` apply.
+"""
+
+from __future__ import annotations
+
+import inspect
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
+
+import hydra.utils
+import jax_datetime as jdt
+import xarray as xr
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
+
+# Importing the config package registers the ${jcm_data:}/${jem_data:}
+# resolvers. A config composed elsewhere (`jem.main`, a test) has already done
+# it, but a caller that hands this module a config built by hand has not, and
+# the resolvers must exist before a value that uses one is read.
+import jem.config  # noqa: F401
+from jem import driver
+from jem.base.coupler import Coupler
+from jem.components.jcm import JCMComponent
+from jem.components.slab import SlabGrid
+from jem.exchangers import (
+    DEFAULT_EXCHANGER_NAME,
+    Exchange,
+    default_exchangers,
+    exchanged_fields,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Which config group builds which component, under which name. The names are
+#: the ones :func:`jem.exchangers.default_exchanges` wires; the atmosphere is
+#: not here because it is not optional and carries its own name
+#: (:class:`~jem.components.jcm.component.JCMComponent` is ``"atm"``).
+GROUP_TO_NAME = {"ocean": "ocn", "land": "lnd", "seaice": "seaice"}
+
+#: Keys a component's config node may carry that are **not** constructor
+#: arguments: they describe the grid the component is to be built on, which is
+#: an object the runner makes and injects. They are read by :func:`build_grid`
+#: and removed before the node is instantiated.
+RUNNER_ONLY_KEYS = ("grid_file", "land_fraction_file")
+
+#: The keyword :func:`build_coupler` injects a built grid under, and the
+#: parameter a component must declare to be given one. See
+#: :func:`_accepts_grid`.
+GRID_KEYWORD = "grid"
+
+#: How the named regridders of the ``regrid`` group map onto the keys
+#: :func:`jem.exchangers.default_exchanges` asks for. A flux or an areal
+#: fraction is mapped conservatively so its budget survives the interface; a
+#: state such as the sea surface temperature is mapped bilinearly, which does
+#: not leave a conservative map's staircase in a smooth field. Both
+#: vocabularies reach an exchange spec, so a hand-written coupling table in
+#: YAML may name either.
+REGRID_ROLES = {
+    "a2o_flux": "a2o_conserve",
+    "a2o_state": "a2o_bilinear",
+    "o2a_flux": "o2a_conserve",
+    "o2a_state": "o2a_bilinear",
+}
+
+#: Land-fraction variable name in the packaged mask files, and the fallback
+#: rule when a file uses another name. The files are ECMWF-derived, where the
+#: land-sea mask is ``lsm``.
+LAND_FRACTION_VARIABLE = "lsm"
+
+
+def build_atmosphere(cfg: DictConfig) -> JCMComponent:
+    """Build the atmosphere component from ``cfg.atmosphere``.
+
+    ``cfg.atmosphere`` is a jax-gcm config, group for group, so jax-gcm's own
+    builders are what read it -- JAX-ESM never reimplements the atmosphere's
+    wiring, and an option that works in ``python -m jcm.main`` works here.
+
+    Physical-constant overrides are applied **first**, process-globally, as
+    jax-gcm's own CLI does: the dynamical core reads the live
+    :mod:`jcm.constants` singleton while it is being constructed. Since the
+    surface components read the same singleton, and they are built after this,
+    one ``+atmosphere.constants.grav=...`` moves the whole Earth system rather
+    than only the atmosphere.
+
+    Nothing here touches ``cfg.atmosphere.run``. The coupled run's length and
+    output interval are the *coupler's* (``cfg.coupled_run``), and
+    :class:`~jem.components.jcm.component.JCMComponent` integrates exactly one
+    coupling interval per call with its own explicit arguments, so the
+    atmosphere's ``run`` group governs only what it governs in an uncoupled
+    run -- above all its timestep.
+
+    Calls ``model.physics.require_surface_exchange()`` right after the model
+    is built (jax-gcm#754 / #301): a physics package that cannot publish the
+    ``SurfaceExchange`` coupling struct (Held-Suarez, which resolves no
+    surface fluxes at all) would otherwise only be discovered at the first
+    coupled step, inside ``JCMComponent.step``'s call to
+    ``jem.components.jcm.exchange_fields.from_diagnostics`` -- a composition-
+    time failure here, naming the composed terms, is far more useful than a
+    ``KeyError`` deep in the first coupled step of what might be an hours-long
+    queued run.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The whole composed config; only ``cfg.atmosphere`` is read.
+
+    Returns
+    -------
+    jem.components.jcm.component.JCMComponent
+
+    """
+    from jcm.runners import (
+        apply_constants_overrides,
+        build_forcing,
+        build_model,
+        warn_on_config_traps,
+    )
+
+    atmosphere = cfg.atmosphere
+    apply_constants_overrides(atmosphere)
+    model = build_model(atmosphere)
+    model.physics.require_surface_exchange()
+    dycore = getattr(model, "dycore", None)
+    forcing = build_forcing(atmosphere, model.coords, dycore=dycore)
+    # jax-gcm's own cross-validation of combinations that run but mislead. It
+    # only ever warns, and a JAX-ESM user should hear the same warnings a
+    # jax-gcm user does.
+    warn_on_config_traps(
+        atmosphere, model.physics, forcing, coords=model.coords, dycore=dycore
+    )
+    return JCMComponent(model, forcing=forcing)
+
+
+def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
+    """Build the grid a surface component runs on.
+
+    Two cases, decided by whether the node names a grid file:
+
+    - **no ``grid_file``** -- the component shares the atmosphere's horizontal
+      grid and its land fraction, which is the single-grid configuration every
+      basic example uses. Taking both from the built atmosphere is what stops a
+      surface component ending up on a grid that merely resembles it.
+    - **``grid_file``** -- a SCRIP grid of the component's own (a
+      displaced-pole ocean grid). Its land fraction comes from
+      ``land_fraction_file`` if one is given, and otherwise from the SCRIP
+      file's own integer mask.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig
+        One component's config node.
+    atm : jem.components.jcm.component.JCMComponent
+        The already-built atmosphere, the source of the shared grid.
+
+    Returns
+    -------
+    jem.components.slab.grid.SlabGrid
+
+    """
+    grid_file = _runner_only_value(node, "grid_file")
+    if grid_file is None:
+        return SlabGrid.from_coords(
+            atm.model.coords.horizontal, atm.model.terrain.fmask
+        )
+    mask_file = _runner_only_value(node, "land_fraction_file")
+    # 0.5 rather than `from_scrip`'s own default, so that a cell counts as
+    # land on a SCRIP grid under the same rule as on the atmosphere's grid
+    # (`from_coords` defaults to 0.5); a coupled run that applied two
+    # different land/ocean splits either side of the interface would be
+    # exchanging fluxes with cells the other side thinks are dry.
+    return SlabGrid.from_scrip(
+        str(grid_file),
+        fractional_mask=None if mask_file is None else _land_fraction(mask_file),
+        threshold=0.5,
+    )
+
+
+def build_component(node: Any, **injected: Any) -> Any:
+    """Instantiate one component (or None) from its config node.
+
+    ``hydra.utils.instantiate`` on everything but the runner-only keys, with
+    the objects this module made passed as keyword arguments. A ``None`` node
+    -- what ``ocean=none`` composes to -- builds nothing, so a configuration
+    drops a component by selecting an option rather than by a flag here.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig or None
+        The component's config node.
+    **injected
+        Objects the config cannot name, passed to the constructor.
+
+    Returns
+    -------
+    Any or None
+        Whatever ``_target_`` builds.
+
+    Raises
+    ------
+    omegaconf.MissingMandatoryValue
+        If the node leaves a required input (``???``) unset. The message names
+        the full config key, so the fix is the override to add.
+
+    """
+    if node is None:
+        return None
+    # Resolved to plain Python here, rather than instantiated straight from
+    # the config node, so that the runner-only keys can be dropped without
+    # mutating the composed config a caller may still be reading (and
+    # `python -m jem.main --cfg job` still prints what the run was given).
+    config = OmegaConf.to_container(node, resolve=True, throw_on_missing=True)
+    if not isinstance(config, dict):
+        raise TypeError(
+            f"A component config node must be a mapping with a `_target_`; got "
+            f"{type(config).__name__}."
+        )
+    for key in RUNNER_ONLY_KEYS:
+        config.pop(key, None)
+    # `_convert_="object"` for two reasons: a constructor is handed plain
+    # Python values rather than OmegaConf containers, which behave differently
+    # under JAX and numpy; and an *injected* object survives as itself. The
+    # grid is a dataclass, which OmegaConf recognises as a structured config
+    # and `_convert_="all"` would hand over as a bare dict.
+    return hydra.utils.instantiate(config, **injected, _convert_="object")
+
+
+def build_regridders(cfg: DictConfig) -> dict[str, Callable[[Any], Any]]:
+    """Build the named regridders, and their role aliases.
+
+    ``regrid=same_grid`` composes to ``None`` -- every component is on one
+    grid and an exchange copies fields straight across -- and gives an empty
+    mapping. ``regrid=esmf`` builds a
+    :class:`jem.regrid.ESMFRegridders` from its weight files.
+
+    The result carries each regridder twice: under the name the config gave it
+    (``o2a_bilinear``) and under the exchange role it plays
+    (:data:`REGRID_ROLES`, ``o2a_state``). A hand-written coupling table can
+    then name whichever reads better, and the default table -- which asks by
+    role -- needs no naming convention imposed on the config.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The whole composed config; only ``cfg.regrid`` is read.
+
+    Returns
+    -------
+    dict[str, Callable]
+
+    """
+    regridders = build_component(cfg.get("regrid"))
+    if regridders is None:
+        return {}
+    named = dict(regridders)
+    roles = {
+        role: named[name] for role, name in REGRID_ROLES.items() if name in named
+    }
+    return {**named, **roles}
+
+
+def build_exchangers(
+    cfg: DictConfig,
+    components: Mapping[str, Any],
+    regridders: Mapping[str, Callable[[Any], Any]],
+) -> dict[str, Any]:
+    """Build the exchangers the coupler runs, from ``cfg.coupling``.
+
+    Four spellings, in precedence order:
+
+    - ``coupling.exchanger`` as a **dotted path** -- an importable single
+      exchanger function, used when the coupling is something a table cannot
+      express (a wind stress rotated onto another grid, a case-specific
+      freshwater budget). It replaces the table entirely.
+    - ``coupling.exchanger`` as a **mapping with a ``_target_``** -- the same
+      replacement, but for an exchanger that is a *class*, needing more than
+      a bare function can be given. A bare dotted path is called with no
+      arguments (``hydra.utils.get_method`` only resolves it), so it cannot
+      be handed the regridders a mixed-grid exchange needs; a node is
+      instead built with :func:`hydra.utils.instantiate`. ``regrid=
+      dict(regridders)`` -- the same regridder mapping
+      :func:`jem.exchangers.default_exchangers` receives below, so a
+      hand-written exchanger and the default table draw on one vocabulary --
+      is injected **only if the target's signature declares a ``regrid``
+      parameter** (:func:`_target_accepts_keyword`, the same rule
+      :func:`_accepts_grid` applies to a component's ``grid``), so a
+      single-grid hand-written exchanger that takes no ``regrid`` at all is
+      still a valid node instead of failing on an unexpected keyword.
+    - ``coupling.exchangers`` -- an explicit coupling table in YAML, a list of
+      ``{src, dst, regrid}`` mappings.
+    - neither (both ``null``, the default) --
+      :func:`jem.exchangers.default_exchangers` for whichever components were
+      built, which is where the standard wiring is written down once.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The whole composed config; only ``cfg.coupling`` is read.
+    components : Mapping[str, Any]
+        The built components, by the name they will be registered under.
+    regridders : Mapping[str, Callable]
+        What :func:`build_regridders` returned.
+
+    Returns
+    -------
+    dict[str, jem.base.component.Exchanger]
+
+    Raises
+    ------
+    ValueError
+        If both ``exchanger`` and ``exchangers`` are set; they are two answers
+        to one question, and guessing which was meant is worse than asking.
+        Also if ``exchanger`` is a mapping with no ``_target_`` -- otherwise
+        ``hydra.utils.instantiate`` would silently return it as a plain
+        ``dict``, a non-callable that only fails once the coupled step is
+        traced, far from this call and naming nothing about the cause.
+
+    """
+    coupling = cfg.coupling
+    path = coupling.get("exchanger")
+    specs = coupling.get("exchangers")
+    if path and specs:
+        raise ValueError(
+            "coupling.exchanger and coupling.exchangers are both set. "
+            "`exchanger` names one exchanger (a dotted path, or a mapping "
+            "with a `_target_`) used INSTEAD of the table, so setting both "
+            "leaves it undecided which couples the run; clear one "
+            "(coupling.exchanger=null or coupling.exchangers=null)."
+        )
+    if isinstance(path, DictConfig):
+        if "_target_" not in path:
+            raise ValueError(
+                f"coupling.exchanger={dict(path)!r} is a mapping with no "
+                "`_target_`, so it names no exchanger at all. Use either "
+                "coupling.exchanger=<dotted.path.to.a.function> (a bare "
+                "function) or coupling.exchanger._target_="
+                "<dotted.path.to.a.class> (an instantiated node)."
+            )
+        # `regrid=dict(regridders)` only if the target declares a `regrid`
+        # parameter (see the docstring), so a single-grid hand-written
+        # exchanger class that takes none is still a valid node.
+        injected = (
+            {"regrid": dict(regridders)}
+            if _target_accepts_keyword(path, "regrid") else {}
+        )
+        # `_convert_="object"` for the same two reasons `build_component`
+        # gives: a plain Python `regrid` mapping reaches the constructor
+        # rather than an OmegaConf container, and the regridders it holds --
+        # injected objects, not configured ones -- survive as themselves.
+        exchanger = hydra.utils.instantiate(path, **injected, _convert_="object")
+        logger.info("Coupling through the instantiated exchanger %r.", exchanger)
+        return {DEFAULT_EXCHANGER_NAME: exchanger}
+    if path:
+        logger.info("Coupling through the exchanger %s.", path)
+        return {DEFAULT_EXCHANGER_NAME: hydra.utils.get_method(path)}
+    if specs is None:
+        roles = {
+            role: regridders[role] for role in REGRID_ROLES if role in regridders
+        }
+        return default_exchangers(components, regrid=roles)
+    table = OmegaConf.to_container(specs, resolve=True, throw_on_missing=True)
+    if not isinstance(table, list):
+        raise TypeError(
+            "coupling.exchangers is the coupling table: a list of "
+            "`{src, dst, regrid}` mappings, or null for the default. Got a "
+            f"{type(table).__name__}."
+        )
+    return {DEFAULT_EXCHANGER_NAME: Exchange(table, regridders)}
+
+
+def declare_exchanged_forcing(
+    cfg: DictConfig,
+    atm: JCMComponent,
+    exchangers: Mapping[str, Any],
+    *,
+    workflow: Sequence[str] | None = None,
+) -> None:
+    """Tell the atmosphere which of its boundary conditions the coupling supplies.
+
+    The atmosphere's ``forcing`` section is the one carry section a coupled
+    model both *reads from a file* and *overwrites every step*. With
+    ``forcing@atmosphere.forcing=from_file`` jax-gcm builds each time-varying
+    boundary condition as a :class:`jcm.forcing.TimeSeries` -- values, time
+    axis and alignment mode -- and slices it by date inside the model; an
+    exchanger writes a single array into the same field. Something has to say
+    which fields are which, and the coupling table is the only place that
+    knows: see
+    :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`
+    for what the atmosphere then does with the answer.
+
+    Two spellings, in precedence order:
+
+    - ``coupling.exchanged_forcing`` -- an explicit list of
+      :class:`jcm.forcing.ForcingData` field names. This is how a
+      configuration coupled by a hand-written ``coupling.exchanger`` says what
+      that function writes, since a Python function cannot be read off the way
+      a table can.
+    - unset (``null``, the default) -- read off the built exchangers with
+      :func:`jem.exchangers.exchanged_fields`, so the declarative table
+      remains the single description of the coupling.
+
+    Deriving rather than assuming a fixed set is what keeps an unexchanged
+    climatology climatological: with ``land=none`` nothing supplies the land
+    surface, so ``stl_am``/``snowc_am``/``soilw_am`` stay time series and go
+    on following the seasonal cycle, exactly as they would in an uncoupled
+    run.
+
+    Both spellings get the same safety net, because both can get the set
+    wrong in the one direction that is silent. A field left *out* fails
+    loudly at trace time (the coupler refuses the carry), but a field left in
+    that nothing writes is a climatology frozen at its start-date value with
+    no symptom at all -- so an explicit declaration naming a field that is not
+    time-varying is warned about, a time-varying field that neither branch
+    declared is warned about whenever a hand-written exchanger could be the
+    one writing it, and (see "Detecting a declared field with no writer"
+    below) an explicit declaration naming a time-varying field that a fully
+    inspectable active table provably does not write is rejected outright.
+
+    An exchanger that is registered but that the coupled model's ``workflow``
+    never runs writes nothing either -- ``coupling.workflow`` omitting
+    :data:`jem.exchangers.DEFAULT_EXCHANGER_NAME` is the supported way to
+    step every component side by side with no coupling at all, for
+    comparison against a coupled run (see the module docstring of
+    :mod:`jem.exchangers`). ``workflow`` is how this function is told which
+    exchangers that is, so the derived branch reads the table only of the
+    ones that actually run and the safety-net warning only fires for those:
+    an exchanger nothing runs is not "opaque", it is simply inert, and a
+    field it would have written but does not is correctly left as the
+    time-varying climatology an uncoupled run needs.
+
+    The explicit branch gets the same treatment when *no* exchanger is
+    active at all (``workflow`` names none of ``exchangers``): a
+    hand-written ``coupling.exchanger`` is exactly the case
+    ``coupling.exchanged_forcing`` exists for (a Python function cannot be
+    read off the way a table can), and the same uncoupled-comparison
+    ``coupling.workflow`` can legally leave it out too. With nothing
+    scheduled to run, nothing can write any declared field regardless of
+    what the exchanger *would* write if it ran, so the declaration collapses
+    nothing and is logged as inert rather than silently freezing every
+    named field's climatology. This is coarser than the derived branch's
+    per-field filtering -- a hand-written exchanger is opaque, so which of
+    several *active* exchangers, if any, actually reaches the atmosphere
+    cannot be read off either -- but "is anything active at all" is a
+    question this function can always answer safely, and is the one the
+    failure mode above turns on.
+
+    Detecting a declared field with no writer
+    ------------------------------------------
+    ``coupling.exchanged_forcing`` can also name a field that *is*
+    time-varying while nothing active actually writes it -- e.g. declaring
+    ``sice_am`` in an atmosphere/ocean run with no sea-ice component. That
+    field is neither caught by the ``pinned`` warning above (it genuinely is
+    time-varying) nor by the "opaque hand-written exchanger" warning below
+    (there may be no opaque exchanger at all): it simply collapses to its
+    start-date value with nothing to say so.
+
+    This is detectable, and only detectable, when **every** active exchanger
+    is a :class:`~jem.exchangers.Exchange` (built from an inspectable table):
+    :func:`jem.exchangers.exchanged_fields` is then a *complete* list of what
+    the coupling writes, so a declared, time-varying name outside it provably
+    has no writer -- and this function raises. When *any* active exchanger is
+    hand-written (not an ``Exchange``), nothing can be concluded -- that
+    opacity is exactly why the explicit declaration exists in the first
+    place -- so this function stays silent there, same as today, and the
+    hand-written field is the user's to get right.
+
+    This is an error rather than a warning, unlike the sibling checks: a
+    declared field that is not time-varying (``pinned``, above) still leaves
+    the run *correct* -- a plain-array field collapses to itself -- so only
+    the intent might be wrong. Here the run is not correct: a seasonal cycle
+    is silently replaced by a constant for the whole integration, and the fix
+    (removing the name from the list) is a one-line edit.
+
+    Raises
+    ------
+    ValueError
+        If ``coupling.exchanged_forcing`` is a bare string. It is a list of
+        field names, and a string would be read as its characters.
+    ValueError
+        If ``coupling.exchanged_forcing`` names a time-varying field that no
+        active, fully inspectable coupling table writes (see "Detecting a
+        declared field with no writer" above).
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        The whole composed config; only ``cfg.coupling`` is read.
+    atm : jem.components.jcm.component.JCMComponent
+        The built atmosphere, which is told the answer.
+    exchangers : Mapping[str, Any]
+        What :func:`build_exchangers` returned.
+    workflow : sequence of str, optional
+        The coupled model's actual workflow -- pass ``coupler.workflow``, the
+        already-resolved and validated tuple (the explicit
+        ``coupling.workflow``, flattened, or the default order
+        :class:`~jem.base.coupler.Coupler` builds when none was given) --
+        so that an exchanger the workflow does not run contributes no fields
+        and triggers no warning. ``None`` (the default) uses every exchanger
+        in ``exchangers`` unfiltered, for a caller -- such as a direct unit
+        test of one exchanger -- that has no workflow to resolve.
+
+    """
+    # Only the exchangers the workflow actually runs can write anything; one
+    # that is registered but that `workflow` never names (the uncoupled
+    # comparison run the module docstring above describes) is exactly as
+    # inert as one that was never built at all. `workflow=None` -- a caller
+    # with no coupler to resolve one from -- keeps the old behaviour of
+    # reading every registered exchanger.
+    active = (
+        exchangers if workflow is None
+        else {name: exchanger for name, exchanger in exchangers.items()
+              if name in workflow}
+    )
+    # Computed once, ahead of the declared/derived split below, because both
+    # the new "declared but unwritten" check and the existing hand-written
+    # warning need to know which active exchangers are inspectable.
+    opaque = sorted(
+        name for name, exchanger in active.items()
+        if not isinstance(exchanger, Exchange)
+    )
+    declared = cfg.coupling.get("exchanged_forcing")
+    if declared is not None:
+        if isinstance(declared, str):
+            # `exchanged_forcing=sice_am` composes to a string, and a string is
+            # an iterable of characters: without this it would be declared as
+            # seven one-letter fields and the error would name those rather
+            # than the missing brackets.
+            raise ValueError(
+                "coupling.exchanged_forcing is a LIST of jcm.forcing.ForcingData "
+                f"field names, not one name; got the string {declared!r}. Write "
+                f"`+coupling.exchanged_forcing=[{declared}]`."
+            )
+        fields = tuple(OmegaConf.to_container(declared, resolve=True)  # type: ignore[arg-type]
+                       if isinstance(declared, ListConfig) else declared)
+        logger.info(
+            "The coupling supplies the atmosphere's %s (coupling.exchanged_forcing).",
+            ", ".join(fields) or "nothing",
+        )
+        # A name that is not time-varying is the declaration's own failure
+        # mode: declaring it collapses a field nothing writes, pinning it at
+        # the start date for the whole run. It is a warning rather than an
+        # error because a plain-array field collapses to itself, so the run is
+        # correct -- it is the *intent* that is probably wrong.
+        pinned = [
+            name for name in fields if name not in atm.time_varying_forcing
+        ]
+        if pinned and atm.time_varying_forcing:
+            logger.warning(
+                "coupling.exchanged_forcing names %s, which %s not time-varying "
+                "in this atmosphere's forcing (%s %s). Declaring a field only "
+                "matters when something writes it; if nothing does, it is "
+                "simply held at its start-date value.",
+                ", ".join(pinned),
+                "is" if len(pinned) == 1 else "are",
+                "the time-varying field(s) are",
+                ", ".join(atm.time_varying_forcing),
+            )
+        if not active:
+            # See the docstring: nothing in `coupling.workflow` runs, so
+            # nothing can write any of `fields` regardless of what was
+            # declared. `fields` is still validated below (an unknown name
+            # is still an error) -- only what actually gets collapsed
+            # changes, from `fields` to nothing.
+            logger.info(
+                "coupling.exchanged_forcing names %s, but coupling.workflow "
+                "runs no exchanger, so nothing can write them: the "
+                "declaration is inert and they stay time-varying.",
+                ", ".join(fields) or "nothing",
+            )
+        elif not opaque:
+            # Every active exchanger is a table (`Exchange`), so unlike the
+            # opaque case below, what it writes is not a guess:
+            # `exchanged_fields` is a complete list. A declared, time-varying
+            # field outside that list therefore provably has no writer -- not
+            # merely an unproven one -- and this is where the `pinned` warning
+            # above cannot help, because the field genuinely *is*
+            # time-varying; it is simply nobody's job to overwrite it. This is
+            # an error, not a warning, because unlike `pinned` the run is not
+            # correct: `atm.initialize()` collapses a declared name to its
+            # start-date value regardless of whether anything then keeps it
+            # current, so the run silently substitutes a constant for a
+            # seasonal cycle for its whole duration. The fix is one line
+            # (removing the name), so failing loudly costs nothing and a
+            # frozen climatology found after the fact costs a rerun.
+            writable = exchanged_fields(active, atm.name)
+            unwritten = [
+                name for name in fields
+                if name in atm.time_varying_forcing and name not in writable
+            ]
+            if unwritten:
+                one = len(unwritten) == 1
+                raise ValueError(
+                    "coupling.exchanged_forcing names "
+                    f"{', '.join(unwritten)}, which "
+                    f"{'is' if one else 'are'} still time-varying in this "
+                    f"atmosphere's forcing but {'has' if one else 'have'} no "
+                    "writer in the active coupling table. Declaring "
+                    f"{'it' if one else 'them'} without anything to "
+                    f"overwrite {'it' if one else 'them'} every coupling "
+                    f"step would silently freeze {'it' if one else 'them'} "
+                    f"at {'its' if one else 'their'} start-date value for "
+                    "the whole run, instead of following "
+                    f"{'its' if one else 'their'} seasonal cycle. The active "
+                    "table writes "
+                    f"{', '.join(writable) if writable else 'nothing'} into "
+                    f"'{atm.name}.forcing'; remove "
+                    f"{'it' if one else 'them'} from "
+                    "coupling.exchanged_forcing if nothing is meant to "
+                    f"supply {'it' if one else 'them'}."
+                )
+    else:
+        fields = exchanged_fields(active, atm.name)
+        logger.info(
+            "The coupling supplies the atmosphere's %s (derived from the "
+            "exchanger table); the rest of its forcing stays time-varying.",
+            ", ".join(fields) or "nothing",
+        )
+
+    # In BOTH branches: a time-varying field nobody declared is one an
+    # exchanger may still write, and the coupled step is then refused for
+    # changing the carry's structure. Only a hand-written exchanger can
+    # produce that silently -- a declarative table is where `fields` came
+    # from -- so the warning is gated on there being one (`opaque`, computed
+    # above).
+    undeclared = [name for name in atm.time_varying_forcing if name not in fields]
+    if opaque and undeclared:
+        # A hand-written exchanger is a function, so there is nothing to
+        # read: whatever it writes into `atm.forcing` is invisible here.
+        # Warned about rather than guessed at, because the guess that is
+        # wrong turns a climatology into a constant without saying so.
+        # Only when something is actually still a time series: with the
+        # default forcing every field is already a plain array and a
+        # hand-written exchanger has nothing to trip over.
+        logger.warning(
+            "The exchanger(s) %s are hand-written, so what they write into "
+            "the atmosphere's forcing cannot be read off a table, while %s "
+            "%s still time-varying. Any of those an exchanger overwrites "
+            "has to be listed in `coupling.exchanged_forcing`, or the "
+            "coupled step is refused for changing the carry's structure.",
+            ", ".join(repr(name) for name in opaque),
+            ", ".join(undeclared),
+            "is" if len(undeclared) == 1 else "are",
+        )
+    atm.set_exchanged_forcing(fields)
+    if declared is not None and not active:
+        # `fields` was just validated (and, above, checked against
+        # `atm.time_varying_forcing`) using the full declared list; this
+        # overrides the actual declaration to nothing, per the docstring and
+        # the `if not active` log above -- nothing active means nothing can
+        # write any of them, so every one of them stays time-varying.
+        atm.set_exchanged_forcing(())
+
+
+def build_coupler(cfg: DictConfig) -> Coupler:
+    """Build the whole coupled model from a composed config.
+
+    The atmosphere first (it owns the clock every other component is checked
+    against, and the grid they default to), then each surface group that is
+    not ``none``, then the exchange and the coupler itself.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``.
+
+    Returns
+    -------
+    jem.base.coupler.Coupler
+
+    """
+    atm = build_atmosphere(cfg)
+    components: dict[str, Any] = {atm.name: atm}
+    for group, name in GROUP_TO_NAME.items():
+        node = cfg.get(group)
+        if node is None:
+            logger.debug("No %s component (%s=none).", name, group)
+            continue
+        components[name] = build_component(node, **_injected_grid(node, atm))
+
+    regridders = build_regridders(cfg)
+    exchangers = build_exchangers(cfg, components, regridders)
+    workflow = cfg.coupling.get("workflow")
+    coupler = Coupler(
+        components,
+        exchangers,
+        coupling_timestep=_coupling_timestep(cfg),
+        start_date=atm.model.start_time,
+        workflow=None if workflow is None else list(workflow),
+    )
+    # After the coupler, not before: what `declare_exchanged_forcing` needs is
+    # not the exchangers `build_exchangers` registered but the ones the
+    # workflow actually runs, and only `Coupler.__init__` resolves that --
+    # flattening and validating an explicit `coupling.workflow`, or falling
+    # back to the default order (every exchanger, then every component,
+    # `jem.exchangers.default_workflow`) if none was given. `coupler.workflow`
+    # is that resolution, reused here rather than duplicated. This is still
+    # in time: `Coupler.__init__` only binds each component to its clock
+    # (`bind`), it does not call `atm.initialize()` -- `_validate_exchangers`
+    # below makes that first call, and `atm.set_exchanged_forcing` has to
+    # land before it does, which it does here.
+    declare_exchanged_forcing(cfg, atm, exchangers, workflow=coupler.workflow)
+    _validate_exchangers(coupler)
+    logger.info("Built %r", coupler)
+    return coupler
+
+
+def build_run_kwargs(cfg: DictConfig) -> dict[str, Any]:
+    """Return the keyword arguments ``driver.run_chunked`` needs from ``cfg``.
+
+    ``cfg.coupled_run`` is the keyword arguments of
+    :func:`jem.driver.run_chunked`, one for one, minus ``log_level`` --- which
+    belongs with the run's other command-line settings but configures
+    :mod:`jem.main`'s logger rather than the run. No default is repeated here:
+    every one of them lives on ``run_chunked``.
+
+    Factored out of :func:`run` (issue #131) so that
+    :func:`jem.configurations.load` -- the Python door onto a named
+    configuration -- can assemble the SAME ``run_kwargs`` the CLI would use
+    without duplicating this dict-building logic; a caller then reproduces
+    ``python -m jem.main +configuration=<name>``'s integration with
+    ``jem.run_chunked(exp.coupler, **exp.run_kwargs)``.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``; only
+        ``cfg.coupled_run`` is read.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments for :func:`jem.driver.run_chunked`.
+
+    """
+    kwargs = OmegaConf.to_container(cfg.coupled_run, resolve=True, throw_on_missing=True)
+    if not isinstance(kwargs, dict):
+        raise TypeError(
+            f"cfg.coupled_run must be a mapping of run settings; got "
+            f"{type(kwargs).__name__}."
+        )
+    settings = {str(key): value for key, value in kwargs.items()}
+    settings.pop("log_level", None)
+    if settings.get("output_dir") is None:
+        settings["output_dir"] = _default_output_dir()
+    return settings
+
+
+def run(cfg: DictConfig) -> driver.RunResult:
+    """Build the coupled model from ``cfg`` and run it.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``.
+
+    Returns
+    -------
+    jem.driver.RunResult
+
+    """
+    logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg))
+    settings = build_run_kwargs(cfg)
+    logger.info("Writing output to %s", settings["output_dir"])
+    return driver.run_chunked(build_coupler(cfg), **settings)
+
+
+# -- the objects a config cannot name ---------------------------------------
+
+
+def _injected_grid(node: Any, atm: JCMComponent) -> dict[str, SlabGrid]:
+    """Return the ``grid=`` keyword for ``node``, or nothing at all.
+
+    A component that brings its own grid -- an ocean GCM with its own
+    bathymetry -- neither takes one nor needs one built, so no grid is made
+    for it either: :func:`build_grid` would read the atmosphere's horizontal
+    grid and its land fraction to produce something nothing would use.
+
+    Such a node carrying a :data:`RUNNER_ONLY_KEYS` key is refused rather than
+    ignored. Those keys describe the grid this function would have built, and
+    :func:`build_component` drops them before instantiating, so a
+    ``ocean.grid_file=...`` on a Veros node would otherwise reach nothing at
+    all and the run would proceed on a grid the user believes they replaced.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig
+        One component's config node.
+    atm : jem.components.jcm.component.JCMComponent
+        The already-built atmosphere, for :func:`build_grid`.
+
+    Returns
+    -------
+    dict
+        ``{"grid": SlabGrid}``, or ``{}``.
+
+    Raises
+    ------
+    ValueError
+        If the node describes a grid for a component that takes none.
+
+    """
+    if not _accepts_grid(node):
+        unusable = [
+            key for key in RUNNER_ONLY_KEYS
+            if _runner_only_value(node, key) is not None
+        ]
+        if unusable:
+            raise ValueError(
+                f"{node.get('_target_')!r} does not take a grid, so "
+                f"{unusable!r} would be read by nothing: these keys describe "
+                "the grid the runner builds for a component that is built ON "
+                "one (the slab models). A component that brings its own grid "
+                "takes its geometry through its own constructor arguments -- "
+                "for a Veros ocean, the keys its setup factory declares."
+            )
+        logger.debug(
+            "%s takes no grid, so none is built for it.", node.get("_target_")
+        )
+        return {}
+    return {GRID_KEYWORD: build_grid(node, atm)}
+
+
+def _accepts_grid(node: Any) -> bool:
+    """Return whether the thing ``node`` builds takes a ``grid=`` argument.
+
+    The slab components are built **on** a grid, which is a live object no
+    configuration file can name, so the runner makes one and injects it. A
+    component that brings its own grid -- an ocean GCM with its own
+    bathymetry and its own land-sea mask -- does not take one, and handing it
+    a grid anyway is not a harmless extra: ``VerosComponent.from_setup``
+    passes every keyword it does not recognise on to the Veros setup factory,
+    which rejects an unknown ``grid``. See :func:`_target_accepts_keyword`
+    for how the question is actually answered.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig or None
+        One component's config node.
+
+    Returns
+    -------
+    bool
+
+    """
+    return _target_accepts_keyword(node, GRID_KEYWORD)
+
+
+def _target_accepts_keyword(node: Any, keyword: str) -> bool:
+    """Return whether the thing ``node``'s ``_target_`` builds takes ``keyword=``.
+
+    Used for both a component's ``grid=`` (:func:`_accepts_grid`) and an
+    exchanger node's ``regrid=`` (:func:`build_exchangers`): in both cases an
+    object no configuration file can name -- a live grid, a live mapping of
+    regridders -- is only injected if the target actually declares the
+    keyword, so that a single-grid hand-written exchanger (or a component
+    that brings its own grid) is not handed an argument it does not accept.
+
+    The question is asked of the target itself rather than answered by a
+    list of names here: the ``_target_`` is resolved to the class or
+    function it names and its signature inspected for an explicit
+    ``keyword`` parameter. A ``**kwargs`` catch-all does not count -- that is
+    exactly the case that swallows the keyword and fails somewhere else.
+
+    A target that cannot be resolved (a typo, or an optional dependency that
+    is not installed) answers ``False``: nothing is injected, and
+    ``hydra.utils.instantiate`` then raises the real import error, which says
+    far more than anything this could invent. Only the errors a *lookup*
+    raises are swallowed for that -- ``ImportError`` and the ``ValueError``
+    Hydra gives an invalid dotstring. Anything else means the lookup itself is
+    broken rather than the target missing, and it must not be mistaken for
+    "this target takes no such keyword": that answer is indistinguishable
+    from the truthful one, and it would silently deny a target the value it
+    requires, leaving a run to die inside ``instantiate`` with a message
+    naming nothing.
+
+    Parameters
+    ----------
+    node : omegaconf.DictConfig or None
+        A config node carrying a ``_target_``.
+    keyword : str
+        The keyword-argument name to look for.
+
+    Returns
+    -------
+    bool
+
+    """
+    target = None if node is None else node.get("_target_")
+    if target is None:
+        return False
+    try:
+        # `get_object` rather than `get_class`/`get_method`, because a
+        # `_target_` is legitimately either -- `jem.components.SlabOceanModel`
+        # is a class, `jem.components.VerosComponent.from_setup` a classmethod
+        # -- and the typed lookups reject (and log an error about) the other.
+        resolved = hydra.utils.get_object(str(target))
+    except (ImportError, ValueError):
+        logger.debug(
+            "Could not resolve _target_ %r; %s not injected.", target, keyword
+        )
+        return False
+    try:
+        signature = inspect.signature(resolved)
+    except (TypeError, ValueError):
+        return False
+    parameter = signature.parameters.get(keyword)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _runner_only_value(node: Any, key: str) -> Any:
+    """Return one of the :data:`RUNNER_ONLY_KEYS` from a node, or None."""
+    if node is None or key not in node:
+        return None
+    return node[key]
+
+
+def _land_fraction(path: str) -> Any:
+    """Read a land fraction from a mask file, onto ``SlabGrid``'s layout.
+
+    The packaged mask files hold a single ``(time, lat, lon)`` field: the
+    first (and only) record is taken and transposed to the ``(n_lon, n_lat)``
+    layout every grid and component in JAX-ESM uses. A file whose variable is
+    named something other than :data:`LAND_FRACTION_VARIABLE` is accepted when
+    it holds exactly one variable, because the name is the file's convention
+    rather than anything the coupler decides.
+    """
+    dataset = xr.open_dataset(path)
+    if LAND_FRACTION_VARIABLE in dataset:
+        field = dataset[LAND_FRACTION_VARIABLE]
+    elif len(dataset.data_vars) == 1:
+        (only,) = dataset.data_vars
+        field = dataset[only]
+    else:
+        raise ValueError(
+            f"{path!r} has no {LAND_FRACTION_VARIABLE!r} variable and holds "
+            f"{sorted(map(str, dataset.data_vars))!r}, so which of them is the "
+            "land fraction is ambiguous."
+        )
+    return field.to_numpy()[0].transpose()
+
+
+def _coupling_timestep(cfg: DictConfig) -> jdt.Timedelta:
+    """Return ``cfg.coupling.timestep`` ("1 day", "12 hours") as a ``jdt.Timedelta``."""
+    from jcm.date import parse_duration_seconds
+
+    return jdt.to_timedelta(parse_duration_seconds(cfg.coupling.timestep), "second")
+
+
+def _validate_exchangers(coupler: Coupler) -> None:
+    """Check every declarative exchange against the model's real carries.
+
+    :meth:`jem.exchangers.Exchange.validate` turns a mistyped component,
+    section, field or regridder into an error naming the spec, before the
+    coupled step is traced. It needs real carries, so this pays for one
+    ``coupler.initialize()`` -- the same call the run makes, whose compiled
+    pieces the run then reuses -- to catch a broken coupling table before a
+    model is integrated at all. Exchangers that are plain functions have
+    nothing to check and are skipped.
+
+    An exchanger the workflow does not run is skipped too, because its rows
+    describe a coupling this coupled model never executes. Left out of
+    ``coupling.workflow`` is the supported way to step every component with
+    no coupling at all, for comparison against a coupled run (see
+    :func:`declare_exchanged_forcing`), and that is exactly what makes such
+    an exchanger's rows unvalidatable rather than merely unused:
+    ``declare_exchanged_forcing`` correctly leaves the destination fields it
+    would have written as the time-varying climatology an uncoupled
+    atmosphere needs, so checking the row anyway would compare that (still a
+    ``jcm.forcing.TimeSeries``) against its still-plain-array source and
+    raise on a structure mismatch that can only ever arise from an exchange
+    that never runs.
+    """
+    active = {
+        name: exchanger for name, exchanger in coupler.exchangers.items()
+        if name in coupler.workflow
+    }
+    checkable = [
+        exchanger
+        for exchanger in active.values()
+        if hasattr(exchanger, "validate")
+    ]
+    if not checkable:
+        return
+    carry = coupler.initialize()
+    for exchanger in checkable:
+        exchanger.validate(carry.components)
+
+
+def _default_output_dir() -> str:
+    """Return the directory a run writes into when the config names none.
+
+    Hydra's run directory, so that each run is self-contained and two runs
+    cannot overwrite each other's files -- and ``outputs`` when this is not a
+    Hydra job at all (a script or a notebook calling :func:`run` directly).
+    """
+    try:
+        return str(HydraConfig.get().runtime.output_dir)
+    except ValueError:
+        return "outputs"

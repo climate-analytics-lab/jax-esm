@@ -1,0 +1,5 @@
+# @package _global_
+# Every component is on the same horizontal grid, so the exchange copies
+# fields straight across and needs no regridders. See `ocean/none.yaml` for
+# why the `_global_` header is needed to make the key null rather than empty.
+regrid: null

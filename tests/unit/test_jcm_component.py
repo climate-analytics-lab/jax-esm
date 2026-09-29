@@ -1,0 +1,960 @@
+"""Tests for the JCM adapter (:mod:`jem.components.jcm`).
+
+These build a real ``jcm`` model, so they use the smallest configuration
+SPEEDY physics supports -- T21 with 5 vertical levels on an aquaplanet --
+and share it across the module: construction plus the first compiled step
+dominates the runtime.
+"""
+
+from types import SimpleNamespace
+
+import jax
+import jax.numpy as jnp
+import jax_datetime as jdt
+import numpy as np
+import pytest
+from jcm.date import DateData
+from jcm.forcing import ForcingData, TimeSeries
+from jcm.model import Model
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.physics.surface.echam.surface_exchange_publisher import (
+    EchamSurfaceExchange,
+)
+from jcm.physics.surface.surface_exchange import (
+    SurfaceExchange as JcmSurfaceExchange,
+)
+from jcm.physics_interface import PhysicsState
+from jcm.terrain import TerrainData
+
+from jem.base.component import (
+    Component,
+    CouplingTime,
+    SupportsBind,
+    SupportsXarray,
+    TimeAxis,
+)
+from jem import constants
+from jem.components.jcm import JCMComponent, exchange_fields
+
+START_DATE = jdt.to_datetime("2000-01-01")
+COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
+
+# T21 on jcm's matching (64, 32) nodal grid; 5 levels is the fewest SPEEDY
+# physics accepts (its convective cloud-top search needs kx >= 5).
+LAYERS = 5
+TRUNCATION = 21
+GRID_SHAPE = (64, 32)
+
+
+def _build_model() -> Model:
+    coords = get_speedy_coords(layers=LAYERS, spectral_truncation=TRUNCATION)
+    return Model(
+        coords=coords,
+        terrain=TerrainData.aquaplanet(coords),
+        start_time=START_DATE,
+    )
+
+
+def _bound_component(model: Model) -> JCMComponent:
+    component = JCMComponent(model)
+    component.bind(
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    return component
+
+
+def _coupling_time(step: int) -> CouplingTime:
+    """Build the clock the coupler hands a component on step ``step``."""
+    return CouplingTime(
+        step=jnp.int32(step),
+        time=START_DATE + jdt.to_timedelta(int(step), "day"),
+        sim_time=jnp.float32(step * 86400.0),
+        dt=86400.0,
+    )
+
+
+@pytest.fixture(scope="module")
+def model() -> Model:
+    return _build_model()
+
+
+@pytest.fixture(scope="module")
+def component(model) -> JCMComponent:
+    return _bound_component(model)
+
+
+@pytest.fixture(scope="module")
+def stepped(component):
+    """Two consecutive coupled steps, computed once for several tests."""
+    carry0 = component.initialize()
+    carry1, diagnostics1 = component.step(carry0, _coupling_time(0))
+    carry2, diagnostics2 = component.step(carry1, _coupling_time(1))
+    return carry0, carry1, carry2, diagnostics1, diagnostics2
+
+
+def _build_echam_model() -> Model:
+    """Build the smallest real ECHAM configuration jax-gcm's own tests use.
+
+    T21 with ECHAM's standard 47-level hybrid table --
+    ``jcm/checkpoint_test.py``'s ``test_echam_round_trip_and_condensate_metadata``
+    is the same combination -- and a 30-minute step, the validated ECHAM
+    default; one coupling day (``COUPLING_TIMESTEP``) is a whole 48 of them.
+    """
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.physics.echam.echam_terms import echam_physics
+    from jcm.utils import get_coords
+
+    coords = get_coords(get_echam_levels(47), spectral_truncation=TRUNCATION)
+    return Model(
+        coords=coords,
+        terrain=TerrainData.aquaplanet(coords),
+        time_step=30,
+        physics=echam_physics(),
+        start_time=START_DATE,
+    )
+
+
+@pytest.fixture(scope="module")
+def echam_model() -> Model:
+    return _build_echam_model()
+
+
+@pytest.fixture(scope="module")
+def echam_component(echam_model) -> JCMComponent:
+    return _bound_component(echam_model)
+
+
+@pytest.fixture(scope="module")
+def echam_stepped(echam_component):
+    """One real coupled ECHAM step -- expensive, computed once per module.
+
+    A single step is enough to exercise ``JCMDerived``/the surface exchange;
+    the two-step scan requirement (CLAUDE.md's "Testing" section) is
+    exercised separately, through a real ``Coupler``, by
+    ``test_echam_two_coupled_steps_through_a_slab_ocean`` below.
+    """
+    carry0 = echam_component.initialize()
+    carry1, diagnostics1 = echam_component.step(carry0, _coupling_time(0))
+    return carry0, carry1, diagnostics1
+
+
+# --------------------------------------------------------------------------
+# Fast tests: no integration.
+# --------------------------------------------------------------------------
+
+def test_component_satisfies_protocols(component):
+    """The wrapper is what the coupler tests for with ``isinstance``."""
+    assert isinstance(component, Component)
+    assert isinstance(component, SupportsBind)
+    assert isinstance(component, SupportsXarray)
+    assert component.name == "atm"
+
+
+def test_step_before_bind_raises(model):
+    """Stepping an unregistered component names the fix."""
+    component = JCMComponent(model)
+    with pytest.raises(RuntimeError, match="bind"):
+        component.step({}, _coupling_time(0))
+
+
+def test_bind_rejects_mismatched_start_date(model):
+    """A start-date mismatch names both dates rather than silently drifting."""
+    component = JCMComponent(model)
+    other = jdt.to_datetime("1990-06-01")
+    with pytest.raises(ValueError, match="Start-date mismatch"):
+        component.bind(
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=other,
+        )
+
+
+def test_bind_rejects_non_multiple_timestep(model):
+    """The coupling interval must be a whole number of model timesteps."""
+    component = JCMComponent(model)
+    model_seconds = int(model.dt_si.to_timedelta().total_seconds())
+    with pytest.raises(ValueError, match="whole multiple"):
+        component.bind(
+            coupling_timestep=jdt.to_timedelta(model_seconds + 1, "second"),
+            start_date=START_DATE,
+        )
+
+
+def test_initialize_does_not_integrate(model, monkeypatch):
+    """``initialize()`` must build pytrees, not run the model.
+
+    The previous adapter ran a whole coupling interval just to learn the
+    shape of the diagnostics dict, which cost a step per run and started
+    the atmosphere one interval ahead of the coupler's clock.
+    """
+    component = _bound_component(model)
+    calls = []
+
+    def _spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("initialize() integrated the model")
+
+    monkeypatch.setattr(model, "run_from_state_with_carry", _spy)
+    carry = component.initialize()
+
+    assert calls == []
+    assert set(carry) == {"state", "physics", "time", "step", "derived", "forcing"}
+    assert carry["time"] == model.start_time
+    assert int(carry["step"]) == 0
+    assert carry["derived"].total_heat_flux.shape == GRID_SHAPE
+
+
+def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
+                          u0=1.5, v0=-2.5, wind_reference="lowest_level"):
+    """Build a real jax-gcm ``SurfaceExchange`` with hand-chosen values.
+
+    The other guaranteed fields are filled with placeholders: JEM's
+    translation does not read them (see ``exchange_fields``'s docstring).
+    """
+    field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
+    return JcmSurfaceExchange(
+        net_heat_flux=field(net_heat_flux),
+        sensible_heat_flux=field(0.0),
+        latent_heat_flux=field(0.0),
+        evaporation=field(evaporation),
+        precipitation=field(precipitation),
+        stress_u=field(0.0),
+        stress_v=field(0.0),
+        wind_speed=field(float(np.hypot(u0, v0))),
+        wind_u=field(u0),
+        wind_v=field(v0),
+        wind_reference=wind_reference,
+        air_density=field(1.2),
+        air_potential_temperature=field(290.0),
+    )
+
+
+def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
+                             precipitation=0.008, u0=1.5, v0=-2.5):
+    """Build a diagnostics dict shaped like SPEEDY's real ``surface_exchange`` output.
+
+    The values are already in the contract's units (kg m-2 s-1, positive
+    up/down); the wind sits at SPEEDY's own ``wind_reference="lowest_level"``.
+    """
+    return {
+        "surface_exchange": _jcm_surface_exchange(
+            net_heat_flux, evaporation, precipitation,
+            u0=u0, v0=v0, wind_reference="lowest_level",
+        ),
+    }
+
+
+def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
+                            precipitation=0.004, u0=4.0, v0=1.0):
+    """Build a diagnostics dict shaped like ECHAM's real ``surface_exchange`` output.
+
+    The wind sits at ECHAM's own ``wind_reference="10m"`` (its
+    stability-corrected 10 m reduction).
+    """
+    return {
+        "surface_exchange": _jcm_surface_exchange(
+            net_heat_flux, evaporation, precipitation,
+            u0=u0, v0=v0, wind_reference="10m",
+        ),
+    }
+
+
+def test_speedy_exchange_shapes_and_signs():
+    """Sign flip only: evaporation/precipitation/wind need no unit conversion
+    or reshape, because the contract already publishes them in JEM's units
+    and on JEM's grid -- see the module docstring's derivation table.
+    """
+    diagnostics = _fake_speedy_diagnostics()
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
+
+    assert exchange.total_heat_flux.shape == GRID_SHAPE
+    # jax-gcm's net_heat_flux is positive DOWN into the surface; JEM is up.
+    np.testing.assert_allclose(exchange.total_heat_flux, -10.0)
+    # Already kg m-2 s-1 and already the convective+large-scale total in the
+    # published contract -- no conversion, no manual summing.
+    np.testing.assert_allclose(exchange.evaporation, 0.002)
+    np.testing.assert_allclose(exchange.precipitation, 0.008)
+    np.testing.assert_allclose(exchange.u0, 1.5)
+    np.testing.assert_allclose(exchange.v0, -2.5)
+    for field in exchange:
+        assert field.shape == GRID_SHAPE
+
+
+def test_echam_exchange_translates_identically_to_speedy():
+    """ECHAM's fluxes AND wind translate through the exact same code path as
+    SPEEDY's, with no per-package branch anywhere in ``from_diagnostics``.
+    """
+    diagnostics = _fake_echam_diagnostics()
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
+
+    # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is the
+    # negative of it (positive UP) -- same sign flip as the SPEEDY case above.
+    np.testing.assert_allclose(exchange.total_heat_flux, -7.0)
+    np.testing.assert_allclose(exchange.evaporation, 0.001)
+    np.testing.assert_allclose(exchange.precipitation, 0.004)
+    # ECHAM's wind sits at its own reference (10 m); the value passes through
+    # exactly as SPEEDY's lowest-level wind does above.
+    np.testing.assert_allclose(exchange.u0, 4.0)
+    np.testing.assert_allclose(exchange.v0, 1.0)
+
+
+def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
+    """A column-vectorized package's flat fields land on the right grid cell.
+
+    ECHAM's default composition (``vectorize_columns=True``) publishes every
+    guaranteed field flat, ``(ix * il,)`` (see the module docstring's
+    "Column-vectorized packages publish flat, not gridded" section) -- this
+    pins the reshape against DISTINCT per-column values on a non-square grid,
+    so a transpose or a wrong major axis would show up as values landing at
+    the wrong ``(ix, il)`` cell, not merely as a shape that happens to have
+    the right total size (the fixed-value fake diagnostics elsewhere in this
+    module could not tell such a bug apart from a correct reshape).
+    """
+    ix, il = 3, 2
+    ncols = ix * il
+    flat = jnp.arange(ncols, dtype=jnp.float32)  # 0, 1, ..., 5
+    zeros = jnp.zeros(ncols)
+    diagnostics = {
+        "surface_exchange": JcmSurfaceExchange(
+            net_heat_flux=zeros, sensible_heat_flux=zeros, latent_heat_flux=zeros,
+            evaporation=zeros, precipitation=zeros,
+            stress_u=zeros, stress_v=zeros,
+            wind_speed=jnp.hypot(flat, flat), wind_u=flat, wind_v=-flat,
+            air_density=zeros, air_potential_temperature=zeros,
+            wind_reference="lowest_level",
+        ),
+    }
+    # jax-gcm's own flatten is a plain C-order reshape(ncols) of an (ix, il)
+    # array (lon-major); .reshape(ix, il) is its exact inverse, so the
+    # expected grid is this same arange reshaped the same way.
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=(ix, il))
+
+    assert exchange.u0.shape == (ix, il)
+    np.testing.assert_array_equal(np.asarray(exchange.u0), flat.reshape(ix, il))
+    np.testing.assert_array_equal(np.asarray(exchange.v0), (-flat).reshape(ix, il))
+
+
+def test_missing_surface_exchange_raises_jcms_own_key_error():
+    """A package that publishes no ``surface_exchange`` at all (Held-Suarez)
+    fails with jax-gcm's own pointed error, not a bare ``KeyError``.
+    """
+    with pytest.raises(KeyError, match="surface_exchange"):
+        exchange_fields.from_diagnostics(
+            {"radiation": None, "clouds": None}, nodal_shape=GRID_SHAPE)
+
+
+def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
+    """``from_diagnostics`` against a REAL ``EchamSurfaceExchange`` step's
+    output -- evidence that the translation is correct end to end, wind
+    included: the diagnostics dict is built by actually calling jax-gcm's own
+    ``EchamSurfaceExchange`` term (not a reimplementation of it) on
+    hand-chosen inputs, and the expected heat/water/wind values are derived
+    by hand from those SAME inputs, following the ECHAM energy balance
+    ``EchamSurfaceExchange`` itself documents (net radiation minus the
+    turbulent fluxes; stratiform plus convective precipitation; the grid-mean
+    10 m wind as the fraction-weighted sum of its tiles).
+    """
+    ncols, nsfc_type = 4, 3  # water, sea ice, land -- EchamSurfaceExchange's tile order
+    shape_3d = (2, ncols)
+    state = PhysicsState(
+        temperature=jnp.full(shape_3d, 290.0),
+        specific_humidity=jnp.full(shape_3d, 0.008),
+        u_wind=jnp.zeros(shape_3d),
+        v_wind=jnp.zeros(shape_3d),
+        geopotential=jnp.zeros(shape_3d),
+        normalized_surface_pressure=jnp.ones((ncols,)),
+    )
+    sensible_heat_flux, latent_heat_flux = 15.0, 85.0
+    sw_down, sw_up, lw_down, lw_up = 200.0, 40.0, 300.0, 350.0
+    precip_rain, precip_snow, precip_conv = 2e-5, 0.0, 1e-5
+    evaporation = 3e-5
+    wind_10m_u, wind_10m_v = 4.0, -1.5
+    wind_10m = float(np.hypot(wind_10m_u, wind_10m_v))
+    # Uniform per-tile wind trivially satisfies the tile invariant
+    # (sum(tile_fraction * wind_u_tile) == wind_u) for any fractions that sum
+    # to 1 -- the fractions themselves are not otherwise exercised here.
+    tile_fraction = jnp.tile(jnp.array([0.6, 0.1, 0.3]), (ncols, 1))
+    diagnostics = {
+        "surface": SimpleNamespace(
+            sensible_heat_flux=jnp.full((ncols,), sensible_heat_flux),
+            latent_heat_flux=jnp.full((ncols,), latent_heat_flux),
+            evaporation=jnp.full((ncols,), evaporation),
+            momentum_flux_u=jnp.full((ncols,), 0.02),
+            momentum_flux_v=jnp.full((ncols,), -0.01),
+        ),
+        "vertical_diffusion": SimpleNamespace(
+            wind_10m=jnp.full((ncols,), wind_10m),
+            wind_10m_u=jnp.full((ncols,), wind_10m_u),
+            wind_10m_v=jnp.full((ncols,), wind_10m_v),
+            surface_fraction=tile_fraction,
+            wind_10m_u_tile=jnp.full((ncols, nsfc_type), wind_10m_u),
+            wind_10m_v_tile=jnp.full((ncols, nsfc_type), wind_10m_v),
+            wind_10m_tile=jnp.full((ncols, nsfc_type), wind_10m),
+        ),
+        "radiation": SimpleNamespace(
+            surface_sw_down=jnp.full((ncols,), sw_down),
+            surface_sw_up=jnp.full((ncols,), sw_up),
+            surface_lw_down=jnp.full((ncols,), lw_down),
+            surface_lw_up=jnp.full((ncols,), lw_up),
+        ),
+        "clouds": SimpleNamespace(
+            precip_rain=jnp.full((ncols,), precip_rain),
+            precip_snow=jnp.full((ncols,), precip_snow),
+        ),
+        "convection": SimpleNamespace(
+            precip_conv=jnp.full((ncols,), precip_conv)),
+        "pressure_full": jnp.full(shape_3d, 95000.0),
+    }
+    _tendency, diagnostics = EchamSurfaceExchange()(
+        state, diagnostics, None, None)
+
+    expected_net_heat_flux = (
+        (sw_down - sw_up) + (lw_down - lw_up)
+        - sensible_heat_flux - latent_heat_flux
+    )
+    expected_precipitation = precip_rain + precip_snow + precip_conv
+
+    # nodal_shape=(2, 2) stands in for the real (ix, il) grid this flat,
+    # column-vectorized diagnostics dict would come from; every value here is
+    # uniform across columns, so this checks the translation, not the
+    # reshape's index correspondence -- see
+    # test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose
+    # for that.
+    exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=(2, 2))
+    # jax-gcm's net_heat_flux is positive DOWN; JEM's total_heat_flux is its
+    # negative (positive UP).
+    np.testing.assert_allclose(exchange.total_heat_flux, -expected_net_heat_flux)
+    np.testing.assert_allclose(exchange.evaporation, evaporation)
+    np.testing.assert_allclose(exchange.precipitation, expected_precipitation)
+    np.testing.assert_allclose(exchange.u0, wind_10m_u)
+    np.testing.assert_allclose(exchange.v0, wind_10m_v)
+
+
+def test_make_jem_compatible_is_deprecated(model):
+    """The old entry point still works, warns, and leaves the model alone."""
+    from jem.components import jcm_component
+
+    with pytest.warns(DeprecationWarning, match="JCMComponent"):
+        component = jcm_component.make_jem_compatible(model, COUPLING_TIMESTEP)
+
+    assert isinstance(component, JCMComponent)
+    assert component.model is model
+    # The wrapper no longer injects methods onto the jcm Model.
+    assert not hasattr(model, "generate_step_function")
+
+
+# --------------------------------------------------------------------------
+# Slow tests: these integrate the model.
+# --------------------------------------------------------------------------
+
+@pytest.mark.slow
+def test_carry_structure_is_scannable(stepped):
+    """A step must return exactly the carry structure, shapes and dtypes it got.
+
+    This is what ``lax.scan`` enforces on the coupled step; checking it here
+    localises a failure to this component.
+    """
+    carry0, carry1, _, _, _ = stepped
+    assert jax.eval_shape(lambda: carry0) == jax.eval_shape(lambda: carry1)
+
+
+@pytest.mark.slow
+def test_physics_carry_is_threaded(component, stepped):
+    """The cross-step physics carry evolves, and threading it is what stepping means.
+
+    Two things at once: the carry is not a constant (so it genuinely holds
+    state), and stepping twice from the initial carry gives the same answer
+    as one two-step sequence -- i.e. nothing outside the carry is
+    remembered between steps.
+    """
+    carry0, carry1, carry2, _, _ = stepped
+
+    initial_leaves = jax.tree.leaves(carry0["physics"])
+    stepped_leaves = jax.tree.leaves(carry1["physics"])
+    assert any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(initial_leaves, stepped_leaves)
+    ), "the physics carry came back unchanged, so it is not being threaded"
+
+    # Re-running the same two steps by hand must reproduce them exactly:
+    # the component holds no hidden state of its own.
+    replay1, _ = component.step(carry0, _coupling_time(0))
+    replay2, _ = component.step(replay1, _coupling_time(1))
+    np.testing.assert_allclose(
+        replay2["derived"].total_heat_flux,
+        carry2["derived"].total_heat_flux,
+        rtol=1e-6, atol=1e-6,
+    )
+    for expected, actual in zip(jax.tree.leaves(carry2["physics"]),
+                                jax.tree.leaves(replay2["physics"])):
+        np.testing.assert_allclose(np.asarray(actual), np.asarray(expected),
+                                   rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.slow
+def test_derived_fields_are_finite_and_consistent(stepped):
+    """The published exchange is finite and its freshwater flux is E - P."""
+    _, carry1, _, _, _ = stepped
+    derived = carry1["derived"]
+
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        field = getattr(derived, name)
+        assert field.shape == GRID_SHAPE
+        assert bool(jnp.all(jnp.isfinite(field))), name
+
+    np.testing.assert_allclose(
+        derived.total_freshwater_flux,
+        derived.evaporation - derived.precipitation,
+        rtol=1e-6, atol=1e-12,
+    )
+
+
+@pytest.mark.slow
+def test_to_xarray_has_time_axis_of_length_n(component, stepped):
+    """Stacked diagnostics serialize through jcm with one record per step.
+
+    Also pins how jcm labels that axis: absolute ``datetime64[ms]`` at the
+    MIDPOINT of each averaging interval. Any component whose output is
+    merged with the atmosphere's has to write the same representation.
+    """
+    _, _, _, diagnostics1, diagnostics2 = stepped
+    stacked = jax.tree.map(lambda *xs: jnp.stack(xs), diagnostics1, diagnostics2)
+    time_axis = TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP)
+
+    dataset = component.to_xarray(stacked, time_axis)
+
+    assert dataset.sizes["time"] == 2
+    assert dataset.time.dtype == np.dtype("datetime64[ms]")
+    np.testing.assert_array_equal(
+        dataset.time.values,
+        np.array(
+            ["2000-01-01T12:00", "2000-01-02T12:00"], dtype="datetime64[ms]"
+        ),
+    )
+    assert dataset.sizes["lon"], dataset.sizes["lat"] == GRID_SHAPE
+
+
+@pytest.mark.slow
+def test_to_xarray_rejects_a_mismatched_time_axis(component, stepped):
+    """A time axis that does not match the records is a coupler-side bug."""
+    _, _, _, diagnostics1, diagnostics2 = stepped
+    stacked = jax.tree.map(lambda *xs: jnp.stack(xs), diagnostics1, diagnostics2)
+    time_axis = TimeAxis(START_DATE, np.arange(3), COUPLING_TIMESTEP)
+
+    with pytest.raises(ValueError, match="output records"):
+        component.to_xarray(stacked, time_axis)
+
+
+@pytest.mark.slow
+def test_derived_wind_matches_the_published_contract_speedy(stepped):
+    """``JCMDerived.u0``/``.v0`` equal the published contract's ``wind_u``/``wind_v``.
+
+    Checked against the struct directly rather than trusting
+    ``from_diagnostics``'s own claim, so a regression reading the wrong
+    diagnostics field would not pass a bare finiteness check.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    _, carry1, _, _, _ = stepped
+    derived = carry1["derived"]
+    contract = surface_exchange_from(derived.physics)
+
+    assert contract.wind_reference == "lowest_level"
+    # SPEEDY is grid-hosted, so contract.wind_u is already derived.u0's
+    # (ix, il) shape and the reshape below is a no-op.
+    np.testing.assert_array_equal(
+        np.asarray(derived.u0),
+        np.asarray(contract.wind_u).reshape(derived.u0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.v0),
+        np.asarray(contract.wind_v).reshape(derived.v0.shape))
+
+
+@pytest.mark.slow
+def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
+    """Same check as the SPEEDY test above, on a real ECHAM step.
+
+    Also pins that ``JCMComponent`` completes a real ECHAM coupled step end
+    to end.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    _, carry1, _ = echam_stepped
+    derived = carry1["derived"]
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
+
+    contract = surface_exchange_from(derived.physics)
+    assert contract.wind_reference == "10m"
+    # ECHAM's default composition is vectorize_columns=True, so
+    # contract.wind_u/.wind_v come back flat and derived.u0/.v0 are already
+    # reshaped onto the grid -- the comparison reshapes the raw contract
+    # value the same way.
+    np.testing.assert_array_equal(
+        np.asarray(derived.u0),
+        np.asarray(contract.wind_u).reshape(derived.u0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.v0),
+        np.asarray(contract.wind_v).reshape(derived.v0.shape))
+
+
+@pytest.mark.slow
+def test_echam_two_coupled_steps_through_a_slab_ocean(echam_model):
+    """Two real steps through ``Coupler.generate_trajectory_function(2)``.
+
+    Per CLAUDE.md's "Testing" section: only ``lax.scan`` catches a
+    carry-structure mismatch, not a single component's ``step()`` in
+    isolation. The default slab exchange table couples on
+    ``total_heat_flux``/``total_freshwater_flux`` alone; it does not read
+    ``derived.u0``/``.v0`` (only ``jem.fluxes.VerosExchange`` does -- see
+    ``test_echam_veros_earth_configuration_steps`` in
+    ``tests/unit/test_veros_setups.py``).
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    atm = _bound_component(echam_model)
+    grid = SlabGrid.from_coords(echam_model.coords.horizontal)
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    coupler = Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+    carry = coupler.initialize()
+    final, _diagnostics = coupler.generate_trajectory_function(2)(carry)
+
+    derived = final.components["atm"]["derived"]
+    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+        assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
+
+
+def test_rebinding_to_a_different_timestep_is_rejected(model):
+    """One instance belongs to one coupled model; a conflicting second bind raises."""
+    component = _bound_component(model)
+    # The same clock again is a no-op.
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
+    with pytest.raises(ValueError, match="already bound"):
+        component.bind(
+            coupling_timestep=COUPLING_TIMESTEP * 2,
+            start_date=START_DATE,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Forcing read from a file, and the fields a coupled run overwrites
+# ---------------------------------------------------------------------------
+#
+# The atmosphere's `forcing` section is the one section a coupled model both
+# reads from a file and overwrites every step. jax-gcm builds a time-varying
+# boundary condition as a `TimeSeries` (values, time axis, alignment mode --
+# three pytree leaves) and slices it by date internally; an exchanger writes a
+# single `(ix, il)` array into the same field. These pin which fields end up
+# which way, and that a coupled step with a file-forced atmosphere really does
+# keep its carry structure.
+
+
+@pytest.fixture(scope="module")
+def file_forcing(model) -> ForcingData:
+    """jax-gcm's packaged T30 surface climatology on the test model's grid.
+
+    The same file `+configuration=earth-slab` names as
+    `${jcm_data:bc/t30/clim/forcing.nc}`, reached through the resolver's own
+    helper so the test and the configuration cannot drift onto different data.
+    """
+    from jem.config import package_data_path
+
+    return ForcingData.from_file(
+        package_data_path("jcm.data", "bc/t30/clim/forcing.nc"),
+        coords=model.coords,
+    )
+
+
+def _is_time_series(value) -> bool:
+    """Return True if ``value`` is a jax-gcm time-varying forcing leaf."""
+    return isinstance(value, TimeSeries)
+
+
+def test_file_forcing_starts_out_as_time_series(file_forcing):
+    """The premise: a from-file boundary condition is a `TimeSeries`, not an array.
+
+    Every other test in this section is about what JAX-ESM does with that, so
+    if jax-gcm ever stopped building one there would be nothing left to fix
+    and these would pass vacuously.
+    """
+    for name in ("sea_surface_temperature", "sice_am", "stl_am",
+                 "snowc_am", "soilw_am"):
+        assert _is_time_series(getattr(file_forcing, name)), name
+
+
+def test_the_component_reports_which_forcing_fields_vary_in_time(
+    model, file_forcing
+):
+    """`time_varying_forcing` is what a hand-written coupling has to declare."""
+    assert set(JCMComponent(model, forcing=file_forcing).time_varying_forcing) == {
+        "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
+    }
+    # The default forcing is plain arrays throughout, so there is nothing to
+    # declare and an exchange into it never changes the carry's structure.
+    assert JCMComponent(model).time_varying_forcing == ()
+
+
+def test_initialize_collapses_only_the_exchanged_forcing(model, file_forcing):
+    """Declared fields become per-step arrays; the rest stay climatologies."""
+    component = JCMComponent(
+        model, forcing=file_forcing,
+        exchanged_forcing=("sea_surface_temperature", "sice_am"),
+    )
+    forcing = component.initialize()["forcing"]
+
+    for name in ("sea_surface_temperature", "sice_am"):
+        value = getattr(forcing, name)
+        assert not _is_time_series(value), name
+        assert value.shape == GRID_SHAPE, name
+    # Nothing supplies the land surface here, so it must still vary through
+    # the year -- freezing it at the start date would be a silent change to
+    # what the atmosphere stands on.
+    for name in ("stl_am", "snowc_am", "soilw_am"):
+        value = getattr(forcing, name)
+        assert _is_time_series(value), name
+        assert value.values.shape[0] > 1, name
+
+
+def test_collapsed_forcing_is_the_climatology_at_the_start_date(
+    model, file_forcing
+):
+    """The value a collapsed field takes is the file's, read at the start date."""
+    component = JCMComponent(
+        model, forcing=file_forcing, exchanged_forcing=("sea_surface_temperature",),
+    )
+    expected = file_forcing.select(
+        DateData.set_date(START_DATE)
+    ).sea_surface_temperature
+
+    collapsed = np.asarray(
+        component.initialize()["forcing"].sea_surface_temperature
+    )
+    np.testing.assert_array_equal(collapsed, np.asarray(expected))
+    # And it is that date's slice rather than any date's: a mid-year one
+    # differs, so the start date is doing real work here.
+    midyear = np.asarray(file_forcing.select(
+        DateData.set_date(jdt.to_datetime("2000-07-01"))
+    ).sea_surface_temperature)
+    assert not np.allclose(collapsed, midyear)
+
+
+def test_initialize_leaves_the_forcing_alone_when_nothing_is_exchanged(
+    model, file_forcing
+):
+    """An atmosphere no exchanger writes to keeps jax-gcm's forcing untouched."""
+    component = JCMComponent(model, forcing=file_forcing)
+
+    assert component.exchanged_forcing == ()
+    assert component.initialize()["forcing"] is file_forcing
+
+
+def test_set_exchanged_forcing_rejects_an_unknown_field(model):
+    """A field `ForcingData` does not have is refused while the model is built."""
+    component = JCMComponent(model)
+    with pytest.raises(ValueError, match="sea_ice_fraction"):
+        component.set_exchanged_forcing(["sice_am", "sea_ice_fraction"])
+    # The declaration is all-or-nothing: the valid name in the same call is
+    # not half-applied.
+    assert component.exchanged_forcing == ()
+
+
+def test_set_exchanged_forcing_deduplicates_and_keeps_order(model):
+    component = JCMComponent(model)
+    component.set_exchanged_forcing(["stl_am", "sice_am", "stl_am"])
+    assert component.exchanged_forcing == ("stl_am", "sice_am")
+
+
+def test_coupled_step_keeps_its_structure_with_file_forcing(model, file_forcing):
+    """One coupled step with a file-forced atmosphere scans.
+
+    The regression this section exists for: the standard exchange writes plain
+    arrays into `atm.forcing`, so before the fields it writes were collapsed
+    the atmosphere's carry had one pytree structure going into the first
+    exchange and another coming out -- which `lax.scan` cannot carry, and
+    which `Coupler` refuses by name at trace time.
+
+    Traced with `jax.eval_shape` rather than run: the structure check is a
+    trace-time check, so tracing is what exercises it, and it costs no
+    compilation. No land model, so the file's land climatology is not
+    exchanged and has to come through the step still time-varying.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel, SlabSeaiceModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers, exchanged_fields
+
+    atm = JCMComponent(model, forcing=file_forcing)
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": atm,
+        "ocn": SlabOceanModel(grid),
+        "seaice": SlabSeaiceModel(grid, name="seaice"),
+    }
+    exchangers = default_exchangers(components)
+    # What a coupler's runner does: the coupling table is what knows which of
+    # the atmosphere's boundary conditions somebody else supplies.
+    atm.set_exchanged_forcing(exchanged_fields(exchangers, atm.name))
+    assert atm.exchanged_forcing == ("sea_surface_temperature", "sice_am")
+
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+    carry = coupler.initialize()
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    # The land surface nothing supplies came through with its time axis, so
+    # the atmosphere goes on being given a seasonal cycle for it.
+    assert _is_time_series(final.components["atm"]["forcing"].stl_am)
+    assert final.components["atm"]["forcing"].stl_am.values.shape[0] > 1
+
+
+def test_undeclared_file_forcing_is_refused_by_the_structure_check(
+    model, file_forcing
+):
+    """An undeclared time-varying field is a named error, not a silent one.
+
+    The declaration exists because of this: an exchanger writing an array
+    into a field that is still a `TimeSeries` changes the carry's pytree
+    structure, and the coupler's per-element check is what says so. Pinned
+    here so that check is not weakened into accepting it -- the only right
+    answer is to declare the field, which is what
+    `jem.runners.build_coupler` does from the coupling table.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model, forcing=file_forcing),
+        "ocn": SlabOceanModel(grid),
+    }
+    coupler = Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+    with pytest.raises(RuntimeError, match="changed the structure"):
+        jax.eval_shape(
+            coupler.generate_trajectory_function(1), coupler.initialize()
+        )
+
+
+def test_validate_names_the_spec_for_an_undeclared_file_forcing(
+    model, file_forcing
+):
+    """The pre-flight catches it too, and names the row rather than the element.
+
+    `Exchange.validate` runs on the initial carries before anything is
+    compiled, so a `TimeSeries` destination that an exchanger would overwrite
+    with one array is a build-time `ValueError` naming the spec -- where the
+    coupler's own check, which still fires, can only name the workflow
+    element `'exchange'` at trace time.
+    """
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    components = {
+        "atm": JCMComponent(model, forcing=file_forcing),
+        "ocn": SlabOceanModel(grid),
+    }
+    exchangers = default_exchangers(components)
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+
+    with pytest.raises(ValueError, match="atm.forcing.sea_surface_temperature"):
+        exchangers["exchange"].validate(coupler.initialize().components)
+
+
+def test_validate_passes_once_the_forcing_is_declared(model, file_forcing):
+    """Declaring the field makes both ends the same pytree, and validate agrees."""
+    from jem.base.coupler import Coupler
+    from jem.components import SlabOceanModel
+    from jem.components.slab import SlabGrid
+    from jem.exchangers import default_exchangers, exchanged_fields
+
+    grid = SlabGrid.from_coords(model.coords.horizontal)
+    atm = JCMComponent(model, forcing=file_forcing)
+    components = {"atm": atm, "ocn": SlabOceanModel(grid)}
+    exchangers = default_exchangers(components)
+    atm.set_exchanged_forcing(exchanged_fields(exchangers, atm.name))
+    coupler = Coupler(
+        components, exchangers,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+
+    exchangers["exchange"].validate(coupler.initialize().components)
+
+
+@pytest.mark.slow
+def test_earth_slab_runs_from_the_command_line(tmp_path):
+    """`+configuration=earth-slab` runs end to end with its file forcing.
+
+    The shipped configuration that couples a from-file-forced atmosphere to a
+    slab ocean, land and sea ice -- the one the structure mismatch stopped
+    before it had integrated a single step. A subprocess, like the aquaplanet
+    smoke test in `test_driver.py`, because Hydra's composition from the
+    installed package and the `${jcm_data:}` resolver are part of what is
+    being checked.
+    """
+    import os
+    import pathlib
+    import subprocess
+    import sys
+
+    repository = pathlib.Path(__file__).resolve().parents[2]
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(repository), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    finished = subprocess.run(
+        [sys.executable, "-m", "jem.main",
+         "+configuration=earth-slab", "coupled_run=short_run"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=1800,
+    )
+    assert finished.returncode == 0, finished.stderr[-4000:]
+
+    run_directories = sorted((tmp_path / "outputs").glob("*/*"))
+    assert len(run_directories) == 1, run_directories
+    written = sorted(path.name for path in run_directories[0].glob("*.nc"))
+    assert written == [
+        "atm-00000000.nc", "lnd-00000000.nc",
+        "ocn-00000000.nc", "seaice-00000000.nc",
+    ]
+
+    # The polar surface the run starts from, end to end. The first record is
+    # what `seaice.initialize()` published, which under the standard workflow
+    # is also what the atmosphere was handed for its first two steps: it has
+    # to be the observed cover, not an ice-free ocean. And the ice must still
+    # be a plausible thickness two days later -- a run that begins out of
+    # balance with its own freezing point answers with tens of metres of ice
+    # in a single coupling step.
+    import xarray as xr
+
+    with xr.open_dataset(run_directories[0] / "seaice-00000000.nc") as sea_ice:
+        first = sea_ice["ice_fraction"].isel(time=0).values
+        assert float(first.max()) > 0.9
+        assert float(first.mean()) > 0.01
+        thickness = sea_ice["ice_thickness"].values
+        assert np.isfinite(thickness).all()
+        assert float(thickness.max()) < 5.0, float(thickness.max())
+
+    with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
+        # The whole field: land carries the 288.15 K fill value, which is
+        # above the floor and so cannot hide an ocean cell below it.
+        sst = ocean["sea_surface_temperature"].isel(time=0).values
+        assert float(sst.min()) >= constants.seawater_freezing_point_K

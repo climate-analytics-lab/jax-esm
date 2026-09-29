@@ -1,0 +1,5 @@
+# Thermodynamic slab sea ice, growing and melting on the ocean's frazil/melt
+# energy. The runner injects `grid=`.
+_target_: jem.components.SlabSeaiceModel
+params:
+  _target_: jem.components.slab.SlabSeaiceParameters

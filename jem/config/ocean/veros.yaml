@@ -1,0 +1,15 @@
+# The Veros ocean GCM (optional dependency; see the README for the install).
+#
+# `VerosComponent` takes an already-built Veros model, which is a Python
+# object no YAML can describe. `from_setup` is the config-shaped door: it
+# imports `setup`, calls it with every other key in this node, runs the
+# resulting setup's `setup()` and wraps it. `setup` may name a `VerosSetup`
+# subclass or a factory returning one (the shipped examples use a factory, so
+# that a case can be parameterised by grid file and timestep).
+#
+# Unlike the slab models, this component brings its own grid, so the runner
+# injects nothing.
+_target_: jem.components.VerosComponent.from_setup
+# Importable dotted path, never a file path: the module has to be on
+# PYTHONPATH like any other import.
+setup: ???

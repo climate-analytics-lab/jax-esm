@@ -1,0 +1,9 @@
+# The shortest run that exercises the whole path -- two coupling days in one
+# chunk. Used to check that a configuration composes, builds, steps and
+# writes output before committing to a real integration.
+defaults:
+  - default
+  - _self_
+
+total_time: "2 days"
+chunk: "2 days"

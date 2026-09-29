@@ -1,0 +1,122 @@
+# @package _global_
+#
+# Earth with a dynamical ocean: SPEEDY T31L8 over the Veros ocean GCM on a
+# rotated Gaussian lon/lat grid, exchanging through ESMF weights.
+#
+#   python -m jem.main +configuration=veros-earth coupled_run=short_run
+#
+# WHY each setting:
+#  - ocean=veros on the packaged `RotatedGaussianLatLon` SCRIP grid: rotating
+#    the grid moves its pole onto land, and the ocean's land-sea mask comes
+#    from the matching packaged land-fraction file.
+#  - ocean.setup names `jem.components.veros.setups.earth.earth_setup`, an
+#    importable factory (`from_setup` calls it with every other key in this
+#    node) rather than a script on PYTHONPATH; every physics default
+#    (`dt_mom`/`dt_tracer`, the layer thicknesses, the cold start
+#    temperature) is a Python default on that factory, not repeated here.
+#  - regrid=esmf with the four packaged weight files for that grid pair --
+#    conservative for fluxes, bilinear for states.
+#  - atmosphere.terrain.file is the packaged, ERA5-derived
+#    `terrain_JCM_T31.nc` -- verified byte-identical to what the original
+#    standalone driver built at run time from the same source files, so
+#    nothing is generated during a run any more. It stays on JCM's own
+#    **unrotated** grid: JCM computes its Coriolis parameter from its own
+#    latitudes (no override hook), so the atmosphere's terrain must be
+#    geographically consistent with *that* latitude, not the ocean's rotated
+#    one.
+#  - atmosphere.run.time_step = 30 min: the validated step for this coupled
+#    case (the original standalone driver's `run.sh`).
+#  - seaice=none, land=none: this configuration couples the ocean only. The
+#    driver this configuration replaces stood a `fakelnd` slab in for the
+#    atmosphere's land boundary condition; that stand-in is gone (there is no
+#    configuration group for a fourth "fake" component), so with `land=none`
+#    and the atmosphere's `forcing` group left at `default`, those boundary
+#    conditions stay at what `jcm.forcing.ForcingData.zeros` put there for
+#    the whole integration -- land surface temperature 288.15 K everywhere,
+#    zero snow cover, zero soil water, zero bare-land albedo. That is a
+#    deliberate simplification of THIS experiment, not a land model: over the
+#    continents the surface neither warms, cools nor carries a seasonal
+#    cycle. `forcing@atmosphere.forcing=from_file` gives a PRESCRIBED land
+#    surface instead (declare in `coupling.exchanged_forcing` any field an
+#    exchanger also writes, as this configuration already does for the SST).
+#    A user following this override also has to set `atmosphere.forcing.file`
+#    AND, in most cases, `atmosphere.forcing.align` explicitly (jax-gcm#884,
+#    jax-gcm PR 877): `forcing.align` defaults to `auto`, which resolves ONLY
+#    a jax-gcm data-mirror or packaged product (from the kind its manifest
+#    records) and RAISES for any other file, naming the knob -- a one-year
+#    transient archive and a monthly climatology have identical timestamps,
+#    so jax-gcm does not guess which one a user's own file is. Pointing
+#    `atmosphere.forcing.file` at jax-gcm's OWN packaged T30 climatology
+#    (`${jcm_data:bc/t30/clim/forcing.nc}`, the same file `+configuration=
+#    earth-slab` uses) needs no `align` -- it resolves via the manifest, like
+#    `earth-slab`'s forcing does. Any other file does.
+#    A RESPONDING one is not available here: composing `land=slab_speedy`
+#    would build and step a land model, but a hand-written
+#    `coupling.exchanger` replaces the declarative table entirely and
+#    `VerosExchange` carries no `lnd` rows, so that model would receive zero
+#    forcing and its surface temperature would never reach the atmosphere --
+#    an inert component, not a land surface. See jax-esm#128.
+#  - coupling.exchanger names `jem.fluxes.VerosExchange` with
+#    `rotation_grid_file` set to the same SCRIP file `regrid` uses: it
+#    computes the wind stress from the atmosphere's near-surface wind with a
+#    bulk drag law, rotated into the ocean grid's local frame using that
+#    file's per-cell rotation angles, masks the heat and freshwater fluxes
+#    wherever the surface has reached the freezing point, and carries the
+#    rest of `jem.exchangers.VEROS_OCEAN_EXCHANGES` (regridded through the
+#    weights above: conservatively for the fluxes, bilinearly for the sea
+#    surface temperature) -- so the ocean is mechanically as well as
+#    thermodynamically forced.
+#  - coupling.exchanged_forcing = [sea_surface_temperature], the one
+#    atmosphere-facing field `jem.fluxes.VerosExchange` writes (it also
+#    writes the ocean's own `surface_taux`/`surface_tauy`/`heat_flux`/
+#    `freshwater_flux`, but those are the ocean's forcing, not the
+#    atmosphere's, so `declare_exchanged_forcing` does not need them named).
+#    This has to be declared by hand because `VerosExchange` is a
+#    hand-written exchanger, not a `jem.exchangers.Exchange` table --
+#    `declare_exchanged_forcing` can only derive the field set by reading a
+#    table, and a Python function's body cannot be read that way. With the
+#    default `forcing@atmosphere.forcing` (`ForcingData.zeros()`, all plain
+#    arrays already) the declaration changes nothing; it starts to matter
+#    the moment this configuration is composed with
+#    `forcing@atmosphere.forcing=from_file`, which builds
+#    `sea_surface_temperature` as a `jcm.forcing.TimeSeries` -- without the
+#    declaration, `VerosExchange` overwriting it with a plain array on the
+#    first coupled step changes the carry's pytree structure and `lax.scan`
+#    refuses the whole trajectory.
+#  - A Veros configuration also runs the atmosphere in double precision:
+#    importing Veros sets `jax_enable_x64` process-wide, and which of the
+#    atmosphere's own fields stay float32 depends on build order (whatever
+#    jax-gcm allocated before Veros was imported); `VerosExchange` reads each
+#    destination field's dtype at trace time rather than assuming one, so the
+#    coupling itself is robust to that.
+defaults:
+  - override /physics@atmosphere.physics: speedy
+  - override /grid@atmosphere.grid: speedy_t31_l8
+  - override /terrain@atmosphere.terrain: from_file
+  - override /ocean: veros
+  - override /seaice: none
+  - override /land: none
+  - override /regrid: esmf
+
+atmosphere:
+  terrain:
+    file: ${jem_data:terrain_JCM_T31.nc}
+  run:
+    time_step: 30
+
+ocean:
+  setup: jem.components.veros.setups.earth.earth_setup
+  scrip_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
+  landsea_mask_file: ${jem_data:landsea_mask_fraction_RotatedGaussianLatLon.nc}
+
+regrid:
+  a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_RotatedGaussianLatLon.nc}
+  a2o_bilinear: ${jem_data:weight_algo-bilinear_JCM_T31_to_RotatedGaussianLatLon.nc}
+  o2a_conserve: ${jem_data:weight_algo-conserve_RotatedGaussianLatLon_to_JCM_T31.nc}
+  o2a_bilinear: ${jem_data:weight_algo-bilinear_RotatedGaussianLatLon_to_JCM_T31.nc}
+
+coupling:
+  exchanger:
+    _target_: jem.fluxes.VerosExchange
+    rotation_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
+  exchanged_forcing: [sea_surface_temperature]

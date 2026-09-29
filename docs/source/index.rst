@@ -1,8 +1,3 @@
-.. JAX-ESM documentation master file, created by
-   sphinx-quickstart on Thu Jan 15 10:54:14 2026.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
 JAX-ESM documentation
 =====================
 
@@ -11,22 +6,27 @@ system components. It couples independent atmosphere, ocean, land, and sea-ice m
 such as JCM, Veros, and JEM's own slab models — into a single JIT-compilable simulation loop
 built on ``jax.lax.scan``.
 
-- New to JEM? Start with :doc:`quick_start` for a copy-and-paste aquaplanet example.
-- Want to see it in action first? Browse :doc:`examples`.
-- Integrating your own model? Follow :doc:`tutorial`.
+- New to JEM? Start with :doc:`getting_started` for install and your first
+  coupled run.
+- Building a coupled model in Python? See :doc:`python_api` for the complete
+  construction.
+- Integrating your own model? Follow :doc:`adding_a_component`.
 - Looking for a specific class or function? See :doc:`api_superset`.
 
+JEM is alpha software: its API may change without deprecation before 1.0.
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
-   quick_start
+   getting_started
+   python_api
    examples
-   tutorial
+   adding_a_component
    experimental
 
    issues
+   design
    developers
    api_superset
 

@@ -1,0 +1,58 @@
+# How the components are coupled: how often they exchange, and what the
+# exchange consists of. A daily coupling step is what the shipped examples and
+# every slab configuration use.
+#
+# `null` everywhere else means "use the Python default", which is defined once,
+# in Python, for the set of components that were actually built.
+
+# Interval between exchanges, as a `jcm.date.parse_duration_seconds` string
+# ("1 day", "12 hours"). It is also the step the atmosphere is
+# integrated over between exchanges, so it must be a whole number of the
+# atmosphere's own timesteps.
+timestep: "1 day"
+
+# Order in which exchangers and components are stepped, as `Coupler` takes it.
+# null -> the Coupler's default workflow (every exchanger, then every
+# component).
+workflow: null
+
+# The declarative exchange list.
+# null -> `jem.exchangers.default_exchangers(components)`, which picks the
+# exchanges that the components present can actually support.
+exchangers: null
+
+# A hand-written exchanger, used INSTEAD of `exchangers` when a configuration
+# needs an exchange that the declarative list cannot express -- one that
+# computes a flux (a wind stress from a wind), converts units or blends two
+# fields. Setting both `exchanger` and `exchangers` is an error the runner
+# reports. Two spellings:
+#   - an importable dotted path to a single `jem.Exchanger` function, called
+#     with no arguments (e.g. "my_package.my_exchange");
+#   - a mapping with a `_target_`, instantiated with the run's regridders
+#     injected as `regrid=` -- but only if the target's own signature
+#     declares a `regrid` parameter, so a single-grid hand-written exchanger
+#     class that takes none is still a valid node -- for an exchanger that is
+#     a class needing more than a bare function can be given (e.g.
+#     jem.fluxes.VerosExchange, which needs the atmosphere-to-ocean and
+#     ocean-to-atmosphere regridders a mixed-grid coupling uses):
+#       exchanger:
+#         _target_: jem.fluxes.VerosExchange
+#     A mapping with no `_target_` names no exchanger at all and is refused.
+#     This second spelling has no `key: value` form on the command line --
+#     `null` cannot have a key set under it without `+` -- so a CLI override
+#     spells it `+coupling.exchanger._target_=jem.fluxes.VerosExchange`
+#     (and further keys the same way, e.g.
+#     `+coupling.exchanger.rotation_grid_file=<path>`).
+exchanger: null
+
+# Which of the atmosphere's boundary conditions the coupling supplies, as
+# `jcm.forcing.ForcingData` field names. They stop being read from the
+# atmosphere's own forcing file and become per-step values an exchanger
+# writes, which is what lets a `forcing@atmosphere.forcing=from_file`
+# atmosphere be coupled at all: a field left as a time series would change
+# the carry's pytree structure the first time an exchanger wrote an array
+# into it.
+# null -> read off the declarative exchange table, so the table stays the one
+# description of the coupling. A hand-written `exchanger` cannot be read that
+# way, so a configuration that uses one lists here what it writes.
+exchanged_forcing: null
