@@ -202,6 +202,42 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: is the answer without importing anything at all.
 VEROS_COMPONENT_MODULE = "jem.components.veros_component"
 
+#: What the Winton sea ice takes from the ocean **in addition to** the rows of
+#: :data:`STANDARD_EXCHANGES`, which already carry its freeze/melt potential
+#: and take its ice fraction. The Winton ice grows and melts on the freeze/melt
+#: potential like the slab ice, but it also draws heat from the ocean through
+#: the basal boundary layer, and that draw is a function of the sea surface
+#: temperature -- a field the single-layer slab ice has no use for and so has no
+#: standard row. These rows are added by :func:`default_exchanges` when the
+#: component registered as ``"seaice"`` is a Winton model.
+#:
+#: What no default row supplies is everything the Winton ice reads from the
+#: *atmosphere* (surface radiation, near-surface air state, snowfall, the
+#: atmosphere's flux over the open sea) and the ice velocity: the atmosphere
+#: adapter does not publish them in a form a copy can move, and the design
+#: decisions behind that -- which flux plays the part of the atmosphere's
+#: open-sea flux now that no per-tile flux is published, and whether the
+#: atmosphere then sees the ice through its ice fraction or through an
+#: ice-weighted surface temperature -- are recorded in
+#: ``docs/source/design/winton_seaice.md``. :func:`default_exchanges` logs the
+#: fields left unsupplied.
+WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.state.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+)
+
+#: The same row when the ocean is Veros, which publishes its sea surface
+#: temperature from ``derived`` (see :data:`VEROS_OCEAN_EXCHANGES`).
+WINTON_SEAICE_VEROS_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+)
+
+#: Module holding the Winton sea-ice component, looked up in ``sys.modules``
+#: for the same reason as :data:`VEROS_COMPONENT_MODULE`: if it was never
+#: imported, nothing in the process can be a Winton model.
+WINTON_COMPONENT_MODULE = "jem.components.slab.winton_seaice_model.winton_seaice_model"
+
 
 def _parse_path(path: str, end: str, spec: Any) -> tuple[str, str, str]:
     """Split a ``"component.section.field"`` path, or raise naming the spec."""
@@ -702,6 +738,12 @@ def default_exchanges(
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
 
+    A :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
+    registered as ``"seaice"`` adds :data:`WINTON_SEAICE_EXCHANGES` (the ocean's
+    sea surface temperature, which its basal heat flux depends on) to whichever
+    table applies, and a warning names the forcing fields of that model that no
+    row supplies -- the ones an exchanger of the coupled model's own has to.
+
     Regridding
     ----------
     ``regrid`` names a regridder for the specs that cross the
@@ -757,6 +799,13 @@ def default_exchanges(
         )
 
     table = _exchange_table(components)
+    winton = _winton_module(components)
+    if winton is not None:
+        table = table + (
+            WINTON_SEAICE_VEROS_EXCHANGES
+            if table is VEROS_OCEAN_EXCHANGES
+            else WINTON_SEAICE_EXCHANGES
+        )
     specs: list[ExchangeSpec] = []
     for src, dst, kind in table:
         src_component, _, _ = _parse_path(src, "source", src)
@@ -784,6 +833,25 @@ def default_exchanges(
                 "example SlabSeaiceModel(grid, name='seaice')) or write the "
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
+            )
+    if winton is not None:
+        supplied = {
+            spec.dst_parts[2]
+            for spec in specs
+            if spec.dst_parts[:2] == ("seaice", "forcing")
+        }
+        unsupplied = [
+            field.name
+            for field in dataclasses.fields(winton.WintonForcing)
+            if field.name not in supplied
+        ]
+        if unsupplied:
+            logger.warning(
+                "The default coupling does not supply the Winton sea ice's "
+                "forcing fields %s: they stay at their initial values unless "
+                "an exchanger of your own writes them (see "
+                "docs/source/design/winton_seaice.md).",
+                ", ".join(unsupplied),
             )
     if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
         logger.warning(
@@ -820,6 +888,23 @@ def _exchange_table(
         "The ocean is a Veros GCM, so the default coupling is the Veros table."
     )
     return VEROS_OCEAN_EXCHANGES
+
+
+def _winton_module(
+    components: Mapping[str, Component] | Iterable[str],
+) -> Any:
+    """Return the Winton component module if ``"seaice"`` is a Winton model, else None.
+
+    Chosen by type, like :func:`_exchange_table`, so it needs real components:
+    a list of names says nothing about a carry.
+    """
+    if not isinstance(components, Mapping):
+        return None
+    module = sys.modules.get(WINTON_COMPONENT_MODULE)
+    seaice = components.get("seaice")
+    if module is None or seaice is None:
+        return None
+    return module if isinstance(seaice, module.WintonSeaiceModel) else None
 
 
 def _grid_direction(src_component: str, dst_component: str) -> str | None:
