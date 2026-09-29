@@ -77,6 +77,7 @@ datasets = coupler.to_xarray(diagnostics)
 | {doc}`running` | `run_chunked`: chunking, the health gate, checkpointing and resume, output files, in-scan reductions |
 | {doc}`configuration` | The Hydra config groups, jax-gcm's groups re-rooted under `atmosphere`, the wiring-only rule |
 | {doc}`jcm_adapter` | The pinned jax-gcm revision and integration points; `JCMComponent`, the surface-exchange reader |
+| {doc}`winton_seaice` | The Winton three-layer sea ice: parameters, coupling contract, budgets, transport |
 
 ## Adding a new component
 

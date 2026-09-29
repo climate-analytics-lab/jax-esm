@@ -125,6 +125,17 @@ not a copy, and therefore a hand-written exchanger,
 configurations. The declarative table above carries the rest of the
 coupling.
 
+**A sea ice that needs more than the standard rows.** The Winton sea ice
+({doc}`winton_seaice`) takes the ocean's freeze/melt potential through the
+standard row, and also the ocean's sea surface temperature, which its basal
+heat flux depends on; `default_exchanges` adds that one row
+(`WINTON_SEAICE_EXCHANGES`, `ocn.derived...` for Veros) when the component
+registered as `seaice` is a Winton model. What it reads from the atmosphere --
+surface radiation, near-surface air state, snowfall and the atmosphere's flux
+over the open sea -- has no row, because the JCM adapter does not publish those
+as fields a copy can move; `default_exchanges` logs the forcing fields it
+leaves unsupplied, and a coupled model writes an exchanger for them.
+
 Three properties are worth stating, because a hand-written exchanger has
 them only by accident:
 
