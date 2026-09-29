@@ -23,8 +23,9 @@ checks the state is still healthy:
 
 ```
 carry = initial_carry or coupler.initialize()          # or the checkpoint's
-for steps in batches:                # `steps` is the chunk, except that the
-    first_step = int(carry.step)     #   last batch of a resume can be short
+for steps in batches:                # `steps` is the chunk, except that the first
+    first_step = int(carry.step)     #   batch of an off-grid start and the last
+                                     #   can be short
     trajectory = compiled[steps]     # one compiled trajectory per length
     carry, diagnostics = trajectory(carry)
     datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
@@ -61,6 +62,22 @@ extra compiled trajectory. A calendar `end_time` rarely divides evenly —
 2001-01-01 to 2011-01-01 is 3652 days, so 30-day chunks end with a 22-day
 one. Everything is checked before anything is built or compiled, and each
 message names the quantities involved.
+
+**Chunks sit on a grid.** Chunk boundaries are the multiples of `chunk`
+counted from step 0 of the run — the same grid `checkpoint_interval` and
+`subsample` are counted on. A run that starts *off* it — extending a run whose
+last chunk was short by giving a later `end_time`, or resuming a checkpoint
+written under a different `chunk` — integrates a **short first chunk**, just
+long enough to reach the next multiple, and every later chunk is a whole one
+on the grid. Without that, the run's chunks would end at offsets from the
+grid and none before the last could land on a multiple of the
+`checkpoint_interval`, so the run would checkpoint only when it finished. The
+cost is one more compiled trajectory, for the short chunk (which is the
+same one as the short last chunk when they happen to be the same length). The
+first file is named after the step the run resumed at, like every other file;
+`chunk_index`, the counter the health check and the log line report, is the
+grid chunk a batch lies in, so the short first piece of a chunk the earlier run
+stopped inside carries that chunk's index.
 
 ## The health gate
 

@@ -795,37 +795,43 @@ def test_a_bail_out_saves_the_accepted_chunk_the_interval_had_skipped(
     )
 
 
-def test_a_resume_that_cannot_reach_the_interval_says_so(tmp_path, caplog):
-    """A resume part-way through a chunk warns that the interval cannot land.
+def test_a_resume_under_another_chunk_realigns_and_keeps_the_interval(
+    tmp_path, caplog
+):
+    """A resume part-way through a chunk lands back on the chunk grid first.
 
     The interval is counted from the start of the run and the loop stops only
     at a chunk boundary, so a checkpoint written under a *different* chunk
-    length leaves an offset that no chunk end of this run can turn into a
-    multiple of the interval: the run would checkpoint only when it finished.
-    That is a real loss of restart points, so it is said out loud rather than
-    left to be discovered after a job was killed.
+    length leaves an offset that whole chunks of this run could never turn into
+    a multiple of the interval. The run therefore integrates a short first
+    chunk up to the next multiple of its chunk (step 3 to 4 here) and is on the
+    grid from there: the save due at step 4 happens, and nothing has to be said
+    about a lost interval.
     """
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
         two_slabs(), total_time="3 days", chunk="3 days",
         output_dir=tmp_path / "first", checkpoint_path=checkpoint,
     )
+    seen = []
     with caplog.at_level(logging.WARNING):
         result = run_chunked(
             two_slabs(), total_time="8 days", chunk="2 days",
             checkpoint_interval="4 days",
             output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(checkpoint, seen),
         )
 
     assert result.steps_completed == 8
-    assert "starts at coupled step 3" in caplog.text
-    assert "not a whole number of the 2-step chunks" in caplog.text
-    assert "no chunk it integrates before the last" in caplog.text
-    # This run has a checkpoint whose chunk length it could match, so it is
-    # told how to get the interval back.
-    assert "resuming with that chunk restores the interval" in caplog.text
-    # It still leaves its final restart state, which is the other guarantee.
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    # The gate looks before each chunk is saved: the restored step 3, then the
+    # save the short first chunk earned at step 4 (twice: the chunk ending at
+    # 6 is not on the interval), and the final state at 8.
+    assert seen == [3, 4, 4]
     assert checkpoint_step(checkpoint) == 8
+    assert [path.name for path in result.paths if path.name.startswith("ocn")] == [
+        "ocn-00000003.nc", "ocn-00000004.nc", "ocn-00000006.nc",
+    ]
 
 
 def test_a_total_time_that_is_not_whole_intervals_warns_but_runs(tmp_path, caplog):
@@ -863,35 +869,31 @@ def test_a_total_time_that_is_whole_intervals_says_nothing(tmp_path, caplog):
     assert "checkpoint_interval" not in caplog.text
 
 
-def test_an_initial_carry_part_way_through_a_chunk_warns_without_a_remedy(
-    tmp_path, caplog
-):
-    """The same warning for a carry handed in, minus the advice that would lie.
+def test_an_initial_carry_part_way_through_a_chunk_realigns_too(tmp_path, caplog):
+    """The short first chunk is not specific to a resume.
 
-    A run also starts part-way through a chunk when it is given an
-    `initial_carry` at such a step -- it never resumed, and there is no
-    checkpoint whose chunk length it could match -- so the fact is stated and
-    the remedy is not.
+    A run is also handed a starting state part-way through a chunk when it is
+    given an `initial_carry` at such a step -- it never resumed, and there is
+    no checkpoint whose chunk length it could match. It realigns all the same:
+    step 3 to 4, then whole chunks, with the interval's save at step 4.
     """
     coupler = two_slabs()
     carry, _ = coupler.generate_trajectory_function(3)(coupler.initialize())
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
 
     with caplog.at_level(logging.WARNING):
         result = run_chunked(
             coupler, total_time="8 days", chunk="2 days",
             checkpoint_interval="4 days", initial_carry=carry,
-            output_dir=tmp_path / "output",
-            checkpoint_path=tmp_path / "checkpoint",
+            output_dir=tmp_path / "output", checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(checkpoint, seen),
         )
 
     assert result.steps_completed == 8
-    warnings = [
-        record.getMessage() for record in caplog.records
-        if record.levelno >= logging.WARNING
-    ]
-    assert len(warnings) == 1
-    assert "starts at coupled step 3" in warnings[0]
-    assert "the chunk the checkpoint was written under" not in warnings[0]
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    assert seen == [None, 4, 4]
+    assert checkpoint_step(checkpoint) == 8
 
 
 def test_an_accumulated_run_checkpoints_on_the_interval_too(tmp_path):
@@ -1218,13 +1220,14 @@ def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     The chunk length is a choice of the run, not a property of the checkpoint,
     so a run resumed with a longer chunk starts mid-chunk. What is left is
     computed from the restored step counter, so the run still stops exactly at
-    `total_time` -- and, because `remaining_batches` puts the short batch
-    LAST, the eight days are integrated as 3 + 4 + 1. The control run is what
-    makes that a statement about the trajectory rather than about the counter:
-    the separately-compiled short final batch has to produce the same numbers
-    as one continuous eight-day integration, which is the property a bug in
-    `remaining_batches` or in the driver's per-length trajectory cache would
-    break while still stopping at step 8.
+    `total_time` -- and, because `remaining_batches` makes the FIRST batch the
+    short one that lands on the chunk grid, the eight days are integrated as
+    3 + 1 + 4. The control run is what makes that a statement about the
+    trajectory rather than about the counter: the separately-compiled short
+    batch has to produce the same numbers as one continuous eight-day
+    integration, which is the property a bug in `remaining_batches` or in the
+    driver's per-length trajectory cache would break while still stopping at
+    step 8.
     """
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
@@ -1250,11 +1253,11 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
 
     Three days in one chunk, then a resume with four-day chunks into the SAME
     output directory. Every file is named after the coupled step its chunk
-    starts at -- 0 for the first run, then 3 and 7 (a full four-day chunk and
-    then the short one that stops the run exactly at eight days) -- so all
-    three survive. Under a chunk *index* the resumed run's first chunk would
-    have been index `3 // 4 == 0` again, and the first run's three days of
-    output would have been silently replaced.
+    starts at -- 0 for the first run, then 3 (the one-day chunk that lands the
+    resumed run on its chunk grid) and 4 (a full four-day chunk, ending the
+    run at eight days) -- so all three survive. Under a chunk *index* the
+    resumed run's first chunk would have been index `3 // 4 == 0` again, and
+    the first run's three days of output would have been silently replaced.
     """
     checkpoint = tmp_path / "checkpoint"
     output = tmp_path / "output"
@@ -1272,8 +1275,8 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
         "ocn-00000000.nc", "seaice-00000000.nc"
     ]
     assert sorted(path.name for path in resumed.paths) == [
-        "ocn-00000003.nc", "ocn-00000007.nc",
-        "seaice-00000003.nc", "seaice-00000007.nc",
+        "ocn-00000003.nc", "ocn-00000004.nc",
+        "seaice-00000003.nc", "seaice-00000004.nc",
     ]
     # The first run's files are still there, and still hold its three days.
     assert all(path.exists() for path in first.paths)
@@ -1293,9 +1296,10 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
     The coupler starts at 06:00 with 6-hour steps, so ``end_time="2001-01-03"``
     (a date, i.e. midnight) is 7 steps in 4-step chunks: 4 + 3. Extending it
     to "2001-01-05T12:00:00" resumes at step 7, off the chunk grid, and runs
-    4 + 4 + 2 more. The carry, and the records the run-global ``subsample``
-    stride keeps across both calls' short chunks, must be those of one
-    uninterrupted call.
+    1 + 4 + 4 + 1 more: a short first chunk back onto the grid, two whole
+    chunks and the short last one. The carry, and the records the run-global
+    ``subsample`` stride keeps across both calls' short chunks, must be those
+    of one uninterrupted call.
     """
     def coupler():
         return two_slabs(
@@ -1313,8 +1317,10 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
     extended = run_chunked(coupler(), end_time="2001-01-05T12:00:00", **run)
     assert extended.steps_completed == 17
     assert extended.final_carry.time.to_pydatetime().isoformat() == "2001-01-05T12:00:00"
+    # The stride keeps steps 9, 12 and 15 of the extension; the chunks that
+    # start at steps 7 and 16 hold none of them and write no file.
     assert sorted(path.name for path in extended.paths if path.name.startswith("ocn")) == [
-        "ocn-00000007.nc", "ocn-00000011.nc", "ocn-00000015.nc",
+        "ocn-00000008.nc", "ocn-00000012.nc",
     ]
 
     continuous = run_chunked(
@@ -1331,16 +1337,20 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
         np.testing.assert_array_equal(combined["time"].values, single["time"].values)
 
 
-def test_an_extended_run_never_repeats_a_chunk_index(tmp_path):
+def test_chunk_indices_name_the_grid_chunk_across_an_extension(tmp_path):
     """Chunk indices keep increasing across an extension that resumes off-grid.
 
     7 steps in 4-step chunks are chunks 0 and 1 (the short one starts at step
-    4); the extension resumes at step 7 and must not report index 1 again.
+    4). The extension resumes at step 7, inside chunk 1: its short first
+    chunk, up to step 8, is the rest of chunk 1 and carries its index, and
+    chunks 2, 3 and 4 follow -- `first_step // 4` for every one of them, so an
+    index always names the same stretch of the run whichever call integrated
+    it, and within a call it never repeats.
     """
-    seen: list[int] = []
+    calls: list[list[int]] = []
 
     def record(datasets, chunk_index, elapsed_days):
-        seen.append(chunk_index)
+        calls[-1].append(chunk_index)
         return True, {}
 
     def coupler():
@@ -1353,10 +1363,74 @@ def test_an_extended_run_never_repeats_a_chunk_index(tmp_path):
         chunk="1 day", output_dir=tmp_path / "run",
         checkpoint_path=tmp_path / "checkpoint", health_check=record,
     )
+    calls.append([])
     run_chunked(coupler(), end_time="2001-01-03", **run)
+    calls.append([])
     run_chunked(coupler(), end_time="2001-01-05T12:00:00", **run)
-    assert seen == sorted(set(seen))
-    assert seen[:2] == [0, 1]
+    assert calls == [[0, 1], [1, 2, 3, 4]]
+    for indices in calls:
+        assert indices == sorted(set(indices))
+
+
+def test_an_extended_run_checkpoints_at_the_normal_interval(tmp_path, caplog):
+    """A run that ended on a short chunk, extended, saves on the interval again.
+
+    Four-step chunks with an eight-step interval: the first call ends at step 7
+    on a short chunk (and saves there, being the last). The extension resumes
+    off the grid; without a realignment its chunks would end at 11, 15 and 17
+    -- none a multiple of 8, so nothing but the final state would be saved.
+    With it they end at 8, 12, 16 and 17, and the saves due at 8 and 16 happen.
+    `seen` is what the checkpoint held as each chunk was judged.
+    """
+    def coupler():
+        return two_slabs(
+            start_date=jdt.to_datetime("2001-01-01T06:00:00"),
+            coupling_timestep=jdt.to_timedelta(6, "hours"),
+        )
+
+    checkpoint = tmp_path / "checkpoint"
+
+    def held_step():
+        """Return the step the checkpoint holds, read by a coupler on this clock."""
+        if not (checkpoint / CARRY_FILENAME).exists():
+            return None
+        return int(coupler().load_carry(checkpoint).step)
+
+    seen = []
+
+    def watch(datasets, chunk_index, elapsed_days):
+        seen.append(held_step())
+        return True, {}
+
+    run = dict(
+        chunk="1 day", checkpoint_interval="2 days",
+        output_dir=tmp_path / "run", checkpoint_path=checkpoint,
+    )
+    first = run_chunked(coupler(), end_time="2001-01-03", **run)
+    assert first.steps_completed == 7
+    assert held_step() == 7
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        extended = run_chunked(
+            coupler(), end_time="2001-01-05T12:00:00",
+            health_check=watch, **run,
+        )
+
+    assert extended.steps_completed == 17
+    # The one thing said is that 17 steps is not a whole number of intervals;
+    # nothing about the run starting off its chunk grid.
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "final gap between saves" in warnings[0]
+    # Judged before saving: the restored step 7; then the save at 8; the chunk
+    # to 12 is not on the interval; the save at 16; the last chunk (to 17) is
+    # judged with 16 held, and saved as the run's end.
+    assert seen == [7, 8, 8, 16]
+    assert held_step() == 17
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1583,57 @@ def test_a_resume_under_the_same_chunk_rewrites_and_is_allowed(
             reference["sea_surface_temperature"].values,
             atol=1e-12, rtol=0,
         )
+
+
+def test_a_realigned_resume_rewrites_the_short_first_chunk_and_the_files_after_it(
+    tmp_path, caplog
+):
+    """A resume off the chunk grid rewrites its first file and those on the grid.
+
+    A killed run with one-day chunks and a three-day interval leaves a
+    checkpoint at step 3 and files for steps 3 and 4. Resumed with two-day
+    chunks it integrates 3-4 (the short chunk back onto the grid), 4-6, 6-8:
+    the step-3 file is where its first chunk starts and the step-4 one is on
+    the grid, so both are this run's to rewrite -- and the directory reads back
+    as eight days with every record once.
+    """
+    output = tmp_path / "output"
+    checkpoint = tmp_path / "checkpoint"
+    settings = {
+        "chunk": "1 day",
+        "checkpoint_interval": "3 days",
+        "output_dir": output,
+        "checkpoint_path": checkpoint,
+    }
+    run_chunked(two_slabs(), total_time="3 days", **settings)
+    at_three = tmp_path / "checkpoint-at-step-3"
+    shutil.copytree(checkpoint, at_three)
+    run_chunked(two_slabs(), total_time="5 days", **settings)
+    shutil.rmtree(checkpoint)
+    shutil.copytree(at_three, checkpoint)
+    assert checkpoint_step(checkpoint) == 3
+
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(), total_time="8 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 8
+    assert (
+        "4 existing output file(s) at or after coupled step 3 start on this "
+        "run's chunk boundaries" in caplog.text
+    )
+    assert output_names(output) == [
+        f"{name}-{step:08d}.nc"
+        for name in ("ocn", "seaice")
+        for step in (0, 1, 2, 3, 4, 6)
+    ]
+    with xr.open_mfdataset(
+        sorted(output.glob("ocn-*.nc")), combine="by_coords"
+    ) as combined:
+        assert combined.sizes["time"] == 8
+        assert len(np.unique(combined["time"].values)) == 8
 
 
 def test_a_rechunked_resume_removes_a_file_it_keeps_no_record_for(

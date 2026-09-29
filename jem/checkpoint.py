@@ -657,10 +657,17 @@ def remaining_batches(
     that resumes it, so a batch index means nothing across the two, whereas the
     coupled step counts the same coupling steps in both.
 
-    The last batch is short when the total is not a whole number of batches.
-    It is returned with its true length rather than rounded up, so a run stops
-    exactly at ``total_steps``; a driver pays for it with one extra trajectory
-    compile, only on that final batch.
+    The batches sit on a **grid** of multiples of ``steps_per_batch`` counted
+    from step 0, which is what a run's ``checkpoint_interval`` (a whole number
+    of batches, counted from step 0) and its ``subsample`` stride refer to. A
+    run that starts off the grid -- a checkpoint written under another batch
+    length, or at the end of an earlier run whose last batch was short -- gets
+    a **short first batch**, just long enough to land on the next multiple, so
+    that every later batch boundary is a grid line and a save that is due at a
+    multiple of the interval is not skipped over. The last batch is short too
+    when the total is not a whole number of batches. Both are returned with
+    their true lengths rather than rounded, so a run stops exactly at
+    ``total_steps``; a driver pays for each with one extra trajectory compile.
 
     Parameters
     ----------
@@ -700,8 +707,16 @@ def remaining_batches(
     if remaining <= 0:
         return []
 
+    batches: list[int] = []
+    off_grid = steps_done % steps_per_batch
+    if off_grid:
+        # Just far enough to reach the next grid line, or the end of the run
+        # if that comes first.
+        realign = min(steps_per_batch - off_grid, remaining)
+        batches.append(realign)
+        remaining -= realign
     full_batches, leftover = divmod(remaining, steps_per_batch)
-    batches = [steps_per_batch] * full_batches
+    batches.extend([steps_per_batch] * full_batches)
     if leftover:
         batches.append(leftover)
     return batches

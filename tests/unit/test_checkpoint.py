@@ -662,6 +662,8 @@ def test_a_checkpoint_is_refused_by_a_coupler_on_another_clock(tmp_path, start, 
     else:
         with pytest.raises(ValueError, match="use the configuration it was produced with") as raised:
             resumed.load_carry(tmp_path / "checkpoint")
+        # ... and says how to reuse it deliberately.
+        assert "restart_clock" in str(raised.value)
 
 
 # ---------------------------------------------------------------------------
@@ -687,9 +689,25 @@ def test_remaining_batches_resumes_from_the_step_not_from_a_batch_index():
     # ... and the same restart asked for 10-step batches runs the one batch it
     # needs rather than exiting as "already done".
     assert remaining_batches(10, 20, 10) == [10]
-    # A restart part-way through a batch is not special: what is left is what
-    # is left, whether or not it divides evenly.
-    assert remaining_batches(7, 20, 5) == [5, 5, 3]
+
+
+def test_remaining_batches_lands_a_restart_off_the_grid_back_on_it():
+    """A restart part-way through a batch gets a short FIRST batch.
+
+    The batches sit on multiples of the batch length counted from step 0, so a
+    restart at step 7 in batches of 5 finishes the batch it is in (3 steps, to
+    step 10) and only then runs whole ones: every later boundary is a
+    multiple of 5, and a checkpoint interval that is a multiple of the batch
+    is reachable again.
+    """
+    assert remaining_batches(7, 20, 5) == [3, 5, 5]
+    # Nothing but the realigning batch when the run ends first ...
+    assert remaining_batches(7, 9, 5) == [2]
+    # ... and the last batch is still short when the total is off the grid.
+    assert remaining_batches(7, 23, 5) == [3, 5, 5, 3]
+    # Every boundary but the end of the run is a multiple of the batch.
+    boundaries = 7 + np.cumsum(remaining_batches(7, 23, 5))
+    assert list(boundaries[:-1] % 5) == [0, 0, 0]
 
 
 def test_remaining_batches_is_empty_when_the_run_is_done():

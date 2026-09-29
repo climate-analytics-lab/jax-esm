@@ -110,7 +110,10 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   integrate is exactly one of `total_time` (a fixed duration) and `end_time`
   (an ISO date). The run length and `chunk` must be whole multiples of the
   coupling timestep; a run length that is not a whole number of chunks ends
-  with a shorter chunk.
+  with a shorter chunk, and a run that starts off the chunk grid (extending a
+  run that ended on a short chunk, or resuming under a different `chunk`) opens
+  with a short one that lands it back on it, so its checkpoints stay on
+  `checkpoint_interval`.
 
 ## Exchanges a table can express
 

@@ -43,11 +43,21 @@ when the checkpoints fall depends on it, because ``subsample`` counts coupled
 steps from the start of the **run** (:mod:`jem.output`) and so does
 ``checkpoint_interval``.
 
-The trajectory is compiled once per batch length: once for ``chunk``, and
-once more for a short last batch. A resumed run whose restored step is not a
-whole number of its chunks -- a checkpoint written under another ``chunk``,
-or at the end of a run whose length was not a whole number of chunks --
-counts its batches from that step, so it too may end in a short batch.
+**The chunks sit on a grid** of multiples of ``chunk`` counted from step 0 of
+the run -- the grid ``checkpoint_interval`` and ``subsample`` are counted on
+too. A run that starts off it -- a checkpoint written under another ``chunk``,
+or at the end of an earlier run whose last chunk was short (a run extended to a
+later ``end_time``) -- integrates a **short first chunk**, just long enough to
+land on the next multiple of ``chunk``, so that every later chunk boundary is a
+grid line: a checkpoint due at a multiple of the interval is not stepped over,
+and the output files after the first line up with the ones an uninterrupted run
+writes. (The first file is named after the step the run resumed at, like every
+other.) ``chunk_index`` is the grid chunk a batch lies in, so the short first
+piece of a chunk the earlier run stopped inside carries that chunk's index.
+
+The trajectory is compiled once per batch length: once for ``chunk``, and once
+more for each of the short first and short last batches a run has (they share
+one compilation when they happen to be the same length).
 
 Resuming
 --------
@@ -98,8 +108,9 @@ write *beside* the killed run's leftovers rather than over them and leave the
 directory holding two passes' records for overlapping simulated time. So a
 resumed run checks, before anything is compiled, that every output file at or
 after the step it restored is one this call really writes over
-(:func:`_check_resumed_output_is_rewritable`): it starts on one of *this*
-run's chunk boundaries **and** before the step this run stops at. Those it
+(:func:`_check_resumed_output_is_rewritable`): it starts where one of *this*
+run's chunks does (the step it restored, or a multiple of ``chunk``) **and**
+before the step this run stops at. Those it
 rewrites -- or, for a chunk it keeps no record of (a ``subsample`` stride that
 lands on none of that chunk's steps), removes, since this pass's output for
 that name is nothing and leaving the earlier pass's file there would leave a
@@ -387,9 +398,9 @@ def run_chunked(
         ``n`` records of a kept step and none of a dropped one: the stride is
         in coupled steps, not in records. A chunk that contains no coupled
         step on the stride -- which a ``subsample`` longer than ``chunk`` can
-        give, and so can the short final batch a resume under a different
-        chunk length ends with -- writes **no file** rather than an empty
-        one, and removes an earlier pass's file at that name if one is there.
+        give, and so can a short first or last batch -- writes **no file**
+        rather than an empty one, and removes an earlier pass's file at that
+        name if one is there.
         ``paths`` is then one file per component per chunk except for the
         chunks that kept nothing.
     health_check : callable, optional
@@ -654,8 +665,10 @@ def run_chunked(
             run_length, total_steps, checkpoint_interval, steps_per_checkpoint,
         )
 
-    # Cached by length: every batch but (at most) the last is a full chunk,
-    # so a run compiles one trajectory, or two when its last batch is short.
+    # Cached by length: every batch but (at most) the first and the last is a
+    # full chunk, so a run compiles one trajectory, plus one for each of a
+    # short first batch (a run that starts off the chunk grid) and a short last
+    # one -- the same one when they are the same length.
     trajectories: dict[int, Callable[..., tuple[CoupledCarry, Any]]] = {}
 
     reports: list[dict] = []
@@ -681,34 +694,6 @@ def run_chunked(
             "Nothing to integrate: the run starts at coupled step %d and asks "
             "for %d. %s", int(carry.step), total_steps, provenance,
         )
-    elif steps_per_checkpoint is not None and int(carry.step) % steps_per_chunk:
-        # The interval is counted from the start of the run and the loop can
-        # only stop at a chunk boundary, so when the starting step is not a
-        # whole number of THIS run's chunks, no chunk before the last can end
-        # on a multiple of the interval. (The last one can: `remaining_batches`
-        # makes the final batch the short one, so it ends exactly at
-        # `total_steps`.) Every save in between is lost, which is worse than
-        # what the interval asked for, so it is said rather than silently
-        # accepted. A run starts at such a step when it resumes a checkpoint
-        # written under a different `chunk`, or one written at the end of an
-        # earlier run whose length was not a whole number of chunks (a run
-        # extended to a later `end_time`), or is handed an `initial_carry`
-        # part-way through a chunk. Only the first has a chunk to go back
-        # to, and the checkpoint does not record which it was, so the remedy
-        # is conditional.
-        remedy = (
-            " If the checkpoint was written under a different chunk, resuming "
-            "with that chunk restores the interval."
-        ) if resumed else ""
-        logger.warning(
-            "This run starts at coupled step %d, which is not a whole number "
-            "of the %d-step chunks it is using, so no chunk it integrates "
-            "before the last can end on a multiple of the %d-step "
-            "checkpoint_interval: it will checkpoint when it finishes (and, if "
-            "the health gate stops it, at the last chunk that passed), but not "
-            "in between.%s",
-            int(carry.step), steps_per_chunk, steps_per_checkpoint, remedy,
-        )
 
     # The last chunk the health gate accepted and the interval did NOT save, so
     # that a bail-out can still leave the restart point at the last healthy
@@ -717,13 +702,15 @@ def run_chunked(
     pending_carry: CoupledCarry | None = None
     for batch_index, steps in enumerate(batches):
         first_step = int(carry.step)
-        # A counter for the health check and the log line only. It is
-        # run-global -- `first_step` in chunks, rounded up -- so a resumed run
-        # carries on numbering rather than starting again at 0, including one
-        # resumed off the chunk grid after a short final chunk. It labels a
-        # position for a health check's report; `first_step`, which names the
-        # output files, is what identifies a chunk exactly.
-        chunk_index = -(-first_step // steps_per_chunk)
+        # A counter for the health check and the log line only: the grid chunk
+        # this batch lies in, `first_step // steps_per_chunk`. It is run-global,
+        # so a resumed run carries on numbering rather than starting again at
+        # 0. The short first batch of a run that resumed off the grid is the
+        # rest of the chunk the earlier run stopped inside and so shares that
+        # chunk's index; every other batch starts on the grid and has its own.
+        # `first_step`, which names the output files, is what identifies a
+        # chunk exactly.
+        chunk_index = first_step // steps_per_chunk
         if steps not in trajectories:
             trajectories[steps] = coupler.generate_trajectory_function(
                 steps, accumulate=accumulate
@@ -1053,10 +1040,11 @@ def _check_resumed_output_is_rewritable(
     call really writes over it, which takes **both** halves of what the run is
     about to do:
 
-    - it starts on this run's **chunk grid**, ``restored_step + k *
-      steps_per_chunk`` -- where this run's chunks begin, the short final batch
-      included (:func:`jem.checkpoint.remaining_batches` puts it last, so it
-      too starts on the grid); and
+    - it starts where one of this run's chunks does: at ``restored_step``
+      itself, or on the chunk grid, a multiple of ``steps_per_chunk``
+      (:func:`jem.checkpoint.remaining_batches` makes a run that starts off the
+      grid integrate a short first chunk up to the next multiple, so every
+      later chunk, the short last one included, starts on it); and
     - it starts **before** ``total_steps``, because that is where this run
       stops. A run resumed for less simulated time than an earlier, longer pass
       already wrote leaves that pass's files beyond its own end: on the grid or
@@ -1132,7 +1120,7 @@ def _check_resumed_output_is_rewritable(
     for path, step in existing:
         if step >= total_steps:
             past_the_end.append(path)
-        elif (step - restored_step) % steps_per_chunk:
+        elif step != restored_step and step % steps_per_chunk:
             overlapping.append(path)
         else:
             rewritten.append(path)
@@ -1159,8 +1147,8 @@ def _check_resumed_output_is_rewritable(
             f"{restored_step}, which this run resumed from, that this run will "
             "never write again. A file is named after the coupled step its "
             f"chunk starts at, and this run writes chunks starting at "
-            f"{restored_step} + k x {steps_per_chunk} coupled steps "
-            f"(chunk={chunk!r}) up to step {total_steps}. "
+            f"{restored_step} and then at every multiple of {steps_per_chunk} "
+            f"coupled steps (chunk={chunk!r}) up to step {total_steps}. "
             + ". ".join(reasons)
             + ". Resume with the chunk those files were written under (and, "
             "for those past the end, a run length that reaches them), or "
