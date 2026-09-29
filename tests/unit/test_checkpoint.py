@@ -660,7 +660,7 @@ def test_a_checkpoint_is_refused_by_a_coupler_on_another_clock(tmp_path, start, 
     if (start, days) == ("2001-01-01", 1):
         assert int(resumed.load_carry(tmp_path / "checkpoint").step) == 2
     else:
-        with pytest.raises(ValueError, match="configuration the run was started with"):
+        with pytest.raises(ValueError, match="use the configuration it was produced with") as raised:
             resumed.load_carry(tmp_path / "checkpoint")
 
 
