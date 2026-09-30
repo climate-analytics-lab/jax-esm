@@ -15,7 +15,6 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
-import xarray as xr
 
 # Importing the adapter is what points Veros at its JAX backend, and it has
 # to happen before anything imports veros.core -- including the setup module
@@ -903,25 +902,21 @@ def test_a_spun_up_ocean_is_reused_under_another_start_date(
     reset = july.restart_clock(spun_up)
     assert float(reset.components["ocn"]["state"].variables.time) == zero
 
+    # The reset carry is integrated and labelled in memory: writing netCDF in
+    # the process that ran the other Veros tests hits jax-esm#113.
     with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
-        result = run_chunked(
-            july, total_time="2 days", chunk="2 days", initial_carry=reset,
-            output_dir=tmp_path / "output", checkpoint_path=None,
-            health_check=None,
-        )
+        final, diagnostics = july.generate_trajectory_function(2)(reset)
         jax.effects_barrier()
     # (Constructing the wrappers logged a setup warning; the drift report is
     # the message that must be absent.)
     assert "model clock is" not in caplog.text
-    assert result.final_carry.time == july_start + jdt.to_timedelta(2, "day")
-    assert float(
-        result.final_carry.components["ocn"]["state"].variables.time
-    ) == zero + 2 * 86400.0
-    with xr.open_dataset(tmp_path / "output" / "ocn-00000000.nc") as written:
-        np.testing.assert_array_equal(
-            written["time"].values,
-            np.array(["2000-07-01T12:00", "2000-07-02T12:00"], dtype="datetime64[ms]"),
-        )
+    assert final.time == july_start + jdt.to_timedelta(2, "day")
+    assert float(final.components["ocn"]["state"].variables.time) == zero + 2 * 86400.0
+    written = july.to_xarray(diagnostics)["ocn"]
+    np.testing.assert_array_equal(
+        written["time"].values,
+        np.array(["2000-07-01T12:00", "2000-07-02T12:00"], dtype="datetime64[ms]"),
+    )
 
     caplog.clear()
     with caplog.at_level(logging.ERROR, logger="jem.components.veros_component"):
