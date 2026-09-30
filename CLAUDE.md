@@ -329,6 +329,12 @@ including the three whose value changed.
 - Heat flux is **positive upward** (out of the surface); freshwater flux is
   positive upward (evaporation minus precipitation). JCM publishes downward
   positive, so the adapter negates once, at the boundary.
+- Wind stress is the stress the atmosphere exerts **on the surface**
+  (`eastward_wind_stress`/`northward_wind_stress`; westerlies give a positive
+  eastward stress) — jax-gcm's "positive down" momentum flux and Veros'
+  `surface_taux`, so it crosses the boundary unnegated. It is the
+  atmosphere's own delivered stress, never one JEM recomputes from the wind,
+  so momentum is conserved across the exchange.
 - `ice_frazil_melt_energy` follows CESM's `frzmlt`: positive means the mixed
   layer went sub-freezing and new ice forms; negative means surplus heat is
   available to melt existing ice.

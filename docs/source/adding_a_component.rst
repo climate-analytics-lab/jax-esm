@@ -127,7 +127,10 @@ objects. So the carry structure the adapter adopts is
             physics,                # JCM's own per-step diagnostics, opaque
             total_heat_flux,        # W/m^2, positive upward
             total_freshwater_flux,  # kg/m^2/s, positive upward (evap - precip)
-            evaporation, precipitation, u0, v0,
+            evaporation, precipitation,
+            eastward_wind_stress,   # N/m^2, the stress ON the surface
+            northward_wind_stress,
+            u0, v0,                 # near-surface wind, package's own height
         ),
     }
 
@@ -205,7 +208,9 @@ Four things to note:
   :code:`net_heat_flux` positive *down* and the water fluxes already in
   :code:`kg m-2 s-1`, and JEM's convention is heat flux positive *up*, so the
   sign is flipped exactly once, at the component boundary -- no unit
-  conversion is needed any more. That single translation is what keeps every
+  conversion is needed any more. The surface wind stress crosses unchanged:
+  JCM's "positive down" stress is the stress *on* the surface, which is
+  already JEM's convention. That single translation is what keeps every
   exchanger downstream sign- and unit-consistent, for either physics package:
   see the module's docstring for the full derivation.
 

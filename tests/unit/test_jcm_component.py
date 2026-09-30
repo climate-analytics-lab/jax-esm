@@ -285,7 +285,8 @@ def test_initialize_does_not_integrate(model, monkeypatch):
 
 
 def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
-                          u0=1.5, v0=-2.5, wind_reference="lowest_level"):
+                          u0=1.5, v0=-2.5, stress_u=0.08, stress_v=-0.03,
+                          wind_reference="lowest_level"):
     """Build a real jax-gcm ``SurfaceExchange`` with hand-chosen values.
 
     The other guaranteed fields are filled with placeholders: JEM's
@@ -298,8 +299,8 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
         latent_heat_flux=field(0.0),
         evaporation=field(evaporation),
         precipitation=field(precipitation),
-        stress_u=field(0.0),
-        stress_v=field(0.0),
+        stress_u=field(stress_u),
+        stress_v=field(stress_v),
         wind_speed=field(float(np.hypot(u0, v0))),
         wind_u=field(u0),
         wind_v=field(v0),
@@ -310,7 +311,8 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
 
 
 def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
-                             precipitation=0.008, u0=1.5, v0=-2.5):
+                             precipitation=0.008, u0=1.5, v0=-2.5,
+                             stress_u=0.08, stress_v=-0.03):
     """Build a diagnostics dict shaped like SPEEDY's real ``surface_exchange`` output.
 
     The values are already in the contract's units (kg m-2 s-1, positive
@@ -319,13 +321,15 @@ def _fake_speedy_diagnostics(net_heat_flux=10.0, evaporation=0.002,
     return {
         "surface_exchange": _jcm_surface_exchange(
             net_heat_flux, evaporation, precipitation,
-            u0=u0, v0=v0, wind_reference="lowest_level",
+            u0=u0, v0=v0, stress_u=stress_u, stress_v=stress_v,
+            wind_reference="lowest_level",
         ),
     }
 
 
 def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
-                            precipitation=0.004, u0=4.0, v0=1.0):
+                            precipitation=0.004, u0=4.0, v0=1.0,
+                            stress_u=0.12, stress_v=0.02):
     """Build a diagnostics dict shaped like ECHAM's real ``surface_exchange`` output.
 
     The wind sits at ECHAM's own ``wind_reference="10m"`` (its
@@ -334,15 +338,17 @@ def _fake_echam_diagnostics(net_heat_flux=7.0, evaporation=0.001,
     return {
         "surface_exchange": _jcm_surface_exchange(
             net_heat_flux, evaporation, precipitation,
-            u0=u0, v0=v0, wind_reference="10m",
+            u0=u0, v0=v0, stress_u=stress_u, stress_v=stress_v,
+            wind_reference="10m",
         ),
     }
 
 
 def test_speedy_exchange_shapes_and_signs():
-    """Sign flip only: evaporation/precipitation/wind need no unit conversion
-    or reshape, because the contract already publishes them in JEM's units
-    and on JEM's grid -- see the module docstring's derivation table.
+    """Sign flip only: evaporation/precipitation/stress/wind need no unit
+    conversion or reshape, because the contract already publishes them in
+    JEM's units and on JEM's grid -- see the module docstring's derivation
+    table.
     """
     diagnostics = _fake_speedy_diagnostics()
     exchange = exchange_fields.from_diagnostics(diagnostics, nodal_shape=GRID_SHAPE)
@@ -354,6 +360,10 @@ def test_speedy_exchange_shapes_and_signs():
     # published contract -- no conversion, no manual summing.
     np.testing.assert_allclose(exchange.evaporation, 0.002)
     np.testing.assert_allclose(exchange.precipitation, 0.008)
+    # The stress is positive down -- the stress ON the surface -- in both
+    # conventions, so it passes through unnegated.
+    np.testing.assert_allclose(exchange.eastward_wind_stress, 0.08)
+    np.testing.assert_allclose(exchange.northward_wind_stress, -0.03)
     np.testing.assert_allclose(exchange.u0, 1.5)
     np.testing.assert_allclose(exchange.v0, -2.5)
     for field in exchange:
@@ -372,6 +382,8 @@ def test_echam_exchange_translates_identically_to_speedy():
     np.testing.assert_allclose(exchange.total_heat_flux, -7.0)
     np.testing.assert_allclose(exchange.evaporation, 0.001)
     np.testing.assert_allclose(exchange.precipitation, 0.004)
+    np.testing.assert_allclose(exchange.eastward_wind_stress, 0.12)
+    np.testing.assert_allclose(exchange.northward_wind_stress, 0.02)
     # ECHAM's wind sits at its own reference (10 m); the value passes through
     # exactly as SPEEDY's lowest-level wind does above.
     np.testing.assert_allclose(exchange.u0, 4.0)
@@ -398,7 +410,7 @@ def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
         "surface_exchange": JcmSurfaceExchange(
             net_heat_flux=zeros, sensible_heat_flux=zeros, latent_heat_flux=zeros,
             evaporation=zeros, precipitation=zeros,
-            stress_u=zeros, stress_v=zeros,
+            stress_u=10 * flat, stress_v=-10 * flat,
             wind_speed=jnp.hypot(flat, flat), wind_u=flat, wind_v=-flat,
             air_density=zeros, air_potential_temperature=zeros,
             wind_reference="lowest_level",
@@ -412,6 +424,10 @@ def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
     assert exchange.u0.shape == (ix, il)
     np.testing.assert_array_equal(np.asarray(exchange.u0), flat.reshape(ix, il))
     np.testing.assert_array_equal(np.asarray(exchange.v0), (-flat).reshape(ix, il))
+    np.testing.assert_array_equal(
+        np.asarray(exchange.eastward_wind_stress), (10 * flat).reshape(ix, il))
+    np.testing.assert_array_equal(
+        np.asarray(exchange.northward_wind_stress), (-10 * flat).reshape(ix, il))
 
 
 def test_missing_surface_exchange_raises_jcms_own_key_error():
@@ -577,7 +593,8 @@ def test_derived_fields_are_finite_and_consistent(stepped):
     _, carry1, _, _, _ = stepped
     derived = carry1["derived"]
 
-    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+    for name in ("total_heat_flux", "evaporation", "precipitation",
+                 "eastward_wind_stress", "northward_wind_stress", "u0", "v0"):
         field = getattr(derived, name)
         assert field.shape == GRID_SHAPE
         assert bool(jnp.all(jnp.isfinite(field))), name
@@ -627,7 +644,10 @@ def test_to_xarray_rejects_a_mismatched_time_axis(component, stepped):
 
 @pytest.mark.slow
 def test_derived_wind_matches_the_published_contract_speedy(stepped):
-    """``JCMDerived.u0``/``.v0`` equal the published contract's ``wind_u``/``wind_v``.
+    """``JCMDerived``'s wind and stress equal the published contract's.
+
+    ``u0``/``v0`` are ``wind_u``/``wind_v``, and ``eastward_wind_stress``/
+    ``northward_wind_stress`` are ``stress_u``/``stress_v``, bit for bit.
 
     Checked against the struct directly rather than trusting
     ``from_diagnostics``'s own claim, so a regression reading the wrong
@@ -648,6 +668,14 @@ def test_derived_wind_matches_the_published_contract_speedy(stepped):
     np.testing.assert_array_equal(
         np.asarray(derived.v0),
         np.asarray(contract.wind_v).reshape(derived.v0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.eastward_wind_stress),
+        np.asarray(contract.stress_u).reshape(derived.u0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.northward_wind_stress),
+        np.asarray(contract.stress_v).reshape(derived.v0.shape))
+    # A real stress, not a placeholder: SPEEDY's lowest level always moves.
+    assert float(jnp.max(jnp.abs(derived.eastward_wind_stress))) > 0.0
 
 
 @pytest.mark.slow
@@ -661,7 +689,8 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
 
     _, carry1, _ = echam_stepped
     derived = carry1["derived"]
-    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+    for name in ("total_heat_flux", "evaporation", "precipitation",
+                 "eastward_wind_stress", "northward_wind_stress", "u0", "v0"):
         assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
 
     contract = surface_exchange_from(derived.physics)
@@ -676,6 +705,12 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
     np.testing.assert_array_equal(
         np.asarray(derived.v0),
         np.asarray(contract.wind_v).reshape(derived.v0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.eastward_wind_stress),
+        np.asarray(contract.stress_u).reshape(derived.u0.shape))
+    np.testing.assert_array_equal(
+        np.asarray(derived.northward_wind_stress),
+        np.asarray(contract.stress_v).reshape(derived.v0.shape))
 
 
 @pytest.mark.slow
@@ -686,7 +721,7 @@ def test_echam_two_coupled_steps_through_a_slab_ocean(echam_model):
     carry-structure mismatch, not a single component's ``step()`` in
     isolation. The default slab exchange table couples on
     ``total_heat_flux``/``total_freshwater_flux`` alone; it does not read
-    ``derived.u0``/``.v0`` (only ``jem.fluxes.VerosExchange`` does -- see
+    the wind stress (only ``jem.fluxes.VerosExchange`` does -- see
     ``test_echam_veros_earth_configuration_steps`` in
     ``tests/unit/test_veros_setups.py``).
     """
@@ -706,7 +741,8 @@ def test_echam_two_coupled_steps_through_a_slab_ocean(echam_model):
     final, _diagnostics = coupler.generate_trajectory_function(2)(carry)
 
     derived = final.components["atm"]["derived"]
-    for name in ("total_heat_flux", "evaporation", "precipitation", "u0", "v0"):
+    for name in ("total_heat_flux", "evaporation", "precipitation",
+                 "eastward_wind_stress", "northward_wind_stress", "u0", "v0"):
         assert bool(jnp.all(jnp.isfinite(getattr(derived, name)))), name
 
 

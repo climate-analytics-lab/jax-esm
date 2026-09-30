@@ -40,9 +40,11 @@ sea-ice component -- see each configuration's own comment for what that
 means for the atmosphere's land boundary conditions.
 
 The two components are coupled through :class:`jem.fluxes.VerosExchange`,
-named as ``coupling.exchanger``: it computes the surface wind stress from the
-atmosphere's near-surface wind with a bulk drag law (rotated into the ocean
-grid's local frame for ``veros-earth``, whose grid is not true east/north),
+named as ``coupling.exchanger``: it hands the ocean the surface wind stress
+the atmosphere itself received -- jax-gcm's published, stability-corrected
+stress, the same for every physics package, so momentum is conserved across
+the interface -- regridded conservatively and rotated into the ocean grid's
+local frame for ``veros-earth``, whose grid is not true east/north;
 applies a "swamp" sea-ice mask to the heat and freshwater fluxes once the
 surface reaches the freezing point, and carries the rest of
 :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` (the fluxes onto the ocean, its

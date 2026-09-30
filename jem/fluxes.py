@@ -2,26 +2,57 @@
 
 :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` is the copy-only half of the
 coupling between a JCM atmosphere and a Veros ocean: every row it holds moves
-a field from one carry to another unchanged (bar a regrid). Two things a
-Veros ocean needs are not copies of anything the atmosphere publishes, and so
-cannot be table rows at all:
+a *scalar* field from one carry to another unchanged (bar a regrid). Two
+things a Veros ocean needs cannot be table rows at all:
 
 - **the surface wind stress** Veros integrates (``forcing.surface_taux`` /
-  ``surface_tauy``) is not a field the atmosphere has -- it publishes a
-  near-surface *wind* (``derived.u0`` / ``v0``), and turning a wind into a
-  stress is a bulk drag law, optionally followed by a rotation into the
-  ocean grid's own frame;
+  ``surface_tauy``) is a *vector*. The atmosphere publishes it
+  (``derived.eastward_wind_stress`` / ``northward_wind_stress``, jax-gcm's
+  own delivered surface stress), but in true east/north components, while
+  an ocean on a rotated-pole grid integrates it in that grid's own local
+  x/y frame. Getting from one to the other mixes the two components
+  (:func:`rotate_vector`), which a row moving one field at a time cannot
+  express;
 - **the "swamp" sea-ice mask** is not a field either -- it is a condition
   (has the surface reached the freezing point?) applied to two fields the
   table already knows how to move.
 
 This module is where that computed half of the coupling lives, so that an
 exchanger built from it is wiring -- which regridder, which grid file --
-rather than physics: :func:`bulk_wind_stress`, :func:`mask_fluxes_under_ice`
-and :func:`rotate_vector` are pure functions with no notion of a carry, and
-:class:`VerosExchange` is the thin :class:`~jem.base.component.Exchanger`
-that reads the atmosphere and ocean carries, calls them, and writes the
-result back with ``.replace(...)``.
+rather than physics: :func:`mask_fluxes_under_ice` and :func:`rotate_vector`
+are pure functions with no notion of a carry, and :class:`VerosExchange` is
+the thin :class:`~jem.base.component.Exchanger` that reads the atmosphere and
+ocean carries, calls them, and writes the result back with ``.replace(...)``.
+
+Why the ocean takes the atmosphere's stress rather than computing its own
+--------------------------------------------------------------------------
+The stress jax-gcm publishes is the one the atmosphere's lowest layer was
+actually given that step ("published == delivered"; see
+:mod:`jem.components.jcm.exchange_fields`), computed by the physics
+package's own stability-dependent surface closure and averaged over the
+coupling interval. Handing the ocean that stress conserves momentum across
+the interface: what the atmosphere loses the ocean gains, up to the
+conservative regrid. A drag law applied here to the published near-surface
+wind would not: it would be a second, independent stress law, blind to
+stability, and -- because SPEEDY publishes its lowest-level wind and ECHAM
+a 10 m one -- a law whose answer changes with the composed physics package
+for a reason that has nothing to do with the ocean. It would also be applied
+to the *interval-mean* wind, and a quadratic drag law of a mean wind is
+smaller than the mean of the instantaneous stress, which is what the
+published field is. The two differed by 30-40 % in magnitude on a T21
+SPEEDY aquaplanet (jax-esm#132), and over the open ocean of
+``+configuration=veros-double-drake`` after 30 days the published stress is
+about 1.6 times the old ``Cd = 1e-3`` law's (RMS), with the same sign
+everywhere and a pattern correlation of 0.92. JAX-ESM therefore has one
+stress law for every package: the atmosphere's.
+
+Two properties of that stress are inherited rather than chosen here. It is a
+**grid-box mean** over land, sea and sea ice, like every other flux the
+contract guarantees, so a coastal ocean cell receives some of the land's
+drag (jax-esm#147). And it is the stress against a surface **at rest**:
+jax-gcm reserves ``ForcingData.ocean_u``/``ocean_v`` for a relative-wind
+stress but does not yet apply them (jax-gcm#915), so JEM does not send the
+ocean's surface current back to the atmosphere.
 """
 
 from __future__ import annotations
@@ -79,81 +110,6 @@ def rotate_vector(
     return x, y
 
 
-def bulk_wind_stress(
-    u: jax.Array,
-    v: jax.Array,
-    *,
-    drag_coefficient: float = 1e-3,
-    air_density: float = 1.22,
-    min_speed: float = 1e-3,
-) -> tuple[jax.Array, jax.Array]:
-    """Return the surface wind stress a bulk drag law gives for a near-surface wind.
-
-    ``tau = drag_coefficient * air_density * |wind| * wind``, applied
-    component-wise. ``|wind|`` is computed as
-    ``sqrt(max(u**2 + v**2, min_speed**2))``: the floor is on the **squared**
-    speed, before the square root, rather than on ``|wind|`` itself, because
-    ``d sqrt(x)/dx`` is unbounded as ``x -> 0`` -- automatic differentiation
-    through ``sqrt(u**2 + v**2)`` at zero wind gives ``NaN`` even though the
-    primal value (zero) is perfectly finite. Flooring the argument of the
-    square root keeps both the value and its derivative bounded, at the cost
-    of a wind speed that never reads below ``min_speed``. This mirrors the
-    identical fix :class:`jem.components.veros_component.VerosComponent`
-    already applies to Veros' own ``forc_tke_surface``.
-
-    Parameters
-    ----------
-    u, v : jax.Array
-        The near-surface wind's components, in the frame the ocean's stress
-        is to be given in (rotate first with :func:`rotate_vector` if the
-        ocean grid is not true-east/true-north).
-    drag_coefficient : float
-        Dimensionless bulk drag coefficient. Default ``1e-3``.
-    air_density : float
-        Near-surface air density, kg/m^3. Default ``1.22``.
-    min_speed : float
-        The wind speed floor described above, m/s. Default ``1e-3``.
-
-    Returns
-    -------
-    tuple[jax.Array, jax.Array]
-        The wind stress's components, in the same frame as ``u``/``v``.
-
-    Notes
-    -----
-    This bulk law is a deliberately independent computation, not a lookup of
-    what SPEEDY itself already computed. JCM's own surface scheme separately
-    derives a sea-surface stress (``jcm.physics.surface.speedy_surface_flux``,
-    published as ``SurfaceTypeFluxes.ustr``/``vstr``, e.g.
-    ``ustr = -sfp.cds * rho_wind * air.u_bottom`` with a stability-corrected
-    ``rho_wind``), and this function's ``drag_coefficient=1e-3``,
-    ``air_density=1.22`` law over the same near-surface wind will not agree
-    with it in general. Momentum is therefore *not* conserved between the
-    atmosphere and the ocean across this exchange -- this is faithful to the
-    original (pre-package) double-drake/earth drivers, which computed the
-    ocean's wind stress this same independent way rather than reusing
-    SPEEDY's.
-
-    ``u``/``v`` sit at whichever reference the composed physics package's own
-    surface closure diagnoses -- SPEEDY's ``fwind0``-scaled lowest model
-    level, ECHAM's stability-corrected 10 m wind (``jcm.physics.surface.
-    surface_exchange.SurfaceExchange.wind_reference`` names which; see
-    ``jem.components.jcm.exchange_fields``). This law applies one
-    ``drag_coefficient``/``air_density`` regardless of that reference height,
-    so switching the composed package changes the stress for a reason that
-    has nothing to do with the ocean: a slower, near-surface 10 m wind
-    against the same drag law gives a systematically different stress than a
-    faster lowest-level one would, for the same underlying flow (jax-esm#132).
-    A drag law that depended on the reference height (a neutral-log profile
-    calibrated to a specific height, say) would need to branch on
-    ``wind_reference`` and does not exist here.
-
-    """
-    speed = jnp.sqrt(jnp.maximum(u**2 + v**2, min_speed**2))
-    scale = drag_coefficient * air_density * speed
-    return scale * u, scale * v
-
-
 def mask_fluxes_under_ice(
     sea_surface_temperature: jax.Array,
     heat_flux: jax.Array,
@@ -209,7 +165,7 @@ def read_rotation_angles(scrip_grid_file: str) -> tuple[jax.Array, jax.Array]:
     with ``order="F"`` using the file's own ``grid_dims`` -- the same layout
     :class:`jem.utils.esmf_regrid.ESMFRegridder` and
     :class:`jem.components.slab.grid.SlabGrid` both use, so the angles this
-    returns line up index-for-index with a regridded ``u0``/``v0`` field with
+    returns line up index-for-index with a regridded wind-stress field with
     no transpose needed.
 
     Parameters
@@ -259,11 +215,12 @@ class VerosExchange:
     Reproduces the ``atm``/``ocn`` rows of
     :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` -- the surface heat and
     freshwater fluxes onto the ocean, the sea surface temperature back onto
-    the atmosphere -- and adds the two things that table cannot express: a
-    :func:`bulk_wind_stress` computed from the atmosphere's near-surface wind
-    (rotated into the ocean grid's frame first, when ``rotation_grid_file``
-    is given), and :func:`mask_fluxes_under_ice` applied to the heat and
-    freshwater fluxes. It is what makes a Veros configuration mechanically,
+    the atmosphere -- and adds the two things that table cannot express: the
+    atmosphere's published surface wind stress, regridded onto the ocean grid
+    and rotated into its local frame when ``rotation_grid_file`` is given
+    (see the module docstring for why the ocean takes that stress rather than
+    one of its own), and :func:`mask_fluxes_under_ice` applied to the heat
+    and freshwater fluxes. It is what makes a Veros configuration mechanically,
     as well as thermodynamically, forced. It does not touch a land or
     sea-ice component -- :data:`VEROS_OCEAN_EXCHANGES`'s ``lnd``/``seaice``
     rows have no counterpart here, because the configurations this exchanger
@@ -278,9 +235,10 @@ class VerosExchange:
     regrid : Mapping[str, Callable] or None
         Whatever :func:`jem.runners.build_regridders` produced -- named
         regridders, plus the role aliases :data:`jem.runners.REGRID_ROLES`
-        gives them. Two roles are used: ``"a2o_flux"`` for the wind and the
-        two fluxes going onto the ocean grid (mapped **conservatively**, so a
-        flux's budget survives the interface), and ``"o2a_state"`` for the
+        gives them. Two roles are used: ``"a2o_flux"`` for the two stress
+        components and the two fluxes going onto the ocean grid (mapped
+        **conservatively**, so a flux's budget -- momentum included --
+        survives the interface), and ``"o2a_state"`` for the
         sea surface temperature coming back (mapped **bilinearly**, so it is
         not left with a conservative map's staircase -- see
         :mod:`jem.regrid` for the same reasoning applied to the declarative
@@ -295,8 +253,6 @@ class VerosExchange:
         means no rotation -- the identity -- which is right for a grid whose
         axes already are true east/north (the double-drake configuration's
         uniform lat-lon ocean grid).
-    drag_coefficient, air_density, min_speed : float
-        Passed to :func:`bulk_wind_stress`.
     freezing_point : float
         Passed to :func:`mask_fluxes_under_ice`.
 
@@ -305,9 +261,13 @@ class VerosExchange:
     Every numeric tunable is a Python default on this constructor, never a
     YAML value -- a configuration names only ``_target_`` and, where needed,
     ``rotation_grid_file``; the CLI reaches the rest with, for example,
-    ``+coupling.exchanger.drag_coefficient=2e-3``. The rotation-angle file is
-    read and the regridder lookups are resolved once, here in ``__init__``;
-    :meth:`__call__` runs inside the traced coupled step and does no I/O.
+    ``+coupling.exchanger.freezing_point=271.2``. There is deliberately no
+    drag coefficient: the stress is the atmosphere's, and tuning the ocean's
+    momentum forcing means tuning the atmosphere's surface closure, so the
+    two sides of the interface cannot disagree about it. The rotation-angle
+    file is read and the regridder lookups are resolved once, here in
+    ``__init__``; :meth:`__call__` runs inside the traced coupled step and
+    does no I/O.
 
     The destination-dtype cast this exchanger applies (see the build-order
     comment in :meth:`__call__`) is not unique to this hand-written class:
@@ -322,9 +282,6 @@ class VerosExchange:
         *,
         regrid: Mapping[str, Callable[[Any], Any]] | None = None,
         rotation_grid_file: str | None = None,
-        drag_coefficient: float = 1e-3,
-        air_density: float = 1.22,
-        min_speed: float = 1e-3,
         freezing_point: float = 271.35,
     ) -> None:
         """Build the exchanger; see the class docstring for the parameters."""
@@ -336,9 +293,6 @@ class VerosExchange:
             None if rotation_grid_file is None
             else read_rotation_angles(rotation_grid_file)
         )
-        self.drag_coefficient = drag_coefficient
-        self.air_density = air_density
-        self.min_speed = min_speed
         self.freezing_point = freezing_point
         logger.debug("Built %r", self)
 
@@ -384,7 +338,8 @@ class VerosExchange:
         # while the atmosphere's carry is *mixed* -- whatever jax-gcm had
         # already allocated at `Model` construction (built first) stays
         # float32, and anything allocated after the flip (every per-step
-        # diagnostic, including `derived.u0` and `derived.total_heat_flux`)
+        # diagnostic, including `derived.eastward_wind_stress` and
+        # `derived.total_heat_flux`)
         # comes out float64 too. So which atmosphere fields are float32
         # depends on build order, not on any promise this module makes.
         # `jax.lax.scan` requires a step's output carry to match its input
@@ -396,8 +351,8 @@ class VerosExchange:
         # place a value is known to cross the boundary, and reading the
         # destination's dtype at trace time (rather than assuming one) is
         # what makes the coupling robust to that ordering.
-        u0 = atm["derived"].u0
-        v0 = atm["derived"].v0
+        eastward_wind_stress = atm["derived"].eastward_wind_stress
+        northward_wind_stress = atm["derived"].northward_wind_stress
         total_heat_flux = atm["derived"].total_heat_flux
         total_freshwater_flux = atm["derived"].total_freshwater_flux
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
@@ -411,28 +366,28 @@ class VerosExchange:
             atm["forcing"].sea_surface_temperature.dtype
         )
 
-        # Wind stress: regrid the wind onto the ocean grid, rotate into its
-        # local frame if it has one, then apply the bulk drag law. Regridding
-        # *before* rotating (never the other way around) is deliberate: JCM's
-        # own grid is unrotated, so `u0`/`v0` are true east/north everywhere
-        # on it, which is what makes a component-wise conservative regrid of
-        # each of them well defined (there is no single frame change that
-        # could be "moved before" the regrid to simplify this). The rotation
-        # angles, by contrast, are defined per *ocean* cell
-        # (`read_rotation_angles` reads them off the ocean's own SCRIP file),
-        # so they only make sense to apply once the wind is already sitting
-        # on that grid.
-        wind_x = self._a2o_flux(u0)
-        wind_y = self._a2o_flux(v0)
+        # Wind stress: regrid the atmosphere's stress onto the ocean grid,
+        # then rotate it into that grid's local frame if it has one. The
+        # stress is a flux of momentum, so it goes through the conservative
+        # a2o map like the heat and freshwater fluxes, which keeps the
+        # area-integrated momentum the atmosphere lost equal to what the
+        # ocean receives. Regridding *before* rotating (never the other way
+        # around) is deliberate: JCM's own grid is unrotated, so the two
+        # components are true east/north everywhere on it, which is what makes
+        # a component-wise conservative regrid of each of them well defined
+        # (there is no single frame change that could be "moved before" the
+        # regrid to simplify this). The rotation angles, by contrast, are
+        # defined per *ocean* cell (`read_rotation_angles` reads them off the
+        # ocean's own SCRIP file), so they only make sense to apply once the
+        # stress is already sitting on that grid. The rotation re-expresses
+        # the same vector in the ocean's own frame, so it does not change the
+        # momentum delivered either.
+        surface_taux = self._a2o_flux(eastward_wind_stress)
+        surface_tauy = self._a2o_flux(northward_wind_stress)
         if self._rotation_angles is not None:
             cos_angle, sin_angle = self._rotation_angles
-            wind_x, wind_y = rotate_vector(wind_x, wind_y, cos_angle, sin_angle)
-        surface_taux, surface_tauy = bulk_wind_stress(
-            wind_x, wind_y,
-            drag_coefficient=self.drag_coefficient,
-            air_density=self.air_density,
-            min_speed=self.min_speed,
-        )
+            surface_taux, surface_tauy = rotate_vector(
+                surface_taux, surface_tauy, cos_angle, sin_angle)
 
         # Heat and freshwater fluxes: regrid onto the ocean grid, then mask
         # wherever the ocean the flux is destined for has reached the
@@ -480,7 +435,5 @@ class VerosExchange:
         )
         return (
             f"{type(self).__name__}(a2o_flux={a2o}, o2a_state={o2a}, "
-            f"rotates={rotates}, drag_coefficient={self.drag_coefficient}, "
-            f"air_density={self.air_density}, min_speed={self.min_speed}, "
-            f"freezing_point={self.freezing_point})"
+            f"rotates={rotates}, freezing_point={self.freezing_point})"
         )

@@ -58,10 +58,11 @@
 #    `VerosExchange` carries no `lnd` rows, so that model would receive zero
 #    forcing and its surface temperature would never reach the atmosphere --
 #    an inert component, not a land surface. See jax-esm#128.
-#  - coupling.exchanger names `jem.fluxes.VerosExchange`, which computes the
-#    wind stress from the atmosphere's near-surface wind with a bulk drag
-#    law, masks the heat and freshwater fluxes wherever the surface has
-#    reached the freezing point, and carries the rest of
+#  - coupling.exchanger names `jem.fluxes.VerosExchange`, which hands the
+#    ocean the surface wind stress the atmosphere itself received (jax-gcm's
+#    published, stability-corrected stress, so momentum is conserved across
+#    the interface -- jax-esm#132), masks the heat and freshwater fluxes
+#    wherever the surface has reached the freezing point, and carries the rest of
 #    `jem.exchangers.VEROS_OCEAN_EXCHANGES` (the surface heat and freshwater
 #    fluxes onto the ocean, its sea surface temperature back) -- so the ocean
 #    is mechanically as well as thermodynamically forced. No `regrid` and no

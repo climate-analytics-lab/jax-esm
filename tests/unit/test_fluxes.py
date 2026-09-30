@@ -1,7 +1,7 @@
 """Tests for :mod:`jem.fluxes` -- the computed half of the Veros coupling.
 
-The pure functions (:func:`~jem.fluxes.bulk_wind_stress`,
-:func:`~jem.fluxes.mask_fluxes_under_ice`, :func:`~jem.fluxes.rotate_vector`,
+The pure functions (:func:`~jem.fluxes.mask_fluxes_under_ice`,
+:func:`~jem.fluxes.rotate_vector`,
 :func:`~jem.fluxes.read_rotation_angles`) are tested directly on plain
 arrays. :class:`~jem.fluxes.VerosExchange` is tested on small fake carries --
 :mod:`flax.struct` dataclasses carrying exactly the field names it reads and
@@ -21,7 +21,6 @@ from flax import struct
 from jem.base.component import CouplingTime
 from jem.fluxes import (
     VerosExchange,
-    bulk_wind_stress,
     mask_fluxes_under_ice,
     read_rotation_angles,
     rotate_vector,
@@ -35,52 +34,6 @@ TIME = CouplingTime(
     time=jdt.to_datetime("2001-01-01"),
     dt=86400.0,
 )
-
-
-# ---------------------------------------------------------------------------
-# bulk_wind_stress
-# ---------------------------------------------------------------------------
-
-
-def test_bulk_wind_stress_is_quadratic_in_the_wind():
-    """Doubling the wind quadruples the stress, away from the speed floor."""
-    u, v = jnp.array([3.0]), jnp.array([4.0])
-    taux, tauy = bulk_wind_stress(u, v)
-    taux2, tauy2 = bulk_wind_stress(2 * u, 2 * v)
-    np.testing.assert_allclose(taux2, 4 * taux, rtol=1e-6)
-    np.testing.assert_allclose(tauy2, 4 * tauy, rtol=1e-6)
-
-
-def test_bulk_wind_stress_is_aligned_with_the_wind():
-    """The stress is parallel to (u, v), with magnitude Cd*rho*|U|^2."""
-    u, v = jnp.array([3.0]), jnp.array([-4.0])
-    drag_coefficient, air_density = 1e-3, 1.22
-    taux, tauy = bulk_wind_stress(
-        u, v, drag_coefficient=drag_coefficient, air_density=air_density
-    )
-    speed = jnp.sqrt(u**2 + v**2)
-    expected_magnitude = drag_coefficient * air_density * speed**2
-    np.testing.assert_allclose(
-        jnp.sqrt(taux**2 + tauy**2), expected_magnitude, rtol=1e-6
-    )
-    # Parallel: the cross product of (u, v) and (taux, tauy) is zero.
-    np.testing.assert_allclose(u * tauy - v * taux, 0.0, atol=1e-10)
-
-
-def test_bulk_wind_stress_gradient_is_finite_at_zero_wind():
-    """The regression test for the squared-speed floor.
-
-    Without flooring the squared speed before the square root,
-    `d sqrt(x)/dx` is unbounded at `x=0` and this gradient comes back NaN
-    even though the primal stress at zero wind is exactly zero.
-    """
-
-    def total_stress(uv):
-        taux, tauy = bulk_wind_stress(uv[0], uv[1])
-        return taux + tauy
-
-    gradient = jax.grad(total_stress)(jnp.array([0.0, 0.0]))
-    assert jnp.all(jnp.isfinite(gradient)), gradient
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +107,8 @@ def test_read_rotation_angles_names_the_file_when_unrotated():
 
 @struct.dataclass
 class _AtmDerived:
-    u0: jnp.ndarray
-    v0: jnp.ndarray
+    eastward_wind_stress: jnp.ndarray
+    northward_wind_stress: jnp.ndarray
     total_heat_flux: jnp.ndarray
     total_freshwater_flux: jnp.ndarray
 
@@ -182,8 +135,8 @@ def _fake_components():
     shape = (4,)
     atm = {
         "derived": _AtmDerived(
-            u0=jnp.full(shape, 5.0),
-            v0=jnp.full(shape, -3.0),
+            eastward_wind_stress=jnp.array([0.1, -0.05, 0.02, 0.0]),
+            northward_wind_stress=jnp.array([-0.03, 0.04, 0.0, 0.01]),
             total_heat_flux=jnp.full(shape, 20.0),
             total_freshwater_flux=jnp.full(shape, 1e-6),
         ),
@@ -264,8 +217,8 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
         shape = (4,)
         atm = {
             "derived": _AtmDerived(
-                u0=jnp.full(shape, 5.0, dtype=jnp.float32),
-                v0=jnp.full(shape, -3.0, dtype=jnp.float32),
+                eastward_wind_stress=jnp.full(shape, 0.1, dtype=jnp.float32),
+                northward_wind_stress=jnp.full(shape, -0.03, dtype=jnp.float32),
                 total_heat_flux=jnp.full(shape, 20.0, dtype=jnp.float32),
                 total_freshwater_flux=jnp.full(shape, 1e-6, dtype=jnp.float32),
             ),
@@ -314,8 +267,13 @@ def test_veros_exchange_uses_the_regridders_it_was_given():
     exchange = VerosExchange(regrid={"a2o_flux": a2o_flux, "o2a_state": o2a_state})
     exchange(components, TIME)
 
-    # u0, v0, total_heat_flux, total_freshwater_flux all cross a2o.
+    # Both stress components and both fluxes cross the conservative a2o map
+    # -- the stress is a momentum flux, so it is regridded like one.
     assert len(a2o_calls) == 4
+    derived = components["atm"]["derived"]
+    for field in (derived.eastward_wind_stress, derived.northward_wind_stress,
+                  derived.total_heat_flux, derived.total_freshwater_flux):
+        assert any(call is field for call in a2o_calls)
     # The sea surface temperature crosses o2a exactly once.
     assert len(o2a_calls) == 1
     np.testing.assert_allclose(
@@ -329,13 +287,141 @@ def test_veros_exchange_without_regridders_is_the_identity_path():
     exchange = VerosExchange()
     assert exchange.rotation_grid_file is None
     result = exchange(components, TIME)
-    # With no regridder and no rotation, the wind stress is the bulk drag law
-    # applied directly to (u0, v0).
-    expected_taux, expected_tauy = bulk_wind_stress(
-        components["atm"]["derived"].u0, components["atm"]["derived"].v0
+    # With no regridder and no rotation, the ocean receives exactly the stress
+    # the atmosphere published -- no drag law, no rescaling, no sign flip.
+    np.testing.assert_array_equal(
+        result["ocn"]["forcing"].surface_taux,
+        components["atm"]["derived"].eastward_wind_stress,
     )
-    np.testing.assert_allclose(result["ocn"]["forcing"].surface_taux, expected_taux)
-    np.testing.assert_allclose(result["ocn"]["forcing"].surface_tauy, expected_tauy)
+    np.testing.assert_array_equal(
+        result["ocn"]["forcing"].surface_tauy,
+        components["atm"]["derived"].northward_wind_stress,
+    )
+
+
+def test_veros_exchange_passes_the_stress_sign_through():
+    """A westerly (positive eastward) stress on the surface pushes Veros east.
+
+    jax-gcm's `stress_u` is positive down -- the stress ON the surface -- and
+    Veros' `surface_taux` is the stress on the water, positive eastward, so
+    the sign must survive the exchange unchanged. Getting this wrong would
+    spin every gyre backwards without failing anything else.
+    """
+    components = _fake_components()
+    components["atm"]["derived"] = components["atm"]["derived"].replace(
+        eastward_wind_stress=jnp.full((4,), 0.1),
+        northward_wind_stress=jnp.full((4,), -0.2),
+    )
+    result = VerosExchange()(components, TIME)
+    assert bool(jnp.all(result["ocn"]["forcing"].surface_taux > 0))
+    assert bool(jnp.all(result["ocn"]["forcing"].surface_tauy < 0))
+
+
+def test_veros_exchange_conserves_momentum_through_a_conservative_regrid():
+    """What the atmosphere loses, the ocean gains, area-integrated.
+
+    A toy first-order conservative map from two atmosphere cells onto four
+    ocean cells of half the area (each ocean cell takes its parent's value)
+    preserves each flux's area integral exactly; the exchange must pass the
+    stress through that map without any rescaling of its own, so the
+    area-integrated momentum on the ocean side equals the atmosphere's.
+    """
+    atm_area = jnp.array([2.0, 2.0])
+    ocn_area = jnp.array([1.0, 1.0, 1.0, 1.0])
+
+    def a2o_flux(value):
+        return jnp.repeat(value, 2)
+
+    components = _fake_components()
+    components["atm"]["derived"] = _AtmDerived(
+        eastward_wind_stress=jnp.array([0.12, -0.04]),
+        northward_wind_stress=jnp.array([0.03, 0.05]),
+        total_heat_flux=jnp.array([20.0, 30.0]),
+        total_freshwater_flux=jnp.array([1e-6, 2e-6]),
+    )
+    components["atm"]["forcing"] = _AtmForcing(
+        sea_surface_temperature=jnp.full((2,), 290.0))
+
+    def o2a_state(value):
+        return value.reshape(2, 2).mean(axis=1)
+
+    exchange = VerosExchange(regrid={"a2o_flux": a2o_flux, "o2a_state": o2a_state})
+    result = exchange(components, TIME)
+    derived = components["atm"]["derived"]
+    forcing = result["ocn"]["forcing"]
+    np.testing.assert_allclose(
+        jnp.sum(forcing.surface_taux * ocn_area),
+        jnp.sum(derived.eastward_wind_stress * atm_area))
+    np.testing.assert_allclose(
+        jnp.sum(forcing.surface_tauy * ocn_area),
+        jnp.sum(derived.northward_wind_stress * atm_area))
+
+
+def test_veros_exchange_rotates_the_stress_into_the_ocean_frame(tmp_path):
+    """On a rotated grid the stress is rotated as a vector, after the regrid.
+
+    Uses a small SCRIP file carrying rotation angles only, so the exchange
+    runs end to end on a shape the test controls: the result is
+    `rotate_vector` of the published stress, and each cell keeps its stress
+    magnitude (the same momentum, expressed in the grid's own frame).
+    """
+    import xarray as xr
+
+    angle = np.array([0.0, np.pi / 6, np.pi / 2, -np.pi / 4])
+    path = tmp_path / "rotated.SCRIP.nc"
+    xr.Dataset({
+        "grid_dims": ("grid_rank", np.array([4, 1], dtype=np.int32)),
+        "grid_cos_angle": ("grid_size", np.cos(angle)),
+        "grid_sin_angle": ("grid_size", np.sin(angle)),
+    }).to_netcdf(path)
+
+    components = _fake_components()
+    components = dict(components, atm=dict(
+        components["atm"],
+        derived=_AtmDerived(
+            eastward_wind_stress=jnp.full((4, 1), 0.1),
+            northward_wind_stress=jnp.full((4, 1), 0.05),
+            total_heat_flux=jnp.full((4, 1), 20.0),
+            total_freshwater_flux=jnp.full((4, 1), 1e-6),
+        ),
+    ))
+    result = VerosExchange(rotation_grid_file=str(path))(components, TIME)
+    taux = result["ocn"]["forcing"].surface_taux
+    tauy = result["ocn"]["forcing"].surface_tauy
+
+    expected_x, expected_y = rotate_vector(
+        jnp.full((4, 1), 0.1), jnp.full((4, 1), 0.05),
+        jnp.asarray(np.cos(angle)[:, None]), jnp.asarray(np.sin(angle)[:, None]))
+    np.testing.assert_allclose(taux, expected_x, rtol=1e-6)
+    np.testing.assert_allclose(tauy, expected_y, rtol=1e-6)
+    np.testing.assert_allclose(jnp.hypot(taux, tauy), jnp.hypot(0.1, 0.05),
+                               rtol=1e-6)
+    # Zero angle is the identity; a quarter turn puts the eastward stress on
+    # the grid's -y axis and the northward stress on its +x axis.
+    np.testing.assert_allclose(taux[0], 0.1, rtol=1e-6)
+    np.testing.assert_allclose(taux[2], 0.05, rtol=1e-6)
+    np.testing.assert_allclose(tauy[2], -0.1, rtol=1e-6)
+
+
+def test_veros_exchange_stress_is_differentiable():
+    """The ocean's stress has a unit, finite gradient in the atmosphere's.
+
+    The exchange is linear in the stress, so the derivative of the total
+    stress the ocean receives with respect to the published eastward stress
+    is exactly one per cell -- the gradient path from the ocean's momentum
+    forcing back into the atmosphere's surface closure is unbroken.
+    """
+    components = _fake_components()
+
+    def total_ocean_stress(eastward):
+        atm = dict(components["atm"], derived=components["atm"]["derived"].replace(
+            eastward_wind_stress=eastward))
+        result = VerosExchange()(dict(components, atm=atm), TIME)
+        return jnp.sum(result["ocn"]["forcing"].surface_taux)
+
+    gradient = jax.grad(total_ocean_stress)(
+        components["atm"]["derived"].eastward_wind_stress)
+    np.testing.assert_array_equal(gradient, jnp.ones(4))
 
 
 def test_veros_exchange_rotates_when_given_a_rotation_grid_file():

@@ -121,6 +121,8 @@ class JCMDerived:
     total_freshwater_flux: jnp.ndarray
     evaporation: jnp.ndarray
     precipitation: jnp.ndarray
+    eastward_wind_stress: jnp.ndarray
+    northward_wind_stress: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
 
@@ -148,6 +150,8 @@ class JCMDerived:
                 "total_freshwater_flux",
                 "evaporation",
                 "precipitation",
+                "eastward_wind_stress",
+                "northward_wind_stress",
                 "u0",
                 "v0",
             )
@@ -585,6 +589,8 @@ class JCMComponent:
             total_freshwater_flux=exchange.evaporation - exchange.precipitation,
             evaporation=exchange.evaporation,
             precipitation=exchange.precipitation,
+            eastward_wind_stress=exchange.eastward_wind_stress,
+            northward_wind_stress=exchange.northward_wind_stress,
             u0=exchange.u0,
             v0=exchange.v0,
         )

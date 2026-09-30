@@ -421,11 +421,26 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " actually composed.",
     ),
     IntegrationPoint(
+        "surface_exchange", "stress_u", "diagnostics",
+        "Eastward surface stress, N m-2, positive down (the stress ON the"
+        " surface; westerlies give stress_u > 0) -- already JAX-ESM's"
+        " convention. The stress the atmosphere column was given, so the"
+        " ocean receives the momentum the atmosphere lost: feeds"
+        " JCMDerived.eastward_wind_stress, which jem.fluxes.VerosExchange"
+        " hands to Veros as surface_taux (jax-esm#132).",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "stress_v", "diagnostics",
+        "Northward surface stress, N m-2; same note as stress_u. Feeds"
+        " JCMDerived.northward_wind_stress.",
+    ),
+    IntegrationPoint(
         "surface_exchange", "wind_u", "diagnostics",
         "Near-surface eastward wind, m s-1, at the package's own reference"
         " (jax-gcm#911/#914; the reference is named in the struct's static"
         " wind_reference field -- '10m' for ECHAM, 'lowest_level' for"
-        " SPEEDY). Feeds jem.fluxes.bulk_wind_stress via JCMDerived.u0.",
+        " SPEEDY). Published as JCMDerived.u0 for a consumer that needs the"
+        " wind itself; JAX-ESM derives no stress from it (see stress_u).",
     ),
     IntegrationPoint(
         "surface_exchange", "wind_v", "diagnostics",

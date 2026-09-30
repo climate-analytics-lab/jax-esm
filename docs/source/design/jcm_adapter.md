@@ -59,7 +59,9 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
     "step":    <jax-gcm's own step counter>,
     "forcing": <jcm ForcingData; holds sea_surface_temperature, sice_am, ...>,
     "derived": JCMDerived(physics, total_heat_flux, total_freshwater_flux,
-                          evaporation, precipitation, u0, v0),
+                          evaporation, precipitation,
+                          eastward_wind_stress, northward_wind_stress,
+                          u0, v0),
 }
 ```
 
@@ -84,7 +86,7 @@ silently continuing.
 package-independent `diagnostics["surface_exchange"]` struct, published
 identically by every physics package that resolves a surface (SPEEDY, ECHAM;
 Held-Suarez opts out because it has no surface fluxes at all) — the heat and
-water fluxes AND the near-surface wind vector. Translating that contract to
+water fluxes, the surface wind stress AND the near-surface wind vector. Translating that contract to
 JEM's conventions is a sign flip, plus one reshape every field takes:
 
 | jax-gcm field | jax-gcm convention | JEM field | JEM convention |
@@ -92,6 +94,8 @@ JEM's conventions is a sign flip, plus one reshape every field takes:
 | `net_heat_flux` | W m⁻², positive **down** | `total_heat_flux` | W m⁻², positive **up** (negated here) |
 | `evaporation` | kg m⁻² s⁻¹, positive up | `evaporation` | unchanged |
 | `precipitation` | kg m⁻² s⁻¹, positive down | `precipitation` | unchanged |
+| `stress_u` | N m⁻², positive down (stress **on** the surface) | `eastward_wind_stress` | unchanged |
+| `stress_v` | N m⁻², positive down (stress **on** the surface) | `northward_wind_stress` | unchanged |
 | `wind_u` | m s⁻¹, package's own reference | `u0` | unchanged |
 | `wind_v` | m s⁻¹, package's own reference | `v0` | unchanged |
 
@@ -105,11 +109,24 @@ explanation.
 
 `evaporation` and `precipitation` are already the convective+large-scale (or
 convective+stratiform) total, computed once by the publisher, so no
-package-specific arithmetic happens here at all beyond the reshape. `wind_u`
-and `wind_v` sit at whichever reference the *publishing* package's own
-surface closure defines — the contract's static `wind_reference` field names
-which (`"10m"`/`"lowest_level"`); `jem.fluxes.bulk_wind_stress`'s docstring
-has the caveat that follows from that (jax-esm#132). An ECHAM-composed
+package-specific arithmetic happens here at all beyond the reshape.
+
+`stress_u`/`stress_v` keep jax-gcm's sign: "positive down" for a momentum
+flux is the stress the atmosphere exerts *on* the surface (westerlies give a
+positive eastward stress), which is JEM's convention for a stress and the one
+Veros integrates. It is the stress the atmosphere column was actually given
+that step, which is why `jem.fluxes.VerosExchange` hands it to the ocean
+instead of applying a drag law of its own to the wind (jax-esm#132; see
+{doc}`exchange`). Like every guaranteed field it is a grid-box mean over
+land, sea and sea ice, so a coastal ocean cell receives some of the land's
+drag (jax-esm#147).
+
+`wind_u` and `wind_v` sit at whichever reference the *publishing* package's
+own surface closure defines — the contract's static `wind_reference` field
+names which (`"10m"`/`"lowest_level"`). JEM publishes the wind as `u0`/`v0`
+for a consumer that needs the wind itself and derives no stress from it: a
+drag law applied to winds at two different heights would give each physics
+package a different ocean forcing for the same flow. An ECHAM-composed
 coupled model completes a step like any other package, coupled to a slab
 surface or to **Veros**. Importing `veros` sets `jax_enable_x64` process-wide,
 so a Veros-coupled ECHAM atmosphere traces its Tiedtke-Nordeng convection and

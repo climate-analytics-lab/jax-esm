@@ -116,14 +116,31 @@ table. The check looks the wrapper's module up in `sys.modules` rather than
 importing it, so a JAX-ESM without the optional Veros dependency never
 imports Veros to find out that it has no Veros ocean.
 
-What the Veros table deliberately does **not** carry is the **wind stress**:
-Veros integrates `forcing.surface_taux`/`tauy` and the atmosphere publishes a
-near-surface *wind*, so getting from one to the other is a bulk drag law
-(and, on a rotated grid, a rotation into its local frame) — a computation,
-not a copy, and therefore a hand-written exchanger,
+What the Veros table deliberately does **not** carry is the **wind stress**.
+The atmosphere publishes the stress its own surface closure delivered
+(`derived.eastward_wind_stress`/`northward_wind_stress`) and Veros integrates
+`forcing.surface_taux`/`tauy`, but a stress is a vector in true east/north
+components, and a rotated ocean grid needs it in its own local frame. That
+rotation mixes the two components, which a row moving one field at a time
+cannot do, and two plain copy rows would be silently wrong on a rotated grid.
+It therefore goes through a hand-written exchanger,
 `coupling.exchanger: jem.fluxes.VerosExchange`, in the shipped `veros-*`
-configurations. The declarative table above carries the rest of the
-coupling.
+configurations — which also applies the sea-ice mask, a condition rather
+than a copy. The declarative table above carries the rest of the coupling.
+
+The ocean takes the atmosphere's stress rather than applying a drag law of
+its own to the near-surface wind (jax-esm#132). The published stress is the
+one the atmosphere column received, stability-corrected and averaged over the
+coupling interval, so momentum is conserved across the interface up to the
+conservative regrid. A JEM-side bulk law would be a second stress law, blind
+to stability, applied to a wind whose reference height differs between
+physics packages (SPEEDY's lowest model level, ECHAM's 10 m), so the ocean's
+forcing would change with the atmosphere package for a reason unrelated to
+the ocean. It would also be applied to the interval-mean wind, and the drag
+of a mean wind is smaller than the mean drag. On the `veros-double-drake`
+configuration after 30 days, the published stress over open ocean is about
+1.6 times the old `Cd = 1e-3` law's (RMS), with the same sign everywhere and
+a pattern correlation of 0.92.
 
 Three properties are worth stating, because a hand-written exchanger has
 them only by accident:
