@@ -57,9 +57,11 @@
 #    forcing and its surface temperature would never reach the atmosphere --
 #    an inert component, not a land surface. See jax-esm#128.
 #  - coupling.exchanger names `jem.fluxes.VerosExchange` with
-#    `rotation_grid_file` set to the same SCRIP file `regrid` uses: it
-#    computes the wind stress from the atmosphere's near-surface wind with a
-#    bulk drag law, rotated into the ocean grid's local frame using that
+#    `rotation_grid_file` set to the same SCRIP file `regrid` uses: it hands
+#    the ocean the surface wind stress the atmosphere itself received
+#    (jax-gcm's published, stability-corrected stress, so momentum is
+#    conserved across the interface -- jax-esm#132), regridded
+#    conservatively and rotated into the ocean grid's local frame using that
 #    file's per-cell rotation angles, masks the heat and freshwater fluxes
 #    wherever the surface has reached the freezing point, and carries the
 #    rest of `jem.exchangers.VEROS_OCEAN_EXCHANGES` (regridded through the

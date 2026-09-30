@@ -20,13 +20,13 @@ Contract field (jax-gcm)      jax-gcm sign / units                JEM field     
                                surface medium)
 ``evaporation``                kg m-2 s-1, positive up            ``evaporation``                            kg m-2 s-1, positive up
 ``precipitation``              kg m-2 s-1, positive down, >= 0     ``precipitation``                          kg m-2 s-1, positive down
+``stress_u``/``stress_v``     N m-2, **positive down**: the       ``eastward_wind_stress``/                  N m-2, the stress ON the
+                               eastward/northward momentum flux    ``northward_wind_stress``                  surface, unchanged
+                               into the surface
 ``wind_u``/``wind_v``          m s-1, at the package's own         ``u0``/``v0``                              m s-1, unchanged
                                reference (``wind_reference``)
 ``sensible_heat_flux``        (not exchanged -- folded into        --                                         --
 ``latent_heat_flux``           jem's own ``total_heat_flux``)
-``stress_u``/``stress_v``     (not exchanged -- JEM's own          --                                         --
-                               Veros coupling computes its own
-                               stress independently, see below)
 ``wind_speed``                m s-1, scalar                        (not exchanged -- ``wind_u``/``wind_v``
                                                                      already carry the direction)
 ============================  =================================  ========================================  ========================
@@ -36,17 +36,39 @@ Contract field (jax-gcm)      jax-gcm sign / units                JEM field     
   ``hfluxn`` convention, SW_net + LW_net - SHF - LHF); JEM's convention is the
   net flux leaving the surface into the atmosphere, i.e. exactly the
   negative.
-- **``evaporation``, ``precipitation``, ``wind_u``/``wind_v`` need no unit
-  conversion**, only the same reshape ``total_heat_flux`` needs -- see below.
-- **``sensible_heat_flux``/``latent_heat_flux``/``stress_u``/``stress_v``/
-  ``wind_speed`` are on the contract but JEM does not exchange them
-  separately**: the slab ocean/land/sea-ice models and ``jem.exchangers``
-  couple on the *net* ``total_heat_flux``, and momentum is not exchanged
-  through this struct at all -- :class:`jem.fluxes.VerosExchange` derives its
-  own stress from ``u0``/``v0`` with an independent bulk drag law rather than
-  reusing ``stress_u``/``stress_v`` (see that module's docstring for why).
-  ``wind_speed`` is redundant once the vector is available
-  (``hypot(wind_u, wind_v) == wind_speed`` is a contract invariant).
+- **``evaporation``, ``precipitation``, ``stress_u``/``stress_v`` and
+  ``wind_u``/``wind_v`` need no unit conversion**, only the same reshape
+  ``total_heat_flux`` needs -- see below.
+- **The wind stress keeps the contract's sign.** jax-gcm's "positive down"
+  for a momentum flux means the stress the atmosphere exerts *on* the
+  surface (minus the stress on the atmosphere; surface westerlies give
+  ``stress_u > 0``), which is already the convention an ocean integrates --
+  Veros' ``surface_taux`` pushes the water eastward when positive -- and is
+  JEM's own convention for a stress (``CLAUDE.md``, "Sign and mask
+  conventions"), so there is nothing to negate. The JEM names say
+  *eastward*/*northward* because the atmosphere's grid is unrotated, and a
+  consumer on a rotated grid must rotate the pair as a vector (see
+  :func:`jem.fluxes.rotate_vector`).
+- **The wind stress is the one the atmosphere received.** jax-gcm fills
+  every guaranteed field from the fluxes the atmosphere column was actually
+  given that step ("published == delivered"), stability-corrected by the
+  package's own surface closure, so a component that takes this stress
+  receives exactly the momentum the atmosphere lost: momentum is conserved
+  across the interface up to the regrid, which the ocean coupling does
+  conservatively. That is why :class:`jem.fluxes.VerosExchange` uses it
+  instead of deriving a stress of its own from ``u0``/``v0`` (jax-esm#132).
+- **``sensible_heat_flux``/``latent_heat_flux``/``wind_speed`` are on the
+  contract but JEM does not exchange them separately**: the slab
+  ocean/land/sea-ice models and ``jem.exchangers`` couple on the *net*
+  ``total_heat_flux``, and ``wind_speed`` is redundant once the vector is
+  available (``hypot(wind_u, wind_v) == wind_speed`` is a contract
+  invariant).
+- **Every field is a grid-box mean over land, sea and sea ice** -- the only
+  thing the contract guarantees. An ocean coupled through a coastal cell
+  therefore receives that cell's *mean* heat, freshwater and momentum flux,
+  land fraction included, rather than an open-water one; the contract's
+  per-tile fields are where an open-water flux would come from, and neither
+  package fills them for the fluxes yet (jax-esm#147).
 
 Column-vectorized packages publish flat, not gridded
 ------------------------------------------------------
@@ -66,10 +88,16 @@ transpose or column-order bookkeeping is needed here.
 The near-surface wind's reference height is package-specific
 -----------------------------------------------------------------
 :attr:`~jem.components.jcm.exchange_fields.SurfaceExchange.u0`/``v0`` are read
-verbatim from the contract's ``wind_u``/``wind_v`` (the reference height is
-named in the struct's static ``wind_reference`` field); see
-:func:`jem.fluxes.bulk_wind_stress`'s docstring for what that means for the
-stress a bulk drag law derived from them.
+verbatim from the contract's ``wind_u``/``wind_v``, which sit at whichever
+reference the publishing package's own surface closure diagnoses -- the
+struct's static ``wind_reference`` field names which: SPEEDY's
+``fwind0``-scaled lowest model level (``"lowest_level"``), ECHAM's
+stability-corrected 10 m wind (``"10m"``). JEM publishes the wind for a
+consumer that needs the wind itself (a sea-ice free-drift term, a wave
+model) and says nothing about its height beyond that; nothing in JEM turns it
+into a stress, because the stress is published directly and a drag law
+applied to winds at two different heights would give each package a
+different ocean forcing for the same flow.
 """
 
 from __future__ import annotations
@@ -81,7 +109,7 @@ from jcm.physics.surface.surface_exchange import surface_exchange_from
 
 
 class SurfaceExchange(NamedTuple):
-    """Surface fluxes and near-surface wind, in JEM's conventions.
+    """Surface fluxes, wind stress and near-surface wind, in JEM's conventions.
 
     Every field is a ``(ix, il)`` horizontal map on the atmosphere's nodal
     grid (the grid-cell mean over land and sea -- jax-gcm's contract
@@ -100,6 +128,14 @@ class SurfaceExchange(NamedTuple):
     precipitation : jax.Array
         Total precipitation (convective plus large-scale/stratiform)
         reaching the surface, ``kg m-2 s-1``, positive downward.
+    eastward_wind_stress : jax.Array
+        Eastward stress the atmosphere exerts on the surface, ``N m-2``
+        (jax-gcm's ``stress_u``, sign unchanged: surface westerlies give a
+        positive value). See the module docstring for why it is the stress
+        a surface component should take.
+    northward_wind_stress : jax.Array
+        Northward stress the atmosphere exerts on the surface, ``N m-2``
+        (jax-gcm's ``stress_v``). Same convention.
     u0 : jax.Array
         Near-surface zonal wind, ``m s-1``, at the publishing package's own
         reference (see the module docstring's "near-surface wind" section).
@@ -111,6 +147,8 @@ class SurfaceExchange(NamedTuple):
     total_heat_flux: jnp.ndarray
     evaporation: jnp.ndarray
     precipitation: jnp.ndarray
+    eastward_wind_stress: jnp.ndarray
+    northward_wind_stress: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
 
@@ -144,8 +182,8 @@ def from_diagnostics(
     Returns
     -------
     SurfaceExchange
-        The fluxes and wind translated to JEM's sign and unit conventions,
-        each field shaped ``nodal_shape``.
+        The fluxes, stress and wind translated to JEM's sign and unit
+        conventions, each field shaped ``nodal_shape``.
 
     Raises
     ------
@@ -166,6 +204,8 @@ def from_diagnostics(
         total_heat_flux=(-exchange.net_heat_flux).reshape(nodal_shape),
         evaporation=exchange.evaporation.reshape(nodal_shape),
         precipitation=exchange.precipitation.reshape(nodal_shape),
+        eastward_wind_stress=exchange.stress_u.reshape(nodal_shape),
+        northward_wind_stress=exchange.stress_v.reshape(nodal_shape),
         u0=exchange.wind_u.reshape(nodal_shape),
         v0=exchange.wind_v.reshape(nodal_shape),
     )

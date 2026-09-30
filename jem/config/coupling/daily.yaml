@@ -23,8 +23,9 @@ exchangers: null
 
 # A hand-written exchanger, used INSTEAD of `exchangers` when a configuration
 # needs an exchange that the declarative list cannot express -- one that
-# computes a flux (a wind stress from a wind), converts units or blends two
-# fields. Setting both `exchanger` and `exchangers` is an error the runner
+# rotates a vector onto another grid's frame (a wind stress onto a
+# rotated-pole ocean), applies a condition (an ice mask), converts units or
+# blends two fields. Setting both `exchanger` and `exchangers` is an error the runner
 # reports. Two spellings:
 #   - an importable dotted path to a single `jem.Exchanger` function, called
 #     with no arguments (e.g. "my_package.my_exchange");

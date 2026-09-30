@@ -166,10 +166,16 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: can express it -- each needs a hand-written exchanger
 #: (``coupling.exchanger``):
 #:
-#: - **wind stress.** Veros integrates ``forcing.surface_taux/tauy``; the
-#:   atmosphere publishes a near-surface *wind* (``derived.u0``/``v0``). Going
-#:   from one to the other is a bulk drag law, and on a rotated ocean grid it
-#:   is followed by a rotation into the grid's local frame.
+#: - **wind stress.** The atmosphere publishes its delivered surface stress
+#:   (``derived.eastward_wind_stress``/``northward_wind_stress``) and Veros
+#:   integrates ``forcing.surface_taux/tauy``, but the stress is a *vector*
+#:   in true east/north components, and on a rotated ocean grid it has to be
+#:   rotated into the grid's local frame -- which mixes the two components,
+#:   and a row moves one field at a time. Two plain copy rows would be right
+#:   on an unrotated ocean grid and silently wrong on a rotated one, so the
+#:   stress goes through :class:`jem.fluxes.VerosExchange` (which knows the
+#:   grid's rotation) or not at all: a Veros ocean coupled through this
+#:   table alone is thermodynamically forced only.
 #: - **the "swamp" sea-ice insulation** the example drivers apply, which
 #:   masks the heat and freshwater fluxes wherever the surface has reached the
 #:   freezing point.
