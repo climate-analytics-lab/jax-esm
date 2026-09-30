@@ -111,16 +111,13 @@ surface closure defines — the contract's static `wind_reference` field names
 which (`"10m"`/`"lowest_level"`); `jem.fluxes.bulk_wind_stress`'s docstring
 has the caveat that follows from that (jax-esm#132). An ECHAM-composed
 coupled model completes a step like any other package, coupled to a slab
-surface. Coupled to **Veros**, the composition builds, but
-`Coupler.initialize()` (which traces `Model.bootstrap_state()`, and with it
-ECHAM's Tiedtke-Nordeng convection) raises under `jax_enable_x64=True`
-(which importing `veros` always sets process-wide): the convection's
-`lax.cond` dtype guard pins its float outputs but not `ConvectionState.ktop`
-(an integer level index). This reproduces for any Veros coupling of any
-ECHAM composition, independent of this contract or of `veros-earth`
-specifically. Filed as jax-gcm#927;
+surface or to **Veros**. Importing `veros` sets `jax_enable_x64` process-wide,
+so a Veros-coupled ECHAM atmosphere traces its Tiedtke-Nordeng convection and
+RRTMGP radiation in 64-bit mode; jax-gcm supports that from the pinned
+revision on (jax-gcm#927, fixed by jax-gcm#946).
 `tests/unit/test_veros_setups.py::test_echam_veros_earth_configuration_steps`
-is marked `xfail` on this exact failure so a fix upstream is noticed here.
+steps `+configuration=veros-earth physics@atmosphere.physics=echam` twice and
+checks every carry field is finite.
 
 **Public surface.** Every JCM attribute the wrapper touches is public at the
 pinned revision: the initial state and physics carry come from
