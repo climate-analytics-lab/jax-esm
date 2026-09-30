@@ -176,10 +176,11 @@ def role_attrs(role: Role) -> dict[str, str]:
 class CouplingTime:
     """The coupler's clock as seen by one component step.
 
-    ``time`` is the clock: the one statement of *when* a step happens. A
-    component that needs the seconds elapsed since the run began (a wrapped
-    model's clock-drift check) subtracts the coupler's start date from it
-    instead of reading a second, redundant counter. ``step`` counts the same
+    ``time`` is the clock: the one statement of *when* a step happens, held
+    as a calendar datetime so that no float32 count of seconds limits how long
+    a run can be timed to the second. A component that needs the seconds
+    elapsed since the run began (a wrapped model's clock-drift check)
+    subtracts the coupler's start date from it. ``step`` counts the same
     progress as an integer, for the sub-step indexing a component with an
     internal timestep needs.
 

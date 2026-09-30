@@ -851,10 +851,11 @@ class VerosComponent:
         ``step`` has already refused can be.
 
         The tolerance grows with simulation time
-        (:func:`jem.components.clock.clock_tolerance_seconds`, shared with the
-        other wrappers that make this check), because both counters are
-        float32 by default and would otherwise disagree by float32 rounding
-        alone after a few decades.
+        (:func:`jem.components.clock.clock_tolerance_seconds`), because
+        ``variables.time`` is a float count of seconds that is float32 when
+        Veros runs in single precision (it is float64 by default) and would
+        then disagree with the exact coupler side by float32 rounding alone
+        after a few decades.
 
         Reported rather than raised, and through ``jax.debug.callback``
         rather than ``checkify``: the check runs inside the coupled

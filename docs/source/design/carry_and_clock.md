@@ -218,11 +218,12 @@ class CouplingTime:
 ```
 
 `time` is the one statement of *when* the step happens; `step` and `dt` say
-how far along the run is and how long the step lasts. There is no second
-elapsed-seconds counter to keep in agreement with `time`: a component that
-needs the seconds since the run began takes them from the clock
-(`time.time - start_date` for a wrapped model's drift check, `step * dt` for
-a plain integrator's output label).
+how far along the run is and how long the step lasts. `time` is a calendar
+datetime (whole days and seconds in `int32`), so it stays exact however long
+the run is, where a float32 count of seconds would be off by minutes after a
+century. A component that needs the seconds since the run began derives them
+from the clock (`time.time - start_date` for a wrapped model's drift check,
+`step * dt` for a plain integrator's output label).
 
 - `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
   *start* of the step; it is what a monthly climatology is interpolated with
