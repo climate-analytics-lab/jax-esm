@@ -29,6 +29,7 @@ of its own (see `CLAUDE.md`, jax-esm#113).
 from importlib import resources
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import xarray as xr
@@ -202,20 +203,14 @@ def test_earth_setup_coriolis_uses_the_true_latitude():
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True, raises=TypeError,
-    reason="jax-gcm#927: Tiedtke-Nordeng ktop int32/int64 lax.cond mismatch"
-    " under jax_enable_x64",
-)
 def test_echam_veros_earth_configuration_steps():
     """`+configuration=veros-earth physics@atmosphere.physics=echam` builds,
-    initializes and steps twice.
+    initializes and steps twice, and every atmosphere and ocean field stays
+    finite.
 
-    `Coupler.initialize()` traces ECHAM's Tiedtke-Nordeng convection, whose
-    `lax.cond` dtype guard pins its float outputs but not
-    `ConvectionState.ktop` (an integer level index), so it raises under
-    `jax_enable_x64=True` -- which importing `veros` always sets
-    process-wide.
+    Importing `veros` sets `jax_enable_x64` process-wide, so this traces ECHAM's
+    Tiedtke-Nordeng convection and RRTMGP radiation in 64-bit mode -- the
+    dtype-sensitive path a slab-coupled ECHAM step (float32) never exercises.
     """
     from hydra import compose, initialize_config_module
 
@@ -230,4 +225,12 @@ def test_echam_veros_earth_configuration_steps():
     coupler = runners.build_coupler(cfg)
     assert set(coupler.components) == {"atm", "ocn"}
     carry = coupler.initialize()
-    coupler.generate_trajectory_function(2)(carry)
+    final, _diagnostics = coupler.generate_trajectory_function(2)(carry)
+
+    assert int(final.step) == 2
+    for name, component_carry in final.components.items():
+        for path, leaf in jax.tree_util.tree_leaves_with_path(component_carry):
+            leaf = jnp.asarray(leaf)
+            if jnp.issubdtype(leaf.dtype, jnp.inexact):
+                assert bool(jnp.all(jnp.isfinite(leaf))), (
+                    f"{name}{jax.tree_util.keystr(path)} is not finite")
