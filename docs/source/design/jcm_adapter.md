@@ -139,7 +139,7 @@ coupler's `start_date`: `bind` records the reading the setup holds when the
 coupler adopts it, and the check compares `variables.time` minus that zero
 point. A setup already integrated before it was wrapped therefore starts the
 coupled run where it stands, while a *later* disagreement — a Veros restart
-paired with a `CoupledCarry.step` from elsewhere in the run — is caught. Both
+paired with a `CoupledCarry.time` from elsewhere in the run — is caught. Both
 this check and the JCM clock-drift check above report through
 `jax.debug.callback` rather than raising, since they run inside the coupled
 `lax.scan`, where a Python exception cannot fire on a traced value.

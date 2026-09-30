@@ -28,6 +28,7 @@ from jem.base.component import (
     CoupledCarry,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsClockReset,
     SupportsXarray,
 )
 from jem.base.coupler import Coupler, nested_carry, with_nested_carry
@@ -44,6 +45,15 @@ FAST_TIMESTEP = jdt.to_timedelta(1, "hour")
 START_DATE = jdt.to_datetime("2001-01-01")
 
 
+def elapsed_seconds(time):
+    """Return the seconds since ``START_DATE`` that ``time``'s clock reads.
+
+    What a component that wants an elapsed-seconds label derives from the
+    clock it is handed: the clock has no second counter of its own.
+    """
+    return (time.time - START_DATE).total_seconds()
+
+
 class Counter:
     """Counts up by one plus what it was given, and reports its clock."""
 
@@ -58,7 +68,7 @@ class Counter:
         new_carry = dict(carry, value=carry["value"] + 1.0 + carry["received"])
         return new_carry, {
             "value": new_carry["value"],
-            "sim_time": time.sim_time,
+            "elapsed_seconds": elapsed_seconds(time),
             "dt": jnp.float32(time.dt),
         }
 
@@ -66,7 +76,7 @@ class Counter:
         return xr.Dataset(
             {
                 "value": ("time", np.asarray(diagnostics["value"])),
-                "sim_time": ("time", np.asarray(diagnostics["sim_time"])),
+                "elapsed_seconds": ("time", np.asarray(diagnostics["elapsed_seconds"])),
             },
             coords={"time": time.datetimes()},
         )
@@ -140,25 +150,25 @@ def srf_ocn_exchange_nested(components, time):
     )
 
 
-def fast_coupler(**kwargs):
+def fast_coupler(start_date=START_DATE, **kwargs):
     """Build the hourly atmosphere/land model, on its own."""
     return Coupler(
         {"atm": Counter("atm"), "lnd": Counter("lnd")},
         {"atm_lnd_exchange": atm_lnd_exchange},
         coupling_timestep=FAST_TIMESTEP,
-        start_date=START_DATE,
+        start_date=start_date,
         name="atm_lnd",
         **kwargs,
     )
 
 
-def nested_model():
+def nested_model(start_date=START_DATE):
     """Build the daily model whose surface is the hourly coupler."""
     return Coupler(
-        {"atm_lnd": fast_coupler(), "ocn": Counter("ocn")},
+        {"atm_lnd": fast_coupler(start_date), "ocn": Counter("ocn")},
         {"srf_ocn_exchange": srf_ocn_exchange_nested},
         coupling_timestep=COUPLING_TIMESTEP,
-        start_date=START_DATE,
+        start_date=start_date,
         workflow=["srf_ocn_exchange", "atm_lnd", "ocn"],
     )
 
@@ -229,6 +239,9 @@ def test_a_coupler_is_a_component():
     # It checkpoints itself too, which is what lets an outer coupler hand it
     # its own subdirectory instead of pickling its whole inner carry.
     assert isinstance(coupler, SupportsCheckpoint)
+    # ... and resets its own clock, so that an outer `restart_clock` reaches
+    # the models inside it without knowing they are there.
+    assert isinstance(coupler, SupportsClockReset)
     assert coupler.name == "atm_lnd"
     assert Coupler(
         {}, coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE
@@ -399,7 +412,7 @@ def test_the_inner_components_advance_once_per_inner_step():
     assert atmosphere["value"].shape == (2, 24)
     np.testing.assert_allclose(np.asarray(atmosphere["dt"]), np.full((2, 24), HOUR))
     np.testing.assert_allclose(
-        np.asarray(atmosphere["sim_time"]).ravel(), np.arange(48) * HOUR
+        np.asarray(atmosphere["elapsed_seconds"]).ravel(), np.arange(48) * HOUR
     )
     # The ocean is on the outer clock.
     np.testing.assert_allclose(np.asarray(diagnostics["ocn"]["dt"]), [DAY, DAY])
@@ -541,7 +554,7 @@ def test_checkpoint_round_trip_of_a_nested_run(tmp_path):
     assert_trees_equal(resumed, continuous_carry)
     # The inner clock continues from hour 48, not from zero.
     np.testing.assert_allclose(
-        np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
+        np.asarray(diagnostics["atm_lnd"]["atm"]["elapsed_seconds"]).ravel(),
         np.arange(48, 96) * HOUR,
     )
 
@@ -617,7 +630,7 @@ def test_a_nested_run_resumed_from_load_carry_continues_identically(tmp_path):
     assert_trees_equal(resumed, continuous_carry)
     # The inner clock continues from hour 48, not from zero.
     np.testing.assert_allclose(
-        np.asarray(diagnostics["atm_lnd"]["atm"]["sim_time"]).ravel(),
+        np.asarray(diagnostics["atm_lnd"]["atm"]["elapsed_seconds"]).ravel(),
         np.arange(48, 96) * HOUR,
     )
 
@@ -735,3 +748,76 @@ def test_an_inner_carry_from_another_point_in_the_run_is_reported(caplog):
     messages = [r.getMessage() for r in caplog.records if "nested clock" in r.getMessage()]
     # 24 inner steps ahead of outer step 0, whose consistent inner step is 0.
     assert any("inner step 24" in m and "inner step 0" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Reusing a state under another start date
+# ---------------------------------------------------------------------------
+
+JULY_START = jdt.to_datetime("2001-07-01")
+
+
+def test_restart_clock_reaches_the_clock_of_a_nested_coupler():
+    """One outer reset puts the inner coupled clock back too."""
+    january = nested_model()
+    carry, _ = january.generate_trajectory_function(2)(january.initialize())
+    inner = carry.components["atm_lnd"]
+    assert int(inner.step) == 48
+
+    july = nested_model(JULY_START)
+    reset = july.restart_clock(carry)
+
+    assert reset.time == JULY_START
+    assert int(reset.step) == 0
+    reset_inner = reset.components["atm_lnd"]
+    assert isinstance(reset_inner, CoupledCarry)
+    assert reset_inner.time == JULY_START
+    assert int(reset_inner.step) == 0
+    # The physical state of every component, inner ones included, is kept.
+    np.testing.assert_array_equal(
+        reset_inner.components["lnd"]["value"], inner.components["lnd"]["value"]
+    )
+    np.testing.assert_array_equal(
+        reset.components["ocn"]["value"], carry.components["ocn"]["value"]
+    )
+    july.require_consistent_clock(reset)
+    july.components["atm_lnd"].require_consistent_clock(reset_inner)
+
+
+def test_a_reset_nested_model_runs_with_the_clocks_in_step(caplog):
+    """Two outer steps after the reset: both levels advance from the new start.
+
+    The nested coupler's own drift report (its step counter against the outer
+    one's) is the check that would fire if the reset had left the inner clock
+    on the old run's count.
+    """
+    january = nested_model()
+    carry, _ = january.generate_trajectory_function(2)(january.initialize())
+    july = nested_model(JULY_START)
+
+    with caplog.at_level("ERROR", logger="jem.base.coupler"):
+        final, _ = july.generate_trajectory_function(2)(july.restart_clock(carry))
+        jax.effects_barrier()
+
+    assert caplog.text == ""
+    assert final.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert int(final.step) == 2
+    inner = final.components["atm_lnd"]
+    assert inner.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert int(inner.step) == 48
+
+
+def test_a_nested_checkpoint_is_loaded_unchecked_at_every_level(tmp_path):
+    """`check_clock=False` reaches the nested coupler's own loader."""
+    january = nested_model()
+    carry, _ = january.generate_trajectory_function(2)(january.initialize())
+    january.save_carry(carry, tmp_path / "spun-up")
+    july = nested_model(JULY_START)
+
+    with pytest.raises(ValueError, match="restart_clock"):
+        july.load_carry(tmp_path / "spun-up")
+
+    loaded = july.load_carry(tmp_path / "spun-up", check_clock=False)
+    reset = july.restart_clock(loaded)
+    july.require_consistent_clock(reset)
+    assert reset.components["atm_lnd"].time == JULY_START

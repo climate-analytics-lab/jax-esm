@@ -64,9 +64,9 @@ its number of coupled ``steps``, and reads each component's records per step
 off its own record count.
 
 A chunk can then contain no step on the stride at all -- a ``subsample``
-longer than the chunk gives that, and so does the short final batch a resume
-under a different chunk length ends with. Such a chunk reduces to no records
-and :func:`write_chunk` writes **no file** for it: an empty netCDF file would
+longer than the chunk gives that, and so does a short first or last batch (a
+run that starts off the chunk grid, or ends off it). Such a chunk reduces to no
+records and :func:`write_chunk` writes **no file** for it: an empty netCDF file would
 carry nothing and its zero-length dimension would make
 ``xr.open_mfdataset(files)`` fail on the whole directory.
 

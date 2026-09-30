@@ -48,10 +48,10 @@ The coupler raises :code:`TypeError` naming the missing member if an object
 does not satisfy the protocol.
 
 
-The three optional capabilities
----------------------------------
+The four optional capabilities
+--------------------------------
 
-Three further capabilities are optional, and each is detected with
+Four further capabilities are optional, and each is detected with
 :code:`isinstance` at the point it is used -- a component that omits one is
 simply skipped there, never broken:
 
@@ -78,6 +78,13 @@ simply skipped there, never broken:
        coupler's clock against the model's own and **refuse**, with
        ``ValueError``, a configuration that cannot work (a coupling timestep
        that does not divide the model's own).
+   * - :class:`~jem.base.component.SupportsClockReset`
+     - ``restart_clock(carry)``
+     - Implement it if the **carry holds a clock of its own** (a wrapped
+       model's time or step counter). :meth:`jem.base.coupler.Coupler.restart_clock`
+       calls it to reuse a spun-up state under a different start date; return
+       the carry with only that clock put back at the start date the
+       component was bound to. A component whose carry has no clock omits it.
 
 
 Designing the carry

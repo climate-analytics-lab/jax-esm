@@ -44,6 +44,10 @@ rediagnose:
   check runs inside the traced scan) if that carried clock ever disagrees
   with the coupler's own — which can only happen if the carry came from
   somewhere else, such as a checkpoint restored under the wrong start date.
+  A state that is *deliberately* reused under another start date is put back
+  in step by `Coupler.restart_clock` (see *Reusing a state under another start
+  date* below), which resets `"time"` and `"step"` through the component's
+  `SupportsClockReset`.
 - `JCMComponent`'s `carry["forcing"]` is a whole `jcm.forcing.ForcingData`, so
   an exchanger addresses a boundary condition under JCM's own field name
   (`atm.forcing.sea_surface_temperature`). It is the one section that is
@@ -138,7 +142,7 @@ how an initial-condition parameter is varied (above); the slab models and
 `Coupler` itself do, `JCMComponent` and `VerosComponent` do not, since they
 initialize from the wrapped model's own state.
 
-Three capabilities are **optional**, and are tested for with `isinstance`
+Four capabilities are **optional**, and are tested for with `isinstance`
 against their own protocols at the one place that uses them — never with
 `hasattr` at a random call site:
 
@@ -147,6 +151,7 @@ against their own protocols at the one place that uses them — never with
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
 | `SupportsBind` | `bind(*, coupling_timestep, start_date)` | `JCMComponent`, `VerosComponent`, the slab models |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
+| `SupportsClockReset` | `restart_clock(carry) -> carry` | `JCMComponent`, `VerosComponent`, `Coupler` |
 
 `bind` is called by the coupler once per component, from `add_component`
 (hence from the constructor for everything passed to it), and it is the only
@@ -209,9 +214,16 @@ Each `step` is handed a `CouplingTime` built from that carried clock:
 class CouplingTime:
     step: jax.Array          # int32, coupled steps completed before this one
     time: jdt.Datetime       # the coupled clock at the start of this step
-    sim_time: jax.Array      # seconds since start_date; equals step * dt
     dt: float                # static: coupling timestep in seconds
 ```
+
+`time` is the one statement of *when* the step happens; `step` and `dt` say
+how far along the run is and how long the step lasts. `time` is a calendar
+datetime (whole days and seconds in `int32`), so it stays exact however long
+the run is, where a float32 count of seconds would be off by minutes after a
+century. A component that needs the seconds since the run began derives them
+from the clock (`time.time - start_date` for a wrapped model's drift check,
+`step * dt` for a plain integrator's output label).
 
 - `time.year_fraction` is the position in the annual cycle in `[0, 1)` at the
   *start* of the step; it is what a monthly climatology is interpolated with
@@ -219,18 +231,87 @@ class CouplingTime:
   `jcm.date.fraction_of_year_elapsed` on `time.time` — the same function the
   atmosphere itself uses, so JEM does not vendor any date arithmetic of its
   own.
-- `time.end_of_step()` returns the clock one step later, advancing `step`,
-  `time` and `sim_time` together. A model that needs a boundary condition at
-  both ends of a step (the slab models measure an anomaly against the
-  climatology at the start and add it back at the end) must use it rather
-  than advancing `sim_time` by hand, because `year_fraction` is derived from
-  `time`.
+- `time.end_of_step()` returns the clock one step later, advancing `step`
+  and `time` together. A model that needs a boundary condition at both ends
+  of a step (the slab models measure an anomaly against the climatology at
+  the start and add it back at the end) must use it rather than advancing
+  `time` by hand, because `year_fraction` is derived from `time`.
 
 `coupling_timestep` itself is a `jdt.Timedelta`, which holds whole seconds —
 the shortest step expressible today is one second, which is no limit for a
 geoscience configuration but does force a non-geoscience component onto a
 coarser step than it might otherwise want (jax-esm#110 tracks lifting it to
 accept a float number of seconds).
+
+## Reusing a state under another start date
+
+A spun-up state is routinely the initial condition of an experiment that
+starts on a different date -- a control run spun up from 1 January, then
+perturbation runs that start on 1 July. The coupler's clock is part of that
+state (`CoupledCarry.time` and `step`, plus the copy of it JCM and Veros keep
+in their own carries), so a carry taken from the first run does not agree with
+a coupler whose `start_date` is 1 July, and the run loop refuses it rather than
+label a July run with January's dates:
+
+```python
+carry = july_coupler.load_carry(spun_up, check_clock=False)   # or a carry in memory
+carry = july_coupler.restart_clock(carry)
+result = run_chunked(july_coupler, total_time="30 days", initial_carry=carry)
+```
+
+For a checkpoint directory the two loading lines are one argument,
+`run_chunked(july_coupler, ..., initial_condition=spun_up)`, or
+`coupled_run.initial_condition=<directory>` from the command line
+({doc}`running` has the precedence against `checkpoint_path`).
+
+`Coupler.restart_clock(carry)` returns the carry with `time` set to this
+coupler's `start_date` and `step` to 0 -- what `initialize()` leaves -- so
+everything derived from the clock counts from the new start: the seasonal
+position (`CouplingTime.year_fraction`, from which the slab models sample
+their climatologies and JCM slices its date-indexed forcing), the output time
+axis and file names, `checkpoint_interval` and `subsample`. Nothing else
+changes: the model's physical state is the reason for reusing it. It does not
+modify the carry it is given.
+
+The coupler does not know which components keep a clock. A component that does
+implements `SupportsClockReset.restart_clock(carry)`, and the coupler asks each
+one to put its own back, so it never special-cases a component type:
+
+- `JCMComponent` sets `"time"` to the model's `start_time` (which `bind`
+  required to equal the coupler's start date), `"step"` to 0 and the dycore
+  state's native elapsed-seconds counter to zero -- jax-gcm's own convention
+  for importing a state as an initial condition
+  (`load_checkpoint(..., as_initial_condition=True)`), and the only clock pair
+  its `restore_state` accepts. The physics carry (radiation sub-cycle caches,
+  prior-step TKE) is kept, as jax-gcm keeps it. A forcing field an exchanger
+  supplies keeps the donor's last exchanged value until the first exchange
+  overwrites it; a time-varying boundary condition no exchanger supplies is a
+  time series JCM slices by date, so it follows the new start date by itself.
+- `VerosComponent` sets `variables.time` back to the reading `bind` recorded as
+  its start, which is what its clock-drift check measures from. Only the clock
+  moves: the coupled integration never consumes `variables.time` (the setup's
+  `set_forcing` is disabled and Veros' own diagnostics are not run), while
+  `itt` is not a clock -- Veros' pressure solve treats `itt == 0` as "first
+  step ever" and re-initialises every time level -- so it is left alone.
+- A nested `Coupler` resets its own clock and its components' in turn.
+- The slab models keep no clock in their carries -- they read the season from
+  `CouplingTime` on every step -- so they have nothing to reset and do not
+  implement the capability. A component that keeps a clock in its carry and
+  does not implement it cannot be reused under another start date, and its own
+  drift check (if it has one) will say so.
+
+The two ways in apply the **same** check, `Coupler.require_consistent_clock`:
+`load_carry` (unless `check_clock=False`, which reaches nested couplers too) and
+`run_chunked`'s `initial_carry`. Both raise a `ValueError` that names
+`restart_clock`. `generate_trajectory_function` does not check -- it is a pure
+function of any carry, and a check that reads the carry's values cannot run
+under `jit` -- so a carry that skips both is integrated as it stands. The
+coupled clock is part of the carry, so such a run continues on the calendar
+the carry came with, while its output labels and file names are computed from
+this coupler's start date; a component's own drift check compares its clock
+with the one the coupler hands it, so it stays silent when the whole carry is
+consistently on the old calendar (Veros' check, which measures from the start
+date it was bound to, is the one that reports it).
 
 ## The scan loop
 

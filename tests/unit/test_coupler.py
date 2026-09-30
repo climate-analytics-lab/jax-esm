@@ -28,6 +28,15 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 START_DATE = jdt.to_datetime("2001-01-01")
 
 
+def elapsed_seconds(time):
+    """Return the seconds since ``START_DATE`` that ``time``'s clock reads.
+
+    What a component that wants an elapsed-seconds label derives from the
+    clock it is handed: the clock has no second counter of its own.
+    """
+    return (time.time - START_DATE).total_seconds()
+
+
 # ---------------------------------------------------------------------------
 # Toy components and exchangers
 # ---------------------------------------------------------------------------
@@ -73,14 +82,14 @@ class ClockWatcher:
         self.name = name
 
     def initialize(self):
-        return {"sim_time": jnp.float32(0.0)}
+        return {"elapsed_seconds": jnp.float32(0.0)}
 
     def step(self, carry, time):
         del carry
         return (
-            {"sim_time": time.sim_time},
+            {"elapsed_seconds": elapsed_seconds(time)},
             {
-                "sim_time": time.sim_time,
+                "elapsed_seconds": elapsed_seconds(time),
                 "step": time.step,
                 "year_fraction": time.year_fraction,
             },
@@ -161,7 +170,7 @@ class ClockRecorder:
             {"calls": carry["calls"] + 1},
             {
                 "step": time.step,
-                "sim_time": time.sim_time,
+                "elapsed_seconds": elapsed_seconds(time),
                 "dt": jnp.float32(time.dt),
                 "year_fraction": time.year_fraction,
             },
@@ -170,7 +179,7 @@ class ClockRecorder:
     def to_xarray(self, diagnostics, time):
         self.time_axes.append(time)
         return xr.Dataset(
-            {"sim_time": ("time", np.asarray(diagnostics["sim_time"]))},
+            {"elapsed_seconds": ("time", np.asarray(diagnostics["elapsed_seconds"]))},
             coords={"time": time.datetimes()},
         )
 
@@ -351,12 +360,12 @@ def test_clock_persists_across_trajectory_calls():
 
     assert int(carry.step) == 10
     assert carry.time == START_DATE + jdt.to_timedelta(10, "day")
-    np.testing.assert_allclose(first["clock"]["sim_time"], np.arange(0, 5) * DAY)
-    np.testing.assert_allclose(second["clock"]["sim_time"], np.arange(5, 10) * DAY)
+    np.testing.assert_allclose(first["clock"]["elapsed_seconds"], np.arange(0, 5) * DAY)
+    np.testing.assert_allclose(second["clock"]["elapsed_seconds"], np.arange(5, 10) * DAY)
 
     # The next step - the one the persisted counter is for - sees 10 * dt.
     _, tenth = coupler.generate_step_function()(carry)
-    assert float(tenth["clock"]["sim_time"]) == pytest.approx(10 * DAY)
+    assert float(tenth["clock"]["elapsed_seconds"]) == pytest.approx(10 * DAY)
 
 
 def test_components_share_clock():
@@ -369,7 +378,7 @@ def test_components_share_clock():
     _, diagnostics = coupler.generate_trajectory_function(4)(coupler.initialize())
 
     np.testing.assert_array_equal(
-        diagnostics["first"]["sim_time"], diagnostics["second"]["sim_time"]
+        diagnostics["first"]["elapsed_seconds"], diagnostics["second"]["elapsed_seconds"]
     )
     np.testing.assert_array_equal(diagnostics["first"]["step"], np.arange(4))
 
@@ -778,11 +787,11 @@ def test_a_repeated_component_runs_on_a_faster_clock():
 
     fast = diagnostics["fast"]
     # The extra leading axis is the multiplicity, inside the scanned steps.
-    assert fast["sim_time"].shape == (2, 24)
+    assert fast["elapsed_seconds"].shape == (2, 24)
     np.testing.assert_allclose(np.asarray(fast["dt"]), np.full((2, 24), HOUR))
     # Hourly and continuous across the coupled step boundary.
     np.testing.assert_allclose(
-        np.asarray(fast["sim_time"]).ravel(), np.arange(48) * HOUR
+        np.asarray(fast["elapsed_seconds"]).ravel(), np.arange(48) * HOUR
     )
     np.testing.assert_array_equal(np.asarray(fast["step"]).ravel(), np.arange(48))
     # The sub-step clock advances an hour at a time through 2001, a
@@ -793,9 +802,9 @@ def test_a_repeated_component_runs_on_a_faster_clock():
 
     # A component listed once still gets the coupled daily clock.
     slow = diagnostics["slow"]
-    assert slow["sim_time"].shape == (2,)
+    assert slow["elapsed_seconds"].shape == (2,)
     np.testing.assert_allclose(np.asarray(slow["dt"]), [DAY, DAY])
-    np.testing.assert_allclose(np.asarray(slow["sim_time"]), [0.0, DAY])
+    np.testing.assert_allclose(np.asarray(slow["elapsed_seconds"]), [0.0, DAY])
 
 
 def test_a_repeated_component_is_bound_with_its_own_timestep():
@@ -872,7 +881,7 @@ def test_to_xarray_labels_a_repeated_component_at_the_sub_rate():
     np.testing.assert_array_equal(datasets["fast"].time.values, hourly)
     # The records are in run order: the flattened sub-step clock.
     np.testing.assert_allclose(
-        datasets["fast"].sim_time.values, np.arange(48) * HOUR
+        datasets["fast"].elapsed_seconds.values, np.arange(48) * HOUR
     )
 
     assert datasets["slow"].sizes["time"] == 2
@@ -946,7 +955,6 @@ def test_the_substep_clock_of_a_single_element_is_the_coupled_clock():
     coupled = coupler.coupling_time(3, time)
     substep = coupler.coupling_time_at_substep(3, time, 0, 1)
     assert int(substep.step) == int(coupled.step)
-    assert float(substep.sim_time) == float(coupled.sim_time)
     assert substep.dt == coupled.dt
     assert substep.time == coupled.time
 
@@ -956,7 +964,7 @@ def test_a_repeated_exchanger_sees_the_sub_stepped_clock():
     seen = []
 
     def record(components, time):
-        seen.append((float(time.sim_time), time.dt, int(time.step)))
+        seen.append((float(elapsed_seconds(time)), time.dt, int(time.step)))
         return components
 
     coupler = Coupler(
@@ -998,5 +1006,185 @@ def test_checkpoint_round_trip_of_a_run_with_multiplicity(tmp_path):
     _assert_carries_close(resumed, continuous_carry)
     _assert_carries_close(_concatenate(first, second), continuous)
     np.testing.assert_allclose(
-        np.asarray(second["fast"]["sim_time"]).ravel(), np.arange(48, 96) * HOUR
+        np.asarray(second["fast"]["elapsed_seconds"]).ravel(), np.arange(48, 96) * HOUR
     )
+
+
+# ---------------------------------------------------------------------------
+# Reusing a state under another start date: restart_clock
+# ---------------------------------------------------------------------------
+
+JULY_START = jdt.to_datetime("2001-07-01")
+
+
+class SelfClocked:
+    """A component that keeps its own clock in its carry, as JCM and Veros do.
+
+    ``step`` advances the copy of the clock and reports what it read, so a test
+    sees whether the copy was put back. It implements
+    ``SupportsClockReset`` the way a wrapper of such a model does: only the
+    clock changes, and ``value`` -- the model's physical memory -- is kept.
+    """
+
+    def __init__(self, name="selfclocked"):
+        """Name the component."""
+        self.name = name
+        self.start_date = START_DATE
+
+    def bind(self, *, coupling_timestep, start_date):
+        self.start_date = start_date
+
+    def initialize(self):
+        return {
+            "time": self.start_date, "step": jnp.int32(0), "value": jnp.float32(0.0),
+        }
+
+    def step(self, carry, time):
+        del time
+        new_carry = {
+            "time": carry["time"] + COUPLING_TIMESTEP,
+            "step": carry["step"] + 1,
+            "value": carry["value"] + 1.0,
+        }
+        return new_carry, {"own_step": carry["step"], "own_time": carry["time"]}
+
+    def restart_clock(self, carry):
+        return dict(carry, time=self.start_date, step=jnp.int32(0))
+
+
+def _clocked_coupler(start_date):
+    return Coupler(
+        {"clock": ClockWatcher(), "own": SelfClocked()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=start_date,
+    )
+
+
+def _spun_up_in_january(steps=3):
+    coupler = _clocked_coupler(START_DATE)
+    carry, _ = coupler.generate_trajectory_function(steps)(coupler.initialize())
+    return carry
+
+
+def test_restart_clock_puts_the_coupled_clock_at_the_new_start():
+    """Time is the coupler's start date and the step is zero, whatever it was."""
+    january = _spun_up_in_january()
+    assert int(january.step) == 3
+    july = _clocked_coupler(JULY_START)
+
+    reset = july.restart_clock(january)
+
+    assert reset.time == JULY_START
+    assert int(reset.step) == 0
+    # The clock is the ONLY thing that moved: the model's memory is kept.
+    assert float(reset.components["own"]["value"]) == 3.0
+
+
+def test_restart_clock_resets_only_the_components_that_hold_a_clock():
+    """The coupler asks the capability, so a clockless component is untouched."""
+    january = _spun_up_in_january()
+    reset = _clocked_coupler(JULY_START).restart_clock(january)
+
+    own = reset.components["own"]
+    assert own["time"] == JULY_START
+    assert int(own["step"]) == 0
+    # `ClockWatcher` keeps no clock in its carry, so its carry is the very
+    # object it was handed.
+    assert reset.components["clock"] is january.components["clock"]
+
+
+def test_restart_clock_returns_a_new_carry_and_leaves_the_old_one_alone():
+    january = _spun_up_in_january()
+    _clocked_coupler(JULY_START).restart_clock(january)
+
+    assert int(january.step) == 3
+    assert january.time == START_DATE + jdt.to_timedelta(3, "day")
+    assert int(january.components["own"]["step"]) == 3
+
+
+def test_restart_clock_keeps_the_carry_structure():
+    """A reset carry is scannable: same pytree structure, shapes and dtypes."""
+    january = _spun_up_in_january()
+    july = _clocked_coupler(JULY_START)
+    reset = july.restart_clock(january)
+
+    fresh = july.initialize()
+    assert jax.tree_util.tree_structure(reset) == jax.tree_util.tree_structure(fresh)
+    for left, right in zip(
+        jax.tree_util.tree_leaves(reset), jax.tree_util.tree_leaves(fresh)
+    ):
+        assert jnp.shape(left) == jnp.shape(right)
+        assert jnp.result_type(left) == jnp.result_type(right)
+
+
+def test_a_reset_carry_runs_on_the_new_calendar():
+    """Two steps after a reset: times, step, components' clocks and the season.
+
+    The run goes through `generate_trajectory_function`, i.e. `lax.scan`,
+    which is what rejects a carry whose structure a reset changed. The seasonal
+    position is the one the *new* start date implies: 1 July is day 181 of
+    365, and the January run's day 3 is nowhere in it.
+    """
+    january = _spun_up_in_january()
+    july = _clocked_coupler(JULY_START)
+
+    carry, diagnostics = july.generate_trajectory_function(2)(july.restart_clock(january))
+
+    assert int(carry.step) == 2
+    assert carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    np.testing.assert_allclose(
+        diagnostics["clock"]["year_fraction"], [181 / 365, 182 / 365], rtol=1e-6
+    )
+    np.testing.assert_array_equal(diagnostics["own"]["own_step"], [0, 1])
+    np.testing.assert_array_equal(
+        np.asarray(diagnostics["own"]["own_time"].to_datetime64(), "datetime64[s]"),
+        np.array(["2001-07-01", "2001-07-02"], dtype="datetime64[s]"),
+    )
+
+
+def test_require_consistent_clock_refuses_a_carry_from_another_start_date():
+    """The un-reset carry is refused, and the message names the way in."""
+    january = _spun_up_in_january()
+    july = _clocked_coupler(JULY_START)
+
+    with pytest.raises(ValueError, match=r"restart_clock") as raised:
+        july.require_consistent_clock(january, source="initial_carry")
+
+    message = str(raised.value)
+    assert "initial_carry" in message
+    assert "after 3 steps" in message
+    assert "2001-07-01" in message
+
+    # A carry of this coupler's own, and a reset one, both pass.
+    july.require_consistent_clock(july.initialize())
+    july.require_consistent_clock(july.restart_clock(january))
+
+
+def test_restart_clock_refuses_a_carry_of_another_model():
+    """Resetting part of a carry would leave the rest on the old clock."""
+    other = Coupler(
+        {"source": SourceComponent()},
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    with pytest.raises(ValueError, match="cannot be reset onto this coupler"):
+        _clocked_coupler(JULY_START).restart_clock(other.initialize())
+
+
+def test_a_loaded_checkpoint_is_refused_unless_it_is_to_be_reset(tmp_path):
+    """load, restart_clock, run: the checkpoint route to a different start date."""
+    january = _spun_up_in_january()
+    _clocked_coupler(START_DATE).save_carry(january, tmp_path / "spun-up")
+    july = _clocked_coupler(JULY_START)
+
+    with pytest.raises(ValueError, match="restart_clock"):
+        july.load_carry(tmp_path / "spun-up")
+
+    loaded = july.load_carry(tmp_path / "spun-up", check_clock=False)
+    assert int(loaded.step) == 3
+    reset = july.restart_clock(loaded)
+    july.require_consistent_clock(reset)
+    assert reset.time == JULY_START
+    assert float(reset.components["own"]["value"]) == 3.0
+    carry, _ = july.generate_trajectory_function(2)(reset)
+    assert int(carry.step) == 2

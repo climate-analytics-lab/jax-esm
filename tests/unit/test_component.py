@@ -272,7 +272,7 @@ def test_year_fraction_equals_jcm_fraction_of_year_elapsed():
     for when in ("2000-03-01", "2000-12-31", "2001-07-04T18:00:00"):
         time = jdt.to_datetime(when)
         coupling_time = CouplingTime(
-            step=jnp.int32(0), time=time, sim_time=jnp.float32(0.0), dt=86400.0
+            step=jnp.int32(0), time=time, dt=86400.0
         )
         assert float(coupling_time.year_fraction) == pytest.approx(
             float(fraction_of_year_elapsed(time))

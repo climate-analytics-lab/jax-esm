@@ -299,8 +299,9 @@ class JCMComponent:
     """The JCM atmosphere, driven one coupling timestep at a time.
 
     Satisfies :class:`~jem.base.component.Component`,
-    :class:`~jem.base.component.SupportsBind` and
-    :class:`~jem.base.component.SupportsXarray`.
+    :class:`~jem.base.component.SupportsBind`,
+    :class:`~jem.base.component.SupportsXarray` and
+    :class:`~jem.base.component.SupportsClockReset`.
 
     Parameters
     ----------
@@ -598,6 +599,61 @@ class JCMComponent:
             },
             predictions,
         )
+
+    def restart_clock(self, carry: Carry) -> Carry:
+        """Return ``carry`` with JCM's own clock back at the model's start time.
+
+        (:class:`~jem.base.component.SupportsClockReset`.) A carry taken from
+        a run with another start date holds that run's ``time`` and ``step``,
+        which :meth:`step` would feed to JCM as ``initial_time`` and
+        ``initial_step`` -- dating the forcing and the seasonal cycle by the
+        old start and tripping the clock-drift check against the coupler's.
+
+        This is jax-gcm's own convention for importing a state as an initial
+        condition (``load_checkpoint(..., as_initial_condition=True)``): the
+        exact clock goes back to the model's ``start_time`` and the step to 0
+        -- the pair :meth:`initialize` builds, and the only pair
+        :meth:`jcm.model.Model.restore_state` accepts, since JCM requires
+        ``time == start_time + step * timestep`` -- and the dycore's native
+        elapsed-seconds counter goes back to zero, as
+        ``Model._at_fresh_clock`` does for a fresh run, so that no second
+        clock keeps counting from the donor's offset. ``bind`` has already
+        checked ``model.start_time`` against the coupler's start date, so
+        "the model's start" is the coupler's.
+
+        Everything else is kept: the dynamical state, the cross-step physics
+        carry (radiation sub-cycle caches, prior-step TKE -- as jax-gcm's own
+        initial-condition mode keeps it), the diagnostics other components
+        read, and the forcing. A ``forcing`` field an exchanger supplies keeps
+        the donor's last exchanged value until the first exchange overwrites
+        it, which is what a carry that came from a running model holds; a
+        time-varying boundary condition no exchanger supplies is a
+        :class:`jcm.forcing.TimeSeries` that JCM slices by date every step, so
+        it follows the new start date on its own.
+
+        Parameters
+        ----------
+        carry : dict
+            An atmosphere carry, from :meth:`initialize`, a step or a
+            checkpoint.
+
+        Returns
+        -------
+        dict
+            A new carry with the same structure, shapes and dtypes.
+
+        """
+        dycore = self.model.dycore
+        state = carry["state"]
+        native_elapsed = dycore.sim_time(state)
+        if native_elapsed is not None:
+            state = dycore.with_sim_time(state, jnp.zeros_like(native_elapsed))
+        return {
+            **carry,
+            "state": state,
+            "time": self.model.start_time,
+            "step": jnp.int32(0),
+        }
 
     def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
         """Serialize the stacked per-step predictions through JCM.

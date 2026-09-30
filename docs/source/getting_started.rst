@@ -204,7 +204,21 @@ Hydra makes fresh each run. Point a second run at the first's output directory
 (``coupled_run.output_dir=outputs/2026-09-16/11-04-02``) and it continues from
 the coupled step the checkpoint holds, saying so in its log; an absolute
 ``coupled_run.checkpoint_path`` is used as given, and
-``coupled_run.checkpoint_path=null`` turns checkpointing off. See
+``coupled_run.checkpoint_path=null`` turns checkpointing off.
+
+To start an experiment from a state another run spun up -- often under a
+different start date -- name that run's checkpoint directory:
+
+.. code-block:: bash
+
+    python -m jem.main +configuration=earth-slab \
+        coupled_run.initial_condition=/scratch/spinup/checkpoint
+
+The state is kept and the clock restarts at the atmosphere's ``start_time``.
+The experiment writes its own checkpoint, and repeating the same command
+resumes *that* rather than starting again from the spun-up state: a complete
+checkpoint at ``checkpoint_path`` takes precedence over ``initial_condition``,
+and the log's first line says which one the run started from. See
 :doc:`design/running` for the worked examples, ``checkpoint_interval``,
 ``subsample``, ``output_averages`` and the in-scan reductions in
 ``jem.accumulate``.
