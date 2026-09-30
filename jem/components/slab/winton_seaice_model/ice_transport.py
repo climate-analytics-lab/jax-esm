@@ -92,8 +92,16 @@ class IceTransportGrid:
         longitude = np.asarray(grid.longitude_axis_radian, dtype=np.float64)
         latitude = np.asarray(grid.latitude_axis_radian, dtype=np.float64)
         radius = jcm_constants.rearth
-        # A metric width is positive whichever way the axis runs.
-        dlon = float(np.median(np.abs(np.diff(longitude)))) if longitude.size > 1 else 2 * np.pi
+        # One zonal width per row needs a uniform longitude axis; a metric width
+        # is positive whichever way the axis runs.
+        spacing = np.abs(np.diff(longitude))
+        if spacing.size and not np.allclose(spacing, spacing[0], rtol=1e-6):
+            raise ValueError(
+                "IceTransportGrid.from_grid needs a uniformly spaced longitude "
+                "axis; build IceTransportGrid(dx=..., dy=...) from the grid's own "
+                "metrics instead."
+            )
+        dlon = float(spacing[0]) if spacing.size else 2 * np.pi
         dlat = np.gradient(latitude) if latitude.size > 1 else np.array([np.pi])
         shape = grid.shape
         dx = radius * np.cos(latitude)[None, :] * dlon * np.ones(shape)

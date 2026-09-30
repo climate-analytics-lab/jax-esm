@@ -568,7 +568,8 @@ def test_parameters_outside_the_schemes_domain_are_rejected(grid, field, value):
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("dtheta", 0.0), ("dtheta", -1.0), ("chs", -1e-3), ("vgust", float("nan")), ("fstab", float("inf"))],
+    [("dtheta", 0.0), ("dtheta", -1.0), ("chs", -1e-3), ("vgust", float("nan")),
+     ("fstab", float("inf")), ("fstab", 1.5), ("fstab", -0.1)],
 )
 def test_surface_flux_parameters_outside_the_domain_are_rejected(grid, field, value):
     sfp = IceSurfaceFluxParameters.default().replace(**{field: value})
@@ -610,6 +611,20 @@ def test_transport_metrics_of_a_lon_lat_grid():
     np.testing.assert_allclose(dy[0, 1:-1], radius * np.deg2rad(160.0 / 11), rtol=1e-5)
     assert metrics.cyclic_x
 
+
+
+def test_transport_metrics_refuse_a_nonuniform_longitude_axis():
+    import types
+
+    grid = global_grid(nx=24, ny=12)
+    longitude = np.asarray(grid.longitude_axis_radian).copy()
+    longitude[5] += 0.01
+    uneven = types.SimpleNamespace(
+        is_separable=True, longitude_axis_radian=longitude,
+        latitude_axis_radian=grid.latitude_axis_radian, shape=grid.shape,
+    )
+    with pytest.raises(ValueError, match="uniformly spaced"):
+        IceTransportGrid.from_grid(uneven)
 
 
 def test_transport_metrics_are_positive_on_a_descending_longitude_axis():
@@ -777,6 +792,17 @@ def test_a_gradient_through_two_steps_of_a_melting_ice_cover_is_finite(grid):
 # ---------------------------------------------------------------------------
 # The energy budget (float64, exact to the accuracy of the surface solve)
 # ---------------------------------------------------------------------------
+
+
+def test_ocean_heat_flux_is_zero_on_land():
+    grid = make_grid(fractional_mask=np.array([[1, 0, 0]] * 4, dtype=float))
+    model = WintonSeaiceModel(grid)
+    land = np.asarray(grid.binary_mask == 1.0)
+    forcing = make_forcing(grid, atm_sea_heat_flux=50.0)
+    stepped, _ = model.step(
+        with_state_and_forcing(model, ice_state(grid, 1.0, T=-5.0), forcing), coupling_time(0)
+    )
+    assert np.all(np.asarray(stepped["derived"].ocean_heat_flux_up)[land] == 0.0)
 
 
 def test_energy_budget_closes_in_every_regime(x64):

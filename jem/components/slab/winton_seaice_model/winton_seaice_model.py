@@ -674,11 +674,12 @@ class WintonSeaiceModel(SlabModelBase):
             # energy to the ocean (downward positive), per cell area, over this substep: the atmosphere's flux over
             # the sea cell minus what the ice absorbed, plus what the ice passes down, minus the basal heat it draws;
             # the fusion enthalpy of snow that landed on ice (the atmosphere condensed it as liquid) and the
-            # enthalpy of disposed slivers are charged here so the coupled budget closes
-            down = (fc.atm_sea_heat_flux - jnp.where(icy, f * F_ice_atm, 0.0)
-                    + jnp.where(icy, f * (sw_ocn + e_ocn / dt - F_b), 0.0)
-                    + jnp.where(icy & ~vanished, f * fc.snowfall * L_ICE, 0.0)
-                    - e_dispose / dt)
+            # enthalpy of disposed slivers are charged here so the coupled budget closes; cells this model does
+            # not integrate (land) carry no ocean flux
+            down = jnp.where(ocean, fc.atm_sea_heat_flux - jnp.where(icy, f * F_ice_atm, 0.0)
+                             + jnp.where(icy, f * (sw_ocn + e_ocn / dt - F_b), 0.0)
+                             + jnp.where(icy & ~vanished, f * fc.snowfall * L_ICE, 0.0)
+                             - e_dispose / dt, 0.0)
             new_s = WintonState(hn * ocean, hsn * ocean, fn * ocean, T1n, T2n, Tsn)
             intercepted = jnp.where(icy & ~vanished, f * fc.snowfall * dt, 0.0)   # snow mass that landed on ice, kg/m2
             diag = (jnp.where(icy, M_s, 0.0), jnp.where(icy, -(F_b + F_cb), 0.0), jnp.where(icy, F_ice_atm, 0.0), -down,
@@ -871,7 +872,10 @@ def _validate_parameters(params: WintonSeaiceParameters) -> None:
     at_least("surface_flux.chs", sfp.chs, 0.0, strict=False)
     at_least("surface_flux.vgust", sfp.vgust, 0.0, strict=False)
     at_least("surface_flux.dtheta", sfp.dtheta, 0.0, strict=True)
-    finite("surface_flux.fstab", sfp.fstab)
+    # The exchange multiplier 1 + dth*fstab/dtheta reaches 1 - fstab at the
+    # stable limit, so fstab above 1 would reverse the turbulent fluxes.
+    if not 0.0 <= finite("surface_flux.fstab", sfp.fstab) <= 1.0:
+        raise ValueError(f"surface_flux.fstab must lie in [0, 1]; got {sfp.fstab!r}.")
     for field in ("n_substeps", "n_flux_iterations", "transport_n_substeps"):
         count = getattr(params, field)
         if int(count) != count or int(count) < 1:
