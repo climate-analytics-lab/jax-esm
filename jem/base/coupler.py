@@ -855,8 +855,11 @@ class Coupler:
                 f"{expected}. If it came from a run with the same start date "
                 "and timestep, use the configuration it was produced with. To "
                 "reuse it as the initial condition of a run that starts on "
-                "this coupler's start date, reset its clock first: "
-                "`carry = coupler.restart_clock(carry)`."
+                "this coupler's start date, reset its clock: in Python, "
+                "`carry = coupler.restart_clock(carry)` (or "
+                "`run_chunked(..., initial_condition=<checkpoint directory>)` "
+                "for a checkpoint); from the command line, "
+                "`coupled_run.initial_condition=<checkpoint directory>`."
             )
 
     def restart_clock(self, carry: CoupledCarry) -> CoupledCarry:
@@ -1683,7 +1686,9 @@ class Coupler:
         under another start date or timestep, and resuming it would integrate
         on one clock and label on another (:meth:`require_consistent_clock`). To reuse a
         checkpoint deliberately as the initial condition of a run with a
-        different start date, load it with ``check_clock=False`` and pass the
+        different start date, name it as ``initial_condition`` of
+        :func:`jem.driver.run_chunked` (``coupled_run.initial_condition`` on
+        the command line), or load it with ``check_clock=False`` and pass the
         result through :meth:`restart_clock` before running it;
         :func:`jem.driver.run_chunked` refuses an ``initial_carry`` that has
         not been.

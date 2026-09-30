@@ -2580,6 +2580,169 @@ def test_a_checkpoint_from_another_start_date_is_reused_through_a_reset(tmp_path
     assert resumed.time == JULY_START + jdt.to_timedelta(2, "day")
 
 
+def test_an_initial_condition_directory_is_reused_under_another_start_date(
+    tmp_path, caplog
+):
+    """`initial_condition=<checkpoint>` is the reset route, in one argument.
+
+    The July run starts from the January checkpoint's physical state at step 0
+    on the July calendar, and ends in the same carry as loading the checkpoint
+    unchecked, resetting it and passing that as `initial_carry` does -- the two
+    routes cannot differ. The run's own checkpoint is then on the July
+    calendar and resumable.
+    """
+    spun_up = tmp_path / "spun-up"
+    january = spun_up_in_january()
+    probed_slabs(START_DATE).save_carry(january, spun_up)
+    july = probed_slabs(JULY_START)
+    checkpoint = tmp_path / "experiment-checkpoint"
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="1 day", initial_condition=spun_up,
+            output_dir=tmp_path / "experiment", checkpoint_path=checkpoint,
+        )
+
+    assert (
+        f"Starting from initial_condition {spun_up} at coupled step 0 "
+        "(its clock restarted from step 5 at 2001-01-06T00:00:00)."
+    ) in caplog.text
+    assert result.completed
+    assert result.steps_completed == 2
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    with xr.open_mfdataset(
+        sorted((tmp_path / "experiment").glob("ocn-*.nc")), combine="by_coords"
+    ) as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ns]"),
+        )
+
+    by_hand = run_chunked(
+        july, total_time="2 days", chunk="1 day",
+        initial_carry=july.restart_clock(january),
+        output_dir=tmp_path / "by-hand", checkpoint_path=None,
+    )
+    assert_carries_agree(result.final_carry, by_hand.final_carry, atol=1e-12)
+
+    resumed = july.load_carry(checkpoint)
+    assert int(resumed.step) == 2
+    assert resumed.time == JULY_START + jdt.to_timedelta(2, "day")
+
+
+def test_the_experiments_own_checkpoint_wins_over_the_initial_condition(
+    tmp_path, caplog
+):
+    """Repeating the launch command resumes the experiment, it does not restart it.
+
+    The first call starts from the spun-up state and checkpoints; the second,
+    with identical arguments and a longer run, finds that checkpoint, says the
+    `initial_condition` went unused, and ends where one uninterrupted run of
+    the whole length does -- which it could not if it had started over from
+    the spun-up state.
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    checkpoint = tmp_path / "experiment-checkpoint"
+    arguments = dict(
+        chunk="1 day", initial_condition=spun_up, checkpoint_path=checkpoint,
+        output_dir=tmp_path / "experiment",
+    )
+    run_chunked(probed_slabs(JULY_START), total_time="2 days", **arguments)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        second = run_chunked(probed_slabs(JULY_START), total_time="4 days", **arguments)
+
+    assert (
+        f"Resumed from checkpoint {checkpoint} at coupled step 2. "
+        f"The initial_condition {spun_up} was not used."
+    ) in caplog.text
+    assert "Starting from initial_condition" not in caplog.text
+    assert second.steps_completed == 4
+
+    july = probed_slabs(JULY_START)
+    uninterrupted = run_chunked(
+        july, total_time="4 days", chunk="1 day", initial_condition=spun_up,
+        checkpoint_path=None, output_dir=tmp_path / "uninterrupted",
+    )
+    assert_carries_agree(second.final_carry, uninterrupted.final_carry, atol=1e-12)
+
+
+def test_an_initial_condition_is_used_when_the_checkpoint_path_is_incomplete(
+    tmp_path, caplog
+):
+    """The wreckage of an interrupted save is not a checkpoint to resume."""
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            probed_slabs(JULY_START), total_time="1 day", chunk="1 day",
+            initial_condition=spun_up, checkpoint_path=checkpoint,
+            output_dir=tmp_path / "output",
+        )
+
+    assert f"Starting from initial_condition {spun_up}" in caplog.text
+    assert "the run starts from initial_condition" in caplog.text
+    assert "was not used" not in caplog.text
+
+
+def test_an_initial_condition_and_an_initial_carry_are_mutually_exclusive(tmp_path):
+    """Two statements of where to start are refused before anything is loaded."""
+    january = spun_up_in_january()
+    with pytest.raises(ValueError, match="initial_carry and initial_condition"):
+        run_chunked(
+            probed_slabs(START_DATE), total_time="1 day", chunk="1 day",
+            initial_carry=january, initial_condition=tmp_path / "anywhere",
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_an_initial_condition_without_a_checkpoint_is_refused(tmp_path):
+    """A named state that is not there is an error, not a cold start."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for missing in (empty, tmp_path / "typo"):
+        with pytest.raises(ValueError, match="holds no .*not a complete checkpoint"):
+            run_chunked(
+                probed_slabs(JULY_START), total_time="1 day", chunk="1 day",
+                initial_condition=missing, checkpoint_path=None,
+                output_dir=tmp_path / "output",
+            )
+    assert not list((tmp_path / "output").glob("*.nc"))
+
+
+def test_a_mismatched_clock_is_refused_naming_both_routes_in(tmp_path):
+    """Whichever way the foreign state arrives, the message offers both fixes.
+
+    A carry passed as `initial_carry` and a checkpoint resumed from
+    `checkpoint_path` are refused by the same check, and the message names the
+    Python route (`restart_clock`) and the command-line one
+    (`coupled_run.initial_condition`).
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    july = probed_slabs(JULY_START)
+
+    for keyword, value in (
+        ("initial_carry", spun_up_in_january()),
+        ("checkpoint_path", spun_up),
+    ):
+        arguments = {"checkpoint_path": None, keyword: value}
+        with pytest.raises(ValueError) as raised:
+            run_chunked(
+                july, total_time="1 day", chunk="1 day",
+                output_dir=tmp_path / "output", **arguments,
+            )
+        message = str(raised.value)
+        assert "restart_clock" in message
+        assert "coupled_run.initial_condition=" in message
+        assert "initial_condition=<checkpoint directory>" in message
+
+
 @pytest.mark.slow
 def test_a_spun_up_atmosphere_is_reused_under_another_start_date(tmp_path, caplog):
     """The reset reaches JCM's own clock, and the run on the new date is clean.

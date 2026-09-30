@@ -259,6 +259,11 @@ carry = july_coupler.restart_clock(carry)
 result = run_chunked(july_coupler, total_time="30 days", initial_carry=carry)
 ```
 
+For a checkpoint directory the two loading lines are one argument,
+`run_chunked(july_coupler, ..., initial_condition=spun_up)`, or
+`coupled_run.initial_condition=<directory>` from the command line
+({doc}`running` has the precedence against `checkpoint_path`).
+
 `Coupler.restart_clock(carry)` returns the carry with `time` set to this
 coupler's `start_date` and `step` to 0 -- what `initialize()` leaves -- so
 everything derived from the clock counts from the new start: the seasonal

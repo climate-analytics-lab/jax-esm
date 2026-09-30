@@ -22,7 +22,7 @@ Per chunk it integrates, labels and writes the output, checkpoints, and
 checks the state is still healthy:
 
 ```
-carry = initial_carry or coupler.initialize()          # or the checkpoint's
+carry = initial_carry or initial_condition or coupler.initialize()   # or the checkpoint's
 for steps in batches:                # `steps` is the chunk, except that the first
     first_step = int(carry.step)     #   batch of an off-grid start and the last
                                      #   can be short
@@ -210,7 +210,8 @@ another chunk's file already holds).
 
 `run_chunked` logs the provenance of the carry it is about to integrate, at
 INFO, in one line before anything is compiled — "Starting from
-`coupler.initialize()`", "Starting from the `initial_carry` argument", or
+`coupler.initialize()`", "Starting from the `initial_carry` argument",
+"Starting from initial_condition ...", or
 "Resumed from checkpoint ... at coupled step N" — because resuming a run is
 the *same command* as starting one, so nothing else says which happened. A
 directory an interrupted save left without its carry file is a WARNING (a
@@ -222,14 +223,44 @@ date.** `initial_carry` must have this coupler's clock -- `time` equal to
 `start_date + step * dt` -- exactly as a resumed checkpoint must
 (`Coupler.require_consistent_clock`, applied by `load_carry` and by
 `run_chunked` before anything is compiled). A carry from a run with a
-different start date fails that check with a message naming
-`Coupler.restart_clock`, which is the explicit way in: it returns the carry
-with the coupled clock at this coupler's `start_date` and `step` 0, and asks
-every component that keeps a clock of its own (JCM, Veros, a nested coupler)
-to reset it too. A checkpoint is reused the same way --
-`coupler.load_carry(directory, check_clock=False)`, then `restart_clock` --
-and goes in as `initial_carry` with a `checkpoint_path` of its own, because
-pointing `checkpoint_path` at the spun-up checkpoint is a resume, which is
+different start date fails that check with a message naming both ways in, one
+per interface:
+
+- **Python:** `Coupler.restart_clock` returns the carry with the coupled clock
+  at this coupler's `start_date` and `step` 0, and asks every component that
+  keeps a clock of its own (JCM, Veros, a nested coupler) to reset it too; the
+  result goes in as `initial_carry`.
+- **A checkpoint directory, from Python or the command line:**
+  `run_chunked(initial_condition=directory)`, which
+  `coupled_run.initial_condition=directory` sets. The runner is generic --
+  `build_run_kwargs` hands every `coupled_run` key to `run_chunked` -- so the
+  key names a directory and nothing about which components the run has. The
+  driver loads it with `coupler.load_carry(directory, check_clock=False)` and
+  applies `restart_clock`, i.e. exactly the Python route, so the two cannot
+  differ. It is an argument of `run_chunked` rather than a step of the
+  runner because a checkpoint directory is the only form of state a command
+  line can name, and every run knob lives on the one signature. Naming a
+  directory that holds no carry file is a `ValueError`: the state was asked
+  for by name, and quietly starting from `coupler.initialize()` would give an
+  experiment that never saw the spin-up.
+
+`initial_condition` and `initial_carry` are mutually exclusive.
+
+**Precedence with `checkpoint_path`.** A complete checkpoint at
+`checkpoint_path` wins over `initial_condition` (and over `initial_carry`), and
+the provenance line says the argument went unused. `initial_condition` is
+where a run that has *not started* begins; once the run has written its own
+checkpoint, that is the run, and starting from the spun-up state again would
+discard what it integrated. So one command launches an experiment from a
+spun-up state and, repeated, resumes it:
+
+```bash
+python -m jem.main +configuration=earth-slab \
+    coupled_run.initial_condition=/scratch/spinup/checkpoint \
+    coupled_run.output_dir=/scratch/experiment
+```
+
+Pointing `checkpoint_path` itself at the spun-up checkpoint is a resume, and is
 refused under another start date. After the reset the seasonal cycle, the
 output labels and file names, `checkpoint_interval` and `subsample` all count
 from the new start; see *Reusing a state under another start date* in
