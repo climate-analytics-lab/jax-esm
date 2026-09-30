@@ -966,3 +966,41 @@ def test_coupled_run_keys_are_run_chunked_arguments():
     arguments = set(inspect.signature(driver.run_chunked).parameters)
     assert keys - {"log_level"} <= arguments
     assert "log_level" not in arguments
+
+
+def test_initial_condition_reaches_the_run_through_the_runner(tmp_path, monkeypatch):
+    """`coupled_run.initial_condition` starts a run under another start date.
+
+    Goes through `runners.run`, the function `python -m jem.main` calls, on a
+    two-slab model swapped in for `build_coupler` (the runner hands
+    `run_chunked` whatever coupler it is given, and knows nothing of its
+    components): a January checkpoint becomes the initial condition of a July
+    run, and repeating the command resumes the run instead.
+    """
+    from tests.unit.test_driver import JULY_START, probed_slabs, spun_up_in_january
+
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(jdt.to_datetime("2001-01-01")).save_carry(spun_up_in_january(), spun_up)
+    monkeypatch.setattr(runners, "build_coupler", lambda cfg: probed_slabs(JULY_START))
+
+    def launch(total_time: str):
+        return runners.run(composed([
+            f"coupled_run.total_time={total_time}", "coupled_run.chunk=1 day",
+            f"coupled_run.initial_condition={spun_up}",
+            f"coupled_run.output_dir={tmp_path / 'experiment'}",
+        ]))
+
+    first = launch("2 days")
+    assert first.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert int(first.final_carry.step) == 2
+
+    second = launch("3 days")
+    assert second.steps_completed == 3
+    assert int(second.final_carry.step) == 3
+
+
+def test_initial_condition_is_a_schema_key_that_defaults_to_none():
+    """The key is in the group's schema, so it overrides without a `+`."""
+    assert composed([]).coupled_run.initial_condition is None
+    kwargs = runners.build_run_kwargs(composed(["coupled_run.initial_condition=/x/y"]))
+    assert kwargs["initial_condition"] == "/x/y"

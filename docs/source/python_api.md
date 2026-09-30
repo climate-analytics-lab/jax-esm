@@ -110,7 +110,10 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   integrate is exactly one of `total_time` (a fixed duration) and `end_time`
   (an ISO date). The run length and `chunk` must be whole multiples of the
   coupling timestep; a run length that is not a whole number of chunks ends
-  with a shorter chunk.
+  with a shorter chunk, and a run that starts off the chunk grid (extending a
+  run that ended on a short chunk, or resuming under a different `chunk`) opens
+  with a short one that lands it back on it, so its checkpoints stay on
+  `checkpoint_interval`.
 
 ## Exchanges a table can express
 
@@ -205,6 +208,20 @@ instead of writing every step to disk, and is differentiable like everything
 else in the carry. Both are long enough that they are not duplicated here:
 see {doc}`design/running` for the worked examples, the checkpoint format and
 the accumulator's binning rules.
+
+A spun-up state can be the initial condition of a run with a **different start
+date**: build the coupler for the new run, put the carry's clock at *its*
+start date with `Coupler.restart_clock`, and pass the result as
+`initial_carry`. `run_chunked` refuses a carry whose clock is not its
+coupler's, and the message names this method:
+
+```python
+carry = july_coupler.restart_clock(spun_up_carry)     # or load_carry(..., check_clock=False)
+run_chunked(july_coupler, total_time="30 days", initial_carry=carry)
+```
+
+The seasonal cycle, output labels and file names then count from the new start
+date. See {doc}`design/carry_and_clock` for what each component resets.
 
 ## Validated configurations from Python
 

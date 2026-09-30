@@ -14,6 +14,7 @@ from jem.base.component import (
     Exchanger,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsClockReset,
     SupportsXarray,
     TimeAxis,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "RunResult",
     "SupportsBind",
     "SupportsCheckpoint",
+    "SupportsClockReset",
     "SupportsXarray",
     "TimeAxis",
     "chunk_datasets",

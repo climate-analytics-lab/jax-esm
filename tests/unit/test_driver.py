@@ -795,37 +795,43 @@ def test_a_bail_out_saves_the_accepted_chunk_the_interval_had_skipped(
     )
 
 
-def test_a_resume_that_cannot_reach_the_interval_says_so(tmp_path, caplog):
-    """A resume part-way through a chunk warns that the interval cannot land.
+def test_a_resume_under_another_chunk_realigns_and_keeps_the_interval(
+    tmp_path, caplog
+):
+    """A resume part-way through a chunk lands back on the chunk grid first.
 
     The interval is counted from the start of the run and the loop stops only
     at a chunk boundary, so a checkpoint written under a *different* chunk
-    length leaves an offset that no chunk end of this run can turn into a
-    multiple of the interval: the run would checkpoint only when it finished.
-    That is a real loss of restart points, so it is said out loud rather than
-    left to be discovered after a job was killed.
+    length leaves an offset that whole chunks of this run could never turn into
+    a multiple of the interval. The run therefore integrates a short first
+    chunk up to the next multiple of its chunk (step 3 to 4 here) and is on the
+    grid from there: the save due at step 4 happens, and nothing has to be said
+    about a lost interval.
     """
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
         two_slabs(), total_time="3 days", chunk="3 days",
         output_dir=tmp_path / "first", checkpoint_path=checkpoint,
     )
+    seen = []
     with caplog.at_level(logging.WARNING):
         result = run_chunked(
             two_slabs(), total_time="8 days", chunk="2 days",
             checkpoint_interval="4 days",
             output_dir=tmp_path / "second", checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(checkpoint, seen),
         )
 
     assert result.steps_completed == 8
-    assert "starts at coupled step 3" in caplog.text
-    assert "not a whole number of the 2-step chunks" in caplog.text
-    assert "no chunk it integrates before the last" in caplog.text
-    # This run has a checkpoint whose chunk length it could match, so it is
-    # told how to get the interval back.
-    assert "resuming with that chunk restores the interval" in caplog.text
-    # It still leaves its final restart state, which is the other guarantee.
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    # The gate looks before each chunk is saved: the restored step 3, then the
+    # save the short first chunk earned at step 4 (twice: the chunk ending at
+    # 6 is not on the interval), and the final state at 8.
+    assert seen == [3, 4, 4]
     assert checkpoint_step(checkpoint) == 8
+    assert [path.name for path in result.paths if path.name.startswith("ocn")] == [
+        "ocn-00000003.nc", "ocn-00000004.nc", "ocn-00000006.nc",
+    ]
 
 
 def test_a_total_time_that_is_not_whole_intervals_warns_but_runs(tmp_path, caplog):
@@ -863,35 +869,31 @@ def test_a_total_time_that_is_whole_intervals_says_nothing(tmp_path, caplog):
     assert "checkpoint_interval" not in caplog.text
 
 
-def test_an_initial_carry_part_way_through_a_chunk_warns_without_a_remedy(
-    tmp_path, caplog
-):
-    """The same warning for a carry handed in, minus the advice that would lie.
+def test_an_initial_carry_part_way_through_a_chunk_realigns_too(tmp_path, caplog):
+    """The short first chunk is not specific to a resume.
 
-    A run also starts part-way through a chunk when it is given an
-    `initial_carry` at such a step -- it never resumed, and there is no
-    checkpoint whose chunk length it could match -- so the fact is stated and
-    the remedy is not.
+    A run is also handed a starting state part-way through a chunk when it is
+    given an `initial_carry` at such a step -- it never resumed, and there is
+    no checkpoint whose chunk length it could match. It realigns all the same:
+    step 3 to 4, then whole chunks, with the interval's save at step 4.
     """
     coupler = two_slabs()
     carry, _ = coupler.generate_trajectory_function(3)(coupler.initialize())
+    checkpoint = tmp_path / "checkpoint"
+    seen = []
 
     with caplog.at_level(logging.WARNING):
         result = run_chunked(
             coupler, total_time="8 days", chunk="2 days",
             checkpoint_interval="4 days", initial_carry=carry,
-            output_dir=tmp_path / "output",
-            checkpoint_path=tmp_path / "checkpoint",
+            output_dir=tmp_path / "output", checkpoint_path=checkpoint,
+            health_check=watch_the_checkpoint(checkpoint, seen),
         )
 
     assert result.steps_completed == 8
-    warnings = [
-        record.getMessage() for record in caplog.records
-        if record.levelno >= logging.WARNING
-    ]
-    assert len(warnings) == 1
-    assert "starts at coupled step 3" in warnings[0]
-    assert "the chunk the checkpoint was written under" not in warnings[0]
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    assert seen == [None, 4, 4]
+    assert checkpoint_step(checkpoint) == 8
 
 
 def test_an_accumulated_run_checkpoints_on_the_interval_too(tmp_path):
@@ -1218,13 +1220,14 @@ def test_resume_with_a_different_chunk_length_still_stops_on_time(tmp_path):
     The chunk length is a choice of the run, not a property of the checkpoint,
     so a run resumed with a longer chunk starts mid-chunk. What is left is
     computed from the restored step counter, so the run still stops exactly at
-    `total_time` -- and, because `remaining_batches` puts the short batch
-    LAST, the eight days are integrated as 3 + 4 + 1. The control run is what
-    makes that a statement about the trajectory rather than about the counter:
-    the separately-compiled short final batch has to produce the same numbers
-    as one continuous eight-day integration, which is the property a bug in
-    `remaining_batches` or in the driver's per-length trajectory cache would
-    break while still stopping at step 8.
+    `total_time` -- and, because `remaining_batches` makes the FIRST batch the
+    short one that lands on the chunk grid, the eight days are integrated as
+    3 + 1 + 4. The control run is what makes that a statement about the
+    trajectory rather than about the counter: the separately-compiled short
+    batch has to produce the same numbers as one continuous eight-day
+    integration, which is the property a bug in `remaining_batches` or in the
+    driver's per-length trajectory cache would break while still stopping at
+    step 8.
     """
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
@@ -1250,11 +1253,11 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
 
     Three days in one chunk, then a resume with four-day chunks into the SAME
     output directory. Every file is named after the coupled step its chunk
-    starts at -- 0 for the first run, then 3 and 7 (a full four-day chunk and
-    then the short one that stops the run exactly at eight days) -- so all
-    three survive. Under a chunk *index* the resumed run's first chunk would
-    have been index `3 // 4 == 0` again, and the first run's three days of
-    output would have been silently replaced.
+    starts at -- 0 for the first run, then 3 (the one-day chunk that lands the
+    resumed run on its chunk grid) and 4 (a full four-day chunk, ending the
+    run at eight days) -- so all three survive. Under a chunk *index* the
+    resumed run's first chunk would have been index `3 // 4 == 0` again, and
+    the first run's three days of output would have been silently replaced.
     """
     checkpoint = tmp_path / "checkpoint"
     output = tmp_path / "output"
@@ -1272,8 +1275,8 @@ def test_resume_with_a_different_chunk_length_keeps_the_earlier_files(tmp_path):
         "ocn-00000000.nc", "seaice-00000000.nc"
     ]
     assert sorted(path.name for path in resumed.paths) == [
-        "ocn-00000003.nc", "ocn-00000007.nc",
-        "seaice-00000003.nc", "seaice-00000007.nc",
+        "ocn-00000003.nc", "ocn-00000004.nc",
+        "seaice-00000003.nc", "seaice-00000004.nc",
     ]
     # The first run's files are still there, and still hold its three days.
     assert all(path.exists() for path in first.paths)
@@ -1293,9 +1296,10 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
     The coupler starts at 06:00 with 6-hour steps, so ``end_time="2001-01-03"``
     (a date, i.e. midnight) is 7 steps in 4-step chunks: 4 + 3. Extending it
     to "2001-01-05T12:00:00" resumes at step 7, off the chunk grid, and runs
-    4 + 4 + 2 more. The carry, and the records the run-global ``subsample``
-    stride keeps across both calls' short chunks, must be those of one
-    uninterrupted call.
+    1 + 4 + 4 + 1 more: a short first chunk back onto the grid, two whole
+    chunks and the short last one. The carry, and the records the run-global
+    ``subsample`` stride keeps across both calls' short chunks, must be those
+    of one uninterrupted call.
     """
     def coupler():
         return two_slabs(
@@ -1313,8 +1317,10 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
     extended = run_chunked(coupler(), end_time="2001-01-05T12:00:00", **run)
     assert extended.steps_completed == 17
     assert extended.final_carry.time.to_pydatetime().isoformat() == "2001-01-05T12:00:00"
+    # The stride keeps steps 9, 12 and 15 of the extension; the chunks that
+    # start at steps 7 and 16 hold none of them and write no file.
     assert sorted(path.name for path in extended.paths if path.name.startswith("ocn")) == [
-        "ocn-00000007.nc", "ocn-00000011.nc", "ocn-00000015.nc",
+        "ocn-00000008.nc", "ocn-00000012.nc",
     ]
 
     continuous = run_chunked(
@@ -1331,16 +1337,20 @@ def test_a_run_extended_to_a_later_end_time_matches_one_uninterrupted_run(tmp_pa
         np.testing.assert_array_equal(combined["time"].values, single["time"].values)
 
 
-def test_an_extended_run_never_repeats_a_chunk_index(tmp_path):
+def test_chunk_indices_name_the_grid_chunk_across_an_extension(tmp_path):
     """Chunk indices keep increasing across an extension that resumes off-grid.
 
     7 steps in 4-step chunks are chunks 0 and 1 (the short one starts at step
-    4); the extension resumes at step 7 and must not report index 1 again.
+    4). The extension resumes at step 7, inside chunk 1: its short first
+    chunk, up to step 8, is the rest of chunk 1 and carries its index, and
+    chunks 2, 3 and 4 follow -- `first_step // 4` for every one of them, so an
+    index always names the same stretch of the run whichever call integrated
+    it, and within a call it never repeats.
     """
-    seen: list[int] = []
+    calls: list[list[int]] = []
 
     def record(datasets, chunk_index, elapsed_days):
-        seen.append(chunk_index)
+        calls[-1].append(chunk_index)
         return True, {}
 
     def coupler():
@@ -1353,10 +1363,74 @@ def test_an_extended_run_never_repeats_a_chunk_index(tmp_path):
         chunk="1 day", output_dir=tmp_path / "run",
         checkpoint_path=tmp_path / "checkpoint", health_check=record,
     )
+    calls.append([])
     run_chunked(coupler(), end_time="2001-01-03", **run)
+    calls.append([])
     run_chunked(coupler(), end_time="2001-01-05T12:00:00", **run)
-    assert seen == sorted(set(seen))
-    assert seen[:2] == [0, 1]
+    assert calls == [[0, 1], [1, 2, 3, 4]]
+    for indices in calls:
+        assert indices == sorted(set(indices))
+
+
+def test_an_extended_run_checkpoints_at_the_normal_interval(tmp_path, caplog):
+    """A run that ended on a short chunk, extended, saves on the interval again.
+
+    Four-step chunks with an eight-step interval: the first call ends at step 7
+    on a short chunk (and saves there, being the last). The extension resumes
+    off the grid; without a realignment its chunks would end at 11, 15 and 17
+    -- none a multiple of 8, so nothing but the final state would be saved.
+    With it they end at 8, 12, 16 and 17, and the saves due at 8 and 16 happen.
+    `seen` is what the checkpoint held as each chunk was judged.
+    """
+    def coupler():
+        return two_slabs(
+            start_date=jdt.to_datetime("2001-01-01T06:00:00"),
+            coupling_timestep=jdt.to_timedelta(6, "hours"),
+        )
+
+    checkpoint = tmp_path / "checkpoint"
+
+    def held_step():
+        """Return the step the checkpoint holds, read by a coupler on this clock."""
+        if not (checkpoint / CARRY_FILENAME).exists():
+            return None
+        return int(coupler().load_carry(checkpoint).step)
+
+    seen = []
+
+    def watch(datasets, chunk_index, elapsed_days):
+        seen.append(held_step())
+        return True, {}
+
+    run = dict(
+        chunk="1 day", checkpoint_interval="2 days",
+        output_dir=tmp_path / "run", checkpoint_path=checkpoint,
+    )
+    first = run_chunked(coupler(), end_time="2001-01-03", **run)
+    assert first.steps_completed == 7
+    assert held_step() == 7
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        extended = run_chunked(
+            coupler(), end_time="2001-01-05T12:00:00",
+            health_check=watch, **run,
+        )
+
+    assert extended.steps_completed == 17
+    # The one thing said is that 17 steps is not a whole number of intervals;
+    # nothing about the run starting off its chunk grid.
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "final gap between saves" in warnings[0]
+    # Judged before saving: the restored step 7; then the save at 8; the chunk
+    # to 12 is not on the interval; the save at 16; the last chunk (to 17) is
+    # judged with 16 held, and saved as the run's end.
+    assert seen == [7, 8, 8, 16]
+    assert held_step() == 17
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1583,57 @@ def test_a_resume_under_the_same_chunk_rewrites_and_is_allowed(
             reference["sea_surface_temperature"].values,
             atol=1e-12, rtol=0,
         )
+
+
+def test_a_realigned_resume_rewrites_the_short_first_chunk_and_the_files_after_it(
+    tmp_path, caplog
+):
+    """A resume off the chunk grid rewrites its first file and those on the grid.
+
+    A killed run with one-day chunks and a three-day interval leaves a
+    checkpoint at step 3 and files for steps 3 and 4. Resumed with two-day
+    chunks it integrates 3-4 (the short chunk back onto the grid), 4-6, 6-8:
+    the step-3 file is where its first chunk starts and the step-4 one is on
+    the grid, so both are this run's to rewrite -- and the directory reads back
+    as eight days with every record once.
+    """
+    output = tmp_path / "output"
+    checkpoint = tmp_path / "checkpoint"
+    settings = {
+        "chunk": "1 day",
+        "checkpoint_interval": "3 days",
+        "output_dir": output,
+        "checkpoint_path": checkpoint,
+    }
+    run_chunked(two_slabs(), total_time="3 days", **settings)
+    at_three = tmp_path / "checkpoint-at-step-3"
+    shutil.copytree(checkpoint, at_three)
+    run_chunked(two_slabs(), total_time="5 days", **settings)
+    shutil.rmtree(checkpoint)
+    shutil.copytree(at_three, checkpoint)
+    assert checkpoint_step(checkpoint) == 3
+
+    with caplog.at_level(logging.INFO):
+        result = run_chunked(
+            two_slabs(), total_time="8 days", chunk="2 days",
+            output_dir=output, checkpoint_path=checkpoint,
+        )
+
+    assert result.steps_completed == 8
+    assert (
+        "4 existing output file(s) at or after coupled step 3 start on this "
+        "run's chunk boundaries" in caplog.text
+    )
+    assert output_names(output) == [
+        f"{name}-{step:08d}.nc"
+        for name in ("ocn", "seaice")
+        for step in (0, 1, 2, 3, 4, 6)
+    ]
+    with xr.open_mfdataset(
+        sorted(output.glob("ocn-*.nc")), combine="by_coords"
+    ) as combined:
+        assert combined.sizes["time"] == 8
+        assert len(np.unique(combined["time"].values)) == 8
 
 
 def test_a_rechunked_resume_removes_a_file_it_keeps_no_record_for(
@@ -2300,6 +2425,401 @@ def test_output_options_reach_the_files(coupler, tmp_path):
         output_dir=tmp_path / "thinned", subsample=2,
     )
     assert xr.open_dataset(thinned.paths[0]).sizes["time"] == 2
+
+
+# ---------------------------------------------------------------------------
+# A spun-up state as the initial condition of a run with another start date
+# ---------------------------------------------------------------------------
+
+JULY_START = jdt.to_datetime("2001-07-01")
+
+
+class SeasonProbe:
+    """Reports the position in the annual cycle every step is handed.
+
+    The slab models sample their climatologies at `time.year_fraction`, so
+    what this records is the seasonal phase they were driven at.
+    """
+
+    name = "probe"
+
+    def initialize(self):
+        return {"calls": jnp.int32(0)}
+
+    def step(self, carry, time):
+        return {"calls": carry["calls"] + 1}, {"year_fraction": time.year_fraction}
+
+
+def probed_slabs(start_date: jdt.Datetime) -> Coupler:
+    """Return the two-slab coupler with a season probe, starting on `start_date`."""
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    return Coupler(
+        {**components, "probe": SeasonProbe()},
+        default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP,
+        start_date=start_date,
+    )
+
+
+def spun_up_in_january(steps: int = 5):
+    """Return a carry that has integrated `steps` days from 1 January."""
+    coupler = probed_slabs(START_DATE)
+    carry, _ = coupler.generate_trajectory_function(steps)(coupler.initialize())
+    return carry
+
+
+def test_a_spun_up_state_is_reused_under_another_start_date(tmp_path, caplog):
+    """Spin up in January, reset onto 1 July, run two more days.
+
+    The reset carry runs through `run_chunked` and through a trajectory
+    function alike, on the July calendar: the coupled time and step, the
+    output labels and file names, and the seasonal phase the components were
+    driven at all count from the new start date, and the two routes end in the
+    same carry. The physical state is the January run's, untouched.
+    """
+    january = spun_up_in_january()
+    july = probed_slabs(JULY_START)
+    reset = july.restart_clock(january)
+    assert reset.time == JULY_START
+    assert int(reset.step) == 0
+    np.testing.assert_array_equal(
+        reset.components["ocn"]["state"].sea_surface_temperature,
+        january.components["ocn"]["state"].sea_surface_temperature,
+    )
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="1 day", initial_carry=reset,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+
+    assert "Starting from the initial_carry argument at coupled step 0" in caplog.text
+    assert result.completed
+    assert result.steps_completed == 2
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert sorted(path.name for path in result.paths) == [
+        "ocn-00000000.nc", "ocn-00000001.nc",
+        "seaice-00000000.nc", "seaice-00000001.nc",
+    ]
+    with xr.open_mfdataset(
+        sorted((tmp_path / "output").glob("ocn-*.nc")), combine="by_coords"
+    ) as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ns]"),
+        )
+
+    trajectory = july.generate_trajectory_function(2)
+    final, diagnostics = trajectory(reset)
+    # 1 July is day 181 of a 365-day year, and the January run's day 5 is
+    # nowhere in it.
+    np.testing.assert_allclose(
+        diagnostics["probe"]["year_fraction"], [181 / 365, 182 / 365], rtol=1e-6
+    )
+    assert_carries_agree(result.final_carry, final, atol=1e-12)
+
+
+def test_an_initial_carry_from_another_start_date_is_refused_with_the_way_in(
+    tmp_path, caplog
+):
+    """The un-reset carry is refused before anything is compiled or written."""
+    january = spun_up_in_january()
+
+    with pytest.raises(ValueError) as raised:
+        run_chunked(
+            probed_slabs(JULY_START), total_time="2 days", chunk="1 day",
+            initial_carry=january,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+
+    message = str(raised.value)
+    assert "initial_carry" in message
+    assert "after 5 steps" in message
+    assert "restart_clock" in message
+    assert not list((tmp_path / "output").glob("*.nc"))
+
+    # A carry of this coupler's own start date -- a continuation, mid-run --
+    # is not refused.
+    coupler = probed_slabs(START_DATE)
+    result = run_chunked(
+        coupler, total_time="7 days", chunk="1 day", initial_carry=january,
+        output_dir=tmp_path / "continued", checkpoint_path=None,
+    )
+    assert result.steps_completed == 7
+
+
+def test_a_checkpoint_from_another_start_date_is_reused_through_a_reset(tmp_path):
+    """Load without the check, reset, pass as `initial_carry`.
+
+    Pointing `checkpoint_path` at the spun-up checkpoint is a resume, and a
+    resume under another start date is refused, so the state goes in as an
+    `initial_carry` and the run checkpoints somewhere of its own.
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    july = probed_slabs(JULY_START)
+
+    with pytest.raises(ValueError, match="restart_clock"):
+        run_chunked(
+            july, total_time="2 days", chunk="1 day",
+            output_dir=tmp_path / "refused", checkpoint_path=spun_up,
+        )
+
+    reset = july.restart_clock(july.load_carry(spun_up, check_clock=False))
+    checkpoint = tmp_path / "experiment-checkpoint"
+    result = run_chunked(
+        july, total_time="2 days", chunk="1 day", initial_carry=reset,
+        output_dir=tmp_path / "experiment", checkpoint_path=checkpoint,
+    )
+
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    # The experiment's own checkpoint is on the new calendar, so it resumes.
+    resumed = july.load_carry(checkpoint)
+    assert int(resumed.step) == 2
+    assert resumed.time == JULY_START + jdt.to_timedelta(2, "day")
+
+
+def test_an_initial_condition_directory_is_reused_under_another_start_date(
+    tmp_path, caplog
+):
+    """`initial_condition=<checkpoint>` is the reset route, in one argument.
+
+    The July run starts from the January checkpoint's physical state at step 0
+    on the July calendar, and ends in the same carry as loading the checkpoint
+    unchecked, resetting it and passing that as `initial_carry` does -- the two
+    routes cannot differ. The run's own checkpoint is then on the July
+    calendar and resumable.
+    """
+    spun_up = tmp_path / "spun-up"
+    january = spun_up_in_january()
+    probed_slabs(START_DATE).save_carry(january, spun_up)
+    july = probed_slabs(JULY_START)
+    checkpoint = tmp_path / "experiment-checkpoint"
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="1 day", initial_condition=spun_up,
+            output_dir=tmp_path / "experiment", checkpoint_path=checkpoint,
+        )
+
+    assert (
+        f"Starting from initial_condition {spun_up} at coupled step 0 "
+        "(its clock restarted from step 5 at 2001-01-06T00:00:00)."
+    ) in caplog.text
+    assert result.completed
+    assert result.steps_completed == 2
+    assert result.final_carry.time == JULY_START + jdt.to_timedelta(2, "day")
+    with xr.open_mfdataset(
+        sorted((tmp_path / "experiment").glob("ocn-*.nc")), combine="by_coords"
+    ) as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ns]"),
+        )
+
+    by_hand = run_chunked(
+        july, total_time="2 days", chunk="1 day",
+        initial_carry=july.restart_clock(january),
+        output_dir=tmp_path / "by-hand", checkpoint_path=None,
+    )
+    assert_carries_agree(result.final_carry, by_hand.final_carry, atol=1e-12)
+
+    resumed = july.load_carry(checkpoint)
+    assert int(resumed.step) == 2
+    assert resumed.time == JULY_START + jdt.to_timedelta(2, "day")
+
+
+def test_the_experiments_own_checkpoint_wins_over_the_initial_condition(
+    tmp_path, caplog
+):
+    """Repeating the launch command resumes the experiment, it does not restart it.
+
+    The first call starts from the spun-up state and checkpoints; the second,
+    with identical arguments and a longer run, finds that checkpoint, says the
+    `initial_condition` went unused, and ends where one uninterrupted run of
+    the whole length does -- which it could not if it had started over from
+    the spun-up state.
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    checkpoint = tmp_path / "experiment-checkpoint"
+    arguments = dict(
+        chunk="1 day", initial_condition=spun_up, checkpoint_path=checkpoint,
+        output_dir=tmp_path / "experiment",
+    )
+    run_chunked(probed_slabs(JULY_START), total_time="2 days", **arguments)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        second = run_chunked(probed_slabs(JULY_START), total_time="4 days", **arguments)
+
+    assert (
+        f"Resumed from checkpoint {checkpoint} at coupled step 2. "
+        f"The initial_condition {spun_up} was not used."
+    ) in caplog.text
+    assert "Starting from initial_condition" not in caplog.text
+    assert second.steps_completed == 4
+
+    july = probed_slabs(JULY_START)
+    uninterrupted = run_chunked(
+        july, total_time="4 days", chunk="1 day", initial_condition=spun_up,
+        checkpoint_path=None, output_dir=tmp_path / "uninterrupted",
+    )
+    assert_carries_agree(second.final_carry, uninterrupted.final_carry, atol=1e-12)
+
+
+def test_an_initial_condition_is_used_when_the_checkpoint_path_is_incomplete(
+    tmp_path, caplog
+):
+    """The wreckage of an interrupted save is not a checkpoint to resume."""
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            probed_slabs(JULY_START), total_time="1 day", chunk="1 day",
+            initial_condition=spun_up, checkpoint_path=checkpoint,
+            output_dir=tmp_path / "output",
+        )
+
+    assert f"Starting from initial_condition {spun_up}" in caplog.text
+    assert "the run starts from initial_condition" in caplog.text
+    assert "was not used" not in caplog.text
+
+
+def test_an_initial_condition_and_an_initial_carry_are_mutually_exclusive(tmp_path):
+    """Two statements of where to start are refused before anything is loaded."""
+    january = spun_up_in_january()
+    with pytest.raises(ValueError, match="initial_carry and initial_condition"):
+        run_chunked(
+            probed_slabs(START_DATE), total_time="1 day", chunk="1 day",
+            initial_carry=january, initial_condition=tmp_path / "anywhere",
+            output_dir=tmp_path / "output", checkpoint_path=None,
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_an_initial_condition_without_a_checkpoint_is_refused(tmp_path):
+    """A named state that is not there is an error, not a cold start."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for missing in (empty, tmp_path / "typo"):
+        with pytest.raises(ValueError, match="holds no .*not a complete checkpoint"):
+            run_chunked(
+                probed_slabs(JULY_START), total_time="1 day", chunk="1 day",
+                initial_condition=missing, checkpoint_path=None,
+                output_dir=tmp_path / "output",
+            )
+    assert not list((tmp_path / "output").glob("*.nc"))
+
+
+def test_a_mismatched_clock_is_refused_naming_both_routes_in(tmp_path):
+    """Whichever way the foreign state arrives, the message offers both fixes.
+
+    A carry passed as `initial_carry` and a checkpoint resumed from
+    `checkpoint_path` are refused by the same check, and the message names the
+    Python route (`restart_clock`) and the command-line one
+    (`coupled_run.initial_condition`).
+    """
+    spun_up = tmp_path / "spun-up"
+    probed_slabs(START_DATE).save_carry(spun_up_in_january(), spun_up)
+    july = probed_slabs(JULY_START)
+
+    for keyword, value in (
+        ("initial_carry", spun_up_in_january()),
+        ("checkpoint_path", spun_up),
+    ):
+        arguments = {"checkpoint_path": None, keyword: value}
+        with pytest.raises(ValueError) as raised:
+            run_chunked(
+                july, total_time="1 day", chunk="1 day",
+                output_dir=tmp_path / "output", **arguments,
+            )
+        message = str(raised.value)
+        assert "restart_clock" in message
+        assert "coupled_run.initial_condition=" in message
+        assert "initial_condition=<checkpoint directory>" in message
+
+
+@pytest.mark.slow
+def test_a_spun_up_atmosphere_is_reused_under_another_start_date(tmp_path, caplog):
+    """The reset reaches JCM's own clock, and the run on the new date is clean.
+
+    A real atmosphere keeps a clock of its own in its carry and checks it
+    against the coupler's every step. One coupled day from 1 January, reset
+    onto a coupler that starts on 1 July, and two more days through
+    `run_chunked`: JCM's clock and step counter count from July (the step
+    counter has advanced exactly twice as far as the day of spin-up took), its
+    clock-drift check against the coupler's stays silent, and the output is
+    labelled on the July calendar.
+    """
+    import jcm
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.terrain import TerrainData
+
+    from jem.components import JCMComponent
+    from jem.components.slab import SlabGrid
+
+    def build(start_date) -> Coupler:
+        coords = get_speedy_coords(layers=5, spectral_truncation=21)
+        model = jcm.model.Model(
+            coords=coords,
+            terrain=TerrainData.aquaplanet(coords),
+            start_time=start_date,
+        )
+        components = {
+            "atm": JCMComponent(model),
+            "ocn": SlabOceanModel(SlabGrid.from_coords(coords.horizontal)),
+        }
+        return Coupler(
+            components,
+            default_exchangers(components),
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=start_date,
+        )
+
+    january = build(START_DATE)
+    spun_up, _ = january.generate_trajectory_function(1)(january.initialize())
+    steps_per_day = int(spun_up.components["atm"]["step"])
+    assert steps_per_day > 0
+
+    july = build(JULY_START)
+    reset = july.restart_clock(spun_up)
+    atmosphere = reset.components["atm"]
+    assert atmosphere["time"] == JULY_START
+    assert int(atmosphere["step"]) == 0
+    np.testing.assert_array_equal(
+        july.components["atm"].model.dycore.sim_time(atmosphere["state"]), 0.0
+    )
+
+    drift = "disagrees with the coupler"
+    with caplog.at_level(logging.ERROR, logger="jem.components.jcm.component"):
+        result = run_chunked(
+            july, total_time="2 days", chunk="2 days", initial_carry=reset,
+            output_dir=tmp_path / "output", checkpoint_path=None,
+            health_check=None,
+        )
+        jax.effects_barrier()
+    assert drift not in caplog.text
+    final = result.final_carry
+    assert final.time == JULY_START + jdt.to_timedelta(2, "day")
+    assert final.components["atm"]["time"] == final.time
+    assert int(final.components["atm"]["step"]) == 2 * steps_per_day
+    with xr.open_dataset(tmp_path / "output" / "atm-00000000.nc") as written:
+        np.testing.assert_array_equal(
+            written["time"].values,
+            np.array(["2001-07-01T12:00", "2001-07-02T12:00"], dtype="datetime64[ms]"),
+        )
+        # The seasonal cycle follows the new start date: the atmosphere was
+        # spun up in January, when the southern hemisphere has the stronger
+        # sun (by about 330 W m-2 over the hemispheres), and on 1 July it is
+        # the northern one.
+        incoming = written["shortwave_rad.fsol"]
+        northern = incoming.where(written["lat"] > 0).mean(("lon", "lat"))
+        southern = incoming.where(written["lat"] < 0).mean(("lon", "lat"))
+        assert bool(((northern - southern) > 100.0).all())
 
 
 # ---------------------------------------------------------------------------

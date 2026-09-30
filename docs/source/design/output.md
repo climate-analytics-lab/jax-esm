@@ -51,7 +51,10 @@ The conventions, which are JCM's:
   (`xr.merge(join="exact")`). Each `to_xarray` hands those values, plus
   `TimeAxis.attrs`, straight to xarray. JCM's own output additionally
   carries a `time_bounds` variable with each interval's start and end; the
-  other components do not. The dates are `jax_datetime`'s proleptic
+  other components do not, **by decision**: they merge with the atmosphere on
+  the identical midpoint axis, so bounds would add nothing a merge needs, and
+  the interval of record *k* is `[start_date + k dt, start_date + (k+1) dt)`
+  for a reader that wants it. The dates are `jax_datetime`'s proleptic
   Gregorian — there is one clock and one calendar, so no component's labels
   can disagree with another's about what day it is.
 - **Variable names**: state and derived quantities keep their plain names,

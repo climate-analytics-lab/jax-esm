@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import functools
 import inspect
 import logging
 import math
@@ -66,6 +67,7 @@ from jem.base.component import (
     Exchanger,
     SupportsBind,
     SupportsCheckpoint,
+    SupportsClockReset,
     SupportsXarray,
     TimeAxis,
 )
@@ -740,7 +742,6 @@ class Coupler:
         return CouplingTime(
             step=step_array,
             time=time,
-            sim_time=step_array * self._dt_seconds,
             dt=self._dt_seconds,
         )
 
@@ -777,7 +778,6 @@ class Coupler:
             step=substep,
             time=time
             + jdt.to_timedelta(call * self._dt_total_seconds // multiplicity, "second"),
-            sim_time=substep * sub_dt,
             dt=sub_dt,
         )
 
@@ -808,6 +808,131 @@ class Coupler:
             start_date=self._start_date,
             steps=np.arange(first_step, first_step + n),
             dt=dt,
+        )
+
+    def require_consistent_clock(self, carry: CoupledCarry, *, source: str = "carry") -> None:
+        """Raise if ``carry``'s clock is not one this coupler's clock produces.
+
+        A coupled run labels its output, samples its climatologies and names
+        its files from this coupler's ``start_date`` and timestep, so a carry
+        whose ``time`` is not ``start_date + step * coupling_timestep`` would
+        be integrated on one clock and labelled on another. It says nothing
+        about *why*: a checkpoint written under another configuration and a
+        state deliberately taken from a run with another start date look the
+        same here, and the message names both remedies.
+
+        This is the check :meth:`load_carry` and
+        :func:`jem.driver.run_chunked` (for its ``initial_carry``) apply.
+        :meth:`generate_trajectory_function` does not: it is a pure function
+        of whatever carry it is handed, and a check that reads the carry's
+        values could not run under ``jit``.
+
+        Parameters
+        ----------
+        carry : CoupledCarry
+            The carry to check; it must hold concrete values.
+        source : str
+            What to call the carry in the message (``"checkpoint <dir>"``,
+            ``"initial_carry"``).
+
+        Raises
+        ------
+        ValueError
+            If ``carry.time`` is not this coupler's start date advanced by
+            ``carry.step`` timesteps. The message names :meth:`restart_clock`.
+
+        """
+        step = int(carry.step)
+        found = np.asarray(jax.device_get(carry.time).to_datetime64(), "datetime64[s]")
+        expected = np.asarray(
+            self._start_date.to_datetime64(), "datetime64[s]"
+        ) + np.timedelta64(step * self._dt_total_seconds, "s")
+        if found != expected:
+            raise ValueError(
+                f"{self.name}: {source} is at {found} after {step} steps, but "
+                f"this coupler's start date ({self._start_date.to_datetime64()}) "
+                f"and timestep ({self._dt_total_seconds} s) put step {step} at "
+                f"{expected}. If it came from a run with the same start date "
+                "and timestep, use the configuration it was produced with. To "
+                "reuse it as the initial condition of a run that starts on "
+                "this coupler's start date, reset its clock: in Python, "
+                "`carry = coupler.restart_clock(carry)` (or "
+                "`run_chunked(..., initial_condition=<checkpoint directory>)` "
+                "for a checkpoint); from the command line, "
+                "`coupled_run.initial_condition=<checkpoint directory>`."
+            )
+
+    def restart_clock(self, carry: CoupledCarry) -> CoupledCarry:
+        """Return ``carry`` with the clock put back at this coupler's start date.
+
+        This is how a spun-up state becomes the initial condition of an
+        experiment with a **different start date**: build the coupler for the
+        experiment (its components are bound to *its* start date), reset the
+        carry onto it, and run from there. The coupled ``time`` becomes
+        ``start_date`` and ``step`` becomes 0, exactly as
+        :meth:`initialize` leaves them, so everything derived from the clock
+        -- the position in the seasonal cycle (``CouplingTime.year_fraction``),
+        the output time axis and file names, ``checkpoint_interval``,
+        ``subsample`` -- counts from the new start. Nothing else in the
+        coupled state changes: the model's physical state is the point of
+        reusing it.
+
+        A component that keeps a clock of its own in its carry (JCM's
+        ``time``/``step``, Veros' ``variables.time``) implements
+        :class:`~jem.base.component.SupportsClockReset`, and each such
+        component is asked to reset its own; the coupler holds no knowledge
+        of which components those are. A component with no clock in its carry
+        needs nothing (the slab models read the season from the
+        :class:`~jem.base.component.CouplingTime` every step). A nested
+        :class:`Coupler` is one of the former: it resets its own clock and its
+        components' in turn, and its start date is the outer one's (checked
+        at :meth:`bind`).
+
+        The result is a new carry; ``carry`` is not modified. It can be
+        passed as ``initial_carry`` to :func:`jem.driver.run_chunked` or to
+        a trajectory function, and a checkpoint is reset the same way::
+
+            carry = coupler.load_carry(spun_up, check_clock=False)
+            carry = coupler.restart_clock(carry)
+
+        Parameters
+        ----------
+        carry : CoupledCarry
+            A carry with a component for each of this coupler's components,
+            at any step.
+
+        Returns
+        -------
+        CoupledCarry
+
+        Raises
+        ------
+        ValueError
+            If ``carry`` has no entry for a component of this coupler or has
+            entries this coupler has no component for: it is not a carry of
+            this model, and resetting part of one would leave the rest on the
+            old clock.
+
+        """
+        if set(carry.components) != set(self.components):
+            raise ValueError(
+                f"{self.name}: the carry holds components "
+                f"{sorted(carry.components)!r}, but this coupler's are "
+                f"{sorted(self.components)!r}; it cannot be reset onto this "
+                "coupler."
+            )
+        components = {
+            name: (
+                component.restart_clock(carry.components[name])
+                if isinstance(component, SupportsClockReset)
+                else carry.components[name]
+            )
+            for name, component in self.components.items()
+        }
+        # `dataclasses.replace` so that a field added to CoupledCarry later is
+        # carried through untouched. The dtypes are those `initialize` gives.
+        return dataclasses.replace(
+            carry, components=components, time=self._start_date, step=jnp.int32(0)
         )
 
     # -- the coupled model as a function -----------------------------------
@@ -1441,15 +1566,25 @@ class Coupler:
             if isinstance(component, SupportsCheckpoint)
         }
 
-    def _component_loaders(self) -> dict[str, Callable[[Path], Carry]]:
+    def _component_loaders(self, check_clock: bool) -> dict[str, Callable[[Path], Carry]]:
         """Return the ``load_carry`` of every component that has one.
 
         The inverse of :meth:`_component_savers`, derived from the same
         capability, so a carry written by a component's ``save_carry`` is
         always read back by that component's ``load_carry``.
+
+        A nested :class:`Coupler` is loaded with the same ``check_clock`` as
+        the coupler that contains it: a checkpoint loaded unchecked, to be
+        passed through :meth:`restart_clock`, is unchecked at every level, or
+        the nested model would refuse the very carry the reset is about to
+        repair.
         """
         return {
-            name: component.load_carry
+            name: (
+                functools.partial(component.load_carry, check_clock=check_clock)
+                if isinstance(component, Coupler)
+                else component.load_carry
+            )
             for name, component in self.components.items()
             if isinstance(component, SupportsCheckpoint)
         }
@@ -1515,7 +1650,9 @@ class Coupler:
 
         save_coupled_carry(carry, directory, component_savers=self._component_savers())
 
-    def load_carry(self, directory: Path) -> CoupledCarry:
+    def load_carry(
+        self, directory: Path, *, check_clock: bool = True
+    ) -> CoupledCarry:
         """Read back a coupled carry written by :meth:`save_carry`.
 
         The exact inverse: the loaders are derived from the same components,
@@ -1544,10 +1681,26 @@ class Coupler:
         :func:`jem.checkpoint.load_coupled_carry` -- once, from there, so a
         nested model reports each level as it is read rather than twice.
 
+        **The clock is checked by default.** A checkpoint whose ``time`` is
+        not this coupler's ``start_date`` plus ``step`` timesteps was written
+        under another start date or timestep, and resuming it would integrate
+        on one clock and label on another (:meth:`require_consistent_clock`). To reuse a
+        checkpoint deliberately as the initial condition of a run with a
+        different start date, name it as ``initial_condition`` of
+        :func:`jem.driver.run_chunked` (``coupled_run.initial_condition`` on
+        the command line), or load it with ``check_clock=False`` and pass the
+        result through :meth:`restart_clock` before running it;
+        :func:`jem.driver.run_chunked` refuses an ``initial_carry`` that has
+        not been.
+
         Parameters
         ----------
         directory : pathlib.Path
             A directory written by :meth:`save_carry`.
+        check_clock : bool
+            Refuse a checkpoint whose clock is not this coupler's. ``False``
+            is for a carry that :meth:`restart_clock` is about to reset; it
+            applies to every nested coupler as well.
 
         Returns
         -------
@@ -1557,7 +1710,8 @@ class Coupler:
         ------
         ValueError
             If ``directory`` holds no carry file, i.e. it is not a complete
-            checkpoint, or if what it holds does not match this model.
+            checkpoint, if what it holds does not match this model, or if
+            ``check_clock`` and its clock is not this coupler's.
 
         """
         # See `save_carry` for why this import is not at module scope.
@@ -1566,24 +1720,10 @@ class Coupler:
         carry = load_coupled_carry(
             directory,
             self._plain_component_templates(),
-            component_loaders=self._component_loaders(),
+            component_loaders=self._component_loaders(check_clock),
         )
-        # Output labels are built from this coupler's start date and timestep,
-        # so a checkpoint whose clock does not sit on them (the start date or
-        # timestep was changed between runs) would be integrated on one clock
-        # and labelled on another.
-        step = int(carry.step)
-        saved = np.asarray(jax.device_get(carry.time).to_datetime64(), "datetime64[s]")
-        expected = np.asarray(
-            self._start_date.to_datetime64(), "datetime64[s]"
-        ) + np.timedelta64(step * int(self._dt_seconds), "s")
-        if saved != expected:
-            raise ValueError(
-                f"{self.name}: checkpoint {directory} is at {saved} after "
-                f"{step} steps, but this coupler's start date and timestep put "
-                f"step {step} at {expected}. Resume with the configuration the "
-                "run was started with."
-            )
+        if check_clock:
+            self.require_consistent_clock(carry, source=f"checkpoint {directory}")
         return carry
 
     def __repr__(self) -> str:

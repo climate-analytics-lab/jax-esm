@@ -72,6 +72,20 @@ bail_on_unhealthy: true
 # Disable with `coupled_run.checkpoint_path=null`.
 checkpoint_path: checkpoint
 
+# A checkpoint directory to use as the initial condition of this run, whatever
+# clock it was written under -- how a spun-up state is reused by an experiment
+# with a different start date (`coupled_run.initial_condition=/scratch/spinup/
+# checkpoint`). Its physical state is kept and its clock is restarted at the
+# atmosphere's `start_time`, coupled step 0. null starts from the components'
+# own initial state.
+#
+# It is used only when `checkpoint_path` holds no complete checkpoint: once the
+# run has written its own, that is what the same command resumes, so a restarted
+# experiment is not thrown back to the spun-up state. The provenance line the
+# run logs says which one it started from. A relative path is resolved against
+# the working directory (Hydra does not change it), unlike `checkpoint_path`.
+initial_condition: null
+
 # How often that checkpoint is written, in the same duration forms as `chunk`.
 # null -- the default -- writes one after every chunk the health gate accepts.
 # A value must be a whole multiple of `chunk` (a chunk boundary is the only

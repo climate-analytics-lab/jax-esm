@@ -43,11 +43,21 @@ when the checkpoints fall depends on it, because ``subsample`` counts coupled
 steps from the start of the **run** (:mod:`jem.output`) and so does
 ``checkpoint_interval``.
 
-The trajectory is compiled once per batch length: once for ``chunk``, and
-once more for a short last batch. A resumed run whose restored step is not a
-whole number of its chunks -- a checkpoint written under another ``chunk``,
-or at the end of a run whose length was not a whole number of chunks --
-counts its batches from that step, so it too may end in a short batch.
+**The chunks sit on a grid** of multiples of ``chunk`` counted from step 0 of
+the run -- the grid ``checkpoint_interval`` and ``subsample`` are counted on
+too. A run that starts off it -- a checkpoint written under another ``chunk``,
+or at the end of an earlier run whose last chunk was short (a run extended to a
+later ``end_time``) -- integrates a **short first chunk**, just long enough to
+land on the next multiple of ``chunk``, so that every later chunk boundary is a
+grid line: a checkpoint due at a multiple of the interval is not stepped over,
+and the output files after the first line up with the ones an uninterrupted run
+writes. (The first file is named after the step the run resumed at, like every
+other.) ``chunk_index`` is the grid chunk a batch lies in, so the short first
+piece of a chunk the earlier run stopped inside carries that chunk's index.
+
+The trajectory is compiled once per batch length: once for ``chunk``, and once
+more for each of the short first and short last batches a run has (they share
+one compilation when they happen to be the same length).
 
 Resuming
 --------
@@ -98,8 +108,9 @@ write *beside* the killed run's leftovers rather than over them and leave the
 directory holding two passes' records for overlapping simulated time. So a
 resumed run checks, before anything is compiled, that every output file at or
 after the step it restored is one this call really writes over
-(:func:`_check_resumed_output_is_rewritable`): it starts on one of *this*
-run's chunk boundaries **and** before the step this run stops at. Those it
+(:func:`_check_resumed_output_is_rewritable`): it starts where one of *this*
+run's chunks does (the step it restored, or a multiple of ``chunk``) **and**
+before the step this run stops at. Those it
 rewrites -- or, for a chunk it keeps no record of (a ``subsample`` stride that
 lands on none of that chunk's steps), removes, since this pass's output for
 that name is nothing and leaving the earlier pass's file there would leave a
@@ -133,8 +144,9 @@ command distinguishes the two, and a run that was meant to resume and quietly
 cold-started repeats simulated time that has already been paid for. So
 :func:`run_chunked` states the provenance of the carry it is about to
 integrate, at INFO, in exactly one line, before anything is compiled --
-``coupler.initialize()``, the ``initial_carry`` argument, or a named
-checkpoint, always with the coupled step. A ``checkpoint_path`` that holds no
+``coupler.initialize()``, the ``initial_carry`` argument, the
+``initial_condition`` directory, or the run's own checkpoint, always with the
+coupled step. A ``checkpoint_path`` that holds no
 complete checkpoint says so on the line before, naming the failure and what
 the run does instead -- for a run with no ``initial_carry``, in as many words,
 that every component starts from its initial state rather than from a restart.
@@ -145,6 +157,34 @@ nobody can avoid is a warning nobody reads. Both name the path, so a mistyped
 one is visible in the line the run always prints. :meth:`jem.base.coupler.Coupler.load_carry` completes the picture
 by naming each component's own source -- the shared carry file or its own
 ``load_carry`` -- so no part of a resumed model's carry is unaccounted for.
+
+Reusing a spun-up state as the initial condition of a run with a **different
+start date** is supported, but explicitly. Such a carry's clock is not this
+coupler's, and integrating it as it stands would label, name and checkpoint it
+on the wrong dates, so ``initial_carry`` is refused -- with a message naming the
+way in -- unless its clock is this coupler's
+(:meth:`~jem.base.coupler.Coupler.require_consistent_clock`, the check
+:meth:`~jem.base.coupler.Coupler.load_carry` applies to a checkpoint, so the two
+ways in cannot disagree about what a consistent clock is).
+There are two ways in, one per interface:
+
+- Python: :meth:`~jem.base.coupler.Coupler.restart_clock` puts the coupled
+  clock, and every component's own, back at this coupler's start date, and its
+  result is passed as ``initial_carry``.
+- A checkpoint directory, from Python or the command line: ``initial_condition``
+  (``coupled_run.initial_condition=<directory>``) loads it with the clock check
+  off, resets its clock exactly as ``restart_clock`` does, and starts from it.
+  A directory is the form a spun-up state takes on disk, and it is the only
+  form a command line can name.
+
+``checkpoint_path`` and ``initial_condition`` may both be set, and that is
+what lets one command serve a whole experiment: a **complete checkpoint at**
+``checkpoint_path`` **wins**, and ``initial_condition`` is used only when there
+is none. The first launch therefore starts from the spun-up state; the
+experiment's own checkpoint then exists, so the same command resumes the
+experiment rather than restarting it from the spun-up state and repeating
+simulated time already paid for. The provenance line says which happened, and
+which argument went unused.
 
 ``CoupledCarry.step`` restored from the checkpoint is the only source of truth
 for how far the run has got. Nothing is derived from the chunk index or from a
@@ -317,6 +357,7 @@ def run_chunked(
     end_time: str | None = None,
     chunk: str | float = "30 days",
     initial_carry: CoupledCarry | None = None,
+    initial_condition: Path | str | None = None,
     output_dir: Path | str = "outputs",
     output_averages: bool = False,
     subsample: int = 1,
@@ -351,7 +392,29 @@ def run_chunked(
     initial_carry : jem.base.component.CoupledCarry, optional
         Where to start. Defaults to ``coupler.initialize()``. A complete
         checkpoint found at ``checkpoint_path`` takes precedence over it, and
-        the run says so.
+        the run says so. Its clock must be this coupler's
+        (:meth:`~jem.base.coupler.Coupler.require_consistent_clock`): to use
+        a state from a run with another start date as this run's initial
+        condition, pass it through
+        :meth:`~jem.base.coupler.Coupler.restart_clock` first, which puts the
+        coupled clock and every component's own clock at this coupler's
+        ``start_date``. Mutually exclusive with ``initial_condition``.
+    initial_condition : path-like, optional
+        A checkpoint directory -- one written by
+        :meth:`~jem.base.coupler.Coupler.save_carry`, or another run's
+        ``checkpoint_path`` -- to use as the run's initial condition, whatever
+        clock it was written under. It is loaded with the clock check off and
+        passed through :meth:`~jem.base.coupler.Coupler.restart_clock`, so the
+        run starts at this coupler's ``start_date`` and coupled step 0 with
+        the checkpoint's physical state; it is what ``initial_carry`` is for a
+        state that is on disk, and what
+        ``coupled_run.initial_condition=<directory>`` sets from the command
+        line. Like ``initial_carry`` it is used only when no complete
+        checkpoint is found at ``checkpoint_path``, so the run's own
+        checkpoint, once written, is what a repeated command resumes. A
+        relative path is resolved against the working directory (it names
+        something that already exists, unlike ``checkpoint_path``, which names
+        where this run writes). Mutually exclusive with ``initial_carry``.
     output_dir : path-like
         Directory the chunk files are written into, created if absent.
     output_averages : bool
@@ -368,9 +431,9 @@ def run_chunked(
         ``n`` records of a kept step and none of a dropped one: the stride is
         in coupled steps, not in records. A chunk that contains no coupled
         step on the stride -- which a ``subsample`` longer than ``chunk`` can
-        give, and so can the short final batch a resume under a different
-        chunk length ends with -- writes **no file** rather than an empty
-        one, and removes an earlier pass's file at that name if one is there.
+        give, and so can a short first or last batch -- writes **no file**
+        rather than an empty one, and removes an earlier pass's file at that
+        name if one is there.
         ``paths`` is then one file per component per chunk except for the
         chunks that kept nothing.
     health_check : callable, optional
@@ -482,8 +545,13 @@ def run_chunked(
         and ``end_time`` is given, if ``end_time`` is not after the start
         date, ``checkpoint_interval`` is not a whole number of chunks or was given
         without a ``checkpoint_path``, or ``subsample`` is not a positive
-        integer, or if ``accumulate`` is given with a ``health_check``. All of
-        them are checked before anything is compiled or integrated. Also if
+        integer, or if ``accumulate`` is given with a ``health_check``, or if
+        ``initial_carry`` is at a time this coupler's start date and timestep
+        do not put its step at (its message names both ways in: ``restart_clock``
+        and ``initial_condition``), if both ``initial_carry`` and
+        ``initial_condition`` are given, or if ``initial_condition`` is used
+        and holds no complete checkpoint. All of them are checked before
+        anything is compiled or integrated. Also if
         the run resumes from a checkpoint and ``output_dir`` already holds
         output at or after the restored step that this run will not write
         again -- an earlier pass's files, off this run's chunk grid or past
@@ -532,6 +600,12 @@ def run_chunked(
     # until the first chunk has already been written, and finding out then
     # that it was 0 would have cost a chunk of an atmosphere.
     check_subsample(subsample)
+    if initial_carry is not None and initial_condition is not None:
+        raise ValueError(
+            "initial_carry and initial_condition both name where the run "
+            "starts; give one. initial_carry is a carry already in memory, "
+            "initial_condition a checkpoint directory."
+        )
     steps_per_chunk = _whole_steps(chunk, coupler, "chunk")
     run_length = (
         f"total_time={total_time!r}" if end_time is None else f"end_time={end_time!r}"
@@ -558,7 +632,7 @@ def run_chunked(
     checkpoint_dir = _checkpoint_directory(checkpoint_path, output_dir)
 
     carry, provenance, resumed = _starting_carry(
-        coupler, initial_carry, checkpoint_dir
+        coupler, initial_carry, initial_condition, checkpoint_dir
     )
     # One line, always, whatever the run does next: a modeller reading a log
     # has to be able to see at a glance whether the state being integrated is
@@ -633,8 +707,10 @@ def run_chunked(
             run_length, total_steps, checkpoint_interval, steps_per_checkpoint,
         )
 
-    # Cached by length: every batch but (at most) the last is a full chunk,
-    # so a run compiles one trajectory, or two when its last batch is short.
+    # Cached by length: every batch but (at most) the first and the last is a
+    # full chunk, so a run compiles one trajectory, plus one for each of a
+    # short first batch (a run that starts off the chunk grid) and a short last
+    # one -- the same one when they are the same length.
     trajectories: dict[int, Callable[..., tuple[CoupledCarry, Any]]] = {}
 
     reports: list[dict] = []
@@ -660,34 +736,6 @@ def run_chunked(
             "Nothing to integrate: the run starts at coupled step %d and asks "
             "for %d. %s", int(carry.step), total_steps, provenance,
         )
-    elif steps_per_checkpoint is not None and int(carry.step) % steps_per_chunk:
-        # The interval is counted from the start of the run and the loop can
-        # only stop at a chunk boundary, so when the starting step is not a
-        # whole number of THIS run's chunks, no chunk before the last can end
-        # on a multiple of the interval. (The last one can: `remaining_batches`
-        # makes the final batch the short one, so it ends exactly at
-        # `total_steps`.) Every save in between is lost, which is worse than
-        # what the interval asked for, so it is said rather than silently
-        # accepted. A run starts at such a step when it resumes a checkpoint
-        # written under a different `chunk`, or one written at the end of an
-        # earlier run whose length was not a whole number of chunks (a run
-        # extended to a later `end_time`), or is handed an `initial_carry`
-        # part-way through a chunk. Only the first has a chunk to go back
-        # to, and the checkpoint does not record which it was, so the remedy
-        # is conditional.
-        remedy = (
-            " If the checkpoint was written under a different chunk, resuming "
-            "with that chunk restores the interval."
-        ) if resumed else ""
-        logger.warning(
-            "This run starts at coupled step %d, which is not a whole number "
-            "of the %d-step chunks it is using, so no chunk it integrates "
-            "before the last can end on a multiple of the %d-step "
-            "checkpoint_interval: it will checkpoint when it finishes (and, if "
-            "the health gate stops it, at the last chunk that passed), but not "
-            "in between.%s",
-            int(carry.step), steps_per_chunk, steps_per_checkpoint, remedy,
-        )
 
     # The last chunk the health gate accepted and the interval did NOT save, so
     # that a bail-out can still leave the restart point at the last healthy
@@ -696,13 +744,15 @@ def run_chunked(
     pending_carry: CoupledCarry | None = None
     for batch_index, steps in enumerate(batches):
         first_step = int(carry.step)
-        # A counter for the health check and the log line only. It is
-        # run-global -- `first_step` in chunks, rounded up -- so a resumed run
-        # carries on numbering rather than starting again at 0, including one
-        # resumed off the chunk grid after a short final chunk. It labels a
-        # position for a health check's report; `first_step`, which names the
-        # output files, is what identifies a chunk exactly.
-        chunk_index = -(-first_step // steps_per_chunk)
+        # A counter for the health check and the log line only: the grid chunk
+        # this batch lies in, `first_step // steps_per_chunk`. It is run-global,
+        # so a resumed run carries on numbering rather than starting again at
+        # 0. The short first batch of a run that resumed off the grid is the
+        # rest of the chunk the earlier run stopped inside and so shares that
+        # chunk's index; every other batch starts on the grid and has its own.
+        # `first_step`, which names the output files, is what identifies a
+        # chunk exactly.
+        chunk_index = first_step // steps_per_chunk
         if steps not in trajectories:
             trajectories[steps] = coupler.generate_trajectory_function(
                 steps, accumulate=accumulate
@@ -1032,10 +1082,11 @@ def _check_resumed_output_is_rewritable(
     call really writes over it, which takes **both** halves of what the run is
     about to do:
 
-    - it starts on this run's **chunk grid**, ``restored_step + k *
-      steps_per_chunk`` -- where this run's chunks begin, the short final batch
-      included (:func:`jem.checkpoint.remaining_batches` puts it last, so it
-      too starts on the grid); and
+    - it starts where one of this run's chunks does: at ``restored_step``
+      itself, or on the chunk grid, a multiple of ``steps_per_chunk``
+      (:func:`jem.checkpoint.remaining_batches` makes a run that starts off the
+      grid integrate a short first chunk up to the next multiple, so every
+      later chunk, the short last one included, starts on it); and
     - it starts **before** ``total_steps``, because that is where this run
       stops. A run resumed for less simulated time than an earlier, longer pass
       already wrote leaves that pass's files beyond its own end: on the grid or
@@ -1111,7 +1162,7 @@ def _check_resumed_output_is_rewritable(
     for path, step in existing:
         if step >= total_steps:
             past_the_end.append(path)
-        elif (step - restored_step) % steps_per_chunk:
+        elif step != restored_step and step % steps_per_chunk:
             overlapping.append(path)
         else:
             rewritten.append(path)
@@ -1138,8 +1189,8 @@ def _check_resumed_output_is_rewritable(
             f"{restored_step}, which this run resumed from, that this run will "
             "never write again. A file is named after the coupled step its "
             f"chunk starts at, and this run writes chunks starting at "
-            f"{restored_step} + k x {steps_per_chunk} coupled steps "
-            f"(chunk={chunk!r}) up to step {total_steps}. "
+            f"{restored_step} and then at every multiple of {steps_per_chunk} "
+            f"coupled steps (chunk={chunk!r}) up to step {total_steps}. "
             + ". ".join(reasons)
             + ". Resume with the chunk those files were written under (and, "
             "for those past the end, a run length that reaches them), or "
@@ -1166,18 +1217,26 @@ def _check_resumed_output_is_rewritable(
 def _starting_carry(
     coupler: "Coupler",
     initial_carry: CoupledCarry | None,
+    initial_condition: Path | str | None,
     checkpoint_dir: Path | None,
 ) -> tuple[CoupledCarry, str, bool]:
     """Return the starting carry, where it came from, and whether it was resumed.
 
-    There are only three places a run's starting state can come from -- a
-    checkpoint, the ``initial_carry`` argument, or ``coupler.initialize()`` --
-    and which one it was decides what the run *means*: a cold start where a
-    restart was intended repeats simulated time that has already been paid
-    for, and does it silently, because the command that resumes a run is the
-    command that starts one. So the choice is made here, in one place, and
-    handed back with the sentence :func:`run_chunked` logs, rather than each
-    branch logging its own half of the story.
+    There are only four places a run's starting state can come from -- the
+    run's own checkpoint, the ``initial_carry`` argument, the
+    ``initial_condition`` directory, or ``coupler.initialize()`` -- and which
+    one it was decides what the run *means*: a cold start where a restart was
+    intended repeats simulated time that has already been paid for, and does
+    it silently, because the command that resumes a run is the command that
+    starts one. So the choice is made here, in one place, and handed back with
+    the sentence :func:`run_chunked` logs, rather than each branch logging its
+    own half of the story.
+
+    The run's own checkpoint always wins over the other two, which are both
+    "where to start a run that has not started yet": once the run has written
+    a checkpoint, starting from ``initial_condition`` again would throw away
+    what it integrated. That precedence is what lets one command be both the
+    launch and the restart of an experiment begun from a spun-up state.
 
     A checkpoint directory with no carry file is not a checkpoint but the
     wreckage of an interrupted save (:mod:`jem.checkpoint` publishes that file
@@ -1198,17 +1257,28 @@ def _starting_carry(
         (None, None, logging.INFO) if path is None else _load_checkpoint(coupler, path)
     )
     if restored is not None:
-        # A caller who passed both gets told which one won, because the
-        # argument they wrote is not the state that is being integrated.
-        ignored = "" if initial_carry is None else (
-            " The initial_carry argument was not used."
+        # A caller who passed a starting state as well gets told which one
+        # won, because the argument they wrote is not the state that is being
+        # integrated.
+        unused = (
+            "initial_carry argument" if initial_carry is not None
+            else f"initial_condition {initial_condition}"
+            if initial_condition is not None
+            else None
         )
+        ignored = "" if unused is None else f" The {unused} was not used."
         return restored, (
             f"Resumed from checkpoint {path} at coupled step "
             f"{int(restored.step)}.{ignored}"
         ), True
 
     if initial_carry is not None:
+        # The same clock check a loaded checkpoint gets: a carry whose time is
+        # not this coupler's start date plus `step` timesteps would be
+        # integrated on one clock and labelled, named and checkpointed on
+        # another. Only a carry that is actually used is checked -- one a
+        # restored checkpoint has superseded is never integrated.
+        coupler.require_consistent_clock(initial_carry, source="initial_carry")
         carry = initial_carry
         provenance = (
             "Starting from the initial_carry argument at coupled step "
@@ -1220,6 +1290,12 @@ def _starting_carry(
         consequence = (
             "the run starts from the initial_carry argument at coupled step "
             f"{int(carry.step)} rather than from a restart"
+        )
+    elif initial_condition is not None:
+        carry, provenance = _load_initial_condition(coupler, Path(initial_condition))
+        consequence = (
+            f"the run starts from initial_condition {initial_condition} at "
+            f"coupled step {int(carry.step)} rather than from a restart"
         )
     else:
         carry = coupler.initialize()
@@ -1239,6 +1315,47 @@ def _starting_carry(
     if failure is not None:
         logger.log(level, "%s Nothing is restored from it: %s.", failure, consequence)
     return carry, provenance, False
+
+
+def _load_initial_condition(
+    coupler: "Coupler", directory: Path
+) -> tuple[CoupledCarry, str]:
+    """Load ``directory`` as the initial condition of a run, and say so.
+
+    The checkpoint is read with the clock check off and its clock reset onto
+    this coupler's start date (:meth:`~jem.base.coupler.Coupler.restart_clock`),
+    so the physical state is the checkpoint's and the time axis is the run's
+    own. Unlike a ``checkpoint_path`` with nothing at it, a missing or
+    incomplete ``initial_condition`` is an error: the caller asked for this
+    state by name, and starting the model from ``coupler.initialize()``
+    instead would give an experiment that never saw the spin-up without
+    saying so.
+
+    Returns
+    -------
+    tuple[CoupledCarry, str]
+        The reset carry (coupled step 0) and the provenance sentence.
+
+    Raises
+    ------
+    ValueError
+        If ``directory`` holds no carry file, or holds a different model's
+        state (:meth:`~jem.base.coupler.Coupler.load_carry`).
+
+    """
+    if not (directory / CARRY_FILENAME).exists():
+        raise ValueError(
+            f"initial_condition {directory} holds no {CARRY_FILENAME}, so it is "
+            "not a complete checkpoint. It must be a directory written by "
+            "Coupler.save_carry or by a run's checkpoint_path."
+        )
+    loaded = coupler.load_carry(directory, check_clock=False)
+    carry = coupler.restart_clock(loaded)
+    return carry, (
+        f"Starting from initial_condition {directory} at coupled step "
+        f"{int(carry.step)} (its clock restarted from step {int(loaded.step)} "
+        f"at {loaded.time.to_datetime64()})."
+    )
 
 
 def _load_checkpoint(

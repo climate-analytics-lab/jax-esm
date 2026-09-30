@@ -27,7 +27,6 @@ def coupling_time(step: int, dt: float = TIMESTEP) -> CouplingTime:
     return CouplingTime(
         step=jnp.int32(step),
         time=START_DATE + jdt.to_timedelta(int(step * dt), "second"),
-        sim_time=jnp.float32(step * dt),
         dt=dt,
     )
 

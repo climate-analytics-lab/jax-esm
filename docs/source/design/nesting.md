@@ -67,9 +67,8 @@ coupling, with no second `Coupler` and no component-side sub-stepping code.
   static number: call *k* of coupled step *s* is handed
   `Coupler.coupling_time_at_substep(s, time, k, n)`, whose `step` is the
   sub-step `s * n + k` (exact integer arithmetic on the int32 counter),
-  whose `dt` is the sub-timestep, whose `sim_time` is `(s * n + k) * dt` and
-  whose `time` is the carried `jax_datetime.Datetime` advanced to that
-  sub-step. `year_fraction` is `jcm.date.fraction_of_year_elapsed(time)` at
+  whose `dt` is the sub-timestep and whose `time` is the carried
+  `jax_datetime.Datetime` advanced to that sub-step. `year_fraction` is `jcm.date.fraction_of_year_elapsed(time)` at
   the sub-rate too, so an hourly sub-step's own `time` is a real instant on
   the real calendar and the seasonal cycle does not quantise away in a long
   run. Exchangers may be repeated as well and see the same clock.
