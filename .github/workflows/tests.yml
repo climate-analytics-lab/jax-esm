@@ -21,12 +21,13 @@ on:
 # one and the test tells you to change the other. The `canary-jcm-dev` job
 # below still tracks `dev`, so drift is visible without blocking a PR.
 #
-# This is the `dev` tip that carries jax-gcm PR 911/914: the near-surface
-# wind vector on the package-independent `SurfaceExchange` struct as
-# `wind_u`/`wind_v`, published by every physics package including ECHAM. See
+# This `dev` commit carries jax-gcm PR 946 (ECHAM physics traces under
+# `jax_enable_x64`, so ECHAM couples to Veros) and PR 911/914 (the near-surface
+# wind vector `wind_u`/`wind_v` on the package-independent `SurfaceExchange`
+# struct, published by every physics package including ECHAM). See
 # JCM_SUPPORTED_REV's docstring in contract.py.
 env:
-  JCM_REV: 0eef9b3a88982886241622fde6530513d025192c
+  JCM_REV: f378069090b127badbb158b06e2767f3be8f436c
 
 jobs:
   lint:

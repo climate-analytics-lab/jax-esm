@@ -23,7 +23,7 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 -------------------------------------------
-``JCM_SUPPORTED_REV`` is ``0eef9b3a88982886241622fde6530513d025192c``, a
+``JCM_SUPPORTED_REV`` is ``f378069090b127badbb158b06e2767f3be8f436c``, a
 ``dev`` commit. jax-gcm has no 3.x tag yet -- ``3.0.0rc1`` is reported from
 the source tree, not cut as a release -- so a sha is the most precise thing
 there is to name; ``pyproject.toml``'s ``jcm>=3.0.0rc1`` floor is the loosest
@@ -37,12 +37,14 @@ commits this branch has never been run against. When a tagged jax-gcm
 release finally contains this revision, replace the sha with the tag and
 raise the ``pyproject.toml`` floor to match.
 
-This revision is needed because jax-gcm's package-independent
-``SurfaceExchange`` contract (``diagnostics["surface_exchange"]``) publishes
-a near-surface wind vector, ``wind_u``/``wind_v``, identically from every
-physics package (jax-gcm#911/#914); see
-:mod:`jem.components.jcm.exchange_fields` for the translation and
-``docs/source/design/jcm_adapter.md`` for the full adapter design.
+This revision is needed because ECHAM physics traces under
+``jax_enable_x64`` (jax-gcm#946), so an ECHAM atmosphere couples to Veros,
+and because jax-gcm's package-independent ``SurfaceExchange`` contract
+(``diagnostics["surface_exchange"]``) publishes a near-surface wind vector,
+``wind_u``/``wind_v``, identically from every physics package
+(jax-gcm#911/#914); see :mod:`jem.components.jcm.exchange_fields` for the
+translation and ``docs/source/design/jcm_adapter.md`` for the full adapter
+design.
 
 Current behaviour a JEM user must know:
 
@@ -84,7 +86,7 @@ from typing import NamedTuple
 #:
 #: This ``dev`` commit is validated as a whole against this repository's own
 #: gates -- see "Why a ``dev`` revision rather than a release" above.
-JCM_SUPPORTED_REV = "0eef9b3a88982886241622fde6530513d025192c"
+JCM_SUPPORTED_REV = "f378069090b127badbb158b06e2767f3be8f436c"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
