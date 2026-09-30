@@ -778,6 +778,19 @@ def test_rebinding_to_a_different_timestep_is_rejected(component):
         )
 
 
+def test_rebinding_to_a_different_start_date_is_rejected(component):
+    """The drift check measures from the bound start date, so it cannot move."""
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
+    with pytest.raises(ValueError, match="start date"):
+        component.bind(
+            coupling_timestep=COUPLING_TIMESTEP,
+            start_date=START_DATE + jdt.to_timedelta(1, "day"),
+        )
+    assert component.start_date == START_DATE
+    # The same binding again is a no-op.
+    component.bind(coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE)
+
+
 @pytest.mark.slow
 def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     """The carry survives the split between the HDF5 restart and the carry file.

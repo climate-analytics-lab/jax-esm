@@ -449,11 +449,10 @@ class VerosComponent:
         ValueError
             If the coupling timestep is not a whole multiple of
             ``dt_tracer``, or the component is already bound to a
-            different coupling timestep (the same one again is a no-op).
+            different coupling timestep or start date (the same ones again
+            are a no-op).
 
         """
-        self.start_date = start_date
-
         model_timestep = jdt.to_timedelta(
             int(self.model.state.settings.dt_tracer), "second")
         n_steps = float(coupling_timestep / model_timestep)
@@ -478,7 +477,17 @@ class VerosComponent:
                 f"steps and cannot also be bound to {steps_per_coupling_step:d}. "
                 "Build a separate instance per coupled model."
             )
+        if self.start_date is not None and start_date != self.start_date:
+            # The drift check measures the coupler's clock from this date, so
+            # a second coupler with another start date would make the first
+            # coupler's runs report a drift that is not there.
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r} is already bound to start "
+                f"date {self.start_date!r} and cannot also be bound to "
+                f"{start_date!r}. Build a separate instance per coupled model."
+            )
         self._steps_per_coupling_step = steps_per_coupling_step
+        self.start_date = start_date
         if self._veros_time_zero is None:
             self._veros_time_zero = float(self.model.state.variables.time)
 
