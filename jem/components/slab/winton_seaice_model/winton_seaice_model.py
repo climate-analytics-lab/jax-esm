@@ -62,6 +62,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jcm.constants as jcm_constants
+import numpy as np
 import tree_math
 from jcm.physics.speedy.params import ModRadConParameters
 
@@ -531,6 +532,13 @@ class WintonSeaiceModel(SlabModelBase):
                         f"{tuple(jnp.shape(metric))} but the grid has shape "
                         f"{tuple(grid.shape)}."
                     )
+                # Cell widths divide the fluxes and form the cell areas.
+                values = np.asarray(metric)
+                if not (np.all(np.isfinite(values)) and np.all(values > 0)):
+                    raise ValueError(
+                        f"Transport metric {metric_name} must be finite and "
+                        "positive everywhere."
+                    )
             logger.info("%s: ice transport enabled (cyclic_x=%s)", name, self.transport.cyclic_x)
 
     def _ocean_cells(self, params: WintonSeaiceParameters) -> jnp.ndarray:
@@ -848,6 +856,12 @@ def _validate_parameters(params: WintonSeaiceParameters) -> None:
     at_least("lead_closing_thickness", params.lead_closing_thickness, 0.0, strict=True)
     at_least("min_ice_thickness", params.min_ice_thickness, 0.0, strict=False)
     at_least("min_ice_fraction", params.min_ice_fraction, 0.0, strict=False)
+    # A cell integrates while its fraction exceeds this, and fractions are
+    # capped at 1, so a threshold of 1 or more would dispose of every column.
+    if float(params.min_ice_fraction) >= 1.0:
+        raise ValueError(
+            f"min_ice_fraction must be less than 1; got {params.min_ice_fraction!r}."
+        )
     at_least("initial_ice_thickness", params.initial_ice_thickness, 0.0, strict=False)
     at_least("emissivity", params.emissivity, 0.0, strict=False)
     at_least("transport_diffusivity", params.transport_diffusivity, 0.0, strict=False)

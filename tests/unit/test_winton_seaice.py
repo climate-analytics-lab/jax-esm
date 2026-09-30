@@ -547,6 +547,7 @@ def test_land_cells_carry_no_ice_and_report_the_masked_temperature(half_land_gri
         ("lead_closing_thickness", float("nan")),
         ("min_ice_thickness", -1.0),
         ("min_ice_fraction", -0.1),
+        ("min_ice_fraction", 1.0),
         ("initial_ice_thickness", -1.0),
         ("initial_ice_thickness", float("inf")),
         ("ice_albedo", 1.5),
@@ -586,6 +587,14 @@ def test_transport_metrics_must_match_the_grid(grid):
     wrong = IceTransportGrid(dx=jnp.ones((2, 2)), dy=jnp.ones((2, 2)))
     with pytest.raises(ValueError, match="dx"):
         WintonSeaiceModel(grid, transport=wrong)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_transport_metrics_must_be_finite_and_positive(grid, bad):
+    dx = np.ones(grid.shape)
+    dx[0, 0] = bad
+    with pytest.raises(ValueError, match="finite and positive"):
+        WintonSeaiceModel(grid, transport=IceTransportGrid(dx=jnp.asarray(dx), dy=jnp.ones(grid.shape)))
 
 
 def test_transport_metrics_of_a_lon_lat_grid():
