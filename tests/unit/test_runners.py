@@ -34,6 +34,7 @@ from jem.components.slab import (
     SlabLandParameters,
     SlabOceanParameters,
     SlabSeaiceParameters,
+    WintonSeaiceParameters,
 )
 from jem.exchangers import Exchange
 
@@ -156,6 +157,7 @@ def test_runners_has_no_component_kwargs():
             SlabLandParameters,
             SlabSeaiceParameters,
             SlabAtmosphereParameters,
+            WintonSeaiceParameters,
         )
         for field in dataclasses.fields(parameters)
     }
@@ -398,6 +400,55 @@ def test_missing_component_filters_exchanges():
     )
     assert [spec for spec in with_land["exchange"].specs
             if "lnd" in (spec.src + spec.dst)]
+
+
+def _winton_components():
+    from jem.components.slab import SlabOceanModel, WintonSeaiceModel
+    from tests.unit.slab_test_utils import make_grid
+
+    grid = make_grid()
+    return {"atm": None, "ocn": SlabOceanModel(grid), "seaice": WintonSeaiceModel(grid)}
+
+
+def test_a_winton_ice_beside_an_atmosphere_needs_an_explicit_coupling():
+    """The default table cannot force the Winton ice from an atmosphere, so the
+    config path refuses to build it rather than run an ice that never sees the
+    atmosphere (issue #141); the message names the fields and the design doc.
+    """
+    cfg = composed(["seaice=winton"])
+    with pytest.raises(ValueError, match="winton_seaice.md") as excinfo:
+        runners.build_exchangers(cfg, _winton_components(), {})
+    message = str(excinfo.value)
+    for field in ("rsds", "rlds", "air_temperature", "atm_sea_heat_flux"):
+        assert field in message
+    assert "issues/141" in message
+
+
+def test_an_explicit_coupling_lifts_the_winton_refusal():
+    """Either spelling of an explicit coupling is the user taking the forcing on."""
+    table = composed([
+        "seaice=winton",
+        "coupling.exchangers=[{src: 'ocn.state.sea_surface_temperature',"
+        " dst: 'seaice.forcing.sea_surface_temperature'}]",
+    ])
+    assert runners.build_exchangers(table, _winton_components(), {})["exchange"].specs
+    path = composed([
+        "seaice=winton", "coupling.exchanger=tests.unit.test_runners.example_exchanger",
+    ])
+    assert runners.build_exchangers(path, _winton_components(), {}) == {
+        "exchange": example_exchanger
+    }
+
+
+def test_the_slab_ice_and_a_winton_ice_without_an_atmosphere_are_not_refused():
+    from jem.components.slab import SlabSeaiceModel
+    from tests.unit.slab_test_utils import make_grid
+
+    components = _winton_components()
+    slab = {**components, "seaice": SlabSeaiceModel(make_grid())}
+    assert runners.build_exchangers(composed([]), slab, {})["exchange"].specs
+    forced = {name: c for name, c in components.items() if name != "atm"}
+    assert runners.build_exchangers(composed(["seaice=winton"]), forced, {})["exchange"].specs
 
 
 def test_exchanger_path_replaces_the_list():

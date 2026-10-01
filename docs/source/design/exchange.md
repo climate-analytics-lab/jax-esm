@@ -142,6 +142,22 @@ configuration after 30 days, the published stress over open ocean is about
 1.6 times the old `Cd = 1e-3` law's (RMS), with the same sign everywhere and
 a pattern correlation of 0.92.
 
+**A sea ice that needs more than the standard rows.** The Winton sea ice
+({doc}`winton_seaice`) takes the ocean's freeze/melt potential through the
+standard row, and also the ocean's sea surface temperature, which its basal
+heat flux depends on; `default_exchanges` adds that one row
+(`WINTON_SEAICE_EXCHANGES`, `ocn.derived...` for Veros) when the component
+registered as `seaice` is a Winton model. What it reads from the atmosphere --
+surface radiation, near-surface air state, snowfall and the atmosphere's flux
+over the open sea -- has no row, because the JCM adapter does not publish those
+as fields a copy can move (the gap is tracked in
+[issue #141](https://github.com/climate-analytics-lab/jax-esm/issues/141)).
+Called from Python, `default_exchanges` logs the forcing fields it leaves
+unsupplied; from Hydra, with an `atm` component and no `coupling.exchanger` or
+`coupling.exchangers`, it raises (`require_complete=True`), because an ice that
+never sees the atmosphere is a run that only looks coupled. A coupled model
+writes an exchanger for those fields.
+
 Three properties are worth stating, because a hand-written exchanger has
 them only by accident:
 

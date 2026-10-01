@@ -208,6 +208,48 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: is the answer without importing anything at all.
 VEROS_COMPONENT_MODULE = "jem.components.veros_component"
 
+#: What the Winton sea ice takes from the ocean **in addition to** the rows of
+#: :data:`STANDARD_EXCHANGES`, which already carry its freeze/melt potential
+#: and take its ice fraction. The Winton ice grows and melts on the freeze/melt
+#: potential like the slab ice, but it also draws heat from the ocean through
+#: the basal boundary layer, and that draw is a function of the sea surface
+#: temperature -- a field the single-layer slab ice has no use for and so has no
+#: standard row. These rows are added by :func:`default_exchanges` when the
+#: component registered as ``"seaice"`` is a Winton model.
+#:
+#: What no default row supplies is everything the Winton ice reads from the
+#: *atmosphere* (surface radiation, near-surface air state, snowfall, the
+#: atmosphere's flux over the open sea) and the ice velocity: the atmosphere
+#: adapter does not publish them in a form a copy can move, and the design
+#: decisions behind that -- which flux plays the part of the atmosphere's
+#: open-sea flux when no per-tile flux is published -- are recorded in
+#: ``docs/source/design/winton_seaice.md``, and the gap itself is tracked in
+#: https://github.com/climate-analytics-lab/jax-esm/issues/141. The atmosphere
+#: sees the ice through its ice fraction (``sice_am``, a standard row), not
+#: through an ice-weighted surface temperature. Called from Python,
+#: :func:`default_exchanges` logs the fields left unsupplied; with
+#: ``require_complete=True`` (what the Hydra runner passes) it raises instead
+#: when an atmosphere is coupled to the ice.
+WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.state.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+)
+
+#: The same row when the ocean is Veros, which publishes its sea surface
+#: temperature from ``derived`` (see :data:`VEROS_OCEAN_EXCHANGES`).
+WINTON_SEAICE_VEROS_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+)
+
+#: The issue tracking the Winton ice's missing atmospheric forcing.
+WINTON_FORCING_ISSUE = "https://github.com/climate-analytics-lab/jax-esm/issues/141"
+
+#: Module holding the Winton sea-ice component, looked up in ``sys.modules``
+#: for the same reason as :data:`VEROS_COMPONENT_MODULE`: if it was never
+#: imported, nothing in the process can be a Winton model.
+WINTON_COMPONENT_MODULE = "jem.components.slab.winton_seaice_model.winton_seaice_model"
+
 
 def _parse_path(path: str, end: str, spec: Any) -> tuple[str, str, str]:
     """Split a ``"component.section.field"`` path, or raise naming the spec."""
@@ -671,6 +713,7 @@ class Exchange:
 def default_exchanges(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, str] | None = None,
+    require_complete: bool = False,
 ) -> list[ExchangeSpec]:
     """Return the standard coupling table, filtered to the components present.
 
@@ -708,6 +751,19 @@ def default_exchanges(
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
 
+    A :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
+    registered as ``"seaice"`` adds :data:`WINTON_SEAICE_EXCHANGES` (the ocean's
+    sea surface temperature, which its basal heat flux depends on) to whichever
+    table applies, and a warning names the forcing fields of that model that no
+    row supplies -- the ones an exchanger of the coupled model's own has to.
+    With ``require_complete=True`` that warning is an error whenever an
+    ``"atm"`` component is also present: an atmosphere coupled to the ice
+    through a table that leaves the ice's atmospheric forcing at its initial
+    values is a run that looks coupled and is not (issue #141), so the
+    Hydra path refuses it unless the coupling is written out explicitly.
+    Without an atmosphere (a forced or standalone ice) the fields are the
+    caller's to write and only the warning applies.
+
     Regridding
     ----------
     ``regrid`` names a regridder for the specs that cross the
@@ -743,10 +799,19 @@ def default_exchanges(
         Regridder *names* per direction and kind, as above. The callables
         themselves are given to :class:`Exchange`; see
         :func:`default_exchangers` for the one-call form.
+    require_complete : bool, optional
+        Raise instead of warning when a Winton sea ice is coupled to an
+        ``"atm"`` component and the table leaves some of its forcing fields
+        unsupplied. Default False: the Python API stays permissive.
 
     Returns
     -------
     list[ExchangeSpec]
+
+    Raises
+    ------
+    ValueError
+        If ``require_complete`` and the condition above holds.
 
     """
     present = set(components)
@@ -763,6 +828,14 @@ def default_exchanges(
         )
 
     table = _exchange_table(components)
+    # Decided before any rows are appended: the concatenation below makes a
+    # new tuple, which is never the Veros table itself.
+    veros_ocean = table is VEROS_OCEAN_EXCHANGES
+    winton = _winton_module(components)
+    if winton is not None:
+        table = table + (
+            WINTON_SEAICE_VEROS_EXCHANGES if veros_ocean else WINTON_SEAICE_EXCHANGES
+        )
     specs: list[ExchangeSpec] = []
     for src, dst, kind in table:
         src_component, _, _ = _parse_path(src, "source", src)
@@ -791,7 +864,38 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
+    if winton is not None:
+        supplied = {
+            spec.dst_parts[2]
+            for spec in specs
+            if spec.dst_parts[:2] == ("seaice", "forcing")
+        }
+        unsupplied = [
+            field.name
+            for field in dataclasses.fields(winton.WintonForcing)
+            if field.name not in supplied
+        ]
+        if unsupplied and require_complete and "atm" in present:
+            raise ValueError(
+                "A Winton sea ice is coupled to an atmosphere through the "
+                "default coupling table, which does not supply the ice's "
+                f"forcing fields {', '.join(unsupplied)}: they would stay at "
+                "their initial values for the whole run, so the ice would "
+                "not respond to the atmosphere. Supply them with an exchanger "
+                "of your own (coupling.exchanger or coupling.exchangers) that "
+                "reads what your atmosphere publishes. See "
+                "docs/source/design/winton_seaice.md and "
+                f"{WINTON_FORCING_ISSUE}."
+            )
+        if unsupplied:
+            logger.warning(
+                "The default coupling does not supply the Winton sea ice's "
+                "forcing fields %s: they stay at their initial values unless "
+                "an exchanger of your own writes them (see "
+                "docs/source/design/winton_seaice.md and %s).",
+                ", ".join(unsupplied), WINTON_FORCING_ISSUE,
+            )
+    if veros_ocean and "seaice" in present:
         logger.warning(
             "A sea-ice component is coupled to a Veros ocean, which publishes "
             "no freeze/melt potential (`ice_frazil_melt_energy`), so the "
@@ -828,6 +932,23 @@ def _exchange_table(
     return VEROS_OCEAN_EXCHANGES
 
 
+def _winton_module(
+    components: Mapping[str, Component] | Iterable[str],
+) -> Any:
+    """Return the Winton component module if ``"seaice"`` is a Winton model, else None.
+
+    Chosen by type, like :func:`_exchange_table`, so it needs real components:
+    a list of names says nothing about a carry.
+    """
+    if not isinstance(components, Mapping):
+        return None
+    module = sys.modules.get(WINTON_COMPONENT_MODULE)
+    seaice = components.get("seaice")
+    if module is None or seaice is None:
+        return None
+    return module if isinstance(seaice, module.WintonSeaiceModel) else None
+
+
 def _grid_direction(src_component: str, dst_component: str) -> str | None:
     """Return ``"a2o"``/``"o2a"`` if a spec crosses the grid boundary, else None."""
     if src_component == "atm" and dst_component in OCEAN_GRID_COMPONENTS:
@@ -840,6 +961,7 @@ def _grid_direction(src_component: str, dst_component: str) -> str | None:
 def default_exchangers(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, Callable[[Any], Any]] | None = None,
+    require_complete: bool = False,
 ) -> dict[str, Exchanger]:
     """Return the standard coupling as a coupler's ``exchangers=`` argument.
 
@@ -865,6 +987,10 @@ def default_exchangers(
                 "o2a_flux": ESMFRegridder(o2a_conservative_weights),
                 "o2a_state": ESMFRegridder(o2a_bilinear_weights),
             })
+    require_complete : bool, optional
+        Passed to :func:`default_exchanges`, which documents it: raise
+        rather than warn when the table leaves a coupled component's forcing
+        unsupplied.
 
     Returns
     -------
@@ -874,7 +1000,7 @@ def default_exchangers(
     regridders = dict(regrid or {})
     names = {key: key for key in regridders}
     return {DEFAULT_EXCHANGER_NAME: Exchange(
-        default_exchanges(components, names), regridders
+        default_exchanges(components, names, require_complete), regridders
     )}
 
 
