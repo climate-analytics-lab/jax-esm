@@ -52,3 +52,8 @@ ice_thermal_conductivity = 2.03  # Thermal conductivity of sea ice (W/m/K)
 ice_latent_heat_fusion = 3.34e5  # Latent heat of fusion of ice (J/kg)
 seawater_freezing_point_K = 271.35  # Freezing point of seawater (K) = -1.8°C
 ice_melting_point_K = 273.15  # Melting point of (fresh) ice/snow surface (K) = 0°C
+
+# =============================================================================
+# Sea ice properties
+# =============================================================================
+freshwater_density = 1000.0 # Water density (kg/m^3)
