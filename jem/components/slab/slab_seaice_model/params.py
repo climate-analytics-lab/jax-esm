@@ -46,14 +46,6 @@ class SlabSeaiceParameters:
         time, and is a mask convention rather than a physical tunable.
 
     """
-
-    initial_ice_thickness: float | jnp.ndarray = 0.0
-    # A thick multi-year pack. At the default `ice_fraction_thickness_scale`
-    # it diagnoses back as 99.75% cover, so a cell the file calls fully
-    # ice-covered is handed to the atmosphere as fully ice-covered.
-    max_initial_ice_thickness: float | jnp.ndarray = 3.0
-    min_ice_thickness: float | jnp.ndarray = 1e-3
-    ice_fraction_thickness_scale: float | jnp.ndarray = 0.5
     ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
 
     @classmethod
