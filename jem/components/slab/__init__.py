@@ -7,6 +7,7 @@ from jem.components.slab.slab_atmosphere_model import (
     SlabAtmosphereParameters,
 )
 from jem.components.slab.slab_land_model import SlabLandModel, SlabLandParameters
+from jem.components.slab.slab_bucket_land_model import SlabBucketLandModel, SlabBucketLandParameters
 from jem.components.slab.slab_ocean_model import SlabOceanModel, SlabOceanParameters
 from jem.components.slab.slab_seaice_model import (
     SlabSeaiceModel,
