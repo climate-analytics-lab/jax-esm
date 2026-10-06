@@ -800,24 +800,22 @@ def test_a_declared_field_with_a_writer_is_accepted():
 def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     """The ice the atmosphere is handed on step 0 is the file's, not zero.
 
-    The exchange runs before the components and a `derived` field is only
-    rewritten at the end of a step, so `seaice.initialize()`'s `ice_fraction`
-    is what `atm.forcing.sice_am` holds for the first two coupling steps. An
-    Earth-like run must not begin with ice-free poles.
+    The exchange runs before the components, so `seaice.initialize()`'s
+    `ice_fraction` -- not one diagnosed from an SST the sea ice has not been
+    handed yet -- is what `atm.forcing.sice_am` holds on the atmosphere's
+    first coupling step. An Earth-like run must not begin with ice-free
+    poles.
     """
     coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
     carries = coupler.initialize().components
 
-    ice_fraction = carries["seaice"]["derived"].ice_fraction
+    ice_fraction = carries["seaice"]["state"].ice_fraction
     assert float(jnp.max(ice_fraction)) > 0.9
     assert float(jnp.mean(ice_fraction)) > 0.01
-    # Finite, because the fraction closure's inverse is capped: a fully
-    # covered cell would otherwise be infinitely thick.
-    thickness = carries["seaice"]["state"].ice_thickness
-    assert bool(jnp.all(jnp.isfinite(thickness)))
-    assert float(jnp.max(thickness)) <= float(
-        coupler.components["seaice"].params.max_initial_ice_thickness
-    )
+    # A concentration: finite and within [0, 1] everywhere, land included.
+    assert bool(jnp.all(jnp.isfinite(ice_fraction)))
+    assert float(jnp.min(ice_fraction)) >= 0.0
+    assert float(jnp.max(ice_fraction)) <= 1.0
 
     # And it reaches the atmosphere: the exchange puts it in `sice_am`.
     exchanged = coupler.exchangers["exchange"](

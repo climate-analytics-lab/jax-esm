@@ -15,20 +15,20 @@ exp = configurations.load("aquaplanet-slab")   # a jem.base.coupler.Coupler
 exp.coupler, exp.config, exp.run_kwargs        # built, plain-dict, run_chunked() kwargs
 ```
 
-A notebook that *teaches* how a coupled model is put together builds its
-components directly (`01_aquaplanet.ipynb`,
-`04_jcm_slabs_mixed_grid_aqua_planet.ipynb`); a notebook that *runs* a
-validated configuration to demonstrate something else -- perturbing an
-initial condition, differentiating through a trajectory -- loads it through
-the door instead of copying its settings into Python, which is exactly the
-drift the door exists to prevent.
+The notebooks under `01_basic/` build their coupled models directly --
+plain component classes and a hand-written exchanger function, with no
+configuration file and no standard exchange table -- so how each model is
+put together is readable in the notebook itself. A notebook that *runs* a
+validated configuration as-is (`02_experimental/01_earth.ipynb`) loads it
+through the door instead of copying its settings into Python, which is
+exactly the drift the door exists to prevent.
 
 | Example | How to run it |
 | --- | --- |
 | Aquaplanet (`01_basic/01_aquaplanet.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice); equivalent to `python -m jem.main +configuration=aquaplanet-slab` |
-| Custom initial SST (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: `configurations.load("aquaplanet-slab")`, then one field of the initial carry is replaced before the run |
-| Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
-| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction on a displaced-pole ocean grid with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
+| Custom initial SST (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice), then one field of the initial carry is replaced before the run |
+| Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: direct construction (atmosphere and slab ocean, no sea ice), then `jax.jvp` through the coupled trajectory |
+| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction on a displaced-pole ocean grid, with the ESMF regridding written out in its exchanger function; the same components as `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |

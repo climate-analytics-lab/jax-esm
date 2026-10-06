@@ -20,8 +20,9 @@
 #  - ocean=slab with no forcing term: the mixed layer responds to the coupled
 #    surface heat flux alone. Nothing pins it, which is the point -- the
 #    coupled system finds its own equilibrium.
-#  - seaice=slab: the ocean reports the energy its freezing clamp removed, and
-#    something has to turn that into ice or it is silently lost.
+#  - seaice=slab: the ice fraction the atmosphere's surface-flux scheme sees
+#    is diagnosed from the coupled ocean's SST, so the ice cover follows the
+#    ocean instead of staying at the forcing's ice-free default.
 #  - land=none: there is no land.
 defaults:
   - override /physics@atmosphere.physics: speedy
