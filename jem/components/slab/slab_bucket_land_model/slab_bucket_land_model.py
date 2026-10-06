@@ -555,6 +555,19 @@ class SlabBucketLandModel(SlabModelBase):
                     **role_attrs("forcing"),
                 },
             ),
+            # The water source of the top soil layer. Prefixed like every
+            # forcing so it does not collide with the atmosphere's own
+            # `precipitation` when the two datasets are merged.
+            forcing_variable("precipitation"): (
+                dims,
+                forcing.precipitation,
+                {
+                    "long_name": "Precipitation the land surface was forced with",
+                    "units": "kg m-2 s-1",
+                    "positive": "downward",
+                    **role_attrs("forcing"),
+                },
+            ),
         }
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
