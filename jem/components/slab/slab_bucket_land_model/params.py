@@ -73,7 +73,7 @@ class SlabBucketLandParameters:
     land_ice_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
     tdland: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
     flandmin: float | jnp.ndarray = 1.0 / 3.0
-    tau_drain: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((5.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
+    tau_drain: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((60.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
     swcap: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
     swwil: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.17, 0.17)))
     land_threshold: float | jnp.ndarray = 0.1
