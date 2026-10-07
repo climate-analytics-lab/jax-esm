@@ -93,6 +93,8 @@ package spelled out.
      - ``physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8``
    * - Set one atmosphere key
      - ``atmosphere.run.time_step=7``
+   * - Start the atmosphere from ERA5 (or ``jw``, ``from_state``, ...)
+     - ``init@atmosphere.init=era5 atmosphere.run.start_time=2022-12-24``
    * - Choose a surface component
      - ``ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Drop one
@@ -124,6 +126,12 @@ Several things worth knowing:
   **is set.** ``total_time`` is a fixed duration ("years" and "months" are
   refused); ``end_time`` is an ISO date for a calendar target, and setting it
   needs ``coupled_run.total_time=null`` too.
+- **The atmosphere's** ``init`` **group is jax-gcm's own.** ``isothermal``
+  (the default, at rest), ``balanced_isothermal``, ``jw``, ``era5`` (the
+  WeatherBench2 analysis at ``atmosphere.init.date``, or at the run's start
+  date) and ``from_state`` (a saved state, with its physics carry) mean what
+  they mean in ``python -m jcm.main``; ``jem.runners.build_initial_state``
+  builds them with the same jax-gcm functions.
 - **Single-quote a** ``${...}`` **resolver.** ``'${jcm_data:bc/t30/clim/forcing.nc}'``
   is a resolver Hydra expands when the config is composed; unquoted, the shell
   expands ``${...}`` to nothing first, so the override arrives empty.

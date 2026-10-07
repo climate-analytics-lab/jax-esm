@@ -24,6 +24,8 @@ with no Hydra visible to the caller (issue #131; see :doc:`python_api`).
 ``jem.checkpoint`` and ``jem.accumulate`` are module-level APIs -- they are not
 re-exported from ``jem``, because a run reaches them through
 ``Coupler.save_carry`` and ``generate_trajectory_function(accumulate=...)``.
+``jem.adjoint`` is the gradient of a run too long to differentiate in one
+piece (see :doc:`design/differentiating_long_runs`).
 
 .. autosummary::
    :toctree: generated
@@ -33,6 +35,7 @@ re-exported from ``jem``, because a run reaches them through
    jem.output
    jem.checkpoint
    jem.accumulate
+   jem.adjoint
    jem.regrid
    jem.config
    jem.runners
@@ -50,9 +53,11 @@ Components
    jem.components.jcm.component
    jem.components.jcm.contract
    jem.components.jcm.exchange_fields
+   jem.components.jcm.forcing_window
    jem.components.veros_component
    jem.components.veros.setups.double_drake
    jem.components.veros.setups.earth
+   jem.components.veros.setups.global_latlon
 
    jem.components.slab.slab_ocean_model.SlabOceanModel
    jem.components.slab.slab_ocean_model.SlabOceanParameters
@@ -79,3 +84,4 @@ Constants and utilities
    jem.tools.idealised_terrain
    jem.utils.esmf_regrid.ESMFRegridder
    jem.utils.esmf_regrid.ESMFWeights
+   jem.utils.latlon_weights

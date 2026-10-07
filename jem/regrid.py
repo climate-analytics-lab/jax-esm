@@ -2,9 +2,12 @@
 
 Components on different horizontal grids can only exchange through a map
 between those grids. JAX-ESM applies pre-computed ESMF weights
-(:class:`jem.utils.esmf_regrid.ESMFRegridder`); it does not generate them --
-that is an offline ``ESMF_RegridWeightGen`` step, because the weights depend
-only on the two grids and never on the run.
+(:class:`jem.utils.esmf_regrid.ESMFRegridder`); for a general pair of grids
+it does not generate them -- that is an offline ``ESMF_RegridWeightGen``
+step, because the weights depend only on the two grids and never on the run.
+Between two grids bounded by meridians and parallels (a Gaussian atmosphere
+and a regular lat-lon ocean) the weights have a closed form, and
+:mod:`jem.utils.latlon_weights` writes them in the same format.
 
 A coupled run needs several maps at once: one per direction, and one per
 algorithm within a direction (a flux has to be mapped conservatively so the

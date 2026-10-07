@@ -51,6 +51,13 @@ surface reaches the freezing point, and carries the rest of
 sea surface temperature back) -- so the ocean is mechanically as well as
 thermodynamically forced.
 
+Veros applies its ``device`` runtime setting to the whole process
+(``jax_platform_name``), and its default is ``"cpu"``.
+:func:`jem.components.veros_component.configure_veros_runtime` therefore sets
+it to the platform JAX would use anyway (``VEROS_DEVICE`` still chooses
+explicitly), so a Veros configuration runs on the GPU of a GPU host --
+atmosphere included -- rather than silently on its CPU.
+
 A Veros configuration also runs the **atmosphere** in double precision:
 importing Veros sets ``jax_enable_x64`` process-wide, and which of the
 atmosphere's own fields stay float32 depends on build order (whatever
@@ -61,3 +68,17 @@ so the coupling itself is robust to that.
 Veros is an optional dependency -- the jittable fork this project is built
 against, cloned and ``pip install -e``d as shown in the main
 ``README.md``'s install steps -- and is required for both configurations.
+
+
+A realistic Veros ocean for sensitivity studies
+-----------------------------------------------
+
+:mod:`jem.components.veros.setups.global_latlon` is Veros on its own
+one-degree ``global_1deg`` grid with the Levitus bathymetry, started from the
+Levitus temperature and salinity with an observed SST (an ERA5 analysis, say)
+blended into the mixed layer -- the ocean to use when the initial ocean state
+itself is under study. Coupled to a Gaussian atmosphere it exchanges through
+the closed-form weights of :mod:`jem.utils.latlon_weights`, and its gradient
+over a long, high-resolution run comes from
+:func:`jem.adjoint.checkpointed_value_and_grad`; see
+:doc:`design/differentiating_long_runs` for a worked T255 case.
