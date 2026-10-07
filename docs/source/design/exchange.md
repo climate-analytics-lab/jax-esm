@@ -85,9 +85,9 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | --- | --- |
 | `atm.derived.total_heat_flux` | `ocn.forcing.total_heat_flux` |
 | `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
-| `ocn.derived.ice_frazil_melt_energy` | `seaice.forcing.ice_frazil_melt_energy` |
+| `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
-| `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
+| `seaice.state.ice_fraction` | `atm.forcing.sice_am` |
 | `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
 | `lnd.state.snowc` | `atm.forcing.snowc_am` |
 | `lnd.state.soilw` | `atm.forcing.soilw_am` |
@@ -108,8 +108,8 @@ sea surface temperature from `derived` (its `state` is Veros' own
 `forcing.total_heat_flux` and `state.sea_surface_temperature`. So a
 `VerosComponent` registered as `"ocn"` selects `VEROS_OCEAN_EXCHANGES`
 instead — the same wiring in Veros' names, plus the freshwater flux Veros
-also takes, and with no `ocn` → `seaice` row because Veros publishes no
-freeze/melt potential (that combination is warned about). The choice is made
+also takes; the `ocn` → `seaice` row reads the sea surface temperature from
+`derived` like the atmosphere's does. The choice is made
 by *type*, which needs real components: called with a list of names,
 `default_exchanges` cannot tell one ocean from another and gives the slab
 table. The check looks the wrapper's module up in `sys.modules` rather than
@@ -165,8 +165,8 @@ name a regridder, and `default_exchanges` names one from a mapping keyed by
 kind. The kind is written on each row of the table rather than inferred from
 the carry section the field is read from, because the two do not agree — the
 same intensive sea surface temperature comes from `state` on a slab and from
-`derived` on a Veros ocean. Extensive quantities (heat fluxes, the
-freeze/melt energy, an areal ice fraction) are mapped conservatively so their
+`derived` on a Veros ocean. Extensive quantities (heat fluxes, an areal ice
+fraction) are mapped conservatively so their
 budgets survive the interface, while an intensive state variable such as SST
 is interpolated bilinearly, which does not leave a conservative map's
 staircase in a smooth field. Rows that stay on one grid never get a
