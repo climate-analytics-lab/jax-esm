@@ -185,7 +185,7 @@ jem/                             # Main package
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, frazil diagnostic)
 │       ├── slab_land_model/     # SlabLandModel
-│       ├── slab_seaice_model/   # SlabSeaiceModel (basal-only thickness)
+│       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
