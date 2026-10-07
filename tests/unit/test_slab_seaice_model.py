@@ -4,12 +4,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.test_util import check_grads
 
-import jcm.constants as jcm_constants
 from jem import constants
-from jem.components.slab.base import MASKED_SURFACE_TEMPERATURE
-from jem.components.slab.slab_seaice_model import SlabSeaiceModel, SlabSeaiceParameters
+from jem.components.slab.slab_seaice_model import (
+    ICE_FREE_SST_EXCESS,
+    SlabSeaiceModel,
+    SlabSeaiceParameters,
+)
 from tests.unit.slab_test_utils import (
     LATITUDE_DEGREES,
     LONGITUDE_DEGREES,
@@ -17,9 +18,6 @@ from tests.unit.slab_test_utils import (
     make_grid,
     tree_signature,
 )
-
-#: Energy (J/m2) that freezes one metre of ice, for the constants JCM owns.
-ENERGY_PER_METRE = jcm_constants.rhoi * jcm_constants.alhf
 
 
 @pytest.fixture
@@ -40,103 +38,91 @@ def half_land_grid():
     return make_grid(fractional_mask=fractional_mask)
 
 
-def test_positive_frazil_energy_grows_ice(uniform_grid):
-    """The freeze/melt potential is an energy per coupling step, applied as-is."""
-    model = SlabSeaiceModel(uniform_grid)
+def _step_with_sst(model, sea_surface_temperature, step=0):
+    """Return the carry after one step forced with ``sea_surface_temperature``."""
     carry = model.initialize()
     carry["forcing"] = carry["forcing"].replace(
-        ice_frazil_melt_energy=jnp.full(uniform_grid.shape, 0.5 * ENERGY_PER_METRE)
-    )
-
-    stepped, _ = model.step(carry, coupling_time(0))
-
-    np.testing.assert_allclose(
-        np.asarray(stepped["state"].ice_thickness), 0.5, rtol=1e-5
-    )
-    # Half a metre against the 0.5 m fill-in scale: 1 - exp(-1).
-    np.testing.assert_allclose(
-        np.asarray(stepped["derived"].ice_fraction), 1.0 - np.exp(-1.0), rtol=1e-5
-    )
-    np.testing.assert_allclose(
-        np.asarray(stepped["state"].ice_surface_temperature), jcm_constants.tmelt
-    )
-
-
-def test_melt_cannot_drive_thickness_negative(uniform_grid):
-    """Surplus ocean heat melts ice, and stops at open water."""
-    model = SlabSeaiceModel(
-        uniform_grid, SlabSeaiceParameters(initial_ice_thickness=0.1)
-    )
-    carry = model.initialize()
-    carry["forcing"] = carry["forcing"].replace(
-        ice_frazil_melt_energy=jnp.full(uniform_grid.shape, -1.0 * ENERGY_PER_METRE)
-    )
-
-    stepped, _ = model.step(carry, coupling_time(0))
-
-    np.testing.assert_allclose(np.asarray(stepped["state"].ice_thickness), 0.0)
-    np.testing.assert_allclose(
-        np.asarray(stepped["state"].ice_surface_temperature),
-        constants.seawater_freezing_point_K,
-    )
-
-
-def test_land_cells_carry_no_ice(half_land_grid):
-    """Only ocean cells are integrated; land reports the masked temperature."""
-    model = SlabSeaiceModel(
-        half_land_grid, SlabSeaiceParameters(initial_ice_thickness=1.0)
-    )
-    carry = model.initialize()
-    carry["forcing"] = carry["forcing"].replace(
-        ice_frazil_melt_energy=jnp.full(half_land_grid.shape, ENERGY_PER_METRE)
-    )
-    stepped, _ = model.step(carry, coupling_time(0))
-
-    land = np.asarray(half_land_grid.binary_mask) == 1.0
-    thickness = np.asarray(stepped["state"].ice_thickness)
-    temperature = np.asarray(stepped["state"].ice_surface_temperature)
-    assert np.all(thickness[land] == 0.0)
-    assert np.all(thickness[~land] > 0.0)
-    np.testing.assert_allclose(temperature[land], MASKED_SURFACE_TEMPERATURE)
-
-
-def test_invalid_parameters_are_rejected(uniform_grid):
-    """A thickness scale of zero would make the closures undefined."""
-    with pytest.raises(ValueError, match="min_ice_thickness"):
-        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(min_ice_thickness=0.0))
-    with pytest.raises(ValueError, match="ice_fraction_thickness_scale"):
-        SlabSeaiceModel(
-            uniform_grid, SlabSeaiceParameters(ice_fraction_thickness_scale=0.0)
+        sea_surface_temperature=jnp.broadcast_to(
+            jnp.asarray(sea_surface_temperature, dtype=jnp.float32),
+            model.grid.shape,
         )
-    with pytest.raises(ValueError, match="initial_ice_thickness"):
-        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(initial_ice_thickness=-1.0))
+    )
+    stepped, _ = model.step(carry, coupling_time(step))
+    return stepped
 
 
 @pytest.mark.parametrize(
-    "field, value",
+    "excess, expected",
     [
-        ("min_ice_thickness", 0.0),
-        ("min_ice_thickness", -1.0),
-        ("min_ice_thickness", np.nan),
-        ("min_ice_thickness", np.inf),
-        ("ice_fraction_thickness_scale", 0.0),
-        ("ice_fraction_thickness_scale", -0.5),
-        ("ice_fraction_thickness_scale", np.nan),
-        ("ice_fraction_thickness_scale", np.inf),
-        ("initial_ice_thickness", -1.0),
-        ("initial_ice_thickness", np.nan),
-        ("initial_ice_thickness", np.inf),
+        (-5.0, 1.0),                         # well below freezing: full cover
+        (0.0, 1.0),                          # at the freezing point: full cover
+        (0.25 * ICE_FREE_SST_EXCESS, 0.75),  # on the ramp
+        (0.5 * ICE_FREE_SST_EXCESS, 0.5),
+        (ICE_FREE_SST_EXCESS, 0.0),          # the top of the ramp: ice-free
+        (10.0, 0.0),                         # warm water: ice-free
     ],
 )
-def test_non_finite_thicknesses_are_rejected(uniform_grid, field, value):
-    """Every thickness must be finite as well as correctly signed.
+def test_ice_fraction_ramps_from_the_freezing_point(uniform_grid, excess, expected):
+    """Full cover at the freezing point, none `ICE_FREE_SST_EXCESS` above it."""
+    model = SlabSeaiceModel(uniform_grid)
+    stepped = _step_with_sst(
+        model, constants.seawater_freezing_point_K + excess)
 
-    A NaN compares False against every threshold and an infinite fraction scale
-    makes ``1 - exp(-h / scale)`` zero everywhere, so an unvalidated one gives a
-    run with no ice rather than an error.
+    np.testing.assert_allclose(
+        np.asarray(stepped["state"].ice_fraction), expected, atol=1e-4
+    )
+
+
+def test_ice_fraction_follows_the_sst_cell_by_cell(uniform_grid):
+    """Each cell is diagnosed from its own SST, colder meaning more ice."""
+    model = SlabSeaiceModel(uniform_grid)
+    excess = jnp.linspace(
+        -1.0, ICE_FREE_SST_EXCESS + 1.0, uniform_grid.fractional_mask.size
+    ).reshape(uniform_grid.shape)
+    stepped = _step_with_sst(
+        model, constants.seawater_freezing_point_K + excess)
+
+    fraction = np.asarray(stepped["state"].ice_fraction)
+    np.testing.assert_allclose(
+        fraction,
+        np.clip(1.0 - np.asarray(excess) / ICE_FREE_SST_EXCESS, 0.0, 1.0),
+        atol=1e-4,
+    )
+    assert fraction.min() == 0.0 and fraction.max() == 1.0
+    assert bool(np.all(np.diff(fraction.ravel()) <= 0.0))
+
+
+def test_land_cells_carry_no_ice(half_land_grid):
+    """A land cell has no ice however cold the SST it is handed."""
+    model = SlabSeaiceModel(half_land_grid)
+    stepped = _step_with_sst(
+        model, constants.seawater_freezing_point_K - 10.0)
+
+    fraction = np.asarray(stepped["state"].ice_fraction)
+    land = np.asarray(half_land_grid.binary_mask == 1.0)
+    np.testing.assert_allclose(fraction[land], 0.0)
+    np.testing.assert_allclose(fraction[~land], 1.0)
+
+
+def test_the_ice_has_no_memory(uniform_grid):
+    """The fraction is a function of this step's SST alone.
+
+    Whatever cover the carry arrives with -- here full cover -- one step
+    under warm water leaves none: nothing is integrated from step to step.
     """
-    with pytest.raises(ValueError, match=field):
-        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(**{field: value}))
+    model = SlabSeaiceModel(uniform_grid)
+    carry = model.initialize()
+    carry["state"] = carry["state"].replace(
+        ice_fraction=jnp.ones(uniform_grid.shape))
+    carry["forcing"] = carry["forcing"].replace(
+        sea_surface_temperature=jnp.full(
+            uniform_grid.shape,
+            constants.seawater_freezing_point_K + 2.0 * ICE_FREE_SST_EXCESS,
+        )
+    )
+    stepped, _ = model.step(carry, coupling_time(0))
+
+    np.testing.assert_allclose(np.asarray(stepped["state"].ice_fraction), 0.0)
 
 
 def test_params_default_equivalence(uniform_grid):
@@ -158,24 +144,19 @@ def test_params_default_equivalence(uniform_grid):
 def test_state_has_no_clock(uniform_grid):
     """State carries no time, and the step does not depend on the date.
 
-    The sea-ice model integrates an energy that already has the coupling step
-    folded into it (the ocean's ``frzmlt``), so unlike the ocean and land
-    models it reads nothing from the clock at all -- which is only checkable
-    now that the clock arrives as an argument rather than living in the state.
+    The ice fraction is diagnosed from the SST the model is handed, so unlike
+    the ocean and land models it reads nothing from the clock at all.
     """
     model = SlabSeaiceModel(uniform_grid)
-    carry = model.initialize()
-    assert "sim_time" not in carry["state"].asdict()
+    assert "sim_time" not in model.initialize()["state"].asdict()
 
-    carry["forcing"] = carry["forcing"].replace(
-        ice_frazil_melt_energy=jnp.full(uniform_grid.shape, 0.25 * ENERGY_PER_METRE)
-    )
-    first, _ = model.step(carry, coupling_time(0))
-    later, _ = model.step(carry, coupling_time(182))
+    sst = constants.seawater_freezing_point_K + 0.5 * ICE_FREE_SST_EXCESS
+    first = _step_with_sst(model, sst, step=0)
+    later = _step_with_sst(model, sst, step=182)
 
     np.testing.assert_array_equal(
-        np.asarray(first["state"].ice_thickness),
-        np.asarray(later["state"].ice_thickness),
+        np.asarray(first["state"].ice_fraction),
+        np.asarray(later["state"].ice_fraction),
     )
 
 
@@ -188,134 +169,80 @@ def test_step_shapes_and_dtypes_stable(uniform_grid):
     assert tree_signature(new_carry) == tree_signature(carry)
 
 
-def test_step_is_differentiable(uniform_grid):
-    """Reverse-mode gradients of one step agree with finite differences."""
+def test_two_steps_scan_with_a_stable_carry(uniform_grid):
+    """`lax.scan` accepts the step: the carry keeps its structure and dtypes."""
     model = SlabSeaiceModel(uniform_grid)
     carry = model.initialize()
-
-    def mean_ice_fraction(energy_scale):
-        # One unit is the energy that freezes a metre of ice, so the ice
-        # fraction responds at O(1) to a unit change.
-        forced = carry["forcing"].replace(
-            ice_frazil_melt_energy=jnp.full(
-                uniform_grid.shape, ENERGY_PER_METRE * energy_scale
-            )
+    carry["forcing"] = carry["forcing"].replace(
+        sea_surface_temperature=jnp.full(
+            uniform_grid.shape, constants.seawater_freezing_point_K + 0.9
         )
-        stepped, _ = model.step({**carry, "forcing": forced}, coupling_time(0))
-        return jnp.mean(stepped["derived"].ice_fraction)
-
-    check_grads(
-        mean_ice_fraction, (0.5,), order=1, modes=["rev"], eps=1e-3, atol=1e-3, rtol=1e-3
     )
 
+    def body(carry, step):
+        new_carry, diagnostics = model.step(carry, coupling_time(0))
+        del step
+        return new_carry, diagnostics["state"].ice_fraction
 
-def test_thickness_scale_is_differentiable(uniform_grid):
-    """The ice-fraction closure's scale is a pytree leaf of the carry."""
+    final, fractions = jax.lax.scan(body, carry, jnp.arange(2))
+
+    assert tree_signature(final) == tree_signature(carry)
+    assert fractions.shape == (2,) + uniform_grid.shape
+    np.testing.assert_allclose(np.asarray(fractions), 0.5, atol=1e-4)
+
+
+def test_step_is_differentiable_in_the_sst(uniform_grid):
+    """d(fraction)/d(SST) is the ramp's slope on it and zero off it."""
     model = SlabSeaiceModel(uniform_grid)
 
-    def mean_ice_fraction(scale):
+    def mean_fraction(sst):
         carry = model.initialize()
-        carry["params"] = carry["params"].replace(ice_fraction_thickness_scale=scale)
         carry["forcing"] = carry["forcing"].replace(
-            ice_frazil_melt_energy=jnp.full(uniform_grid.shape, ENERGY_PER_METRE)
+            sea_surface_temperature=jnp.full(uniform_grid.shape, sst)
         )
-        carry, _ = model.step(carry, coupling_time(0))
-        return jnp.mean(carry["derived"].ice_fraction)
+        stepped, _ = model.step(carry, coupling_time(0))
+        return jnp.mean(stepped["state"].ice_fraction)
 
-    gradient = jax.grad(mean_ice_fraction)(jnp.float32(0.5))
-    assert bool(jnp.isfinite(gradient))
-    assert abs(float(gradient)) > 0.0
-
-
-def test_initialize_takes_parameters_and_defaults_to_the_models_own(uniform_grid):
-    """``initialize(params)`` starts from them; no argument starts as before."""
-    model = SlabSeaiceModel(uniform_grid)
-
-    default = model.initialize()
-    explicit = model.initialize(model.params)
-    thicker = model.initialize(
-        SlabSeaiceParameters(initial_ice_thickness=2.0)
-    )
-
-    # No argument is the construction-time initial state, unchanged.
-    assert jax.tree_util.tree_structure(default) == jax.tree_util.tree_structure(
-        explicit
-    )
-    for left, right in zip(
-        jax.tree_util.tree_leaves(default), jax.tree_util.tree_leaves(explicit)
-    ):
-        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
-    np.testing.assert_allclose(np.asarray(default["state"].ice_thickness), 0.0)
-
-    # Parameters given here build the state *and* travel in the carry, so the
-    # two cannot come from different objects.
-    np.testing.assert_allclose(np.asarray(thicker["state"].ice_thickness), 2.0)
-    assert float(thicker["params"].initial_ice_thickness) == 2.0
+    freezing = constants.seawater_freezing_point_K
+    on_ramp = jax.grad(mean_fraction)(freezing + 0.5 * ICE_FREE_SST_EXCESS)
     np.testing.assert_allclose(
-        np.asarray(thicker["derived"].ice_fraction),
-        1.0 - np.exp(-2.0 / 0.5),
-        rtol=1e-5,
+        float(on_ramp), -1.0 / ICE_FREE_SST_EXCESS, rtol=1e-4)
+    # Saturated either way, the cover no longer responds to the SST -- and
+    # the gradient there is exactly zero, not NaN.
+    assert float(jax.grad(mean_fraction)(freezing - 3.0)) == 0.0
+    assert float(jax.grad(mean_fraction)(freezing + 3.0 * ICE_FREE_SST_EXCESS)) == 0.0
+
+
+def test_output_variables_and_roles(uniform_grid):
+    """The dataset holds the fraction as state and the SST as a forcing."""
+    import jax_datetime as jdt
+
+    from jem.base.component import TimeAxis
+
+    model = _bind(SlabSeaiceModel(uniform_grid), start="2000-01-01")
+    _, diagnostics = model.step(
+        _step_with_sst(model, constants.seawater_freezing_point_K + 0.9),
+        coupling_time(0),
     )
+    stacked = jax.tree.map(lambda leaf: leaf[None], diagnostics)
+    dataset = model.to_xarray(stacked, TimeAxis(
+        start_date=jdt.to_datetime("2000-01-01"),
+        steps=np.array([0]),
+        dt=jdt.to_timedelta(1, "day"),
+    ))
 
-
-def test_replacing_the_carried_leaf_cannot_move_the_initial_state(uniform_grid):
-    """Why ``initialize`` takes parameters: the initial condition is spent.
-
-    ``initial_ice_thickness`` has already been copied into the state by the
-    time a carry exists, and ``step`` never reads it, so replacing that leaf
-    in the carry does nothing -- which is exactly why an initial condition is
-    varied through ``initialize`` instead.
-    """
-    model = SlabSeaiceModel(uniform_grid)
-    carry = model.initialize()
-
-    carry["params"] = carry["params"].replace(initial_ice_thickness=3.0)
-    stepped, _ = model.step(carry, coupling_time(0))
-
-    np.testing.assert_allclose(np.asarray(carry["state"].ice_thickness), 0.0)
-    np.testing.assert_allclose(np.asarray(stepped["state"].ice_thickness), 0.0)
-
-
-def test_grad_wrt_initial_thickness_reaches_the_trajectory(uniform_grid):
-    """The initial thickness is differentiable through ``initialize``."""
-    model = SlabSeaiceModel(uniform_grid)
-
-    def mean_thickness(initial_ice_thickness):
-        params = model.params.replace(initial_ice_thickness=initial_ice_thickness)
-        carry = model.initialize(params)
-        carry["forcing"] = carry["forcing"].replace(
-            # Growth well clear of the clip at zero, so the derivative is not
-            # measuring the clip.
-            ice_frazil_melt_energy=jnp.full(
-                uniform_grid.shape, 0.25 * ENERGY_PER_METRE
-            )
-        )
-        for step in range(3):
-            carry, _ = model.step(carry, coupling_time(step))
-        return jnp.mean(carry["state"].ice_thickness)
-
-    gradient = jax.grad(mean_thickness)(jnp.float32(1.0))
-
-    assert bool(jnp.isfinite(gradient))
-    assert abs(float(gradient)) > 0.0
-    # Basal growth is additive, so a metre of initial ice is a metre at the end.
-    np.testing.assert_allclose(float(gradient), 1.0, rtol=1e-5)
+    assert set(dataset.data_vars) == {
+        "ice_fraction", "forcing_sea_surface_temperature"}
+    assert dataset["ice_fraction"].attrs["jem_role"] == "state"
+    assert dataset["forcing_sea_surface_temperature"].attrs["jem_role"] == "forcing"
+    np.testing.assert_allclose(dataset["ice_fraction"].values, 0.5, atol=1e-4)
 
 
 # ---------------------------------------------------------------------------
-# Starting from an observed ice concentration
+# Initial condition
 # ---------------------------------------------------------------------------
-#
-# Under the standard workflow the exchange runs before the components, and a
-# `derived` field is only rewritten at the end of a step, so
-# `initialize()`'s `ice_fraction` is what an atmosphere is handed for its
-# first two coupling steps. Starting from zero hands an Earth-like run
-# ice-free poles, and the heat loss that causes comes back as a freeze/melt
-# potential that grows implausibly thick ice in one step. These pin the
-# climatological start that avoids it.
 
 
-#: A January-peaking concentration: fully covered in January, ice-free in July.
 MONTHLY_ICE_FRACTION = 0.5 + 0.5 * np.cos(2 * np.pi * np.arange(12) / 12.0)
 
 
@@ -344,20 +271,18 @@ def _bind(model, start="2000-04-01"):
 def test_initial_fraction_reproduces_the_climatology_at_the_start_date(
     uniform_grid, ice_clim_file
 ):
-    """The fraction `initialize` publishes is the file's, at the run's month.
+    """The fraction `initialize` returns is the file's, at the run's month.
 
-    Round-tripped through the closure and its inverse, so this checks the
-    inversion as well as the sampling: away from saturation the two are exact
-    to float32. The climatology is read here the way the slab ocean reads its
-    SST -- `load_monthly_climatology` then `evaluate_cyclic_linear` -- so the
-    file's own month-to-month interpolation is what is compared against.
+    The climatology is read here the way the slab ocean reads its SST --
+    `load_monthly_climatology` then `evaluate_cyclic_linear` -- so the file's
+    own month-to-month interpolation is what is compared against.
     """
     from jem.components.slab.base import load_monthly_climatology
     from jem.utils.cycles import evaluate_cyclic_linear
 
     model = _bind(SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file))
 
-    fraction = np.asarray(model.initialize()["derived"].ice_fraction)
+    fraction = np.asarray(model.initialize()["state"].ice_fraction)
     expected = np.asarray(evaluate_cyclic_linear(
         model.start_year_fraction,
         load_monthly_climatology(ice_clim_file, "icec", uniform_grid),
@@ -366,49 +291,35 @@ def test_initial_fraction_reproduces_the_climatology_at_the_start_date(
     np.testing.assert_allclose(fraction, expected, atol=1e-6)
 
     # And it is the START date that selected it, not simply the first month:
-    # a January start of the same file gives a different (saturated) cover.
+    # a January start of the same file gives a different (near-full) cover.
     january = _bind(
         SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
         start="2000-01-01",
-    ).initialize()["derived"].ice_fraction
+    ).initialize()["state"].ice_fraction
     assert float(np.asarray(january).min()) > fraction.max()
 
 
-def test_a_fully_covered_cell_is_capped_rather_than_infinite(
+def test_without_a_climatology_the_run_starts_ice_free(uniform_grid):
+    """No file, no ice: the first step's SST is what puts any there."""
+    carry = _bind(SlabSeaiceModel(uniform_grid)).initialize()
+
+    assert np.asarray(carry["state"].ice_fraction).shape == uniform_grid.shape
+    np.testing.assert_array_equal(np.asarray(carry["state"].ice_fraction), 0.0)
+
+
+def test_the_first_step_replaces_the_climatological_cover(
     uniform_grid, ice_clim_file
 ):
-    """Concentration 1 inverts to infinity, so it is given a real depth instead.
-
-    The closure saturates, so a fully covered cell's thickness is not
-    recoverable from its fraction; `max_initial_ice_thickness` is what such a
-    cell gets. It must still *read back* as effectively fully covered.
-    """
+    """The climatology is an initial condition only: one step and it is gone."""
     model = _bind(
         SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
-        start="2000-01-01",  # the month the climatology is 1.0
+        start="2000-01-01",
     )
-    carry = model.initialize()
+    assert float(np.asarray(model.initialize()["state"].ice_fraction).min()) > 0.9
 
-    thickness = np.asarray(carry["state"].ice_thickness)
-    np.testing.assert_allclose(
-        thickness, float(model.params.max_initial_ice_thickness), rtol=1e-6
-    )
-    assert np.isfinite(thickness).all()
-    assert np.asarray(carry["derived"].ice_fraction).min() > 0.99
-
-
-def test_without_a_climatology_the_ice_starts_from_the_parameter(uniform_grid):
-    """No file is the unchanged behaviour: a uniform thickness, zero by default."""
-    bare = _bind(SlabSeaiceModel(uniform_grid)).initialize()
-    assert float(np.asarray(bare["state"].ice_thickness).max()) == 0.0
-    assert float(np.asarray(bare["derived"].ice_fraction).max()) == 0.0
-
-    uniform = _bind(
-        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(initial_ice_thickness=0.5))
-    ).initialize()
-    np.testing.assert_allclose(
-        np.asarray(uniform["state"].ice_thickness), 0.5, rtol=1e-6
-    )
+    stepped = _step_with_sst(
+        model, constants.seawater_freezing_point_K + 2.0 * ICE_FREE_SST_EXCESS)
+    np.testing.assert_allclose(np.asarray(stepped["state"].ice_fraction), 0.0)
 
 
 def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
@@ -417,11 +328,11 @@ def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
         SlabSeaiceModel(half_land_grid, ice_clim_file=ice_clim_file),
         start="2000-01-01",
     )
-    carry = model.initialize()
+    fraction = np.asarray(model.initialize()["state"].ice_fraction)
 
     land = np.asarray(half_land_grid.binary_mask == 1.0)
-    assert np.asarray(carry["state"].ice_thickness)[land].max() == 0.0
-    assert np.asarray(carry["derived"].ice_fraction)[land].max() == 0.0
+    assert fraction[land].max() == 0.0
+    assert fraction[~land].min() > 0.9
 
 
 def test_a_missing_climatology_file_is_reported_at_construction(uniform_grid):
@@ -443,75 +354,15 @@ def test_a_climatology_with_nans_over_ocean_is_refused(tmp_path, uniform_grid):
         SlabSeaiceModel(uniform_grid, ice_clim_file=path)
 
 
-def test_max_initial_ice_thickness_is_validated_and_differentiable(
-    uniform_grid, ice_clim_file
+def test_a_nan_land_fill_value_stays_out_of_the_initial_state(
+    half_land_grid, tmp_path
 ):
-    """It is a depth like the others, and a gradient reaches it through the state."""
-    with pytest.raises(ValueError, match="max_initial_ice_thickness"):
-        SlabSeaiceModel(
-            uniform_grid, SlabSeaiceParameters(max_initial_ice_thickness=-1.0)
-        )
+    """A file's NaN land fill value must not reach the carry.
 
-    model = _bind(
-        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
-        start="2000-01-01",  # saturated, so the cap is what sets the thickness
-    )
-
-    def total_thickness(cap):
-        params = SlabSeaiceParameters(max_initial_ice_thickness=cap)
-        return jnp.sum(model.initialize(params)["state"].ice_thickness)
-
-    gradient = float(jax.grad(total_thickness)(3.0))
-    assert gradient == pytest.approx(float(np.prod(uniform_grid.shape)))
-
-
-def test_saturated_cell_gradient_is_finite_not_nan(uniform_grid, ice_clim_file):
-    """Regression: a fully-covered cell must not poison the closure's gradient.
-
-    ``_thickness_from_fraction`` inverts ``f = 1 - exp(-h / scale)`` with
-    ``log1p(-f)``. At ``f == 1`` that is ``log1p(-1) = -inf``, and although
-    the outer ``jnp.where`` replaces the *primal* with the cap for such a
-    cell, reverse-mode AD still evaluates the VJP of the unselected branch
-    before zeroing its cotangent -- ``0 * inf = nan``. Every ocean cell of
-    ``ice_clim_file`` is exactly 1.0 in January, so this exercises the bug
-    with real data rather than a hand-built edge case.
-    """
-    model = _bind(
-        SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
-        start="2000-01-01",  # the month the climatology is 1.0 everywhere
-    )
-
-    def total_thickness(scale):
-        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
-        return jnp.sum(model.initialize(params)["state"].ice_thickness)
-
-    thickness = np.asarray(model.initialize()["state"].ice_thickness)
-    gradient = jax.grad(total_thickness)(jnp.float32(0.5))
-
-    # The primal is unchanged by the fix: every cell is still capped.
-    np.testing.assert_allclose(
-        thickness, float(model.params.max_initial_ice_thickness), rtol=1e-6
-    )
-    assert bool(jnp.isfinite(gradient))
-    # Every cell is saturated, so the cap -- not the scale -- sets the
-    # thickness everywhere: the gradient is exactly zero, not merely finite.
-    assert float(gradient) == 0.0
-
-
-def test_a_nan_land_fill_value_does_not_poison_the_gradient(half_land_grid, tmp_path):
-    """Regression: a NaN land fill value must not poison the closure's gradient.
-
-    `__init__` accepts a NaN fill value over land in the ice climatology --
-    only a NaN over *ocean* is refused, since a real file's land cells
-    routinely carry one. `_thickness_from_fraction` used to invert every
-    cell's concentration, land included, only for the caller's own
-    ``jnp.where(ocean, ...)`` to zero the land cells afterwards. That gets the
-    *primal* right, but `jax.grad` still differentiates through
-    `log1p(-nan) = nan` for the land cells first, and multiplying that local
-    gradient by the outer mask's already-zeroed cotangent is `0 * nan = nan`
-    -- the same failure `test_saturated_cell_gradient_is_finite_not_nan`
-    regression-tests for a saturated ocean cell, just reached through a land
-    NaN instead.
+    `__init__` accepts a NaN over land -- only a NaN over *ocean* is refused,
+    since a real file's land cells routinely carry one -- so `initialize` has
+    to select the land cells out, or the first exchange would hand the
+    atmosphere a NaN ice cover over every continent.
     """
     from tests.unit.slab_test_utils import write_climatology
 
@@ -525,18 +376,9 @@ def test_a_nan_land_fill_value_does_not_poison_the_gradient(half_land_grid, tmp_
 
     # Construction succeeds: the NaNs are over land, not ocean.
     model = _bind(SlabSeaiceModel(half_land_grid, ice_clim_file=path))
-
-    def total_thickness(scale):
-        params = SlabSeaiceParameters(ice_fraction_thickness_scale=scale)
-        return jnp.sum(model.initialize(params)["state"].ice_thickness)
+    fraction = np.asarray(model.initialize()["state"].ice_fraction)
 
     ocean = np.asarray(half_land_grid.binary_mask == 0.0)
-    thickness = np.asarray(model.initialize()["state"].ice_thickness)
-    gradient = jax.grad(total_thickness)(jnp.float32(0.7))
-
-    # The primal was already correct before the fix: land is exactly zero,
-    # ocean is finite.
-    assert bool(np.all(thickness[~ocean] == 0.0))
-    assert bool(np.all(np.isfinite(thickness[ocean])))
-    assert bool(jnp.isfinite(gradient))
-    assert float(gradient) != 0.0
+    assert bool(np.all(np.isfinite(fraction)))
+    np.testing.assert_array_equal(fraction[~ocean], 0.0)
+    np.testing.assert_allclose(fraction[ocean], 0.5, atol=1e-6)
