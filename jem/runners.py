@@ -122,6 +122,10 @@ def build_atmosphere(cfg: DictConfig) -> JCMComponent:
     ``KeyError`` deep in the first coupled step of what might be an hours-long
     queued run.
 
+    The ``atmosphere.init`` group is honoured as jax-gcm's own CLI honours
+    it -- an ERA5 analysis, a Jablonowski-Williamson profile, a warm start
+    from a saved state -- by :func:`build_initial_state`.
+
     Parameters
     ----------
     cfg : omegaconf.DictConfig
@@ -151,7 +155,99 @@ def build_atmosphere(cfg: DictConfig) -> JCMComponent:
     warn_on_config_traps(
         atmosphere, model.physics, forcing, coords=model.coords, dycore=dycore
     )
-    return JCMComponent(model, forcing=forcing)
+    initial_state, initial_physics_state = build_initial_state(atmosphere, model)
+    return JCMComponent(
+        model,
+        forcing=forcing,
+        initial_state=initial_state,
+        initial_physics_state=initial_physics_state,
+    )
+
+
+def build_initial_state(atmosphere: DictConfig, model: Any) -> tuple[Any, Any]:
+    """Build the atmosphere's initial condition from its ``init`` config group.
+
+    The same choices, with the same meaning, as ``python -m jcm.main``'s
+    ``init=`` group, each built by the public jax-gcm function that builds it
+    there:
+
+    ``isothermal``
+        ``(None, None)``: jax-gcm's default state, an isothermal atmosphere
+        at rest.
+    ``balanced_isothermal``
+        :func:`jcm.initial_states.balanced_isothermal_state`.
+    ``jw``
+        :func:`jcm.initial_states.jw_state` with ``init.rh``.
+    ``era5``
+        :func:`jcm.initial_states.era5_state` -- WeatherBench2's ERA5,
+        regridded onto the model grid -- at ``init.date``, or at the model's
+        start time when that is unset, so the analysis is the one for the day
+        the coupled run starts.
+    ``from_state``
+        :func:`jcm.initial_states.checkpoint_state` on ``init.file`` (an
+        ``hf://`` path is fetched from jax-gcm's data mirror), returning the
+        donor's physics carry as well, so a warm start keeps it.
+
+    Parameters
+    ----------
+    atmosphere : omegaconf.DictConfig
+        The ``atmosphere`` config subtree.
+    model : jcm.model.Model
+        The built atmosphere.
+
+    Returns
+    -------
+    tuple
+        ``(initial_state, initial_physics_state)`` for
+        :class:`~jem.components.jcm.component.JCMComponent`; either may be
+        ``None``.
+
+    Raises
+    ------
+    ValueError
+        For an ``init.kind`` jax-gcm does not define.
+
+    """
+    init = atmosphere.get("init") or {}
+    kind = init.get("kind", "isothermal")
+    if kind == "isothermal":
+        return None, None
+    if kind == "balanced_isothermal":
+        from jcm.initial_states import balanced_isothermal_state
+
+        return balanced_isothermal_state(model), None
+    if kind == "jw":
+        from jcm.initial_states import jw_state
+
+        return jw_state(model, rh=float(init.get("rh", 0.6))), None
+    if kind == "era5":
+        from jcm.initial_states import era5_state
+
+        date = init.get("date") or str(model.start_time.to_datetime64())
+        logger.info("Atmosphere initial condition: ERA5 at %s.", date)
+        return era5_state(model.coords, str(date)), None
+    if kind == "from_state":
+        from jcm.checkpoint import parse_unstamped_scale
+        from jcm.data.remote import fetch
+        from jcm.initial_states import checkpoint_state
+
+        path = str(init["file"])
+        if path.startswith("hf://"):
+            path = fetch(path.removeprefix("hf://"))
+        state, physics_carry, donor_days = checkpoint_state(
+            model, path,
+            unstamped_scale=parse_unstamped_scale(init.get("unstamped_scale")),
+        )
+        logger.info(
+            "Atmosphere initial condition: %s (donor state carried %.0f"
+            " model days; the clock starts at the run's start date).",
+            path, donor_days,
+        )
+        return state, physics_carry
+    raise ValueError(
+        f"atmosphere.init.kind={kind!r} is not one of jax-gcm's initial"
+        " conditions: isothermal, balanced_isothermal, jw, era5, from_state."
+    )
 
 
 def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:

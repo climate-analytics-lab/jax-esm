@@ -318,6 +318,20 @@ class JCMComponent:
         model's grid. It lives in the carry, not on ``self``, because
         exchangers overwrite parts of it (the SST an ocean component
         computes) every coupling step.
+    initial_state : jcm.physics_interface.PhysicsState or dycore state, optional
+        The atmosphere's initial condition, as
+        :meth:`jcm.model.Model.bootstrap_state` takes it: a gridpoint
+        ``PhysicsState`` (an ERA5 analysis from
+        ``jcm.initial_states.era5_state``, a ``jw_state``...) or a
+        dycore-native state (a warm start from
+        ``jcm.initial_states.checkpoint_state``). Default ``None``: jax-gcm's
+        own default, an isothermal atmosphere at rest. :func:`jem.runners.
+        build_atmosphere` sets it from the ``atmosphere.init`` config group.
+    initial_physics_state : optional
+        The cross-step physics carry to start from, for a warm start that
+        restores a donor run's carry along with its state (what
+        ``checkpoint_state`` returns as its second value). Default ``None``:
+        a fresh carry, which is what every other initial condition means.
     exchanged_forcing : iterable of str, optional
         Names of ``forcing`` fields the coupled model supplies -- the ones
         an exchanger writes into ``atm.forcing`` every coupling step. They
@@ -344,9 +358,13 @@ class JCMComponent:
         *,
         forcing: ForcingData | None = None,
         exchanged_forcing: Iterable[str] = (),
+        initial_state: Any = None,
+        initial_physics_state: Any = None,
     ) -> None:
         """Wrap ``model``; see the class docstring for the parameters."""
         self.model = model
+        self.initial_state = initial_state
+        self.initial_physics_state = initial_physics_state
         self.forcing = (forcing if forcing is not None
                         else default_forcing(model.coords.horizontal))
         self._exchanged_forcing: tuple[str, ...] = ()
@@ -518,7 +536,9 @@ class JCMComponent:
             "derived": JCMDerived, "forcing": ForcingData}``.
 
         """
-        dycore_state, physics_carry = self.model.bootstrap_state()
+        dycore_state, physics_carry = self.model.bootstrap_state(self.initial_state)
+        if self.initial_physics_state is not None:
+            physics_carry = self.initial_physics_state
         return {
             "state": dycore_state,
             "physics": physics_carry,
