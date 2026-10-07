@@ -105,7 +105,7 @@ def slab_exchange(components, time):
     The slab atmosphere computes the surface heat flux itself, from the
     surface temperatures the ocean and the land hand it, so it is the source
     of the flux the other two are forced with. The sea ice is driven purely by
-    the ocean's freeze/melt potential.
+    the ocean's sea surface temperature.
 
     ``atm.forcing.total_heat_flux`` is set from the atmosphere's own
     ``derived.internal_total_heat_flux`` for one reason only: that forcing
@@ -134,7 +134,7 @@ def slab_exchange(components, time):
         ice=dict(
             seaice,
             forcing=seaice["forcing"].replace(
-                ice_frazil_melt_energy=ocean["derived"].ice_frazil_melt_energy
+                sea_surface_temperature=ocean["state"].sea_surface_temperature
             ),
         ),
     )
@@ -426,7 +426,7 @@ def test_all_four_slab_datasets_merge(slab_coupler):
     """Every component of a coupled run merges into one dataset.
 
     Three of these four components are forced with a heat flux and two of them
-    see the ocean's freeze/melt potential, so without a naming convention the
+    are handed the ocean's sea surface temperature, so without a naming convention the
     same physical name would arrive from several components carrying different
     values -- coupling is lagged, so a received copy is a step behind the
     original -- and ``xr.merge`` would refuse the lot. A field a component was
@@ -449,11 +449,11 @@ def test_all_four_slab_datasets_merge(slab_coupler):
         "mean_air_temperature",
         "sea_surface_temperature",
         "land_surface_temperature",
-        "ice_thickness",
+        "ice_fraction",
         "internal_total_heat_flux",
         "total_heat_flux",
         "forcing_total_heat_flux",
-        "forcing_ice_frazil_melt_energy",
+        "forcing_sea_surface_temperature",
     ):
         assert name in merged, name
 

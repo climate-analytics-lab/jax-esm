@@ -138,16 +138,19 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # the JCM wrapper) drives both surfaces.
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
-    # The mixed layer's freeze/melt potential (CESM's `frzmlt`) is what the
-    # sea ice grows and melts on.
-    ("ocn.derived.ice_frazil_melt_energy",
-     "seaice.forcing.ice_frazil_melt_energy", "flux"),
+    # The slab sea ice diagnoses its ice fraction from the sea surface
+    # temperature alone, so SST is the one field the ocean hands it. The two
+    # share the ocean grid, so this row never crosses a grid boundary.
+    ("ocn.state.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
     # The surface state the atmosphere's surface-flux scheme reads. In an
     # uncoupled JCM run these are prescribed boundary conditions; here the
-    # surface components provide them, under JCM's own field names.
+    # surface components provide them, under JCM's own field names. The ice
+    # fraction is an areal quantity, hence "flux": regridded conservatively
+    # so the ice-covered area is the same on both grids.
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
     ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
     ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
@@ -159,8 +162,9 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: ``forcing.heat_flux`` rather than ``forcing.total_heat_flux``, the ocean
 #: takes a freshwater flux as well, and the sea surface temperature is
 #: published from ``derived`` (Veros' ``state`` is Veros' own ``VerosState``
-#: object, which is not a struct of exchangeable fields). The rows that do not
-#: involve the ocean are the same as :data:`STANDARD_EXCHANGES`'.
+#: object, which is not a struct of exchangeable fields) -- which is also
+#: where the sea ice's row reads it from. The rows that do not involve the
+#: ocean are the same as :data:`STANDARD_EXCHANGES`'.
 #:
 #: What this table deliberately does **not** carry, because no copy of a field
 #: can express it -- each needs a hand-written exchanger
@@ -179,10 +183,6 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: - **the "swamp" sea-ice insulation** the example drivers apply, which
 #:   masks the heat and freshwater fluxes wherever the surface has reached the
 #:   freezing point.
-#: - **the freeze/melt potential a slab sea ice runs on.** Veros publishes no
-#:   ``ice_frazil_melt_energy``, so there is no ``ocn`` to ``seaice`` row and
-#:   a sea-ice component coupled to a Veros ocean is not driven by it;
-#:   :func:`default_exchanges` warns when it sees that combination.
 #:
 #: ``forcing.surface_air_temperature`` has no row either: Veros carries it
 #: only to write it back out as a diagnostic, and nothing in the integration
@@ -192,8 +192,10 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
     ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+    ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
     ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
     ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
@@ -682,9 +684,9 @@ def default_exchanges(
     ==========================================  =======================================
     ``atm.derived.total_heat_flux``             ``ocn.forcing.total_heat_flux``
     ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
-    ``ocn.derived.ice_frazil_melt_energy``      ``seaice.forcing.ice_frazil_melt_energy``
+    ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
-    ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
+    ``seaice.state.ice_fraction``               ``atm.forcing.sice_am``
     ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
     ``lnd.state.snowc``                         ``atm.forcing.snowc_am``
     ``lnd.state.soilw``                         ``atm.forcing.soilw_am``
@@ -720,8 +722,8 @@ def default_exchanges(
     - *kind* is the row's own ``"flux"``/``"state"`` (:data:`KINDS`).
 
     That split is the one the mixed-grid example makes by hand: extensive
-    quantities -- heat fluxes, the freeze/melt energy, an areal ice fraction
-    -- are regridded conservatively to keep their budgets, while an intensive
+    quantities -- heat fluxes, an areal ice fraction -- are regridded
+    conservatively to keep their budgets, while an intensive
     state variable such as the sea surface temperature is interpolated
     bilinearly. So the mixed-grid configuration is::
 
@@ -791,15 +793,6 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
-        logger.warning(
-            "A sea-ice component is coupled to a Veros ocean, which publishes "
-            "no freeze/melt potential (`ice_frazil_melt_energy`), so the "
-            "default coupling has no row that drives it: the ice will only "
-            "respond to what it computes itself. Write the exchange out by "
-            "hand (coupling.exchanger) if the ice is meant to grow on the "
-            "ocean's heat budget."
-        )
     return specs
 
 
