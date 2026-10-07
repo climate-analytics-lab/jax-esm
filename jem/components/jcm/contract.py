@@ -323,10 +323,63 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     IntegrationPoint(
         "jcm.forcing", "TimeSeries", "public",
         "The time-varying forcing leaf a from-file boundary condition is"
-        " built as. JAX-ESM never constructs one; it is watched because"
-        " whether a ForcingData field IS one decides the pytree structure of"
-        " the atmosphere's carry, which is what JCMComponent.initialize()"
-        " has to settle before a coupled run can scan.",
+        " built as. Whether a ForcingData field IS one decides the pytree"
+        " structure of the atmosphere's carry, which is what"
+        " JCMComponent.initialize() has to settle before a coupled run can"
+        " scan; restrict_forcing_to_window reads its values/times/align_mode/"
+        "persist fields to cut it down to a run's window.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing", "make_time_series", "public",
+        "Build the restricted, by-date TimeSeries in"
+        " jem.components.jcm.forcing_window. Signature: make_time_series("
+        "values, times, align_mode=BY_DATE, persist='strict') -> TimeSeries.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing", "WRAP_YEAR", "public",
+        "The align_mode code of a climatology replayed every year, which"
+        " restrict_forcing_to_window re-expresses by date.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing", "BY_DATE", "public",
+        "The align_mode code of a step-held dated series.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing", "BY_DATE_INTERP", "public",
+        "The align_mode code of a linearly interpolated dated series.",
+    ),
+    IntegrationPoint(
+        "jcm.initial_states", "era5_state", "public",
+        "The ERA5 initial condition behind init=era5"
+        " (jem.runners.build_initial_state). Lazily re-exported from"
+        " jcm.data.era5.initial_state. Signature: (coords, date: str) ->"
+        " PhysicsState.",
+    ),
+    IntegrationPoint(
+        "jcm.initial_states", "jw_state", "public",
+        "The Jablonowski-Williamson initial condition behind init=jw."
+        " Signature: jw_state(model, rh=0.6).",
+    ),
+    IntegrationPoint(
+        "jcm.initial_states", "balanced_isothermal_state", "public",
+        "The orography-balanced isothermal initial condition behind"
+        " init=balanced_isothermal. Signature: (model) -> PhysicsState.",
+    ),
+    IntegrationPoint(
+        "jcm.initial_states", "checkpoint_state", "public",
+        "The warm start behind init=from_state, returning the donor's"
+        " physics carry with its state. Signature: checkpoint_state(model,"
+        " path, *, unstamped_scale=None) -> (state, physics_carry, days).",
+    ),
+    IntegrationPoint(
+        "jcm.checkpoint", "parse_unstamped_scale", "public",
+        "Parse init.unstamped_scale for checkpoint_state, as jax-gcm's CLI"
+        " does.",
+    ),
+    IntegrationPoint(
+        "jcm.data.remote", "fetch", "public",
+        "Resolve an hf:// data-mirror path given as atmosphere.init.file to"
+        " a local file, as jax-gcm's own CLI does.",
     ),
     IntegrationPoint(
         "jcm.forcing.ForcingData", "select", "public",
