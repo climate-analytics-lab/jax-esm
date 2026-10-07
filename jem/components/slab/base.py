@@ -312,8 +312,8 @@ class SlabModelBase(ABC):
       ``carry["params"]`` every step (the ocean's ``relaxation_time``, the
       land's ``tdland``). Vary one by replacing that leaf in the carry.
     - **Initial-condition parameters** are read once, by :meth:`initialize`,
-      and never again (``initial_sst``, ``initial_ice_thickness``, the slab
-      atmosphere's ``initial_*``). Replacing such a leaf in a carry that
+      and never again (the ocean's ``initial_sst``, the slab atmosphere's
+      ``initial_*``). Replacing such a leaf in a carry that
       already exists does nothing at all -- its value has already been copied
       into the state. Vary one by passing the parameters to ``initialize``:
       ``model.initialize(params)`` builds the initial state from them *and*
