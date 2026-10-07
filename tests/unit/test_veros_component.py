@@ -37,6 +37,7 @@ from jem.components.veros_component import (  # noqa: E402
     VerosDerived,
     VerosForcing,
     configure_veros_runtime,
+    default_veros_device,
 )
 
 START_DATE = jdt.to_datetime("2000-01-01")
@@ -224,6 +225,37 @@ def test_configure_veros_runtime_is_idempotent():
 
     configure_veros_runtime()
     assert runtime_settings.backend == "jax"
+
+
+def test_veros_device_follows_the_jax_default_backend():
+    """Veros must not pin the process to its own ``"cpu"`` default device.
+
+    Veros applies its ``device`` setting process-wide
+    (``jax_platform_name``), so if it differed from JAX's own default
+    backend, importing Veros would move every computation in the process --
+    the atmosphere's included -- onto that device.
+    """
+    import os
+
+    from veros import runtime_settings
+
+    if "VEROS_DEVICE" in os.environ:
+        pytest.skip("VEROS_DEVICE chooses the device explicitly")
+    assert runtime_settings.device == default_veros_device()
+    # What Veros' `jax_platform_name` update actually decides: where a new
+    # array is placed.
+    (device,) = jax.numpy.zeros(1).devices()
+    assert device.platform == jax.devices()[0].platform
+
+
+@pytest.mark.parametrize(
+    "jax_backend, veros_device",
+    [("cpu", "cpu"), ("gpu", "gpu"), ("cuda", "gpu"), ("rocm", "gpu"), ("tpu", "tpu")],
+)
+def test_default_veros_device_maps_jax_platform_names(monkeypatch, jax_backend, veros_device):
+    """Every JAX spelling of a GPU platform is Veros' ``"gpu"``."""
+    monkeypatch.setattr(jax, "default_backend", lambda: jax_backend)
+    assert default_veros_device() == veros_device
 
 
 def test_component_satisfies_protocols(component):

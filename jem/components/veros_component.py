@@ -14,6 +14,7 @@ handed it. That is done once, in the constructor, and said out loud there.
 
 import importlib
 import logging
+import os
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -67,6 +68,18 @@ MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
 VEROS_RESTART_FILENAME = "veros.restart.h5"
 
 
+def default_veros_device() -> str:
+    """Return the Veros ``device`` name for the platform JAX would use anyway.
+
+    JAX names its CUDA and ROCm platforms ``"gpu"`` from
+    :func:`jax.default_backend`, but the platform names ``"cuda"`` and
+    ``"rocm"`` are mapped too so that the answer is one of Veros' own
+    ``("cpu", "gpu", "tpu")`` whichever spelling a JAX version reports.
+    """
+    backend = jax.default_backend()
+    return "gpu" if backend in ("gpu", "cuda", "rocm") else backend
+
+
 def configure_veros_runtime() -> None:
     """Point Veros at the JAX backend before any of its operators are bound.
 
@@ -84,6 +97,15 @@ def configure_veros_runtime() -> None:
     locked settings are inspected instead of assigned, and an error is
     raised only if they were bound to a non-JAX backend.
 
+    The device follows JAX's own default backend. Veros' ``device`` setting
+    defaults to ``"cpu"``, and when Veros initialises its JAX backend it
+    applies that setting *process-wide* with
+    ``jax.config.update("jax_platform_name", device)`` -- so leaving the
+    default in place would silently move every computation in the process,
+    the atmosphere's included, onto the CPU of a GPU host. An explicit
+    ``VEROS_DEVICE`` environment variable is Veros' own way of choosing a
+    device and is honoured as given.
+
     Raises
     ------
     RuntimeError
@@ -96,6 +118,8 @@ def configure_veros_runtime() -> None:
         runtime_settings.backend = "jax"
         runtime_settings.force_overwrite = True
         runtime_settings.linear_solver = "scipy_jax"
+        if "VEROS_DEVICE" not in os.environ:
+            runtime_settings.device = default_veros_device()
     except RuntimeError as exc:
         # Settings are locked because veros.core was already imported. If
         # they were locked with the JAX backend (this module was imported
