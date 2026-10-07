@@ -199,6 +199,57 @@ Each `*Parameters` docstring says which of its fields are initial conditions.
 See {doc}`design/carry_and_clock`'s *Parameters* section for the pattern in
 full, including why the distinction is not one the framework enforces.
 
+## The atmosphere's initial condition
+
+`JCMComponent` starts the atmosphere from jax-gcm's default, an isothermal
+atmosphere at rest, unless it is given an `initial_state` -- anything
+`jcm.model.Model.bootstrap_state` takes: a gridpoint `PhysicsState` such as an
+ERA5 analysis, or a dycore-native warm-start state (with its physics carry as
+`initial_physics_state`):
+
+```python
+from jcm.initial_states import era5_state, jw_state
+
+atm = JCMComponent(atm_model, initial_state=era5_state(atm_model.coords, "2022-12-24"))
+atm = JCMComponent(atm_model, initial_state=jw_state(atm_model, rh=0.6))
+```
+
+From the command line this is jax-gcm's own `init` group, re-rooted:
+`init@atmosphere.init=era5` (see {doc}`getting_started`).
+
+## Gradients of long, high-resolution runs
+
+`jax.grad` of `generate_trajectory_function(n, remat=True)` keeps one coupled
+carry per step on the device. When that does not fit -- a T255 atmosphere
+coupled hourly to a one-degree ocean carries 2.6 GB, and a twelve-day
+sensitivity has 288 steps -- {func}`jem.adjoint.checkpointed_value_and_grad`
+computes the same gradient with the block-start carries held in host memory:
+
+```python
+from jem.adjoint import checkpointed_value_and_grad
+
+weights = np.zeros(n_steps)
+weights[-120:] = 1 / 120                       # J = mean over the last 120 steps
+
+def box_precipitation(new_carry, diagnostics):
+    return jnp.sum(box_weight * new_carry.components["atm"]["derived"].precipitation)
+
+J, gradient = checkpointed_value_and_grad(
+    coupler.generate_step_function(), box_precipitation, coupler.initialize(), weights,
+    block_size=6,                               # carries held on the device at once
+    on_block_gradient=lambda k, g: ...,         # dJ/d(carry at step k), every block
+)
+gradient.components["ocn"]["state"]             # dJ/d(initial ocean state)
+```
+
+At high resolution the atmosphere's time-varying forcing is the other big
+leaf of the carry (jax-gcm's daily T255 climatology is 4.3 GB);
+`jem.components.jcm.forcing_window.restrict_forcing_to_window(forcing, start,
+end)` keeps only the records a run reads, without changing any value it
+sees. {doc}`design/differentiating_long_runs` explains the choices, with a
+worked T255 case, including what the gradient of a chaotic atmosphere a week
+ahead does and does not tell you.
+
 ## Long runs, checkpoints and reductions
 
 `run_chunked` checkpoints by default and resumes from the same call; a

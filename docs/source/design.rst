@@ -16,3 +16,4 @@ implementation-specific details belong in the PR that introduced them.
    design/running
    design/configuration
    design/jcm_adapter
+   design/differentiating_long_runs
