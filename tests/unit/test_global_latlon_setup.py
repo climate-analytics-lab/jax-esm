@@ -1,24 +1,34 @@
 """The observation-started global ocean: its vertical grid and initial state."""
 
-import jax
+import json
+import os
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pytest
 
 veros = pytest.importorskip("veros")
 
 
-@pytest.fixture(autouse=True)
-def _restore_x64():
-    """Leave `jax_enable_x64` as this test found it.
+def _run_isolated(code: str) -> dict:
+    """Run ``code`` in a fresh interpreter and return the dict it prints as JSON.
 
-    Initialising Veros' JAX backend (building a setup, importing
-    `veros.core`) switches it on process-wide, and the float32 tests that run
-    after this one in the same worker must not inherit that -- the same
-    snapshot-and-restore `test_fluxes.py` uses.
+    Building a Veros setup (or importing ``veros.core``) initialises Veros'
+    JAX backend, a once-per-process event that switches ``jax_enable_x64``
+    on for the whole process. Doing that here, at a point in the suite that
+    depends on test order, would leave every later float32 test running in
+    float64 -- and switching it back off afterwards would leave every later
+    Veros test running in float32. A subprocess touches neither.
     """
-    previous = jax.config.read("jax_enable_x64")
-    yield
-    jax.config.update("jax_enable_x64", previous)
+    env = dict(os.environ, JAX_PLATFORMS="cpu")
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        capture_output=True, text=True, env=env, timeout=600,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 from jem.components.veros.setups.global_latlon import (  # noqa: E402
     GLOBAL_LATLON_LAYER_CENTRES,
@@ -31,12 +41,17 @@ from jem.components.veros.setups.global_latlon import (  # noqa: E402
 
 def veros_t_points(thickness_surface_first):
     """Veros' own T-point depths for given thicknesses (`u_centered_grid`)."""
-    from veros.core.numerics import u_centered_grid
-    import jax.numpy as jnp
-
-    dzt = jnp.asarray(np.asarray(thickness_surface_first)[::-1])
-    _, zt, zw = u_centered_grid(dzt, jnp.zeros_like(dzt), jnp.zeros_like(dzt), jnp.zeros_like(dzt))
-    return -(np.asarray(zt) - np.asarray(zw)[-1])[::-1]
+    out = _run_isolated(f"""
+        import json
+        import numpy as np
+        from jem.components import veros_component  # Veros on the JAX backend
+        import jax.numpy as jnp
+        from veros.core.numerics import u_centered_grid
+        dzt = jnp.asarray(np.asarray({list(map(float, thickness_surface_first))})[::-1])
+        _, zt, zw = u_centered_grid(dzt, jnp.zeros_like(dzt), jnp.zeros_like(dzt), jnp.zeros_like(dzt))
+        print(json.dumps({{"zt": (-(np.asarray(zt) - np.asarray(zw)[-1])[::-1]).tolist()}}))
+    """)
+    return np.asarray(out["zt"])
 
 
 def test_veros_puts_its_t_points_exactly_at_the_requested_centres():
@@ -101,28 +116,38 @@ def climatology(tmp_path_factory):
 
 
 def test_setup_matches_the_climatology_grid_and_takes_the_observed_sst(climatology):
-    from jem.components.veros.setups.global_latlon import global_latlon_setup
-
     path, xt, yt, bathymetry = climatology
-    sst = np.full((36, 16), np.nan)
-    sst[0, 8] = 30.0  # one observed cell
-    setup = global_latlon_setup(
-        climatology=path, sea_surface_temperature=sst,
-        layer_centres=(5.0, 15.0, 25.0, 40.0, 70.0, 150.0, 400.0, 1000.0, 2500.0),
-    )()
-    setup.setup()
-    vs = setup.state.variables
-    interior = slice(2, -2)
+    out = _run_isolated(f"""
+        import json
+        import numpy as np
+        from jem.components.veros.setups.global_latlon import global_latlon_setup
+        sst = np.full((36, 16), np.nan)
+        sst[0, 8] = 30.0  # one observed cell
+        setup = global_latlon_setup(
+            climatology={str(path)!r}, sea_surface_temperature=sst,
+            layer_centres=(5.0, 15.0, 25.0, 40.0, 70.0, 150.0, 400.0, 1000.0, 2500.0),
+        )()
+        setup.setup()
+        vs = setup.state.variables
+        interior = slice(2, -2)
+        print(json.dumps(dict(
+            xt=np.asarray(vs.xt[interior]).tolist(),
+            yt=np.asarray(vs.yt[interior]).tolist(),
+            zt=(-np.asarray(vs.zt)[::-1]).tolist(),
+            kbot=np.asarray(vs.kbot[interior, interior]).tolist(),
+            top=np.asarray(vs.temp[interior, interior, -1, 1]).tolist(),
+        )))
+    """)
     # The T points are the asset's own cell centres.
-    np.testing.assert_allclose(np.asarray(vs.xt[interior]), xt)
-    np.testing.assert_allclose(np.asarray(vs.yt[interior]), yt)
-    np.testing.assert_allclose(-np.asarray(vs.zt)[::-1], (5.0, 15.0, 25.0, 40.0, 70.0, 150.0, 400.0, 1000.0, 2500.0))
-    kbot = np.asarray(vs.kbot[interior, interior])
+    np.testing.assert_allclose(out["xt"], xt)
+    np.testing.assert_allclose(out["yt"], yt)
+    np.testing.assert_allclose(out["zt"], (5.0, 15.0, 25.0, 40.0, 70.0, 150.0, 400.0, 1000.0, 2500.0))
+    kbot = np.asarray(out["kbot"])
     is_ocean = bathymetry.T < 0
     np.testing.assert_array_equal(kbot > 0, is_ocean)
     # The 100 m shelf holds the layers centred above it (5..70 m): 5 of 9.
     assert kbot[20, 8] == 9 - 5 + 1
-    top = np.asarray(vs.temp[interior, interior, -1, 1])
+    top = np.asarray(out["top"])
     assert top[0, 8] == pytest.approx(30.0)
     # Elsewhere the climatology's top value, interpolated to 5 m.
     assert top[1, 8] == pytest.approx(25.0 - 20.0 * 5.0 / 90.0 - 5.0 / 500.0, rel=1e-6)

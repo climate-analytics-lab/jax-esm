@@ -234,12 +234,6 @@ def global_latlon_setup(
     type[veros.VerosSetup]
 
     """
-    # Imported here rather than at module scope: importing
-    # `veros.core.operators` initialises Veros' JAX backend, which switches
-    # `jax_enable_x64` on for the whole process. The column helpers above
-    # need none of Veros, so importing this module for them must not do that.
-    from veros.core.operators import at, update
-
     climatology = climatology or climatology_file()
     with xr.open_dataset(climatology) as ds:
         # The asset stores (z, y, x); this module works in (x, y, z) with the
@@ -290,6 +284,13 @@ def global_latlon_setup(
                 f" from {latitude[0]}N)."
             )
         temperature = blend_observed_sst(temperature, sst, depth, mixed_layer_depth)
+
+    # Imported here, after every input has been read and checked, rather than
+    # at module scope: importing `veros.core.operators` initialises Veros' JAX
+    # backend, which switches `jax_enable_x64` on for the whole process. The
+    # column helpers above need none of Veros, and neither does refusing a
+    # bad input, so neither must do that.
+    from veros.core.operators import at, update
 
     class GlobalLatLonSetup(VerosSetup):
         """A global lat-lon ocean with Levitus bathymetry and initial state."""
