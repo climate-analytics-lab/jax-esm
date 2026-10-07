@@ -1,13 +1,13 @@
 from .params import SlabSeaiceParameters
 from .slab_seaice_model import (
-    SeaiceDerived,
+    ICE_FREE_SST_EXCESS,
     SeaiceForcing,
     SeaiceState,
     SlabSeaiceModel,
 )
 
 __all__ = [
-    "SeaiceDerived",
+    "ICE_FREE_SST_EXCESS",
     "SeaiceForcing",
     "SeaiceState",
     "SlabSeaiceModel",
