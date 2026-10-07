@@ -82,7 +82,8 @@ Yucatan channel, off Japan, near Mindanao); a finite-difference check in an
 ocean-only run reproduced them only for perturbations of `1e-4` K, and a 0.01 K
 perturbation responded five times less. Freezing the Prandtl number in the
 reverse pass removed them, which located the switch. The fix, in the Veros
-fork (`veros.core.tke.prandtl_number`), keeps the reference value and takes the
+fork (`veros.core.tke.prandtl_number`,
+[veros-jittable#2](https://github.com/meteorologytoday/veros-jittable/pull/2)), keeps the reference value and takes the
 derivative from the same formula with the shear floor raised smoothly to
 `settings.tke_prandtl_surrogate_shear_floor` (default `1e-7 s^-2`, a weak
 current shear of a few cm/s per 100 m) and the clip rounded over
