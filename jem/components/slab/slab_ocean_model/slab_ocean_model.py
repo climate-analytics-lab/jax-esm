@@ -192,8 +192,18 @@ class SlabOceanModel(SlabModelBase):
     This is exactly CESM's ``frzmlt``: one signed quantity, computed once per
     coupling step with no separate relaxation timescale (the coupling step
     itself is the timescale). This ocean model has no ice physics of its own,
-    so ``ice_frazil_melt_energy`` is meant to be consumed by a sea-ice
-    component (e.g. ``SlabSeaiceModel``) through the coupler.
+    so ``ice_frazil_melt_energy`` is published for a sea-ice component with
+    an energy budget to grow and melt ice on, through the coupler.
+
+    No component in the standard coupling consumes it: ``SlabSeaiceModel``
+    diagnoses its ice fraction from the sea surface temperature alone, and
+    forms and removes ice at no energy cost. The clamp holds the mixed layer
+    warmer than its heat budget left it, so where it acts it is a source of
+    energy for the coupled system -- the latent heat of ice that no component
+    then accounts for -- and the positive part of ``ice_frazil_melt_energy``
+    is the record of how much. An energy budget across the slab ocean closes
+    only with that term included. The negative part is a diagnostic alone:
+    nothing is taken from a mixed layer above freezing.
     """
 
     def __init__(
