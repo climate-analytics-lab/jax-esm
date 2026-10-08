@@ -57,9 +57,9 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 EXPECTED_SPECS = (
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"),
-    ("ocn.derived.ice_frazil_melt_energy", "seaice.forcing.ice_frazil_melt_energy"),
+    ("ocn.state.sea_surface_temperature", "seaice.forcing.sea_surface_temperature"),
     ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"),
     ("lnd.state.snowc", "atm.forcing.snowc_am"),
     ("lnd.state.soilw", "atm.forcing.soilw_am"),
@@ -369,15 +369,15 @@ def test_exchange_roundtrip(components):
         is incoming["atm"]["derived"].total_heat_flux
     )
     assert (
-        exchanged["seaice"]["forcing"].ice_frazil_melt_energy
-        is incoming["ocn"]["derived"].ice_frazil_melt_energy
+        exchanged["seaice"]["forcing"].sea_surface_temperature
+        is incoming["ocn"]["state"].sea_surface_temperature
     )
     atmosphere_forcing = exchanged["atm"]["forcing"]
     assert (
         atmosphere_forcing.sea_surface_temperature
         is incoming["ocn"]["state"].sea_surface_temperature
     )
-    assert atmosphere_forcing.sice_am is incoming["seaice"]["derived"].ice_fraction
+    assert atmosphere_forcing.sice_am is incoming["seaice"]["state"].ice_fraction
     assert (
         atmosphere_forcing.stl_am
         is incoming["lnd"]["state"].land_surface_temperature
@@ -437,11 +437,11 @@ def readme_style_exchange(components, time):
         total_heat_flux=atm["derived"].total_heat_flux,
     ))
     seaice = dict(seaice, forcing=seaice["forcing"].replace(
-        ice_frazil_melt_energy=components["ocn"]["derived"].ice_frazil_melt_energy,
+        sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
     ))
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
-        sice_am=seaice["derived"].ice_fraction,
+        sice_am=seaice["state"].ice_fraction,
         stl_am=lnd["state"].land_surface_temperature,
         snowc_am=lnd["state"].snowc,
         soilw_am=lnd["state"].soilw,
@@ -549,11 +549,11 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
     assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"): "a2o_conserve",
         ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"): None,
-        ("ocn.derived.ice_frazil_melt_energy",
-         "seaice.forcing.ice_frazil_melt_energy"): None,
+        ("ocn.state.sea_surface_temperature",
+         "seaice.forcing.sea_surface_temperature"): None,
         ("ocn.state.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
-        ("seaice.derived.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
+        ("seaice.state.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
         ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"): None,
         ("lnd.state.snowc", "atm.forcing.snowc_am"): None,
         ("lnd.state.soilw", "atm.forcing.soilw_am"): None,
@@ -667,19 +667,30 @@ def test_names_alone_cannot_select_the_veros_table(veros_module):
     ]
 
 
-def test_sea_ice_with_a_veros_ocean_is_warned_about(veros_components, caplog):
-    """Veros publishes no freeze/melt potential, so the ice is undriven.
+def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components, caplog):
+    """The slab sea ice takes SST, which a Veros ocean publishes from ``derived``.
 
-    The table has no row that could drive it, and a silently unforced sea-ice
-    model is exactly the failure this warning exists to prevent.
+    The row stays on the ocean grid, so it gets no regridder even in a
+    mixed-grid configuration, and the ice's fraction goes on to the
+    atmosphere like any other ocean-grid field. Nothing is left undriven, so
+    nothing is warned about.
     """
     grid = half_land_grid()
     components = dict(
         veros_components, seaice=SlabSeaiceModel(grid, name="seaice")
     )
     with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
-        default_exchanges(components)
-    assert "no freeze/melt potential" in caplog.text
+        specs = default_exchanges(
+            components, regrid={"a2o": "a2o", "o2a_flux": "o2a_conserve"})
+    by_route = {(spec.src, spec.dst): spec.regrid for spec in specs}
+    assert by_route[(
+        "ocn.derived.sea_surface_temperature",
+        "seaice.forcing.sea_surface_temperature",
+    )] is None
+    assert by_route[
+        ("seaice.state.ice_fraction", "atm.forcing.sice_am")
+    ] == "o2a_conserve"
+    assert caplog.text == ""
 
 
 def test_the_veros_table_is_the_documented_one():
@@ -697,7 +708,13 @@ def test_a_bare_direction_key_covers_both_kinds():
     assert by_route[
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature")
     ] == "o2a"
-    assert by_route[("seaice.derived.ice_fraction", "atm.forcing.sice_am")] == "o2a"
+    assert by_route[("seaice.state.ice_fraction", "atm.forcing.sice_am")] == "o2a"
+    # The ocean and the sea ice share a grid, so the SST between them is
+    # never regridded, whatever the direction keys say.
+    assert by_route[(
+        "ocn.state.sea_surface_temperature",
+        "seaice.forcing.sea_surface_temperature",
+    )] is None
     assert by_route[
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux")
     ] is None

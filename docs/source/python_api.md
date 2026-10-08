@@ -136,11 +136,11 @@ components = {
 # below builds: the standard rows filtered to the components present.
 table = Exchange([
     ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-    ExchangeSpec("ocn.derived.ice_frazil_melt_energy",
-                 "seaice.forcing.ice_frazil_melt_energy"),
+    ExchangeSpec("ocn.state.sea_surface_temperature",
+                 "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "atm.forcing.sea_surface_temperature"),
-    ExchangeSpec("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
+    ExchangeSpec("seaice.state.ice_fraction", "atm.forcing.sice_am"),
 ])
 
 coupler = Coupler(
@@ -164,7 +164,7 @@ coupler.initialize()` — before building the coupler's trajectory function; it
 names a mistyped component, section, field or regridder rather than letting
 it fail inside a traced step. And the wiring is by *name*:
 `SlabSeaiceModel`'s `name` must be `"seaice"` (its default) for
-`default_exchangers` to route the ocean's freeze/melt potential to it — a
+`default_exchangers` to route the ocean's sea surface temperature to it — a
 sea-ice model registered under any other name is left unconnected, silently
 unless the name is one of the near-misses (`ice`, `sea_ice`, `sic`) the
 default wiring recognises and warns about.

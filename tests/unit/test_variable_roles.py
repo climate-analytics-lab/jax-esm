@@ -109,10 +109,8 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "forcing_total_heat_flux": "forcing",
         },
         "seaice": {
-            "ice_thickness": "state",
-            "ice_surface_temperature": "state",
-            "forcing_ice_frazil_melt_energy": "forcing",
-            "ice_fraction": "derived",
+            "ice_fraction": "state",
+            "forcing_sea_surface_temperature": "forcing",
         },
     }
     for name, roles in expected.items():
@@ -156,7 +154,7 @@ def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
     assert forcing == {
         "forcing_total_heat_flux",
         "forcing_q_flux",
-        "forcing_ice_frazil_melt_energy",
+        "forcing_sea_surface_temperature",
     }
     assert "sea_surface_temperature" in map(
         str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "state"})
