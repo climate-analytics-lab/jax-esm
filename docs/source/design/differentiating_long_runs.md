@@ -85,16 +85,93 @@ reverse pass removed them, which located the switch. The fix, in the Veros
 fork (`veros.core.tke.prandtl_number`,
 [veros-jittable#2](https://github.com/meteorologytoday/veros-jittable/pull/2)), keeps the reference value and takes the
 derivative from the same formula with the shear floor raised smoothly to
-`settings.tke_prandtl_surrogate_shear_floor` (default `1e-7 s^-2`, a weak
-current shear of a few cm/s per 100 m) and the clip rounded over
-`tke_prandtl_surrogate_width` (0.5). With it the adjoint reproduces the
-response to a 0.01 K perturbation at the former spike cells and is unchanged
-at every ordinary cell; `1e-8` was too narrow to matter and `1e-6` smoothed
-the real convective response away. The fork's earlier
+`settings.tke_prandtl_surrogate_shear_floor` and the clip rounded over
+`tke_prandtl_surrogate_width` (0.5).
+
+The same switch also survives, less violently, where the shear is resolved
+but weak. Between its clips the Prandtl number is `6.6 N^2 / shear^2`, a
+ramp about `1.4 shear^2` wide in `N^2`; with `shear^2` near `1e-7 s^-2` (a
+few mm/s across a 10 m layer) the whole switch fits inside the `~2e-6 s^-2`
+change in `N^2` that a 0.01 K surface perturbation makes. The derivative
+there is the true local slope -- a `1e-4` K finite difference reproduces it --
+but it overstates the 0.01 K response five- to tenfold, and a global
+one-degree ocean-only adjoint (24 hourly steps, a random-weighted global SST
+objective) showed it as isolated spikes after the zero-shear switch was
+smoothed. Freezing the Prandtl number again removed them. The floor therefore
+has to cover these columns too, and a scan against 0.01 K finite differences
+fixed it:
+
+| Floor (s^-2) | max / 99th pct | spike cells: gradient vs 0.01 K FD | change in median, 99th pct |
+|---|---|---|---|
+| `1e-7` | 25 | 28 vs 3.2; -12 vs -2.0; 9.9 vs 2.4 | (reference) |
+| **`3e-7`** (default) | 19 | 2.5 vs 3.2; -0.9 vs -2.0; 5.1 vs 2.4 | 0 %, -1 % |
+| `1e-6` | 18 | 0.5 vs 3.2; +0.7 vs -2.0; 0.9 vs 2.4 | 0 %, -5 % |
+| `1e-5` | 15 | 0.1 vs 3.2; +0.8 vs -2.0; 0.6 vs 2.4 | -1 %, -7 % |
+
+`3e-7` brings the spike cells to within a factor of about two of the 0.01 K
+response without touching ordinary cells; a larger floor discards real
+sensitivity (and flips a sign) rather than just the switch. What remains
+above the bulk at `3e-7` is not a switch: the largest cells agree in size with a
+`1e-4` K finite difference, and the largest of all, in the Arctic, runs
+through the mixing length rather than the Prandtl number, and the 0.01 K
+response there is larger still. Freezing all the vertical diffusivities would
+flatten the gradient further (max / 99th percentile 3.5), but only by deleting
+that real sensitivity with the switch.
+
+The fork's earlier
 `sqrt(max(x, eps))` regularisation of the closures' square roots turned out not
 to be the source of the spikes: a surrogate there changed nothing.
 
-The forward model is unchanged by the surrogate up to floating-point
+### The isoneutral tensor: a linearisation that is not dissipative
+
+With the Prandtl number smoothed, the coupled adjoint still had isolated ocean
+cells 10^3-10^4 times the 99th percentile of the SST sensitivity, at a
+different place every day or two (the Andaman Sea, off Cape Hatteras, the
+Philippine Sea, the Gulf of Alaska). They did not move with the Prandtl floor
+or with jax-gcm's SPEEDY surrogates, and the ocean-only test above never
+produced them: they need the realistic, time-varying ocean of the coupled run.
+Their signature is not a switch's. Replaying a few hours of the coupled run
+from a saved carry and recording the cotangent every step, the cotangent at
+one cell grows a thousandfold within three or four hourly steps, *changing
+sign every step*, and then collapses -- the behaviour of an unstable
+tangent-linear operator, not of one steep function.
+
+Stopping the derivative through one process at a time in those replays located
+it. The vertical velocity, the flux limiter of the tracer advection, TKE and
+EKE made no difference; holding the TKE diffusivities fixed shrank the spikes
+but left them in place; holding the
+isoneutral mixing tensor (slopes `Ai_*` and diffusivities `K_11`, `K_22`,
+`K_33`) fixed removed it in both windows tested. The slopes go as `1 /
+drho/dz`, and in Griffies' triad scheme the slope terms of the flux of a
+density-carrying tracer nearly cancel; differentiating the slopes keeps both
+halves of that cancellation in the tangent-linear model with nothing to keep
+it stable. Smoothing does not rescue it: holding only `K_33` fixed, or
+flooring the stratification in the slope derivative at `drho/dz = -1e-4 kg
+m^-4` (`N^2 ~ 1e-6 s^-2`), broke the cancellation and gave growth of
+10^6-10^8 elsewhere, and a floor of `1e-3 kg m^-4` -- ordinary thermocline
+stratification -- was indistinguishable from holding the tensor fixed.
+
+The fork therefore holds the tensor fixed in the derivative
+(`veros.core.isoneutral.isoneutral_diffusion_pre`, in the same
+[veros-jittable#2](https://github.com/meteorologytoday/veros-jittable/pull/2); the setting
+`enable_isoneutral_tensor_derivative` restores the full linearisation). The
+value is unchanged and the isoneutral and skew fluxes are still differentiated
+with respect to the tracer they mix, so within each step the tangent-linear
+model sees a fixed, symmetric positive semi-definite diffusion, as the forward
+model does -- the same kind of simplification operational 4D-Var makes when it
+neglects perturbations of mixing coefficients in its linearised physics. In
+the worked case (seven-day gradient, every six hours):
+
+| | worst SST max / 99th pct | daily SST max / 99th pct | 1-day lead, +/-0.5 K upstream mixed layer |
+|---|---|---|---|
+| tensor differentiated | 28 988 | 19 - 2 221 | +/-0.060 mm/day |
+| **tensor held fixed** | **88** | **7 - 46** | **+/-0.062 mm/day** |
+| perturbed runs | | | +0.089 / -0.047 mm/day |
+
+Below the 99th percentile the two gradients correlate at 0.96-0.97 and their
+medians agree to 3 %: what is lost is the unstable mode, not the sensitivity.
+
+The forward model is unchanged by either change up to floating-point
 reassociation (the compiled program fuses differently): in an ocean-only run
 the objective agrees to `1e-12`. In a coupled run a week long, that last-bit
 difference grows like any other perturbation, which is the next point.
