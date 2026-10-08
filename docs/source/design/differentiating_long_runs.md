@@ -188,8 +188,8 @@ mm/day; a +/-0.5 K change of the upstream mixed layer):
 
 | Lead | Perturbed runs | Gradient | 0.01 K random noise alone |
 |---|---|---|---|
-| 1 day | +0.075 mm/day | +0.052 mm/day | 0.017 mm/day |
-| 7 days | +0.083 +/- 0.027 mm/day (3 members) | +651 mm/day | 0.099 mm/day rms |
+| 1 day | +0.064 / -0.085 mm/day | +0.060 / -0.060 mm/day | 0.017 mm/day |
+| 7 days | +0.083 +/- 0.027 mm/day (3 members) | +133 mm/day | 0.099 mm/day rms |
 
 A day ahead the gradient is a usable stand-in for perturbation runs; a week
 ahead it is not, and the deterministic ocean effect is an ensemble statement
