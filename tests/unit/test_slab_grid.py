@@ -86,32 +86,44 @@ def test_from_coords_takes_the_mask_from_terrain_data(t31_coords):
     would fail this.
     """
     fmask = TerrainData.from_file(str(T31_TERRAIN), t31_coords).fmask
-    grid = SlabGrid.from_coords(t31_coords.horizontal, fractional_mask=fmask)
+    grid = SlabGrid.from_coords(t31_coords.horizontal, land_fraction=fmask)
 
     latitudes = to_degrees(grid.latitude_axis_radian)
     assert latitudes[0] < -85.0 and latitudes[-1] > 85.0
 
-    land_fraction = np.asarray(grid.fractional_mask)
+    land_fraction = np.asarray(grid.land_fraction)
     assert land_fraction[:, 0].mean() == pytest.approx(1.0)   # Antarctica
     assert land_fraction[:, -1].mean() == pytest.approx(0.0)  # Arctic ocean
 
-    # binary_mask == 1 is land (jem CLAUDE.md).
-    assert float(np.asarray(grid.binary_mask)[:, 0].mean()) == pytest.approx(1.0)
-    assert float(np.asarray(grid.binary_mask)[:, -1].mean()) == pytest.approx(0.0)
+    assert float(np.asarray(grid.binary_land_mask)[:, 0].mean()) == pytest.approx(1.0)
+    assert float(np.asarray(grid.binary_ocean_mask)[:, -1].mean()) == pytest.approx(1.0)
 
 
 def test_from_coords_defaults_to_all_ocean(t31_coords):
     """A grid built with no mask is all ocean, not all land."""
     grid = SlabGrid.from_coords(t31_coords.horizontal)
-    assert float(jnp.sum(grid.binary_mask)) == 0.0
+    assert float(jnp.sum(grid.binary_land_mask)) == 0.0
+    assert bool(jnp.all(grid.binary_ocean_mask == 1.0))
+
+
+def test_binary_masks_overlap_on_partial_land_cells():
+    """A cell with some land and some ocean is in both masks."""
+    land_fraction = jnp.asarray([[0.0, 0.5, 1.0]])
+    grid = SlabGrid(
+        land_fraction=land_fraction,
+        latitude_radian=jnp.zeros((1, 3)),
+        longitude_radian=jnp.zeros((1, 3)),
+    )
+    np.testing.assert_array_equal(np.asarray(grid.binary_land_mask), [[0.0, 1.0, 1.0]])
+    np.testing.assert_array_equal(np.asarray(grid.binary_ocean_mask), [[1.0, 1.0, 0.0]])
 
 
 def test_from_coords_rejects_a_mask_that_is_not_on_the_grid(t31_coords):
     """A transposed mask is the likely mistake, so it is named in the error."""
     with pytest.raises(ValueError, match="n_lon, n_lat"):
-        SlabGrid.from_coords(t31_coords.horizontal, fractional_mask=jnp.zeros((48, 96)))
+        SlabGrid.from_coords(t31_coords.horizontal, land_fraction=jnp.zeros((48, 96)))
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        SlabGrid.from_coords(t31_coords.horizontal, fractional_mask=jnp.full((96, 48), 2.0))
+        SlabGrid.from_coords(t31_coords.horizontal, land_fraction=jnp.full((96, 48), 2.0))
 
 
 def test_scrip_curvilinear_grid_is_not_separable():
@@ -148,7 +160,7 @@ def test_mismatched_shapes_are_rejected():
     """The three grid fields must describe one grid."""
     with pytest.raises(ValueError, match="latitude_radian"):
         SlabGrid(
-            fractional_mask=jnp.zeros((4, 3)),
+            land_fraction=jnp.zeros((4, 3)),
             latitude_radian=jnp.zeros((3, 4)),
             longitude_radian=jnp.zeros((4, 3)),
         )
@@ -254,11 +266,11 @@ def test_explicit_scrip_mask_is_validated(bad_value):
     good = SlabGrid.from_scrip(str(T31_SCRIP))
     mask = np.zeros(good.shape)
     mask[0, 0] = bad_value
-    with pytest.raises(ValueError, match="fractional_mask"):
-        SlabGrid.from_scrip(str(T31_SCRIP), fractional_mask=mask)
-    with pytest.raises(ValueError, match="fractional_mask"):
+    with pytest.raises(ValueError, match="land_fraction"):
+        SlabGrid.from_scrip(str(T31_SCRIP), land_fraction=mask)
+    with pytest.raises(ValueError, match="land_fraction"):
         SlabGrid(
-            fractional_mask=jnp.asarray(mask),
+            land_fraction=jnp.asarray(mask),
             latitude_radian=good.latitude_radian,
             longitude_radian=good.longitude_radian,
         )
