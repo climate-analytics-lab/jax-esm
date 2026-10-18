@@ -95,12 +95,6 @@ class SlabGrid:
         2-D latitudes in radians, matching ``land_fraction.shape``.
     longitude_radian : jax.Array
         2-D longitudes in radians, matching ``land_fraction.shape``.
-    land_threshold : float
-        Fractional-mask value at or above which a cell counts as land in
-        :attr:`binary_land_mask`.
-    ocean_threshold : float
-        Fractional-mask value at or below which a cell counts as ocean in
-        :attr:`binary_ocean_mask`.
     longitude_axis_radian, latitude_axis_radian : numpy.ndarray or None
         The 1-D axes of a separable grid, in radians, in float64. Derived in
         ``__post_init__`` when not given, and ``None`` for a curvilinear grid.
@@ -114,8 +108,6 @@ class SlabGrid:
     land_fraction: Array
     latitude_radian: Array
     longitude_radian: Array
-    land_threshold: float = 0.2
-    ocean_threshold: float = 0.8
     longitude_axis_radian: np.ndarray | None = field(default=None)
     latitude_axis_radian: np.ndarray | None = field(default=None)
 
@@ -136,6 +128,7 @@ class SlabGrid:
                 "A SlabGrid is 2-D (n_lon, n_lat); got land_fraction with shape "
                 f"{tuple(self.land_fraction.shape)}."
             )
+
         # Every construction path ends here, so the value check lives here
         # too: a fill value (-1), a percentage or a NaN would otherwise pass
         # straight into `binary_mask` and the land-fraction arithmetic as a
@@ -182,20 +175,18 @@ class SlabGrid:
     @property
     def binary_land_mask(self) -> Array:
         """Binary land(1)/ocean(0) mask, derived from ``land_fraction``."""
-        return jnp.where(self.land_fraction >= self.land_threshold, 1.0, 0.0)
+        return jnp.where(self.land_fraction > 0, 1.0, 0.0)
 
     @property
     def binary_ocean_mask(self) -> Array:
         """Binary land(1)/ocean(0) mask, derived from ``land_fraction``."""
-        return jnp.where(self.land_fraction <= self.ocean_threshold, 1.0, 0.0)
+        return jnp.where(self.land_fraction < 1, 1.0, 0.0)
 
     @classmethod
     def from_coords(
         cls,
         horizontal,
         land_fraction: Array | None = None,
-        land_threshold: float = 0.2,
-        ocean_threshold: float = 0.8,
     ) -> "SlabGrid":
         """Build a SlabGrid on an atmosphere's horizontal grid.
 
@@ -256,8 +247,6 @@ class SlabGrid:
             land_fraction=land_fraction,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            land_threshold=land_threshold,
-            ocean_threshold=ocean_threshold,
             longitude_axis_radian=longitude_axis,
             latitude_axis_radian=latitude_axis,
         )
