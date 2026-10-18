@@ -1,11 +1,11 @@
 """Land surface model component."""
 
-from .params import SlabLandParameters
-from .slab_land_model import LandForcing, LandState, SlabLandModel
+from .params import SlabBucketLandParameters
+from .slab_bucket_land_model import LandForcing, LandState, SlabBucketLandModel
 
 __all__ = [
     "LandForcing",
     "LandState",
-    "SlabLandModel",
-    "SlabLandParameters",
+    "SlabBucketLandModel",
+    "SlabBucketLandParameters",
 ]

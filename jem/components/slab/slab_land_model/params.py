@@ -8,7 +8,7 @@ SECONDS_PER_DAY = 86400.0
 
 @struct.dataclass
 class SlabLandParameters:
-    """Parameters of :class:`~jem.components.slab.slab_land_model.SlabLandModel`.
+    """Parameters of :class:`~jem.components.slab.slab_bucket_land_model.SlabLandModel`.
 
     Every numeric field is a pytree leaf, so ``jax.grad`` of a coupled run with
     respect to any of them works: the parameters travel in the component's
@@ -24,7 +24,7 @@ class SlabLandParameters:
     Attributes
     ----------
     depth_soil : jnp.ndarray
-        Depth (m) of the soil layer that carries the surface heat capacity.
+        Per-layer soil depth (m) (default: (1.0, 2.0))
     depth_lice : jnp.ndarray
         Depth (m) of the land-ice layer, used instead of the soil layer where
         the surface albedo marks an ice sheet.
@@ -44,6 +44,13 @@ class SlabLandParameters:
         Land fraction at or above which a cell counts as land for this model.
         Cells below it report :data:`MASKED_SURFACE_TEMPERATURE` and are not
         integrated.
+    tau_drain: Per-layer soil moisture drainage timescale in seconds
+        (default: (5, 60) days). Layer 0 drains into layer 1; layer 1
+        drains out as deep drainage.
+    swcap: Per-layer field capacity, unitless 0-1 (default: (0.30, 0.30)).
+        Currently unused by the bucket dynamics.
+    swwil: Per-layer wilting point, unitless 0-1 (default: (0.17, 0.17)).
+        Currently unused by the bucket dynamics.
     snow_depth_to_cover_scale : jnp.ndarray
         Snow depth (mm water equivalent) at which the diagnosed snow cover
         fraction saturates at one. SPEEDY's ``sd2sc``.
@@ -57,12 +64,18 @@ class SlabLandParameters:
 
     """
 
-    depth_soil: float | jnp.ndarray = 1.0
+    # The per-layer fields default to arrays, which are unhashable and so are
+    # rejected by ``dataclasses`` as a plain default; a factory also gives each
+    # instance its own array rather than one shared at class-definition time.
+    depth_soil: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((1.0, 2.0)))
     depth_lice: float | jnp.ndarray = 5.0
     soil_volumetric_heat_capacity: float | jnp.ndarray = 2.50e6
     land_ice_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
     tdland: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
     flandmin: float | jnp.ndarray = 1.0 / 3.0
+    tau_drain: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((60.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
+    swcap: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
+    swwil: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.17, 0.17)))
     land_threshold: float | jnp.ndarray = 0.1
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
     land_ice_albedo_threshold: float | jnp.ndarray = 0.4
