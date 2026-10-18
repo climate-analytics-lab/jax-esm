@@ -378,7 +378,7 @@ class SlabLandModel(SlabModelBase):
             state.snow_depth = evaluate_cyclic_linear(
                 cycle_position, self.snow_depth_climatology
             )
-            state.snow_cover = convert_snow_depth_to_snow_cover(snow_depth, params)
+            state.snow_cover = convert_snow_depth_to_snow_cover(state.snow_depth, params)
 
         return {
             "params": params,
