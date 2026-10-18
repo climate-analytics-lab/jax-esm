@@ -249,8 +249,6 @@ class SlabGrid:
         cls,
         scrip_file: str,
         land_fraction: Array | None = None,
-        land_threshold: float = 0.2,
-        ocean_threshold: float = 0.8,
     ) -> "SlabGrid":
         """Build a SlabGrid from a SCRIP-convention grid file.
 
@@ -335,8 +333,6 @@ class SlabGrid:
             land_fraction=land_fraction,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            land_threshold=land_threshold,
-            ocean_threshold=ocean_threshold,
         )
 
 
