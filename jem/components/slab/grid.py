@@ -1,19 +1,16 @@
 """Minimal grid concept owned by the slab models.
 
-Slab models do no advection, so unlike a full coupling-layer grid they only
-need a fractional (land) mask and the coordinates that go with it -- shape and
-the binary mask are both derived from ``land_fraction``, so nothing here can
-drift out of sync.
+Slab models do no advection, so the grid only needs the land fraction and the
+cell coordinates. The shape and the land and ocean masks are derived from
+``land_fraction``.
 
 Two constructors cover every grid JEM runs on:
 
 - :meth:`SlabGrid.from_coords` -- a separable lon/lat grid taken straight from
   the dinosaur horizontal grid the atmosphere is discretized on
   (``jcm.utils.get_coords(...).horizontal`` or
-  ``jcm.physics.speedy.speedy_coords.get_speedy_coords(...).horizontal``). This
-  replaced the ``"JCM::T31"`` specification-string DSL: the atmosphere's grid
-  object is the single source of truth for the grid a coupled run uses, and
-  re-deriving it from a string was one more place for the two to disagree.
+  ``jcm.physics.speedy.speedy_coords.get_speedy_coords(...).horizontal``).
+  Taking the grid from the atmosphere guarantees the two agree.
 - :meth:`SlabGrid.from_scrip` -- a 2-D structured grid from a SCRIP file, which
   may be curvilinear (a displaced-pole ocean grid).
 
@@ -47,7 +44,7 @@ def to_degrees(radians) -> np.ndarray:
     (``jcm.utils.data_to_xarray``), so a slab dataset must too: a last-bit
     difference in a coordinate value is enough for ``xr.merge`` to treat the
     two grids as different axes and produce a 119-point longitude union out of
-    two 96-point grids, which is exactly what happened before this existed.
+    two 96-point grids.
     """
     return np.asarray(radians, dtype=np.float64) * 180.0 / np.pi
 
@@ -80,11 +77,15 @@ def _separable_axes(
 class SlabGrid:
     """Grid information needed by slab models.
 
-    ``land_fraction``, ``latitude_radian`` and ``longitude_radian`` fully
-    specify the grid: shape, the derived binary mask, whether the grid is
-    separable and the dimension names of its output all come from those three
-    alone, so there is a single source of truth instead of several attributes
-    that could drift out of sync.
+    The grid is defined by ``land_fraction``, ``latitude_radian`` and
+    ``longitude_radian``. The shape, the masks, whether the grid is separable
+    and the output dimension names are all derived from them.
+
+    The two masks overlap on coast cells. ``binary_land_mask`` is 1 wherever
+    there is any land (``land_fraction > 0``) and ``binary_ocean_mask`` is 1
+    wherever there is any ocean (``land_fraction < 1``), so a cell with a
+    land fraction between 0 and 1 is integrated by both the land and the
+    ocean components.
 
     Attributes
     ----------
@@ -98,10 +99,8 @@ class SlabGrid:
     longitude_axis_radian, latitude_axis_radian : numpy.ndarray or None
         The 1-D axes of a separable grid, in radians, in float64. Derived in
         ``__post_init__`` when not given, and ``None`` for a curvilinear grid.
-        They are kept in float64 numpy (not jax) deliberately: they are grid
-        *metadata*, and the degrees written into the output coordinates have to
-        match JCM's bit for bit or ``xr.merge`` of two components' datasets
-        would align on nothing.
+        They are float64 numpy arrays because the output coordinates must
+        match JCM's bit for bit for ``xr.merge`` to align the datasets.
 
     """
 
@@ -129,10 +128,9 @@ class SlabGrid:
                 f"{tuple(self.land_fraction.shape)}."
             )
 
-        # Every construction path ends here, so the value check lives here
-        # too: a fill value (-1), a percentage or a NaN would otherwise pass
-        # straight into `binary_mask` and the land-fraction arithmetic as a
-        # plausible-looking but wrong land/ocean domain.
+        # Every constructor ends here, so check the values here. A fill value
+        # (-1), a percentage or a NaN would otherwise give wrong but
+        # plausible-looking land and ocean masks.
         mask = np.asarray(self.land_fraction)
         if not np.all(np.isfinite(mask)):
             raise ValueError("land_fraction contains non-finite values.")
@@ -164,22 +162,21 @@ class SlabGrid:
     def dims(self) -> tuple[str, str]:
         """Dimension names of a 2-D field on this grid, in shape order.
 
-        A separable grid uses JCM's own axis names, so a slab dataset and a JCM
-        dataset share dimensions and merge. A curvilinear grid must NOT: its
-        latitude and longitude are 2-D auxiliary coordinates, and CF (and
-        xarray) forbid a 2-D variable named after one of its own dimensions --
-        hence the index-space names.
+        A separable grid uses JCM's names, ``("lon", "lat")``, so slab and
+        JCM datasets merge. A curvilinear grid uses ``("x", "y")``, because
+        its 2-D ``lat``/``lon`` coordinates cannot share a name with a
+        dimension under CF and xarray.
         """
         return ("lon", "lat") if self.is_separable else ("x", "y")
 
     @property
     def binary_land_mask(self) -> Array:
-        """Binary land(1)/ocean(0) mask, derived from ``land_fraction``."""
+        """1 where the cell has any land (``land_fraction > 0``), else 0."""
         return jnp.where(self.land_fraction > 0, 1.0, 0.0)
 
     @property
     def binary_ocean_mask(self) -> Array:
-        """Binary land(1)/ocean(0) mask, derived from ``land_fraction``."""
+        """1 where the cell has any ocean (``land_fraction < 1``), else 0."""
         return jnp.where(self.land_fraction < 1, 1.0, 0.0)
 
     @classmethod
@@ -205,10 +202,6 @@ class SlabGrid:
             ``TerrainData.from_file(path, coords).fmask`` or
             ``TerrainData.aquaplanet(coords).fmask`` -- which is already on
             this layout and orientation. Defaults to all-ocean.
-        land_threshold : float
-            Land fraction at or above which a cell counts as land.
-        ocean_threshold : float
-            Land fraction at or below which a cell counts as ocean.
 
         Returns
         -------
@@ -278,10 +271,6 @@ class SlabGrid:
             Land fraction in [0, 1] matching the file's shape. If None, it is
             derived from the file's own ``grid_imask`` (see
             :func:`_load_scrip_land_fraction` for the assumed polarity).
-        land_threshold : float
-            Land fraction at or above which a cell counts as land.
-        ocean_threshold : float
-            Land fraction at or below which a cell counts as ocean.
 
         Returns
         -------
