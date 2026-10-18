@@ -10,16 +10,6 @@ This module implements a slab land-surface model with:
 
 - Land/ice-sheet discrimination based on albedo
 
-Physics based on SPEEDY (Simplified Parameterizations, primiTivE-Equation DYnamics):
-Molteni, F. (2003). Atmospheric simulations using a GCM with simplified 
-physical parametrizations. I: model climatology and variability in 
-multi-decadal experiments. Climate Dynamics, 20(2-3), 175-191.
-
-Contributor: Tien-Yiao Hsu, Aya Lalou
-
-Initial translation by Aya Lalou from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
-Adapted by Tien-Yiao Hsu
-
 """
 import logging
 import math
@@ -40,43 +30,36 @@ from jem.components.slab.base import (
     role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
-from jem.components.slab.slab_bucket_land_model.params import (
-    SlabBucketLandParameters,
+from jem.components.slab.slab_land_model.params import (
+    SlabLandParameters,
 )
 from jem.utils.cycles import evaluate_cyclic_linear
 
 logger = logging.getLogger(__name__)
-
 _MONTHS_PER_YEAR = 12
-
-# Names the same field goes by in the boundary files JEM is given: SPEEDY's
-# own spelling first, then jax-gcm's. Resolving by name (rather than by
-# position in the file, as this model used to) is what lets
-# ``load_monthly_climatology`` verify that the file is on the model grid.
-_SNOW_DEPTH_NAMES = ("snowd", "snowc")
-_SOIL_WATER_NAMES = ("soilw", "soilw_am")
-_SURFACE_TEMPERATURE_NAMES = ("stl",)
-
 
 @tree_math.struct
 class LandState:
     land_surface_temperature: jnp.ndarray
-    snowc: jnp.ndarray
-    soilw: jnp.ndarray
+    snow_depth: jnp.ndarray
+    snow_cover: jnp.ndarray
+    soil_water_content: jnp.ndarray
 
     @classmethod
     def zeros(
         cls,
         shape,
         land_surface_temperature=None,
-        snowc=None,
-        soilw=None,
+        snow_depth=None,
+        snow_cover=None,
+        soil_water_content=None,
         n_soil_layers=2,
     ):
         return cls(
             land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
-            snowc if snowc is not None else jnp.zeros(shape),
-            soilw if soilw is not None else jnp.zeros(shape + (n_soil_layers,)),
+            snow_depth if snow_depth is not None else jnp.zeros(shape),
+            snow_cover if snow_cover is not None else jnp.zeros(shape),
+            soil_water_content if soil_water_content is not None else jnp.zeros(shape + (n_soil_layers,)),
         )
 
 
@@ -93,8 +76,8 @@ class LandForcing:
         )
 
 
-class SlabBucketLandModel(SlabModelBase):
-    """Slab bucket land-surface model with:
+class SlabLandModel(SlabModelBase):
+    """Slab land-surface model with:
 
     - Heat capacity-based temperature evolution
     - Snow depth and soil moisture from climatology
@@ -104,20 +87,26 @@ class SlabBucketLandModel(SlabModelBase):
     Based on SPEEDY's land model with prescribed climatological boundary
     conditions. The prognostic variable is the *anomaly* of the surface
     temperature about its climatology: it is damped towards zero on
-    ``params.tdland`` and forced by the surface heat flux, and the climatology
+    ``params.temperature_relaxation_timescale`` and forced by the surface heat flux, and the climatology
     is added back at the end of the step. Cells whose land fraction is below
     ``params.flandmin`` have no anomaly at all (SPEEDY's ``dmask``), so a cell
-    that is mostly ocean simply follows the climatology.
+    that is moland_surface_temperaturey ocean simply follows the climatology.
     """
 
     def __init__(
         self,
         grid: SlabGrid,
-        params: SlabBucketLandParameters | None = None,
+        params: SlabLandParameters | None = None,
         *,
         name: str = "lnd",
-        land_clim_file: str | None = None,
         surface_albedo: jnp.ndarray | None = None,
+        land_clim_file: str | None = None,
+        soil_water_content_from_clim_file: bool = False,
+        snow_depth_from_clim_file: bool = False,
+        land_surface_temperature_from_clim_file: bool = False,
+        soil_water_content_varname_in_clim_file: str = "soil_water_content",
+        snow_depth_varname_in_clim_file: str = "snow_depth",
+        land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
     ):
         """Initialize the land surface model.
 
@@ -125,9 +114,9 @@ class SlabBucketLandModel(SlabModelBase):
         ----------
         grid : SlabGrid
             The model's grid.
-        params : SlabBucketLandParameters, optional
+        params : SlabLandParameters, optional
             Tunable parameters; defaults to
-            :meth:`SlabBucketLandParameters.default`. They are what
+            :meth:`SlabLandParameters.default`. They are what
             :meth:`initialize` uses unless it is handed parameters of its own,
             and what the checks below are made against: validation applies to
             these concrete, construction-time values, which is why it can read
@@ -136,9 +125,13 @@ class SlabBucketLandModel(SlabModelBase):
             Component name in the coupler's workflow and carry.
         land_clim_file : str, optional
             netCDF file holding 12-month climatologies of surface temperature
-            (``stl``), snow depth (``snowd`` or ``snowc``) and soil water
-            availability (``soilw`` or ``soilw_am``) on the model grid. Fields
+            (``land_surface_temperature``), snow cover (``snow_depth``) and soil water
+            availability (``soil_water_content`` or ``soil_water_content``) on the model grid. Fields
             the file does not carry fall back to idealized ones.
+        *_from_clim_file: bool
+            Whether read these variables from climatology file
+        *_varname_in_clim_file:
+            The variable names in the climatology file
         surface_albedo : jnp.ndarray, optional
             Surface albedo on the model grid, used to tell an ice sheet from
             soil (SPEEDY reads it from its topography file). Defaults to a
@@ -158,26 +151,33 @@ class SlabBucketLandModel(SlabModelBase):
 
         """
         super().__init__(name=name, grid=grid)
-        self.params = SlabBucketLandParameters.default() if params is None else params
+        self.params = SlabLandParameters.default() if params is None else params
         self.land_clim_file = land_clim_file
+        self.varnames_in_clim_file = {
+            "snow_depth": snow_depth_varname_in_clim_file,
+            "soil_water_content": soil_water_content_varname_in_clim_file,
+            "land_surface_temperature": land_surface_temperature_varname_in_clim_file,
+        }
+
+        self.read_from_clim_file = {
+            "snow_depth": snow_depth_from_clim_file,
+            "soil_water_content": soil_water_content_from_clim_file,
+            "land_surface_temperature": land_surface_temperature_from_clim_file,
+        }
 
         # Both timescales are read as a ratio against a length -- the relaxation
-        # as `tdland / dt`, the snow cover as `snow_depth / scale` -- and an
+        # as `temperature_relaxation_timescale / dt`, the snow cover as `snow_depth / scale` -- and an
         # infinite one is silent where a zero one is not: it damps the land
         # temperature by `inf / (1 + inf)`, which is NaN, and it puts the snow
         # cover at zero everywhere however deep the snow. Finiteness is
         # therefore required as well as sign (the fractions below get it from
         # being bounded on both sides).
-        tdland = float(self.params.tdland)
-        if not math.isfinite(tdland) or tdland <= 0.0:
+        temperature_relaxation_timescale = float(self.params.temperature_relaxation_timescale)
+        if not math.isfinite(temperature_relaxation_timescale) or temperature_relaxation_timescale <= 0.0:
             raise ValueError(
-                "params.tdland must be a finite positive number of seconds; "
-                f"got {tdland!r}."
+                "params.temperature_relaxation_timescale must be a finite positive number of seconds; "
+                f"got {temperature_relaxation_timescale!r}."
             )
-        if not 0.0 <= float(self.params.land_threshold) <= 1.0:
-            raise ValueError("land_threshold must be a land fraction in [0, 1].")
-        if not 0.0 <= float(self.params.flandmin) <= 1.0:
-            raise ValueError("flandmin must be a land fraction in [0, 1].")
         snow_depth_to_cover_scale = float(self.params.snow_depth_to_cover_scale)
         if (
             not math.isfinite(snow_depth_to_cover_scale)
@@ -192,7 +192,7 @@ class SlabBucketLandModel(SlabModelBase):
         # replaces `carry["params"]` afterwards takes on that responsibility.
         # Both albedo values feed the soil/ice comparison; a NaN in either
         # compares False everywhere and silently selects one material.
-        for name in ("surface_albedo", "land_ice_albedo_threshold"):
+        for name in ("surface_albedo", "landice_albedo_threshold"):
             albedo_value = float(getattr(self.params, name))
             if not math.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
                 raise ValueError(
@@ -201,13 +201,13 @@ class SlabBucketLandModel(SlabModelBase):
                 )
         # The slab heat capacity is depth times volumetric capacity; a zero or
         # negative factor makes the temperature update infinite or unstable.
-        # `depth_soil` is per-layer, so every element is checked: the layer
+        # `soil_depth` is per-layer, so every element is checked: the layer
         # depths are also the divisors of the bucket's water budget.
         for factor_name in (
-            "depth_soil",
-            "depth_lice",
+            "soil_depth",
+            "landice_depth",
             "soil_volumetric_heat_capacity",
-            "land_ice_volumetric_heat_capacity",
+            "landice_volumetric_heat_capacity",
         ):
             factor = np.asarray(getattr(self.params, factor_name), dtype=float)
             if not np.all(np.isfinite(factor)) or not np.all(factor > 0.0):
@@ -220,7 +220,7 @@ class SlabBucketLandModel(SlabModelBase):
         # without one, `step` builds a uniform field from the *carried*
         # `params.surface_albedo` each step, so the parameter stays live for
         # anyone who replaces `carry["params"]` (it is below
-        # `land_ice_albedo_threshold` by default, so such a model is all
+        # `landice_albedo_threshold` by default, so such a model is all
         # soil). Nothing in JEM routes the albedo the atmosphere's boundary
         # data already carries (`jcm.forcing.ForcingData.alb0`) to this
         # argument, so that is what every packaged configuration gets, ice
@@ -252,9 +252,9 @@ class SlabBucketLandModel(SlabModelBase):
         # ``initialize()``: that keeps initialize() pure with respect to self
         # and surfaces a bad file at construction.
         (
-            self.surface_temperature_climatology,
+            self.land_surface_temperature_climatology,
             self.snow_depth_climatology,
-            self.soil_water_climatology,
+            self.soil_water_content_climatology,
         ) = self._load_climatologies()
 
     def _load_climatologies(self) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -263,13 +263,16 @@ class SlabBucketLandModel(SlabModelBase):
         Every field is read BY NAME through
         :func:`~jem.components.slab.base.load_monthly_climatology`, which
         checks it against the model grid. The previous positional read
-        (``jnp.array(ds["stl"].values)``) accepted any array whose shape
+        (``jnp.array(ds["land_surface_temperature"].values)``) accepted any array whose shape
         happened to fit, so a file on a different grid, or written in a
         different axis order, loaded silently and wrongly.
         """
+        
         shape = self.grid.shape
         monthly = shape + (_MONTHS_PER_YEAR,)
-
+        
+        varnames_in_clim_file = self.varnames_in_clim_file
+        
         if self.land_clim_file is None:
             logger.info(
                 "%s: no land climatology file; using an idealized climatology.",
@@ -280,45 +283,45 @@ class SlabBucketLandModel(SlabModelBase):
                 jnp.zeros(monthly),
                 jnp.full(monthly, 0.5),
             )
-
+        
         if not Path(self.land_clim_file).exists():
             raise FileNotFoundError(
                 f"Land climatology file \"{self.land_clim_file!s:s}\" does not exist."
             )
 
-        surface_temperature = self._load_named(_SURFACE_TEMPERATURE_NAMES)
-        if surface_temperature is None:
+        land_surface_temperature = self._load_named([varnames_in_clim_file["land_surface_temperature"],])
+        if land_surface_temperature is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; using an idealized "
+                "%s: land climatology file %s does not have %s; using an idealized "
                 "surface-temperature climatology.",
                 self.name,
                 self.land_clim_file,
-                _SURFACE_TEMPERATURE_NAMES,
+                varnames_in_clim_file["land_surface_temperature"],
             )
-            surface_temperature = self._idealized_land_temperature()
+            land_surface_temperature = self._idealized_land_temperature()
 
-        snow_depth = self._load_named(_SNOW_DEPTH_NAMES)
+        snow_depth = self._load_named([varnames_in_clim_file["snow_depth"],])
         if snow_depth is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; assuming no snow.",
+                "%s: land climatology file %s does not have %s; assuming no snow.",
                 self.name,
                 self.land_clim_file,
-                _SNOW_DEPTH_NAMES,
+                varnames_in_clim_file["snow_depth"],
             )
             snow_depth = jnp.zeros(monthly)
 
-        soil_water = self._load_named(_SOIL_WATER_NAMES)
-        if soil_water is None:
+        soil_water_content = self._load_named([varnames_in_clim_file["soil_water_content"],])
+        if soil_water_content is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; assuming uniform soil "
-                "water availability of 0.5.",
+                "%s: land climatology file %s does not have %s; assuming uniform soil "
+                "water content of 0.5.",
                 self.name,
                 self.land_clim_file,
-                _SOIL_WATER_NAMES,
+                varnames_in_clim_file["soil_water_content"],
             )
-            soil_water = jnp.full(monthly, 0.5)
+            soil_water_content = jnp.full(monthly, 0.5)
 
-        return surface_temperature, snow_depth, soil_water
+        return land_surface_temperature, snow_depth, soil_water_content
 
     def _load_named(self, candidates: tuple[str, ...]) -> jnp.ndarray | None:
         """Load whichever of `candidates` the climatology file carries."""
@@ -330,16 +333,19 @@ class SlabBucketLandModel(SlabModelBase):
         )
         return load_monthly_climatology(self.land_clim_file, name, self.grid)
 
-    def initialize(self, params: SlabBucketLandParameters | None = None) -> Carry:
+    def initialize(self,
+        params: SlabLandParameters | None = None,
+        initialize_from_clim_file: bool = False,
+    ) -> Carry:
         """Build the initial land carry.
 
         Parameters
         ----------
-        params : SlabBucketLandParameters, optional
+        params : SlabLandParameters, optional
             Parameters to start from; defaults to the ones the model was
             constructed with. The land model has no initial-condition
             parameters -- it starts from its climatology, and every field of
-            :class:`SlabBucketLandParameters` is a process parameter ``step`` reads
+            :class:`SlabLandParameters` is a process parameter ``step`` reads
             out of the carry -- but the parameters given here still shape the
             initial state (through the land mask and the snow-cover closure)
             and are what the carry carries, so the state and the process
@@ -347,30 +353,36 @@ class SlabBucketLandModel(SlabModelBase):
 
         """
         params = self._initial_params(params)
-        land = _land_cells(self.grid, params)
+        land = self.grid.binary_land_mask
         # The month the run starts in; the coupler sets it through `bind`.
         cycle_position = self.start_year_fraction
 
-        surface_temperature = jnp.where(
-            land,
-            evaluate_cyclic_linear(
-                cycle_position, self.surface_temperature_climatology
-            ),
-            MASKED_SURFACE_TEMPERATURE,
-        )
+        state = LandState.zeros(self.grid.shape)
+        state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
+        state.soil_water_content = state.soil_water_content.at[:].set(0.5)
+
+        if initialize_from_clim_file:
+
+            logger.info(
+                "Initialize land states (land_surface_temperature and snow_depth"
+                " with climatology."
+            )
+            state.land_surface_temperature = jnp.where(
+                land,
+                evaluate_cyclic_linear(
+                    cycle_position, self.land_surface_temperature_climatology
+                ),
+                MASKED_SURFACE_TEMPERATURE,
+            )
+
+            state.snow_depth = evaluate_cyclic_linear(
+                cycle_position, self.snow_depth_climatology
+            )
+            state.snow_cover = convert_snow_depth_to_snow_cover(snow_depth, params)
 
         return {
             "params": params,
-            "state": LandState.zeros(
-                self.grid.shape,
-                land_surface_temperature=surface_temperature,
-                snowc=_snow_cover(
-                    evaluate_cyclic_linear(
-                        cycle_position, self.snow_depth_climatology
-                    ),
-                    params,
-                ),
-            ),
+            "state": state,
             "forcing": LandForcing.zeros(self.grid.shape),
         }
 
@@ -385,12 +397,8 @@ class SlabBucketLandModel(SlabModelBase):
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
-
-        land = _land_cells(self.grid, params)
-        land_fraction = _land_fraction(self.grid, params)
-        # SPEEDY's dmask: only cells that are mostly land carry an anomaly of
-        # their own; the rest follow the climatology exactly.
-        anomaly_mask = jnp.where(land_fraction >= params.flandmin, 1.0, 0.0)
+        read_from_clim_file = self.read_from_clim_file
+        land_mask = self.grid.binary_land_mask
 
         # Heat capacity per unit area, and its reciprocal scaled by the step:
         # SPEEDY's rhcapl. Computed here rather than cached on the model because
@@ -401,73 +409,99 @@ class SlabBucketLandModel(SlabModelBase):
             if self.surface_albedo is not None
             else jnp.full(self.grid.shape, params.surface_albedo)
         )
+
         # The thermal slab is the top soil layer only: the temperature is a
         # single-layer prognostic, and with the default 1 m top layer this is
         # exactly SPEEDY's hcapl. The deeper layer holds water, not heat.
         heat_capacity = jnp.where(
-            surface_albedo < params.land_ice_albedo_threshold,
-            params.depth_soil[0] * params.soil_volumetric_heat_capacity,
-            params.depth_lice * params.land_ice_volumetric_heat_capacity,
+            surface_albedo < params.landice_albedo_threshold,
+            params.soil_depth[0] * params.soil_volumetric_heat_capacity,
+            params.landice_depth * params.landice_volumetric_heat_capacity,
         )
-        inverse_heat_capacity = time.dt / heat_capacity
-
-        # SPEEDY's cdland, in units of the coupling step.
-        dissipation_steps = params.tdland / time.dt
-        dissipation = (anomaly_mask * dissipation_steps) / (
-            1.0 + anomaly_mask * dissipation_steps
-        )
-
-        climatology_begin = evaluate_cyclic_linear(
-            time.year_fraction, self.surface_temperature_climatology
-        )
-        climatology_end = evaluate_cyclic_linear(
-            time.end_of_step().year_fraction, self.surface_temperature_climatology
-        )
-        snow_depth = evaluate_cyclic_linear(
-            time.year_fraction, self.snow_depth_climatology
-        )
-        soil_water = evaluate_cyclic_linear(
-            time.year_fraction, self.soil_water_climatology
-        )
+        dt_inverse_heat_capacity = time.dt / heat_capacity
 
         # The heat flux arrives in the coupler's upward-positive convention;
         # the land is warmed by what flows into it, hence the negation.
-        downward_heat_flux = -forcing.total_heat_flux
+        downward_heat_flux = - forcing.total_heat_flux
 
-        anomaly = state.land_surface_temperature - climatology_begin
-        new_anomaly = dissipation * (anomaly + inverse_heat_capacity * downward_heat_flux)
-        surface_temperature = jnp.where(
-            land, new_anomaly + climatology_end, MASKED_SURFACE_TEMPERATURE
-        )
+        if read_from_clim_file["land_surface_temperature"]:
+ 
+            logger.info("Relax land surface temperature to climatology")
+ 
+            lst_climatology_begin = evaluate_cyclic_linear(
+                time.year_fraction, self.land_surface_temperature_climatology
+            )
+            lst_climatology_end = evaluate_cyclic_linear(
+                time.end_of_step().year_fraction, self.land_surface_temperature_climatology
+            )
 
-        # =====================================================================
-        # Land surface soil moisture evolution (two-layer leaky bucket)
-        # =====================================================================
-        # Layer 0 (surface): receives precipitation, drains into layer 1.
-        # Layer 1 (deep): receives layer 0's drainage, drains out as deep drainage.
-        W1 = state.soilw[..., 0]
-        W2 = state.soilw[..., 1]
+           
+            dissipation_steps = params.temperature_relaxation_timescale / time.dt
+            dissipation = (land_mask * dissipation_steps) / (
+                1.0 + land_mask * dissipation_steps
+            )
+
+            anomaly = state.land_surface_temperature - lst_climatology_begin
+            new_anomaly = dissipation * (anomaly + dt_inverse_heat_capacity * downward_heat_flux)
+            new_land_surface_temperature = jnp.where(
+                land_mask, new_anomaly + lst_climatology_end, MASKED_SURFACE_TEMPERATURE
+            )
         
-        drain1 = W1 / params.tau_drain[0]
-        inflow2 = (params.depth_soil[0] / params.depth_soil[1]) * drain1
+        else:
+            new_land_surface_temperature = state.land_surface_temperature + dt_inverse_heat_capacity * downward_heat_flux
 
-        new_W1 = jnp.maximum(
-            0.0,
-            W1 + (forcing.precipitation / (1000.0 * params.depth_soil[0]) - drain1) * time.dt,
-        )
-        
-        new_W2 = jnp.maximum(
-            0.0,
-            W2 + (inflow2 - W2 / params.tau_drain[1]) * time.dt,
+        new_land_surface_temperature = jnp.where(
+            land_mask, new_land_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
 
-        new_soilw = jnp.stack([new_W1, new_W2], axis=-1)
-        new_soilw = jnp.where(land[..., None], new_soilw, 0.0)
+        if read_from_clim_file["snow_depth"]:
+            logger.info("Read snow depth from climatology")
+            new_snow_depth = evaluate_cyclic_linear(
+                time.year_fraction, self.snow_depth_climatology
+            )
+        else:
+            new_snow_depth = state.snow_depth
+         
+        if read_from_clim_file["soil_water_content"]:
+            logger.info("Read soil water content from climatology")
+            new_soil_water_content_surface_grid = evaluate_cyclic_linear(
+                time.year_fraction, self.soil_water_content_climatology
+            )
+            new_soil_water_content = state.soil_water_content.at[:, :, 0].set(new_soil_water_content_surface_grid)
+
+        else:
+ 
+            # =====================================================================
+            # Land surface soil moisture evolution (two-layer leaky bucket)
+            # =====================================================================
+            # Layer 0 (surface): receives precipitation, drains into layer 1.
+            # Layer 1 (deep): receives layer 0's drainage, drains out as deep drainage.
+
+            W1 = state.soil_water_content[..., 0]
+            W2 = state.soil_water_content[..., 1]
+            
+            drain1 = W1 / params.drainage_timescale[0]
+            inflow2 = (params.soil_depth[0] / params.soil_depth[1]) * drain1
+
+            new_W1 = jnp.maximum(
+                0.0,
+                W1 + (forcing.precipitation / (1000.0 * params.soil_depth[0]) - drain1) * time.dt,
+            )
+            
+            new_W2 = jnp.maximum(
+                0.0,
+                W2 + (inflow2 - W2 / params.drainage_timescale[1]) * time.dt,
+            )
+
+            new_soil_water_content = jnp.stack([new_W1, new_W2], axis=-1)
+
+        new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
 
         new_state = state.replace(
-            land_surface_temperature=surface_temperature,
-            snowc=_snow_cover(snow_depth, params),
-            soilw=new_soilw,
+            land_surface_temperature=new_land_surface_temperature,
+            snow_depth=new_snow_depth,
+            snow_cover=convert_snow_depth_to_snow_cover(new_snow_depth, params),
+            soil_water_content=new_soil_water_content,
         )
 
         diagnostics = {
@@ -527,18 +561,18 @@ class SlabBucketLandModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
-            "snowc": (
+            "snow_depth": (
                 dims,
-                state.snowc,
+                state.snow_depth,
                 {
                     "long_name": "Snow cover fraction",
                     "units": "1",
                     **role_attrs("state"),
                 },
             ),
-            "soilw": (
+            "soil_water_content": (
                 layer_dims,
-                state.soilw,
+                state.soil_water_content,
                 {
                     "long_name": "Soil water availability",
                     "units": "1",
@@ -579,22 +613,6 @@ class SlabBucketLandModel(SlabModelBase):
         return {"description": "SPEEDY-based slab land surface model output"}
 
 
-def _land_fraction(grid: SlabGrid, params: SlabBucketLandParameters) -> jnp.ndarray:
-    """SPEEDY's fmask_l: land fraction, snapped to 0 or 1 near the ends."""
-    threshold = params.land_threshold
-    fractional_mask = grid.fractional_mask
-    return jnp.where(
-        fractional_mask >= threshold,
-        jnp.where(fractional_mask > (1.0 - threshold), 1.0, fractional_mask),
-        0.0,
-    )
-
-
-def _land_cells(grid: SlabGrid, params: SlabBucketLandParameters) -> jnp.ndarray:
-    """Boolean mask of the cells this model integrates (SPEEDY's bmask_l)."""
-    return grid.fractional_mask >= params.land_threshold
-
-
-def _snow_cover(snow_depth: jnp.ndarray, params: SlabBucketLandParameters) -> jnp.ndarray:
+def convert_snow_depth_to_snow_cover(snow_depth: jnp.ndarray, params: SlabLandParameters) -> jnp.ndarray:
     """Snow cover fraction from snow depth (SPEEDY's sd2sc closure)."""
     return jnp.minimum(1.0, snow_depth / params.snow_depth_to_cover_scale)
