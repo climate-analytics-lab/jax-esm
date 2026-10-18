@@ -1,4 +1,10 @@
-"""Slab sea-ice model component."""
+"""Slab sea-ice model.
+
+Sea-ice cover diagnosed from the sea surface temperature. The ice has no
+thickness, no heat capacity and no memory, and it does not exchange energy
+with the ocean. Its only effect on the coupled system is the ice fraction
+handed to the atmosphere.
+"""
 
 import logging
 from pathlib import Path
@@ -21,14 +27,22 @@ from jem.utils.cycles import evaluate_cyclic_linear
 
 logger = logging.getLogger(__name__)
 
-#: How far above the seawater freezing point (K) the sea surface has to be
-#: for a cell to be ice-free; the ice fraction ramps linearly to full cover
-#: across this range. See :class:`SlabSeaiceModel`.
+#: Width (K) of the SST ramp from full ice cover to open water. A cell is
+#: ice-free when its SST is this much above the seawater freezing point.
 ICE_FREE_SST_EXCESS = 1.8
 
 
 @tree_math.struct
 class SeaiceState:
+    """Sea-ice state.
+
+    Attributes
+    ----------
+    ice_fraction : (n_lon, n_lat) array
+        Areal ice fraction in [0, 1]. Zero on all-land cells.
+
+    """
+
     ice_fraction: jnp.ndarray
 
     @classmethod
@@ -40,6 +54,15 @@ class SeaiceState:
 
 @tree_math.struct
 class SeaiceForcing:
+    """Sea-ice forcing, filled by an exchanger.
+
+    Attributes
+    ----------
+    sea_surface_temperature : (n_lon, n_lat) array
+        SST (K) from the ocean.
+
+    """
+
     sea_surface_temperature: jnp.ndarray
 
     @classmethod
@@ -52,44 +75,34 @@ class SeaiceForcing:
 class SlabSeaiceModel(SlabModelBase):
     """Sea-ice cover diagnosed from the sea surface temperature.
 
-    The model has no thickness, no heat capacity and no memory: each coupling
-    step it reads the SST the ocean handed it and reports an areal ice
-    fraction that ramps linearly from open water to full cover as the surface
-    cools to the seawater freezing point ``T_f``
-    (``jem.constants.seawater_freezing_point_K``)::
+    Each step the ice fraction is computed from the SST alone::
 
         ice_fraction = clip((T_f + ICE_FREE_SST_EXCESS - SST) / ICE_FREE_SST_EXCESS, 0, 1)
 
-    so a cell at or below ``T_f`` is fully covered, one
-    :data:`ICE_FREE_SST_EXCESS` kelvin or more above it is ice-free, and land
-    cells carry no ice. The fraction is the model's only state field,
-    ``state.ice_fraction``; ``forcing.sea_surface_temperature`` is its only
-    input, and wiring an ocean's SST to it through an exchanger is required
-    for the model to do anything
-    (``ocn.state.sea_surface_temperature -> seaice.forcing.sea_surface_temperature``
-    in :data:`jem.exchangers.STANDARD_EXCHANGES`).
+    where ``T_f`` is ``jem.constants.seawater_freezing_point_K``. A cell at or
+    below ``T_f`` is fully covered, a cell :data:`ICE_FREE_SST_EXCESS` K or
+    more above it is ice-free, and the fraction is linear in between. Cells
+    with no ocean (``grid.binary_ocean_mask == 0``) have no ice.
 
-    The ice does not feed back on the ocean: it takes no energy to form and
-    releases none when it goes, so the ocean's own freeze/melt diagnostic
-    (``derived.ice_frazil_melt_energy``) is not consumed by this model. What
-    the ice changes is the atmosphere's surface, through the fraction an
-    exchanger routes to the atmosphere's ice-cover forcing (jcm's
-    ``sice_am``).
+    The SST must be supplied by an exchanger. The standard coupling does this
+    with ``ocn.state.sea_surface_temperature -> seaice.forcing.sea_surface_temperature``
+    (see :data:`jem.exchangers.STANDARD_EXCHANGES`), and passes the ice
+    fraction on to the atmosphere's ice-cover forcing (jcm's ``sice_am``).
+
+    The ice does not feed back on the ocean. Forming or melting it costs no
+    energy, so the ocean's ``derived.ice_frazil_melt_energy`` is not used here.
 
     Initial condition
     -----------------
-    With an ice-concentration climatology (``ice_clim_file``) the run starts
-    from the observed cover: the climatology is sampled at the month the run
-    starts in (:attr:`SlabModelBase.start_year_fraction`, which the coupler
-    sets through ``bind``). Without one the run starts ice-free.
+    If ``ice_clim_file`` is given, the initial ice fraction is the
+    climatology at the month the run starts in
+    (:attr:`SlabModelBase.start_year_fraction`, set by the coupler through
+    ``bind``). Otherwise the run starts ice-free.
 
-    The choice matters for exactly one coupling step. Under the standard
-    workflow the exchange runs before the components, so the fraction
-    :meth:`initialize` returns is what the atmosphere is handed on its first
-    step, before this model has seen any SST; from the first :meth:`step` on
-    the fraction is the one diagnosed from the ocean. An Earth-like run
-    started without a climatology spends that first step with open water at
-    both poles.
+    This only matters for the first coupling step. In the standard workflow
+    the exchange runs before the components, so the atmosphere's first step
+    sees the initial fraction. From the first :meth:`step` on, the fraction
+    comes from the ocean's SST.
     """
 
     def __init__(
@@ -107,21 +120,18 @@ class SlabSeaiceModel(SlabModelBase):
         grid : SlabGrid
             The model's grid.
         params : SlabSeaiceParameters, optional
-            Tunable parameters; defaults to
-            :meth:`SlabSeaiceParameters.default`. They are what
-            :meth:`initialize` puts in the carry unless it is handed
-            parameters of its own.
+            Model parameters, defaulting to
+            :meth:`SlabSeaiceParameters.default`. :meth:`initialize` puts them
+            in the carry unless it is given other parameters.
         name : str
-            Component name in the coupler's workflow and carry. The default is
-            the name the standard coupling wires the sea ice under
-            (:func:`jem.exchangers.default_exchanges`), so a model registered
-            as ``{"seaice": SlabSeaiceModel(grid)}`` is connected without
-            being renamed.
+            Component name in the coupler's workflow and carry. The default,
+            ``"seaice"``, is the name the standard coupling
+            (:func:`jem.exchangers.default_exchanges`) expects.
         ice_clim_file : str, optional
-            netCDF file holding a 12-month ``icec`` sea-ice *concentration*
-            climatology (a fraction in ``[0, 1]``) on the model grid. Used
-            for the initial condition only -- this model has no relaxation
-            and never reads it again. Without it the run starts ice-free.
+            netCDF file with a 12-month ``icec`` sea-ice concentration
+            climatology (fraction in [0, 1]) on the model grid. It is only
+            used for the initial condition. Without it the run starts
+            ice-free.
 
         Raises
         ------
@@ -161,10 +171,14 @@ class SlabSeaiceModel(SlabModelBase):
         Parameters
         ----------
         params : SlabSeaiceParameters, optional
-            Parameters to start from; defaults to the ones the model was
-            constructed with. The same object goes into ``carry["params"]``,
-            so the parameters ``step`` reads are the ones the initial state
-            was built from.
+            Parameters to put in ``carry["params"]``. Defaults to the ones
+            the model was constructed with.
+
+        Returns
+        -------
+        Carry
+            ``{"params", "state", "forcing"}``. The forcing starts at zero
+            and is filled by the exchanger before the first step.
 
         """
         params = self._initial_params(params)
@@ -196,11 +210,23 @@ class SlabSeaiceModel(SlabModelBase):
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
-        """Diagnose the ice fraction from the SST this step was handed.
+        """Diagnose the ice fraction from the current SST forcing.
 
-        The step is independent of ``time`` and of the previous state: the
-        fraction is a function of the forcing alone, so there is no ``dt`` to
-        apply and no seasonal cycle to look up.
+        The result depends only on ``carry["forcing"]``. The previous state
+        and ``time`` are not used.
+
+        Parameters
+        ----------
+        carry : Carry
+            ``{"params", "state", "forcing"}`` as built by :meth:`initialize`.
+        time : CouplingTime
+            Not used.
+
+        Returns
+        -------
+        tuple[Carry, Diagnostics]
+            The new carry, and ``{"state", "forcing"}`` for output.
+
         """
         params = carry["params"]
         state = carry["state"]
