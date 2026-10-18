@@ -138,7 +138,7 @@ class SlabSeaiceModel(SlabModelBase):
         self.ice_climatology = self._load(ice_clim_file, "icec")
 
         if self.ice_climatology is not None:
-            ocean = self._ocean_cells(self.params)
+            ocean = self.grid.binary_ocean_mask
             if bool(jnp.any(jnp.isnan(self.ice_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"Sea-ice climatology file \"{ice_clim_file!s:s}\" has NaNs over "
@@ -155,10 +155,6 @@ class SlabSeaiceModel(SlabModelBase):
         logger.info("%s: loading %r climatology from %s", self.name, var, path)
         return load_monthly_climatology(path, var, self.grid)
 
-    def _ocean_cells(self, params: SlabSeaiceParameters) -> jnp.ndarray:
-        """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
-
     def initialize(self, params: SlabSeaiceParameters | None = None) -> Carry:
         """Build the initial sea-ice carry.
 
@@ -173,7 +169,7 @@ class SlabSeaiceModel(SlabModelBase):
         """
         params = self._initial_params(params)
 
-        ocean = self._ocean_cells(params)
+        ocean = self.grid.binary_ocean_mask
         if self.ice_climatology is not None:
             # The observed concentration at the month the run starts in. It
             # is what the atmosphere is handed on its first step, before this
@@ -209,7 +205,7 @@ class SlabSeaiceModel(SlabModelBase):
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
-        ocean = self._ocean_cells(params)
+        ocean = self.grid.binary_ocean_mask
 
         sea_surface_temperature = forcing.sea_surface_temperature
 

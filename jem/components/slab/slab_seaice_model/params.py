@@ -19,8 +19,6 @@ class SlabSeaiceParameters:
 
     """
 
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
-
     @classmethod
     def default(cls) -> "SlabSeaiceParameters":
         """Return the default parameters."""
