@@ -473,6 +473,11 @@ class SlabModelBase(ABC):
         and each data variable gets the CF ``coordinates`` attribute that
         points at them.
 
+        The grid's ``land_fraction``, ``binary_land_mask`` and
+        ``binary_ocean_mask`` are written as time-independent coordinates.
+        A coast cell has both binary masks set to 1, because the land and the
+        ocean models both integrate it.
+
         Parameters
         ----------
         diagnostics : Diagnostics
@@ -522,6 +527,33 @@ class SlabModelBase(ABC):
                 name: (dims, values, {**attrs, "coordinates": "lat lon"})
                 for name, (dims, values, attrs) in data_vars.items()
             }
+
+        # The land-sea mask is written as time-independent coordinates rather
+        # than data variables, so that combining chunk files along time does
+        # not give it a time dimension.
+        coords["land_fraction"] = (
+            grid_dims,
+            np.asarray(self.grid.land_fraction),
+            {"long_name": "Land area fraction", "units": "1"},
+        )
+        coords["binary_land_mask"] = (
+            grid_dims,
+            np.asarray(self.grid.binary_land_mask, dtype=np.int8),
+            {
+                "long_name": "Cells with any land",
+                "flag_values": np.array([0, 1], dtype=np.int8),
+                "flag_meanings": "no_land land",
+            },
+        )
+        coords["binary_ocean_mask"] = (
+            grid_dims,
+            np.asarray(self.grid.binary_ocean_mask, dtype=np.int8),
+            {
+                "long_name": "Cells with any ocean",
+                "flag_values": np.array([0, 1], dtype=np.int8),
+                "flag_meanings": "no_ocean ocean",
+            },
+        )
 
         return xr.Dataset(
             data_vars=data_vars,

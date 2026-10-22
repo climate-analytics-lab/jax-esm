@@ -107,6 +107,12 @@ The conventions, which are JCM's:
   forcing. A variable that is none of the three — a grid mask, a layer
   thickness, anything time-invariant from the component's configuration
   rather than its carry — is left untagged deliberately.
+- **Slab datasets carry their land-sea mask.** Every slab model writes its
+  grid's `land_fraction`, `binary_land_mask` (1 where there is any land) and
+  `binary_ocean_mask` (1 where there is any ocean) as time-independent
+  coordinates. A coast cell is 1 in both, since the land and ocean models
+  both integrate it. They are coordinates rather than data variables so that
+  combining chunk files along `time` does not give them a time dimension.
 - **A configuration-dependent variable is decided by the run, not by the
   component object.** `SlabOceanModel` writes `forcing_q_flux` only when the
   trajectory actually applied a Q-flux, following the `forcing_method` in
