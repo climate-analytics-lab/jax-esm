@@ -11,9 +11,12 @@ import jem.data
 from jcm.physics.speedy.speedy_coords import get_speedy_coords
 from jcm.terrain import TerrainData
 from jcm.utils import data_to_xarray
+from jem.base.component import TimeAxis
 from jem.components.slab import grid as grid_module
 from jem.components.slab.grid import SlabGrid, to_degrees
+from jem.components.slab.slab_land_model import SlabLandModel
 from jem.components.slab.slab_ocean_model import SlabOceanModel
+from jem.components.slab.slab_seaice_model import SlabSeaiceModel
 from tests.unit.slab_test_utils import (
     make_grid,
     run_steps,
@@ -262,3 +265,89 @@ def test_explicit_scrip_mask_is_validated(bad_value):
             latitude_radian=good.latitude_radian,
             longitude_radian=good.longitude_radian,
         )
+
+
+MASK_COORDINATES = ("land_fraction", "binary_land_mask", "binary_ocean_mask")
+
+
+def _coastal_grid() -> SlabGrid:
+    """Return a 4x3 grid with all-ocean, coast and all-land cells."""
+    longitude_axis = np.deg2rad([0.0, 90.0, 180.0, 270.0])
+    latitude_axis = np.deg2rad([-60.0, 0.0, 60.0])
+    shape = (4, 3)
+    land_fraction = np.zeros(shape)
+    land_fraction[1, :] = 0.5
+    land_fraction[2:, :] = 1.0
+    return SlabGrid(
+        land_fraction=jnp.asarray(land_fraction),
+        latitude_radian=jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape)),
+        longitude_radian=jnp.asarray(np.broadcast_to(longitude_axis[:, None], shape)),
+    )
+
+
+def _slab_datasets(grid: SlabGrid, n_steps: int = 2) -> dict[str, xr.Dataset]:
+    models = {
+        "ocn": SlabOceanModel(grid),
+        "lnd": SlabLandModel(grid),
+        "seaice": SlabSeaiceModel(grid),
+    }
+    datasets = {}
+    for name, model in models.items():
+        _, diagnostics = run_steps(model, model.initialize(), n_steps)
+        datasets[name] = model.to_xarray(diagnostics, time_axis(n_steps))
+    return datasets
+
+
+def test_slab_output_carries_the_land_sea_mask():
+    """Each slab dataset has the grid's masks as time-independent coordinates."""
+    grid = _coastal_grid()
+    for name, dataset in _slab_datasets(grid).items():
+        for coordinate in MASK_COORDINATES:
+            assert coordinate in dataset.coords, f"{name}.{coordinate}"
+            assert coordinate not in dataset.data_vars, f"{name}.{coordinate}"
+            assert dataset[coordinate].dims == grid.dims, f"{name}.{coordinate}"
+        np.testing.assert_array_equal(dataset["land_fraction"], np.asarray(grid.land_fraction))
+        np.testing.assert_array_equal(dataset["binary_land_mask"], np.asarray(grid.binary_land_mask))
+        np.testing.assert_array_equal(dataset["binary_ocean_mask"], np.asarray(grid.binary_ocean_mask))
+        # The coast row is in both masks.
+        assert int(dataset["binary_land_mask"][1, 0]) == 1
+        assert int(dataset["binary_ocean_mask"][1, 0]) == 1
+
+
+def test_land_sea_mask_does_not_gain_a_time_dimension_across_chunks(tmp_path):
+    """Combining chunk files along time leaves the masks time-independent."""
+    grid = _coastal_grid()
+    model = SlabOceanModel(grid)
+    carry, first = run_steps(model, model.initialize(), 2)
+    _, second = run_steps(model, carry, 2)
+    first_ds = model.to_xarray(first, time_axis(2))
+    later = time_axis(2)
+    second_ds = model.to_xarray(second, TimeAxis(start_date=later.start_date, steps=np.arange(2, 4), dt=later.dt))
+    first_ds.to_netcdf(tmp_path / "chunk_0.nc")
+    second_ds.to_netcdf(tmp_path / "chunk_1.nc")
+
+    with xr.open_mfdataset(sorted(tmp_path.glob("chunk_*.nc")), combine="by_coords") as combined:
+        assert combined.sizes["time"] == 4
+        for coordinate in MASK_COORDINATES:
+            assert "time" not in combined[coordinate].dims, coordinate
+
+
+def test_land_sea_mask_on_a_curvilinear_grid_round_trips(tmp_path):
+    """On a curvilinear grid the masks are written over the index dims and read back."""
+    grid = SlabGrid.from_scrip(str(DISPLACED_POLE_SCRIP))
+    model = SlabOceanModel(grid)
+    _, diagnostics = run_steps(model, model.initialize(), 2)
+    model.to_xarray(diagnostics, time_axis(2)).to_netcdf(tmp_path / "ocn.nc")
+
+    with xr.open_dataset(tmp_path / "ocn.nc") as dataset:
+        for coordinate in MASK_COORDINATES:
+            assert coordinate in dataset.coords, coordinate
+            assert dataset[coordinate].dims == ("x", "y"), coordinate
+
+
+def test_slab_datasets_with_masks_still_merge():
+    """Components on the same grid write identical masks, so they merge."""
+    datasets = _slab_datasets(_coastal_grid())
+    merged = xr.merge(list(datasets.values()), join="exact", compat="no_conflicts")
+    for coordinate in MASK_COORDINATES:
+        assert coordinate in merged.coords, coordinate
