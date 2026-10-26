@@ -72,7 +72,7 @@ _MONTHS_PER_YEAR = 12
 # looser than that rounding. It is still two orders of magnitude tighter than
 # the ~0.4 degree spacing of the finest grid JEM supports, so a file written
 # on a genuinely different grid is rejected rather than silently regridded.
-_COORDINATE_TOLERANCE_DEGREES = 1e3
+_COORDINATE_TOLERANCE_DEGREES = 1e-3
 
 #: CF attributes for the horizontal coordinates, copied from
 #: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
