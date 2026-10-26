@@ -16,6 +16,7 @@ run starts in -- reaches the model through
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 import jax.numpy as jnp
@@ -167,7 +168,7 @@ def _check_axis_matches(
         )
 
 
-def first_present_variable(path, candidates: tuple[str, ...]) -> str | None:
+def first_present_variable(path, candidates: Sequence[str]) -> str | None:
     """Return the first of `candidates` present in the netCDF file at `path`.
 
     Boundary files written by different tools spell the same field differently

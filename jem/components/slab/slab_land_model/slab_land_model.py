@@ -18,6 +18,7 @@ climatology file.
 
 import logging
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -485,7 +486,7 @@ class SlabLandModel(SlabModelBase):
             )
         return jnp.asarray(np.where(land, values, off_land_value))
 
-    def _load_named(self, candidates: tuple[str, ...]) -> jnp.ndarray | None:
+    def _load_named(self, candidates: Sequence[str]) -> jnp.ndarray | None:
         """Load whichever of `candidates` the climatology file carries."""
         name = first_present_variable(self.land_clim_file, candidates)
         if name is None:
