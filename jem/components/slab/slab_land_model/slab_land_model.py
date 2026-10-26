@@ -8,8 +8,12 @@ The model has three parts:
   value. Snow cover is diagnosed from the depth.
 - Soil water: a two-layer leaky bucket filled by precipitation, or the
   surface layer read from a climatology.
+- Surface albedo: either a uniform parameter or read from a climatology.
+  It is output only for now.
 
-Each cell is soil or land ice, depending on its surface albedo.
+The slab heat capacity mixes soil and glacier ice in proportion to
+``glacier_fraction``, a single value or a time-invariant map read from the
+climatology file.
 """
 
 import logging
@@ -20,14 +24,16 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 import tree_math
+import xarray as xr
 
-from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
 from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     first_present_variable,
     forcing_variable,
     load_monthly_climatology,
+    load_static_field,
     role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
@@ -54,6 +60,8 @@ class LandState:
         Snow cover fraction in [0, 1], diagnosed from ``snow_depth``.
     soil_water_content : (n_lon, n_lat, 2) array
         Volumetric soil water content (m3 m-3) of the surface and deep layer.
+    surface_albedo : (n_lon, n_lat) array
+        Surface albedo (dimensionless, in [0, 1]).
 
     """
 
@@ -61,6 +69,7 @@ class LandState:
     snow_depth: jnp.ndarray
     snow_cover: jnp.ndarray
     soil_water_content: jnp.ndarray
+    surface_albedo: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -70,6 +79,7 @@ class LandState:
         snow_depth=None,
         snow_cover=None,
         soil_water_content=None,
+        surface_albedo=None,
         n_soil_layers=2,
     ):
         return cls(
@@ -77,6 +87,7 @@ class LandState:
             snow_depth if snow_depth is not None else jnp.zeros(shape),
             snow_cover if snow_cover is not None else jnp.zeros(shape),
             soil_water_content if soil_water_content is not None else jnp.zeros(shape + (n_soil_layers,)),
+            surface_albedo if surface_albedo is not None else jnp.zeros(shape),
         )
 
 
@@ -112,11 +123,14 @@ class SlabLandModel(SlabModelBase):
     soil water.
 
     Surface temperature
-        A single slab with heat capacity ``C``. On soil
-        ``C = soil_depth[0] * soil_volumetric_heat_capacity``; on land ice
-        (albedo >= ``landice_albedo_threshold``)
-        ``C = landice_depth * landice_volumetric_heat_capacity``. With
-        ``F`` the downward heat flux, the default update is::
+        A single slab whose heat capacity mixes soil and glacier ice. With
+        ``f = glacier_fraction`` (a scalar, or a map read from the
+        climatology file with ``glacier_fraction_from_clim_file=True``)::
+
+            C = (1 - f) * soil_depth[0] * soil_volumetric_heat_capacity
+                + f * glacier_depth * glacier_volumetric_heat_capacity
+
+        With ``F`` the downward heat flux, the default update is::
 
             T_new = T + dt * F / C
 
@@ -149,6 +163,12 @@ class SlabLandModel(SlabModelBase):
         With ``soil_water_content_from_clim_file=True`` the surface layer is
         set to the climatology at the current time, and the deep layer keeps
         its previous value.
+
+    Surface albedo
+        With ``surface_albedo_from_clim_file=True`` the albedo is the
+        climatology at the current time. Otherwise it is the uniform
+        ``params.surface_albedo``. It is written to the output, but nothing
+        in the model or the coupling reads it yet.
     """
 
     def __init__(
@@ -157,14 +177,17 @@ class SlabLandModel(SlabModelBase):
         params: SlabLandParameters | None = None,
         *,
         name: str = "lnd",
-        surface_albedo: jnp.ndarray | None = None,
         land_clim_file: str | None = None,
         soil_water_content_from_clim_file: bool = False,
         snow_depth_from_clim_file: bool = False,
         land_surface_temperature_from_clim_file: bool = False,
+        surface_albedo_from_clim_file: bool = False,
+        glacier_fraction_from_clim_file: bool = False,
         soil_water_content_varname_in_clim_file: str = "soil_water_content",
         snow_depth_varname_in_clim_file: str = "snow_depth",
         land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
+        surface_albedo_varname_in_clim_file: str = "surface_albedo",
+        glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
     ):
         """Initialize the land surface model.
 
@@ -179,16 +202,12 @@ class SlabLandModel(SlabModelBase):
         name : str
             Component name in the coupler's workflow and carry. Default
             ``"lnd"``.
-        surface_albedo : jnp.ndarray, optional
-            Surface albedo on the model grid, used to tell land ice from soil.
-            Defaults to a uniform ``params.surface_albedo``, which makes every
-            cell soil. Nothing in JEM passes the atmosphere's albedo here yet,
-            so real ice sheets are also treated as soil (jax-esm#109).
         land_clim_file : str, optional
             netCDF file with 12-month climatologies on the model grid. A field
-            missing from the file, or every field when no file is given, uses
-            a fallback: an idealized temperature climatology, no snow, and a
-            soil water content of 0.5.
+            with no time dimension is used as the same map in every month. A
+            field missing from the file, or every field when no file is given,
+            uses a fallback: an idealized temperature climatology, no snow, a
+            soil water content of 0.5 and a surface albedo of 0.2.
         soil_water_content_from_clim_file : bool
             Set the surface soil layer from the climatology instead of
             running the bucket. Default False.
@@ -198,18 +217,33 @@ class SlabLandModel(SlabModelBase):
         land_surface_temperature_from_clim_file : bool
             Relax the surface temperature to the climatology instead of
             letting it run freely. Default False.
+        surface_albedo_from_clim_file : bool
+            Read the surface albedo from the climatology instead of using the
+            uniform ``params.surface_albedo``. Default False.
+        glacier_fraction_from_clim_file : bool
+            Read a glacier fraction map from ``land_clim_file`` and use it as
+            ``params.glacier_fraction``. The variable must have no time
+            dimension. Cells with no land are set to 0, so the file may hold
+            NaN or a fill value over ocean; a NaN over land is an error.
+            Default False.
         soil_water_content_varname_in_clim_file : str
             Name of the soil water variable in ``land_clim_file``.
         snow_depth_varname_in_clim_file : str
             Name of the snow depth variable in ``land_clim_file``.
         land_surface_temperature_varname_in_clim_file : str
             Name of the surface temperature variable in ``land_clim_file``.
+        surface_albedo_varname_in_clim_file : str
+            Name of the surface albedo variable in ``land_clim_file``.
+        glacier_fraction_varname_in_clim_file : str
+            Name of the glacier fraction variable in ``land_clim_file``.
 
         Raises
         ------
         ValueError
-            If a parameter is out of range or ``surface_albedo`` is not on the
-            model grid.
+            If a parameter is out of range, a field in ``land_clim_file`` is
+            not on the model grid, or ``glacier_fraction_from_clim_file`` is
+            set without a ``land_clim_file`` or with a glacier fraction that
+            varies in time.
         FileNotFoundError
             If ``land_clim_file`` does not exist.
 
@@ -221,13 +255,26 @@ class SlabLandModel(SlabModelBase):
             "snow_depth": snow_depth_varname_in_clim_file,
             "soil_water_content": soil_water_content_varname_in_clim_file,
             "land_surface_temperature": land_surface_temperature_varname_in_clim_file,
+            "surface_albedo": surface_albedo_varname_in_clim_file,
+            "glacier_fraction": glacier_fraction_varname_in_clim_file,
         }
 
         self.read_from_clim_file = {
             "snow_depth": snow_depth_from_clim_file,
             "soil_water_content": soil_water_content_from_clim_file,
             "land_surface_temperature": land_surface_temperature_from_clim_file,
+            "surface_albedo": surface_albedo_from_clim_file,
+            "glacier_fraction": glacier_fraction_from_clim_file,
         }
+
+        # The glacier map goes into the parameters rather than onto the model,
+        # so the heat capacity has one source and the map stays a pytree leaf
+        # that jax.grad can reach. It is loaded before the parameter checks
+        # below, so the map is range-checked like a scalar would be.
+        if glacier_fraction_from_clim_file:
+            self.params = self.params.replace(
+                glacier_fraction=self._load_static_field(self.varnames_in_clim_file["glacier_fraction"])
+            )
 
         # Both timescales are read as a ratio against a length -- the relaxation
         # as `temperature_relaxation_timescale / dt`, the snow cover as `snow_depth / scale` -- and an
@@ -254,24 +301,37 @@ class SlabLandModel(SlabModelBase):
         # The parameters are validated here, at construction, because inside
         # `step` they are traced values that cannot be inspected. A caller who
         # replaces `carry["params"]` afterwards takes on that responsibility.
-        # Both albedo values feed the soil/ice comparison; a NaN in either
-        # compares False everywhere and silently selects one material.
-        for name in ("surface_albedo", "landice_albedo_threshold"):
-            albedo_value = float(getattr(self.params, name))
-            if not math.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
+        # Both are fractions. A NaN would propagate silently: through the
+        # heat capacity into the temperature for the glacier fraction, and
+        # into the output for the albedo. The glacier fraction may be a map,
+        # so every element is checked, and a map must be on the model grid
+        # (anything else would broadcast or fail deep inside `step`).
+        for name in ("surface_albedo", "glacier_fraction"):
+            fraction = np.asarray(getattr(self.params, name), dtype=float)
+            if not np.all(np.isfinite(fraction)) or not np.all(
+                (fraction >= 0.0) & (fraction <= 1.0)
+            ):
                 raise ValueError(
-                    f"params.{name} must be a finite albedo in [0, 1]; "
-                    f"got {albedo_value!r}."
+                    f"params.{name} must be finite and in [0, 1]; "
+                    f"got values in [{np.nanmin(fraction):g}, {np.nanmax(fraction):g}]."
                 )
+        glacier_fraction_shape = np.shape(self.params.glacier_fraction)
+        if glacier_fraction_shape not in ((), self.grid.shape):
+            raise ValueError(
+                f"params.glacier_fraction has shape {glacier_fraction_shape}; it must "
+                f"be a scalar or a map on the grid, {self.grid.shape} (n_lon, n_lat)."
+            )
+        if np.ndim(self.params.surface_albedo) != 0:
+            raise ValueError("params.surface_albedo must be a scalar.")
         # The slab heat capacity is depth times volumetric capacity; a zero or
         # negative factor makes the temperature update infinite or unstable.
         # `soil_depth` is per-layer, so every element is checked: the layer
         # depths are also the divisors of the bucket's water budget.
         for factor_name in (
             "soil_depth",
-            "landice_depth",
+            "glacier_depth",
             "soil_volumetric_heat_capacity",
-            "landice_volumetric_heat_capacity",
+            "glacier_volumetric_heat_capacity",
         ):
             factor = np.asarray(getattr(self.params, factor_name), dtype=float)
             if not np.all(np.isfinite(factor)) or not np.all(factor > 0.0):
@@ -280,38 +340,6 @@ class SlabLandModel(SlabModelBase):
                     f"(it is a factor of the slab heat capacity); got {factor!r}."
                 )
 
-        # An explicit albedo field is boundary data and lives on the model;
-        # without one, `step` builds a uniform field from the *carried*
-        # `params.surface_albedo` each step, so the parameter stays live for
-        # anyone who replaces `carry["params"]` (it is below
-        # `landice_albedo_threshold` by default, so such a model is all
-        # soil). Nothing in JEM routes the albedo the atmosphere's boundary
-        # data already carries (`jcm.forcing.ForcingData.alb0`) to this
-        # argument, so that is what every packaged configuration gets, ice
-        # sheets included -- see jax-esm#109.
-        self.surface_albedo: jnp.ndarray | None = None
-        if surface_albedo is not None:
-            surface_albedo = jnp.asarray(surface_albedo)
-            if tuple(surface_albedo.shape) != self.grid.shape:
-                raise ValueError(
-                    f"surface_albedo has shape {tuple(surface_albedo.shape)}, but the "
-                    f"grid is {self.grid.shape} (n_lon, n_lat)."
-                )
-            # The field only ever feeds a comparison against the ice
-            # threshold, so a NaN (which compares False, selecting the ice
-            # slab) or an out-of-range value would silently choose the wrong
-            # heat capacity rather than fail.
-            if not bool(jnp.all(jnp.isfinite(surface_albedo))):
-                raise ValueError("surface_albedo contains non-finite values.")
-            albedo_min = float(surface_albedo.min())
-            albedo_max = float(surface_albedo.max())
-            if albedo_min < 0.0 or albedo_max > 1.0:
-                raise ValueError(
-                    "surface_albedo must lie in [0, 1]; got values in "
-                    f"[{albedo_min:g}, {albedo_max:g}]."
-                )
-            self.surface_albedo = surface_albedo
-
         # Boundary data is *configuration*, so it is read here rather than in
         # ``initialize()``: that keeps initialize() pure with respect to self
         # and surfaces a bad file at construction.
@@ -319,10 +347,11 @@ class SlabLandModel(SlabModelBase):
             self.land_surface_temperature_climatology,
             self.snow_depth_climatology,
             self.soil_water_content_climatology,
+            self.surface_albedo_climatology,
         ) = self._load_climatologies()
 
     def _load_climatologies(self) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Load the three monthly climatologies, with idealized fallbacks.
+        """Load the four monthly climatologies, with idealized fallbacks.
 
         Fields are read by name through
         :func:`~jem.components.slab.base.load_monthly_climatology`, which
@@ -331,8 +360,8 @@ class SlabLandModel(SlabModelBase):
         Returns
         -------
         tuple of jnp.ndarray
-            Surface temperature (K), snow depth (mm) and soil water content
-            (m3 m-3), each of shape ``(n_lon, n_lat, 12)``.
+            Surface temperature (K), snow depth (mm), soil water content
+            (m3 m-3) and surface albedo, each of shape ``(n_lon, n_lat, 12)``.
 
         """
         shape = self.grid.shape
@@ -349,6 +378,7 @@ class SlabLandModel(SlabModelBase):
                 self._idealized_land_temperature(),
                 jnp.zeros(monthly),
                 jnp.full(monthly, 0.5),
+                jnp.full(monthly, self.params.surface_albedo),
             )
         
         if not Path(self.land_clim_file).exists():
@@ -388,7 +418,74 @@ class SlabLandModel(SlabModelBase):
             )
             soil_water_content = jnp.full(monthly, 0.5)
 
-        return land_surface_temperature, snow_depth, soil_water_content
+        surface_albedo = self._load_named([varnames_in_clim_file["surface_albedo"],])
+        if surface_albedo is None:
+            logger.warning(
+                "%s: land climatology file %s does not have %s; assuming uniform surface_albedo 0.2 ",
+                self.name,
+                self.land_clim_file,
+                varnames_in_clim_file["surface_albedo"],
+            )
+            surface_albedo = jnp.full(monthly, 0.2)
+ 
+        return (
+            land_surface_temperature,
+            snow_depth,
+            soil_water_content,
+            surface_albedo,
+        )
+
+    def _load_static_field(self, field: str, varname: str, off_land_value: float = 0.0) -> jnp.ndarray:
+        """Load a time-invariant map from the climatology file.
+
+        Unlike the climatologies there is no fallback: a static field is read
+        only when its ``<field>_from_clim_file`` switch asks for the file's
+        map, so a missing file or variable is an error rather than a silent
+        uniform value.
+
+        Parameters
+        ----------
+        field : str
+            The field's key in ``varnames_in_clim_file``, which names the
+            variable to read, e.g. ``"glacier_fraction"``.
+        off_land_value : float
+            Value given to cells with no land. Default 0.
+
+        Returns
+        -------
+        jnp.ndarray
+            The field with shape ``(n_lon, n_lat)``.
+
+        """
+
+        if self.land_clim_file is None:
+            raise ValueError(
+                f"{field}_from_clim_file=True needs a land_clim_file to "
+                f"read \"{varname}\" from."
+            )
+        if not Path(self.land_clim_file).exists():
+            raise FileNotFoundError(
+                f"Land climatology file \"{self.land_clim_file!s:s}\" does not exist."
+            )
+        logger.info(
+            "%s: loading %r static field from %s",
+            self.name,
+            varname,
+            self.land_clim_file,
+        )
+        values = np.asarray(
+            load_static_field(self.land_clim_file, varname, self.grid), dtype=float
+        )
+        # Source files usually leave ocean cells as NaN or a fill value. The
+        # land model never integrates those cells, so they are overwritten
+        # here; a NaN over land is a broken file and is rejected.
+        land = np.asarray(self.grid.binary_land_mask) == 1
+        if not np.all(np.isfinite(values[land])):
+            raise ValueError(
+                f"Land climatology file \"{self.land_clim_file!s:s}\": "
+                f"\"{varname}\" has non-finite values on land cells."
+            )
+        return jnp.asarray(np.where(land, values, off_land_value))
 
     def _load_named(self, candidates: tuple[str, ...]) -> jnp.ndarray | None:
         """Load whichever of `candidates` the climatology file carries."""
@@ -406,8 +503,9 @@ class SlabLandModel(SlabModelBase):
     ) -> Carry:
         """Build the initial land carry.
 
-        By default every cell starts at 288.15 K with no snow and a soil
-        water content of 0.5 in both layers.
+        By default every cell starts at 288.15 K with no snow, a soil water
+        content of 0.5 in both layers and a surface albedo of
+        ``params.surface_albedo``.
 
         Parameters
         ----------
@@ -415,8 +513,8 @@ class SlabLandModel(SlabModelBase):
             Parameters to put in ``carry["params"]``. Defaults to the ones
             the model was constructed with.
         initialize_from_clim_file : bool
-            Start the surface temperature, snow depth and snow cover from the
-            climatology at the month the run starts in
+            Start the surface temperature, snow depth, snow cover and surface
+            albedo from the climatology at the month the run starts in
             (:attr:`SlabModelBase.start_year_fraction`). Soil water still
             starts at 0.5. Default False.
 
@@ -427,6 +525,19 @@ class SlabLandModel(SlabModelBase):
             and is filled by the exchangers before the first step.
 
         """
+        if (
+            params is not None
+            and self.read_from_clim_file["glacier_fraction"]
+            and jnp.shape(params.glacier_fraction) != self.grid.shape
+        ):
+            # Passed parameters win, as they do for every other parameter,
+            # but losing the file's map that way is easy to do by accident.
+            logger.warning(
+                "%s: the params passed to initialize() have a uniform "
+                "glacier_fraction, so the map read from %s is not used.",
+                self.name,
+                self.land_clim_file,
+            )
         params = self._initial_params(params)
         land = self.grid.binary_land_mask
         # The month the run starts in; the coupler sets it through `bind`.
@@ -435,9 +546,9 @@ class SlabLandModel(SlabModelBase):
         state = LandState.zeros(self.grid.shape)
         state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
         state.soil_water_content = state.soil_water_content.at[:].set(0.5)
+        state.surface_albedo = state.surface_albedo.at[:].set(params.surface_albedo)
 
         if initialize_from_clim_file:
-
             logger.info(
                 "Initialize land states (land_surface_temperature and snow_depth"
                 " with climatology."
@@ -454,6 +565,9 @@ class SlabLandModel(SlabModelBase):
                 cycle_position, self.snow_depth_climatology
             )
             state.snow_cover = convert_snow_depth_to_snow_cover(state.snow_depth, params)
+            state.surface_albedo = evaluate_cyclic_linear(
+                cycle_position, self.surface_albedo_climatology
+            )
 
         return {
             "params": params,
@@ -486,23 +600,12 @@ class SlabLandModel(SlabModelBase):
         read_from_clim_file = self.read_from_clim_file
         land_mask = self.grid.binary_land_mask
 
-        # Heat capacity per unit area, and its reciprocal scaled by the step:
-        # SPEEDY's rhcapl. Computed here rather than cached on the model because
-        # both the depths and the coupling timestep are things a caller may vary
-        # between runs -- and, for the depths, differentiate through.
-        surface_albedo = (
-            self.surface_albedo
-            if self.surface_albedo is not None
-            else jnp.full(self.grid.shape, params.surface_albedo)
-        )
-
         # The thermal slab is the top soil layer only: the temperature is a
         # single-layer prognostic, and with the default 1 m top layer this is
         # exactly SPEEDY's hcapl. The deeper layer holds water, not heat.
-        heat_capacity = jnp.where(
-            surface_albedo < params.landice_albedo_threshold,
-            params.soil_depth[0] * params.soil_volumetric_heat_capacity,
-            params.landice_depth * params.landice_volumetric_heat_capacity,
+        heat_capacity = (
+            params.soil_depth[0] * params.soil_volumetric_heat_capacity * (1.0 - params.glacier_fraction)
+            + params.glacier_depth * params.glacier_volumetric_heat_capacity * params.glacier_fraction
         )
         dt_inverse_heat_capacity = time.dt / heat_capacity
 
@@ -583,11 +686,21 @@ class SlabLandModel(SlabModelBase):
 
         new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
 
+        if read_from_clim_file["surface_albedo"]:
+            logger.info("Read albedo content from climatology")
+            new_surface_albedo = evaluate_cyclic_linear(
+                time.year_fraction, self.surface_albedo_climatology
+            )
+        else:
+            new_surface_albedo = state.surface_albedo.at[:].set(params.surface_albedo)
+ 
+ 
         new_state = state.replace(
             land_surface_temperature=new_land_surface_temperature,
             snow_depth=new_snow_depth,
             snow_cover=convert_snow_depth_to_snow_cover(new_snow_depth, params),
             soil_water_content=new_soil_water_content,
+            surface_albedo=new_surface_albedo,
         )
 
         diagnostics = {
@@ -653,6 +766,16 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
+            "surface_albedo": (
+                dims,
+                state.surface_albedo,
+                {
+                    "long_name": "Surface albedo",
+                    "units": "None",
+                    **role_attrs("state"),
+                },
+            ),
+
             # layer 0 is the surface soil layer, layer 1 the deep one; their
             # depths are params.soil_depth.
             "soil_water_content": (
@@ -688,6 +811,30 @@ class SlabLandModel(SlabModelBase):
                 },
             ),
         }
+
+    def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
+        """Convert a run's stacked diagnostics to a Dataset.
+
+        As :meth:`SlabModelBase.to_xarray`, with the glacier fraction added
+        as a time-independent coordinate next to the land-sea mask.
+
+        The map written is ``self.params.glacier_fraction``, the one the
+        model was constructed with (and read from the file, if
+        ``glacier_fraction_from_clim_file=True``). A run started with
+        ``initialize(params)`` whose glacier fraction differs is not
+        reflected here.
+        """
+        dataset = super().to_xarray(diagnostics, time)
+        glacier_fraction = np.broadcast_to(
+            np.asarray(self.params.glacier_fraction, dtype=float), self.grid.shape
+        )
+        return dataset.assign_coords(
+            glacier_fraction=(
+                self.grid.dims,
+                glacier_fraction,
+                {"long_name": "Glacier fraction of the land area", "units": "1"},
+            )
+        )
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
         # No parameter values here: the dynamics read `carry["params"]`, which

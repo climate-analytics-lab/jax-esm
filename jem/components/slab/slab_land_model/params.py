@@ -24,12 +24,13 @@ class SlabLandParameters:
         Thickness (m) of the surface and deep soil layers. Default (1, 2).
         The surface layer is also the thermal slab, so ``soil_depth[0]``
         sets the soil heat capacity.
-    landice_depth : float
-        Thickness (m) of the thermal slab on land ice. Default 5.
+    glacier_depth : float
+        Thickness (m) of the thermal slab on the glacier part of a cell.
+        Default 5.
     soil_volumetric_heat_capacity : float
         Volumetric heat capacity of soil (J m-3 K-1). Default 2.5e6.
-    landice_volumetric_heat_capacity : float
-        Volumetric heat capacity of land ice (J m-3 K-1). Default 1.93e6.
+    glacier_volumetric_heat_capacity : float
+        Volumetric heat capacity of glacier ice (J m-3 K-1). Default 1.93e6.
     temperature_relaxation_timescale : float
         Damping timescale (s) of the land surface temperature anomaly about
         its climatology. Default 40 days. Only used when the model relaxes to
@@ -48,29 +49,34 @@ class SlabLandParameters:
     snow_depth_to_cover_scale : float
         Snow depth (mm water equivalent) at which snow cover reaches 1.
         SPEEDY's ``sd2sc``. Default 60.
-    landice_albedo_threshold : float
-        Cells with surface albedo at or above this value are treated as land
-        ice. Default 0.4.
     surface_albedo : float
-        Uniform surface albedo used when the model is built without an albedo
-        field. Default 0.2, which is below ``landice_albedo_threshold``, so
-        such a model has no land ice.
+        Uniform surface albedo, in [0, 1], used when the albedo is not read
+        from the climatology (``surface_albedo_from_clim_file=False``).
+        Default 0.2. The albedo is written to the output but does not yet
+        feed back on the land model or the atmosphere.
+    glacier_fraction : float or jnp.ndarray, shape (n_lon, n_lat)
+        Fraction of the land part of each cell covered by glacier, in
+        [0, 1]. The slab heat capacity is the soil and glacier capacities
+        weighted by this fraction. Either a single value for every cell or
+        a map on the model grid, which ``SlabLandModel`` reads from its
+        climatology file with ``glacier_fraction_from_clim_file=True``. It
+        is constant in time. Default 0, so every cell is all soil.
 
     """
 
     # Per-layer defaults are arrays, which dataclasses only accept through a
     # default_factory.
     soil_depth: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((1.0, 2.0)))
-    landice_depth: float | jnp.ndarray = 5.0
+    glacier_depth: float | jnp.ndarray = 5.0
     soil_volumetric_heat_capacity: float | jnp.ndarray = 2.50e6
-    landice_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
+    glacier_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
     temperature_relaxation_timescale: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
     drainage_timescale: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((60.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
     soil_water_field_capacity: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
     soil_water_wilting_point: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.17, 0.17)))
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
-    landice_albedo_threshold: float | jnp.ndarray = 0.4
     surface_albedo: float | jnp.ndarray = 0.2
+    glacier_fraction: float | jnp.ndarray = 0.0
 
     @classmethod
     def default(cls) -> "SlabLandParameters":
