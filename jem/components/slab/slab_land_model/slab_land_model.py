@@ -435,19 +435,17 @@ class SlabLandModel(SlabModelBase):
             surface_albedo,
         )
 
-    def _load_static_field(self, field: str, varname: str, off_land_value: float = 0.0) -> jnp.ndarray:
+    def _load_static_field(self, varname: str, off_land_value: float = 0.0) -> jnp.ndarray:
         """Load a time-invariant map from the climatology file.
 
         Unlike the climatologies there is no fallback: a static field is read
-        only when its ``<field>_from_clim_file`` switch asks for the file's
-        map, so a missing file or variable is an error rather than a silent
-        uniform value.
+        only when the caller asks for the file's map, so a missing file or
+        variable is an error rather than a silent uniform value.
 
         Parameters
         ----------
-        field : str
-            The field's key in ``varnames_in_clim_file``, which names the
-            variable to read, e.g. ``"glacier_fraction"``.
+        varname : str
+            Name of the variable in ``land_clim_file``.
         off_land_value : float
             Value given to cells with no land. Default 0.
 
@@ -457,11 +455,9 @@ class SlabLandModel(SlabModelBase):
             The field with shape ``(n_lon, n_lat)``.
 
         """
-
         if self.land_clim_file is None:
             raise ValueError(
-                f"{field}_from_clim_file=True needs a land_clim_file to "
-                f"read \"{varname}\" from."
+                f"Reading the static field \"{varname}\" needs a land_clim_file."
             )
         if not Path(self.land_clim_file).exists():
             raise FileNotFoundError(
