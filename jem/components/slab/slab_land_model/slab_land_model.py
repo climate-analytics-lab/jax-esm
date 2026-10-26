@@ -350,7 +350,9 @@ class SlabLandModel(SlabModelBase):
             self.surface_albedo_climatology,
         ) = self._load_climatologies()
 
-    def _load_climatologies(self) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def _load_climatologies(
+        self,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Load the four monthly climatologies, with idealized fallbacks.
 
         Fields are read by name through
