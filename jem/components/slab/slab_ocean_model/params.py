@@ -53,8 +53,7 @@ class SlabOceanParameters:
     mixed_layer_depth_max: float | jnp.ndarray = 60.0
     initial_sst: float | jnp.ndarray = 288.15
     forcing_method: str = struct.field(pytree_node=False, default="none")
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
-
+    
     @classmethod
     def default(cls) -> "SlabOceanParameters":
         """Return the default parameters."""
