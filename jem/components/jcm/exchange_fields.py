@@ -141,6 +141,9 @@ class SurfaceExchange(NamedTuple):
         reference (see the module docstring's "near-surface wind" section).
     v0 : jax.Array
         Near-surface meridional wind, ``m s-1``. Same reference as ``u0``.
+    air_potential_temperature : jax.Array
+        Potential temperature of the lowest model level, ``K``, referenced
+        to the publishing package's reference pressure.
 
     """
 
@@ -149,8 +152,10 @@ class SurfaceExchange(NamedTuple):
     precipitation: jnp.ndarray
     eastward_wind_stress: jnp.ndarray
     northward_wind_stress: jnp.ndarray
+    air_potential_temperature: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
+
 
 
 def from_diagnostics(
@@ -206,6 +211,7 @@ def from_diagnostics(
         precipitation=exchange.precipitation.reshape(nodal_shape),
         eastward_wind_stress=exchange.stress_u.reshape(nodal_shape),
         northward_wind_stress=exchange.stress_v.reshape(nodal_shape),
+        air_potential_temperature=exchange.air_potential_temperature.reshape(nodal_shape),
         u0=exchange.wind_u.reshape(nodal_shape),
         v0=exchange.wind_v.reshape(nodal_shape),
     )
