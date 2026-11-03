@@ -541,9 +541,9 @@ class WintonSeaiceModel(SlabModelBase):
                     )
             logger.info("%s: ice transport enabled (cyclic_x=%s)", name, self.transport.cyclic_x)
 
-    def _ocean_cells(self, params: WintonSeaiceParameters) -> jnp.ndarray:
+    def _ocean_cells(self) -> jnp.ndarray:
         """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
+        return self.grid.binary_ocean_mask == 1.0
 
     def initialize(self, params: WintonSeaiceParameters | None = None) -> Carry:
         """Build the initial sea-ice carry.
@@ -560,18 +560,8 @@ class WintonSeaiceModel(SlabModelBase):
 
         """
         params = self._initial_params(params)
-        # The ocean mask is a property of the grid the model was built on, and
-        # ``to_xarray`` masks its output with it; a run whose parameters named
-        # a different mask would integrate one set of cells and report another.
-        if params.ocean_mask_value != self.params.ocean_mask_value:
-            raise ValueError(
-                f"initialize(params) has ocean_mask_value="
-                f"{params.ocean_mask_value!r} but this model was built with "
-                f"{self.params.ocean_mask_value!r}; construct the model with the "
-                "mask convention the run uses."
-            )
         shape = self.grid.shape
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
         thickness = jnp.where(ocean, jnp.asarray(params.initial_ice_thickness), 0.0)
         fraction = jnp.where(thickness > 0, 1.0, 0.0)
         zeros = jnp.zeros(shape)
@@ -602,7 +592,7 @@ class WintonSeaiceModel(SlabModelBase):
         coupling_dt: float,
     ) -> tuple[WintonState, WintonDerived]:
         """Advance ``state`` by one coupling step and diagnose the step's budgets."""
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
         n = params.n_substeps
         dt = coupling_dt / n
         h_min, f_min, h0 = params.min_ice_thickness, params.min_ice_fraction, params.lead_closing_thickness
@@ -768,7 +758,7 @@ class WintonSeaiceModel(SlabModelBase):
         # the freezing point in the state; report them masked, as the surface
         # temperature is, rather than as a temperature that looks physical.
         # This changes the output only, not the state.
-        ocean = self._ocean_cells(self.params)
+        ocean = self._ocean_cells()
 
         def layer_temperature(T):
             return jnp.where(ocean, T + KELVIN, MASKED_SURFACE_TEMPERATURE)

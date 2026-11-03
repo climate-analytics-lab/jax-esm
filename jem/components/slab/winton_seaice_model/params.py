@@ -73,7 +73,7 @@ class WintonSeaiceParameters:
     respect to any of them works: the parameters travel in the component's
     carry (``carry["params"]``), not in a closure over the model object. The
     fields that select a code path or fix an array shape at trace time (the
-    substep counts, the mask convention) are static.
+    substep counts) are static.
 
     ``initial_ice_thickness`` is an **initial-condition** parameter: it is read
     once, by :meth:`WintonSeaiceModel.initialize`, and never by ``step``. Vary
@@ -136,10 +136,6 @@ class WintonSeaiceParameters:
         coupled runs use three.
     transport_n_substeps : int
         Substeps of the transport step per coupling step. Static.
-    ocean_mask_value : float
-        Value of the grid's binary mask that marks an ocean cell (0 = ocean,
-        1 = land). Static: it selects which cells the model integrates at
-        trace time, and is a mask convention rather than a physical tunable.
 
     """
 
@@ -162,7 +158,6 @@ class WintonSeaiceParameters:
     n_substeps: int = struct.field(pytree_node=False, default=4)
     n_flux_iterations: int = struct.field(pytree_node=False, default=3)
     transport_n_substeps: int = struct.field(pytree_node=False, default=12)
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Accept JCM's ``SurfaceFluxParameters`` for ``surface_flux``.
