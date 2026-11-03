@@ -13,6 +13,12 @@ from jem.components.slab.slab_seaice_model import (
     SlabSeaiceParameters,
 )
 
+from jem.components.slab.winton_seaice_model import (
+    WintonSeaiceParameters,
+    WintonSeaiceModel,
+)
+
+
 __all__ = [
     "SlabAtmosphereModel",
     "SlabAtmosphereParameters",
@@ -24,5 +30,7 @@ __all__ = [
     "SlabOceanParameters",
     "SlabSeaiceModel",
     "SlabSeaiceParameters",
+    "WintonSeaiceParameters",
+    "WintonSeaiceModel",
     "load_monthly_climatology",
 ]
