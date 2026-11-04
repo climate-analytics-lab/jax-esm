@@ -33,8 +33,12 @@ potential (``derived.ocean_frazil_heating``), which goes back to the ocean so th
 sub-freezing water it came from warms back to the freezing point. That last term
 assumes an ocean that does not clamp its own temperature at freezing (Veros); an
 ocean that clamps has already removed the deficit, and would count it twice.
-``derived.ocean_freshwater_flux_up`` is the water ice growth takes from the ocean
-minus the cell's rain, ``forcing.liquid_precipitation``. It is published, but the default coupling does not consume it (the ocean
+``derived.ocean_freshwater_flux_up`` is built the same way: the atmosphere's
+E - P over the sea cell (``forcing.atm_sea_freshwater_flux``), plus the snow that
+landed on ice (held back from the ocean until it melts), plus the water ice
+growth takes from the ocean. The ice has no sublimation mass term, so the
+atmosphere's evaporation over the ice-covered part is still charged to the ocean.
+It is published, but the default coupling does not consume it (the ocean
 receives the atmosphere's grid-mean flux), and the default coupling does not supply
 the atmospheric forcing the ice reads either; both gaps are tracked in
 https://github.com/climate-analytics-lab/jax-esm/issues/141 and described in
@@ -361,8 +365,8 @@ class WintonForcing:
     Precipitation comes split by phase. ``frozen_precipitation`` is the part that
     falls as snow: what lands on ice is added to the snow layer, and what falls on
     open water is left to the ocean. ``liquid_precipitation`` is rain; the ice does
-    not hold it, and it is passed straight to the ocean in
-    ``ocean_freshwater_flux_up``. Whether the ice charges the ocean the latent
+    not hold it, and it reaches the ocean through ``atm_sea_freshwater_flux``,
+    which already contains all of the precipitation. Whether the ice charges the ocean the latent
     heat of fusion of the snow that lands on it (thsice's convention, for a
     supplier that condensed it as liquid) is set by the model's
     ``frozen_precipitation_latent_heat_release_mode``.
@@ -379,6 +383,7 @@ class WintonForcing:
     sea_surface_temperature: jnp.ndarray   # K
     ice_frazil_melt_energy: jnp.ndarray    # J/m2 per coupling step, + = freezing potential (CESM frzmlt)
     atm_sea_heat_flux: jnp.ndarray         # W/m2 downward, atmosphere's flux over the sea fraction
+    atm_sea_freshwater_flux: jnp.ndarray   # kg/m2/s upward, atmosphere's E - P over the sea fraction
     ice_velocity_u: jnp.ndarray            # m/s along the grid's x (used only with transport)
     ice_velocity_v: jnp.ndarray            # m/s along the grid's y
 
@@ -425,6 +430,7 @@ class WintonForcing:
             sea_surface_temperature=zeros + freezing,
             ice_frazil_melt_energy=zeros,
             atm_sea_heat_flux=zeros,
+            atm_sea_freshwater_flux=zeros,
             ice_velocity_u=zeros,
             ice_velocity_v=zeros,
         )
@@ -443,7 +449,7 @@ class WintonDerived:
     surface_melt_flux: jnp.ndarray
     basal_growth_flux: jnp.ndarray
     ice_atm_heat_flux: jnp.ndarray
-    ocean_freshwater_flux_up: jnp.ndarray   # kg/m2/s per cell area; + = ice growth removes water from the ocean, minus the cell's rain
+    ocean_freshwater_flux_up: jnp.ndarray   # kg/m2/s per cell area, upward; the atmosphere's E - P plus the snow held on ice plus the water ice growth takes
     snowfall_on_ice: jnp.ndarray            # kg/m2/s per cell area; snowfall that landed on ice instead of the ocean
     ice_albedo: jnp.ndarray                 # effective albedo of the ice-covered part (snow-aware)
     ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; THERMODYNAMIC rate of change of the ice+snow enthalpy (relative to water at 0 C), i.e. the exchange with ocean and atmosphere; transport is excluded
@@ -725,7 +731,9 @@ class WintonSeaiceModel(SlabModelBase):
         snowfall_on_ice = intercepted * n / coupling_dt
 
         ocean_heat_flux_up = q_up - ocean_frazil_heating
-        ocean_freshwater_flux_up = fw_up - fc.liquid_precipitation
+        # the atmosphere's E - P over the cell, with the snow that landed on ice held back from the ocean and the
+        # water ice growth takes added; cells this model does not integrate (land) carry no ocean flux
+        ocean_freshwater_flux_up = jnp.where(ocean, fc.atm_sea_freshwater_flux + snowfall_on_ice + fw_up, 0.0)
 
         # every derived field from the final state
         derived = _derived_from_state(
@@ -808,7 +816,7 @@ class WintonSeaiceModel(SlabModelBase):
             "effective_sea_surface_temperature": (dims, d.effective_sea_surface_temperature, {"units": "K", "long_name": "ice-fraction-weighted sea surface temperature", **derived}),
             "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2", "long_name": "heat flux out of the ocean: atmosphere-ocean flux through the ice and leads, minus the returned frazil latent heat", "positive": "upward", **derived}),
             "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2", "long_name": "surface melt energy flux of the ice-covered part", **derived}),
-            "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1", "long_name": "freshwater removed from the ocean by ice growth, minus rain", "positive": "upward", **derived}),
+            "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1", "long_name": "freshwater flux out of the ocean: atmosphere E - P, plus snow held on ice, plus ice growth", "positive": "upward", **derived}),
             "snowfall_on_ice": (dims, d.snowfall_on_ice, {"units": "kg m-2 s-1", "long_name": "snowfall intercepted by sea ice, kept from the ocean", **derived}),
             "ice_albedo": (dims, d.ice_albedo, {"units": "1", "long_name": "effective albedo of the ice-covered part", **derived}),
             "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)", **derived}),
