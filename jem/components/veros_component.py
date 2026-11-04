@@ -28,6 +28,7 @@ import tree_math
 import xarray as xr
 from veros import runtime_settings
 
+from jem import constants
 from jem.base.component import (
     Carry,
     CouplingTime,
@@ -212,14 +213,17 @@ class VerosDerived:
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None,
+              ice_frazil_melt_energy=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
         )
 
 
@@ -548,6 +552,19 @@ class VerosComponent:
         sea_surface_temperature = (
             variables.temp[interior, interior, -1, tau] + 273.15
         )
+        # Freeze/melt potential of the top cell, in the slab ocean's
+        # convention (CESM `frzmlt`, J m-2): positive is the heat deficit
+        # below freezing, negative the heat held above it. It is reported
+        # only -- the top cell is not reset to freezing -- so the heat of any
+        # ice formed from it has to reach the ocean through the sea ice's
+        # heat flux. Computed before the land substitution below, with the
+        # density and heat capacity Veros' own surface heat flux uses.
+        surface_mask = variables.maskT[interior, interior, -1]
+        ice_frazil_melt_energy = (
+            (constants.seawater_freezing_point_K - sea_surface_temperature)
+            * state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * self.dzt[-1]
+            * surface_mask
+        )
         # Intended to replace a land column's fill value with a plausible
         # constant, so downstream components never read an unphysical SST
         # through the mask. It does not fire for either shipped setup: both
@@ -566,6 +583,7 @@ class VerosComponent:
 
         return VerosDerived(  # type: ignore[call-arg]
             sea_surface_temperature, sea_surface_u, sea_surface_v,
+            ice_frazil_melt_energy,
         )
 
     def initialize(self) -> Carry:
@@ -729,6 +747,7 @@ class VerosComponent:
             "sea_surface_salinity": sea_surface_salinity,
             "sea_surface_u": sea_surface_u,
             "sea_surface_v": sea_surface_v,
+            "ice_frazil_melt_energy": derived.ice_frazil_melt_energy,
             "temp": variables.temp[interior, interior, :, tau],
             "salt": variables.salt[interior, interior, :, tau],
             "u": zonal_velocity,
@@ -1037,6 +1056,7 @@ class VerosComponent:
                 "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
+                "ice_frazil_melt_energy": (["time", "lon", "lat"], diagnostics["ice_frazil_melt_energy"]),
                 "psi": (["time", "lon", "lat"], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
                     ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
@@ -1127,6 +1147,12 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
+            "ice_frazil_melt_energy": {
+                "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
+                "units": "J m-2",
+                "comment": "of the top cell; reported only, the top cell is not reset to freezing",
+                **role_attrs("derived"),
+            },
             "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
                     "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
