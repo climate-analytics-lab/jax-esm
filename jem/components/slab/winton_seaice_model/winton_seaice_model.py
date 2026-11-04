@@ -34,8 +34,9 @@ sub-freezing water it came from warms back to the freezing point. That last term
 assumes an ocean that does not clamp its own temperature at freezing (Veros); an
 ocean that clamps has already removed the deficit, and would count it twice.
 ``derived.ocean_freshwater_flux_up`` is built the same way: the atmosphere's
-E - P over the sea cell (``forcing.atm_sea_freshwater_flux``), plus the snow that
-landed on ice (held back from the ocean until it melts), plus the water ice
+evaporation minus its rain and snow over the sea cell (``forcing.evaporation``,
+``forcing.liquid_precipitation``, ``forcing.frozen_precipitation``), plus the snow
+that landed on ice (held back from the ocean until it melts), plus the water ice
 growth takes from the ocean. The ice has no sublimation mass term, so the
 atmosphere's evaporation over the ice-covered part is still charged to the ocean.
 It is published, but the default coupling does not consume it (the ocean
@@ -365,8 +366,9 @@ class WintonForcing:
     Precipitation comes split by phase. ``frozen_precipitation`` is the part that
     falls as snow: what lands on ice is added to the snow layer, and what falls on
     open water is left to the ocean. ``liquid_precipitation`` is rain; the ice does
-    not hold it, and it reaches the ocean through ``atm_sea_freshwater_flux``,
-    which already contains all of the precipitation. Whether the ice charges the ocean the latent
+    not hold it, and it is passed straight to the ocean. The split is the
+    supplier's: the ice does not partition precipitation by phase itself.
+    ``evaporation`` is the atmosphere's, over the whole sea cell. Whether the ice charges the ocean the latent
     heat of fusion of the snow that lands on it (thsice's convention, for a
     supplier that condensed it as liquid) is set by the model's
     ``frozen_precipitation_latent_heat_release_mode``.
@@ -378,12 +380,12 @@ class WintonForcing:
     air_specific_humidity: jnp.ndarray  # kg/kg
     wind_speed: jnp.ndarray
     normalized_surface_pressure: jnp.ndarray
-    liquid_precipitation: jnp.ndarray      # kg/m2/s
-    frozen_precipitation: jnp.ndarray      # kg/m2/s
+    evaporation: jnp.ndarray               # kg/m2/s upward, atmosphere's evaporation over the sea fraction
+    liquid_precipitation: jnp.ndarray      # kg/m2/s downward
+    frozen_precipitation: jnp.ndarray      # kg/m2/s downward
     sea_surface_temperature: jnp.ndarray   # K
     ice_frazil_melt_energy: jnp.ndarray    # J/m2 per coupling step, + = freezing potential (CESM frzmlt)
     atm_sea_heat_flux: jnp.ndarray         # W/m2 downward, atmosphere's flux over the sea fraction
-    atm_sea_freshwater_flux: jnp.ndarray   # kg/m2/s upward, atmosphere's E - P over the sea fraction
     ice_velocity_u: jnp.ndarray            # m/s along the grid's x (used only with transport)
     ice_velocity_v: jnp.ndarray            # m/s along the grid's y
 
@@ -425,12 +427,12 @@ class WintonForcing:
             air_specific_humidity=zeros + humidity,
             wind_speed=zeros + 5.0,
             normalized_surface_pressure=zeros + pressure,
+            evaporation=zeros,
             liquid_precipitation=zeros,
             frozen_precipitation=zeros,
             sea_surface_temperature=zeros + freezing,
             ice_frazil_melt_energy=zeros,
             atm_sea_heat_flux=zeros,
-            atm_sea_freshwater_flux=zeros,
             ice_velocity_u=zeros,
             ice_velocity_v=zeros,
         )
@@ -731,9 +733,9 @@ class WintonSeaiceModel(SlabModelBase):
         snowfall_on_ice = intercepted * n / coupling_dt
 
         ocean_heat_flux_up = q_up - ocean_frazil_heating
-        # the atmosphere's E - P over the cell, with the snow that landed on ice held back from the ocean and the
+        # the atmosphere's E - P over the cell (rain and snow), with the snow that landed on ice held back from the ocean and the
         # water ice growth takes added; cells this model does not integrate (land) carry no ocean flux
-        ocean_freshwater_flux_up = jnp.where(ocean, fc.atm_sea_freshwater_flux + snowfall_on_ice + fw_up, 0.0)
+        ocean_freshwater_flux_up = jnp.where(ocean, fc.evaporation - fc.liquid_precipitation - fc.frozen_precipitation + snowfall_on_ice + fw_up, 0.0)
 
         # every derived field from the final state
         derived = _derived_from_state(
