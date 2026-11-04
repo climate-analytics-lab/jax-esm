@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 #: in any slab model reads it back. 288.15 K (15 degC) is what the models have
 #: always used.
 MASKED_SURFACE_TEMPERATURE = 288.15
+MASKED_SURFACE_SALINITY = 35.0 # PSU
 
 # Dimension names a monthly climatology file may use, per axis, in the order
 # the loader normalises them to: (longitude, latitude, time).

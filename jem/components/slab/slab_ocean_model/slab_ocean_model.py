@@ -12,6 +12,7 @@ from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
+    MASKED_SURFACE_SALINITY,
     SlabModelBase,
     forcing_variable,
     load_monthly_climatology,
@@ -48,23 +49,27 @@ class OceanState:
     """
 
     sea_surface_temperature: jnp.ndarray
+    sea_surface_salinity: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_salinity=None):
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
+            sea_surface_salinity if sea_surface_salinity is not None else jnp.zeros(shape),
         )
 
 
 @tree_math.struct
 class OceanForcing:
     total_heat_flux: jnp.ndarray
+    total_freshwater_flux: jnp.ndarray
     q_flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None, q_flux=None):
+    def zeros(cls, shape, total_heat_flux=None, total_freshwater_flux=None, q_flux=None):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            total_freshwater_flux if total_freshwater_flux is not None else jnp.zeros(shape),
             q_flux if q_flux is not None else jnp.zeros(shape + (12,)),
         )
 
@@ -457,11 +462,14 @@ class SlabOceanModel(SlabModelBase):
             ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
 
+        sea_surface_salinity = jnp.full(ocean.shape, params.reference_salinity)
+
         return {
             "params": params,
             "state": OceanState.zeros(
                 self.grid.shape,
                 sea_surface_temperature=sea_surface_temperature,
+                sea_surface_salinity=sea_surface_salinity,
             ),
             "forcing": OceanForcing.zeros(
                 self.grid.shape, q_flux=self.q_flux_climatology
@@ -501,6 +509,7 @@ class SlabOceanModel(SlabModelBase):
         )
 
         total_heat_flux = forcing.total_heat_flux
+        total_freshwater_flux = forcing.total_freshwater_flux
         anomaly = state.sea_surface_temperature
         climatology_end = None
         time_factor = 1.0
@@ -559,7 +568,20 @@ class SlabOceanModel(SlabModelBase):
             sea_surface_temperature,
         )
 
-        new_state = state.replace(sea_surface_temperature=sea_surface_temperature)
+        sea_surface_salinity = state.sea_surface_salinity + time.dt * (
+            total_freshwater_flux * params.reference_salinity / (constants.ocean_density * mixed_layer_depth)
+        )
+        sea_surface_salinity = jnp.where(
+            ocean, sea_surface_salinity, MASKED_SURFACE_SALINITY
+        )
+
+
+
+        new_state = state.replace(
+            sea_surface_temperature=sea_surface_temperature,
+            sea_surface_salinity=sea_surface_salinity,
+        )
+        
         new_derived = OceanDerived.zeros(
             self.grid.shape,
             mixed_layer_depth=mixed_layer_depth,
@@ -645,6 +667,15 @@ class SlabOceanModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
+            "sea_surface_salinity": (
+                dims,
+                state.sea_surface_salinity,
+                {
+                    "long_name": "Sea surface salinity",
+                    "units": "PSU",
+                    **role_attrs("state"),
+                },
+            ),
             "mixed_layer_depth": (
                 dims,
                 derived.mixed_layer_depth,
@@ -666,6 +697,16 @@ class SlabOceanModel(SlabModelBase):
                     "units": "W m-2",
                     "positive": "upward",
                     **role_attrs("derived"),
+                },
+            ),
+            forcing_variable("total_freshwater_flux"): (
+                dims,
+                diagnostics["forcing"].total_freshwater_flux,
+                {
+                    "long_name": "Total freshwater flux",
+                    "units": "kg s-1 m-2",
+                    "positive": "upward",
+                    **role_attrs("forcing"),
                 },
             ),
             "ice_frazil_melt_energy": (
