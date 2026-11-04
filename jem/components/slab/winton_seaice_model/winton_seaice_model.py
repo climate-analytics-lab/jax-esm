@@ -432,6 +432,7 @@ class WintonDerived:
     basal_growth_flux: jnp.ndarray
     ice_atm_heat_flux: jnp.ndarray
     ocean_freshwater_flux_up: jnp.ndarray   # kg/m2/s per cell area; + = ice growth removes water from the ocean
+    snowfall_on_ice: jnp.ndarray            # kg/m2/s per cell area; snowfall that landed on ice instead of the ocean
     ice_albedo: jnp.ndarray                 # effective albedo of the ice-covered part (snow-aware)
     ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; THERMODYNAMIC rate of change of the ice+snow enthalpy (relative to water at 0 C), i.e. the exchange with ocean and atmosphere; transport is excluded
     ice_energy_transport: jnp.ndarray       # W/m2 per cell area; change of ice+snow enthalpy by transport convergence (zero without transport)
@@ -704,6 +705,7 @@ class WintonSeaiceModel(SlabModelBase):
             basal_growth_flux=growth,
             ice_atm_heat_flux=f_ice_atm,
             ocean_freshwater_flux_up=fw_up,
+            snowfall_on_ice=intercepted * n / coupling_dt,
             ice_albedo=albedo,
             ice_energy_tendency=de_dt,
             ice_energy_transport=de_transport,
@@ -776,6 +778,7 @@ class WintonSeaiceModel(SlabModelBase):
             "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2", "long_name": "heat flux from the ocean into the ice-covered cell (positive upward)", **derived}),
             "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2", "long_name": "surface melt energy flux of the ice-covered part", **derived}),
             "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1", "long_name": "freshwater removed from the ocean by ice growth (positive upward)", **derived}),
+            "snowfall_on_ice": (dims, d.snowfall_on_ice, {"units": "kg m-2 s-1", "long_name": "snowfall intercepted by sea ice, kept from the ocean", **derived}),
             "ice_albedo": (dims, d.ice_albedo, {"units": "1", "long_name": "effective albedo of the ice-covered part", **derived}),
             "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)", **derived}),
             "ice_energy_transport": (dims, d.ice_energy_transport, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area by transport convergence", **derived}),
