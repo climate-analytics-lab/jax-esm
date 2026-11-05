@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import tree_math
@@ -42,6 +43,7 @@ from jem.components.slab.slab_land_model.params import (
     SlabLandParameters,
 )
 from jem.utils.cycles import evaluate_cyclic_linear
+from jem.utils.esmf_regrid import ESMFRegridder
 
 logger = logging.getLogger(__name__)
 _MONTHS_PER_YEAR = 12
@@ -122,18 +124,25 @@ class LandDerived:
 
     Attributes
     ----------
-    runoff_to_ocean : (n_lon, n_lat) array
+    deep_drainage : (n_lon, n_lat) array
         Water draining out of the bottom of the deep soil layer, which leaves
         the land model (kg m-2 s-1). Zero where there is no land, and when the
         soil water is read from a climatology.
+    runoff_to_ocean : array
+        ``deep_drainage`` passed through the model's ``runoff_to_ocean_mapping``:
+        the same water, as the flux the ocean receives (kg m-2 s-1).
 
     """
 
+    deep_drainage: jnp.ndarray
     runoff_to_ocean: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, runoff_to_ocean=None):
-        return cls(runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape))
+    def zeros(cls, shape, deep_drainage=None, runoff_to_ocean=None):
+        return cls(
+            deep_drainage if deep_drainage is not None else jnp.zeros(shape),
+            runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
+        )
 
 
 class SlabLandModel(SlabModelBase):
@@ -179,6 +188,7 @@ class SlabLandModel(SlabModelBase):
 
         Water leaving the surface layer enters the deep layer, and water
         leaving the deep layer leaves the model; its rate is published as
+        ``derived.deep_drainage``, and routed to the ocean as
         ``derived.runoff_to_ocean``. Both layers are kept non-negative.
         There is no evaporation and no runoff yet.
 
@@ -210,6 +220,7 @@ class SlabLandModel(SlabModelBase):
         land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
         surface_albedo_varname_in_clim_file: str = "surface_albedo",
         glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
+        runoff_to_ocean_mapping = lambda runoff: runoff,
     ):
         """Initialize the land surface model.
 
@@ -258,6 +269,15 @@ class SlabLandModel(SlabModelBase):
             Name of the surface albedo variable in ``land_clim_file``.
         glacier_fraction_varname_in_clim_file : str
             Name of the glacier fraction variable in ``land_clim_file``.
+        runoff_to_ocean_mapping : str or a function
+            If it is a string, is a NetCDF file that can be used with
+            ESMFRegridder to rout runoff to ocean grid. If it is a function, 
+            it accepts river runoff and spits out the mapped flux. 
+            Either way the routing stays on the model's own grid: it takes
+            and returns a field of ``grid.shape``, moving the runoff from land
+            cells to ocean cells of that grid. ``derived.runoff_to_ocean``
+            is then on the same grid as everything else this model writes.
+
 
         Raises
         ------
@@ -265,7 +285,8 @@ class SlabLandModel(SlabModelBase):
             If a parameter is out of range, a field in ``land_clim_file`` is
             not on the model grid, or ``glacier_fraction_from_clim_file`` is
             set without a ``land_clim_file`` or with a glacier fraction that
-            varies in time.
+            varies in time, or if ``runoff_to_ocean_mapping`` does not return
+            a field on the model grid.
         FileNotFoundError
             If ``land_clim_file`` does not exist.
 
@@ -288,6 +309,25 @@ class SlabLandModel(SlabModelBase):
             "surface_albedo": surface_albedo_from_clim_file,
             "glacier_fraction": glacier_fraction_from_clim_file,
         }
+
+        if isinstance(runoff_to_ocean_mapping, str):
+            regridder = ESMFRegridder(runoff_to_ocean_mapping)
+            runoff_to_ocean_mapping = lambda runoff: regridder(runoff)
+
+        self.runoff_to_ocean_mapping = runoff_to_ocean_mapping
+
+        # The routing must stay on this grid: runoff_to_ocean is carried and
+        # written out on it, and a field of another shape would change the
+        # scan carry between initialize and step. Checked once here, with
+        # jax.eval_shape so no data is moved, rather than failing inside scan.
+        routed = jax.eval_shape(
+            self.runoff_to_ocean_mapping, jax.ShapeDtypeStruct(self.grid.shape, jnp.float32)
+        )
+        if routed.shape != tuple(self.grid.shape):
+            raise ValueError(
+                "runoff_to_ocean_mapping must route runoff within the model grid "
+                f"{tuple(self.grid.shape)}; it returns a field of shape {routed.shape}."
+            )
 
         # The glacier map goes into the parameters rather than onto the model,
         # so the heat capacity has one source and the map stays a pytree leaf
@@ -593,7 +633,12 @@ class SlabLandModel(SlabModelBase):
             "params": params,
             "state": state,
             "forcing": LandForcing.zeros(self.grid.shape),
-            "derived": LandDerived.zeros(self.grid.shape),
+            # runoff_to_ocean is built by the same routing step uses, so its
+            # dtype matches what step returns and the scan carry is stable.
+            "derived": LandDerived.zeros(
+                self.grid.shape,
+                runoff_to_ocean=self.runoff_to_ocean_mapping(jnp.zeros(self.grid.shape)),
+            ),
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -680,7 +725,7 @@ class SlabLandModel(SlabModelBase):
             )
             new_soil_water_content = state.soil_water_content.at[:, :, 0].set(new_soil_water_content_surface_grid)
             # The soil water is overwritten rather than drained, so no water leaves.
-            runoff_to_ocean = jnp.zeros(self.grid.shape)
+            deep_drainage_flux = jnp.zeros(self.grid.shape)
 
         else:
  
@@ -703,11 +748,11 @@ class SlabLandModel(SlabModelBase):
             
             # The deep layer's drainage leaves the model. It is published as a
             # mass flux (m3 m-3 s-1 times the layer depth and water density),
-            # so an exchanger can route it on as runoff. It equals what is
+            # and routed to the ocean as runoff. It equals what is
             # removed below unless dt exceeds the drainage timescale, when the
             # non-negativity clamp would remove less.
             deep_drainage = W2 / params.drainage_timescale[1]
-            runoff_to_ocean = 1000.0 * params.soil_depth[1] * deep_drainage
+            deep_drainage_flux = 1000.0 * params.soil_depth[1] * deep_drainage
 
             new_W2 = jnp.maximum(
                 0.0,
@@ -717,7 +762,8 @@ class SlabLandModel(SlabModelBase):
             new_soil_water_content = jnp.stack([new_W1, new_W2], axis=-1)
 
         new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
-        runoff_to_ocean = jnp.where(land_mask, runoff_to_ocean, 0.0)
+        deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
+        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux)
 
         if read_from_clim_file["surface_albedo"]:
             logger.info("Read albedo content from climatology")
@@ -739,7 +785,9 @@ class SlabLandModel(SlabModelBase):
         diagnostics = {
             "state": new_state,
             "forcing": forcing,
-            "derived": LandDerived.zeros(self.grid.shape, runoff_to_ocean=runoff_to_ocean),
+            "derived": LandDerived.zeros(
+                self.grid.shape, deep_drainage=deep_drainage_flux, runoff_to_ocean=runoff_to_ocean
+            ),
         }
         return {"params": params, **diagnostics}, diagnostics
 
@@ -845,11 +893,20 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("forcing"),
                 },
             ),
+            "deep_drainage": (
+                dims,
+                derived.deep_drainage,
+                {
+                    "long_name": "Water drained out of the deep soil layer",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
+                },
+            ),
             "runoff_to_ocean": (
                 dims,
                 derived.runoff_to_ocean,
                 {
-                    "long_name": "Water drained out of the deep soil layer",
+                    "long_name": "Deep drainage routed to the ocean",
                     "units": "kg m-2 s-1",
                     **role_attrs("derived"),
                 },
