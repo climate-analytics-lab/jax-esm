@@ -104,17 +104,21 @@ class LandForcing:
         Net surface heat flux (W m-2), positive upward.
     precipitation : (n_lon, n_lat) array
         Precipitation rate (kg m-2 s-1, the same as mm s-1 of water).
+    evaporation : (n_lon, n_lat) array
+        Evaporation rate (kg m-2 s-1), positive upward; negative is dew.
 
     """
 
     total_heat_flux: jnp.ndarray
     precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None, precipitation=None):
+    def zeros(cls, shape, total_heat_flux=None, precipitation=None, evaporation=None):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
             precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
         )
 
 
@@ -131,17 +135,25 @@ class LandDerived:
     runoff_to_ocean : array
         ``deep_drainage`` passed through the model's ``runoff_to_ocean_mapping``:
         the same water, as the flux the ocean receives (kg m-2 s-1).
+    unmet_evaporation : (n_lon, n_lat) array
+        The part of ``forcing.evaporation`` the surface soil layer had no
+        water left to supply (kg m-2 s-1, positive upward, never negative).
+        The atmosphere evaporated it anyway, so it is water the coupled
+        system created. Zero where there is no land, and when the soil water
+        is read from a climatology.
 
     """
 
     deep_drainage: jnp.ndarray
     runoff_to_ocean: jnp.ndarray
+    unmet_evaporation: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, deep_drainage=None, runoff_to_ocean=None):
+    def zeros(cls, shape, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None):
         return cls(
             deep_drainage if deep_drainage is not None else jnp.zeros(shape),
             runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
+            unmet_evaporation if unmet_evaporation is not None else jnp.zeros(shape),
         )
 
 
@@ -180,17 +192,26 @@ class SlabLandModel(SlabModelBase):
     Soil water
         By default, a two-layer leaky bucket. With ``W1``, ``W2`` the
         volumetric water content, ``d1``, ``d2`` the layer depths,
-        ``tau1``, ``tau2`` the drainage timescales and ``P`` the
-        precipitation::
+        ``tau1``, ``tau2`` the drainage timescales, ``P`` the
+        precipitation and ``E`` the evaporation::
 
-            dW1/dt = P / (rho_w * d1) - W1 / tau1
+            dW1/dt = (P - E) / (rho_w * d1) - W1 / tau1
             dW2/dt = (d1 / d2) * W1 / tau1 - W2 / tau2
+
+        Evaporation is taken from the surface layer only, after this step's
+        precipitation and drainage. It is limited to the water that layer
+        holds: the part it cannot supply is published as
+        ``derived.unmet_evaporation`` rather than clamped away, so the land's
+        water budget still closes and the gap is visible. Dew (``E < 0``)
+        adds water. The evaporation is the cell mean the atmosphere
+        publishes, so in a partly-land cell the soil also supplies the sea
+        part, and there is no snow budget, so sublimation is taken from the
+        soil too.
 
         Water leaving the surface layer enters the deep layer, and water
         leaving the deep layer leaves the model; its rate is published as
         ``derived.deep_drainage``, and routed to the ocean as
         ``derived.runoff_to_ocean``. Both layers are kept non-negative.
-        There is no evaporation and no runoff yet.
 
         With ``soil_water_content_from_clim_file=True`` the surface layer is
         set to the climatology at the current time, and the deep layer keeps
@@ -726,6 +747,7 @@ class SlabLandModel(SlabModelBase):
             new_soil_water_content = state.soil_water_content.at[:, :, 0].set(new_soil_water_content_surface_grid)
             # The soil water is overwritten rather than drained, so no water leaves.
             deep_drainage_flux = jnp.zeros(self.grid.shape)
+            unmet_evaporation = jnp.zeros(self.grid.shape)
 
         else:
  
@@ -741,9 +763,24 @@ class SlabLandModel(SlabModelBase):
             drain1 = W1 / params.drainage_timescale[0]
             inflow2 = (params.soil_depth[0] / params.soil_depth[1]) * drain1
 
+            # Evaporation comes out of what the surface layer holds after this
+            # step's precipitation and drainage, and no more: what it cannot
+            # supply is published as unmet_evaporation instead of being
+            # clamped away, which would silently create water. Dew (negative
+            # evaporation) is always taken in.
+            surface_water_mass = 1000.0 * params.soil_depth[0]   # kg m-2 per unit W1
+            W1_before_evaporation = jnp.maximum(
+                0.0,
+                W1 + (forcing.precipitation / surface_water_mass - drain1) * time.dt,
+            )
+            supplied_evaporation = jnp.minimum(
+                forcing.evaporation, W1_before_evaporation * surface_water_mass / time.dt
+            )
+            unmet_evaporation = forcing.evaporation - supplied_evaporation
+
             new_W1 = jnp.maximum(
                 0.0,
-                W1 + (forcing.precipitation / (1000.0 * params.soil_depth[0]) - drain1) * time.dt,
+                W1_before_evaporation - supplied_evaporation / surface_water_mass * time.dt,
             )
             
             # The deep layer's drainage leaves the model. It is published as a
@@ -763,6 +800,7 @@ class SlabLandModel(SlabModelBase):
 
         new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
         deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
+        unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
         runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux)
 
         if read_from_clim_file["surface_albedo"]:
@@ -786,7 +824,10 @@ class SlabLandModel(SlabModelBase):
             "state": new_state,
             "forcing": forcing,
             "derived": LandDerived.zeros(
-                self.grid.shape, deep_drainage=deep_drainage_flux, runoff_to_ocean=runoff_to_ocean
+                self.grid.shape,
+                deep_drainage=deep_drainage_flux,
+                runoff_to_ocean=runoff_to_ocean,
+                unmet_evaporation=unmet_evaporation,
             ),
         }
         return {"params": params, **diagnostics}, diagnostics
@@ -909,6 +950,26 @@ class SlabLandModel(SlabModelBase):
                     "long_name": "Deep drainage routed to the ocean",
                     "units": "kg m-2 s-1",
                     **role_attrs("derived"),
+                },
+            ),
+            "unmet_evaporation": (
+                dims,
+                derived.unmet_evaporation,
+                {
+                    "long_name": "Evaporation the surface soil layer had no water to supply",
+                    "units": "kg m-2 s-1",
+                    "positive": "upward",
+                    **role_attrs("derived"),
+                },
+            ),
+            forcing_variable("evaporation"): (
+                dims,
+                forcing.evaporation,
+                {
+                    "long_name": "Evaporation the land surface was forced with",
+                    "units": "kg m-2 s-1",
+                    "positive": "upward",
+                    **role_attrs("forcing"),
                 },
             ),
         }
