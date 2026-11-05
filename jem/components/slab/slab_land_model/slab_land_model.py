@@ -116,6 +116,26 @@ class LandForcing:
         )
 
 
+@tree_math.struct
+class LandDerived:
+    """What the land diagnoses every step and other components may read.
+
+    Attributes
+    ----------
+    runoff_to_ocean : (n_lon, n_lat) array
+        Water draining out of the bottom of the deep soil layer, which leaves
+        the land model (kg m-2 s-1). Zero where there is no land, and when the
+        soil water is read from a climatology.
+
+    """
+
+    runoff_to_ocean: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, runoff_to_ocean=None):
+        return cls(runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape))
+
+
 class SlabLandModel(SlabModelBase):
     """Slab land model with a two-layer soil water bucket.
 
@@ -158,7 +178,8 @@ class SlabLandModel(SlabModelBase):
             dW2/dt = (d1 / d2) * W1 / tau1 - W2 / tau2
 
         Water leaving the surface layer enters the deep layer, and water
-        leaving the deep layer is lost. Both layers are kept non-negative.
+        leaving the deep layer leaves the model; its rate is published as
+        ``derived.runoff_to_ocean``. Both layers are kept non-negative.
         There is no evaporation and no runoff yet.
 
         With ``soil_water_content_from_clim_file=True`` the surface layer is
@@ -520,8 +541,8 @@ class SlabLandModel(SlabModelBase):
         Returns
         -------
         Carry
-            ``{"params", "state", "forcing"}``. The forcing starts at zero
-            and is filled by the exchangers before the first step.
+            ``{"params", "state", "forcing", "derived"}``. The forcing starts
+            at zero and is filled by the exchangers before the first step.
 
         """
         if (
@@ -572,6 +593,7 @@ class SlabLandModel(SlabModelBase):
             "params": params,
             "state": state,
             "forcing": LandForcing.zeros(self.grid.shape),
+            "derived": LandDerived.zeros(self.grid.shape),
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -583,14 +605,15 @@ class SlabLandModel(SlabModelBase):
         Parameters
         ----------
         carry : Carry
-            ``{"params", "state", "forcing"}`` as built by :meth:`initialize`.
+            ``{"params", "state", "forcing", "derived"}`` as built by
+            :meth:`initialize`.
         time : CouplingTime
             Start time and length (``dt``) of the step.
 
         Returns
         -------
         tuple[Carry, Diagnostics]
-            The new carry, and ``{"state", "forcing"}`` for output.
+            The new carry, and ``{"state", "forcing", "derived"}`` for output.
 
         """
         params = carry["params"]
@@ -656,6 +679,8 @@ class SlabLandModel(SlabModelBase):
                 time.year_fraction, self.soil_water_content_climatology
             )
             new_soil_water_content = state.soil_water_content.at[:, :, 0].set(new_soil_water_content_surface_grid)
+            # The soil water is overwritten rather than drained, so no water leaves.
+            runoff_to_ocean = jnp.zeros(self.grid.shape)
 
         else:
  
@@ -676,14 +701,23 @@ class SlabLandModel(SlabModelBase):
                 W1 + (forcing.precipitation / (1000.0 * params.soil_depth[0]) - drain1) * time.dt,
             )
             
+            # The deep layer's drainage leaves the model. It is published as a
+            # mass flux (m3 m-3 s-1 times the layer depth and water density),
+            # so an exchanger can route it on as runoff. It equals what is
+            # removed below unless dt exceeds the drainage timescale, when the
+            # non-negativity clamp would remove less.
+            deep_drainage = W2 / params.drainage_timescale[1]
+            runoff_to_ocean = 1000.0 * params.soil_depth[1] * deep_drainage
+
             new_W2 = jnp.maximum(
                 0.0,
-                W2 + (inflow2 - W2 / params.drainage_timescale[1]) * time.dt,
+                W2 + (inflow2 - deep_drainage) * time.dt,
             )
 
             new_soil_water_content = jnp.stack([new_W1, new_W2], axis=-1)
 
         new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
+        runoff_to_ocean = jnp.where(land_mask, runoff_to_ocean, 0.0)
 
         if read_from_clim_file["surface_albedo"]:
             logger.info("Read albedo content from climatology")
@@ -705,6 +739,7 @@ class SlabLandModel(SlabModelBase):
         diagnostics = {
             "state": new_state,
             "forcing": forcing,
+            "derived": LandDerived.zeros(self.grid.shape, runoff_to_ocean=runoff_to_ocean),
         }
         return {"params": params, **diagnostics}, diagnostics
 
@@ -744,6 +779,7 @@ class SlabLandModel(SlabModelBase):
         """Create xarray data variables for land output."""
         state = diagnostics["state"]
         forcing = diagnostics["forcing"]
+        derived = diagnostics["derived"]
         dims = ("time",) + self.grid.dims
         layer_dims = ("time",) + self.grid.dims + ("layer", )
         return {
@@ -807,6 +843,15 @@ class SlabLandModel(SlabModelBase):
                     "units": "kg m-2 s-1",
                     "positive": "downward",
                     **role_attrs("forcing"),
+                },
+            ),
+            "runoff_to_ocean": (
+                dims,
+                derived.runoff_to_ocean,
+                {
+                    "long_name": "Water drained out of the deep soil layer",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
                 },
             ),
         }
