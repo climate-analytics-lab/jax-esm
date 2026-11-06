@@ -42,15 +42,16 @@ class SlabLandParameters:
         its climatology. Default 40 days. Only used when the model relaxes to
         climatology (``land_surface_temperature_from_clim_file=True``).
     drainage_timescale : jnp.ndarray, shape (2,)
-        Drainage timescale (s) of each soil layer. Default (60, 60) days. The
+        Drainage timescale (s) of each soil layer. Default (10, 10) days. The
         surface layer drains into the deep layer, and the deep layer drains
         out of the model. Only used when the bucket is active
         (``soil_water_content_from_clim_file=False``).
     soil_water_field_capacity : jnp.ndarray, shape (2,)
         Field capacity of each layer (m3 m-3). Default (0.30, 0.30), SPEEDY's
-        ``swcap``. Used only in the soil water availability, whose denominator
-        is the water both layers hold between wilting point and field
-        capacity.
+        ``swcap``. Each layer is capped at it, and the excess leaves as
+        ``soil_water_overflow``. It also sets the denominator of the soil
+        water availability, the water both layers hold between wilting point
+        and field capacity.
     soil_water_wilting_point : jnp.ndarray, shape (2,)
         Wilting point of each layer (m3 m-3). Used only in the soil water
         availability: water below it does not count as available. Default
@@ -90,7 +91,7 @@ class SlabLandParameters:
     soil_volumetric_heat_capacity: float | jnp.ndarray = 2.50e6
     glacier_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
     temperature_relaxation_timescale: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
-    drainage_timescale: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((60.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
+    drainage_timescale: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((10.0 * SECONDS_PER_DAY, 10.0 * SECONDS_PER_DAY)))
     soil_water_field_capacity: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
     soil_water_wilting_point: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.0, 0.17)))
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
