@@ -140,9 +140,15 @@ class LandDerived:
         Water draining out of the bottom of the deep soil layer, which leaves
         the land model (kg m-2 s-1). Zero where there is no land, and when the
         soil water is read from a climatology.
+    soil_water_overflow : (n_lon, n_lat) array
+        Water above field capacity that left the two soil layers this step,
+        summed over both layers (kg m-2 s-1). It leaves the land model as
+        runoff. Zero where there is no land, and when the soil water is read
+        from a climatology.
     runoff_to_ocean : array
-        ``deep_drainage`` passed through the model's ``runoff_to_ocean_mapping``:
-        the same water, as the flux the ocean receives (kg m-2 s-1).
+        ``deep_drainage + soil_water_overflow`` passed through the model's
+        ``runoff_to_ocean_mapping``: the same water, as the flux the ocean
+        receives (kg m-2 s-1).
     unmet_evaporation : (n_lon, n_lat) array
         The part of ``forcing.evaporation`` the surface soil layer had no
         water left to supply (kg m-2 s-1, positive upward, never negative).
@@ -166,15 +172,17 @@ class LandDerived:
 
     surface_albedo: jnp.ndarray
     deep_drainage: jnp.ndarray
+    soil_water_overflow: jnp.ndarray
     runoff_to_ocean: jnp.ndarray
     unmet_evaporation: jnp.ndarray
     soil_water_availability: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None, soil_water_availability=None):
+    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, soil_water_overflow=None, runoff_to_ocean=None, unmet_evaporation=None, soil_water_availability=None):
         return cls(
             surface_albedo if surface_albedo is not None else jnp.zeros(shape),
             deep_drainage if deep_drainage is not None else jnp.zeros(shape),
+            soil_water_overflow if soil_water_overflow is not None else jnp.zeros(shape),
             runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
             unmet_evaporation if unmet_evaporation is not None else jnp.zeros(shape),
             soil_water_availability if soil_water_availability is not None else jnp.zeros(shape),
@@ -234,8 +242,12 @@ class SlabLandModel(SlabModelBase):
 
         Water leaving the surface layer enters the deep layer, and water
         leaving the deep layer leaves the model; its rate is published as
-        ``derived.deep_drainage``, and routed to the ocean as
-        ``derived.runoff_to_ocean``. Both layers are kept non-negative.
+        ``derived.deep_drainage``. Both layers are kept non-negative and no
+        higher than their field capacity ``soil_water_field_capacity``. The
+        water above field capacity leaves the model directly, without
+        entering the layer below, and is published as
+        ``derived.soil_water_overflow``. The deep drainage and the overflow
+        together are routed to the ocean as ``derived.runoff_to_ocean``.
 
         With ``soil_water_content_from_clim_file=True`` the surface layer is
         set to the climatology at the current time, and the deep layer keeps
@@ -784,7 +796,7 @@ class SlabLandModel(SlabModelBase):
             # The soil water is overwritten rather than drained, so no water leaves.
             deep_drainage_flux = jnp.zeros(self.grid.shape)
             unmet_evaporation = jnp.zeros(self.grid.shape)
-
+            runoff_due_to_overflow = jnp.zeros(self.grid.shape)
         else:
  
             # =====================================================================
@@ -834,10 +846,21 @@ class SlabLandModel(SlabModelBase):
 
             new_soil_water_content = jnp.stack([new_W1, new_W2], axis=-1)
 
+            # Neither layer holds more than its field capacity. The excess of
+            # each layer leaves the model as runoff, without passing through
+            # the layer below, and is routed to the ocean with the deep drainage.
+            capped_soil_water_content = jnp.minimum(new_soil_water_content, params.soil_water_field_capacity[None, None, :])
+            runoff_due_to_overflow = jnp.where(
+                land_mask == 1,
+                1000 * jnp.sum( (new_soil_water_content - capped_soil_water_content) * params.soil_bucket_depth[None, None, :] / time.dt, axis=-1),
+                0.0
+            )
+            new_soil_water_content = capped_soil_water_content
+
         new_soil_water_content = jnp.where(land_mask[..., None], new_soil_water_content, 0.0)
         deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
         unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
-        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux)
+        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux + runoff_due_to_overflow)
 
 
         d1, d2 = params.soil_bucket_depth
@@ -878,6 +901,7 @@ class SlabLandModel(SlabModelBase):
                 self.grid.shape,
                 surface_albedo=new_surface_albedo,
                 deep_drainage=deep_drainage_flux,
+                soil_water_overflow=runoff_due_to_overflow,
                 runoff_to_ocean=runoff_to_ocean,
                 unmet_evaporation=unmet_evaporation,
                 soil_water_availability=new_soil_water_availability,
@@ -997,11 +1021,20 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("derived"),
                 },
             ),
+            "soil_water_overflow": (
+                dims,
+                derived.soil_water_overflow,
+                {
+                    "long_name": "Soil water above field capacity leaving the soil layers",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
+                },
+            ),
             "runoff_to_ocean": (
                 dims,
                 derived.runoff_to_ocean,
                 {
-                    "long_name": "Deep drainage routed to the ocean",
+                    "long_name": "Deep drainage and soil water overflow routed to the ocean",
                     "units": "kg m-2 s-1",
                     **role_attrs("derived"),
                 },
