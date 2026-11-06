@@ -15,15 +15,21 @@ class SlabLandParameters:
     step.
 
     The thermal parameters, the relaxation timescale and the snow-cover scale
-    follow SPEEDY (``land_model.f90``). The two-layer soil water bucket is not
-    part of SPEEDY, and its defaults are our own choice.
+    follow SPEEDY (``land_model.f90``). SPEEDY prescribes its soil water
+    rather than evolving it, so the two-layer bucket's drainage is our own
+    choice; its layer depths, field capacity and wilting points are the ones
+    SPEEDY uses for its soil water availability.
 
     Attributes
     ----------
-    soil_depth : jnp.ndarray, shape (2,)
-        Thickness (m) of the surface and deep soil layers. Default (1, 2).
-        The surface layer is also the thermal slab, so ``soil_depth[0]``
-        sets the soil heat capacity.
+    soil_bucket_depth : jnp.ndarray, shape (2,)
+        Thickness (m) of the surface and deep layers of the soil water
+        bucket. Default (0.07, 0.21), SPEEDY's soil water layers (``sdep1``
+        and ``idep2 * sdep1``). It sets how much water each layer holds and
+        does not affect the heat capacity.
+    soil_thermal_depth : float
+        Thickness (m) of the thermal slab on the soil part of a cell.
+        Default 1, SPEEDY's ``depth_soil``.
     glacier_depth : float
         Thickness (m) of the thermal slab on the glacier part of a cell.
         Default 5.
@@ -41,11 +47,15 @@ class SlabLandParameters:
         out of the model. Only used when the bucket is active
         (``soil_water_content_from_clim_file=False``).
     soil_water_field_capacity : jnp.ndarray, shape (2,)
-        Field capacity of each layer (m3 m-3). Default (0.30, 0.30). Not used
-        yet.
+        Field capacity of each layer (m3 m-3). Default (0.30, 0.30), SPEEDY's
+        ``swcap``. Used only in the soil water availability, whose denominator
+        is the water both layers hold between wilting point and field
+        capacity.
     soil_water_wilting_point : jnp.ndarray, shape (2,)
-        Wilting point of each layer (m3 m-3). Default (0.17, 0.17). Not used
-        yet.
+        Wilting point of each layer (m3 m-3). Used only in the soil water
+        availability: water below it does not count as available. Default
+        (0, 0.17), which reproduces SPEEDY: the deep layer uses SPEEDY's
+        ``swwil``, and the surface layer counts all of its water.
     snow_depth_to_cover_scale : float
         Snow depth (mm water equivalent) at which snow cover reaches 1.
         SPEEDY's ``sd2sc``. Default 60.
@@ -74,14 +84,15 @@ class SlabLandParameters:
 
     # Per-layer defaults are arrays, which dataclasses only accept through a
     # default_factory.
-    soil_depth: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((1.0, 2.0)))
+    soil_bucket_depth: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.07, 0.21)))
+    soil_thermal_depth: float | jnp.ndarray = 1.0
     glacier_depth: float | jnp.ndarray = 5.0
     soil_volumetric_heat_capacity: float | jnp.ndarray = 2.50e6
     glacier_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
     temperature_relaxation_timescale: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
     drainage_timescale: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((60.0 * SECONDS_PER_DAY, 60.0 * SECONDS_PER_DAY)))
     soil_water_field_capacity: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
-    soil_water_wilting_point: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.17, 0.17)))
+    soil_water_wilting_point: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.0, 0.17)))
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
     baresoil_albedo: float | jnp.ndarray = 0.2
     vegetation_albedo: float | jnp.ndarray = 0.1
