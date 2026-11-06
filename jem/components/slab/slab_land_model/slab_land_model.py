@@ -63,8 +63,10 @@ class LandState:
         Snow cover fraction in [0, 1], diagnosed from ``snow_depth``.
     soil_water_content : (n_lon, n_lat, 2) array
         Volumetric soil water content (m3 m-3) of the surface and deep layer.
-    surface_albedo : (n_lon, n_lat) array
-        Surface albedo (dimensionless, in [0, 1]).
+    vegetation_fraction : (n_lon, n_lat) array
+        Fraction of the cell covered by vegetation (dimensionless, in
+        [0, 1]). It is kept as state for future vegetation dynamics, but
+        nothing evolves it yet: it starts at 0 and stays there.
 
     """
 
@@ -72,7 +74,7 @@ class LandState:
     snow_depth: jnp.ndarray
     snow_cover: jnp.ndarray
     soil_water_content: jnp.ndarray
-    surface_albedo: jnp.ndarray
+    vegetation_fraction: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -82,7 +84,7 @@ class LandState:
         snow_depth=None,
         snow_cover=None,
         soil_water_content=None,
-        surface_albedo=None,
+        vegetation_fraction=None,
         n_soil_layers=2,
     ):
         return cls(
@@ -90,7 +92,7 @@ class LandState:
             snow_depth if snow_depth is not None else jnp.zeros(shape),
             snow_cover if snow_cover is not None else jnp.zeros(shape),
             soil_water_content if soil_water_content is not None else jnp.zeros(shape + (n_soil_layers,)),
-            surface_albedo if surface_albedo is not None else jnp.zeros(shape),
+            vegetation_fraction if vegetation_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -128,6 +130,12 @@ class LandDerived:
 
     Attributes
     ----------
+    surface_albedo : (n_lon, n_lat) array
+        Surface albedo (dimensionless, in [0, 1]). The climatology when
+        ``surface_albedo_from_clim_file=True``; otherwise
+        ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction``.
+        It is written to the output, but nothing in the model or the coupling
+        reads it yet.
     deep_drainage : (n_lon, n_lat) array
         Water draining out of the bottom of the deep soil layer, which leaves
         the land model (kg m-2 s-1). Zero where there is no land, and when the
@@ -144,13 +152,15 @@ class LandDerived:
 
     """
 
+    surface_albedo: jnp.ndarray
     deep_drainage: jnp.ndarray
     runoff_to_ocean: jnp.ndarray
     unmet_evaporation: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None):
+    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None):
         return cls(
+            surface_albedo if surface_albedo is not None else jnp.zeros(shape),
             deep_drainage if deep_drainage is not None else jnp.zeros(shape),
             runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
             unmet_evaporation if unmet_evaporation is not None else jnp.zeros(shape),
@@ -219,9 +229,11 @@ class SlabLandModel(SlabModelBase):
 
     Surface albedo
         With ``surface_albedo_from_clim_file=True`` the albedo is the
-        climatology at the current time. Otherwise it is the uniform
-        ``params.surface_albedo``. It is written to the output, but nothing
-        in the model or the coupling reads it yet.
+        climatology at the current time. Otherwise it is the bare soil and
+        vegetation albedos weighted by the vegetation fraction,
+        ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction``.
+        It is written to the output, but nothing in the model or the coupling
+        reads it yet.
     """
 
     def __init__(
@@ -241,7 +253,7 @@ class SlabLandModel(SlabModelBase):
         land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
         surface_albedo_varname_in_clim_file: str = "surface_albedo",
         glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
-        runoff_to_ocean_mapping = lambda runoff: runoff,
+        runoff_to_ocean_mapping: str | None = None,
     ):
         """Initialize the land surface model.
 
@@ -272,8 +284,10 @@ class SlabLandModel(SlabModelBase):
             Relax the surface temperature to the climatology instead of
             letting it run freely. Default False.
         surface_albedo_from_clim_file : bool
-            Read the surface albedo from the climatology instead of using the
-            uniform ``params.surface_albedo``. Default False.
+            Read the surface albedo from the climatology instead of blending
+            ``params.baresoil_albedo`` and ``params.vegetation_albedo`` by the
+            vegetation fraction. Without a ``land_clim_file`` the climatology
+            is ``params.baresoil_albedo`` everywhere. Default False.
         glacier_fraction_from_clim_file : bool
             Read a glacier fraction map from ``land_clim_file`` and use it as
             ``params.glacier_fraction``. The variable must have no time
@@ -331,7 +345,9 @@ class SlabLandModel(SlabModelBase):
             "glacier_fraction": glacier_fraction_from_clim_file,
         }
 
-        if isinstance(runoff_to_ocean_mapping, str):
+        if runoff_to_ocean_mapping is None:
+            runoff_to_ocean_mapping = lambda runoff : runoff
+        elif isinstance(runoff_to_ocean_mapping, str):
             regridder = ESMFRegridder(runoff_to_ocean_mapping)
             runoff_to_ocean_mapping = lambda runoff: regridder(runoff)
 
@@ -389,7 +405,7 @@ class SlabLandModel(SlabModelBase):
         # into the output for the albedo. The glacier fraction may be a map,
         # so every element is checked, and a map must be on the model grid
         # (anything else would broadcast or fail deep inside `step`).
-        for name in ("surface_albedo", "glacier_fraction"):
+        for name in ("baresoil_albedo", "vegetation_albedo", "glacier_fraction"):
             fraction = np.asarray(getattr(self.params, name), dtype=float)
             if not np.all(np.isfinite(fraction)) or not np.all(
                 (fraction >= 0.0) & (fraction <= 1.0)
@@ -398,14 +414,13 @@ class SlabLandModel(SlabModelBase):
                     f"params.{name} must be finite and in [0, 1]; "
                     f"got values in [{np.nanmin(fraction):g}, {np.nanmax(fraction):g}]."
                 )
-        glacier_fraction_shape = np.shape(self.params.glacier_fraction)
-        if glacier_fraction_shape not in ((), self.grid.shape):
-            raise ValueError(
-                f"params.glacier_fraction has shape {glacier_fraction_shape}; it must "
-                f"be a scalar or a map on the grid, {self.grid.shape} (n_lon, n_lat)."
-            )
-        if np.ndim(self.params.surface_albedo) != 0:
-            raise ValueError("params.surface_albedo must be a scalar.")
+        for map_name in ("glacier_fraction", "baresoil_albedo", "vegetation_albedo"):
+            field_shape = np.shape(getattr(self.params, map_name))
+            if field_shape not in ((), self.grid.shape):
+                raise ValueError(
+                    f"params.{map_name} has shape {field_shape}; it must "
+                    f"be a scalar or a map on the grid, {self.grid.shape} (n_lon, n_lat)."
+                )
         # The slab heat capacity is depth times volumetric capacity; a zero or
         # negative factor makes the temperature update infinite or unstable.
         # `soil_depth` is per-layer, so every element is checked: the layer
@@ -463,7 +478,10 @@ class SlabLandModel(SlabModelBase):
                 self._idealized_land_temperature(),
                 jnp.zeros(monthly),
                 jnp.full(monthly, 0.5),
-                jnp.full(monthly, self.params.surface_albedo),
+                # Every month holds the bare soil albedo, which may be a map.
+                jnp.broadcast_to(
+                    jnp.broadcast_to(self.params.baresoil_albedo, shape)[..., None], monthly
+                ),
             )
         
         if not Path(self.land_clim_file).exists():
@@ -584,9 +602,10 @@ class SlabLandModel(SlabModelBase):
     ) -> Carry:
         """Build the initial land carry.
 
-        By default every cell starts at 288.15 K with no snow, a soil water
-        content of 0.5 in both layers and a surface albedo of
-        ``params.surface_albedo``.
+        By default every cell starts at 288.15 K with no snow, no soil water
+        and no vegetation. The initial surface albedo is the blend of
+        ``params.baresoil_albedo`` and ``params.vegetation_albedo``, which
+        with no vegetation is ``params.baresoil_albedo``.
 
         Parameters
         ----------
@@ -594,10 +613,12 @@ class SlabLandModel(SlabModelBase):
             Parameters to put in ``carry["params"]``. Defaults to the ones
             the model was constructed with.
         initialize_from_clim_file : bool
-            Start the surface temperature, snow depth, snow cover and surface
-            albedo from the climatology at the month the run starts in
+            Start the surface temperature, snow depth and snow cover from the
+            climatology at the month the run starts in
             (:attr:`SlabModelBase.start_year_fraction`). Soil water still
-            starts at 0.5. Default False.
+            starts at 0, and the initial albedo is the blend even when
+            ``surface_albedo_from_clim_file=True``; the first step replaces
+            it with the climatology. Default False.
 
         Returns
         -------
@@ -626,8 +647,15 @@ class SlabLandModel(SlabModelBase):
 
         state = LandState.zeros(self.grid.shape)
         state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
-        state.soil_water_content = state.soil_water_content.at[:].set(0.5)
-        state.surface_albedo = state.surface_albedo.at[:].set(params.surface_albedo)
+        state.soil_water_content = state.soil_water_content.at[:].set(0.0)
+        state.vegetation_fraction = state.vegetation_fraction.at[:].set(0.0)
+
+        derived = LandDerived.zeros(
+            self.grid.shape,
+            surface_albedo=params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction,
+            runoff_to_ocean=self.runoff_to_ocean_mapping(jnp.zeros(self.grid.shape)),
+        )
+
 
         if initialize_from_clim_file:
             logger.info(
@@ -646,9 +674,6 @@ class SlabLandModel(SlabModelBase):
                 cycle_position, self.snow_depth_climatology
             )
             state.snow_cover = convert_snow_depth_to_snow_cover(state.snow_depth, params)
-            state.surface_albedo = evaluate_cyclic_linear(
-                cycle_position, self.surface_albedo_climatology
-            )
 
         return {
             "params": params,
@@ -656,10 +681,7 @@ class SlabLandModel(SlabModelBase):
             "forcing": LandForcing.zeros(self.grid.shape),
             # runoff_to_ocean is built by the same routing step uses, so its
             # dtype matches what step returns and the scan carry is stable.
-            "derived": LandDerived.zeros(
-                self.grid.shape,
-                runoff_to_ocean=self.runoff_to_ocean_mapping(jnp.zeros(self.grid.shape)),
-            ),
+            "derived": derived,
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -809,7 +831,7 @@ class SlabLandModel(SlabModelBase):
                 time.year_fraction, self.surface_albedo_climatology
             )
         else:
-            new_surface_albedo = state.surface_albedo.at[:].set(params.surface_albedo)
+            new_surface_albedo = params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction
  
  
         new_state = state.replace(
@@ -817,7 +839,6 @@ class SlabLandModel(SlabModelBase):
             snow_depth=new_snow_depth,
             snow_cover=convert_snow_depth_to_snow_cover(new_snow_depth, params),
             soil_water_content=new_soil_water_content,
-            surface_albedo=new_surface_albedo,
         )
 
         diagnostics = {
@@ -825,6 +846,7 @@ class SlabLandModel(SlabModelBase):
             "forcing": forcing,
             "derived": LandDerived.zeros(
                 self.grid.shape,
+                surface_albedo=new_surface_albedo,
                 deep_drainage=deep_drainage_flux,
                 runoff_to_ocean=runoff_to_ocean,
                 unmet_evaporation=unmet_evaporation,
@@ -890,15 +912,6 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
-            "surface_albedo": (
-                dims,
-                state.surface_albedo,
-                {
-                    "long_name": "Surface albedo",
-                    "units": "None",
-                    **role_attrs("state"),
-                },
-            ),
 
             # layer 0 is the surface soil layer, layer 1 the deep one; their
             # depths are params.soil_depth.
@@ -932,6 +945,16 @@ class SlabLandModel(SlabModelBase):
                     "units": "kg m-2 s-1",
                     "positive": "downward",
                     **role_attrs("forcing"),
+                },
+            ),
+            "surface_albedo": (
+                dims,
+                derived.surface_albedo,
+                {
+                    "long_name": "Surface albedo",
+                    "units": "None",
+                    "description": "The climatology when surface_albedo_from_clim_file is set; otherwise baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction",
+                    **role_attrs("derived"),
                 },
             ),
             "deep_drainage": (
