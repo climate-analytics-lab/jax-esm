@@ -149,6 +149,18 @@ class LandDerived:
         The atmosphere evaporated it anyway, so it is water the coupled
         system created. Zero where there is no land, and when the soil water
         is read from a climatology.
+    soil_water_availability : (n_lon, n_lat) array
+        Fraction of the available soil water the soil holds (dimensionless,
+        in [0, 1]), the land's counterpart of SPEEDY's ``soilw_am``. With
+        depths ``d``, field capacities ``fc``, wilting points ``wp`` and
+        vegetation fraction ``f_veg``, it is
+        ``min(1, (d1 max(W1 - wp1, 0) + f_veg d2 max(W2 - wp2, 0)) / (d1 (fc1 - wp1) + d2 (fc2 - wp2)))``.
+        The deep layer counts only through vegetation, whose roots reach it.
+        With the default parameters (surface wilting point 0, depth ratio
+        ``d2 / d1 = 3``) this is SPEEDY's ``soilw_am``; a non-zero surface
+        wilting point also leaves out the surface water below it. Computed
+        from the soil water at the end of the step. Zero where there is no
+        land.
 
     """
 
@@ -156,14 +168,16 @@ class LandDerived:
     deep_drainage: jnp.ndarray
     runoff_to_ocean: jnp.ndarray
     unmet_evaporation: jnp.ndarray
+    soil_water_availability: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None):
+    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, runoff_to_ocean=None, unmet_evaporation=None, soil_water_availability=None):
         return cls(
             surface_albedo if surface_albedo is not None else jnp.zeros(shape),
             deep_drainage if deep_drainage is not None else jnp.zeros(shape),
             runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
             unmet_evaporation if unmet_evaporation is not None else jnp.zeros(shape),
+            soil_water_availability if soil_water_availability is not None else jnp.zeros(shape),
         )
 
 
@@ -179,7 +193,7 @@ class SlabLandModel(SlabModelBase):
         ``f = glacier_fraction`` (a scalar, or a map read from the
         climatology file with ``glacier_fraction_from_clim_file=True``)::
 
-            C = (1 - f) * soil_depth[0] * soil_volumetric_heat_capacity
+            C = (1 - f) * soil_thermal_depth * soil_volumetric_heat_capacity
                 + f * glacier_depth * glacier_volumetric_heat_capacity
 
         With ``F`` the downward heat flux, the default update is::
@@ -423,10 +437,11 @@ class SlabLandModel(SlabModelBase):
                 )
         # The slab heat capacity is depth times volumetric capacity; a zero or
         # negative factor makes the temperature update infinite or unstable.
-        # `soil_depth` is per-layer, so every element is checked: the layer
-        # depths are also the divisors of the bucket's water budget.
+        # The bucket depths divide the bucket's water budget, so they must be
+        # positive too; they are per-layer, so every element is checked.
         for factor_name in (
-            "soil_depth",
+            "soil_bucket_depth",
+            "soil_thermal_depth",
             "glacier_depth",
             "soil_volumetric_heat_capacity",
             "glacier_volumetric_heat_capacity",
@@ -435,7 +450,7 @@ class SlabLandModel(SlabModelBase):
             if not np.all(np.isfinite(factor)) or not np.all(factor > 0.0):
                 raise ValueError(
                     f"params.{factor_name} must be finite and strictly positive "
-                    f"(it is a factor of the slab heat capacity); got {factor!r}."
+                    f"(it divides the heat or water budget); got {factor!r}."
                 )
 
         # Boundary data is *configuration*, so it is read here rather than in
@@ -710,11 +725,10 @@ class SlabLandModel(SlabModelBase):
         read_from_clim_file = self.read_from_clim_file
         land_mask = self.grid.binary_land_mask
 
-        # The thermal slab is the top soil layer only: the temperature is a
-        # single-layer prognostic, and with the default 1 m top layer this is
-        # exactly SPEEDY's hcapl. The deeper layer holds water, not heat.
+        # The thermal slab has its own depth, separate from the water bucket's
+        # layers: SPEEDY also uses 1 m for heat (hcapl) and 7 cm for soil water.
         heat_capacity = (
-            params.soil_depth[0] * params.soil_volumetric_heat_capacity * (1.0 - params.glacier_fraction)
+            params.soil_thermal_depth * params.soil_volumetric_heat_capacity * (1.0 - params.glacier_fraction)
             + params.glacier_depth * params.glacier_volumetric_heat_capacity * params.glacier_fraction
         )
         dt_inverse_heat_capacity = time.dt / heat_capacity
@@ -783,14 +797,14 @@ class SlabLandModel(SlabModelBase):
             W2 = state.soil_water_content[..., 1]
             
             drain1 = W1 / params.drainage_timescale[0]
-            inflow2 = (params.soil_depth[0] / params.soil_depth[1]) * drain1
+            inflow2 = (params.soil_bucket_depth[0] / params.soil_bucket_depth[1]) * drain1
 
             # Evaporation comes out of what the surface layer holds after this
             # step's precipitation and drainage, and no more: what it cannot
             # supply is published as unmet_evaporation instead of being
             # clamped away, which would silently create water. Dew (negative
             # evaporation) is always taken in.
-            surface_water_mass = 1000.0 * params.soil_depth[0]   # kg m-2 per unit W1
+            surface_water_mass = 1000.0 * params.soil_bucket_depth[0]   # kg m-2 per unit W1
             W1_before_evaporation = jnp.maximum(
                 0.0,
                 W1 + (forcing.precipitation / surface_water_mass - drain1) * time.dt,
@@ -811,7 +825,7 @@ class SlabLandModel(SlabModelBase):
             # removed below unless dt exceeds the drainage timescale, when the
             # non-negativity clamp would remove less.
             deep_drainage = W2 / params.drainage_timescale[1]
-            deep_drainage_flux = 1000.0 * params.soil_depth[1] * deep_drainage
+            deep_drainage_flux = 1000.0 * params.soil_bucket_depth[1] * deep_drainage
 
             new_W2 = jnp.maximum(
                 0.0,
@@ -824,6 +838,22 @@ class SlabLandModel(SlabModelBase):
         deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
         unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
         runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux)
+
+
+        d1, d2 = params.soil_bucket_depth
+        wp1, wp2 = params.soil_water_wilting_point
+        fc1, fc2 = params.soil_water_field_capacity
+        swc1 = new_soil_water_content[:, :, 0]
+        swc2 = new_soil_water_content[:, :, 1]
+        f_veg = state.vegetation_fraction
+        new_soil_water_availability = jnp.where(
+            land_mask == 1,
+            jnp.minimum(
+                1,
+                (d1 * jnp.maximum(swc1 - wp1, 0.0) + f_veg * d2 * jnp.maximum(swc2 - wp2, 0.0)) /(d1 * (fc1 - wp1) + d2 * (fc2 - wp2))
+            ),
+            0.0
+        )
 
         if read_from_clim_file["surface_albedo"]:
             logger.info("Read albedo content from climatology")
@@ -850,6 +880,7 @@ class SlabLandModel(SlabModelBase):
                 deep_drainage=deep_drainage_flux,
                 runoff_to_ocean=runoff_to_ocean,
                 unmet_evaporation=unmet_evaporation,
+                soil_water_availability=new_soil_water_availability,
             ),
         }
         return {"params": params, **diagnostics}, diagnostics
@@ -914,7 +945,7 @@ class SlabLandModel(SlabModelBase):
             ),
 
             # layer 0 is the surface soil layer, layer 1 the deep one; their
-            # depths are params.soil_depth.
+            # depths are params.soil_bucket_depth.
             "soil_water_content": (
                 layer_dims,
                 state.soil_water_content,
@@ -995,6 +1026,16 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("forcing"),
                 },
             ),
+            "soil_water_availability": (
+                dims,
+                derived.soil_water_availability,
+                {
+                    "long_name": "Soil water availability",
+                    "units": "1",
+                    **role_attrs("derived"),
+                },
+            ),
+
         }
 
     def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
