@@ -10,6 +10,8 @@ The model has these parts:
   by evaporation, drainage and overflow above field capacity.
 - Soil water availability: SPEEDY's ``soilw_am``, diagnosed from the bucket
   or read from a climatology.
+- Vegetation fraction: a uniform 0.8, or read from a climatology. Nothing
+  evolves it yet.
 - Surface albedo: bare soil and vegetation albedos blended by the
   vegetation fraction, or read from a climatology. It is output only for
   now.
@@ -69,7 +71,9 @@ class LandState:
     vegetation_fraction : (n_lon, n_lat) array
         Fraction of the cell covered by vegetation (dimensionless, in
         [0, 1]). It is kept as state for future vegetation dynamics, but
-        nothing evolves it yet: it starts at 0 and stays there.
+        nothing evolves it yet: it is a uniform 0.8, or the climatology at
+        the current time with ``vegetation_fraction_from_clim_file=True``.
+        Zero where there is no land.
 
     """
 
@@ -266,13 +270,21 @@ class SlabLandModel(SlabModelBase):
         the atmosphere evaporate water the soil does not hold, which shows up
         as ``derived.unmet_evaporation``.
 
+    Vegetation fraction
+        A uniform 0.8 by default. With
+        ``vegetation_fraction_from_clim_file=True`` it is the climatology at
+        the current time, clipped to [0, 1] and set to 0 off land, so the
+        file may hold NaN or a fill value over ocean. It weights the albedo
+        blend and the deep layer's share of the soil water availability.
+
     Surface albedo
         With ``surface_albedo_from_clim_file=True`` the albedo is the
         climatology at the current time. Otherwise it is the bare soil and
         vegetation albedos weighted by the vegetation fraction,
         ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction``.
-        It is written to the output, but nothing in the model or the coupling
-        reads it yet.
+        Either way it is clipped to [0, 1] and set to 0 off land. It is
+        written to the output, but nothing in the model or the coupling reads
+        it yet.
     """
 
     def __init__(
@@ -287,11 +299,13 @@ class SlabLandModel(SlabModelBase):
         land_surface_temperature_from_clim_file: bool = False,
         surface_albedo_from_clim_file: bool = False,
         glacier_fraction_from_clim_file: bool = False,
+        vegetation_fraction_from_clim_file: bool = False,
         soil_water_availability_varname_in_clim_file: str = "soil_water_availability",
         snow_depth_varname_in_clim_file: str = "snow_depth",
         land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
         surface_albedo_varname_in_clim_file: str = "surface_albedo",
         glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
+        vegetation_fraction_varname_in_clim_file: str = "vegetation_fraction",
         runoff_to_ocean_mapping: str | None = None,
     ):
         """Initialize the land surface model.
@@ -312,7 +326,8 @@ class SlabLandModel(SlabModelBase):
             with no time dimension is used as the same map in every month. A
             field missing from the file, or every field when no file is given,
             uses a fallback: an idealized temperature climatology, no snow, a
-            soil water availability of 0.5 and a surface albedo of 0.2.
+            soil water availability of 0.5, a surface albedo of 0.2 and a
+            vegetation fraction of 0.8.
         soil_water_availability_from_clim_file : bool
             Read the soil water availability from the climatology instead of
             diagnosing it from the bucket. The bucket still runs. Default
@@ -334,6 +349,10 @@ class SlabLandModel(SlabModelBase):
             dimension. Cells with no land are set to 0, so the file may hold
             NaN or a fill value over ocean; a NaN over land is an error.
             Default False.
+        vegetation_fraction_from_clim_file : bool
+            Read the vegetation fraction from the climatology instead of
+            using a uniform 0.8. The initial state starts from the climatology
+            too. Default False.
         soil_water_availability_varname_in_clim_file : str
             Name of the soil water availability variable in
             ``land_clim_file``.
@@ -345,6 +364,8 @@ class SlabLandModel(SlabModelBase):
             Name of the surface albedo variable in ``land_clim_file``.
         glacier_fraction_varname_in_clim_file : str
             Name of the glacier fraction variable in ``land_clim_file``.
+        vegetation_fraction_varname_in_clim_file : str
+            Name of the vegetation fraction variable in ``land_clim_file``.
         runoff_to_ocean_mapping : str or a function
             If it is a string, is a NetCDF file that can be used with
             ESMFRegridder to rout runoff to ocean grid. If it is a function, 
@@ -376,6 +397,7 @@ class SlabLandModel(SlabModelBase):
             "land_surface_temperature": land_surface_temperature_varname_in_clim_file,
             "surface_albedo": surface_albedo_varname_in_clim_file,
             "glacier_fraction": glacier_fraction_varname_in_clim_file,
+            "vegetation_fraction": vegetation_fraction_varname_in_clim_file,
         }
 
         self.read_from_clim_file = {
@@ -384,6 +406,7 @@ class SlabLandModel(SlabModelBase):
             "land_surface_temperature": land_surface_temperature_from_clim_file,
             "surface_albedo": surface_albedo_from_clim_file,
             "glacier_fraction": glacier_fraction_from_clim_file,
+            "vegetation_fraction": vegetation_fraction_from_clim_file,
         }
 
         if runoff_to_ocean_mapping is None:
@@ -488,12 +511,13 @@ class SlabLandModel(SlabModelBase):
             self.snow_depth_climatology,
             self.soil_water_availability_climatology,
             self.surface_albedo_climatology,
+            self.vegetation_fraction_climatology,
         ) = self._load_climatologies()
 
     def _load_climatologies(
         self,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Load the four monthly climatologies, with idealized fallbacks.
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Load the five monthly climatologies, with idealized fallbacks.
 
         Fields are read by name through
         :func:`~jem.components.slab.base.load_monthly_climatology`, which
@@ -502,8 +526,9 @@ class SlabLandModel(SlabModelBase):
         Returns
         -------
         tuple of jnp.ndarray
-            Surface temperature (K), snow depth (mm), soil water content
-            (m3 m-3) and surface albedo, each of shape ``(n_lon, n_lat, 12)``.
+            Surface temperature (K), snow depth (mm), soil water availability,
+            surface albedo and vegetation fraction, each of shape
+            ``(n_lon, n_lat, 12)``.
 
         """
         shape = self.grid.shape
@@ -524,6 +549,7 @@ class SlabLandModel(SlabModelBase):
                 jnp.broadcast_to(
                     jnp.broadcast_to(self.params.baresoil_albedo, shape)[..., None], monthly
                 ),
+                jnp.full(monthly, 0.8),
             )
         
         if not Path(self.land_clim_file).exists():
@@ -573,11 +599,23 @@ class SlabLandModel(SlabModelBase):
             )
             surface_albedo = jnp.full(monthly, 0.2)
  
+        vegetation_fraction = self._load_named([varnames_in_clim_file["vegetation_fraction"],])
+        if vegetation_fraction is None:
+            logger.warning(
+                "%s: land climatology file %s does not have %s; assuming uniform vegetation "
+                "fraction of 0.8.",
+                self.name,
+                self.land_clim_file,
+                varnames_in_clim_file["vegetation_fraction"],
+            )
+            vegetation_fraction = jnp.full(monthly, 0.8)
+
         return (
             land_surface_temperature,
             snow_depth,
             soil_water_availability,
             surface_albedo,
+            vegetation_fraction,
         )
 
     def _load_static_field(self, varname: str, off_land_value: float = 0.0) -> jnp.ndarray:
@@ -645,9 +683,13 @@ class SlabLandModel(SlabModelBase):
         """Build the initial land carry.
 
         By default every cell starts at 288.15 K with no snow, no soil water
-        and no vegetation. The initial surface albedo is the blend of
-        ``params.baresoil_albedo`` and ``params.vegetation_albedo``, which
-        with no vegetation is ``params.baresoil_albedo``.
+        and a vegetation fraction of 0.8. With
+        ``vegetation_fraction_from_clim_file=True`` the vegetation fraction
+        starts from the climatology at the month the run starts in instead,
+        whatever ``initialize_from_clim_file`` is. The initial surface albedo
+        is the blend of ``params.baresoil_albedo`` and
+        ``params.vegetation_albedo`` by that vegetation fraction. Vegetation
+        and albedo are 0 off land.
 
         Parameters
         ----------
@@ -690,11 +732,26 @@ class SlabLandModel(SlabModelBase):
         state = LandState.zeros(self.grid.shape)
         state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
         state.soil_water_content = state.soil_water_content.at[:].set(0.0)
-        state.vegetation_fraction = state.vegetation_fraction.at[:].set(0.0)
+        # A prescribed vegetation fraction starts from its climatology, so
+        # the initial albedo matches what the first step computes. Both are
+        # masked to land, as step does.
+        if self.read_from_clim_file["vegetation_fraction"]:
+            initial_vegetation_fraction = evaluate_cyclic_linear(
+                cycle_position, self.vegetation_fraction_climatology
+            )
+        else:
+            initial_vegetation_fraction = jnp.full(self.grid.shape, 0.8)
+        state.vegetation_fraction = jnp.where(
+            land == 1, jnp.clip(initial_vegetation_fraction, 0.0, 1.0), 0.0
+        )
 
         derived = LandDerived.zeros(
             self.grid.shape,
-            surface_albedo=params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction,
+            surface_albedo=jnp.where(
+                land == 1,
+                params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction,
+                0.0,
+            ),
             runoff_to_ocean=self.runoff_to_ocean_mapping(jnp.zeros(self.grid.shape)),
         )
 
@@ -803,6 +860,20 @@ class SlabLandModel(SlabModelBase):
             new_snow_depth = state.snow_depth
          
 
+        if read_from_clim_file["vegetation_fraction"]:
+            logger.info("Read vegetation fraction from climatology")
+            new_vegetation_fraction = evaluate_cyclic_linear(
+                time.year_fraction, self.vegetation_fraction_climatology
+            )
+        else:
+            new_vegetation_fraction = state.vegetation_fraction
+        
+        new_vegetation_fraction = jnp.where(
+            land_mask == 1,
+            jnp.clip(new_vegetation_fraction, 0.0, 1.0),
+            0.0
+        )
+ 
         # =====================================================================
         # Land surface soil moisture evolution (two-layer leaky bucket)
         # =====================================================================
@@ -876,7 +947,7 @@ class SlabLandModel(SlabModelBase):
             fc1, fc2 = params.soil_water_field_capacity
             swc1 = new_soil_water_content[:, :, 0]
             swc2 = new_soil_water_content[:, :, 1]
-            f_veg = state.vegetation_fraction
+            f_veg = new_vegetation_fraction
             new_soil_water_availability = (d1 * jnp.maximum(swc1 - wp1, 0.0) + f_veg * d2 * jnp.maximum(swc2 - wp2, 0.0)) /(d1 * (fc1 - wp1) + d2 * (fc2 - wp2))
 
         new_soil_water_availability = jnp.where(
@@ -898,14 +969,20 @@ class SlabLandModel(SlabModelBase):
                 time.year_fraction, self.surface_albedo_climatology
             )
         else:
-            new_surface_albedo = params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction
+            new_surface_albedo = params.baresoil_albedo * (1.0 - new_vegetation_fraction) + params.vegetation_albedo * new_vegetation_fraction
  
+        new_surface_albedo = jnp.where(
+            land_mask == 1,
+            jnp.clip(new_surface_albedo, 0.0, 1.0),
+            0.0
+        )
  
         new_state = state.replace(
             land_surface_temperature=new_land_surface_temperature,
             snow_depth=new_snow_depth,
             snow_cover=convert_snow_depth_to_snow_cover(new_snow_depth, params),
             soil_water_content=new_soil_water_content,
+            vegetation_fraction=new_vegetation_fraction,
         )
 
         diagnostics = {
