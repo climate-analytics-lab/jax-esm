@@ -44,8 +44,8 @@ class SlabLandParameters:
     drainage_timescale : jnp.ndarray, shape (2,)
         Drainage timescale (s) of each soil layer. Default (10, 10) days. The
         surface layer drains into the deep layer, and the deep layer drains
-        out of the model. Only used when the bucket is active
-        (``soil_water_content_from_clim_file=False``).
+        out of the model. Only the water above each layer's wilting point
+        drains.
     soil_water_field_capacity : jnp.ndarray, shape (2,)
         Field capacity of each layer (m3 m-3). Default (0.30, 0.30), SPEEDY's
         ``swcap``. Each layer is capped at it, and the excess leaves as
