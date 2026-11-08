@@ -155,8 +155,9 @@ class LandDerived:
         ``runoff_to_ocean_mapping``: the same water, as the flux the ocean
         receives (kg m-2 s-1).
     unmet_evaporation : (n_lon, n_lat) array
-        The part of ``forcing.evaporation`` the surface soil layer had no
-        water left to supply (kg m-2 s-1, positive upward, never negative).
+        The part of ``forcing.evaporation`` the soil layers could not supply
+        without going below their wilting points (kg m-2 s-1, positive
+        upward, never negative).
         The atmosphere evaporated it anyway, so it is water the coupled
         system created. Zero where there is no land.
     soil_water_availability : (n_lon, n_lat) array
@@ -234,27 +235,35 @@ class SlabLandModel(SlabModelBase):
         ``tau1``, ``tau2`` the drainage timescales, ``P`` the
         precipitation and ``E`` the evaporation::
 
-            dW1/dt = (P - E) / (rho_w * d1) - max(W1 - wp1, 0) / tau1
-            dW2/dt = (d1 / d2) * max(W1 - wp1, 0) / tau1 - max(W2 - wp2, 0) / tau2
+            dW1/dt = (P - E1) / (rho_w * d1) - max(W1 - wp1, 0) / tau1
+            dW2/dt = -E2 / (rho_w * d2) + (d1 / d2) * max(W1 - wp1, 0) / tau1 - max(W2 - wp2, 0) / tau2
 
         with ``wp1``, ``wp2`` the wilting points: water at or below the
-        wilting point is held by the soil and does not drain. Evaporation
-        can still take it.
+        wilting point is held by the soil, and neither drains nor
+        evaporates. Within a step the processes are applied in turn:
+        precipitation, evaporation, drainage, then the overflow above field
+        capacity.
 
-        Evaporation is taken from the surface layer only, after this step's
-        precipitation and drainage. It is limited to the water that layer
-        holds: the part it cannot supply is published as
+        Evaporation ``E = E1 + E2`` is split between the layers in
+        proportion to the water each can supply, ``a1 = d1 * max(W1 - wp1, 0)``
+        and ``a2 = vegetation_fraction * d2 * max(W2 - wp2, 0)``, the same
+        terms as the soil water availability: the deep layer gives water up
+        only through vegetation. If neither layer has any, all of it is
+        asked of the surface layer. No layer is taken below its wilting
+        point: the part of a layer's share it cannot supply is published as
         ``derived.unmet_evaporation`` rather than clamped away, so the land's
-        water budget still closes and the gap is visible. Dew (``E < 0``)
-        adds water. The evaporation is the cell mean the atmosphere
+        water budget still closes and the gap is visible. This relies on the
+        soil water starting at or above the wilting point, as
+        :meth:`initialize` sets it. Dew (``E < 0``) all goes into the
+        surface layer. The evaporation is the cell mean the atmosphere
         publishes, so in a partly-land cell the soil also supplies the sea
         part, and there is no snow budget, so sublimation is taken from the
         soil too.
 
         Water leaving the surface layer enters the deep layer, and water
         leaving the deep layer leaves the model; its rate is published as
-        ``derived.deep_drainage``. Both layers are kept non-negative and no
-        higher than their field capacity ``soil_water_field_capacity``. The
+        ``derived.deep_drainage``. Both layers are kept no higher than their
+        field capacity ``soil_water_field_capacity``. The
         water above field capacity leaves the model directly, without
         entering the layer below, and is published as
         ``derived.soil_water_overflow``. The deep drainage and the overflow
@@ -682,8 +691,9 @@ class SlabLandModel(SlabModelBase):
     ) -> Carry:
         """Build the initial land carry.
 
-        By default every cell starts at 288.15 K with no snow, no soil water
-        and a vegetation fraction of 0.8. With
+        By default every cell starts at 288.15 K with no snow, soil water at
+        the wilting point of each layer (0 off land) and a vegetation
+        fraction of 0.8. With
         ``vegetation_fraction_from_clim_file=True`` the vegetation fraction
         starts from the climatology at the month the run starts in instead,
         whatever ``initialize_from_clim_file`` is. The initial surface albedo
@@ -700,7 +710,7 @@ class SlabLandModel(SlabModelBase):
             Start the surface temperature, snow depth and snow cover from the
             climatology at the month the run starts in
             (:attr:`SlabModelBase.start_year_fraction`). Soil water still
-            starts at 0, and the initial albedo is the blend even when
+            starts at the wilting point, and the initial albedo is the blend even when
             ``surface_albedo_from_clim_file=True``; the first step replaces
             it with the climatology. Default False.
 
@@ -731,7 +741,15 @@ class SlabLandModel(SlabModelBase):
 
         state = LandState.zeros(self.grid.shape)
         state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
-        state.soil_water_content = state.soil_water_content.at[:].set(0.0)
+        # Soil water starts at the wilting point of each layer: the driest
+        # state the bucket allows. Nothing in step takes a layer below its
+        # wilting point, and the evaporation floor there assumes it never
+        # starts below it.
+        state.soil_water_content = jnp.where(
+            land[..., None] == 1,
+            jnp.broadcast_to(params.soil_water_wilting_point, self.grid.shape + (2,)),
+            0.0,
+        )
         # A prescribed vegetation fraction starts from its climatology, so
         # the initial albedo matches what the first step computes. Both are
         # masked to land, as step does.
@@ -879,89 +897,101 @@ class SlabLandModel(SlabModelBase):
         # =====================================================================
         # Layer 0 (surface): receives precipitation, drains into layer 1.
         # Layer 1 (deep): receives layer 0's drainage, drains out as deep drainage.
+       
+        # The order of physical processes is: precipitation, evaporation, drainage and runoff.
+        # This design is to reduce the chance of unmet evaporation to happen.
 
-        W1 = state.soil_water_content[..., 0]
-        W2 = state.soil_water_content[..., 1]
+        d = params.soil_bucket_depth[None, None, :]
+        prec_m = forcing.precipitation / 1000.0 # kg s-1 m-2 => m s-1
+        evap_m = forcing.evaporation   / 1000.0 # kg s-1 m-2 => m s-1
         
-        drain1 = jnp.maximum(W1 - params.soil_water_wilting_point[0], 0.0) / params.drainage_timescale[0]
-        inflow2 = (params.soil_bucket_depth[0] / params.soil_bucket_depth[1]) * drain1
-
-        # Evaporation comes out of what the surface layer holds after this
-        # step's precipitation and drainage, and no more: what it cannot
-        # supply is published as unmet_evaporation instead of being
-        # clamped away, which would silently create water. Dew (negative
-        # evaporation) is always taken in.
-        surface_water_mass = 1000.0 * params.soil_bucket_depth[0]   # kg m-2 per unit W1
-        W1_before_evaporation = jnp.maximum(
-            0.0,
-            W1 + (forcing.precipitation / surface_water_mass - drain1) * time.dt,
-        )
-        supplied_evaporation = jnp.minimum(
-            forcing.evaporation, W1_before_evaporation * surface_water_mass / time.dt
-        )
-        unmet_evaporation = forcing.evaporation - supplied_evaporation
-
-        new_W1 = jnp.maximum(
-            0.0,
-            W1_before_evaporation - supplied_evaporation / surface_water_mass * time.dt,
+        # 1. Precipitation
+        _swc = jnp.stack(
+            [ 
+              state.soil_water_content[..., 0] + prec_m * time.dt / d[:, :, 0],
+              state.soil_water_content[..., 1]
+            ], axis=-1
         )
         
-        # The deep layer's drainage leaves the model. It is published as a
-        # mass flux (m3 m-3 s-1 times the layer depth and water density),
-        # and routed to the ocean as runoff. It equals what is
-        # removed below unless dt exceeds the drainage timescale, when the
-        # non-negativity clamp would remove less.
-        deep_drainage = jnp.maximum(W2 - params.soil_water_wilting_point[1], 0.0) / params.drainage_timescale[1]
-        deep_drainage_flux = 1000.0 * params.soil_bucket_depth[1] * deep_drainage
-
-        new_W2 = jnp.maximum(
-            0.0,
-            W2 + (inflow2 - deep_drainage) * time.dt,
+        # 2. Evaporation
+        dist_evap = jnp.where(
+            land_mask[..., None],
+            self._compute_distributed_evaporation(
+                evap_m,
+                params.soil_bucket_depth,
+                params.soil_water_wilting_point,
+                params.soil_water_field_capacity,
+                _swc,
+                new_vegetation_fraction,
+            ),
+            0.0
         )
+        
+        _swc_unbounded = _swc - dist_evap * time.dt / d
+        _swc = jnp.maximum(_swc_unbounded, params.soil_water_wilting_point[None, None, :])
+        
+        unmet_evaporation = jnp.sum( (_swc - _swc_unbounded) * d, axis=-1 ) / time.dt * 1000.0 # m s-1 => kg s-1 m-2
 
-        new_soil_water_content = jnp.stack([new_W1, new_W2], axis=-1)
+        # 3. Drainage and runoff
+        flow = jnp.maximum(_swc - params.soil_water_wilting_point[None, None, :], 0.0) / params.drainage_timescale[None, None, :]
+       
+        inflow_1to2 = flow[..., 0] * d[:, :, 0]  # m s-1
+        drainage2 = flow[..., 1]  * d[:, :, 1]   # m s-1
+         
+        _swc = jnp.stack([
+            _swc[..., 0] - inflow_1to2 / d[:, :, 0] * time.dt,
+            _swc[..., 1] + ( inflow_1to2 - drainage2 ) / d[:, :, 1] * time.dt,
+        ], axis=-1)
+        
+        deep_drainage_flux = 1000.0 * drainage2  # kg m-2 s-1
 
         # Neither layer holds more than its field capacity. The excess of
         # each layer leaves the model as runoff, without passing through
         # the layer below, and is routed to the ocean with the deep drainage.
-        capped_soil_water_content = jnp.minimum(new_soil_water_content, params.soil_water_field_capacity[None, None, :])
+        _swc_capped = jnp.minimum(_swc, params.soil_water_field_capacity[None, None, :])
         runoff_due_to_overflow = jnp.where(
-            land_mask == 1,
-            1000 * jnp.sum( (new_soil_water_content - capped_soil_water_content) * params.soil_bucket_depth[None, None, :] / time.dt, axis=-1),
-            0.0
-        )
-        new_soil_water_content = jnp.where(
-            land_mask[..., None],
-            capped_soil_water_content,
+            land_mask,
+            1000 * jnp.sum( (_swc - _swc_capped) * params.soil_bucket_depth[None, None, :] / time.dt, axis=-1),
             0.0
         )
 
+        deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
+        unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
+        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux + runoff_due_to_overflow)
+
+        new_soil_water_content = jnp.where(
+            land_mask[..., None],
+            _swc_capped,
+            0.0
+        )
+ 
         if read_from_clim_file["soil_water_availability"]:
             logger.info("Read soil water availability from climatology")
             new_soil_water_availability = evaluate_cyclic_linear(
                 time.year_fraction, self.soil_water_availability_climatology
             )
-        else: 
-            d1, d2 = params.soil_bucket_depth
-            wp1, wp2 = params.soil_water_wilting_point
-            fc1, fc2 = params.soil_water_field_capacity
-            swc1 = new_soil_water_content[:, :, 0]
-            swc2 = new_soil_water_content[:, :, 1]
-            f_veg = new_vegetation_fraction
-            new_soil_water_availability = (d1 * jnp.maximum(swc1 - wp1, 0.0) + f_veg * d2 * jnp.maximum(swc2 - wp2, 0.0)) /(d1 * (fc1 - wp1) + d2 * (fc2 - wp2))
+        else:
+            abs_swa, max_abs_swa = self._compute_absolute_soil_water_availability(
+                params.soil_bucket_depth,
+                params.soil_water_wilting_point,
+                params.soil_water_field_capacity,
+                new_soil_water_content,
+                new_vegetation_fraction,
+            )
 
+            new_soil_water_availability = jnp.where(
+                jnp.sum(max_abs_swa, axis=-1) > 0,
+                jnp.sum(abs_swa, axis=-1) / jnp.sum(max_abs_swa, axis=-1),
+                0.0
+            )
+        
         new_soil_water_availability = jnp.where(
-            land_mask == 1,
+            land_mask,
             jnp.clip(new_soil_water_availability, 0.0, 1.0),
             0.0
         )
 
 
-        # The bucket runs either way; a prescribed availability does not feed
-        # back on the soil water.
-        deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
-        unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
-        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux + runoff_due_to_overflow)
 
         if read_from_clim_file["surface_albedo"]:
             logger.info("Read albedo content from climatology")
@@ -999,6 +1029,65 @@ class SlabLandModel(SlabModelBase):
             ),
         }
         return {"params": params, **diagnostics}, diagnostics
+
+    def _compute_distributed_evaporation(
+        self,
+        evaporation,
+        soil_bucket_depth,
+        soil_water_wilting_point,
+        soil_water_field_capacity,
+        soil_water_content,
+        vegetation_fraction,
+    ):
+        abs_swa, _ = self._compute_absolute_soil_water_availability(
+            soil_bucket_depth,
+            soil_water_wilting_point,
+            soil_water_field_capacity,
+            soil_water_content,
+            vegetation_fraction,
+        )
+
+        # Compute share of each layer
+        sum_abs_swa = jnp.sum(abs_swa, axis=-1)
+        share1 = jnp.where(
+            sum_abs_swa > 0,
+            abs_swa[..., 0] /  sum_abs_swa,
+            1.0 # avoid divided by zero
+        )
+
+        share1 = jnp.where(
+            evaporation < 0, # when dew happens, force it to be surface layer
+            1.0,
+            share1,
+        )
+        
+        return evaporation[..., None] * jnp.stack( [share1, 1 - share1], axis=-1 )
+
+    def _compute_absolute_soil_water_availability(
+        self,
+        soil_bucket_depth,
+        soil_water_wilting_point,
+        soil_water_field_capacity,
+        soil_water_content,
+        vegetation_fraction,
+    ):
+        d1, d2 = soil_bucket_depth
+        wp1, wp2 = soil_water_wilting_point
+        fc1, fc2 = soil_water_field_capacity
+        swc1 = soil_water_content[:, :, 0]
+        swc2 = soil_water_content[:, :, 1]
+        f_veg = vegetation_fraction
+
+        # swa = soil water availability
+        abs_swa1 = d1 * jnp.maximum(swc1 - wp1, 0.0)
+        abs_swa2 = f_veg * d2 * jnp.maximum(swc2 - wp2, 0.0)
+        max_abs_swa1 = d1 * (fc1 - wp1)
+        max_abs_swa2 = d2 * (fc2 - wp2)
+
+        return (
+            jnp.stack( [abs_swa1,     abs_swa2],     axis=-1),
+            jnp.stack( [max_abs_swa1, max_abs_swa2], axis=-1),
+        )
 
     def _idealized_land_temperature(self) -> jnp.ndarray:
         """Idealized monthly land surface temperature climatology.
@@ -1134,7 +1223,7 @@ class SlabLandModel(SlabModelBase):
                 dims,
                 derived.unmet_evaporation,
                 {
-                    "long_name": "Evaporation the surface soil layer had no water to supply",
+                    "long_name": "Evaporation the soil layers had no water to supply",
                     "units": "kg m-2 s-1",
                     "positive": "upward",
                     **role_attrs("derived"),
