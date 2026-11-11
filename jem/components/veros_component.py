@@ -272,6 +272,12 @@ class VerosComponent:
         :meth:`_barotropic_streamfunction`) and whether there is an ``ssh``
         output at all -- Veros carries a sea surface height only under the
         linear free surface.
+    enable_gm_streamfunction : bool
+        Whether the wrapped setup parameterises mesoscale eddies with GM as a
+        skew diffusion (``settings.enable_neutral_diffusion`` and
+        ``settings.enable_skew_diffusion``); it decides whether there is a
+        ``B1_gm`` output, the zonal component of the GM streamfunction that
+        the eddy-induced overturning is diagnosed from.
 
     """
 
@@ -318,6 +324,10 @@ class VerosComponent:
         # it is read once here as a Python bool and the `psi` branch in
         # `step` is taken at trace time rather than on a traced value.
         self.enable_streamfunction = bool(settings.enable_streamfunction)
+        # Likewise for GM: Veros only has `B1_gm` when the eddy-induced
+        # transport is applied as a skew diffusion.
+        self.enable_gm_streamfunction = bool(
+            settings.enable_neutral_diffusion and settings.enable_skew_diffusion)
 
         # Number of Veros tracer timesteps per coupling step; set by bind().
         self._steps_per_coupling_step: int | None = None
@@ -783,6 +793,19 @@ class VerosComponent:
             diagnostics["ssh"] = (
                 variables.psi[interior, interior, tau] / state.settings.grav
             )
+        # Veros' own driver no longer calls `isoneutral_diag_streamfunction`
+        # (its diagnostics block is commented out to keep the step jittable),
+        # so `B1_gm` is never filled in by the model; the kernel is evaluated
+        # here on the evolved state instead, from the slopes and `K_gm` of the
+        # last sub-step. It only reads the state, so the integration is
+        # unchanged. As with `ssh` the branch is static.
+        if self.enable_gm_streamfunction:
+            # Imported here: importing `veros.core` at module level would lock
+            # Veros' runtime settings before `configure_veros_runtime` runs.
+            from veros.core.isoneutral.isoneutral import isoneutral_diag_streamfunction_kernel
+
+            diagnostics["B1_gm"] = isoneutral_diag_streamfunction_kernel(
+                state).B1_gm[interior, interior, :]
 
         return (
             {
@@ -1204,6 +1227,29 @@ class VerosComponent:
                     " False), where `variables.psi` holds the surface"
                     " pressure; a streamfunction run has no sea surface"
                     " height to publish."
+                ),
+                **role_attrs("derived"),
+            }
+
+        # The GM streamfunction exists only where `step` emitted one.
+        if self.enable_gm_streamfunction:
+            dataset["B1_gm"] = (["time", "lon", "lat", "depth"], diagnostics["B1_gm"])
+            var_attrs["B1_gm"] = {
+                "long_name": "zonal component of the GM (eddy-induced) streamfunction",
+                "units": "m^2/s",
+                "comment": (
+                    "Veros' `B1_gm` (isoneutral_diag_streamfunction), on the"
+                    " V grid in the horizontal and at the top face of each"
+                    " `depth` cell in the vertical, labelled with the T-grid"
+                    " `lon`/`lat` and cell-centre `depth` like `v`. Its"
+                    " zonal integral, sum(B1_gm * dxt * cos(lat_u)), is the"
+                    " eddy-induced meridional overturning streamfunction on"
+                    " geopotentials in Veros' convention (Veros'"
+                    " `bolus_depth`), the counterpart of the Eulerian"
+                    " `vsf_depth` = bottom-up integral of `v`; their sum is"
+                    " the residual overturning. Present only for a run with"
+                    " GM skew diffusion (settings.enable_neutral_diffusion"
+                    " and settings.enable_skew_diffusion)."
                 ),
                 **role_attrs("derived"),
             }
