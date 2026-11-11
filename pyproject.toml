@@ -168,3 +168,5 @@ ignore = [
 # earlier cells (F821), cells are re-run and redefine things (F811), imports
 # follow prose (E402), and demo cells import things they only show (F401).
 "*.ipynb" = ["F821", "F811", "E402", "F401", "D107"]
+# A notebook in jupytext's percent format: its imports follow prose cells too.
+"examples/02_experimental/02_winton_seaice.py" = ["E402"]
