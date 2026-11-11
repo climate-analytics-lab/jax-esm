@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-esm-gke"
+version = "0.1.0"
+description = "Host-side GKE Autopilot launcher for JAX-ESM (jem)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "google-api-core>=2.19",
+    "google-auth>=2.29",
+    "google-cloud-build>=3.24",
+    "google-cloud-container>=2.49",
+    "google-cloud-storage>=2.16",
+    "kubernetes>=30.1",
+    "pyyaml>=6.0",
+]
+
+[tool.setuptools]
+# Explicit module list so flat-layout discovery does not collide on `launch_test.py`
+# when installing into a standard virtualenv (`pip install ./deploy/gke`).
+py-modules = ["launch"]
+
+[tool.uv]
+# `launch.py` is invoked directly via `uv run deploy/gke/launch.py`, so `uv`
+# only needs to sync the host-side dependencies without building a wheel.
+package = false

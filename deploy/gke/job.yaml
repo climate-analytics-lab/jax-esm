@@ -1,0 +1,112 @@
+# Example JEM batch Job for GKE Autopilot (Spot GPU).
+#
+# Can be submitted either via `deploy/gke/launch.py` (which builds one image and
+# fans out one or more Jobs) or directly with `envsubst` + `kubectl`:
+#
+#   export JEM_IMAGE=us-central1-docker.pkg.dev/fluid-script-453604-u5/jax-gcm/jax-gcm-runtime:latest
+#   export JEM_JOB_NAME=jem-earth-slab
+#   export JEM_KSA=jax-gcm-runner
+#   export JEM_ACCELERATOR=nvidia-l4
+#   export JEM_DATASET_BUCKET=climatebench
+#   export JEM_OUTPUT_BUCKET=fluid-script-453604-u5-jax-gcm-runs
+#   export JEM_OUTPUT_PREFIX=earth-slab
+#   export JEM_COMMAND='exec python -m jem.main +configuration=earth-slab coupled_run=short_run hydra.run.dir="$OUTPUT_DIR"'
+#   envsubst '$JEM_IMAGE $JEM_JOB_NAME $JEM_KSA $JEM_ACCELERATOR $JEM_DATASET_BUCKET $JEM_OUTPUT_BUCKET $JEM_OUTPUT_PREFIX $JEM_COMMAND' \
+#     < deploy/gke/job.yaml | kubectl -n jax-gcm apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JEM_JOB_NAME}
+  labels:
+    app: jem
+spec:
+  backoffLimit: 50
+  ttlSecondsAfterFinished: 86400
+  # Retry Spot preemptions (`DisruptionTarget`), while failing immediately on
+  # deterministic Python / Hydra / XLA errors (exit codes 1 and 2).
+  podFailurePolicy:
+    rules:
+    - action: Ignore
+      onPodConditions:
+      - type: DisruptionTarget
+        status: "True"
+    - action: FailJob
+      onExitCodes:
+        containerName: jem
+        operator: In
+        values: [1, 2]
+  template:
+    metadata:
+      labels:
+        app: jem
+        job-name: ${JEM_JOB_NAME}
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    spec:
+      serviceAccountName: ${JEM_KSA}
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-spot: "true"
+        cloud.google.com/gke-accelerator: ${JEM_ACCELERATOR}
+      containers:
+      - name: jem
+        image: ${JEM_IMAGE}
+        command: ["/bin/bash", "-c"]
+        args:
+        - '${JEM_COMMAND}'
+        env:
+        # Keep host CPU visible alongside CUDA so `jax.debug.callback` works.
+        - name: JAX_PLATFORMS
+          value: "cuda,cpu"
+        - name: XLA_PYTHON_CLIENT_MEM_FRACTION
+          value: "0.95"
+        # Disable POSIX byte-range file locking for NetCDF4 / HDF5 writes onto GCS
+        # FUSE (chunked output and Veros restarts), and keep Hugging Face's
+        # flock-based download locks on pod-local disk.
+        - name: HDF5_USE_FILE_LOCKING
+          value: "FALSE"
+        - name: HF_HOME
+          value: /tmp/huggingface
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: CLIMATEBENCH_DATA_DIR
+          value: /mnt/climatebench
+        - name: OUTPUT_DIR
+          value: /mnt/output/${JEM_OUTPUT_PREFIX}
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 30Gi
+          requests:
+            nvidia.com/gpu: "1"
+            cpu: "8"
+            memory: 32Gi
+            ephemeral-storage: 30Gi
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        - name: climatebench
+          mountPath: /mnt/climatebench
+          readOnly: true
+        - name: output
+          mountPath: /mnt/output
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      - name: climatebench
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          readOnly: true
+          volumeAttributes:
+            bucketName: ${JEM_DATASET_BUCKET}
+            mountOptions: implicit-dirs
+      - name: output
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          readOnly: false
+          volumeAttributes:
+            bucketName: ${JEM_OUTPUT_BUCKET}
