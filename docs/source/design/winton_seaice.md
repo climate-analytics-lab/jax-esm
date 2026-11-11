@@ -1,6 +1,6 @@
 # The Winton sea ice
 
-`WintonSeaiceModel` is a thermodynamic sea ice with a snow layer, two ice layers and a Hibler (1979) lead closure for the ice fraction. Its thermodynamics are a port of MITgcm's `pkg/thsice` (Winton 2000), checked against the Fortran at machine precision (`tests/reference/thsice`). The numerics, constants and sign conventions are in the module docstring of `jem.components.slab.winton_seaice_model`; this page is its coupling contract.
+`WintonSeaiceModel` is a thermodynamic sea ice with a snow layer, two ice layers and a Hibler (1979) lead closure for the ice fraction. Its thermodynamics are a port of MITgcm's `pkg/thsice` (Winton 2000), checked against the Fortran at machine precision (`tests/reference/thsice`). The numerics, constants and sign conventions are in the module docstring of `jem.components.slab.winton_seaice_model`; this page is its coupling contract. The component was written by Dhruv Balwada (jax-esm#114).
 
 ## What the ice reads
 

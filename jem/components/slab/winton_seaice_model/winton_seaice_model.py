@@ -59,6 +59,9 @@ downward); ``F_b`` is the ocean-to-ice basal flux (positive = ocean warms ice);
 ``ocean_heat_flux_up`` is positive upward (JEM slab-ocean convention).
 Temperatures inside the ice model are in degC; the JEM interface uses K.
 
+Author: Dhruv Balwada wrote this component (jax-esm#114); it was migrated to JEM's component API in
+jax-esm#142.
+
 Provenance and licence: the thermodynamic core is a port of MITgcm pkg/thsice (MIT License, Copyright (c)
 2018 MITgcm Developers and Contributors); see NOTICE in this package for the licence text and the references
 (Winton 2000; Hibler 1979; the transport follows Ferreira, Marshall and Rose 2011, Edwards and Marsh 2005 and

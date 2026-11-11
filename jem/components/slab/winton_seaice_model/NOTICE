@@ -1,3 +1,6 @@
+The Winton sea-ice component was written by Dhruv Balwada (jax-esm#114) and migrated to JEM's
+component API in jax-esm#142.
+
 The thermodynamic core of this package (winton_seaice_model.py: the implicit surface-temperature solve, the
 layer enthalpies, the thickness update with surface and basal melt, snowfall, flooding and layer
 re-equalisation) is a port to JAX of the MITgcm package pkg/thsice, routines THSICE_SOLVE4TEMP
