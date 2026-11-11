@@ -207,8 +207,9 @@ class SlabAtmosphereModel(SlabModelBase):
 
         # Land and ocean cells exchange heat with different surfaces, so each
         # bulk flux is computed everywhere and then kept only where its surface
-        # actually is. ``binary_mask == 1`` is land (jem CLAUDE.md).
-        land = self.grid.binary_mask == 1.0
+        # actually is. A cell with any land takes the land surface, the same
+        # cells the land model runs on (``binary_land_mask``).
+        land = self.grid.binary_land_mask == 1.0
 
         wind_speed = (
             state.mean_zonal_wind_velocity**2 + state.mean_meridional_wind_velocity**2

@@ -18,8 +18,8 @@
 #    validated setting of the notebook this configuration comes from -- at T31
 #    the slower relaxation lets the tropical SST drift before the seasonal
 #    cycle turns it around.
-#  - land=slab_speedy on the same file's `stl`/`snowc`/`soilw`, with
-#    tdland = 1 day rather than SPEEDY's 40: the land temperature anomaly runs
+#  - land=slab_speedy on the same file's `stl`/`snowc`/`soilw_am`, with
+#    temperature_relaxation_timescale = 1 day rather than SPEEDY's 40: the land temperature anomaly runs
 #    unrealistically hot and cold at this resolution (jax-esm#1), and the
 #    strong relaxation is the stopgap the notebook validated.
 #  - seaice=slab on the same file's `icec`: the relaxed ocean still reports
@@ -53,7 +53,7 @@ ocean:
 land:
   land_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
   params:
-    tdland: 86400.0             # 1 day, in seconds
+    temperature_relaxation_timescale: 86400.0   # 1 day, in seconds
 
 seaice:
   # The same file's `icec`, for the initial ice cover only; this component has

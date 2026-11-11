@@ -282,15 +282,9 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
             atm.model.coords.horizontal, atm.model.terrain.fmask
         )
     mask_file = _runner_only_value(node, "land_fraction_file")
-    # 0.5 rather than `from_scrip`'s own default, so that a cell counts as
-    # land on a SCRIP grid under the same rule as on the atmosphere's grid
-    # (`from_coords` defaults to 0.5); a coupled run that applied two
-    # different land/ocean splits either side of the interface would be
-    # exchanging fluxes with cells the other side thinks are dry.
     return SlabGrid.from_scrip(
         str(grid_file),
-        fractional_mask=None if mask_file is None else _land_fraction(mask_file),
-        threshold=0.5,
+        land_fraction=None if mask_file is None else _land_fraction(mask_file),
     )
 
 
