@@ -101,8 +101,10 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "mixed_layer_depth": "derived",
             "total_heat_flux": "derived",
             "ice_frazil_melt_energy": "derived",
-            "forcing_total_freshwater_flux": "forcing",
+            "forcing_precipitation": "forcing",
+            "forcing_evaporation": "forcing",
             "forcing_runoff": "forcing",
+            "forcing_sea_ice_freshwater_flux": "forcing",
             "forcing_q_flux": "forcing",
         },
         "lnd": {
@@ -164,7 +166,7 @@ def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
     forcing = set(map(str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "forcing"})))
     assert forcing == {
         "forcing_total_heat_flux",
-        "forcing_total_freshwater_flux",
+        "forcing_sea_ice_freshwater_flux",
         "forcing_runoff",
         "forcing_q_flux",
         "forcing_precipitation",

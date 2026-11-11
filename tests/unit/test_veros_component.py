@@ -161,7 +161,8 @@ def _labelling_diagnostics(component, n_records):
             "sea_surface_temperature", "sea_surface_salinity",
             "sea_surface_u", "sea_surface_v", "ice_frazil_melt_energy",
             "surface_air_temperature", "surface_taux", "surface_tauy",
-            "heat_flux", "freshwater_flux",
+            "heat_flux", "precipitation", "evaporation", "runoff",
+            "sea_ice_freshwater_flux",
         )
     })
     # `step` emits a sea surface height only where Veros carries one, so the
@@ -644,6 +645,28 @@ def test_step_advances_and_returns_a_stackable_carry(component, grid_shape):
 
 
 @pytest.mark.slow
+def test_the_water_channels_enter_the_salt_budget_with_their_signs(component):
+    """Precipitation, runoff and the sea ice's water freshen; evaporation salts.
+
+    Veros takes one surface salt forcing, so each inflow channel must act
+    exactly like negative evaporation, and a runoff must lower the salinity.
+    """
+    flux = jnp.full(component.horizontal_shape, 1e-4)
+
+    def salinity(**water):
+        carry = component.initialize()
+        carry = dict(carry, forcing=carry["forcing"].replace(**water))
+        _, diagnostics = component.step(carry, _coupling_time(0))
+        return np.asarray(diagnostics["sea_surface_salinity"])
+
+    leaving = salinity(evaporation=-flux)
+    for channel in ("precipitation", "runoff", "sea_ice_freshwater_flux"):
+        np.testing.assert_allclose(salinity(**{channel: flux}), leaving, rtol=0, atol=1e-12)
+    ocean = np.asarray(component.mask_T[:, :, -1]) == 1
+    assert np.all(leaving[ocean] < salinity()[ocean])
+
+
+@pytest.mark.slow
 def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     """Stacked per-step diagnostics label a time axis one record per step."""
     carry = component.initialize()
@@ -661,7 +684,8 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     assert dataset.forcing_heat_flux.attrs["units"] == "W/m^2"
     assert set(dataset.data_vars) >= {
         forcing_variable(name)
-        for name in ("heat_flux", "freshwater_flux", "surface_taux",
+        for name in ("heat_flux", "precipitation", "evaporation", "runoff",
+                     "sea_ice_freshwater_flux", "surface_taux",
                      "surface_tauy", "surface_air_temperature")
     }
     # ...and what the ocean computed keeps its plain name.

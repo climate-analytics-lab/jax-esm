@@ -139,12 +139,13 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
     # Surface water: the atmosphere's precipitation (positive downward) and
-    # evaporation (positive upward) fill and empty the land's soil bucket,
-    # and E - P (positive upward) drives the mixed layer's salinity.
+    # evaporation (positive upward) fill and empty the land's soil bucket and
+    # the mixed layer. Each water flux is its own row, so every row stays a
+    # plain copy and the ocean's budget can be read term by term.
     ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
     ("atm.derived.evaporation", "lnd.forcing.evaporation", "flux"),
-    ("atm.derived.total_freshwater_flux",
-     "ocn.forcing.total_freshwater_flux", "flux"),
+    ("atm.derived.precipitation", "ocn.forcing.precipitation", "flux"),
+    ("atm.derived.evaporation", "ocn.forcing.evaporation", "flux"),
     # The land's runoff, already routed to ocean cells by the land's own
     # `runoff_to_ocean_mapping` (by default spread evenly over the cells
     # with no land), enters the ocean as a field of its own.
@@ -166,8 +167,7 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: The standard coupling when the ocean is the **Veros** GCM
 #: (:class:`jem.components.veros_component.VerosComponent`), whose carry is
 #: laid out differently from a slab's: the surface heat flux arrives as
-#: ``forcing.heat_flux`` rather than ``forcing.total_heat_flux``, the ocean
-#: takes a freshwater flux as well, and the sea surface temperature is
+#: ``forcing.heat_flux`` rather than ``forcing.total_heat_flux``, and the sea surface temperature is
 #: published from ``derived`` (Veros' ``state`` is Veros' own ``VerosState``
 #: object, which is not a struct of exchangeable fields). The rows that do not
 #: involve the ocean are the same as :data:`STANDARD_EXCHANGES`'.
@@ -187,23 +187,20 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #:   grid's rotation) or not at all: a Veros ocean coupled through this
 #:   table alone is thermodynamically forced only.
 #: - **the "swamp" sea-ice insulation** the example drivers apply, which
-#:   masks the heat and freshwater fluxes wherever the surface has reached the
+#:   masks the heat and water fluxes wherever the surface has reached the
 #:   freezing point.
-#: - **the land's runoff.** Veros takes one freshwater flux,
-#:   ``forcing.freshwater_flux``, and a row copies one field into it, so
-#:   adding ``lnd.derived.runoff_to_ocean`` to the atmosphere's E - P needs
-#:   a field of its own in the Veros wrapper first. Until then a Veros
-#:   ocean does not receive the land's runoff.
 #:
 #: ``forcing.surface_air_temperature`` has no row either: Veros carries it
 #: only to write it back out as a diagnostic, and nothing in the integration
 #: reads it.
 VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux", "flux"),
-    ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
     ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
     ("atm.derived.evaporation", "lnd.forcing.evaporation", "flux"),
+    ("atm.derived.precipitation", "ocn.forcing.precipitation", "flux"),
+    ("atm.derived.evaporation", "ocn.forcing.evaporation", "flux"),
+    ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff", "flux"),
     ("ocn.derived.sea_surface_temperature",
      "seaice.forcing.sea_surface_temperature", "state"),
     ("ocn.derived.sea_surface_temperature",
@@ -699,7 +696,8 @@ def default_exchanges(
     ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
     ``atm.derived.precipitation``               ``lnd.forcing.precipitation``
     ``atm.derived.evaporation``                 ``lnd.forcing.evaporation``
-    ``atm.derived.total_freshwater_flux``       ``ocn.forcing.total_freshwater_flux``
+    ``atm.derived.precipitation``               ``ocn.forcing.precipitation``
+    ``atm.derived.evaporation``                 ``ocn.forcing.evaporation``
     ``lnd.derived.runoff_to_ocean``             ``ocn.forcing.runoff``
     ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
@@ -710,8 +708,13 @@ def default_exchanges(
     ==========================================  =======================================
 
     A row survives only if **both** its components are present, so an
-    aquaplanet without a land model gets the five rows that do not mention
-    ``lnd``, and an atmosphere/ocean pair gets three. The names are
+    aquaplanet without a land model gets the six rows that do not mention
+    ``lnd``, and an atmosphere/ocean pair gets four. No row fills the ocean's
+    ``forcing.sea_ice_freshwater_flux``: the slab sea ice has no water
+    budget, so the ocean takes the atmosphere's precipitation and evaporation
+    directly. A sea ice that has one takes them instead and passes the
+    result on through that channel, through an exchanger of the coupled
+    model's own. The names are
     :data:`STANDARD_COMPONENT_NAMES`; a component registered under any other
     name is not wired by this function.
 
@@ -721,7 +724,7 @@ def default_exchanges(
     a carry of its own needs its own rows, and there is one such table so far:
     a :class:`~jem.components.veros_component.VerosComponent` registered as
     ``"ocn"`` selects :data:`VEROS_OCEAN_EXCHANGES` instead, which is the same
-    wiring spelled in Veros' field names, without the land's runoff. That constant documents what it cannot express -- above all
+    wiring spelled in Veros' field names. That constant documents what it cannot express -- above all
     the wind stress, which is a drag law rather than a copy. The choice is
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
@@ -812,13 +815,6 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "lnd" in present:
-        logger.warning(
-            "A land component is coupled to a Veros ocean, which takes a "
-            "single freshwater flux, so the default coupling has no row for "
-            "the land's runoff: it does not reach the ocean. Write the "
-            "exchange out by hand (coupling.exchanger) to add it."
-        )
     return specs
 
 

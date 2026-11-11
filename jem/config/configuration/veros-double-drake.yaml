@@ -77,7 +77,7 @@
 #  - coupling.exchanged_forcing = [sea_surface_temperature], the one
 #    atmosphere-facing field `jem.fluxes.VerosExchange` writes (it also
 #    writes the ocean's own `surface_taux`/`surface_tauy`/`heat_flux`/
-#    `freshwater_flux`, but those are the ocean's forcing, not the
+#    `evaporation`/`precipitation`, but those are the ocean's forcing, not the
 #    atmosphere's, so `declare_exchanged_forcing` does not need them named).
 #    This has to be declared by hand because `VerosExchange` is a
 #    hand-written exchanger, not a `jem.exchangers.Exchange` table --

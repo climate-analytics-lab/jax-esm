@@ -138,8 +138,8 @@ components = {
 # below builds: the standard rows filtered to the components present.
 table = Exchange([
     ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-    ExchangeSpec("atm.derived.total_freshwater_flux",
-                 "ocn.forcing.total_freshwater_flux"),
+    ExchangeSpec("atm.derived.precipitation", "ocn.forcing.precipitation"),
+    ExchangeSpec("atm.derived.evaporation", "ocn.forcing.evaporation"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
@@ -195,7 +195,7 @@ land = SlabLandModel(
 
 `runoff_to_ocean_mapping` (an ESMF weight file or a function from field to field) routes the land's runoff to ocean cells on the land's own grid; without one the total runoff is spread evenly over the cells with no land. The land's `derived` section publishes `soil_water_availability` (what the atmosphere reads as `soilw_am`), `runoff_to_ocean`, `deep_drainage`, `soil_water_overflow`, `unmet_evaporation` and `surface_albedo`, and its state carries `soil_water_content` for the two layers and `vegetation_fraction`. Soil water starts at each layer's wilting point. {doc}`design/slab_land` explains the bucket.
 
-**Ocean.** The slab ocean also carries a sea surface salinity, driven by `forcing.total_freshwater_flux` (E - P, upward) and `forcing.runoff` (the land's runoff, into the ocean), both of which the standard coupling fills.
+**Ocean.** The slab ocean and `VerosComponent` take their water as four separate forcing fields, all kg m-2 s-1: `precipitation` (positive downward), `evaporation` (positive upward), `runoff` from the land and `sea_ice_freshwater_flux` (both positive into the ocean). The standard coupling fills the first three. A sea ice with a water budget, such as the Winton ice, takes the atmosphere's precipitation and evaporation itself and passes the result on through `sea_ice_freshwater_flux`, so where it is coupled the ocean's own precipitation and evaporation stay zero. The ocean's salinity uses their sum. The slab ocean carries a sea surface salinity for it.
 
 **Sea ice.** `SlabSeaiceModel` diagnoses its ice fraction from the ocean's SST alone, through a ramp from full cover at the freezing point to none 1.8 K above it. `WintonSeaiceModel` is a thermodynamic sea ice ported from MITgcm's thsice; the standard coupling does not supply what it reads yet, see {doc}`design/winton_seaice`.
 

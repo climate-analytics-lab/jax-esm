@@ -16,7 +16,6 @@ that named a field JCM does not have would still fail here.
 """
 
 import dataclasses
-import logging
 import sys
 import types
 
@@ -59,7 +58,8 @@ EXPECTED_SPECS = (
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"),
     ("atm.derived.precipitation", "lnd.forcing.precipitation"),
     ("atm.derived.evaporation", "lnd.forcing.evaporation"),
-    ("atm.derived.total_freshwater_flux", "ocn.forcing.total_freshwater_flux"),
+    ("atm.derived.precipitation", "ocn.forcing.precipitation"),
+    ("atm.derived.evaporation", "ocn.forcing.evaporation"),
     ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff"),
     ("ocn.state.sea_surface_temperature", "seaice.forcing.sea_surface_temperature"),
     ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
@@ -154,7 +154,8 @@ class StubAtmosphere:
 #: module under test, exactly as EXPECTED_SPECS is for the slab table.
 EXPECTED_VEROS_SPECS = (
     ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"),
-    ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux"),
+    ("atm.derived.precipitation", "ocn.forcing.precipitation"),
+    ("atm.derived.evaporation", "ocn.forcing.evaporation"),
     ("ocn.derived.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
 )
 
@@ -181,7 +182,10 @@ class _VerosLikeDerived:
 @tree_math.struct
 class _VerosLikeForcing:
     heat_flux: jnp.ndarray
-    freshwater_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+    runoff: jnp.ndarray
+    sea_ice_freshwater_flux: jnp.ndarray
     surface_taux: jnp.ndarray
     surface_tauy: jnp.ndarray
     surface_air_temperature: jnp.ndarray
@@ -210,7 +214,7 @@ class StubVerosOcean:
         return {
             "state": _VerosLikeState(zeros + 285.0),
             "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros),
-            "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros),
+            "forcing": _VerosLikeForcing(*([zeros] * 8)),
         }
 
     def step(self, carry, time):
@@ -222,7 +226,8 @@ class StubVerosOcean:
         temperature = (
             carry["state"].temperature
             - 1e-3 * forcing.heat_flux
-            - 1.0 * forcing.freshwater_flux
+            - 1.0 * (forcing.evaporation - forcing.precipitation - forcing.runoff
+                     - forcing.sea_ice_freshwater_flux)
         )
         new_carry = {
             "state": _VerosLikeState(temperature),
@@ -312,10 +317,10 @@ def test_default_exchanges_is_the_documented_table(components):
 @pytest.mark.parametrize(
     "present, expected",
     [
-        (("atm", "ocn"), 3),
-        (("atm", "ocn", "seaice"), 5),
-        (("atm", "ocn", "lnd"), 10),
-        (("atm", "ocn", "lnd", "seaice"), 12),
+        (("atm", "ocn"), 4),
+        (("atm", "ocn", "seaice"), 6),
+        (("atm", "ocn", "lnd"), 11),
+        (("atm", "ocn", "lnd", "seaice"), 13),
         (("ocn", "lnd"), 1),
     ],
 )
@@ -333,7 +338,8 @@ def test_default_exchanges_ignores_components_it_has_no_wiring_for():
     specs = default_exchanges(("atm", "ocn", "spring", "chemistry"))
     assert [(spec.src, spec.dst) for spec in specs] == [
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-        ("atm.derived.total_freshwater_flux", "ocn.forcing.total_freshwater_flux"),
+        ("atm.derived.precipitation", "ocn.forcing.precipitation"),
+        ("atm.derived.evaporation", "ocn.forcing.evaporation"),
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
     ]
 
@@ -389,10 +395,8 @@ def test_exchange_roundtrip(components):
     assert land_forcing.precipitation is incoming["atm"]["derived"].precipitation
     assert land_forcing.evaporation is incoming["atm"]["derived"].evaporation
     ocean_forcing = exchanged["ocn"]["forcing"]
-    assert (
-        ocean_forcing.total_freshwater_flux
-        is incoming["atm"]["derived"].total_freshwater_flux
-    )
+    assert ocean_forcing.precipitation is incoming["atm"]["derived"].precipitation
+    assert ocean_forcing.evaporation is incoming["atm"]["derived"].evaporation
     assert ocean_forcing.runoff is incoming["lnd"]["derived"].runoff_to_ocean
     atmosphere_forcing = exchanged["atm"]["forcing"]
     assert (
@@ -457,7 +461,8 @@ def readme_style_exchange(components, time):
 
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
         total_heat_flux=atm["derived"].total_heat_flux,
-        total_freshwater_flux=atm["derived"].total_freshwater_flux,
+        precipitation=atm["derived"].precipitation,
+        evaporation=atm["derived"].evaporation,
         runoff=lnd["derived"].runoff_to_ocean,
     ))
     lnd = dict(lnd, forcing=lnd["forcing"].replace(
@@ -580,8 +585,8 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
         ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"): None,
         ("atm.derived.precipitation", "lnd.forcing.precipitation"): None,
         ("atm.derived.evaporation", "lnd.forcing.evaporation"): None,
-        ("atm.derived.total_freshwater_flux",
-         "ocn.forcing.total_freshwater_flux"): "a2o_conserve",
+        ("atm.derived.precipitation", "ocn.forcing.precipitation"): "a2o_conserve",
+        ("atm.derived.evaporation", "ocn.forcing.evaporation"): "a2o_conserve",
         # The land is on the atmosphere's grid, so its runoff crosses to the
         # ocean's the way the atmosphere's fluxes do.
         ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff"): "a2o_conserve",
@@ -645,7 +650,8 @@ def test_the_veros_wiring_runs_a_coupled_trajectory(veros_components):
     ocean = after_two.components["ocn"]
     # The ocean received the atmosphere's fluxes ...
     assert not np.allclose(np.asarray(ocean["forcing"].heat_flux), 0.0)
-    assert not np.allclose(np.asarray(ocean["forcing"].freshwater_flux), 0.0)
+    assert not np.allclose(np.asarray(ocean["forcing"].precipitation), 0.0)
+    assert not np.allclose(np.asarray(ocean["forcing"].evaporation), 0.0)
     # ... and it is being cooled by them (the flux is upward positive).
     assert float(jnp.min(ocean["derived"].sea_surface_temperature)) < 285.0
     # The atmosphere is driven by the ocean's own temperature, one step back.
@@ -676,8 +682,8 @@ def test_the_veros_sst_is_regridded_as_a_state_though_it_comes_from_derived(
     )
     assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
         ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"): "a2o_conserve",
-        ("atm.derived.total_freshwater_flux",
-         "ocn.forcing.freshwater_flux"): "a2o_conserve",
+        ("atm.derived.precipitation", "ocn.forcing.precipitation"): "a2o_conserve",
+        ("atm.derived.evaporation", "ocn.forcing.evaporation"): "a2o_conserve",
         ("ocn.derived.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
     }
@@ -700,7 +706,8 @@ def test_names_alone_cannot_select_the_veros_table(veros_module):
     specs = default_exchanges(("atm", "ocn"))
     assert [spec.dst for spec in specs] == [
         "ocn.forcing.total_heat_flux",
-        "ocn.forcing.total_freshwater_flux",
+        "ocn.forcing.precipitation",
+        "ocn.forcing.evaporation",
         "atm.forcing.sea_surface_temperature",
     ]
 
@@ -718,15 +725,23 @@ def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components):
     ) in routes
 
 
-def test_land_with_a_veros_ocean_is_warned_about(veros_components, caplog):
-    """Veros takes one freshwater flux, so the land's runoff has no row.
+def test_a_veros_ocean_receives_the_lands_runoff(veros_components):
+    """The land's routed runoff reaches Veros' runoff forcing, one step later."""
+    components = dict(veros_components, lnd=SlabLandModel(half_land_grid()))
+    exchangers = default_exchangers(components)
+    routes = {(spec.src, spec.dst) for spec in exchangers["exchange"].specs}
+    assert ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff") in routes
+    exchangers["exchange"].validate(
+        {name: component.initialize() for name, component in components.items()}
+    )
 
-    A runoff that silently never reaches the ocean is the failure this
-    warning exists to prevent.
-    """
-    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
-        default_exchanges(dict(veros_components, lnd=object()))
-    assert "runoff" in caplog.text
+    coupler = build_coupler(components, exchangers)
+    after_one, _ = coupler.generate_trajectory_function(1)(coupler.initialize())
+    after_two, _ = coupler.generate_trajectory_function(2)(coupler.initialize())
+    np.testing.assert_array_equal(
+        np.asarray(after_two.components["ocn"]["forcing"].runoff),
+        np.asarray(after_one.components["lnd"]["derived"].runoff_to_ocean),
+    )
 
 
 def test_the_veros_table_is_the_documented_one():
@@ -756,7 +771,7 @@ def test_default_exchangers_names_its_regridders_after_their_keys():
     exchangers = default_exchangers(("atm", "ocn"), regrid={"a2o_flux": identity})
     exchange = exchangers["exchange"]
     assert exchange.regridders == {"a2o_flux": identity}
-    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", "a2o_flux", None]
+    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", "a2o_flux", "a2o_flux", None]
 
 
 def test_unknown_regrid_key_is_rejected():

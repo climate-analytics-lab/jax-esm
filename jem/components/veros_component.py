@@ -178,10 +178,22 @@ configure_veros_runtime()
 
 @tree_math.struct
 class VerosForcing:
-    """Surface forcing an exchanger writes for the ocean to integrate."""
+    """Surface forcing an exchanger writes for the ocean to integrate.
+
+    The water fluxes are kg m-2 s-1: ``precipitation`` positive downward,
+    ``evaporation`` positive upward, ``runoff`` (from the land) and
+    ``sea_ice_freshwater_flux`` (what a sea ice with a water budget passes on
+    from the atmosphere's E and P, in their place) positive into the
+    ocean. They are kept apart because each comes from a different
+    component or process, so every exchange row stays a plain copy. Veros'
+    single surface salt forcing takes their sum.
+    """
 
     heat_flux: jnp.ndarray
-    freshwater_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+    runoff: jnp.ndarray
+    sea_ice_freshwater_flux: jnp.ndarray
     surface_taux: jnp.ndarray
     surface_tauy: jnp.ndarray
     surface_air_temperature: jnp.ndarray
@@ -191,7 +203,10 @@ class VerosForcing:
         cls,
         shape,
         heat_flux=None,
-        freshwater_flux=None,
+        precipitation=None,
+        evaporation=None,
+        runoff=None,
+        sea_ice_freshwater_flux=None,
         surface_taux=None,
         surface_tauy=None,
         surface_air_temperature=None,
@@ -199,7 +214,10 @@ class VerosForcing:
         """Zero-filled forcing on a ``shape`` horizontal grid."""
         return cls(
             heat_flux if heat_flux is not None else jnp.zeros(shape),
-            freshwater_flux if freshwater_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
+            runoff if runoff is not None else jnp.zeros(shape),
+            sea_ice_freshwater_flux if sea_ice_freshwater_flux is not None else jnp.zeros(shape),
             surface_taux if surface_taux is not None else jnp.zeros(shape),
             surface_tauy if surface_tauy is not None else jnp.zeros(shape),
             surface_air_temperature if surface_air_temperature is not None else jnp.zeros(shape),
@@ -715,11 +733,16 @@ class VerosComponent:
                 -forcing.heat_flux * surface_mask
                 / SEAWATER_HEAT_CAPACITY / settings.rho_0,
             )
-            # Freshwater flux is positive upward, so a positive flux removes
-            # fresh water and must increase salinity.
+            # Net fresh water leaving the ocean, positive upward: removing
+            # fresh water increases salinity. Evaporation leaves; the
+            # precipitation, the runoff and the sea ice's water come in.
+            freshwater_out = (
+                forcing.evaporation - forcing.precipitation
+                - forcing.runoff - forcing.sea_ice_freshwater_flux
+            )
             variables.forc_salt_surface = update(
                 variables.forc_salt_surface, at[interior, interior],
-                forcing.freshwater_flux * surface_mask
+                freshwater_out * surface_mask
                 / settings.rho_0 * REFERENCE_SALINITY,
             )
 
@@ -767,7 +790,10 @@ class VerosComponent:
             "surface_taux": forcing.surface_taux,
             "surface_tauy": forcing.surface_tauy,
             "heat_flux": forcing.heat_flux,
-            "freshwater_flux": forcing.freshwater_flux,
+            "precipitation": forcing.precipitation,
+            "evaporation": forcing.evaporation,
+            "runoff": forcing.runoff,
+            "sea_ice_freshwater_flux": forcing.sea_ice_freshwater_flux,
         }
         # Under the linear free surface Veros solves for a surface pressure,
         # and the sea surface height that goes with it is that pressure over
@@ -1091,8 +1117,11 @@ class VerosComponent:
                     ["time", "lon", "lat"], diagnostics["surface_tauy"]),
                 forcing_variable("heat_flux"): (
                     ["time", "lon", "lat"], diagnostics["heat_flux"]),
-                forcing_variable("freshwater_flux"): (
-                    ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                **{
+                    forcing_variable(name): (["time", "lon", "lat"], diagnostics[name])
+                    for name in ("precipitation", "evaporation", "runoff",
+                                 "sea_ice_freshwater_flux")
+                },
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
                 "mask_U": (["lon", "lat", "depth"], self.mask_U),
@@ -1194,8 +1223,20 @@ class VerosComponent:
             forcing_variable("heat_flux"): {
                 "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2",
                 **role_attrs("forcing")},
-            forcing_variable("freshwater_flux"): {
-                "long_name": "net surface freshwater flux forcing (upward positive)",
+            forcing_variable("precipitation"): {
+                "long_name": "precipitation forcing (downward positive)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("evaporation"): {
+                "long_name": "evaporation forcing (upward positive)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("runoff"): {
+                "long_name": "runoff from the land (positive into the ocean)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("sea_ice_freshwater_flux"): {
+                "long_name": "water the sea ice gives the ocean (positive into the ocean)",
                 "units": "kg/m^2/s",
                 **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},

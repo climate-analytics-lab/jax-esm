@@ -213,14 +213,14 @@ class VerosExchange:
     """The exchanger a JCM atmosphere and a Veros ocean are coupled through.
 
     Reproduces the ``atm``/``ocn`` rows of
-    :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` -- the surface heat and
-    freshwater fluxes onto the ocean, the sea surface temperature back onto
-    the atmosphere -- and adds the two things that table cannot express: the
+    :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` -- the surface heat flux,
+    precipitation and evaporation onto the ocean, the sea surface temperature
+    back onto the atmosphere -- and adds the two things that table cannot express: the
     atmosphere's published surface wind stress, regridded onto the ocean grid
     and rotated into its local frame when ``rotation_grid_file`` is given
     (see the module docstring for why the ocean takes that stress rather than
     one of its own), and :func:`mask_fluxes_under_ice` applied to the heat
-    and freshwater fluxes. It is what makes a Veros configuration mechanically,
+    flux, the precipitation and the evaporation. It is what makes a Veros configuration mechanically,
     as well as thermodynamically, forced. It does not touch a land or
     sea-ice component -- :data:`VEROS_OCEAN_EXCHANGES`'s ``lnd``/``seaice``
     rows have no counterpart here, because the configurations this exchanger
@@ -236,7 +236,7 @@ class VerosExchange:
         Whatever :func:`jem.runners.build_regridders` produced -- named
         regridders, plus the role aliases :data:`jem.runners.REGRID_ROLES`
         gives them. Two roles are used: ``"a2o_flux"`` for the two stress
-        components and the two fluxes going onto the ocean grid (mapped
+        components and the three fluxes going onto the ocean grid (mapped
         **conservatively**, so a flux's budget -- momentum included --
         survives the interface), and ``"o2a_state"`` for the
         sea surface temperature coming back (mapped **bilinearly**, so it is
@@ -354,13 +354,15 @@ class VerosExchange:
         eastward_wind_stress = atm["derived"].eastward_wind_stress
         northward_wind_stress = atm["derived"].northward_wind_stress
         total_heat_flux = atm["derived"].total_heat_flux
-        total_freshwater_flux = atm["derived"].total_freshwater_flux
+        precipitation = atm["derived"].precipitation
+        evaporation = atm["derived"].evaporation
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
         ocean_forcing_dtypes = {
             "surface_taux": ocn["forcing"].surface_taux.dtype,
             "surface_tauy": ocn["forcing"].surface_tauy.dtype,
             "heat_flux": ocn["forcing"].heat_flux.dtype,
-            "freshwater_flux": ocn["forcing"].freshwater_flux.dtype,
+            "precipitation": ocn["forcing"].precipitation.dtype,
+            "evaporation": ocn["forcing"].evaporation.dtype,
         }
         atmosphere_sea_surface_temperature_dtype = (
             atm["forcing"].sea_surface_temperature.dtype
@@ -369,7 +371,7 @@ class VerosExchange:
         # Wind stress: regrid the atmosphere's stress onto the ocean grid,
         # then rotate it into that grid's local frame if it has one. The
         # stress is a flux of momentum, so it goes through the conservative
-        # a2o map like the heat and freshwater fluxes, which keeps the
+        # a2o map like the heat and water fluxes, which keeps the
         # area-integrated momentum the atmosphere lost equal to what the
         # ocean receives. Regridding *before* rotating (never the other way
         # around) is deliberate: JCM's own grid is unrotated, so the two
@@ -389,13 +391,23 @@ class VerosExchange:
             surface_taux, surface_tauy = rotate_vector(
                 surface_taux, surface_tauy, cos_angle, sin_angle)
 
-        # Heat and freshwater fluxes: regrid onto the ocean grid, then mask
+        # Heat and water fluxes: regrid onto the ocean grid, then mask
         # wherever the ocean the flux is destined for has reached the
         # freezing point.
-        heat_flux, freshwater_flux = mask_fluxes_under_ice(
+        # The ice insulates the ocean from both water fluxes, so each is
+        # masked where the heat flux is: the mask depends only on the heat
+        # flux and the SST.
+        heat_flux_on_ocean = self._a2o_flux(total_heat_flux)
+        heat_flux, evaporation = mask_fluxes_under_ice(
             ocean_sea_surface_temperature,
-            self._a2o_flux(total_heat_flux),
-            self._a2o_flux(total_freshwater_flux),
+            heat_flux_on_ocean,
+            self._a2o_flux(evaporation),
+            freezing_point=self.freezing_point,
+        )
+        _, precipitation = mask_fluxes_under_ice(
+            ocean_sea_surface_temperature,
+            heat_flux_on_ocean,
+            self._a2o_flux(precipitation),
             freezing_point=self.freezing_point,
         )
 
@@ -408,9 +420,8 @@ class VerosExchange:
             surface_taux=surface_taux.astype(ocean_forcing_dtypes["surface_taux"]),
             surface_tauy=surface_tauy.astype(ocean_forcing_dtypes["surface_tauy"]),
             heat_flux=heat_flux.astype(ocean_forcing_dtypes["heat_flux"]),
-            freshwater_flux=freshwater_flux.astype(
-                ocean_forcing_dtypes["freshwater_flux"]
-            ),
+            precipitation=precipitation.astype(ocean_forcing_dtypes["precipitation"]),
+            evaporation=evaporation.astype(ocean_forcing_dtypes["evaporation"]),
         ))
         sea_surface_temperature_on_atm = sea_surface_temperature_on_atm.astype(
             atmosphere_sea_surface_temperature_dtype

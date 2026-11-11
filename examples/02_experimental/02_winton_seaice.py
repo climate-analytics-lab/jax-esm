@@ -185,9 +185,13 @@ def exchanger(cpl_carry, time):
             seaice["derived"].ocean_heat_flux_up
             + seaice["derived"].ocean_frazil_heating
         ),
-        # The ice passes on the atmosphere's E - P, holds back the snow that
-        # landed on it until it melts, and adds the water ice growth takes.
-        total_freshwater_flux=seaice["derived"].ocean_freshwater_flux_up,
+        # The ice sits between the atmosphere and the ocean: it takes the
+        # atmosphere's E - P, holds back the snow that landed on it until it
+        # melts and adds the water ice growth takes, and what results is all
+        # the water the ocean receives. So the ocean's own precipitation and
+        # evaporation stay zero, and the ice's upward flux arrives through
+        # the sea-ice channel, which is positive into the ocean.
+        sea_ice_freshwater_flux=-seaice["derived"].ocean_freshwater_flux_up,
     ))
     seaice = dict(seaice, forcing=seaice["forcing"].replace(
         sea_surface_temperature=sea_surface_temperature,

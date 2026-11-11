@@ -87,7 +87,8 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
 | `atm.derived.precipitation` | `lnd.forcing.precipitation` |
 | `atm.derived.evaporation` | `lnd.forcing.evaporation` |
-| `atm.derived.total_freshwater_flux` | `ocn.forcing.total_freshwater_flux` |
+| `atm.derived.precipitation` | `ocn.forcing.precipitation` |
+| `atm.derived.evaporation` | `ocn.forcing.evaporation` |
 | `lnd.derived.runoff_to_ocean` | `ocn.forcing.runoff` |
 | `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
@@ -96,7 +97,7 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `lnd.state.snow_cover` | `atm.forcing.snowc_am` |
 | `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
-The water rows close the land's bucket and the ocean's salinity budget: the land is filled by precipitation (positive downward) and emptied by evaporation (positive upward), the slab ocean's salinity is driven by E − P (positive upward), and the land's runoff reaches the ocean as a field of its own, `ocn.forcing.runoff` (positive into the ocean), rather than being added to E − P. Keeping it separate keeps every row a plain copy, which is how CESM passes runoff too. The land routes its runoff to ocean cells itself, on its own grid, with its `runoff_to_ocean_mapping`; the row only moves the routed field. The land is on the atmosphere's grid, so in a mixed-grid run the runoff row takes the atmosphere-to-ocean flux regridder like the atmosphere's own fluxes.
+The water rows close the land's bucket and the ocean's salinity budget. Both surfaces take the atmosphere's precipitation (positive downward) and evaporation (positive upward) as separate fields, and the land's runoff reaches the ocean as a field of its own, `ocn.forcing.runoff` (positive into the ocean). An ocean has a fourth water channel, `forcing.sea_ice_freshwater_flux` (positive into the ocean), for a sea ice with a water budget: such an ice takes the atmosphere's precipitation and evaporation itself and passes on the result, in their place. The slab sea ice has no water budget, so no row fills it. We keep the water fluxes apart rather than summing them into one: each comes from a different component or process, so every row stays a plain copy, and the ocean's water budget can be read term by term. The ocean sums them in its own salinity equation. The land routes its runoff to ocean cells itself, on its own grid, with its `runoff_to_ocean_mapping`; the row only moves the routed field. The land is on the atmosphere's grid, so in a mixed-grid run the runoff row takes the atmosphere-to-ocean flux regridder like the atmosphere's own fluxes.
 
 A row survives only if **both** its components are present, so an aquaplanet with no land model gets the five rows that do not mention `lnd`, and an atmosphere/ocean pair gets three. The wiring is by *name* — `("atm",
 "ocn", "lnd", "seaice")` — and a component registered under a name that just
@@ -111,10 +112,8 @@ sea surface temperature from `derived` (its `state` is Veros' own
 `VerosState` object, not a struct of exchangeable fields), where a slab has
 `forcing.total_heat_flux` and `state.sea_surface_temperature`. So a
 `VerosComponent` registered as `"ocn"` selects `VEROS_OCEAN_EXCHANGES`
-instead — the same wiring in Veros' names, without the land's runoff:
-Veros takes a single freshwater flux, and a row copies one field into it, so
-the runoff would need a field of its own in the Veros wrapper first (a land
-coupled to a Veros ocean is warned about). The choice is made
+instead — the same wiring in Veros' names, with the same four water
+channels. The choice is made
 by *type*, which needs real components: called with a list of names,
 `default_exchanges` cannot tell one ocean from another and gives the slab
 table. The check looks the wrapper's module up in `sys.modules` rather than

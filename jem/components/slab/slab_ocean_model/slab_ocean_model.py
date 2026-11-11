@@ -67,28 +67,45 @@ class OceanForcing:
     ----------
     total_heat_flux : (n_lon, n_lat) array
         Net surface heat flux (W m-2, positive upward).
-    total_freshwater_flux : (n_lon, n_lat) array
-        Evaporation minus precipitation (kg m-2 s-1, positive upward).
+    precipitation : (n_lon, n_lat) array
+        Precipitation from the atmosphere (kg m-2 s-1, positive downward).
+    evaporation : (n_lon, n_lat) array
+        Evaporation into the atmosphere (kg m-2 s-1, positive upward).
     runoff : (n_lon, n_lat) array
-        Runoff from the land (kg m-2 s-1, positive into the ocean). It is a
-        field of its own rather than part of ``total_freshwater_flux``
-        because it comes from a different component than E - P.
+        Runoff from the land (kg m-2 s-1, positive into the ocean).
+    sea_ice_freshwater_flux : (n_lon, n_lat) array
+        Water a sea ice with a water budget passes on to the ocean under it
+        (kg m-2 s-1, positive into the ocean). Such an ice takes the
+        atmosphere's precipitation and evaporation itself and passes on what
+        results, so where it is coupled the ocean's own ``precipitation`` and
+        ``evaporation`` are not filled. Zero unless an exchanger fills it.
+
+        The four water fluxes are kept apart rather than summed into one:
+        each comes from a different component or process, so every exchange
+        row stays a plain copy, and a budget can be read term by term.
     q_flux : (n_lon, n_lat, 12) array
         Monthly prescribed ocean heat transport convergence (W m-2).
 
     """
 
     total_heat_flux: jnp.ndarray
-    total_freshwater_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
     runoff: jnp.ndarray
+    sea_ice_freshwater_flux: jnp.ndarray
     q_flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None, total_freshwater_flux=None, runoff=None, q_flux=None):
+    def zeros(
+        cls, shape, total_heat_flux=None, precipitation=None, evaporation=None,
+        runoff=None, sea_ice_freshwater_flux=None, q_flux=None,
+    ):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
-            total_freshwater_flux if total_freshwater_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
             runoff if runoff is not None else jnp.zeros(shape),
+            sea_ice_freshwater_flux if sea_ice_freshwater_flux is not None else jnp.zeros(shape),
             q_flux if q_flux is not None else jnp.zeros(shape + (12,)),
         )
 
@@ -529,9 +546,15 @@ class SlabOceanModel(SlabModelBase):
         )
 
         total_heat_flux = forcing.total_heat_flux
-        # Runoff is freshwater going into the ocean, so it counts against the
-        # upward-positive E - P.
-        total_freshwater_flux = forcing.total_freshwater_flux - forcing.runoff
+        # Net fresh water leaving the ocean, positive upward: evaporation,
+        # less the precipitation, the runoff and the sea ice's water, which
+        # all come in.
+        total_freshwater_flux = (
+            forcing.evaporation
+            - forcing.precipitation
+            - forcing.runoff
+            - forcing.sea_ice_freshwater_flux
+        )
         anomaly = state.sea_surface_temperature
         climatology_end = None
         time_factor = 1.0
@@ -721,13 +744,33 @@ class SlabOceanModel(SlabModelBase):
                     **role_attrs("derived"),
                 },
             ),
-            forcing_variable("total_freshwater_flux"): (
+            forcing_variable("precipitation"): (
                 dims,
-                diagnostics["forcing"].total_freshwater_flux,
+                diagnostics["forcing"].precipitation,
                 {
-                    "long_name": "Total freshwater flux",
+                    "long_name": "Precipitation",
+                    "units": "kg s-1 m-2",
+                    "positive": "downward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("evaporation"): (
+                dims,
+                diagnostics["forcing"].evaporation,
+                {
+                    "long_name": "Evaporation",
                     "units": "kg s-1 m-2",
                     "positive": "upward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("sea_ice_freshwater_flux"): (
+                dims,
+                diagnostics["forcing"].sea_ice_freshwater_flux,
+                {
+                    "long_name": "Water the sea ice gives the ocean",
+                    "units": "kg s-1 m-2",
+                    "positive": "into the ocean",
                     **role_attrs("forcing"),
                 },
             ),
