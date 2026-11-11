@@ -11,8 +11,8 @@ import tree_math
 from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
-    MASKED_SURFACE_TEMPERATURE,
     MASKED_SURFACE_SALINITY,
+    MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     forcing_variable,
     load_monthly_climatology,
@@ -335,7 +335,8 @@ class SlabOceanModel(SlabModelBase):
         self.q_flux_climatology = self._load(q_flux_file, "qflux")
 
         if self.sst_climatology is not None:
-            ocean = self.grid.binary_ocean_mask
+            # A boolean mask: `&` below does not take the float 0/1 mask.
+            ocean = self.grid.binary_ocean_mask == 1
             if bool(jnp.any(jnp.isnan(self.sst_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "

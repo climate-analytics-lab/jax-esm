@@ -112,7 +112,7 @@ sigma_bottom = float(atm_model.coords.vertical.centers[-1])
 
 
 def atmosphere_forcing_for_ice(atm_derived):
-    """The near-surface state and fluxes the Winton ice reads, in its units."""
+    """Return the near-surface state and fluxes the Winton ice reads, in its units."""
     physics = atm_derived.physics
     surface_flux = physics["_surface_flux"]
     humidity = physics["_humidity"]
@@ -137,20 +137,20 @@ def atmosphere_forcing_for_ice(atm_derived):
     # sub-freezing near-surface air is taken as snow.
     frozen_precipitation = jnp.where(
         air_temperature < jcm_constants.tmelt, atm_derived.precipitation, 0.0)
-    return dict(
-        rsds=physics["_shortwave_rad"].rsds,
-        rlds=surface_flux.rlds,
-        air_temperature=air_temperature,
-        air_specific_humidity=air_specific_humidity,
-        wind_speed=exchange.wind_speed,
-        normalized_surface_pressure=sigma_psa / sigma_bottom,
-        liquid_precipitation=atm_derived.precipitation - frozen_precipitation,
-        frozen_precipitation=frozen_precipitation,
+    return {
+        "rsds": physics["_shortwave_rad"].rsds,
+        "rlds": surface_flux.rlds,
+        "air_temperature": air_temperature,
+        "air_specific_humidity": air_specific_humidity,
+        "wind_speed": exchange.wind_speed,
+        "normalized_surface_pressure": sigma_psa / sigma_bottom,
+        "liquid_precipitation": atm_derived.precipitation - frozen_precipitation,
+        "frozen_precipitation": frozen_precipitation,
         # Downward positive. On an aquaplanet the grid mean is the sea flux.
-        atm_sea_heat_flux=-atm_derived.total_heat_flux,
+        "atm_sea_heat_flux": -atm_derived.total_heat_flux,
         # Upward positive; the ice passes E - P on to the ocean.
-        evaporation=atm_derived.evaporation,
-    )
+        "evaporation": atm_derived.evaporation,
+    }
 
 
 def exchanger(cpl_carry, time):
@@ -159,7 +159,6 @@ def exchanger(cpl_carry, time):
     seaice = cpl_carry["seaice"]
 
     sea_surface_temperature = ocn["state"].sea_surface_temperature
-    total_heat_flux = atm["derived"].total_heat_flux
     ice_fraction = seaice["state"].ice_fraction
     
     # The exchange runs before the atmosphere's first step, when everything

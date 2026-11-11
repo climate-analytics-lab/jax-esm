@@ -481,13 +481,13 @@ class SlabLandModel(SlabModelBase):
         # into the output for the albedo. The glacier fraction may be a map,
         # so every element is checked, and a map must be on the model grid
         # (anything else would broadcast or fail deep inside `step`).
-        for name in ("baresoil_albedo", "vegetation_albedo", "glacier_fraction"):
-            fraction = np.asarray(getattr(self.params, name), dtype=float)
+        for fraction_name in ("baresoil_albedo", "vegetation_albedo", "glacier_fraction"):
+            fraction = np.asarray(getattr(self.params, fraction_name), dtype=float)
             if not np.all(np.isfinite(fraction)) or not np.all(
                 (fraction >= 0.0) & (fraction <= 1.0)
             ):
                 raise ValueError(
-                    f"params.{name} must be finite and in [0, 1]; "
+                    f"params.{fraction_name} must be finite and in [0, 1]; "
                     f"got values in [{np.nanmin(fraction):g}, {np.nanmax(fraction):g}]."
                 )
         for map_name in ("glacier_fraction", "baresoil_albedo", "vegetation_albedo"):

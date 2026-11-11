@@ -802,7 +802,9 @@ class VerosComponent:
         if self.enable_gm_streamfunction:
             # Imported here: importing `veros.core` at module level would lock
             # Veros' runtime settings before `configure_veros_runtime` runs.
-            from veros.core.isoneutral.isoneutral import isoneutral_diag_streamfunction_kernel
+            from veros.core.isoneutral.isoneutral import (
+                isoneutral_diag_streamfunction_kernel,
+            )
 
             diagnostics["B1_gm"] = isoneutral_diag_streamfunction_kernel(
                 state).B1_gm[interior, interior, :]

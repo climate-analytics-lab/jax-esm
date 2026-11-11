@@ -148,7 +148,8 @@ class SlabSeaiceModel(SlabModelBase):
         self.ice_climatology = self._load(ice_clim_file, "icec")
 
         if self.ice_climatology is not None:
-            ocean = self.grid.binary_ocean_mask
+            # A boolean mask: `&` below does not take the float 0/1 mask.
+            ocean = self.grid.binary_ocean_mask == 1
             if bool(jnp.any(jnp.isnan(self.ice_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"Sea-ice climatology file \"{ice_clim_file!s:s}\" has NaNs over "
