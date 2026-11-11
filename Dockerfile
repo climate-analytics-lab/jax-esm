@@ -51,10 +51,14 @@ WORKDIR /app
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Install jax-gcm at JCM_SUPPORTED_REV (jem/components/jcm/contract.py) first,
-# since `jcm>=3.0.0rc1` is not published on PyPI.
+# since `jcm>=3.0.0rc1` is not published on PyPI. Keeping this before `COPY .`
+# caches jax-gcm's dependencies across local edits; when `launch.py
+# --jcm-source` stages a local checkout at `_deps/jax-gcm`, the step after
+# `COPY . /app` replaces `/opt/jax-gcm` with it.
 ARG JCM_REV=f378069090b127badbb158b06e2767f3be8f436c
 RUN git clone https://github.com/climate-analytics-lab/jax-gcm.git /opt/jax-gcm \
-    && git -C /opt/jax-gcm checkout "${JCM_REV}" \
+    && (git -C /opt/jax-gcm checkout "origin/${JCM_REV}" 2>/dev/null \
+        || git -C /opt/jax-gcm checkout "${JCM_REV}") \
     && pip install --no-cache-dir -e /opt/jax-gcm
 
 # Install the jittable Veros fork (matching .github/workflows/tests.yml) so
@@ -67,6 +71,12 @@ RUN git clone --branch "${VEROS_REF}" --single-branch \
 ENV PYTHONPATH="/opt/veros-jittable"
 
 COPY . /app
+RUN if [ -d /app/_deps/jax-gcm ]; then \
+        rm -rf /opt/jax-gcm \
+        && mv /app/_deps/jax-gcm /opt/jax-gcm \
+        && rmdir /app/_deps \
+        && pip install --no-cache-dir -e /opt/jax-gcm; \
+    fi
 ARG EXTRAS=""
 RUN pip install --no-cache-dir -e ".${EXTRAS:+[$EXTRAS]}"
 

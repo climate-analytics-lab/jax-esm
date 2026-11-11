@@ -165,6 +165,18 @@ class GkeLauncherTest(unittest.TestCase):
         (self.source / "veros.restart.h5").write_text("skip\n")
         (self.source / "run.ckpt").write_text("skip\n")
 
+        self.jcm_source = Path(self.temp.name) / "sibling-jax-gcm"
+        self.jcm_source.mkdir()
+        (self.jcm_source / "pyproject.toml").write_text("[project]\nname = 'jcm'\n")
+        (self.jcm_source / "jcm" / "data" / "bc").mkdir(parents=True)
+        (self.jcm_source / "jcm" / "__init__.py").write_text("__version__ = '3.1.0'\n")
+        (self.jcm_source / "jcm" / "data" / "bc" / "terrain.nc").write_text("bc\n")
+        (self.jcm_source / ".git").mkdir()
+        (self.jcm_source / ".git" / "HEAD").write_text("ref: refs/heads/dev\n")
+        (self.jcm_source / "outputs").mkdir()
+        (self.jcm_source / "outputs" / "state.nc").write_text("skip\n")
+        (self.jcm_source / "stray.nc").write_text("skip\n")
+
     @contextlib.contextmanager
     def _patched_cloud(self):
         """Patch cloud and Kubernetes clients on `launch` and record calls."""
@@ -178,11 +190,14 @@ class GkeLauncherTest(unittest.TestCase):
                 self.kwargs = kwargs
 
             def bucket(self, name: str):
+                def _upload(blob_name: str, path: str) -> None:
+                    with tarfile.open(path) as tar:
+                        members = sorted(tar.getnames())
+                    uploaded.append((name, blob_name, Path(path).stat().st_size, members))
+
                 return types.SimpleNamespace(
                     blob=lambda blob_name: types.SimpleNamespace(
-                        upload_from_filename=lambda path: uploaded.append(
-                            (name, blob_name, Path(path).stat().st_size)
-                        )
+                        upload_from_filename=lambda path: _upload(blob_name, path)
                     )
                 )
 
@@ -243,6 +258,31 @@ class GkeLauncherTest(unittest.TestCase):
                 sorted(tar.getnames()),
                 ["Dockerfile", "jem.py", "jem/data/terrain_JCM_T31.nc"],
             )
+
+    def test_archive_source_bundles_local_jcm_source(self):
+        """Stage `--jcm-source` under `_deps/jax-gcm/` with packaged `jcm/data` NetCDFs."""
+        archive = Path(self.temp.name) / "src-with-jcm.tar.gz"
+        launch.archive_source(self.source, archive, jcm_source=self.jcm_source)
+        with tarfile.open(archive) as tar:
+            self.assertEqual(
+                sorted(tar.getnames()),
+                [
+                    "Dockerfile",
+                    "_deps/jax-gcm/jcm/__init__.py",
+                    "_deps/jax-gcm/jcm/data/bc/terrain.nc",
+                    "_deps/jax-gcm/pyproject.toml",
+                    "jem.py",
+                    "jem/data/terrain_JCM_T31.nc",
+                ],
+            )
+
+    def test_archive_source_rejects_invalid_jcm_source(self):
+        """Fail fast when `--jcm-source` does not point at a `jax-gcm` checkout."""
+        bad_dir = Path(self.temp.name) / "not-jcm"
+        bad_dir.mkdir()
+        archive = Path(self.temp.name) / "bad.tar.gz"
+        with self.assertRaises(ValueError):
+            launch.archive_source(self.source, archive, jcm_source=bad_dir)
 
     def test_dry_run_multi_job_shares_single_image(self):
         """Render multiple Job manifests sharing one image URI with isolated output prefixes."""
@@ -341,6 +381,70 @@ class GkeLauncherTest(unittest.TestCase):
         build_args = list(rec.builds[0].build.steps[0].args)
         self.assertIn("--build-arg", build_args)
         self.assertIn("EXTRAS=plot", build_args)
+
+    def test_jcm_source_flag_uploads_staged_jcm_tree(self):
+        """Upload `_deps/jax-gcm/` in the Cloud Build source archive when `--jcm-source` is set."""
+        with self._patched_cloud() as rec, contextlib.redirect_stdout(io.StringIO()):
+            rc = launch.main(
+                [
+                    "--source",
+                    str(self.source),
+                    "--jcm-source",
+                    str(self.jcm_source),
+                    "--",
+                    "python -m jem.main +configuration=aquaplanet-slab",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(rec.uploaded), 1)
+        _, _, _, members = rec.uploaded[0]
+        self.assertIn("_deps/jax-gcm/jcm/__init__.py", members)
+        self.assertIn("_deps/jax-gcm/jcm/data/bc/terrain.nc", members)
+
+    def test_jcm_rev_flag_forwards_dockerfile_build_arg(self):
+        """Pass `--build-arg JCM_REV=...` to Cloud Build when `--jcm-rev` is provided."""
+        with self._patched_cloud() as rec, contextlib.redirect_stdout(io.StringIO()):
+            rc = launch.main(
+                [
+                    "--source",
+                    str(self.source),
+                    "--jcm-rev",
+                    "feat/custom-physics",
+                    "--",
+                    "python -m jem.main +configuration=aquaplanet-slab",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        build_args = list(rec.builds[0].build.steps[0].args)
+        self.assertIn("--build-arg", build_args)
+        self.assertIn("JCM_REV=feat/custom-physics", build_args)
+
+    def test_conflicting_jcm_flags_rejected(self):
+        """Reject `--jcm-source` combined with `--jcm-rev` or `--image`."""
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            launch.main(
+                [
+                    "--source",
+                    str(self.source),
+                    "--jcm-source",
+                    str(self.jcm_source),
+                    "--jcm-rev",
+                    "dev",
+                    "--",
+                    "python -m jem.main",
+                ]
+            )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            launch.main(
+                [
+                    "--image",
+                    "us-central1-docker.pkg.dev/proj/jax-gcm/jax-gcm-runtime:prebuilt",
+                    "--jcm-rev",
+                    "dev",
+                    "--",
+                    "python -m jem.main",
+                ]
+            )
 
     def test_separate_output_bucket_mounts_cache_bucket(self):
         """Mount the cluster's cache bucket separately when `--bucket` overrides output."""

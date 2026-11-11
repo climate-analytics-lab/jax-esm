@@ -105,34 +105,72 @@ SKIP_DIRS = {
     "multirun",
     "jax-gcm",
     "veros-jittable",
+    "_deps",
 }
 
 
-def archive_source(source: Path, archive_path: Path) -> None:
-    """Create a `.tar.gz` archive of `source` for Cloud Build."""
+def _add_tree_to_tar(
+    tar: tarfile.TarFile,
+    root: Path,
+    *,
+    arc_prefix: str = "",
+    data_nc_prefix: str,
+) -> None:
+    """Walk `root` and append source and packaged data files to `tar`."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if d not in SKIP_DIRS
+            and not d.endswith(".egg-info")
+            and not d.startswith("output_T")
+            and d != ".claude"
+        )
+        rel_dir = Path(dirpath).relative_to(root)
+        for name in sorted(filenames):
+            if name == "uv.lock" or name.endswith(
+                (".pyc", ".pyo", ".ckpt", ".msgpack", ".h5", ".log")
+            ):
+                continue
+            path = Path(dirpath) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel = (rel_dir / name).as_posix()
+            if name.endswith(".nc") and not rel.startswith(data_nc_prefix):
+                continue
+            arcname = f"{arc_prefix}/{rel}" if arc_prefix else rel
+            tar.add(path, arcname=arcname, recursive=False)
+
+
+def validate_jcm_source(jcm_source: Path) -> Path:
+    """Validate and resolve a local `jax-gcm` checkout path."""
+    resolved = jcm_source.resolve()
+    if not (resolved / "pyproject.toml").is_file() or not (resolved / "jcm").is_dir():
+        raise ValueError(
+            f"Expected a jax-gcm checkout (pyproject.toml and jcm/) in {jcm_source}"
+        )
+    return resolved
+
+
+def archive_source(
+    source: Path,
+    archive_path: Path,
+    *,
+    jcm_source: Path | None = None,
+) -> None:
+    """Create a `.tar.gz` archive of `source` (and optional `jcm_source`) for Cloud Build."""
     if not (source / "Dockerfile").is_file():
         raise ValueError(f"Expected Dockerfile in {source}")
+    resolved_jcm = validate_jcm_source(jcm_source) if jcm_source is not None else None
     with tarfile.open(archive_path, "w:gz") as tar:
-        for dirpath, dirnames, filenames in os.walk(source):
-            dirnames[:] = sorted(
-                d
-                for d in dirnames
-                if d not in SKIP_DIRS
-                and not d.endswith(".egg-info")
-                and not d.startswith("output_T")
-                and d != ".claude"
+        _add_tree_to_tar(tar, source, data_nc_prefix="jem/data/")
+        if resolved_jcm is not None:
+            _add_tree_to_tar(
+                tar,
+                resolved_jcm,
+                arc_prefix="_deps/jax-gcm",
+                data_nc_prefix="jcm/data/",
             )
-            rel_dir = Path(dirpath).relative_to(source)
-            for name in sorted(filenames):
-                if name == "uv.lock" or name.endswith((".pyc", ".pyo", ".ckpt", ".msgpack", ".h5", ".log")):
-                    continue
-                path = Path(dirpath) / name
-                if path.is_symlink() or not path.is_file():
-                    continue
-                rel = (rel_dir / name).as_posix()
-                if name.endswith(".nc") and not rel.startswith("jem/data/"):
-                    continue
-                tar.add(path, arcname=rel, recursive=False)
 
 
 def build_image(
@@ -143,11 +181,14 @@ def build_image(
     image_uri: str,
     run_id: str,
     extras: str,
+    *,
+    jcm_source: Path | None = None,
+    jcm_rev: str = "",
 ) -> None:
     """Upload the source archive and build the root `Dockerfile` once in Cloud Build."""
     with tempfile.TemporaryDirectory(prefix="jem-gke-") as tmp:
         archive = Path(tmp) / "source.tar.gz"
-        archive_source(source, archive)
+        archive_source(source, archive, jcm_source=jcm_source)
         obj_name = f"cloudbuild/{run_id}.tar.gz"
         storage_client.bucket(config["staging_bucket"]).blob(obj_name).upload_from_filename(
             str(archive)
@@ -161,6 +202,8 @@ def build_image(
         ),
     )
     build_args = ["build", "--platform", "linux/amd64"]
+    if jcm_rev:
+        build_args.extend(["--build-arg", f"JCM_REV={jcm_rev}"])
     if extras:
         build_args.extend(["--build-arg", f"EXTRAS={extras}"])
     build_args.extend(["-t", image_uri, "."])
@@ -397,6 +440,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=REPO_ROOT,
         help="Local jax-esm checkout to build (default: %(default)s)",
     )
+    parser.add_argument(
+        "--jcm-source",
+        type=Path,
+        help="Local jax-gcm checkout to bundle into the image instead of cloning JCM_REV",
+    )
+    parser.add_argument(
+        "--jcm-rev",
+        help="jax-gcm git ref (branch, tag, or commit SHA) for Dockerfile JCM_REV build arg",
+    )
     parser.add_argument("--wait", action="store_true", help="Wait for all launched Jobs to finish")
     parser.add_argument("--dry-run", action="store_true", help="Print Job YAML(s) without cloud calls")
     parser.add_argument(
@@ -418,6 +470,15 @@ def main(argv: list[str] | None = None) -> int:
         commands.append(trailing[0] if len(trailing) == 1 else shlex.join(trailing))
     if not commands:
         parser.error("Provide at least one `--cmd '...'` or a command after `--`.")
+
+    jcm_rev = args.jcm_rev.strip() if args.jcm_rev is not None else ""
+    if args.jcm_rev is not None and not jcm_rev:
+        parser.error("`--jcm-rev` must not be empty.")
+    if args.jcm_source is not None and jcm_rev:
+        parser.error("Pass at most one of `--jcm-source` and `--jcm-rev`.")
+    if args.image and (args.jcm_source is not None or jcm_rev):
+        parser.error("`--jcm-source` and `--jcm-rev` build a new image and cannot be combined with `--image`.")
+    jcm_source = validate_jcm_source(args.jcm_source) if args.jcm_source is not None else None
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     config = default_config(args.project, args.cluster)
@@ -464,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             image_uri,
             run_id,
             args.extras.strip(),
+            jcm_source=jcm_source,
+            jcm_rev=jcm_rev,
         )
 
     ns = config["namespace"]

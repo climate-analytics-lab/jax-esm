@@ -59,6 +59,8 @@ uv run deploy/gke/launch.py \
 Useful flags:
 
 - `--image <uri>` — skip Cloud Build and launch Jobs from an already-built image.
+- `--jcm-source <path>` — bundle a local `jax-gcm` checkout (e.g. `../jax-gcm`) into the Cloud Build image to test local uncommitted `jcm` changes.
+- `--jcm-rev <ref>` — build against a pushed `jax-gcm` branch, tag, or commit SHA instead of the default `JCM_REV` in `Dockerfile`.
 - `--gpu {l4,a100-40gb,a100-80gb}` — pick GKE Autopilot GPU class (default `l4` Spot; pass `--no-spot` for on-demand).
 - `--extras plot` — optional `pyproject.toml` extras passed to `Dockerfile` (default `""` for runtime-only).
 - `--dry-run` — print rendered `Job` YAML(s) locally without cloud API calls.
