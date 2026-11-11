@@ -23,7 +23,7 @@ coefficients as JCM's ``speedy_surface_flux``) from the atmosphere's near-surfac
 state, so ``F(Ts)`` and ``dF/dTs`` are available inside the implicit solve. JCM
 computes its sea-fraction fluxes at a single surface temperature, so the atmosphere
 sees the ice only through the sea-ice fraction this component publishes
-(``derived.ice_fraction``, which the default coupling copies to JCM's ``sice_am``);
+(``state.ice_fraction``, which the default coupling copies to JCM's ``sice_am``);
 it is not handed an ice-weighted surface temperature. ``derived.ocean_heat_flux_up``
 is the flux an ocean under ice should receive: the atmosphere's flux over the sea
 cell (``forcing.atm_sea_heat_flux``) minus what the ice absorbed, plus what the ice

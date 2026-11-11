@@ -23,7 +23,7 @@ climatology file.
 
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -315,7 +315,7 @@ class SlabLandModel(SlabModelBase):
         surface_albedo_varname_in_clim_file: str = "surface_albedo",
         glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
         vegetation_fraction_varname_in_clim_file: str = "vegetation_fraction",
-        runoff_to_ocean_mapping: str | None = None,
+        runoff_to_ocean_mapping: str | Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ):
         """Initialize the land surface model.
 
@@ -375,13 +375,15 @@ class SlabLandModel(SlabModelBase):
             Name of the glacier fraction variable in ``land_clim_file``.
         vegetation_fraction_varname_in_clim_file : str
             Name of the vegetation fraction variable in ``land_clim_file``.
-        runoff_to_ocean_mapping : str or a function
-            If it is a string, is a NetCDF file that can be used with
-            ESMFRegridder to rout runoff to ocean grid. If it is a function, 
-            it accepts river runoff and spits out the mapped flux. 
-            Either way the routing stays on the model's own grid: it takes
-            and returns a field of ``grid.shape``, moving the runoff from land
-            cells to ocean cells of that grid. ``derived.runoff_to_ocean``
+        runoff_to_ocean_mapping : str or callable, optional
+            How the runoff is routed to ocean cells. A string is an ESMF
+            weight file read by ``ESMFRegridder``; a callable takes the
+            runoff field and returns the routed one. Without one the total
+            runoff is spread evenly over the cells with no land (see
+            :meth:`_spread_runoff_over_ocean`). Either way the routing stays
+            on the model's own grid: it takes and returns a field of
+            ``grid.shape``, moving the runoff from land cells to ocean cells
+            of that grid. ``derived.runoff_to_ocean``
             is then on the same grid as everything else this model writes.
 
 
@@ -418,13 +420,14 @@ class SlabLandModel(SlabModelBase):
             "vegetation_fraction": vegetation_fraction_from_clim_file,
         }
 
+        self.runoff_to_ocean_mapping: Callable[[jnp.ndarray], jnp.ndarray]
         if runoff_to_ocean_mapping is None:
-            runoff_to_ocean_mapping = lambda runoff : runoff
+            self.runoff_to_ocean_mapping = self._spread_runoff_over_ocean
         elif isinstance(runoff_to_ocean_mapping, str):
             regridder = ESMFRegridder(runoff_to_ocean_mapping)
-            runoff_to_ocean_mapping = lambda runoff: regridder(runoff)
-
-        self.runoff_to_ocean_mapping = runoff_to_ocean_mapping
+            self.runoff_to_ocean_mapping = lambda runoff: regridder(runoff)
+        else:
+            self.runoff_to_ocean_mapping = runoff_to_ocean_mapping
 
         # The routing must stay on this grid: runoff_to_ocean is carried and
         # written out on it, and a field of another shape would change the
@@ -1088,6 +1091,24 @@ class SlabLandModel(SlabModelBase):
             jnp.stack( [abs_swa1,     abs_swa2],     axis=-1),
             jnp.stack( [max_abs_swa1, max_abs_swa2], axis=-1),
         )
+
+    def _spread_runoff_over_ocean(self, runoff: jnp.ndarray) -> jnp.ndarray:
+        """Spread the total runoff evenly over the cells with no land.
+
+        The area-weighted total is kept and handed out as one uniform flux
+        (kg m-2 s-1) over every cell whose land fraction is 0. Those cells
+        are all ocean, so the ocean there receives all of it; a coast cell
+        would share it with its land part. Cell areas are taken as
+        proportional to cos(latitude), which is exact on a regular lon/lat
+        grid and close on a Gaussian one. A grid with no all-ocean cell has
+        nowhere to send the runoff, and it is returned unrouted.
+        """
+        area = jnp.cos(self.grid.latitude_radian)
+        no_land = self.grid.land_fraction == 0.0
+        ocean_area = jnp.sum(jnp.where(no_land, area, 0.0))
+        total = jnp.sum(runoff * area)
+        spread = jnp.where(no_land, total / jnp.where(ocean_area > 0.0, ocean_area, 1.0), 0.0)
+        return jnp.where(ocean_area > 0.0, spread, runoff)
 
     def _idealized_land_temperature(self) -> jnp.ndarray:
         """Idealized monthly land surface temperature climatology.

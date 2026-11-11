@@ -61,15 +61,34 @@ class OceanState:
 
 @tree_math.struct
 class OceanForcing:
+    """Ocean forcing, filled by an exchanger.
+
+    Attributes
+    ----------
+    total_heat_flux : (n_lon, n_lat) array
+        Net surface heat flux (W m-2, positive upward).
+    total_freshwater_flux : (n_lon, n_lat) array
+        Evaporation minus precipitation (kg m-2 s-1, positive upward).
+    runoff : (n_lon, n_lat) array
+        Runoff from the land (kg m-2 s-1, positive into the ocean). It is a
+        field of its own rather than part of ``total_freshwater_flux``
+        because it comes from a different component than E - P.
+    q_flux : (n_lon, n_lat, 12) array
+        Monthly prescribed ocean heat transport convergence (W m-2).
+
+    """
+
     total_heat_flux: jnp.ndarray
     total_freshwater_flux: jnp.ndarray
+    runoff: jnp.ndarray
     q_flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None, total_freshwater_flux=None, q_flux=None):
+    def zeros(cls, shape, total_heat_flux=None, total_freshwater_flux=None, runoff=None, q_flux=None):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
             total_freshwater_flux if total_freshwater_flux is not None else jnp.zeros(shape),
+            runoff if runoff is not None else jnp.zeros(shape),
             q_flux if q_flux is not None else jnp.zeros(shape + (12,)),
         )
 
@@ -509,7 +528,9 @@ class SlabOceanModel(SlabModelBase):
         )
 
         total_heat_flux = forcing.total_heat_flux
-        total_freshwater_flux = forcing.total_freshwater_flux
+        # Runoff is freshwater going into the ocean, so it counts against the
+        # upward-positive E - P.
+        total_freshwater_flux = forcing.total_freshwater_flux - forcing.runoff
         anomaly = state.sea_surface_temperature
         climatology_end = None
         time_factor = 1.0
@@ -706,6 +727,16 @@ class SlabOceanModel(SlabModelBase):
                     "long_name": "Total freshwater flux",
                     "units": "kg s-1 m-2",
                     "positive": "upward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("runoff"): (
+                dims,
+                diagnostics["forcing"].runoff,
+                {
+                    "long_name": "Runoff from the land",
+                    "units": "kg s-1 m-2",
+                    "positive": "into the ocean",
                     **role_attrs("forcing"),
                 },
             ),

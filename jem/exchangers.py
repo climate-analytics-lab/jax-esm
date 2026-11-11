@@ -138,19 +138,29 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # the JCM wrapper) drives both surfaces.
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
-    # The mixed layer's freeze/melt potential (CESM's `frzmlt`) is what the
-    # sea ice grows and melts on.
-    ("ocn.derived.ice_frazil_melt_energy",
-     "seaice.forcing.ice_frazil_melt_energy", "flux"),
+    # Surface water: the atmosphere's precipitation (positive downward) and
+    # evaporation (positive upward) fill and empty the land's soil bucket,
+    # and E - P (positive upward) drives the mixed layer's salinity.
+    ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
+    ("atm.derived.evaporation", "lnd.forcing.evaporation", "flux"),
+    ("atm.derived.total_freshwater_flux",
+     "ocn.forcing.total_freshwater_flux", "flux"),
+    # The land's runoff, already routed to ocean cells by the land's own
+    # `runoff_to_ocean_mapping` (by default spread evenly over the cells
+    # with no land), enters the ocean as a field of its own.
+    ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff", "flux"),
+    # The slab sea ice is diagnosed from the sea surface temperature alone.
+    ("ocn.state.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
     # The surface state the atmosphere's surface-flux scheme reads. In an
     # uncoupled JCM run these are prescribed boundary conditions; here the
     # surface components provide them, under JCM's own field names.
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
+    ("lnd.state.snow_cover", "atm.forcing.snowc_am", "state"),
+    ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
 )
 
 #: The standard coupling when the ocean is the **Veros** GCM
@@ -179,10 +189,11 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: - **the "swamp" sea-ice insulation** the example drivers apply, which
 #:   masks the heat and freshwater fluxes wherever the surface has reached the
 #:   freezing point.
-#: - **the freeze/melt potential a slab sea ice runs on.** Veros publishes no
-#:   ``ice_frazil_melt_energy``, so there is no ``ocn`` to ``seaice`` row and
-#:   a sea-ice component coupled to a Veros ocean is not driven by it;
-#:   :func:`default_exchanges` warns when it sees that combination.
+#: - **the land's runoff.** Veros takes one freshwater flux,
+#:   ``forcing.freshwater_flux``, and a row copies one field into it, so
+#:   adding ``lnd.derived.runoff_to_ocean`` to the atmosphere's E - P needs
+#:   a field of its own in the Veros wrapper first. Until then a Veros
+#:   ocean does not receive the land's runoff.
 #:
 #: ``forcing.surface_air_temperature`` has no row either: Veros carries it
 #: only to write it back out as a diagnostic, and nothing in the integration
@@ -191,12 +202,16 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux", "flux"),
     ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
+    ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
+    ("atm.derived.evaporation", "lnd.forcing.evaporation", "flux"),
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
     ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
+    ("lnd.state.snow_cover", "atm.forcing.snowc_am", "state"),
+    ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
 )
 
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
@@ -682,17 +697,21 @@ def default_exchanges(
     ==========================================  =======================================
     ``atm.derived.total_heat_flux``             ``ocn.forcing.total_heat_flux``
     ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
-    ``ocn.derived.ice_frazil_melt_energy``      ``seaice.forcing.ice_frazil_melt_energy``
+    ``atm.derived.precipitation``               ``lnd.forcing.precipitation``
+    ``atm.derived.evaporation``                 ``lnd.forcing.evaporation``
+    ``atm.derived.total_freshwater_flux``       ``ocn.forcing.total_freshwater_flux``
+    ``lnd.derived.runoff_to_ocean``             ``ocn.forcing.runoff``
+    ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
-    ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
+    ``seaice.state.ice_fraction``               ``atm.forcing.sice_am``
     ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
-    ``lnd.state.snowc``                         ``atm.forcing.snowc_am``
-    ``lnd.state.soilw``                         ``atm.forcing.soilw_am``
+    ``lnd.state.snow_cover``                    ``atm.forcing.snowc_am``
+    ``lnd.derived.soil_water_availability``     ``atm.forcing.soilw_am``
     ==========================================  =======================================
 
     A row survives only if **both** its components are present, so an
-    aquaplanet without a land model gets the four rows that do not mention
-    ``lnd``, and an atmosphere/ocean pair gets two. The names are
+    aquaplanet without a land model gets the five rows that do not mention
+    ``lnd``, and an atmosphere/ocean pair gets three. The names are
     :data:`STANDARD_COMPONENT_NAMES`; a component registered under any other
     name is not wired by this function.
 
@@ -702,8 +721,7 @@ def default_exchanges(
     a carry of its own needs its own rows, and there is one such table so far:
     a :class:`~jem.components.veros_component.VerosComponent` registered as
     ``"ocn"`` selects :data:`VEROS_OCEAN_EXCHANGES` instead, which is the same
-    wiring spelled in Veros' field names and with the freshwater flux Veros
-    also takes. That constant documents what it cannot express -- above all
+    wiring spelled in Veros' field names, without the land's runoff. That constant documents what it cannot express -- above all
     the wind stress, which is a drag law rather than a copy. The choice is
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
@@ -711,8 +729,9 @@ def default_exchanges(
     Regridding
     ----------
     ``regrid`` names a regridder for the specs that cross the
-    atmosphere/ocean-grid boundary -- the ones between ``atm`` and a
-    component of :data:`OCEAN_GRID_COMPONENTS`. Its keys are
+    atmosphere/ocean-grid boundary -- the ones between a component on the
+    atmosphere's grid (``atm``, ``lnd``) and one of
+    :data:`OCEAN_GRID_COMPONENTS`. Its keys are
     ``"<direction>_<kind>"``, or a bare ``"<direction>"`` covering both
     kinds, where
 
@@ -720,20 +739,22 @@ def default_exchanges(
     - *kind* is the row's own ``"flux"``/``"state"`` (:data:`KINDS`).
 
     That split is the one the mixed-grid example makes by hand: extensive
-    quantities -- heat fluxes, the freeze/melt energy, an areal ice fraction
+    quantities -- heat and water fluxes, the runoff, an areal ice fraction
     -- are regridded conservatively to keep their budgets, while an intensive
     state variable such as the sea surface temperature is interpolated
     bilinearly. So the mixed-grid configuration is::
 
         default_exchanges(components, regrid={
-            "a2o_flux": "a2o_conserve",   # surface heat flux onto the ocean grid
+            "a2o_flux": "a2o_conserve",   # surface fluxes and runoff onto the ocean grid
             "o2a_flux": "o2a_conserve",   # ice fraction onto the atmosphere grid
             "o2a_state": "o2a_bilinear",  # SST onto the atmosphere grid
         })
 
     and a configuration with one regridder per direction is
     ``regrid={"a2o": "a2o", "o2a": "o2a"}``. Rows that stay on one grid
-    (``ocn`` to ``seaice``, ``atm`` to ``lnd``) never get a regridder.
+    (``ocn`` to ``seaice``, ``atm`` to ``lnd``) never get a regridder. The
+    land's runoff goes from the atmosphere's grid to the ocean's, so it takes
+    the ``a2o`` flux regridder like the atmosphere's fluxes do.
 
     Parameters
     ----------
@@ -791,14 +812,12 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
+    if table is VEROS_OCEAN_EXCHANGES and "lnd" in present:
         logger.warning(
-            "A sea-ice component is coupled to a Veros ocean, which publishes "
-            "no freeze/melt potential (`ice_frazil_melt_energy`), so the "
-            "default coupling has no row that drives it: the ice will only "
-            "respond to what it computes itself. Write the exchange out by "
-            "hand (coupling.exchanger) if the ice is meant to grow on the "
-            "ocean's heat budget."
+            "A land component is coupled to a Veros ocean, which takes a "
+            "single freshwater flux, so the default coupling has no row for "
+            "the land's runoff: it does not reach the ocean. Write the "
+            "exchange out by hand (coupling.exchanger) to add it."
         )
     return specs
 
@@ -829,10 +848,16 @@ def _exchange_table(
 
 
 def _grid_direction(src_component: str, dst_component: str) -> str | None:
-    """Return ``"a2o"``/``"o2a"`` if a spec crosses the grid boundary, else None."""
-    if src_component == "atm" and dst_component in OCEAN_GRID_COMPONENTS:
+    """Return ``"a2o"``/``"o2a"`` if a spec crosses the grid boundary, else None.
+
+    Every component outside :data:`OCEAN_GRID_COMPONENTS` is on the
+    atmosphere's grid, the land included.
+    """
+    src_on_ocean_grid = src_component in OCEAN_GRID_COMPONENTS
+    dst_on_ocean_grid = dst_component in OCEAN_GRID_COMPONENTS
+    if not src_on_ocean_grid and dst_on_ocean_grid:
         return "a2o"
-    if src_component in OCEAN_GRID_COMPONENTS and dst_component == "atm":
+    if src_on_ocean_grid and not dst_on_ocean_grid:
         return "o2a"
     return None
 
