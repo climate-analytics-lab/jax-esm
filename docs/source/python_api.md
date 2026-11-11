@@ -197,7 +197,7 @@ land = SlabLandModel(
 
 **Ocean.** The slab ocean and `VerosComponent` take their water as four separate forcing fields, all kg m-2 s-1: `precipitation` (positive downward), `evaporation` (positive upward), `runoff` from the land and `sea_ice_freshwater_flux` (both positive into the ocean). The standard coupling fills the first three. A sea ice with a water budget, such as the Winton ice, takes the atmosphere's precipitation and evaporation itself and passes the result on through `sea_ice_freshwater_flux`, so where it is coupled the ocean's own precipitation and evaporation stay zero. The ocean's salinity uses their sum. The slab ocean carries a sea surface salinity for it.
 
-**Sea ice.** `SlabSeaiceModel` diagnoses its ice fraction from the ocean's SST alone, through a ramp from full cover at the freezing point to none 1.8 K above it. `WintonSeaiceModel` is a thermodynamic sea ice ported from MITgcm's thsice; the standard coupling does not supply what it reads yet, see {doc}`design/winton_seaice`.
+**Sea ice.** `SlabSeaiceModel` diagnoses its ice fraction from the ocean's SST alone, through a ramp from full cover at the freezing point to none 1.8 K above it. `WintonSeaiceModel` is a thermodynamic sea ice ported from MITgcm's thsice. `default_exchangers` gives it the ocean's SST and freeze/melt potential and warns about the atmospheric forcing it cannot supply; `default_exchangers(..., require_complete=True)` raises instead when an atmosphere is present. See {doc}`design/winton_seaice`.
 
 ## Parameters: process and initial condition
 
