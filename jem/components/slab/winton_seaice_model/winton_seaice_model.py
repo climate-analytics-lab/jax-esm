@@ -28,11 +28,11 @@ it is not handed an ice-weighted surface temperature. ``derived.ocean_heat_flux_
 is the flux an ocean under ice should receive: the atmosphere's flux over the sea
 cell (``forcing.atm_sea_heat_flux``) minus what the ice absorbed, plus what the ice
 passes down (transmitted shortwave, melt surplus), minus the basal heat the ice
-draws, minus the latent heat of the frazil ice formed from the ocean's freezing
-potential (``derived.ocean_frazil_heating``), which goes back to the ocean so the
-sub-freezing water it came from warms back to the freezing point. That last term
-assumes an ocean that does not clamp its own temperature at freezing (Veros); an
-ocean that clamps has already removed the deficit, and would count it twice.
+draws. It does not include the latent heat of the frazil ice formed from the
+ocean's freezing potential: the ocean is expected to clamp its own temperature at
+freezing, as JEM's slab ocean and Veros wrapper do, and the heat that clamp adds
+is that latent heat. Returning it here as well would count it twice.
+``derived.ocean_frazil_heating`` reports it as a diagnostic.
 ``derived.ocean_freshwater_flux_up`` is built the same way: the atmosphere's
 evaporation minus its rain and snow over the sea cell (``forcing.evaporation``,
 ``forcing.liquid_precipitation``, ``forcing.frozen_precipitation``), plus the snow
@@ -456,7 +456,7 @@ class WintonDerived:
     ice_albedo: jnp.ndarray                 # effective albedo of the ice-covered part (snow-aware)
     ice_energy_tendency: jnp.ndarray        # W/m2 per cell area; THERMODYNAMIC rate of change of the ice+snow enthalpy (relative to water at 0 C), i.e. the exchange with ocean and atmosphere; transport is excluded
     ice_energy_transport: jnp.ndarray       # W/m2 per cell area; change of ice+snow enthalpy by transport convergence (zero without transport)
-    ocean_frazil_heating: jnp.ndarray       # W/m2; latent heat of the frazil ice formed from the ocean's freezing potential, returned to the ocean in ocean_heat_flux_up
+    ocean_frazil_heating: jnp.ndarray       # W/m2; latent heat of the frazil ice formed from the ocean's freezing potential, which the ocean's clamp at freezing has already supplied; a diagnostic, not part of ocean_heat_flux_up
     
     @classmethod
     def zeros(cls, shape, **overrides):
@@ -732,7 +732,9 @@ class WintonSeaiceModel(SlabModelBase):
         ocean_frazil_heating = jnp.maximum(forcing.ice_frazil_melt_energy, 0.0) / coupling_dt
         snowfall_on_ice = intercepted * n / coupling_dt
 
-        ocean_heat_flux_up = q_up - ocean_frazil_heating
+        # The frazil latent heat is not added: the ocean's clamp at freezing has
+        # already supplied it (see the module docstring).
+        ocean_heat_flux_up = q_up
         # the atmosphere's E - P over the cell (rain and snow), with the snow that landed on ice held back from the ocean and the
         # water ice growth takes added; cells this model does not integrate (land) carry no ocean flux
         ocean_freshwater_flux_up = jnp.where(ocean, fc.evaporation - fc.liquid_precipitation - fc.frozen_precipitation + snowfall_on_ice + fw_up, 0.0)
@@ -816,14 +818,14 @@ class WintonSeaiceModel(SlabModelBase):
             "ice_volume": (dims, d.ice_volume, {"units": "m", "long_name": "cell-mean ice thickness", **derived}),
             "snow_volume": (dims, d.snow_volume, {"units": "m", "long_name": "cell-mean snow thickness", **derived}),
             "effective_sea_surface_temperature": (dims, d.effective_sea_surface_temperature, {"units": "K", "long_name": "ice-fraction-weighted sea surface temperature", **derived}),
-            "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2", "long_name": "heat flux out of the ocean: atmosphere-ocean flux through the ice and leads, minus the returned frazil latent heat", "positive": "upward", **derived}),
+            "ocean_heat_flux_up": (dims, d.ocean_heat_flux_up, {"units": "W m-2", "long_name": "heat flux out of the ocean: atmosphere-ocean flux through the ice and leads", "positive": "upward", **derived}),
             "surface_melt_flux": (dims, d.surface_melt_flux, {"units": "W m-2", "long_name": "surface melt energy flux of the ice-covered part", **derived}),
             "ocean_freshwater_flux_up": (dims, d.ocean_freshwater_flux_up, {"units": "kg m-2 s-1", "long_name": "freshwater flux out of the ocean: atmosphere E - P, plus snow held on ice, plus ice growth", "positive": "upward", **derived}),
             "snowfall_on_ice": (dims, d.snowfall_on_ice, {"units": "kg m-2 s-1", "long_name": "snowfall intercepted by sea ice, kept from the ocean", **derived}),
             "ice_albedo": (dims, d.ice_albedo, {"units": "1", "long_name": "effective albedo of the ice-covered part", **derived}),
             "ice_energy_tendency": (dims, d.ice_energy_tendency, {"units": "W m-2", "long_name": "thermodynamic d/dt of ice+snow enthalpy per cell area (exchange with ocean and atmosphere; transport excluded)", **derived}),
             "ice_energy_transport": (dims, d.ice_energy_transport, {"units": "W m-2", "long_name": "d/dt of ice+snow enthalpy per cell area by transport convergence", **derived}),
-            "ocean_frazil_heating": (dims, d.ocean_frazil_heating, {"units": "W m-2", "long_name": "latent heat of frazil ice returned to the ocean", **derived}),
+            "ocean_frazil_heating": (dims, d.ocean_frazil_heating, {"units": "W m-2", "long_name": "latent heat of the frazil ice formed, supplied by the ocean's clamp at freezing", **derived}),
             "basal_growth_flux": (dims, d.basal_growth_flux, {"units": "W m-2", "long_name": "energy flux out of the ice base of the ice-covered part (positive grows ice)", **derived}),
             "ice_atm_heat_flux": (dims, d.ice_atm_heat_flux, {"units": "W m-2", "long_name": "heat flux from the atmosphere into the ice-covered part", "positive": "downward", **derived}),
             forcing_variable("ice_frazil_melt_energy"): (dims, fc.ice_frazil_melt_energy, {"units": "J m-2", "long_name": "Freeze/melt potential (frzmlt) this component was forced with: positive forms ice, negative melts ice", **forcing}),

@@ -177,14 +177,9 @@ def exchanger(cpl_carry, time):
         sea_ice_temperature=seaice["derived"].ice_surface_temperature_K,
     ))
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
-        # The ice returns the frazil latent heat in ocean_heat_flux_up, for an
-        # ocean that stays below freezing until that heat arrives. The slab
-        # ocean clamps at freezing and has already removed the deficit, so the
-        # returned heat is taken back out here, or it would be counted twice.
-        total_heat_flux=(
-            seaice["derived"].ocean_heat_flux_up
-            + seaice["derived"].ocean_frazil_heating
-        ),
+        # The slab ocean clamps at freezing, which supplies the frazil latent
+        # heat, so the ice's flux, which leaves it out, is used as it is.
+        total_heat_flux=seaice["derived"].ocean_heat_flux_up,
         # The ice sits between the atmosphere and the ocean: it takes the
         # atmosphere's E - P, holds back the snow that landed on it until it
         # melts and adds the water ice growth takes, and what results is all

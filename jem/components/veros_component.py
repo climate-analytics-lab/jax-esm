@@ -582,11 +582,12 @@ class VerosComponent:
         )
         # Freeze/melt potential of the top cell, in the slab ocean's
         # convention (CESM `frzmlt`, J m-2): positive is the heat deficit
-        # below freezing, negative the heat held above it. It is reported
-        # only -- the top cell is not reset to freezing -- so the heat of any
-        # ice formed from it has to reach the ocean through the sea ice's
-        # heat flux. Computed before the land substitution below, with the
-        # density and heat capacity Veros' own surface heat flux uses.
+        # below freezing, negative the heat held above it. `step` reads it
+        # before it clamps the top cell at freezing, so a positive value is
+        # the heat that clamp adds back, the latent heat of the frazil ice a
+        # sea ice forms from it. Computed before the land substitution below,
+        # with the density and heat capacity Veros' own surface heat flux
+        # uses.
         surface_mask = variables.maskT[interior, interior, -1]
         ice_frazil_melt_energy = (
             (constants.seawater_freezing_point_K - sea_surface_temperature)
@@ -759,7 +760,30 @@ class VerosComponent:
         variables = state.variables
         tau = variables.tau
 
-        derived = self._derived_fields(state)
+        # The top cell is clamped at the freezing point once per coupling
+        # step, as the slab ocean's mixed layer is: seawater does not stay
+        # below freezing, because the frazil ice that forms releases latent
+        # heat that warms it back. The heat the clamp adds is the positive
+        # part of the freeze/melt potential read just before it, which a sea
+        # ice turns into ice without returning any heat, so it is counted
+        # once. The clamp is at the current time level, `tau`: Veros steps
+        # the temperature from `temp[tau]` and the tendencies at `tau` and
+        # `taum1`, so the next step starts from the clamped value.
+        freeze_melt_potential = self._derived_fields(state).ice_frazil_melt_energy
+        freezing_point_celsius = constants.seawater_freezing_point_K - 273.15
+        with variables.unlock():
+            top = variables.temp[interior, interior, -1, tau]
+            ocean_top = variables.maskT[interior, interior, -1] > 0
+            variables.temp = update(
+                variables.temp, at[interior, interior, -1, tau],
+                npx.where(ocean_top, npx.maximum(top, freezing_point_celsius), top),
+            )
+
+        clamped = self._derived_fields(state)
+        derived = VerosDerived(  # type: ignore[call-arg]
+            clamped.sea_surface_temperature, clamped.sea_surface_u,
+            clamped.sea_surface_v, freeze_melt_potential,
+        )
         sea_surface_temperature = derived.sea_surface_temperature
         sea_surface_u = derived.sea_surface_u
         sea_surface_v = derived.sea_surface_v
@@ -1204,7 +1228,7 @@ class VerosComponent:
             "ice_frazil_melt_energy": {
                 "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
                 "units": "J m-2",
-                "comment": "of the top cell; reported only, the top cell is not reset to freezing",
+                "comment": "of the top cell, read before it is clamped at freezing; positive is the heat the clamp added",
                 **role_attrs("derived"),
             },
             "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",

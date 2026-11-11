@@ -667,6 +667,35 @@ def test_the_water_channels_enter_the_salt_budget_with_their_signs(component):
 
 
 @pytest.mark.slow
+def test_the_top_cell_is_clamped_at_freezing_and_its_deficit_reported_once(component):
+    """A cooling step ends at the freezing point, and the next does not report it again.
+
+    The clamp's heat is the frazil latent heat a sea ice turns into ice, so it
+    must be reported in the step that created the deficit and never again.
+    """
+    from jem import constants
+
+    ocean = np.asarray(component.mask_T[:, :, -1]) == 1
+    carry = component.initialize()
+    carry = dict(carry, forcing=carry["forcing"].replace(
+        heat_flux=jnp.full(component.horizontal_shape, 5.0e4)))
+    carry, cooled = component.step(carry, _coupling_time(0))
+
+    sst = np.asarray(cooled["sea_surface_temperature"])
+    energy = np.asarray(cooled["ice_frazil_melt_energy"])
+    freezing = constants.seawater_freezing_point_K
+    assert np.all(sst[ocean] >= freezing - 1e-6)
+    froze = ocean & (energy > 0.0)
+    assert froze.any()
+    np.testing.assert_allclose(sst[froze], freezing, atol=1e-6)
+
+    carry = dict(carry, forcing=carry["forcing"].replace(
+        heat_flux=jnp.zeros(component.horizontal_shape)))
+    _, quiet = component.step(carry, _coupling_time(1))
+    assert np.all(np.asarray(quiet["ice_frazil_melt_energy"])[froze] <= 1e-6)
+
+
+@pytest.mark.slow
 def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     """Stacked per-step diagnostics label a time axis one record per step."""
     carry = component.initialize()

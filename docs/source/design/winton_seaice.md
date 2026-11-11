@@ -22,7 +22,15 @@ The ice computes its own surface fluxes, with SPEEDY's bulk formulae, from the n
 ## What the ice publishes
 
 - `ice_fraction`, which the standard coupling copies to JCM's `sice_am`.
-- `ocean_heat_flux_up` (W m-2, upward): the flux the ocean under the cell should receive. It is the atmosphere's flux over the sea part, minus what the ice absorbed, plus what the ice passes down, minus the basal heat it draws, minus the latent heat of the frazil ice formed from the ocean's freezing potential (`ocean_frazil_heating`). That last term returns the frazil heat to an ocean that does not clamp its own temperature at freezing (Veros); an ocean that clamps has already removed the deficit and would count it twice.
+- `ocean_heat_flux_up` (W m-2, upward): the flux the ocean under the cell should receive. It is the atmosphere's flux over the sea part, minus what the ice absorbed, plus what the ice passes down, minus the basal heat it draws.
+
+## Frazil ice and the ocean's clamp
+
+The ocean clamps its own temperature at the freezing point, and the ice only forms ice. When a coupling step takes the ocean below freezing, the ocean puts its temperature back at freezing and reports the heat that took as `ice_frazil_melt_energy`: the heat deficit of that step alone. The ice turns that energy into frazil ice. The heat the clamp added is the latent heat that freezing releases, so `ocean_heat_flux_up` does not return it a second time; `ocean_frazil_heating` reports it as a diagnostic.
+
+Both of JEM's oceans do this: the slab ocean clamps its mixed layer, and the Veros wrapper clamps Veros' top cell once per coupling step. We chose the clamp over leaving the ocean below freezing for the ice to warm back, because the coupling is lagged: the heat the ice returned would arrive a step after the ocean had already reported its next deficit, which would still contain the part the ice had just frozen, and the ice would freeze it twice. A clamping ocean reports each deficit once, whatever the lag.
+
+When the ocean is above freezing, the energy is negative and is not an energy exchange: it caps the basal heat the ice may draw in one step, `F_b = min(F_b_raw, -E / dt)`, so the ice cannot take more than the mixed layer holds above freezing. The heat it does draw is part of `ocean_heat_flux_up`.
 - `ocean_freshwater_flux_up` (kg m-2 s-1, upward): the atmosphere's E - P over the sea part, plus the snow held on ice until it melts (`snowfall_on_ice`), plus the water ice growth takes. The ice has no sublimation term, so the evaporation over the ice-covered part is still charged to the ocean.
 - Budget diagnostics: ice and snow volume, surface melt, basal growth, the thermodynamic and transport enthalpy tendencies. These are exact for the thermodynamic state, so a coupler can close the ice-ocean-atmosphere budget.
 
