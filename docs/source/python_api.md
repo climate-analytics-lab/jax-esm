@@ -79,8 +79,10 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   recipe itself instead of reproducing it by hand.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
-  `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
-  for a land-sea mask; without one every cell is ocean.
+  `land_fraction=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
+  for a land-sea mask; without one every cell is ocean. A cell with any land
+  is in `grid.binary_land_mask` and one with any ocean in
+  `grid.binary_ocean_mask`, so a coast cell is in both.
 - **The exchanger** is the only place where components exchange anything.
   {func}`~jem.default_exchangers` builds the standard wiring for
   whichever of the standard components (`atm`, `ocn`, `lnd`, `seaice`) are
@@ -136,11 +138,13 @@ components = {
 # below builds: the standard rows filtered to the components present.
 table = Exchange([
     ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-    ExchangeSpec("ocn.derived.ice_frazil_melt_energy",
-                 "seaice.forcing.ice_frazil_melt_energy"),
+    ExchangeSpec("atm.derived.total_freshwater_flux",
+                 "ocn.forcing.total_freshwater_flux"),
+    ExchangeSpec("ocn.state.sea_surface_temperature",
+                 "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "atm.forcing.sea_surface_temperature"),
-    ExchangeSpec("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
+    ExchangeSpec("seaice.state.ice_fraction", "atm.forcing.sice_am"),
 ])
 
 coupler = Coupler(
@@ -164,13 +168,36 @@ coupler.initialize()` — before building the coupler's trajectory function; it
 names a mistyped component, section, field or regridder rather than letting
 it fail inside a traced step. And the wiring is by *name*:
 `SlabSeaiceModel`'s `name` must be `"seaice"` (its default) for
-`default_exchangers` to route the ocean's freeze/melt potential to it — a
+`default_exchangers` to route the ocean's sea surface temperature to it — a
 sea-ice model registered under any other name is left unconnected, silently
 unless the name is one of the near-misses (`ice`, `sea_ice`, `sic`) the
 default wiring recognises and warns about.
 
 See {doc}`design/exchange` for the full table (including the Veros
 variant), the regridding keys a mixed-grid run uses, and the lag in full.
+
+## The slab surface components
+
+**Land.** `SlabLandModel(grid, land_clim_file=...)` reads up to six fields from its climatology file, each switched on by its own `*_from_clim_file` flag and named by a matching `*_varname_in_clim_file` argument: the surface temperature it relaxes to (`land_surface_temperature`), `snow_depth`, `soil_water_availability`, `surface_albedo`, `vegetation_fraction` and a time-invariant `glacier_fraction` map. Every flag is off by default, so the land runs freely on its own soil water bucket. SPEEDY's land, which is what `land=slab_speedy` builds, prescribes three of them from SPEEDY's names in jax-gcm's packaged file:
+
+```python
+land = SlabLandModel(
+    grid,
+    land_clim_file=forcing_file,
+    land_surface_temperature_from_clim_file=True,
+    land_surface_temperature_varname_in_clim_file="stl",
+    snow_depth_from_clim_file=True,
+    snow_depth_varname_in_clim_file="snowc",
+    soil_water_availability_from_clim_file=True,
+    soil_water_availability_varname_in_clim_file="soilw_am",
+)
+```
+
+`runoff_to_ocean_mapping` (an ESMF weight file or a function from field to field) routes the land's runoff to ocean cells on the land's own grid; without one the total runoff is spread evenly over the cells with no land. The land's `derived` section publishes `soil_water_availability` (what the atmosphere reads as `soilw_am`), `runoff_to_ocean`, `deep_drainage`, `soil_water_overflow`, `unmet_evaporation` and `surface_albedo`, and its state carries `soil_water_content` for the two layers and `vegetation_fraction`. Soil water starts at each layer's wilting point. {doc}`design/slab_land` explains the bucket.
+
+**Ocean.** The slab ocean also carries a sea surface salinity, driven by `forcing.total_freshwater_flux` (E - P, upward) and `forcing.runoff` (the land's runoff, into the ocean), both of which the standard coupling fills.
+
+**Sea ice.** `SlabSeaiceModel` diagnoses its ice fraction from the ocean's SST alone, through a ramp from full cover at the freezing point to none 1.8 K above it. `WintonSeaiceModel` is a thermodynamic sea ice ported from MITgcm's thsice; the standard coupling does not supply what it reads yet, see {doc}`design/winton_seaice`.
 
 ## Parameters: process and initial condition
 
