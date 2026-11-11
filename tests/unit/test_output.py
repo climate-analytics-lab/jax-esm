@@ -560,9 +560,9 @@ def test_datasets_for_chunk_labels_and_postprocesses(two_slab_coupler, tmp_path)
         np.testing.assert_allclose(
             dataset["sea_surface_temperature"].values[0]
             if name == "ocn"
-            else dataset["ice_thickness"].values[0],
+            else dataset["ice_fraction"].values[0],
             datasets[name][
-                "sea_surface_temperature" if name == "ocn" else "ice_thickness"
+                "sea_surface_temperature" if name == "ocn" else "ice_fraction"
             ].values.mean(axis=0),
             rtol=1e-6,
         )

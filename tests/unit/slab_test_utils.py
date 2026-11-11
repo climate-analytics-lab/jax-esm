@@ -40,18 +40,17 @@ def time_axis(n_records: int, dt: float = TIMESTEP) -> TimeAxis:
     )
 
 
-def make_grid(fractional_mask=None, threshold: float = 0.5) -> SlabGrid:
+def make_grid(land_fraction=None) -> SlabGrid:
     """Return a 4x3 lon-lat grid, all ocean unless a land fraction is given."""
     shape = (len(LONGITUDE_DEGREES), len(LATITUDE_DEGREES))
     longitude_axis = np.deg2rad(LONGITUDE_DEGREES)
     latitude_axis = np.deg2rad(LATITUDE_DEGREES)
-    if fractional_mask is None:
-        fractional_mask = jnp.zeros(shape)
+    if land_fraction is None:
+        land_fraction = jnp.zeros(shape)
     return SlabGrid(
-        fractional_mask=jnp.asarray(fractional_mask),
+        land_fraction=jnp.asarray(land_fraction),
         latitude_radian=jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape)),
         longitude_radian=jnp.asarray(np.broadcast_to(longitude_axis[:, None], shape)),
-        threshold=threshold,
         longitude_axis_radian=longitude_axis,
         latitude_axis_radian=latitude_axis,
     )

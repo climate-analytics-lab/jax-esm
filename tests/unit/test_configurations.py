@@ -223,14 +223,19 @@ class TestLoad(unittest.TestCase):
 
     def test_earth_slab_applies_its_tuned_overrides(self):
         # Two of the three documented tunables in earth-slab.yaml (the ocean
-        # relaxation time and the land tdland) reach the built components,
+        # relaxation time and the land temperature relaxation timescale)
+        # reach the built components,
         # proving the door builds the SAME objects `+configuration=earth-slab`
         # would -- not a lighter approximation of them.
         exp = configurations.load("earth-slab")
         ocn_params = exp.coupler.components["ocn"].params
         lnd_params = exp.coupler.components["lnd"].params
         self.assertAlmostEqual(float(ocn_params.relaxation_time), 2592000.0)
-        self.assertAlmostEqual(float(lnd_params.tdland), 86400.0)
+        self.assertAlmostEqual(float(lnd_params.temperature_relaxation_timescale), 86400.0)
+        # And the land is SPEEDY's: relaxed and prescribed from the file.
+        land = exp.coupler.components["lnd"]
+        self.assertTrue(land.read_from_clim_file["land_surface_temperature"])
+        self.assertTrue(land.read_from_clim_file["soil_water_availability"])
 
     def test_restores_host_hydra_context(self):
         """F3: a host application's own, DIFFERENT Hydra context survives ``load()``.

@@ -331,7 +331,10 @@ def test_named_configurations_set_non_default_values():
     assert earth.ocean.params.forcing_method == "relaxation"
     # 30 days, against the model's own 60.
     assert earth.ocean.params.relaxation_time == 30 * 86400
-    assert earth.land.params.tdland == 86400.0
+    assert earth.land.params.temperature_relaxation_timescale == 86400.0
+    # SPEEDY's land prescribes from SPEEDY's names in the packaged file.
+    assert earth.land.land_surface_temperature_from_clim_file is True
+    assert earth.land.soil_water_availability_varname_in_clim_file == "soilw_am"
 
 
 # ---------------------------------------------------------------------------

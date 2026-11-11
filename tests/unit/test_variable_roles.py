@@ -38,7 +38,7 @@ def half_land_grid():
     """Return the 4x3 test grid with its two eastern columns land."""
     fraction = np.zeros((4, 3))
     fraction[2:, :] = 1.0
-    return make_grid(fractional_mask=fraction)
+    return make_grid(land_fraction=fraction)
 
 
 def slab_models() -> dict:
@@ -97,22 +97,31 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
         },
         "ocn": {
             "sea_surface_temperature": "state",
+            "sea_surface_salinity": "state",
             "mixed_layer_depth": "derived",
             "total_heat_flux": "derived",
             "ice_frazil_melt_energy": "derived",
+            "forcing_total_freshwater_flux": "forcing",
+            "forcing_runoff": "forcing",
             "forcing_q_flux": "forcing",
         },
         "lnd": {
             "land_surface_temperature": "state",
-            "snowc": "state",
-            "soilw": "state",
+            "snow_depth": "state",
+            "soil_water_content": "state",
+            "surface_albedo": "derived",
+            "deep_drainage": "derived",
+            "soil_water_overflow": "derived",
+            "runoff_to_ocean": "derived",
+            "unmet_evaporation": "derived",
+            "soil_water_availability": "derived",
             "forcing_total_heat_flux": "forcing",
+            "forcing_precipitation": "forcing",
+            "forcing_evaporation": "forcing",
         },
         "seaice": {
-            "ice_thickness": "state",
-            "ice_surface_temperature": "state",
-            "forcing_ice_frazil_melt_energy": "forcing",
-            "ice_fraction": "derived",
+            "ice_fraction": "state",
+            "forcing_sea_surface_temperature": "forcing",
         },
     }
     for name, roles in expected.items():
@@ -155,8 +164,12 @@ def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
     forcing = set(map(str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "forcing"})))
     assert forcing == {
         "forcing_total_heat_flux",
+        "forcing_total_freshwater_flux",
+        "forcing_runoff",
         "forcing_q_flux",
-        "forcing_ice_frazil_melt_energy",
+        "forcing_precipitation",
+        "forcing_evaporation",
+        "forcing_sea_surface_temperature",
     }
     assert "sea_surface_temperature" in map(
         str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "state"})
@@ -186,10 +199,9 @@ def test_a_curvilinear_grid_keeps_the_role_beside_the_coordinates_attribute():
         np.array([-60.0, 0.0, 60.0])[None, :] + np.arange(4)[:, None]
     )
     curvilinear = SlabGrid(
-        fractional_mask=jnp.zeros((4, 3)),
+        land_fraction=jnp.zeros((4, 3)),
         latitude_radian=jnp.asarray(latitude),
         longitude_radian=jnp.asarray(longitude),
-        threshold=0.5,
     )
     assert not curvilinear.is_separable
     model = SlabSeaiceModel(curvilinear, name="seaice")

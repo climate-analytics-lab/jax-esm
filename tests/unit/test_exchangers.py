@@ -57,12 +57,16 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 EXPECTED_SPECS = (
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"),
-    ("ocn.derived.ice_frazil_melt_energy", "seaice.forcing.ice_frazil_melt_energy"),
+    ("atm.derived.precipitation", "lnd.forcing.precipitation"),
+    ("atm.derived.evaporation", "lnd.forcing.evaporation"),
+    ("atm.derived.total_freshwater_flux", "ocn.forcing.total_freshwater_flux"),
+    ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff"),
+    ("ocn.state.sea_surface_temperature", "seaice.forcing.sea_surface_temperature"),
     ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
-    ("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
+    ("seaice.state.ice_fraction", "atm.forcing.sice_am"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am"),
+    ("lnd.state.snow_cover", "atm.forcing.snowc_am"),
+    ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am"),
 )
 
 
@@ -79,10 +83,12 @@ class _AtmosphereState:
 @tree_math.struct
 class _AtmosphereDerived:
     total_heat_flux: jnp.ndarray
-    # Published by `JCMDerived` too, and taken by a Veros ocean (a slab does
-    # not read it), so the stub has to carry it or the Veros table could not
-    # be checked against a JCM-shaped atmosphere at all.
+    # Published by `JCMDerived` too, and taken by the oceans and the land, so
+    # the stub has to carry them for every table to be checked against a
+    # JCM-shaped atmosphere.
     total_freshwater_flux: jnp.ndarray
+    evaporation: jnp.ndarray
+    precipitation: jnp.ndarray
 
 
 @tree_math.struct
@@ -110,7 +116,7 @@ class StubAtmosphere:
         zeros = jnp.zeros(self.shape)
         return {
             "state": _AtmosphereState(zeros + 280.0),
-            "derived": _AtmosphereDerived(zeros, zeros),
+            "derived": _AtmosphereDerived(zeros, zeros, zeros, zeros),
             "forcing": _AtmosphereForcing(zeros, zeros, zeros, zeros, zeros),
         }
 
@@ -126,9 +132,15 @@ class StubAtmosphere:
         # The snow and soil fields enter weakly, so they too are load-bearing.
         flux = flux * (1.0 + 0.01 * forcing.snowc_am + 0.01 * forcing.soilw_am)
         new_state = _AtmosphereState(state.air_temperature + 1e-3 * flux)
+        # Rain grows with the flux and evaporation with its size, so the
+        # water fields move with every field the atmosphere was given too.
+        evaporation = 2e-6 * jnp.abs(flux)
+        precipitation = 1e-6 * (1.0 + jnp.tanh(flux))
         new_carry = {
             "state": new_state,
-            "derived": _AtmosphereDerived(flux, 1e-5 * flux),
+            "derived": _AtmosphereDerived(
+                flux, evaporation - precipitation, evaporation, precipitation
+            ),
             "forcing": forcing,
         }
         return new_carry, {"air_temperature": new_state.air_temperature}
@@ -248,14 +260,14 @@ def half_land_grid() -> SlabGrid:
     """Return the 4x3 test grid with its two eastern columns land."""
     fraction = np.zeros((4, 3))
     fraction[2:, :] = 1.0
-    return make_grid(fractional_mask=fraction)
+    return make_grid(land_fraction=fraction)
 
 
 def build_components() -> dict:
     """Return the four components of the standard wiring, on the test grid."""
     grid = half_land_grid()
     return {
-        "atm": StubAtmosphere(grid.fractional_mask.shape),
+        "atm": StubAtmosphere(grid.land_fraction.shape),
         "ocn": SlabOceanModel(grid),
         "lnd": SlabLandModel(grid),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
@@ -281,7 +293,7 @@ def components():
 def veros_components(veros_module):
     """Return a JCM-shaped atmosphere over a Veros-shaped ocean."""
     del veros_module
-    shape = half_land_grid().fractional_mask.shape
+    shape = half_land_grid().land_fraction.shape
     return {"atm": StubAtmosphere(shape), "ocn": StubVerosOcean(shape)}
 
 
@@ -300,11 +312,11 @@ def test_default_exchanges_is_the_documented_table(components):
 @pytest.mark.parametrize(
     "present, expected",
     [
-        (("atm", "ocn"), 2),
-        (("atm", "ocn", "seaice"), 4),
-        (("atm", "ocn", "lnd"), 6),
-        (("atm", "ocn", "lnd", "seaice"), 8),
-        (("ocn", "lnd"), 0),
+        (("atm", "ocn"), 3),
+        (("atm", "ocn", "seaice"), 5),
+        (("atm", "ocn", "lnd"), 10),
+        (("atm", "ocn", "lnd", "seaice"), 12),
+        (("ocn", "lnd"), 1),
     ],
 )
 def test_default_exchanges_filters_to_present_components(present, expected):
@@ -321,6 +333,7 @@ def test_default_exchanges_ignores_components_it_has_no_wiring_for():
     specs = default_exchanges(("atm", "ocn", "spring", "chemistry"))
     assert [(spec.src, spec.dst) for spec in specs] == [
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
+        ("atm.derived.total_freshwater_flux", "ocn.forcing.total_freshwater_flux"),
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
     ]
 
@@ -369,21 +382,33 @@ def test_exchange_roundtrip(components):
         is incoming["atm"]["derived"].total_heat_flux
     )
     assert (
-        exchanged["seaice"]["forcing"].ice_frazil_melt_energy
-        is incoming["ocn"]["derived"].ice_frazil_melt_energy
+        exchanged["seaice"]["forcing"].sea_surface_temperature
+        is incoming["ocn"]["state"].sea_surface_temperature
     )
+    land_forcing = exchanged["lnd"]["forcing"]
+    assert land_forcing.precipitation is incoming["atm"]["derived"].precipitation
+    assert land_forcing.evaporation is incoming["atm"]["derived"].evaporation
+    ocean_forcing = exchanged["ocn"]["forcing"]
+    assert (
+        ocean_forcing.total_freshwater_flux
+        is incoming["atm"]["derived"].total_freshwater_flux
+    )
+    assert ocean_forcing.runoff is incoming["lnd"]["derived"].runoff_to_ocean
     atmosphere_forcing = exchanged["atm"]["forcing"]
     assert (
         atmosphere_forcing.sea_surface_temperature
         is incoming["ocn"]["state"].sea_surface_temperature
     )
-    assert atmosphere_forcing.sice_am is incoming["seaice"]["derived"].ice_fraction
+    assert atmosphere_forcing.sice_am is incoming["seaice"]["state"].ice_fraction
     assert (
         atmosphere_forcing.stl_am
         is incoming["lnd"]["state"].land_surface_temperature
     )
-    assert atmosphere_forcing.snowc_am is incoming["lnd"]["state"].snowc
-    assert atmosphere_forcing.soilw_am is incoming["lnd"]["state"].soilw
+    assert atmosphere_forcing.snowc_am is incoming["lnd"]["state"].snow_cover
+    assert (
+        atmosphere_forcing.soilw_am
+        is incoming["lnd"]["derived"].soil_water_availability
+    )
 
     # Nothing was written in place: the mapping, the carries and every leaf
     # the exchanger was handed are exactly as they were.
@@ -421,7 +446,7 @@ def readme_style_exchange(components, time):
 
     Assembled from the exchangers in ``README.md``,
     ``examples/01_basic/01_aquaplanet.ipynb`` and
-    ``examples/02_experimental/01_earth.ipynb`` -- the same eight fields the
+    ``examples/02_experimental/01_earth.ipynb`` -- the same twelve fields the
     declarative default moves, in the same direction.
     """
     del time
@@ -432,19 +457,23 @@ def readme_style_exchange(components, time):
 
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
         total_heat_flux=atm["derived"].total_heat_flux,
+        total_freshwater_flux=atm["derived"].total_freshwater_flux,
+        runoff=lnd["derived"].runoff_to_ocean,
     ))
     lnd = dict(lnd, forcing=lnd["forcing"].replace(
         total_heat_flux=atm["derived"].total_heat_flux,
+        precipitation=atm["derived"].precipitation,
+        evaporation=atm["derived"].evaporation,
     ))
     seaice = dict(seaice, forcing=seaice["forcing"].replace(
-        ice_frazil_melt_energy=components["ocn"]["derived"].ice_frazil_melt_energy,
+        sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
     ))
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
-        sice_am=seaice["derived"].ice_fraction,
+        sice_am=seaice["state"].ice_fraction,
         stl_am=lnd["state"].land_surface_temperature,
-        snowc_am=lnd["state"].snowc,
-        soilw_am=lnd["state"].soilw,
+        snowc_am=lnd["state"].snow_cover,
+        soilw_am=lnd["derived"].soil_water_availability,
     ))
     return dict(components, atm=atm, ocn=ocn, lnd=lnd, seaice=seaice)
 
@@ -549,14 +578,21 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
     assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"): "a2o_conserve",
         ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"): None,
-        ("ocn.derived.ice_frazil_melt_energy",
-         "seaice.forcing.ice_frazil_melt_energy"): None,
+        ("atm.derived.precipitation", "lnd.forcing.precipitation"): None,
+        ("atm.derived.evaporation", "lnd.forcing.evaporation"): None,
+        ("atm.derived.total_freshwater_flux",
+         "ocn.forcing.total_freshwater_flux"): "a2o_conserve",
+        # The land is on the atmosphere's grid, so its runoff crosses to the
+        # ocean's the way the atmosphere's fluxes do.
+        ("lnd.derived.runoff_to_ocean", "ocn.forcing.runoff"): "a2o_conserve",
+        ("ocn.state.sea_surface_temperature",
+         "seaice.forcing.sea_surface_temperature"): None,
         ("ocn.state.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
-        ("seaice.derived.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
+        ("seaice.state.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
         ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"): None,
-        ("lnd.state.snowc", "atm.forcing.snowc_am"): None,
-        ("lnd.state.soilw", "atm.forcing.soilw_am"): None,
+        ("lnd.state.snow_cover", "atm.forcing.snowc_am"): None,
+        ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am"): None,
     }
 
 
@@ -663,23 +699,34 @@ def test_names_alone_cannot_select_the_veros_table(veros_module):
     del veros_module
     specs = default_exchanges(("atm", "ocn"))
     assert [spec.dst for spec in specs] == [
-        "ocn.forcing.total_heat_flux", "atm.forcing.sea_surface_temperature",
+        "ocn.forcing.total_heat_flux",
+        "ocn.forcing.total_freshwater_flux",
+        "atm.forcing.sea_surface_temperature",
     ]
 
 
-def test_sea_ice_with_a_veros_ocean_is_warned_about(veros_components, caplog):
-    """Veros publishes no freeze/melt potential, so the ice is undriven.
-
-    The table has no row that could drive it, and a silently unforced sea-ice
-    model is exactly the failure this warning exists to prevent.
-    """
+def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components):
+    """The slab sea ice reads the SST Veros publishes from ``derived``."""
     grid = half_land_grid()
     components = dict(
         veros_components, seaice=SlabSeaiceModel(grid, name="seaice")
     )
+    routes = {(spec.src, spec.dst) for spec in default_exchanges(components)}
+    assert (
+        "ocn.derived.sea_surface_temperature",
+        "seaice.forcing.sea_surface_temperature",
+    ) in routes
+
+
+def test_land_with_a_veros_ocean_is_warned_about(veros_components, caplog):
+    """Veros takes one freshwater flux, so the land's runoff has no row.
+
+    A runoff that silently never reaches the ocean is the failure this
+    warning exists to prevent.
+    """
     with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
-        default_exchanges(components)
-    assert "no freeze/melt potential" in caplog.text
+        default_exchanges(dict(veros_components, lnd=object()))
+    assert "runoff" in caplog.text
 
 
 def test_the_veros_table_is_the_documented_one():
@@ -697,7 +744,7 @@ def test_a_bare_direction_key_covers_both_kinds():
     assert by_route[
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature")
     ] == "o2a"
-    assert by_route[("seaice.derived.ice_fraction", "atm.forcing.sice_am")] == "o2a"
+    assert by_route[("seaice.state.ice_fraction", "atm.forcing.sice_am")] == "o2a"
     assert by_route[
         ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux")
     ] is None
@@ -709,7 +756,7 @@ def test_default_exchangers_names_its_regridders_after_their_keys():
     exchangers = default_exchangers(("atm", "ocn"), regrid={"a2o_flux": identity})
     exchange = exchangers["exchange"]
     assert exchange.regridders == {"a2o_flux": identity}
-    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", None]
+    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", "a2o_flux", None]
 
 
 def test_unknown_regrid_key_is_rejected():

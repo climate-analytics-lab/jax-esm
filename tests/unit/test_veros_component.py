@@ -159,7 +159,7 @@ def _labelling_diagnostics(component, n_records):
         for name in (
             "psi",
             "sea_surface_temperature", "sea_surface_salinity",
-            "sea_surface_u", "sea_surface_v",
+            "sea_surface_u", "sea_surface_v", "ice_frazil_melt_energy",
             "surface_air_temperature", "surface_taux", "surface_tauy",
             "heat_flux", "freshwater_flux",
         )
@@ -168,6 +168,9 @@ def _labelling_diagnostics(component, n_records):
     # layout handed to `to_xarray` has to follow the same branch.
     if not component.enable_streamfunction:
         diagnostics["ssh"] = surface
+    # Likewise the GM streamfunction, only where the eddy-induced advection runs.
+    if component.enable_gm_streamfunction:
+        diagnostics["B1_gm"] = volume
     return diagnostics
 
 
