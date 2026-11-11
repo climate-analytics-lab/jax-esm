@@ -123,6 +123,7 @@ class JCMDerived:
     precipitation: jnp.ndarray
     eastward_wind_stress: jnp.ndarray
     northward_wind_stress: jnp.ndarray
+    surface_air_potential_temperature: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
 
@@ -152,6 +153,7 @@ class JCMDerived:
                 "precipitation",
                 "eastward_wind_stress",
                 "northward_wind_stress",
+                "surface_air_potential_temperature",
                 "u0",
                 "v0",
             )
@@ -611,6 +613,7 @@ class JCMComponent:
             precipitation=exchange.precipitation,
             eastward_wind_stress=exchange.eastward_wind_stress,
             northward_wind_stress=exchange.northward_wind_stress,
+            surface_air_potential_temperature=exchange.air_potential_temperature,
             u0=exchange.u0,
             v0=exchange.v0,
         )

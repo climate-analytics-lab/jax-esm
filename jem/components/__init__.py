@@ -20,6 +20,8 @@ from jem.components.slab import (
     SlabOceanParameters,
     SlabSeaiceModel,
     SlabSeaiceParameters,
+    WintonSeaiceModel,
+    WintonSeaiceParameters,
     load_monthly_climatology,
 )
 
@@ -37,6 +39,8 @@ __all__ = [
     "SlabSeaiceModel",
     "SlabSeaiceParameters",
     "VerosComponent",
+    "WintonSeaiceModel",
+    "WintonSeaiceParameters",
     "load_monthly_climatology",
 ]
 

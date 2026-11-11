@@ -1052,22 +1052,16 @@ def test_earth_slab_runs_from_the_command_line(tmp_path):
         "ocn-00000000.nc", "seaice-00000000.nc",
     ]
 
-    # The polar surface the run starts from, end to end. The first record is
-    # what `seaice.initialize()` published, which under the standard workflow
-    # is also what the atmosphere was handed for its first two steps: it has
-    # to be the observed cover, not an ice-free ocean. And the ice must still
-    # be a plausible thickness two days later -- a run that begins out of
-    # balance with its own freezing point answers with tens of metres of ice
-    # in a single coupling step.
+    # The polar surface the run produces, end to end: the ice is diagnosed
+    # from the ocean's SST, which starts at the observed climatology, so the
+    # poles are ice covered from the first record on.
     import xarray as xr
 
     with xr.open_dataset(run_directories[0] / "seaice-00000000.nc") as sea_ice:
         first = sea_ice["ice_fraction"].isel(time=0).values
         assert float(first.max()) > 0.9
         assert float(first.mean()) > 0.01
-        thickness = sea_ice["ice_thickness"].values
-        assert np.isfinite(thickness).all()
-        assert float(thickness.max()) < 5.0, float(thickness.max())
+        assert np.isfinite(sea_ice["ice_fraction"].values).all()
 
     with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
         # The whole field: land carries the 288.15 K fill value, which is

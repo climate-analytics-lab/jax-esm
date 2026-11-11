@@ -159,15 +159,19 @@ def _labelling_diagnostics(component, n_records):
         for name in (
             "psi",
             "sea_surface_temperature", "sea_surface_salinity",
-            "sea_surface_u", "sea_surface_v",
+            "sea_surface_u", "sea_surface_v", "ice_frazil_melt_energy",
             "surface_air_temperature", "surface_taux", "surface_tauy",
-            "heat_flux", "freshwater_flux",
+            "heat_flux", "precipitation", "evaporation", "runoff",
+            "sea_ice_freshwater_flux",
         )
     })
     # `step` emits a sea surface height only where Veros carries one, so the
     # layout handed to `to_xarray` has to follow the same branch.
     if not component.enable_streamfunction:
         diagnostics["ssh"] = surface
+    # Likewise the GM streamfunction, only where the eddy-induced advection runs.
+    if component.enable_gm_streamfunction:
+        diagnostics["B1_gm"] = volume
     return diagnostics
 
 
@@ -641,6 +645,57 @@ def test_step_advances_and_returns_a_stackable_carry(component, grid_shape):
 
 
 @pytest.mark.slow
+def test_the_water_channels_enter_the_salt_budget_with_their_signs(component):
+    """Precipitation, runoff and the sea ice's water freshen; evaporation salts.
+
+    Veros takes one surface salt forcing, so each inflow channel must act
+    exactly like negative evaporation, and a runoff must lower the salinity.
+    """
+    flux = jnp.full(component.horizontal_shape, 1e-4)
+
+    def salinity(**water):
+        carry = component.initialize()
+        carry = dict(carry, forcing=carry["forcing"].replace(**water))
+        _, diagnostics = component.step(carry, _coupling_time(0))
+        return np.asarray(diagnostics["sea_surface_salinity"])
+
+    leaving = salinity(evaporation=-flux)
+    for channel in ("precipitation", "runoff", "sea_ice_freshwater_flux"):
+        np.testing.assert_allclose(salinity(**{channel: flux}), leaving, rtol=0, atol=1e-12)
+    ocean = np.asarray(component.mask_T[:, :, -1]) == 1
+    assert np.all(leaving[ocean] < salinity()[ocean])
+
+
+@pytest.mark.slow
+def test_the_top_cell_is_clamped_at_freezing_and_its_deficit_reported_once(component):
+    """A cooling step ends at the freezing point, and the next does not report it again.
+
+    The clamp's heat is the frazil latent heat a sea ice turns into ice, so it
+    must be reported in the step that created the deficit and never again.
+    """
+    from jem import constants
+
+    ocean = np.asarray(component.mask_T[:, :, -1]) == 1
+    carry = component.initialize()
+    carry = dict(carry, forcing=carry["forcing"].replace(
+        heat_flux=jnp.full(component.horizontal_shape, 5.0e4)))
+    carry, cooled = component.step(carry, _coupling_time(0))
+
+    sst = np.asarray(cooled["sea_surface_temperature"])
+    energy = np.asarray(cooled["ice_frazil_melt_energy"])
+    freezing = constants.seawater_freezing_point_K
+    assert np.all(sst[ocean] >= freezing - 1e-6)
+    froze = ocean & (energy > 0.0)
+    assert froze.any()
+    np.testing.assert_allclose(sst[froze], freezing, atol=1e-6)
+
+    carry = dict(carry, forcing=carry["forcing"].replace(
+        heat_flux=jnp.zeros(component.horizontal_shape)))
+    _, quiet = component.step(carry, _coupling_time(1))
+    assert np.all(np.asarray(quiet["ice_frazil_melt_energy"])[froze] <= 1e-6)
+
+
+@pytest.mark.slow
 def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     """Stacked per-step diagnostics label a time axis one record per step."""
     carry = component.initialize()
@@ -658,7 +713,8 @@ def test_to_xarray_has_time_axis_of_length_n(component, grid_shape):
     assert dataset.forcing_heat_flux.attrs["units"] == "W/m^2"
     assert set(dataset.data_vars) >= {
         forcing_variable(name)
-        for name in ("heat_flux", "freshwater_flux", "surface_taux",
+        for name in ("heat_flux", "precipitation", "evaporation", "runoff",
+                     "sea_ice_freshwater_flux", "surface_taux",
                      "surface_tauy", "surface_air_temperature")
     }
     # ...and what the ocean computed keeps its plain name.

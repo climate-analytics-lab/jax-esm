@@ -1,100 +1,299 @@
-"""Land surface model component - translated from Speedy Fortran.
+"""Slab land model with a two-layer soil water bucket.
 
-This module implements a slab land-surface model with:
-- Temperature evolution with heat capacity and dissipation
-- Snow depth climatology
-- Soil water availability climatology
-- Land/ice-sheet discrimination based on albedo
+The model has these parts:
 
-Physics based on SPEEDY (Simplified Parameterizations, primiTivE-Equation DYnamics):
-Molteni, F. (2003). Atmospheric simulations using a GCM with simplified
-physical parametrizations. I: model climatology and variability in
-multi-decadal experiments. Climate Dynamics, 20(2-3), 175-191.
+- Surface temperature: a one-layer slab heated by the surface heat flux. It
+  either runs freely or relaxes to a climatology (SPEEDY's scheme).
+- Snow: snow depth is either read from a climatology or held at its initial
+  value. Snow cover is diagnosed from the depth.
+- Soil water: a two-layer leaky bucket filled by precipitation and emptied
+  by evaporation, drainage and overflow above field capacity.
+- Soil water availability: SPEEDY's ``soilw_am``, diagnosed from the bucket
+  or read from a climatology.
+- Vegetation fraction: a uniform 0.8, or read from a climatology. Nothing
+  evolves it yet.
+- Surface albedo: bare soil and vegetation albedos blended by the
+  vegetation fraction, or read from a climatology. It is output only for
+  now.
 
-Programmer: Aya Lalou
-
-Translation from: https://github.com/samhatfield/speedy.f90/blob/master/source/land_model.f90
+The slab heat capacity mixes soil and glacier ice in proportion to
+``glacier_fraction``, a single value or a time-invariant map read from the
+climatology file.
 """
+
 import logging
 import math
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
+import xarray as xr
 
-from jem.base.component import Carry, CouplingTime, Diagnostics
+from jem.base.component import Carry, CouplingTime, Diagnostics, TimeAxis
 from jem.components.slab.base import (
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     first_present_variable,
     forcing_variable,
     load_monthly_climatology,
+    load_static_field,
     role_attrs,
 )
 from jem.components.slab.grid import SlabGrid
-from jem.components.slab.slab_land_model.params import SlabLandParameters
+from jem.components.slab.slab_land_model.params import (
+    SlabLandParameters,
+)
 from jem.utils.cycles import evaluate_cyclic_linear
+from jem.utils.esmf_regrid import ESMFRegridder
 
 logger = logging.getLogger(__name__)
-
 _MONTHS_PER_YEAR = 12
-
-# Names the same field goes by in the boundary files JEM is given: SPEEDY's
-# own spelling first, then jax-gcm's. Resolving by name (rather than by
-# position in the file, as this model used to) is what lets
-# ``load_monthly_climatology`` verify that the file is on the model grid.
-_SNOW_DEPTH_NAMES = ("snowd", "snowc")
-_SOIL_WATER_NAMES = ("soilw", "soilw_am")
-_SURFACE_TEMPERATURE_NAMES = ("stl",)
-
 
 @tree_math.struct
 class LandState:
+    """Land state.
+
+    Attributes
+    ----------
+    land_surface_temperature : (n_lon, n_lat) array
+        Surface temperature (K). Set to ``MASKED_SURFACE_TEMPERATURE`` on
+        cells with no land.
+    snow_depth : (n_lon, n_lat) array
+        Snow depth (mm water equivalent).
+    snow_cover : (n_lon, n_lat) array
+        Snow cover fraction in [0, 1], diagnosed from ``snow_depth``.
+    soil_water_content : (n_lon, n_lat, 2) array
+        Volumetric soil water content (m3 m-3) of the surface and deep layer.
+    vegetation_fraction : (n_lon, n_lat) array
+        Fraction of the cell covered by vegetation (dimensionless, in
+        [0, 1]). It is kept as state for future vegetation dynamics, but
+        nothing evolves it yet: it is a uniform 0.8, or the climatology at
+        the current time with ``vegetation_fraction_from_clim_file=True``.
+        Zero where there is no land.
+
+    """
+
     land_surface_temperature: jnp.ndarray
-    snowc: jnp.ndarray
-    soilw: jnp.ndarray
+    snow_depth: jnp.ndarray
+    snow_cover: jnp.ndarray
+    soil_water_content: jnp.ndarray
+    vegetation_fraction: jnp.ndarray
 
     @classmethod
     def zeros(
         cls,
         shape,
         land_surface_temperature=None,
-        snowc=None,
-        soilw=None,
+        snow_depth=None,
+        snow_cover=None,
+        soil_water_content=None,
+        vegetation_fraction=None,
+        n_soil_layers=2,
     ):
         return cls(
             land_surface_temperature if land_surface_temperature is not None else jnp.zeros(shape),
-            snowc if snowc is not None else jnp.zeros(shape),
-            soilw if soilw is not None else jnp.zeros(shape),
+            snow_depth if snow_depth is not None else jnp.zeros(shape),
+            snow_cover if snow_cover is not None else jnp.zeros(shape),
+            soil_water_content if soil_water_content is not None else jnp.zeros(shape + (n_soil_layers,)),
+            vegetation_fraction if vegetation_fraction is not None else jnp.zeros(shape),
         )
 
 
 @tree_math.struct
 class LandForcing:
+    """Land forcing, filled by exchangers.
+
+    Attributes
+    ----------
+    total_heat_flux : (n_lon, n_lat) array
+        Net surface heat flux (W m-2), positive upward.
+    precipitation : (n_lon, n_lat) array
+        Precipitation rate (kg m-2 s-1, the same as mm s-1 of water).
+    evaporation : (n_lon, n_lat) array
+        Evaporation rate (kg m-2 s-1), positive upward; negative is dew.
+
+    """
+
     total_heat_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None):
+    def zeros(cls, shape, total_heat_flux=None, precipitation=None, evaporation=None):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
+        )
+
+
+@tree_math.struct
+class LandDerived:
+    """What the land diagnoses every step and other components may read.
+
+    Attributes
+    ----------
+    surface_albedo : (n_lon, n_lat) array
+        Surface albedo (dimensionless, in [0, 1]). The climatology when
+        ``surface_albedo_from_clim_file=True``; otherwise
+        ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction``.
+        It is written to the output, but nothing in the model or the coupling
+        reads it yet.
+    deep_drainage : (n_lon, n_lat) array
+        Water draining out of the bottom of the deep soil layer, which leaves
+        the land model (kg m-2 s-1). Zero where there is no land.
+    soil_water_overflow : (n_lon, n_lat) array
+        Water above field capacity that left the two soil layers this step,
+        summed over both layers (kg m-2 s-1). It leaves the land model as
+        runoff. Zero where there is no land.
+    runoff_to_ocean : array
+        ``deep_drainage + soil_water_overflow`` passed through the model's
+        ``runoff_to_ocean_mapping``: the same water, as the flux the ocean
+        receives (kg m-2 s-1).
+    unmet_evaporation : (n_lon, n_lat) array
+        The part of ``forcing.evaporation`` the soil layers could not supply
+        without going below their wilting points (kg m-2 s-1, positive
+        upward, never negative).
+        The atmosphere evaporated it anyway, so it is water the coupled
+        system created. Zero where there is no land.
+    soil_water_availability : (n_lon, n_lat) array
+        Fraction of the available soil water the soil holds (dimensionless,
+        in [0, 1]), the land's counterpart of SPEEDY's ``soilw_am``. With
+        depths ``d``, field capacities ``fc``, wilting points ``wp`` and
+        vegetation fraction ``f_veg``, it is
+        ``(d1 max(W1 - wp1, 0) + f_veg d2 max(W2 - wp2, 0)) / (d1 (fc1 - wp1) + d2 (fc2 - wp2))``,
+        clipped to [0, 1].
+        The deep layer counts only through vegetation, whose roots reach it.
+        With the default parameters (surface wilting point 0, depth ratio
+        ``d2 / d1 = 3``) this is SPEEDY's ``soilw_am``; a non-zero surface
+        wilting point also leaves out the surface water below it. Computed
+        from the soil water at the end of the step. With
+        ``soil_water_availability_from_clim_file=True`` it is the climatology
+        at the current time instead, also clipped to [0, 1]. Zero where there
+        is no land.
+
+    """
+
+    surface_albedo: jnp.ndarray
+    deep_drainage: jnp.ndarray
+    soil_water_overflow: jnp.ndarray
+    runoff_to_ocean: jnp.ndarray
+    unmet_evaporation: jnp.ndarray
+    soil_water_availability: jnp.ndarray
+
+    @classmethod
+    def zeros(cls, shape, surface_albedo=None, deep_drainage=None, soil_water_overflow=None, runoff_to_ocean=None, unmet_evaporation=None, soil_water_availability=None):
+        return cls(
+            surface_albedo if surface_albedo is not None else jnp.zeros(shape),
+            deep_drainage if deep_drainage is not None else jnp.zeros(shape),
+            soil_water_overflow if soil_water_overflow is not None else jnp.zeros(shape),
+            runoff_to_ocean if runoff_to_ocean is not None else jnp.zeros(shape),
+            unmet_evaporation if unmet_evaporation is not None else jnp.zeros(shape),
+            soil_water_availability if soil_water_availability is not None else jnp.zeros(shape),
         )
 
 
 class SlabLandModel(SlabModelBase):
-    """Slab land-surface model with:
+    """Slab land model with a two-layer soil water bucket.
 
-    - Heat capacity-based temperature evolution
-    - Snow depth and soil moisture from climatology
-    - Separate treatment of soil and ice sheets
+    Only cells with some land (``grid.binary_land_mask == 1``) are
+    integrated. Other cells hold ``MASKED_SURFACE_TEMPERATURE`` and zero
+    soil water.
 
-    Based on SPEEDY's land model with prescribed climatological boundary
-    conditions. The prognostic variable is the *anomaly* of the surface
-    temperature about its climatology: it is damped towards zero on
-    ``params.tdland`` and forced by the surface heat flux, and the climatology
-    is added back at the end of the step. Cells whose land fraction is below
-    ``params.flandmin`` have no anomaly at all (SPEEDY's ``dmask``), so a cell
-    that is mostly ocean simply follows the climatology.
+    Surface temperature
+        A single slab whose heat capacity mixes soil and glacier ice. With
+        ``f = glacier_fraction`` (a scalar, or a map read from the
+        climatology file with ``glacier_fraction_from_clim_file=True``)::
+
+            C = (1 - f) * soil_thermal_depth * soil_volumetric_heat_capacity
+                + f * glacier_depth * glacier_volumetric_heat_capacity
+
+        With ``F`` the downward heat flux, the default update is::
+
+            T_new = T + dt * F / C
+
+        With ``land_surface_temperature_from_clim_file=True`` the model uses
+        SPEEDY's scheme instead. The anomaly ``T' = T - T_clim`` is forced by
+        ``F`` and damped on ``temperature_relaxation_timescale`` (``tau``)::
+
+            T'_new = tau / (tau + dt) * (T' + dt * F / C)
+            T_new  = T'_new + T_clim(end of step)
+
+    Snow
+        With ``snow_depth_from_clim_file=True`` the snow depth is the
+        climatology at the current time. Otherwise it stays at its initial
+        value. Snow cover is
+        ``min(1, snow_depth / snow_depth_to_cover_scale)``.
+
+    Soil water
+        By default, a two-layer leaky bucket. With ``W1``, ``W2`` the
+        volumetric water content, ``d1``, ``d2`` the layer depths,
+        ``tau1``, ``tau2`` the drainage timescales, ``P`` the
+        precipitation and ``E`` the evaporation::
+
+            dW1/dt = (P - E1) / (rho_w * d1) - max(W1 - wp1, 0) / tau1
+            dW2/dt = -E2 / (rho_w * d2) + (d1 / d2) * max(W1 - wp1, 0) / tau1 - max(W2 - wp2, 0) / tau2
+
+        with ``wp1``, ``wp2`` the wilting points: water at or below the
+        wilting point is held by the soil, and neither drains nor
+        evaporates. Within a step the processes are applied in turn:
+        precipitation, evaporation, drainage, then the overflow above field
+        capacity.
+
+        Evaporation ``E = E1 + E2`` is split between the layers in
+        proportion to the water each can supply, ``a1 = d1 * max(W1 - wp1, 0)``
+        and ``a2 = vegetation_fraction * d2 * max(W2 - wp2, 0)``, the same
+        terms as the soil water availability: the deep layer gives water up
+        only through vegetation. If neither layer has any, all of it is
+        asked of the surface layer. No layer is taken below its wilting
+        point: the part of a layer's share it cannot supply is published as
+        ``derived.unmet_evaporation`` rather than clamped away, so the land's
+        water budget still closes and the gap is visible. This relies on the
+        soil water starting at or above the wilting point, as
+        :meth:`initialize` sets it. Dew (``E < 0``) all goes into the
+        surface layer. The evaporation is the cell mean the atmosphere
+        publishes, so in a partly-land cell the soil also supplies the sea
+        part, and there is no snow budget, so sublimation is taken from the
+        soil too.
+
+        Water leaving the surface layer enters the deep layer, and water
+        leaving the deep layer leaves the model; its rate is published as
+        ``derived.deep_drainage``. Both layers are kept no higher than their
+        field capacity ``soil_water_field_capacity``. The
+        water above field capacity leaves the model directly, without
+        entering the layer below, and is published as
+        ``derived.soil_water_overflow``. The deep drainage and the overflow
+        together are routed to the ocean as ``derived.runoff_to_ocean``.
+
+    Soil water availability
+        Diagnosed from the bucket's soil water (see
+        ``LandDerived.soil_water_availability``). With
+        ``soil_water_availability_from_clim_file=True`` it is the climatology
+        at the current time instead. The bucket runs either way, and a
+        prescribed availability does not feed back on the soil water. Once the
+        atmosphere reads it, a prescribed wet availability over dry soil makes
+        the atmosphere evaporate water the soil does not hold, which shows up
+        as ``derived.unmet_evaporation``.
+
+    Vegetation fraction
+        A uniform 0.8 by default. With
+        ``vegetation_fraction_from_clim_file=True`` it is the climatology at
+        the current time, clipped to [0, 1] and set to 0 off land, so the
+        file may hold NaN or a fill value over ocean. It weights the albedo
+        blend and the deep layer's share of the soil water availability.
+
+    Surface albedo
+        With ``surface_albedo_from_clim_file=True`` the albedo is the
+        climatology at the current time. Otherwise it is the bare soil and
+        vegetation albedos weighted by the vegetation fraction,
+        ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction``.
+        Either way it is clipped to [0, 1] and set to 0 off land. It is
+        written to the output, but nothing in the model or the coupling reads
+        it yet.
     """
 
     def __init__(
@@ -104,7 +303,19 @@ class SlabLandModel(SlabModelBase):
         *,
         name: str = "lnd",
         land_clim_file: str | None = None,
-        surface_albedo: jnp.ndarray | None = None,
+        soil_water_availability_from_clim_file: bool = False,
+        snow_depth_from_clim_file: bool = False,
+        land_surface_temperature_from_clim_file: bool = False,
+        surface_albedo_from_clim_file: bool = False,
+        glacier_fraction_from_clim_file: bool = False,
+        vegetation_fraction_from_clim_file: bool = False,
+        soil_water_availability_varname_in_clim_file: str = "soil_water_availability",
+        snow_depth_varname_in_clim_file: str = "snow_depth",
+        land_surface_temperature_varname_in_clim_file: str = "land_surface_temperature",
+        surface_albedo_varname_in_clim_file: str = "surface_albedo",
+        glacier_fraction_varname_in_clim_file: str = "glacier_fraction",
+        vegetation_fraction_varname_in_clim_file: str = "vegetation_fraction",
+        runoff_to_ocean_mapping: str | Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     ):
         """Initialize the land surface model.
 
@@ -113,33 +324,77 @@ class SlabLandModel(SlabModelBase):
         grid : SlabGrid
             The model's grid.
         params : SlabLandParameters, optional
-            Tunable parameters; defaults to
-            :meth:`SlabLandParameters.default`. They are what
-            :meth:`initialize` uses unless it is handed parameters of its own,
-            and what the checks below are made against: validation applies to
-            these concrete, construction-time values, which is why it can read
-            them as Python floats.
+            Model parameters, defaulting to
+            :meth:`SlabLandParameters.default`. They are checked here, since
+            inside ``step`` they are traced and cannot be inspected.
         name : str
-            Component name in the coupler's workflow and carry.
+            Component name in the coupler's workflow and carry. Default
+            ``"lnd"``.
         land_clim_file : str, optional
-            netCDF file holding 12-month climatologies of surface temperature
-            (``stl``), snow depth (``snowd`` or ``snowc``) and soil water
-            availability (``soilw`` or ``soilw_am``) on the model grid. Fields
-            the file does not carry fall back to idealized ones.
-        surface_albedo : jnp.ndarray, optional
-            Surface albedo on the model grid, used to tell an ice sheet from
-            soil (SPEEDY reads it from its topography file). Defaults to a
-            uniform ``params.surface_albedo``, which is below the ice
-            threshold, so a model built without one is all soil everywhere --
-            including over real ice sheets, because nothing yet wires the
-            atmosphere's albedo boundary condition to this argument
-            (jax-esm#109).
+            netCDF file with 12-month climatologies on the model grid. A field
+            with no time dimension is used as the same map in every month. A
+            field missing from the file, or every field when no file is given,
+            uses a fallback: an idealized temperature climatology, no snow, a
+            soil water availability of 0.5, a surface albedo of 0.2 and a
+            vegetation fraction of 0.8.
+        soil_water_availability_from_clim_file : bool
+            Read the soil water availability from the climatology instead of
+            diagnosing it from the bucket. The bucket still runs. Default
+            False.
+        snow_depth_from_clim_file : bool
+            Read snow depth from the climatology instead of holding it fixed.
+            Default False.
+        land_surface_temperature_from_clim_file : bool
+            Relax the surface temperature to the climatology instead of
+            letting it run freely. Default False.
+        surface_albedo_from_clim_file : bool
+            Read the surface albedo from the climatology instead of blending
+            ``params.baresoil_albedo`` and ``params.vegetation_albedo`` by the
+            vegetation fraction. Without a ``land_clim_file`` the climatology
+            is ``params.baresoil_albedo`` everywhere. Default False.
+        glacier_fraction_from_clim_file : bool
+            Read a glacier fraction map from ``land_clim_file`` and use it as
+            ``params.glacier_fraction``. The variable must have no time
+            dimension. Cells with no land are set to 0, so the file may hold
+            NaN or a fill value over ocean; a NaN over land is an error.
+            Default False.
+        vegetation_fraction_from_clim_file : bool
+            Read the vegetation fraction from the climatology instead of
+            using a uniform 0.8. The initial state starts from the climatology
+            too. Default False.
+        soil_water_availability_varname_in_clim_file : str
+            Name of the soil water availability variable in
+            ``land_clim_file``.
+        snow_depth_varname_in_clim_file : str
+            Name of the snow depth variable in ``land_clim_file``.
+        land_surface_temperature_varname_in_clim_file : str
+            Name of the surface temperature variable in ``land_clim_file``.
+        surface_albedo_varname_in_clim_file : str
+            Name of the surface albedo variable in ``land_clim_file``.
+        glacier_fraction_varname_in_clim_file : str
+            Name of the glacier fraction variable in ``land_clim_file``.
+        vegetation_fraction_varname_in_clim_file : str
+            Name of the vegetation fraction variable in ``land_clim_file``.
+        runoff_to_ocean_mapping : str or callable, optional
+            How the runoff is routed to ocean cells. A string is an ESMF
+            weight file read by ``ESMFRegridder``; a callable takes the
+            runoff field and returns the routed one. Without one the total
+            runoff is spread evenly over the cells with no land (see
+            :meth:`_spread_runoff_over_ocean`). Either way the routing stays
+            on the model's own grid: it takes and returns a field of
+            ``grid.shape``, moving the runoff from land cells to ocean cells
+            of that grid. ``derived.runoff_to_ocean``
+            is then on the same grid as everything else this model writes.
+
 
         Raises
         ------
         ValueError
-            If a parameter is out of range or ``surface_albedo`` is not on the
-            model grid.
+            If a parameter is out of range, a field in ``land_clim_file`` is
+            not on the model grid, or ``glacier_fraction_from_clim_file`` is
+            set without a ``land_clim_file`` or with a glacier fraction that
+            varies in time, or if ``runoff_to_ocean_mapping`` does not return
+            a field on the model grid.
         FileNotFoundError
             If ``land_clim_file`` does not exist.
 
@@ -147,24 +402,68 @@ class SlabLandModel(SlabModelBase):
         super().__init__(name=name, grid=grid)
         self.params = SlabLandParameters.default() if params is None else params
         self.land_clim_file = land_clim_file
+        self.varnames_in_clim_file = {
+            "snow_depth": snow_depth_varname_in_clim_file,
+            "soil_water_availability": soil_water_availability_varname_in_clim_file,
+            "land_surface_temperature": land_surface_temperature_varname_in_clim_file,
+            "surface_albedo": surface_albedo_varname_in_clim_file,
+            "glacier_fraction": glacier_fraction_varname_in_clim_file,
+            "vegetation_fraction": vegetation_fraction_varname_in_clim_file,
+        }
+
+        self.read_from_clim_file = {
+            "snow_depth": snow_depth_from_clim_file,
+            "soil_water_availability": soil_water_availability_from_clim_file,
+            "land_surface_temperature": land_surface_temperature_from_clim_file,
+            "surface_albedo": surface_albedo_from_clim_file,
+            "glacier_fraction": glacier_fraction_from_clim_file,
+            "vegetation_fraction": vegetation_fraction_from_clim_file,
+        }
+
+        self.runoff_to_ocean_mapping: Callable[[jnp.ndarray], jnp.ndarray]
+        if runoff_to_ocean_mapping is None:
+            self.runoff_to_ocean_mapping = self._spread_runoff_over_ocean
+        elif isinstance(runoff_to_ocean_mapping, str):
+            regridder = ESMFRegridder(runoff_to_ocean_mapping)
+            self.runoff_to_ocean_mapping = lambda runoff: regridder(runoff)
+        else:
+            self.runoff_to_ocean_mapping = runoff_to_ocean_mapping
+
+        # The routing must stay on this grid: runoff_to_ocean is carried and
+        # written out on it, and a field of another shape would change the
+        # scan carry between initialize and step. Checked once here, with
+        # jax.eval_shape so no data is moved, rather than failing inside scan.
+        routed = jax.eval_shape(
+            self.runoff_to_ocean_mapping, jax.ShapeDtypeStruct(self.grid.shape, jnp.float32)
+        )
+        if routed.shape != tuple(self.grid.shape):
+            raise ValueError(
+                "runoff_to_ocean_mapping must route runoff within the model grid "
+                f"{tuple(self.grid.shape)}; it returns a field of shape {routed.shape}."
+            )
+
+        # The glacier map goes into the parameters rather than onto the model,
+        # so the heat capacity has one source and the map stays a pytree leaf
+        # that jax.grad can reach. It is loaded before the parameter checks
+        # below, so the map is range-checked like a scalar would be.
+        if glacier_fraction_from_clim_file:
+            self.params = self.params.replace(
+                glacier_fraction=self._load_static_field(self.varnames_in_clim_file["glacier_fraction"])
+            )
 
         # Both timescales are read as a ratio against a length -- the relaxation
-        # as `tdland / dt`, the snow cover as `snow_depth / scale` -- and an
+        # as `temperature_relaxation_timescale / dt`, the snow cover as `snow_depth / scale` -- and an
         # infinite one is silent where a zero one is not: it damps the land
         # temperature by `inf / (1 + inf)`, which is NaN, and it puts the snow
         # cover at zero everywhere however deep the snow. Finiteness is
         # therefore required as well as sign (the fractions below get it from
         # being bounded on both sides).
-        tdland = float(self.params.tdland)
-        if not math.isfinite(tdland) or tdland <= 0.0:
+        temperature_relaxation_timescale = float(self.params.temperature_relaxation_timescale)
+        if not math.isfinite(temperature_relaxation_timescale) or temperature_relaxation_timescale <= 0.0:
             raise ValueError(
-                "params.tdland must be a finite positive number of seconds; "
-                f"got {tdland!r}."
+                "params.temperature_relaxation_timescale must be a finite positive number of seconds; "
+                f"got {temperature_relaxation_timescale!r}."
             )
-        if not 0.0 <= float(self.params.land_threshold) <= 1.0:
-            raise ValueError("land_threshold must be a land fraction in [0, 1].")
-        if not 0.0 <= float(self.params.flandmin) <= 1.0:
-            raise ValueError("flandmin must be a land fraction in [0, 1].")
         snow_depth_to_cover_scale = float(self.params.snow_depth_to_cover_scale)
         if (
             not math.isfinite(snow_depth_to_cover_scale)
@@ -177,84 +476,78 @@ class SlabLandModel(SlabModelBase):
         # The parameters are validated here, at construction, because inside
         # `step` they are traced values that cannot be inspected. A caller who
         # replaces `carry["params"]` afterwards takes on that responsibility.
-        # Both albedo values feed the soil/ice comparison; a NaN in either
-        # compares False everywhere and silently selects one material.
-        for name in ("surface_albedo", "land_ice_albedo_threshold"):
-            albedo_value = float(getattr(self.params, name))
-            if not math.isfinite(albedo_value) or not 0.0 <= albedo_value <= 1.0:
+        # Both are fractions. A NaN would propagate silently: through the
+        # heat capacity into the temperature for the glacier fraction, and
+        # into the output for the albedo. The glacier fraction may be a map,
+        # so every element is checked, and a map must be on the model grid
+        # (anything else would broadcast or fail deep inside `step`).
+        for fraction_name in ("baresoil_albedo", "vegetation_albedo", "glacier_fraction"):
+            fraction = np.asarray(getattr(self.params, fraction_name), dtype=float)
+            if not np.all(np.isfinite(fraction)) or not np.all(
+                (fraction >= 0.0) & (fraction <= 1.0)
+            ):
                 raise ValueError(
-                    f"params.{name} must be a finite albedo in [0, 1]; "
-                    f"got {albedo_value!r}."
+                    f"params.{fraction_name} must be finite and in [0, 1]; "
+                    f"got values in [{np.nanmin(fraction):g}, {np.nanmax(fraction):g}]."
+                )
+        for map_name in ("glacier_fraction", "baresoil_albedo", "vegetation_albedo"):
+            field_shape = np.shape(getattr(self.params, map_name))
+            if field_shape not in ((), self.grid.shape):
+                raise ValueError(
+                    f"params.{map_name} has shape {field_shape}; it must "
+                    f"be a scalar or a map on the grid, {self.grid.shape} (n_lon, n_lat)."
                 )
         # The slab heat capacity is depth times volumetric capacity; a zero or
         # negative factor makes the temperature update infinite or unstable.
-        for name in (
-            "depth_soil",
-            "depth_lice",
+        # The bucket depths divide the bucket's water budget, so they must be
+        # positive too; they are per-layer, so every element is checked.
+        for factor_name in (
+            "soil_bucket_depth",
+            "soil_thermal_depth",
+            "glacier_depth",
             "soil_volumetric_heat_capacity",
-            "land_ice_volumetric_heat_capacity",
+            "glacier_volumetric_heat_capacity",
         ):
-            factor = float(getattr(self.params, name))
-            if not math.isfinite(factor) or factor <= 0.0:
+            factor = np.asarray(getattr(self.params, factor_name), dtype=float)
+            if not np.all(np.isfinite(factor)) or not np.all(factor > 0.0):
                 raise ValueError(
-                    f"params.{name} must be finite and strictly positive (it is a "
-                    f"factor of the slab heat capacity); got {factor!r}."
+                    f"params.{factor_name} must be finite and strictly positive "
+                    f"(it divides the heat or water budget); got {factor!r}."
                 )
-
-        # An explicit albedo field is boundary data and lives on the model;
-        # without one, `step` builds a uniform field from the *carried*
-        # `params.surface_albedo` each step, so the parameter stays live for
-        # anyone who replaces `carry["params"]` (it is below
-        # `land_ice_albedo_threshold` by default, so such a model is all
-        # soil). Nothing in JEM routes the albedo the atmosphere's boundary
-        # data already carries (`jcm.forcing.ForcingData.alb0`) to this
-        # argument, so that is what every packaged configuration gets, ice
-        # sheets included -- see jax-esm#109.
-        self.surface_albedo: jnp.ndarray | None = None
-        if surface_albedo is not None:
-            surface_albedo = jnp.asarray(surface_albedo)
-            if tuple(surface_albedo.shape) != self.grid.shape:
-                raise ValueError(
-                    f"surface_albedo has shape {tuple(surface_albedo.shape)}, but the "
-                    f"grid is {self.grid.shape} (n_lon, n_lat)."
-                )
-            # The field only ever feeds a comparison against the ice
-            # threshold, so a NaN (which compares False, selecting the ice
-            # slab) or an out-of-range value would silently choose the wrong
-            # heat capacity rather than fail.
-            if not bool(jnp.all(jnp.isfinite(surface_albedo))):
-                raise ValueError("surface_albedo contains non-finite values.")
-            albedo_min = float(surface_albedo.min())
-            albedo_max = float(surface_albedo.max())
-            if albedo_min < 0.0 or albedo_max > 1.0:
-                raise ValueError(
-                    "surface_albedo must lie in [0, 1]; got values in "
-                    f"[{albedo_min:g}, {albedo_max:g}]."
-                )
-            self.surface_albedo = surface_albedo
 
         # Boundary data is *configuration*, so it is read here rather than in
         # ``initialize()``: that keeps initialize() pure with respect to self
         # and surfaces a bad file at construction.
         (
-            self.surface_temperature_climatology,
+            self.land_surface_temperature_climatology,
             self.snow_depth_climatology,
-            self.soil_water_climatology,
+            self.soil_water_availability_climatology,
+            self.surface_albedo_climatology,
+            self.vegetation_fraction_climatology,
         ) = self._load_climatologies()
 
-    def _load_climatologies(self) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Load the three boundary climatologies, with idealized fallbacks.
+    def _load_climatologies(
+        self,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Load the five monthly climatologies, with idealized fallbacks.
 
-        Every field is read BY NAME through
+        Fields are read by name through
         :func:`~jem.components.slab.base.load_monthly_climatology`, which
-        checks it against the model grid. The previous positional read
-        (``jnp.array(ds["stl"].values)``) accepted any array whose shape
-        happened to fit, so a file on a different grid, or written in a
-        different axis order, loaded silently and wrongly.
+        checks them against the model grid.
+
+        Returns
+        -------
+        tuple of jnp.ndarray
+            Surface temperature (K), snow depth (mm), soil water availability,
+            surface albedo and vegetation fraction, each of shape
+            ``(n_lon, n_lat, 12)``.
+
         """
         shape = self.grid.shape
         monthly = shape + (_MONTHS_PER_YEAR,)
-
+        
+        varnames_in_clim_file = self.varnames_in_clim_file
+        
         if self.land_clim_file is None:
             logger.info(
                 "%s: no land climatology file; using an idealized climatology.",
@@ -264,48 +557,128 @@ class SlabLandModel(SlabModelBase):
                 self._idealized_land_temperature(),
                 jnp.zeros(monthly),
                 jnp.full(monthly, 0.5),
+                # Every month holds the bare soil albedo, which may be a map.
+                jnp.broadcast_to(
+                    jnp.broadcast_to(self.params.baresoil_albedo, shape)[..., None], monthly
+                ),
+                jnp.full(monthly, 0.8),
             )
-
+        
         if not Path(self.land_clim_file).exists():
             raise FileNotFoundError(
                 f"Land climatology file \"{self.land_clim_file!s:s}\" does not exist."
             )
 
-        surface_temperature = self._load_named(_SURFACE_TEMPERATURE_NAMES)
-        if surface_temperature is None:
+        land_surface_temperature = self._load_named([varnames_in_clim_file["land_surface_temperature"],])
+        if land_surface_temperature is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; using an idealized "
+                "%s: land climatology file %s does not have %s; using an idealized "
                 "surface-temperature climatology.",
                 self.name,
                 self.land_clim_file,
-                _SURFACE_TEMPERATURE_NAMES,
+                varnames_in_clim_file["land_surface_temperature"],
             )
-            surface_temperature = self._idealized_land_temperature()
+            land_surface_temperature = self._idealized_land_temperature()
 
-        snow_depth = self._load_named(_SNOW_DEPTH_NAMES)
+        snow_depth = self._load_named([varnames_in_clim_file["snow_depth"],])
         if snow_depth is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; assuming no snow.",
+                "%s: land climatology file %s does not have %s; assuming no snow.",
                 self.name,
                 self.land_clim_file,
-                _SNOW_DEPTH_NAMES,
+                varnames_in_clim_file["snow_depth"],
             )
             snow_depth = jnp.zeros(monthly)
 
-        soil_water = self._load_named(_SOIL_WATER_NAMES)
-        if soil_water is None:
+        soil_water_availability = self._load_named([varnames_in_clim_file["soil_water_availability"],])
+        if soil_water_availability is None:
             logger.warning(
-                "%s: land climatology file %s has none of %r; assuming uniform soil "
+                "%s: land climatology file %s does not have %s; assuming uniform soil "
                 "water availability of 0.5.",
                 self.name,
                 self.land_clim_file,
-                _SOIL_WATER_NAMES,
+                varnames_in_clim_file["soil_water_availability"],
             )
-            soil_water = jnp.full(monthly, 0.5)
+            soil_water_availability = jnp.full(monthly, 0.5)
 
-        return surface_temperature, snow_depth, soil_water
+        surface_albedo = self._load_named([varnames_in_clim_file["surface_albedo"],])
+        if surface_albedo is None:
+            logger.warning(
+                "%s: land climatology file %s does not have %s; assuming uniform surface_albedo 0.2 ",
+                self.name,
+                self.land_clim_file,
+                varnames_in_clim_file["surface_albedo"],
+            )
+            surface_albedo = jnp.full(monthly, 0.2)
+ 
+        vegetation_fraction = self._load_named([varnames_in_clim_file["vegetation_fraction"],])
+        if vegetation_fraction is None:
+            logger.warning(
+                "%s: land climatology file %s does not have %s; assuming uniform vegetation "
+                "fraction of 0.8.",
+                self.name,
+                self.land_clim_file,
+                varnames_in_clim_file["vegetation_fraction"],
+            )
+            vegetation_fraction = jnp.full(monthly, 0.8)
 
-    def _load_named(self, candidates: tuple[str, ...]) -> jnp.ndarray | None:
+        return (
+            land_surface_temperature,
+            snow_depth,
+            soil_water_availability,
+            surface_albedo,
+            vegetation_fraction,
+        )
+
+    def _load_static_field(self, varname: str, off_land_value: float = 0.0) -> jnp.ndarray:
+        """Load a time-invariant map from the climatology file.
+
+        Unlike the climatologies there is no fallback: a static field is read
+        only when the caller asks for the file's map, so a missing file or
+        variable is an error rather than a silent uniform value.
+
+        Parameters
+        ----------
+        varname : str
+            Name of the variable in ``land_clim_file``.
+        off_land_value : float
+            Value given to cells with no land. Default 0.
+
+        Returns
+        -------
+        jnp.ndarray
+            The field with shape ``(n_lon, n_lat)``.
+
+        """
+        if self.land_clim_file is None:
+            raise ValueError(
+                f"Reading the static field \"{varname}\" needs a land_clim_file."
+            )
+        if not Path(self.land_clim_file).exists():
+            raise FileNotFoundError(
+                f"Land climatology file \"{self.land_clim_file!s:s}\" does not exist."
+            )
+        logger.info(
+            "%s: loading %r static field from %s",
+            self.name,
+            varname,
+            self.land_clim_file,
+        )
+        values = np.asarray(
+            load_static_field(self.land_clim_file, varname, self.grid), dtype=float
+        )
+        # Source files usually leave ocean cells as NaN or a fill value. The
+        # land model never integrates those cells, so they are overwritten
+        # here; a NaN over land is a broken file and is rejected.
+        land = np.asarray(self.grid.binary_land_mask) == 1
+        if not np.all(np.isfinite(values[land])):
+            raise ValueError(
+                f"Land climatology file \"{self.land_clim_file!s:s}\": "
+                f"\"{varname}\" has non-finite values on land cells."
+            )
+        return jnp.asarray(np.where(land, values, off_land_value))
+
+    def _load_named(self, candidates: Sequence[str]) -> jnp.ndarray | None:
         """Load whichever of `candidates` the climatology file carries."""
         name = first_present_variable(self.land_clim_file, candidates)
         if name is None:
@@ -315,138 +688,435 @@ class SlabLandModel(SlabModelBase):
         )
         return load_monthly_climatology(self.land_clim_file, name, self.grid)
 
-    def initialize(self, params: SlabLandParameters | None = None) -> Carry:
+    def initialize(self,
+        params: SlabLandParameters | None = None,
+        initialize_from_clim_file: bool = False,
+    ) -> Carry:
         """Build the initial land carry.
+
+        By default every cell starts at 288.15 K with no snow, soil water at
+        the wilting point of each layer (0 off land) and a vegetation
+        fraction of 0.8. With
+        ``vegetation_fraction_from_clim_file=True`` the vegetation fraction
+        starts from the climatology at the month the run starts in instead,
+        whatever ``initialize_from_clim_file`` is. The initial surface albedo
+        is the blend of ``params.baresoil_albedo`` and
+        ``params.vegetation_albedo`` by that vegetation fraction. Vegetation
+        and albedo are 0 off land.
 
         Parameters
         ----------
         params : SlabLandParameters, optional
-            Parameters to start from; defaults to the ones the model was
-            constructed with. The land model has no initial-condition
-            parameters -- it starts from its climatology, and every field of
-            :class:`SlabLandParameters` is a process parameter ``step`` reads
-            out of the carry -- but the parameters given here still shape the
-            initial state (through the land mask and the snow-cover closure)
-            and are what the carry carries, so the state and the process
-            parameters cannot come from two different objects.
+            Parameters to put in ``carry["params"]``. Defaults to the ones
+            the model was constructed with.
+        initialize_from_clim_file : bool
+            Start the surface temperature, snow depth and snow cover from the
+            climatology at the month the run starts in
+            (:attr:`SlabModelBase.start_year_fraction`). Soil water still
+            starts at the wilting point, and the initial albedo is the blend even when
+            ``surface_albedo_from_clim_file=True``; the first step replaces
+            it with the climatology. Default False.
+
+        Returns
+        -------
+        Carry
+            ``{"params", "state", "forcing", "derived"}``. The forcing starts
+            at zero and is filled by the exchangers before the first step.
 
         """
+        if (
+            params is not None
+            and self.read_from_clim_file["glacier_fraction"]
+            and jnp.shape(params.glacier_fraction) != self.grid.shape
+        ):
+            # Passed parameters win, as they do for every other parameter,
+            # but losing the file's map that way is easy to do by accident.
+            logger.warning(
+                "%s: the params passed to initialize() have a uniform "
+                "glacier_fraction, so the map read from %s is not used.",
+                self.name,
+                self.land_clim_file,
+            )
         params = self._initial_params(params)
-        land = _land_cells(self.grid, params)
+        land = self.grid.binary_land_mask
         # The month the run starts in; the coupler sets it through `bind`.
         cycle_position = self.start_year_fraction
 
-        surface_temperature = jnp.where(
-            land,
-            evaluate_cyclic_linear(
-                cycle_position, self.surface_temperature_climatology
-            ),
-            MASKED_SURFACE_TEMPERATURE,
+        state = LandState.zeros(self.grid.shape)
+        state.land_surface_temperature = state.land_surface_temperature.at[:].set(273.15 + 15.0)
+        # Soil water starts at the wilting point of each layer: the driest
+        # state the bucket allows. Nothing in step takes a layer below its
+        # wilting point, and the evaporation floor there assumes it never
+        # starts below it.
+        state.soil_water_content = jnp.where(
+            land[..., None] == 1,
+            jnp.broadcast_to(params.soil_water_wilting_point, self.grid.shape + (2,)),
+            0.0,
         )
+        # A prescribed vegetation fraction starts from its climatology, so
+        # the initial albedo matches what the first step computes. Both are
+        # masked to land, as step does.
+        if self.read_from_clim_file["vegetation_fraction"]:
+            initial_vegetation_fraction = evaluate_cyclic_linear(
+                cycle_position, self.vegetation_fraction_climatology
+            )
+        else:
+            initial_vegetation_fraction = jnp.full(self.grid.shape, 0.8)
+        state.vegetation_fraction = jnp.where(
+            land == 1, jnp.clip(initial_vegetation_fraction, 0.0, 1.0), 0.0
+        )
+
+        derived = LandDerived.zeros(
+            self.grid.shape,
+            surface_albedo=jnp.where(
+                land == 1,
+                params.baresoil_albedo * (1.0 - state.vegetation_fraction) + params.vegetation_albedo * state.vegetation_fraction,
+                0.0,
+            ),
+            runoff_to_ocean=self.runoff_to_ocean_mapping(jnp.zeros(self.grid.shape)),
+        )
+
+
+        if initialize_from_clim_file:
+            logger.info(
+                "Initialize land states (land_surface_temperature and snow_depth"
+                " with climatology."
+            )
+            state.land_surface_temperature = jnp.where(
+                land,
+                evaluate_cyclic_linear(
+                    cycle_position, self.land_surface_temperature_climatology
+                ),
+                MASKED_SURFACE_TEMPERATURE,
+            )
+
+            state.snow_depth = evaluate_cyclic_linear(
+                cycle_position, self.snow_depth_climatology
+            )
+            state.snow_cover = convert_snow_depth_to_snow_cover(state.snow_depth, params)
 
         return {
             "params": params,
-            "state": LandState.zeros(
-                self.grid.shape,
-                land_surface_temperature=surface_temperature,
-                snowc=_snow_cover(
-                    evaluate_cyclic_linear(
-                        cycle_position, self.snow_depth_climatology
-                    ),
-                    params,
-                ),
-                soilw=evaluate_cyclic_linear(
-                    cycle_position, self.soil_water_climatology
-                ),
-            ),
+            "state": state,
             "forcing": LandForcing.zeros(self.grid.shape),
+            # runoff_to_ocean is built by the same routing step uses, so its
+            # dtype matches what step returns and the scan carry is stable.
+            "derived": derived,
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
         """Advance the land surface by one coupling step.
 
-        Follows SPEEDY's ``run_land_model``: interpolate the climatology to the
-        start and end of the step, evolve the temperature anomaly about it with
-        the surface heat flux and the dissipation coefficient, then add the
-        end-of-step climatology back.
+        See the class docstring for the equations. The ``*_from_clim_file``
+        switches pick the branch for each part at trace time.
+
+        Parameters
+        ----------
+        carry : Carry
+            ``{"params", "state", "forcing", "derived"}`` as built by
+            :meth:`initialize`.
+        time : CouplingTime
+            Start time and length (``dt``) of the step.
+
+        Returns
+        -------
+        tuple[Carry, Diagnostics]
+            The new carry, and ``{"state", "forcing", "derived"}`` for output.
+
         """
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
+        read_from_clim_file = self.read_from_clim_file
+        land_mask = self.grid.binary_land_mask
 
-        land = _land_cells(self.grid, params)
-        land_fraction = _land_fraction(self.grid, params)
-        # SPEEDY's dmask: only cells that are mostly land carry an anomaly of
-        # their own; the rest follow the climatology exactly.
-        anomaly_mask = jnp.where(land_fraction >= params.flandmin, 1.0, 0.0)
-
-        # Heat capacity per unit area, and its reciprocal scaled by the step:
-        # SPEEDY's rhcapl. Computed here rather than cached on the model because
-        # both the depths and the coupling timestep are things a caller may vary
-        # between runs -- and, for the depths, differentiate through.
-        surface_albedo = (
-            self.surface_albedo
-            if self.surface_albedo is not None
-            else jnp.full(self.grid.shape, params.surface_albedo)
+        # The thermal slab has its own depth, separate from the water bucket's
+        # layers: SPEEDY also uses 1 m for heat (hcapl) and 7 cm for soil water.
+        heat_capacity = (
+            params.soil_thermal_depth * params.soil_volumetric_heat_capacity * (1.0 - params.glacier_fraction)
+            + params.glacier_depth * params.glacier_volumetric_heat_capacity * params.glacier_fraction
         )
-        heat_capacity = jnp.where(
-            surface_albedo < params.land_ice_albedo_threshold,
-            params.depth_soil * params.soil_volumetric_heat_capacity,
-            params.depth_lice * params.land_ice_volumetric_heat_capacity,
-        )
-        inverse_heat_capacity = time.dt / heat_capacity
-
-        # SPEEDY's cdland, in units of the coupling step.
-        dissipation_steps = params.tdland / time.dt
-        dissipation = (anomaly_mask * dissipation_steps) / (
-            1.0 + anomaly_mask * dissipation_steps
-        )
-
-        climatology_begin = evaluate_cyclic_linear(
-            time.year_fraction, self.surface_temperature_climatology
-        )
-        climatology_end = evaluate_cyclic_linear(
-            time.end_of_step().year_fraction, self.surface_temperature_climatology
-        )
-        snow_depth = evaluate_cyclic_linear(
-            time.year_fraction, self.snow_depth_climatology
-        )
-        soil_water = evaluate_cyclic_linear(
-            time.year_fraction, self.soil_water_climatology
-        )
+        dt_inverse_heat_capacity = time.dt / heat_capacity
 
         # The heat flux arrives in the coupler's upward-positive convention;
         # the land is warmed by what flows into it, hence the negation.
-        downward_heat_flux = -forcing.total_heat_flux
+        downward_heat_flux = - forcing.total_heat_flux
 
-        anomaly = state.land_surface_temperature - climatology_begin
-        new_anomaly = dissipation * (anomaly + inverse_heat_capacity * downward_heat_flux)
-        surface_temperature = jnp.where(
-            land, new_anomaly + climatology_end, MASKED_SURFACE_TEMPERATURE
+        if read_from_clim_file["land_surface_temperature"]:
+ 
+            logger.info("Relax land surface temperature to climatology")
+ 
+            lst_climatology_begin = evaluate_cyclic_linear(
+                time.year_fraction, self.land_surface_temperature_climatology
+            )
+            lst_climatology_end = evaluate_cyclic_linear(
+                time.end_of_step().year_fraction, self.land_surface_temperature_climatology
+            )
+
+           
+            dissipation_steps = params.temperature_relaxation_timescale / time.dt
+            dissipation = (land_mask * dissipation_steps) / (
+                1.0 + land_mask * dissipation_steps
+            )
+
+            anomaly = state.land_surface_temperature - lst_climatology_begin
+            new_anomaly = dissipation * (anomaly + dt_inverse_heat_capacity * downward_heat_flux)
+            new_land_surface_temperature = jnp.where(
+                land_mask, new_anomaly + lst_climatology_end, MASKED_SURFACE_TEMPERATURE
+            )
+        
+        else:
+            new_land_surface_temperature = state.land_surface_temperature + dt_inverse_heat_capacity * downward_heat_flux
+
+        new_land_surface_temperature = jnp.where(
+            land_mask, new_land_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
 
+        if read_from_clim_file["snow_depth"]:
+            logger.info("Read snow depth from climatology")
+            new_snow_depth = evaluate_cyclic_linear(
+                time.year_fraction, self.snow_depth_climatology
+            )
+        else:
+            new_snow_depth = state.snow_depth
+         
+
+        if read_from_clim_file["vegetation_fraction"]:
+            logger.info("Read vegetation fraction from climatology")
+            new_vegetation_fraction = evaluate_cyclic_linear(
+                time.year_fraction, self.vegetation_fraction_climatology
+            )
+        else:
+            new_vegetation_fraction = state.vegetation_fraction
+        
+        new_vegetation_fraction = jnp.where(
+            land_mask == 1,
+            jnp.clip(new_vegetation_fraction, 0.0, 1.0),
+            0.0
+        )
+ 
+        # =====================================================================
+        # Land surface soil moisture evolution (two-layer leaky bucket)
+        # =====================================================================
+        # Layer 0 (surface): receives precipitation, drains into layer 1.
+        # Layer 1 (deep): receives layer 0's drainage, drains out as deep drainage.
+       
+        # The order of physical processes is: precipitation, evaporation, drainage and runoff.
+        # This design is to reduce the chance of unmet evaporation to happen.
+
+        d = params.soil_bucket_depth[None, None, :]
+        prec_m = forcing.precipitation / 1000.0 # kg s-1 m-2 => m s-1
+        evap_m = forcing.evaporation   / 1000.0 # kg s-1 m-2 => m s-1
+        
+        # 1. Precipitation
+        _swc = jnp.stack(
+            [ 
+              state.soil_water_content[..., 0] + prec_m * time.dt / d[:, :, 0],
+              state.soil_water_content[..., 1]
+            ], axis=-1
+        )
+        
+        # 2. Evaporation
+        dist_evap = jnp.where(
+            land_mask[..., None],
+            self._compute_distributed_evaporation(
+                evap_m,
+                params.soil_bucket_depth,
+                params.soil_water_wilting_point,
+                params.soil_water_field_capacity,
+                _swc,
+                new_vegetation_fraction,
+            ),
+            0.0
+        )
+        
+        _swc_unbounded = _swc - dist_evap * time.dt / d
+        _swc = jnp.maximum(_swc_unbounded, params.soil_water_wilting_point[None, None, :])
+        
+        unmet_evaporation = jnp.sum( (_swc - _swc_unbounded) * d, axis=-1 ) / time.dt * 1000.0 # m s-1 => kg s-1 m-2
+
+        # 3. Drainage and runoff
+        flow = jnp.maximum(_swc - params.soil_water_wilting_point[None, None, :], 0.0) / params.drainage_timescale[None, None, :]
+       
+        inflow_1to2 = flow[..., 0] * d[:, :, 0]  # m s-1
+        drainage2 = flow[..., 1]  * d[:, :, 1]   # m s-1
+         
+        _swc = jnp.stack([
+            _swc[..., 0] - inflow_1to2 / d[:, :, 0] * time.dt,
+            _swc[..., 1] + ( inflow_1to2 - drainage2 ) / d[:, :, 1] * time.dt,
+        ], axis=-1)
+        
+        deep_drainage_flux = 1000.0 * drainage2  # kg m-2 s-1
+
+        # Neither layer holds more than its field capacity. The excess of
+        # each layer leaves the model as runoff, without passing through
+        # the layer below, and is routed to the ocean with the deep drainage.
+        _swc_capped = jnp.minimum(_swc, params.soil_water_field_capacity[None, None, :])
+        runoff_due_to_overflow = jnp.where(
+            land_mask,
+            1000 * jnp.sum( (_swc - _swc_capped) * params.soil_bucket_depth[None, None, :] / time.dt, axis=-1),
+            0.0
+        )
+
+        deep_drainage_flux = jnp.where(land_mask, deep_drainage_flux, 0.0)
+        unmet_evaporation = jnp.where(land_mask, unmet_evaporation, 0.0)
+        runoff_to_ocean = self.runoff_to_ocean_mapping(deep_drainage_flux + runoff_due_to_overflow)
+
+        new_soil_water_content = jnp.where(
+            land_mask[..., None],
+            _swc_capped,
+            0.0
+        )
+ 
+        if read_from_clim_file["soil_water_availability"]:
+            logger.info("Read soil water availability from climatology")
+            new_soil_water_availability = evaluate_cyclic_linear(
+                time.year_fraction, self.soil_water_availability_climatology
+            )
+        else:
+            abs_swa, max_abs_swa = self._compute_absolute_soil_water_availability(
+                params.soil_bucket_depth,
+                params.soil_water_wilting_point,
+                params.soil_water_field_capacity,
+                new_soil_water_content,
+                new_vegetation_fraction,
+            )
+
+            new_soil_water_availability = jnp.where(
+                jnp.sum(max_abs_swa, axis=-1) > 0,
+                jnp.sum(abs_swa, axis=-1) / jnp.sum(max_abs_swa, axis=-1),
+                0.0
+            )
+        
+        new_soil_water_availability = jnp.where(
+            land_mask,
+            jnp.clip(new_soil_water_availability, 0.0, 1.0),
+            0.0
+        )
+
+
+
+        if read_from_clim_file["surface_albedo"]:
+            logger.info("Read albedo content from climatology")
+            new_surface_albedo = evaluate_cyclic_linear(
+                time.year_fraction, self.surface_albedo_climatology
+            )
+        else:
+            new_surface_albedo = params.baresoil_albedo * (1.0 - new_vegetation_fraction) + params.vegetation_albedo * new_vegetation_fraction
+ 
+        new_surface_albedo = jnp.where(
+            land_mask == 1,
+            jnp.clip(new_surface_albedo, 0.0, 1.0),
+            0.0
+        )
+ 
         new_state = state.replace(
-            land_surface_temperature=surface_temperature,
-            snowc=_snow_cover(snow_depth, params),
-            soilw=soil_water,
+            land_surface_temperature=new_land_surface_temperature,
+            snow_depth=new_snow_depth,
+            snow_cover=convert_snow_depth_to_snow_cover(new_snow_depth, params),
+            soil_water_content=new_soil_water_content,
+            vegetation_fraction=new_vegetation_fraction,
         )
 
         diagnostics = {
             "state": new_state,
             "forcing": forcing,
+            "derived": LandDerived.zeros(
+                self.grid.shape,
+                surface_albedo=new_surface_albedo,
+                deep_drainage=deep_drainage_flux,
+                soil_water_overflow=runoff_due_to_overflow,
+                runoff_to_ocean=runoff_to_ocean,
+                unmet_evaporation=unmet_evaporation,
+                soil_water_availability=new_soil_water_availability,
+            ),
         }
         return {"params": params, **diagnostics}, diagnostics
 
-    def _idealized_land_temperature(self) -> jnp.ndarray:
-        """Idealised monthly land-temperature climatology.
+    def _compute_distributed_evaporation(
+        self,
+        evaporation,
+        soil_bucket_depth,
+        soil_water_wilting_point,
+        soil_water_field_capacity,
+        soil_water_content,
+        vegetation_fraction,
+    ):
+        abs_swa, _ = self._compute_absolute_soil_water_availability(
+            soil_bucket_depth,
+            soil_water_wilting_point,
+            soil_water_field_capacity,
+            soil_water_content,
+            vegetation_fraction,
+        )
 
-        The latitude dependence is taken from the grid's own 2-D latitude
-        field rather than reconstructed from a shape tuple, so the axis order
-        cannot be confused: an earlier version unpacked `grid.shape` as
-        `(n_lat, n_lon)` when it is in fact `(n_lon, n_lat)`, and so laid the
-        pole-to-pole profile out along the LONGITUDE axis. On JCM grids the
-        two axis lengths differ only by a factor of two, so the shapes lined
-        up and the error was silent.
+        # Compute share of each layer
+        sum_abs_swa = jnp.sum(abs_swa, axis=-1)
+        share1 = jnp.where(
+            sum_abs_swa > 0,
+            abs_swa[..., 0] /  sum_abs_swa,
+            1.0 # avoid divided by zero
+        )
+
+        share1 = jnp.where(
+            evaporation < 0, # when dew happens, force it to be surface layer
+            1.0,
+            share1,
+        )
+        
+        return evaporation[..., None] * jnp.stack( [share1, 1 - share1], axis=-1 )
+
+    def _compute_absolute_soil_water_availability(
+        self,
+        soil_bucket_depth,
+        soil_water_wilting_point,
+        soil_water_field_capacity,
+        soil_water_content,
+        vegetation_fraction,
+    ):
+        d1, d2 = soil_bucket_depth
+        wp1, wp2 = soil_water_wilting_point
+        fc1, fc2 = soil_water_field_capacity
+        swc1 = soil_water_content[:, :, 0]
+        swc2 = soil_water_content[:, :, 1]
+        f_veg = vegetation_fraction
+
+        # swa = soil water availability
+        abs_swa1 = d1 * jnp.maximum(swc1 - wp1, 0.0)
+        abs_swa2 = f_veg * d2 * jnp.maximum(swc2 - wp2, 0.0)
+        max_abs_swa1 = d1 * (fc1 - wp1)
+        max_abs_swa2 = d2 * (fc2 - wp2)
+
+        return (
+            jnp.stack( [abs_swa1,     abs_swa2],     axis=-1),
+            jnp.stack( [max_abs_swa1, max_abs_swa2], axis=-1),
+        )
+
+    def _spread_runoff_over_ocean(self, runoff: jnp.ndarray) -> jnp.ndarray:
+        """Spread the total runoff evenly over the cells with no land.
+
+        The area-weighted total is kept and handed out as one uniform flux
+        (kg m-2 s-1) over every cell whose land fraction is 0. Those cells
+        are all ocean, so the ocean there receives all of it; a coast cell
+        would share it with its land part. Cell areas are taken as
+        proportional to cos(latitude), which is exact on a regular lon/lat
+        grid and close on a Gaussian one. A grid with no all-ocean cell has
+        nowhere to send the runoff, and it is returned unrouted.
+        """
+        area = jnp.cos(self.grid.latitude_radian)
+        no_land = self.grid.land_fraction == 0.0
+        ocean_area = jnp.sum(jnp.where(no_land, area, 0.0))
+        total = jnp.sum(runoff * area)
+        spread = jnp.where(no_land, total / jnp.where(ocean_area > 0.0, ocean_area, 1.0), 0.0)
+        return jnp.where(ocean_area > 0.0, spread, runoff)
+
+    def _idealized_land_temperature(self) -> jnp.ndarray:
+        """Idealized monthly land surface temperature climatology.
+
+        ``T = 273.15 + 25 cos(lat) + 15 sin^2(lat) cos(2 pi (month - 2) / 12)``,
+        so the equator is warm, the poles are cold, and the seasonal cycle
+        grows with latitude. Latitude comes from the grid's 2-D field, which
+        is already in ``(n_lon, n_lat)`` order.
 
         Returns
         -------
@@ -476,8 +1146,9 @@ class SlabLandModel(SlabModelBase):
         """Create xarray data variables for land output."""
         state = diagnostics["state"]
         forcing = diagnostics["forcing"]
+        derived = diagnostics["derived"]
         dims = ("time",) + self.grid.dims
-
+        layer_dims = ("time",) + self.grid.dims + ("layer", )
         return {
             "land_surface_temperature": (
                 dims,
@@ -488,21 +1159,24 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
-            "snowc": (
+            "snow_depth": (
                 dims,
-                state.snowc,
+                state.snow_depth,
                 {
-                    "long_name": "Snow cover fraction",
-                    "units": "1",
+                    "long_name": "Snow depth (water equivalent)",
+                    "units": "mm",
                     **role_attrs("state"),
                 },
             ),
-            "soilw": (
-                dims,
-                state.soilw,
+
+            # layer 0 is the surface soil layer, layer 1 the deep one; their
+            # depths are params.soil_bucket_depth.
+            "soil_water_content": (
+                layer_dims,
+                state.soil_water_content,
                 {
-                    "long_name": "Soil water availability",
-                    "units": "1",
+                    "long_name": "Volumetric soil water content",
+                    "units": "m3 m-3",
                     **role_attrs("state"),
                 },
             ),
@@ -516,7 +1190,111 @@ class SlabLandModel(SlabModelBase):
                     **role_attrs("forcing"),
                 },
             ),
+            # The water source of the top soil layer. Prefixed like every
+            # forcing so it does not collide with the atmosphere's own
+            # `precipitation` when the two datasets are merged.
+            forcing_variable("precipitation"): (
+                dims,
+                forcing.precipitation,
+                {
+                    "long_name": "Precipitation the land surface was forced with",
+                    "units": "kg m-2 s-1",
+                    "positive": "downward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            "surface_albedo": (
+                dims,
+                derived.surface_albedo,
+                {
+                    "long_name": "Surface albedo",
+                    "units": "None",
+                    "description": "The climatology when surface_albedo_from_clim_file is set; otherwise baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo * vegetation_fraction",
+                    **role_attrs("derived"),
+                },
+            ),
+            "deep_drainage": (
+                dims,
+                derived.deep_drainage,
+                {
+                    "long_name": "Water drained out of the deep soil layer",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
+                },
+            ),
+            "soil_water_overflow": (
+                dims,
+                derived.soil_water_overflow,
+                {
+                    "long_name": "Soil water above field capacity leaving the soil layers",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
+                },
+            ),
+            "runoff_to_ocean": (
+                dims,
+                derived.runoff_to_ocean,
+                {
+                    "long_name": "Deep drainage and soil water overflow routed to the ocean",
+                    "units": "kg m-2 s-1",
+                    **role_attrs("derived"),
+                },
+            ),
+            "unmet_evaporation": (
+                dims,
+                derived.unmet_evaporation,
+                {
+                    "long_name": "Evaporation the soil layers had no water to supply",
+                    "units": "kg m-2 s-1",
+                    "positive": "upward",
+                    **role_attrs("derived"),
+                },
+            ),
+            forcing_variable("evaporation"): (
+                dims,
+                forcing.evaporation,
+                {
+                    "long_name": "Evaporation the land surface was forced with",
+                    "units": "kg m-2 s-1",
+                    "positive": "upward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            "soil_water_availability": (
+                dims,
+                derived.soil_water_availability,
+                {
+                    "long_name": "Soil water availability",
+                    "units": "1",
+                    **role_attrs("derived"),
+                },
+            ),
+
         }
+
+    def to_xarray(self, diagnostics: Diagnostics, time: TimeAxis) -> xr.Dataset:
+        """Convert a run's stacked diagnostics to a Dataset.
+
+        As :meth:`SlabModelBase.to_xarray`, with the glacier fraction added
+        as a time-independent coordinate next to the land-sea mask.
+
+        The map written is ``self.params.glacier_fraction``, the one the
+        model was constructed with (and read from the file, if
+        ``glacier_fraction_from_clim_file=True``). A run started with
+        ``initialize(params)`` whose glacier fraction differs is not
+        reflected here.
+        """
+        dataset = super().to_xarray(diagnostics, time)
+        glacier_fraction = np.broadcast_to(
+            np.asarray(self.params.glacier_fraction, dtype=float), self.grid.shape
+        )
+        return dataset.assign_coords(
+            glacier_fraction=(
+                self.grid.dims,
+                glacier_fraction,
+                {"long_name": "Glacier fraction of the land area", "units": "1"},
+            )
+        )
 
     def _create_xarray_global_attributes(self) -> dict[str, Any]:
         # No parameter values here: the dynamics read `carry["params"]`, which
@@ -527,22 +1305,20 @@ class SlabLandModel(SlabModelBase):
         return {"description": "SPEEDY-based slab land surface model output"}
 
 
-def _land_fraction(grid: SlabGrid, params: SlabLandParameters) -> jnp.ndarray:
-    """SPEEDY's fmask_l: land fraction, snapped to 0 or 1 near the ends."""
-    threshold = params.land_threshold
-    fractional_mask = grid.fractional_mask
-    return jnp.where(
-        fractional_mask >= threshold,
-        jnp.where(fractional_mask > (1.0 - threshold), 1.0, fractional_mask),
-        0.0,
-    )
+def convert_snow_depth_to_snow_cover(snow_depth: jnp.ndarray, params: SlabLandParameters) -> jnp.ndarray:
+    """Snow cover fraction from snow depth (SPEEDY's ``sd2sc`` closure).
 
+    Parameters
+    ----------
+    snow_depth : jnp.ndarray
+        Snow depth (mm water equivalent).
+    params : SlabLandParameters
+        Supplies ``snow_depth_to_cover_scale`` (mm).
 
-def _land_cells(grid: SlabGrid, params: SlabLandParameters) -> jnp.ndarray:
-    """Boolean mask of the cells this model integrates (SPEEDY's bmask_l)."""
-    return grid.fractional_mask >= params.land_threshold
+    Returns
+    -------
+    jnp.ndarray
+        ``min(1, snow_depth / snow_depth_to_cover_scale)``.
 
-
-def _snow_cover(snow_depth: jnp.ndarray, params: SlabLandParameters) -> jnp.ndarray:
-    """Snow cover fraction from snow depth (SPEEDY's sd2sc closure)."""
+    """
     return jnp.minimum(1.0, snow_depth / params.snow_depth_to_cover_scale)

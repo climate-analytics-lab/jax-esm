@@ -97,6 +97,8 @@ package spelled out.
      - ``init@atmosphere.init=era5 atmosphere.run.start_time=2022-12-24``
    * - Choose a surface component
      - ``ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
+   * - Use the three-layer Winton sea ice
+     - ``seaice=winton``, with ice transport as ``+seaice.transport=true``
    * - Drop one
      - ``land=none``
    * - Set a component parameter
@@ -110,6 +112,14 @@ package spelled out.
 
 Several things worth knowing:
 
+- **``seaice=winton`` couples less by default than ``seaice=slab``.** The
+  default coupling gives the Winton ice what it can take from the ocean (the
+  sea surface temperature and the freeze/melt potential it forms frazil ice
+  from). Its surface radiation, air state, rain and snow and the atmosphere's
+  flux over the sea are not supplied, so with an ``atm`` component and no
+  ``coupling.exchanger`` or ``coupling.exchangers`` the run **refuses to
+  build**, naming those fields, until an exchanger of the coupled model's own
+  writes them (issue #141). :doc:`design/winton_seaice` has the contract.
 - **Spell the** ``@atmosphere``. ``+configuration=speedy-t31`` without it
   composes that jax-gcm bundle at the *root*, where its ``physics``,
   ``terrain`` and ``run`` keys are nobody's and nothing reads them. The

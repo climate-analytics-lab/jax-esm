@@ -1,19 +1,16 @@
 """Minimal grid concept owned by the slab models.
 
-Slab models do no advection, so unlike a full coupling-layer grid they only
-need a fractional (land) mask and the coordinates that go with it -- shape and
-the binary mask are both derived from ``fractional_mask``, so nothing here can
-drift out of sync.
+Slab models do no advection, so the grid only needs the land fraction and the
+cell coordinates. The shape and the land and ocean masks are derived from
+``land_fraction``.
 
 Two constructors cover every grid JEM runs on:
 
 - :meth:`SlabGrid.from_coords` -- a separable lon/lat grid taken straight from
   the dinosaur horizontal grid the atmosphere is discretized on
   (``jcm.utils.get_coords(...).horizontal`` or
-  ``jcm.physics.speedy.speedy_coords.get_speedy_coords(...).horizontal``). This
-  replaced the ``"JCM::T31"`` specification-string DSL: the atmosphere's grid
-  object is the single source of truth for the grid a coupled run uses, and
-  re-deriving it from a string was one more place for the two to disagree.
+  ``jcm.physics.speedy.speedy_coords.get_speedy_coords(...).horizontal``).
+  Taking the grid from the atmosphere guarantees the two agree.
 - :meth:`SlabGrid.from_scrip` -- a 2-D structured grid from a SCRIP file, which
   may be curvilinear (a displaced-pole ocean grid).
 
@@ -21,7 +18,7 @@ The land-sea mask comes from the atmosphere too:
 ``jcm.terrain.TerrainData.from_coords(coords).fmask`` (or ``.from_file(...)`` /
 ``.aquaplanet(coords)``) is already shaped ``(n_lon, n_lat)`` with latitude
 ascending south to north -- exactly ``SlabGrid``'s layout -- so it is passed
-through as ``fractional_mask`` with no transpose or flip.
+through as ``land_fraction`` with no transpose or flip.
 """
 
 from dataclasses import dataclass, field
@@ -47,7 +44,7 @@ def to_degrees(radians) -> np.ndarray:
     (``jcm.utils.data_to_xarray``), so a slab dataset must too: a last-bit
     difference in a coordinate value is enough for ``xr.merge`` to treat the
     two grids as different axes and produce a 119-point longitude union out of
-    two 96-point grids, which is exactly what happened before this existed.
+    two 96-point grids.
     """
     return np.asarray(radians, dtype=np.float64) * 180.0 / np.pi
 
@@ -80,68 +77,66 @@ def _separable_axes(
 class SlabGrid:
     """Grid information needed by slab models.
 
-    ``fractional_mask``, ``latitude_radian`` and ``longitude_radian`` fully
-    specify the grid: shape, the derived binary mask, whether the grid is
-    separable and the dimension names of its output all come from those three
-    alone, so there is a single source of truth instead of several attributes
-    that could drift out of sync.
+    The grid is defined by ``land_fraction``, ``latitude_radian`` and
+    ``longitude_radian``. The shape, the masks, whether the grid is separable
+    and the output dimension names are all derived from them.
+
+    The two masks overlap on coast cells. ``binary_land_mask`` is 1 wherever
+    there is any land (``land_fraction > 0``) and ``binary_ocean_mask`` is 1
+    wherever there is any ocean (``land_fraction < 1``), so a cell with a
+    land fraction between 0 and 1 is integrated by both the land and the
+    ocean components.
 
     Attributes
     ----------
-    fractional_mask : jax.Array
+    land_fraction : jax.Array
         Fraction of each grid cell occupied by land, in [0, 1], shaped
         ``(n_lon, n_lat)``.
     latitude_radian : jax.Array
-        2-D latitudes in radians, matching ``fractional_mask.shape``.
+        2-D latitudes in radians, matching ``land_fraction.shape``.
     longitude_radian : jax.Array
-        2-D longitudes in radians, matching ``fractional_mask.shape``.
-    threshold : float
-        Fractional-mask value at or above which a cell counts as land in
-        :attr:`binary_mask`.
+        2-D longitudes in radians, matching ``land_fraction.shape``.
     longitude_axis_radian, latitude_axis_radian : numpy.ndarray or None
         The 1-D axes of a separable grid, in radians, in float64. Derived in
         ``__post_init__`` when not given, and ``None`` for a curvilinear grid.
-        They are kept in float64 numpy (not jax) deliberately: they are grid
-        *metadata*, and the degrees written into the output coordinates have to
-        match JCM's bit for bit or ``xr.merge`` of two components' datasets
-        would align on nothing.
+        They are float64 numpy arrays because the output coordinates must
+        match JCM's bit for bit for ``xr.merge`` to align the datasets.
 
     """
 
-    fractional_mask: Array
+    land_fraction: Array
     latitude_radian: Array
     longitude_radian: Array
-    threshold: float = 1.0
     longitude_axis_radian: np.ndarray | None = field(default=None)
     latitude_axis_radian: np.ndarray | None = field(default=None)
 
     def __post_init__(self):
         """Check the shapes agree and work out whether the grid is separable."""
-        if self.latitude_radian.shape != self.fractional_mask.shape:
+        if self.latitude_radian.shape != self.land_fraction.shape:
             raise ValueError(
                 f"latitude_radian has shape {tuple(self.latitude_radian.shape)} but "
-                f"fractional_mask has shape {tuple(self.fractional_mask.shape)}."
+                f"land_fraction has shape {tuple(self.land_fraction.shape)}."
             )
-        if self.longitude_radian.shape != self.fractional_mask.shape:
+        if self.longitude_radian.shape != self.land_fraction.shape:
             raise ValueError(
                 f"longitude_radian has shape {tuple(self.longitude_radian.shape)} but "
-                f"fractional_mask has shape {tuple(self.fractional_mask.shape)}."
+                f"land_fraction has shape {tuple(self.land_fraction.shape)}."
             )
-        if len(self.fractional_mask.shape) != 2:
+        if len(self.land_fraction.shape) != 2:
             raise ValueError(
-                "A SlabGrid is 2-D (n_lon, n_lat); got fractional_mask with shape "
-                f"{tuple(self.fractional_mask.shape)}."
+                "A SlabGrid is 2-D (n_lon, n_lat); got land_fraction with shape "
+                f"{tuple(self.land_fraction.shape)}."
             )
-        # Every construction path ends here, so the value check lives here
-        # too: a fill value (-1), a percentage or a NaN would otherwise pass
-        # straight into `binary_mask` and the land-fraction arithmetic as a
-        # plausible-looking but wrong land/ocean domain.
-        mask = np.asarray(self.fractional_mask)
+
+        # Every constructor ends here, so check the values here. A fill value
+        # (-1), a percentage or a NaN would otherwise give wrong but
+        # plausible-looking land and ocean masks.
+        mask = np.asarray(self.land_fraction)
         if not np.all(np.isfinite(mask)):
-            raise ValueError("fractional_mask contains non-finite values.")
+            raise ValueError("land_fraction contains non-finite values.")
         if mask.size and (mask.min() < 0.0 or mask.max() > 1.0):
             raise ValueError(
-                "fractional_mask must lie in [0, 1] (1 = land); got values in "
+                "land_fraction must lie in [0, 1] (1 = land); got values in "
                 f"[{mask.min():g}, {mask.max():g}]."
             )
 
@@ -153,7 +148,7 @@ class SlabGrid:
     @property
     def shape(self) -> tuple[int, ...]:
         """Grid shape, ``(n_lon, n_lat)``."""
-        return tuple(self.fractional_mask.shape)
+        return tuple(self.land_fraction.shape)
 
     @property
     def is_separable(self) -> bool:
@@ -167,25 +162,28 @@ class SlabGrid:
     def dims(self) -> tuple[str, str]:
         """Dimension names of a 2-D field on this grid, in shape order.
 
-        A separable grid uses JCM's own axis names, so a slab dataset and a JCM
-        dataset share dimensions and merge. A curvilinear grid must NOT: its
-        latitude and longitude are 2-D auxiliary coordinates, and CF (and
-        xarray) forbid a 2-D variable named after one of its own dimensions --
-        hence the index-space names.
+        A separable grid uses JCM's names, ``("lon", "lat")``, so slab and
+        JCM datasets merge. A curvilinear grid uses ``("x", "y")``, because
+        its 2-D ``lat``/``lon`` coordinates cannot share a name with a
+        dimension under CF and xarray.
         """
         return ("lon", "lat") if self.is_separable else ("x", "y")
 
     @property
-    def binary_mask(self) -> Array:
-        """Binary land(1)/ocean(0) mask, derived from ``fractional_mask``."""
-        return jnp.where(self.fractional_mask >= self.threshold, 1.0, 0.0)
+    def binary_land_mask(self) -> Array:
+        """1 where the cell has any land (``land_fraction > 0``), else 0."""
+        return jnp.where(self.land_fraction > 0, 1.0, 0.0)
+
+    @property
+    def binary_ocean_mask(self) -> Array:
+        """1 where the cell has any ocean (``land_fraction < 1``), else 0."""
+        return jnp.where(self.land_fraction < 1, 1.0, 0.0)
 
     @classmethod
     def from_coords(
         cls,
         horizontal,
-        fractional_mask: Array | None = None,
-        threshold: float = 0.5,
+        land_fraction: Array | None = None,
     ) -> "SlabGrid":
         """Build a SlabGrid on an atmosphere's horizontal grid.
 
@@ -198,14 +196,12 @@ class SlabGrid:
             ``jcm.physics.speedy.speedy_coords.get_speedy_coords``. Its
             ``nodal_axes`` give longitude in radians and the sine of latitude,
             in the same ``(n_lon, n_lat)`` layout SlabGrid uses.
-        fractional_mask : jax.Array, optional
+        land_fraction : jax.Array, optional
             Land fraction in [0, 1], shaped ``(n_lon, n_lat)``. Take it from
             ``jcm.terrain.TerrainData`` -- ``TerrainData.from_coords(coords).fmask``,
             ``TerrainData.from_file(path, coords).fmask`` or
             ``TerrainData.aquaplanet(coords).fmask`` -- which is already on
             this layout and orientation. Defaults to all-ocean.
-        threshold : float
-            Land fraction at or above which a cell counts as land.
 
         Returns
         -------
@@ -214,7 +210,7 @@ class SlabGrid:
         Raises
         ------
         ValueError
-            If ``fractional_mask`` is not on the grid's shape or leaves [0, 1].
+            If ``land_fraction`` is not on the grid's shape or leaves [0, 1].
 
         """
         # arcsin of the nodal sine-latitude axis, rather than the grid's own
@@ -226,13 +222,13 @@ class SlabGrid:
         latitude_axis = np.arcsin(np.asarray(sin_latitude, dtype=np.float64))
         shape = (longitude_axis.size, latitude_axis.size)
 
-        if fractional_mask is None:
-            fractional_mask = jnp.zeros(shape)
+        if land_fraction is None:
+            land_fraction = jnp.zeros(shape)
         else:
-            fractional_mask = jnp.asarray(fractional_mask)
-            if tuple(fractional_mask.shape) != shape:
+            land_fraction = jnp.asarray(land_fraction)
+            if tuple(land_fraction.shape) != shape:
                 raise ValueError(
-                    f"fractional_mask has shape {tuple(fractional_mask.shape)}, but this "
+                    f"land_fraction has shape {tuple(land_fraction.shape)}, but this "
                     f"grid is {shape} (n_lon, n_lat). TerrainData.fmask is already on "
                     "this layout; a transposed mask is a sign it came from elsewhere."
                 )
@@ -241,10 +237,9 @@ class SlabGrid:
         latitude_2d = jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape))
 
         return cls(
-            fractional_mask=fractional_mask,
+            land_fraction=land_fraction,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            threshold=threshold,
             longitude_axis_radian=longitude_axis,
             latitude_axis_radian=latitude_axis,
         )
@@ -253,8 +248,7 @@ class SlabGrid:
     def from_scrip(
         cls,
         scrip_file: str,
-        fractional_mask: Array | None = None,
-        threshold: float = 0.5,
+        land_fraction: Array | None = None,
     ) -> "SlabGrid":
         """Build a SlabGrid from a SCRIP-convention grid file.
 
@@ -271,12 +265,10 @@ class SlabGrid:
         ----------
         scrip_file : str
             Path to a SCRIP-convention netCDF grid file.
-        fractional_mask : jax.Array, optional
+        land_fraction : jax.Array, optional
             Land fraction in [0, 1] matching the file's shape. If None, it is
             derived from the file's own ``grid_imask`` (see
-            :func:`_load_scrip_fractional_mask` for the assumed polarity).
-        threshold : float
-            Land fraction at or above which a cell counts as land.
+            :func:`_load_scrip_land_fraction` for the assumed polarity).
 
         Returns
         -------
@@ -318,7 +310,7 @@ class SlabGrid:
         longitude_2d = _scrip_latlon_to_radians(ds["grid_center_lon"], ni, nj, scrip_file)
         latitude_2d = _scrip_latlon_to_radians(ds["grid_center_lat"], ni, nj, scrip_file)
 
-        # Non-finite first, for the same reason as `fractional_mask` above: a
+        # Non-finite first, for the same reason as `land_fraction` above: a
         # NaN compares False against both bounds, so it would pass the range
         # checks below and end up in the output's coordinate axes, where it
         # breaks the merge of two components' datasets rather than this load.
@@ -334,14 +326,13 @@ class SlabGrid:
         if jnp.any((longitude_2d < -2 * jnp.pi) | (longitude_2d > 2 * jnp.pi)):
             raise ValueError(f"'{scrip_file}' has longitude values outside [-360, 360] degrees.")
 
-        if fractional_mask is None:
-            fractional_mask = _load_scrip_fractional_mask(ds, ni, nj)
+        if land_fraction is None:
+            land_fraction = _load_scrip_land_fraction(ds, ni, nj)
 
         return cls(
-            fractional_mask=fractional_mask,
+            land_fraction=land_fraction,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            threshold=threshold,
         )
 
 
@@ -371,14 +362,14 @@ def _scrip_latlon_to_radians(da: xr.DataArray, ni: int, nj: int, scrip_file: str
         )
 
 
-def _load_scrip_fractional_mask(ds: xr.Dataset, ni: int, nj: int) -> Array:
-    """Derive a fractional_mask (1 = land) from a SCRIP grid_imask.
+def _load_scrip_land_fraction(ds: xr.Dataset, ni: int, nj: int) -> Array:
+    """Derive a land_fraction (1 = land) from a SCRIP grid_imask.
 
     SCRIP's grid_imask carries no CF-style flag_meanings metadata, so the
     land/ocean polarity can't be verified from the file itself. This follows
     the standard SCRIP/ESMF convention used by ocean-model grid files (e.g.
     POP, CESM): imask=1 marks a valid/active (ocean) cell, imask=0 marks a
-    masked-out (land) cell. Pass `fractional_mask` explicitly to
+    masked-out (land) cell. Pass `land_fraction` explicitly to
     `SlabGrid.from_scrip` if a file uses the opposite convention.
     """
     if "grid_imask" not in ds:

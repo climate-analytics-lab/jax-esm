@@ -1,9 +1,20 @@
 # SPEEDY's land surface: a soil/land-ice slab whose temperature anomaly is
 # relaxed towards a prescribed climatology.
 _target_: jem.components.SlabLandModel
-# 12-month `stl` / `snowc` / `soilw` climatologies on the land grid. Required:
-# without them the model runs on idealized fields, which is a different
-# experiment and has its own configuration.
+# 12-month `stl` / `snowc` / `soilw_am` climatologies on the land grid, under
+# SPEEDY's names as jax-gcm packages them. Required: without them the model
+# runs on idealized fields, which is a different experiment and has its own
+# configuration.
 land_clim_file: ???
+# SPEEDY prescribes all three: the temperature anomaly relaxes to `stl`, and
+# the snow depth and the soil water availability the atmosphere sees are the
+# climatology itself. The bucket still runs and is written out, but the
+# atmosphere reads the prescribed `soilw_am`.
+land_surface_temperature_from_clim_file: true
+land_surface_temperature_varname_in_clim_file: stl
+snow_depth_from_clim_file: true
+snow_depth_varname_in_clim_file: snowc
+soil_water_availability_from_clim_file: true
+soil_water_availability_varname_in_clim_file: soilw_am
 params:
   _target_: jem.components.slab.SlabLandParameters

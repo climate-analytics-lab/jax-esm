@@ -11,6 +11,7 @@ import tree_math
 from jem import constants
 from jem.base.component import Carry, CouplingTime, Diagnostics
 from jem.components.slab.base import (
+    MASKED_SURFACE_SALINITY,
     MASKED_SURFACE_TEMPERATURE,
     SlabModelBase,
     forcing_variable,
@@ -48,23 +49,63 @@ class OceanState:
     """
 
     sea_surface_temperature: jnp.ndarray
+    sea_surface_salinity: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_salinity=None):
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape),
+            sea_surface_salinity if sea_surface_salinity is not None else jnp.zeros(shape),
         )
 
 
 @tree_math.struct
 class OceanForcing:
+    """Ocean forcing, filled by an exchanger.
+
+    Attributes
+    ----------
+    total_heat_flux : (n_lon, n_lat) array
+        Net surface heat flux (W m-2, positive upward).
+    precipitation : (n_lon, n_lat) array
+        Precipitation from the atmosphere (kg m-2 s-1, positive downward).
+    evaporation : (n_lon, n_lat) array
+        Evaporation into the atmosphere (kg m-2 s-1, positive upward).
+    runoff : (n_lon, n_lat) array
+        Runoff from the land (kg m-2 s-1, positive into the ocean).
+    sea_ice_freshwater_flux : (n_lon, n_lat) array
+        Water a sea ice with a water budget passes on to the ocean under it
+        (kg m-2 s-1, positive into the ocean). Such an ice takes the
+        atmosphere's precipitation and evaporation itself and passes on what
+        results, so where it is coupled the ocean's own ``precipitation`` and
+        ``evaporation`` are not filled. Zero unless an exchanger fills it.
+
+        The four water fluxes are kept apart rather than summed into one:
+        each comes from a different component or process, so every exchange
+        row stays a plain copy, and a budget can be read term by term.
+    q_flux : (n_lon, n_lat, 12) array
+        Monthly prescribed ocean heat transport convergence (W m-2).
+
+    """
+
     total_heat_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+    runoff: jnp.ndarray
+    sea_ice_freshwater_flux: jnp.ndarray
     q_flux: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, total_heat_flux=None, q_flux=None):
+    def zeros(
+        cls, shape, total_heat_flux=None, precipitation=None, evaporation=None,
+        runoff=None, sea_ice_freshwater_flux=None, q_flux=None,
+    ):
         return cls(
             total_heat_flux if total_heat_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
+            runoff if runoff is not None else jnp.zeros(shape),
+            sea_ice_freshwater_flux if sea_ice_freshwater_flux is not None else jnp.zeros(shape),
             q_flux if q_flux is not None else jnp.zeros(shape + (12,)),
         )
 
@@ -311,7 +352,8 @@ class SlabOceanModel(SlabModelBase):
         self.q_flux_climatology = self._load(q_flux_file, "qflux")
 
         if self.sst_climatology is not None:
-            ocean = self._ocean_cells(self.params)
+            # A boolean mask: `&` below does not take the float 0/1 mask.
+            ocean = self.grid.binary_ocean_mask == 1
             if bool(jnp.any(jnp.isnan(self.sst_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
@@ -401,10 +443,6 @@ class SlabOceanModel(SlabModelBase):
         logger.info("%s: loading %r climatology from %s", self.name, var, path)
         return load_monthly_climatology(path, var, self.grid)
 
-    def _ocean_cells(self, params: SlabOceanParameters) -> jnp.ndarray:
-        """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
-
     def initialize(self, params: SlabOceanParameters | None = None) -> Carry:
         """Build the initial ocean carry.
 
@@ -433,7 +471,7 @@ class SlabOceanModel(SlabModelBase):
         """
         params = self._initial_params(params)
         self._check_forcing_configuration(params)
-        ocean = self._ocean_cells(params)
+        ocean = self.grid.binary_ocean_mask
 
         if self.sst_climatology is not None:
             sea_surface_temperature = evaluate_cyclic_linear(
@@ -461,11 +499,14 @@ class SlabOceanModel(SlabModelBase):
             ocean, sea_surface_temperature, MASKED_SURFACE_TEMPERATURE
         )
 
+        sea_surface_salinity = jnp.full(ocean.shape, params.reference_salinity)
+
         return {
             "params": params,
             "state": OceanState.zeros(
                 self.grid.shape,
                 sea_surface_temperature=sea_surface_temperature,
+                sea_surface_salinity=sea_surface_salinity,
             ),
             "forcing": OceanForcing.zeros(
                 self.grid.shape, q_flux=self.q_flux_climatology
@@ -492,7 +533,7 @@ class SlabOceanModel(SlabModelBase):
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
-        ocean = self._ocean_cells(params)
+        ocean = self.grid.binary_ocean_mask
 
         # From the CARRIED parameters, every step: a depth cached at
         # initialization would make `mixed_layer_depth_min/max` dead
@@ -505,6 +546,15 @@ class SlabOceanModel(SlabModelBase):
         )
 
         total_heat_flux = forcing.total_heat_flux
+        # Net fresh water leaving the ocean, positive upward: evaporation,
+        # less the precipitation, the runoff and the sea ice's water, which
+        # all come in.
+        total_freshwater_flux = (
+            forcing.evaporation
+            - forcing.precipitation
+            - forcing.runoff
+            - forcing.sea_ice_freshwater_flux
+        )
         anomaly = state.sea_surface_temperature
         climatology_end = None
         time_factor = 1.0
@@ -563,7 +613,20 @@ class SlabOceanModel(SlabModelBase):
             sea_surface_temperature,
         )
 
-        new_state = state.replace(sea_surface_temperature=sea_surface_temperature)
+        sea_surface_salinity = state.sea_surface_salinity + time.dt * (
+            total_freshwater_flux * params.reference_salinity / (constants.ocean_density * mixed_layer_depth)
+        )
+        sea_surface_salinity = jnp.where(
+            ocean, sea_surface_salinity, MASKED_SURFACE_SALINITY
+        )
+
+
+
+        new_state = state.replace(
+            sea_surface_temperature=sea_surface_temperature,
+            sea_surface_salinity=sea_surface_salinity,
+        )
+        
         new_derived = OceanDerived.zeros(
             self.grid.shape,
             mixed_layer_depth=mixed_layer_depth,
@@ -649,6 +712,15 @@ class SlabOceanModel(SlabModelBase):
                     **role_attrs("state"),
                 },
             ),
+            "sea_surface_salinity": (
+                dims,
+                state.sea_surface_salinity,
+                {
+                    "long_name": "Sea surface salinity",
+                    "units": "PSU",
+                    **role_attrs("state"),
+                },
+            ),
             "mixed_layer_depth": (
                 dims,
                 derived.mixed_layer_depth,
@@ -670,6 +742,46 @@ class SlabOceanModel(SlabModelBase):
                     "units": "W m-2",
                     "positive": "upward",
                     **role_attrs("derived"),
+                },
+            ),
+            forcing_variable("precipitation"): (
+                dims,
+                diagnostics["forcing"].precipitation,
+                {
+                    "long_name": "Precipitation",
+                    "units": "kg s-1 m-2",
+                    "positive": "downward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("evaporation"): (
+                dims,
+                diagnostics["forcing"].evaporation,
+                {
+                    "long_name": "Evaporation",
+                    "units": "kg s-1 m-2",
+                    "positive": "upward",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("sea_ice_freshwater_flux"): (
+                dims,
+                diagnostics["forcing"].sea_ice_freshwater_flux,
+                {
+                    "long_name": "Water the sea ice gives the ocean",
+                    "units": "kg s-1 m-2",
+                    "positive": "into the ocean",
+                    **role_attrs("forcing"),
+                },
+            ),
+            forcing_variable("runoff"): (
+                dims,
+                diagnostics["forcing"].runoff,
+                {
+                    "long_name": "Runoff from the land",
+                    "units": "kg s-1 m-2",
+                    "positive": "into the ocean",
+                    **role_attrs("forcing"),
                 },
             ),
             "ice_frazil_melt_energy": (

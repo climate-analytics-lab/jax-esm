@@ -233,6 +233,36 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
     )
 
 
+def test_the_water_channels_enter_the_salinity_with_their_signs(uniform_grid):
+    """Precipitation, runoff and the sea ice's water freshen; evaporation salts.
+
+    The four channels feed one salinity equation, so each inflow must act
+    exactly like negative evaporation, and E = 1e-4 kg m-2 s-1 for a day must
+    raise the salinity by E dt S0 / (rho h).
+    """
+    model = SlabOceanModel(uniform_grid)
+    flux = jnp.full(uniform_grid.shape, 1.0e-4)
+
+    def salinity(**water):
+        carry = model.initialize()
+        carry["forcing"] = carry["forcing"].replace(**water)
+        new_carry, _ = model.step(carry, coupling_time(0))
+        return np.asarray(new_carry["state"].sea_surface_salinity)
+
+    leaving = salinity(evaporation=flux)
+    for channel in ("precipitation", "runoff", "sea_ice_freshwater_flux"):
+        np.testing.assert_allclose(salinity(**{channel: -flux}), leaving, rtol=1e-6)
+
+    params = model.params
+    expected_rise = (
+        1.0e-4 * TIMESTEP * params.reference_salinity
+        / (constants.ocean_density * np.asarray(model.initialize()["derived"].mixed_layer_depth))
+    )
+    # The rise is about 5e-3 on a salinity near 34.7, which float32 resolves
+    # only to about 4e-6.
+    np.testing.assert_allclose(leaving - salinity(), expected_rise, rtol=0, atol=1e-5)
+
+
 def test_freeze_melt_energy_sign(uniform_grid):
     """A large upward heat flux drives the mixed layer to the freezing point."""
     model = SlabOceanModel(uniform_grid)

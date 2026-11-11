@@ -31,7 +31,7 @@ def half_land_grid():
         jnp.ones(shape),
         jnp.zeros(shape),
     )
-    return make_grid(fractional_mask=fractional_mask)
+    return make_grid(land_fraction=fractional_mask)
 
 
 def test_each_cell_feels_the_surface_beneath_it(half_land_grid):
@@ -48,7 +48,7 @@ def test_each_cell_feels_the_surface_beneath_it(half_land_grid):
     )
     stepped, _ = model.step(carry, coupling_time(0))
 
-    land = np.asarray(half_land_grid.binary_mask) == 1.0
+    land = np.asarray(half_land_grid.binary_land_mask) == 1.0
     heat_flux = np.asarray(stepped["derived"].internal_total_heat_flux)
     assert np.all(heat_flux[land] > 0.0), "warm land must heat the air above it"
     assert np.all(heat_flux[~land] < 0.0), "cold ocean must cool the air above it"

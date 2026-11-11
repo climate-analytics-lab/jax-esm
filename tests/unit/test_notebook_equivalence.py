@@ -112,7 +112,7 @@ class TestNotebookEquivalence(unittest.TestCase):
         ref_grid = ref_coupler.components["ocn"].grid
         assert ocean_grid.shape == ref_grid.shape
         np.testing.assert_array_equal(
-            ocean_grid.fractional_mask, ref_grid.fractional_mask)
+            ocean_grid.land_fraction, ref_grid.land_fraction)
 
         exchange = coupler.exchangers["exchange"]
         ref_exchange = ref_coupler.exchangers["exchange"]

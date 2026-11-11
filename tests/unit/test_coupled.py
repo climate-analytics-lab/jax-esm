@@ -134,7 +134,7 @@ def slab_exchange(components, time):
         ice=dict(
             seaice,
             forcing=seaice["forcing"].replace(
-                ice_frazil_melt_energy=ocean["derived"].ice_frazil_melt_energy
+                sea_surface_temperature=ocean["state"].sea_surface_temperature
             ),
         ),
     )
@@ -378,7 +378,7 @@ def slab_coupler(speedy_coords, tmp_path) -> Coupler:
         jnp.zeros((n_lon, n_lat)),
     )
     grid = SlabGrid.from_coords(
-        speedy_coords.horizontal, fractional_mask=fractional_mask
+        speedy_coords.horizontal, land_fraction=fractional_mask
     )
     ocean = SlabOceanModel(
         grid,
@@ -449,11 +449,11 @@ def test_all_four_slab_datasets_merge(slab_coupler):
         "mean_air_temperature",
         "sea_surface_temperature",
         "land_surface_temperature",
-        "ice_thickness",
+        "ice_fraction",
         "internal_total_heat_flux",
         "total_heat_flux",
         "forcing_total_heat_flux",
-        "forcing_ice_frazil_melt_energy",
+        "forcing_sea_surface_temperature",
     ):
         assert name in merged, name
 

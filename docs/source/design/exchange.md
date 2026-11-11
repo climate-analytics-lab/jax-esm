@@ -85,16 +85,23 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | --- | --- |
 | `atm.derived.total_heat_flux` | `ocn.forcing.total_heat_flux` |
 | `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
-| `ocn.derived.ice_frazil_melt_energy` | `seaice.forcing.ice_frazil_melt_energy` |
+| `atm.derived.precipitation` | `lnd.forcing.precipitation` |
+| `atm.derived.evaporation` | `lnd.forcing.evaporation` |
+| `atm.derived.precipitation` | `ocn.forcing.precipitation` |
+| `atm.derived.evaporation` | `ocn.forcing.evaporation` |
+| `lnd.derived.runoff_to_ocean` | `ocn.forcing.runoff` |
+| `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
-| `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
+| `seaice.state.ice_fraction` | `atm.forcing.sice_am` |
 | `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
-| `lnd.state.snowc` | `atm.forcing.snowc_am` |
-| `lnd.state.soilw` | `atm.forcing.soilw_am` |
+| `lnd.state.snow_cover` | `atm.forcing.snowc_am` |
+| `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
-A row survives only if **both** its components are present, so an
-aquaplanet with no land model gets the four rows that do not mention `lnd`,
-and an atmosphere/ocean pair gets two. The wiring is by *name* — `("atm",
+The water rows close the land's bucket and the ocean's salinity budget. Both surfaces take the atmosphere's precipitation (positive downward) and evaporation (positive upward) as separate fields, and the land's runoff reaches the ocean as a field of its own, `ocn.forcing.runoff` (positive into the ocean). An ocean has a fourth water channel, `forcing.sea_ice_freshwater_flux` (positive into the ocean), for a sea ice with a water budget: such an ice takes the atmosphere's precipitation and evaporation itself and passes on the result, in their place. The slab sea ice has no water budget, so no row fills it. We keep the water fluxes apart rather than summing them into one: each comes from a different component or process, so every row stays a plain copy, and the ocean's water budget can be read term by term. The ocean sums them in its own salinity equation. The land routes its runoff to ocean cells itself, on its own grid, with its `runoff_to_ocean_mapping`; the row only moves the routed field. The land is on the atmosphere's grid, so in a mixed-grid run the runoff row takes the atmosphere-to-ocean flux regridder like the atmosphere's own fluxes.
+
+A Winton sea ice registered as `"seaice"` adds one row, `ocn.derived.ice_frazil_melt_energy` → `seaice.forcing.ice_frazil_melt_energy` (`WINTON_SEAICE_EXCHANGES`), and `default_exchanges` names the forcing fields of that ice no row supplies; with `require_complete=True` it refuses an atmosphere coupled to the ice through the table alone ({doc}`winton_seaice`).
+
+A row survives only if **both** its components are present, so an aquaplanet with no land model gets the five rows that do not mention `lnd`, and an atmosphere/ocean pair gets three. The wiring is by *name* — `("atm",
 "ocn", "lnd", "seaice")` — and a component registered under a name that just
 misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
@@ -107,9 +114,8 @@ sea surface temperature from `derived` (its `state` is Veros' own
 `VerosState` object, not a struct of exchangeable fields), where a slab has
 `forcing.total_heat_flux` and `state.sea_surface_temperature`. So a
 `VerosComponent` registered as `"ocn"` selects `VEROS_OCEAN_EXCHANGES`
-instead — the same wiring in Veros' names, plus the freshwater flux Veros
-also takes, and with no `ocn` → `seaice` row because Veros publishes no
-freeze/melt potential (that combination is warned about). The choice is made
+instead — the same wiring in Veros' names, with the same four water
+channels. The choice is made
 by *type*, which needs real components: called with a list of names,
 `default_exchanges` cannot tell one ocean from another and gives the slab
 table. The check looks the wrapper's module up in `sys.modules` rather than
@@ -165,8 +171,8 @@ name a regridder, and `default_exchanges` names one from a mapping keyed by
 kind. The kind is written on each row of the table rather than inferred from
 the carry section the field is read from, because the two do not agree — the
 same intensive sea surface temperature comes from `state` on a slab and from
-`derived` on a Veros ocean. Extensive quantities (heat fluxes, the
-freeze/melt energy, an areal ice fraction) are mapped conservatively so their
+`derived` on a Veros ocean. Extensive quantities (heat and water fluxes,
+the land's runoff, an areal ice fraction) are mapped conservatively so their
 budgets survive the interface, while an intensive state variable such as SST
 is interpolated bilinearly, which does not leave a conservative map's
 staircase in a smooth field. Rows that stay on one grid never get a

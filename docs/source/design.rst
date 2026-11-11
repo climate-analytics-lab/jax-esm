@@ -11,6 +11,8 @@ implementation-specific details belong in the PR that introduced them.
    design/architecture
    design/carry_and_clock
    design/exchange
+   design/slab_land
+   design/winton_seaice
    design/nesting
    design/output
    design/running

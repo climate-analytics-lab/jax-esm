@@ -282,15 +282,9 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
             atm.model.coords.horizontal, atm.model.terrain.fmask
         )
     mask_file = _runner_only_value(node, "land_fraction_file")
-    # 0.5 rather than `from_scrip`'s own default, so that a cell counts as
-    # land on a SCRIP grid under the same rule as on the atmosphere's grid
-    # (`from_coords` defaults to 0.5); a coupled run that applied two
-    # different land/ocean splits either side of the interface would be
-    # exchanging fluxes with cells the other side thinks are dry.
     return SlabGrid.from_scrip(
         str(grid_file),
-        fractional_mask=None if mask_file is None else _land_fraction(mask_file),
-        threshold=0.5,
+        land_fraction=None if mask_file is None else _land_fraction(mask_file),
     )
 
 
@@ -408,7 +402,10 @@ def build_exchangers(
       ``{src, dst, regrid}`` mappings.
     - neither (both ``null``, the default) --
       :func:`jem.exchangers.default_exchangers` for whichever components were
-      built, which is where the standard wiring is written down once.
+      built, which is where the standard wiring is written down once. It is
+      called with ``require_complete=True``: a table that leaves a coupled
+      component's forcing unsupplied (a Winton sea ice's atmospheric forcing,
+      issue #141) raises here, where the Python API only warns.
 
     Parameters
     ----------
@@ -475,7 +472,9 @@ def build_exchangers(
         roles = {
             role: regridders[role] for role in REGRID_ROLES if role in regridders
         }
-        return default_exchangers(components, regrid=roles)
+        # A run from config has no Python caller to have read the warning, so
+        # a table that leaves a component's forcing unsupplied is an error.
+        return default_exchangers(components, regrid=roles, require_complete=True)
     table = OmegaConf.to_container(specs, resolve=True, throw_on_missing=True)
     if not isinstance(table, list):
         raise TypeError(

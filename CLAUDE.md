@@ -338,7 +338,7 @@ including the three whose value changed.
 - `ice_frazil_melt_energy` follows CESM's `frzmlt`: positive means the mixed
   layer went sub-freezing and new ice forms; negative means surplus heat is
   available to melt existing ice.
-- In a `SlabGrid`, `binary_mask == 1` means land and `0` means ocean.
+- In a `SlabGrid`, `land_fraction` is 1 for land and 0 for ocean. `binary_land_mask` is 1 where a cell has any land, and `binary_ocean_mask` is 1 where it has any ocean, so a partly-land cell is in both.
 
 ### Output conventions
 A coupled run writes one dataset per component, and they are only useful

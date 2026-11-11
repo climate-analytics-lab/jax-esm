@@ -70,11 +70,12 @@ The conventions, which are JCM's:
   the merge of their datasets collides on the shared name. So the slab
   atmosphere and the slab land model write `forcing_total_heat_flux` while
   the ocean writes its own derived `total_heat_flux`; the sea ice writes
-  `forcing_ice_frazil_melt_energy` for the field the ocean published as
-  `ice_frazil_melt_energy`; and Veros writes `forcing_heat_flux`,
-  `forcing_freshwater_flux`, `forcing_surface_taux`, `forcing_surface_tauy`
-  and `forcing_surface_air_temperature` for the five fields an exchanger
-  hands it, keeping plain names for the `temp`, `salt`, `u`, `v`, `psi` and
+  `forcing_sea_surface_temperature` for the field the ocean published as
+  `sea_surface_temperature`; and Veros writes `forcing_heat_flux`, its
+  four water fluxes (`forcing_precipitation`, `forcing_evaporation`,
+  `forcing_runoff`, `forcing_sea_ice_freshwater_flux`), `forcing_surface_taux`,
+  `forcing_surface_tauy` and `forcing_surface_air_temperature` for the nine
+  fields an exchanger hands it, keeping plain names for the `temp`, `salt`, `u`, `v`, `psi` and
   sea-surface fields it computes.
 
   The ocean's `psi` is the barotropic streamfunction, and which of two
@@ -107,6 +108,12 @@ The conventions, which are JCM's:
   forcing. A variable that is none of the three — a grid mask, a layer
   thickness, anything time-invariant from the component's configuration
   rather than its carry — is left untagged deliberately.
+- **Slab datasets carry their land-sea mask.** Every slab model writes its
+  grid's `land_fraction`, `binary_land_mask` (1 where there is any land) and
+  `binary_ocean_mask` (1 where there is any ocean) as time-independent
+  coordinates. A coast cell is 1 in both, since the land and ocean models
+  both integrate it. They are coordinates rather than data variables so that
+  combining chunk files along `time` does not give them a time dimension.
 - **A configuration-dependent variable is decided by the run, not by the
   component object.** `SlabOceanModel` writes `forcing_q_flux` only when the
   trajectory actually applied a Q-flux, following the `forcing_method` in

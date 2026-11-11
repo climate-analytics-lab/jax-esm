@@ -10,63 +10,94 @@ SECONDS_PER_DAY = 86400.0
 class SlabLandParameters:
     """Parameters of :class:`~jem.components.slab.slab_land_model.SlabLandModel`.
 
-    Every numeric field is a pytree leaf, so ``jax.grad`` of a coupled run with
-    respect to any of them works: the parameters travel in the component's
-    carry (``carry["params"]``), not in a closure over the model object.
+    All numeric fields are pytree leaves, so ``jax.grad`` works with respect
+    to any of them. They travel in ``carry["params"]`` and are read every
+    step.
 
-    They are all **process** parameters, read from the carry every step, so a
-    parameter study varies one by replacing that leaf in ``carry["params"]``.
-    The land model has no initial-condition parameters: it starts from its
-    climatology.
-
-    Defaults are SPEEDY's (``land_model.f90``).
+    The thermal parameters, the relaxation timescale and the snow-cover scale
+    follow SPEEDY (``land_model.f90``). SPEEDY prescribes its soil water
+    rather than evolving it, so the two-layer bucket's drainage is our own
+    choice; its layer depths, field capacity and wilting points are the ones
+    SPEEDY uses for its soil water availability.
 
     Attributes
     ----------
-    depth_soil : jnp.ndarray
-        Depth (m) of the soil layer that carries the surface heat capacity.
-    depth_lice : jnp.ndarray
-        Depth (m) of the land-ice layer, used instead of the soil layer where
-        the surface albedo marks an ice sheet.
-    soil_volumetric_heat_capacity : jnp.ndarray
-        Volumetric heat capacity of soil (J/m3/K). With ``depth_soil`` it gives
-        SPEEDY's ``hcapl``.
-    land_ice_volumetric_heat_capacity : jnp.ndarray
-        Volumetric heat capacity of land ice (J/m3/K). With ``depth_lice`` it
-        gives SPEEDY's ``hcapli``.
-    tdland : jnp.ndarray
-        Dissipation timescale (s) of the land-temperature anomaly about its
-        climatology. Default 40 days.
-    flandmin : jnp.ndarray
-        Minimum land fraction of a cell for its anomaly to evolve at all;
-        cells below it are pinned to the climatology.
-    land_threshold : jnp.ndarray
-        Land fraction at or above which a cell counts as land for this model.
-        Cells below it report :data:`MASKED_SURFACE_TEMPERATURE` and are not
-        integrated.
-    snow_depth_to_cover_scale : jnp.ndarray
-        Snow depth (mm water equivalent) at which the diagnosed snow cover
-        fraction saturates at one. SPEEDY's ``sd2sc``.
-    land_ice_albedo_threshold : jnp.ndarray
-        Surface albedo at or above which a cell is treated as land ice rather
-        than soil.
-    surface_albedo : jnp.ndarray
-        Surface albedo used when no albedo field is passed to the model. The
-        default, 0.2, is below ``land_ice_albedo_threshold`` everywhere, so a
-        model built without an albedo field is all soil.
+    soil_bucket_depth : jnp.ndarray, shape (2,)
+        Thickness (m) of the surface and deep layers of the soil water
+        bucket. Default (0.07, 0.21), SPEEDY's soil water layers (``sdep1``
+        and ``idep2 * sdep1``). It sets how much water each layer holds and
+        does not affect the heat capacity.
+    soil_thermal_depth : float
+        Thickness (m) of the thermal slab on the soil part of a cell.
+        Default 1, SPEEDY's ``depth_soil``.
+    glacier_depth : float
+        Thickness (m) of the thermal slab on the glacier part of a cell.
+        Default 5.
+    soil_volumetric_heat_capacity : float
+        Volumetric heat capacity of soil (J m-3 K-1). Default 2.5e6.
+    glacier_volumetric_heat_capacity : float
+        Volumetric heat capacity of glacier ice (J m-3 K-1). Default 1.93e6.
+    temperature_relaxation_timescale : float
+        Damping timescale (s) of the land surface temperature anomaly about
+        its climatology. Default 40 days. Only used when the model relaxes to
+        climatology (``land_surface_temperature_from_clim_file=True``).
+    drainage_timescale : jnp.ndarray, shape (2,)
+        Drainage timescale (s) of each soil layer. Default (10, 10) days. The
+        surface layer drains into the deep layer, and the deep layer drains
+        out of the model. Only the water above each layer's wilting point
+        drains.
+    soil_water_field_capacity : jnp.ndarray, shape (2,)
+        Field capacity of each layer (m3 m-3). Default (0.30, 0.30), SPEEDY's
+        ``swcap``. Each layer is capped at it, and the excess leaves as
+        ``soil_water_overflow``. It also sets the denominator of the soil
+        water availability, the water both layers hold between wilting point
+        and field capacity.
+    soil_water_wilting_point : jnp.ndarray, shape (2,)
+        Wilting point of each layer (m3 m-3). Used only in the soil water
+        availability: water below it does not count as available. Default
+        (0, 0.17), which reproduces SPEEDY: the deep layer uses SPEEDY's
+        ``swwil``, and the surface layer counts all of its water.
+    snow_depth_to_cover_scale : float
+        Snow depth (mm water equivalent) at which snow cover reaches 1.
+        SPEEDY's ``sd2sc``. Default 60.
+    baresoil_albedo : float or jnp.ndarray, shape (n_lon, n_lat)
+        Albedo of bare soil, in [0, 1]. Either a single value for every cell
+        or a map on the model grid. Default 0.2. With
+        ``surface_albedo_from_clim_file=False`` the surface albedo is
+        ``baresoil_albedo * (1 - vegetation_fraction) + vegetation_albedo *
+        vegetation_fraction``. It also fills every month of the idealized
+        albedo climatology used when there is no climatology file. The albedo
+        is written to the output but does not yet feed back on the land model
+        or the atmosphere.
+    vegetation_albedo : float or jnp.ndarray, shape (n_lon, n_lat)
+        Albedo of vegetation, in [0, 1], blended with ``baresoil_albedo`` by
+        the vegetation fraction. Either a single value for every cell or a map
+        on the model grid. Default 0.1.
+    glacier_fraction : float or jnp.ndarray, shape (n_lon, n_lat)
+        Fraction of the land part of each cell covered by glacier, in
+        [0, 1]. The slab heat capacity is the soil and glacier capacities
+        weighted by this fraction. Either a single value for every cell or
+        a map on the model grid, which ``SlabLandModel`` reads from its
+        climatology file with ``glacier_fraction_from_clim_file=True``. It
+        is constant in time. Default 0, so every cell is all soil.
 
     """
 
-    depth_soil: float | jnp.ndarray = 1.0
-    depth_lice: float | jnp.ndarray = 5.0
+    # Per-layer defaults are arrays, which dataclasses only accept through a
+    # default_factory.
+    soil_bucket_depth: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.07, 0.21)))
+    soil_thermal_depth: float | jnp.ndarray = 1.0
+    glacier_depth: float | jnp.ndarray = 5.0
     soil_volumetric_heat_capacity: float | jnp.ndarray = 2.50e6
-    land_ice_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
-    tdland: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
-    flandmin: float | jnp.ndarray = 1.0 / 3.0
-    land_threshold: float | jnp.ndarray = 0.1
+    glacier_volumetric_heat_capacity: float | jnp.ndarray = 1.93e6
+    temperature_relaxation_timescale: float | jnp.ndarray = 40.0 * SECONDS_PER_DAY
+    drainage_timescale: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((10.0 * SECONDS_PER_DAY, 10.0 * SECONDS_PER_DAY)))
+    soil_water_field_capacity: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.30, 0.30)))
+    soil_water_wilting_point: jnp.ndarray = struct.field(default_factory=lambda: jnp.asarray((0.0, 0.17)))
     snow_depth_to_cover_scale: float | jnp.ndarray = 60.0
-    land_ice_albedo_threshold: float | jnp.ndarray = 0.4
-    surface_albedo: float | jnp.ndarray = 0.2
+    baresoil_albedo: float | jnp.ndarray = 0.2
+    vegetation_albedo: float | jnp.ndarray = 0.1
+    glacier_fraction: float | jnp.ndarray = 0.0
 
     @classmethod
     def default(cls) -> "SlabLandParameters":

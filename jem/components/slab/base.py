@@ -16,6 +16,7 @@ run starts in -- reaches the model through
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 import jax.numpy as jnp
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 #: in any slab model reads it back. 288.15 K (15 degC) is what the models have
 #: always used.
 MASKED_SURFACE_TEMPERATURE = 288.15
+MASKED_SURFACE_SALINITY = 35.0 # PSU
 
 # Dimension names a monthly climatology file may use, per axis, in the order
 # the loader normalises them to: (longitude, latitude, time).
@@ -167,7 +169,7 @@ def _check_axis_matches(
         )
 
 
-def first_present_variable(path, candidates: tuple[str, ...]) -> str | None:
+def first_present_variable(path, candidates: Sequence[str]) -> str | None:
     """Return the first of `candidates` present in the netCDF file at `path`.
 
     Boundary files written by different tools spell the same field differently
@@ -190,40 +192,19 @@ def first_present_variable(path, candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
-    """Load a monthly climatology field onto the model grid.
+def _read_field_on_grid(path, var: str, grid: SlabGrid) -> tuple[xr.DataArray, str | None]:
+    """Read `var` from `path` and check it against the grid.
 
-    The array is transposed BY NAME rather than by position, so a file written
-    in any axis order loads correctly and a file written on the wrong grid is
-    rejected instead of being reinterpreted: a bare ``jnp.array(ds[var])`` would
-    silently accept any array whose shape happened to fit.
-
-    Lives on the slab base module because every slab component reads its
-    boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
-    model grid: the ocean uses it for SST and Q-flux, the land model for its
-    surface temperature, snow and soil water.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        Path to a netCDF file.
-    var : str
-        Name of the variable to read.
-    grid : SlabGrid
-        The model grid the file must already be on.
+    The checks both loaders share: the variable exists, its dimensions are
+    longitude, latitude and at most a time dimension, and its coordinates
+    match the grid's.
 
     Returns
     -------
-    jnp.ndarray
-        The field with shape ``(n_lon, n_lat, 12)``.
-
-    Raises
-    ------
-    ValueError
-        If the variable is missing, its dimensions are not recognisable as
-        longitude/latitude/time, it does not have exactly 12 time records, or
-        its coordinates do not match the grid's. The message names the file
-        and the check that failed.
+    field : xarray.DataArray
+        The variable, transposed to ``(lon, lat)`` or ``(lon, lat, time)``.
+    time_name : str or None
+        The name of its time dimension, or None if it has none.
 
     """
     dataset = xr.open_dataset(path)
@@ -235,25 +216,18 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         )
     field = dataset[var]
 
-    longitude_name, latitude_name, time_name = (
-        _resolve_dim_name(tuple(str(d) for d in field.dims), aliases, path, var)
-        for aliases in _CLIMATOLOGY_DIM_ALIASES
-    )
+    dims = tuple(str(d) for d in field.dims)
+    longitude_aliases, latitude_aliases, time_aliases = _CLIMATOLOGY_DIM_ALIASES
+    longitude_name = _resolve_dim_name(dims, longitude_aliases, path, var)
+    latitude_name = _resolve_dim_name(dims, latitude_aliases, path, var)
+    time_name = next((alias for alias in time_aliases if alias in dims), None)
 
-    unexpected = set(field.dims) - {longitude_name, latitude_name, time_name}
+    unexpected = set(dims) - {longitude_name, latitude_name, time_name}
     if unexpected:
         raise ValueError(
             f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has extra "
-            f"dimensions {sorted(map(str, unexpected))!r}; only longitude, latitude and time "
+            f"dimensions {sorted(unexpected)!r}; only longitude, latitude and time "
             "are supported."
-        )
-
-    n_records = field.sizes[time_name]
-    if n_records != _MONTHS_PER_YEAR:
-        raise ValueError(
-            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has "
-            f"{n_records:d} \"{time_name:s}\" records; exactly "
-            f"{_MONTHS_PER_YEAR:d} monthly records are required."
         )
 
     for name in (longitude_name, latitude_name):
@@ -280,9 +254,109 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         var,
     )
 
-    return jnp.asarray(
-        field.transpose(longitude_name, latitude_name, time_name).values
-    )
+    order = (longitude_name, latitude_name) + ((time_name,) if time_name else ())
+    return field.transpose(*order), time_name
+
+
+def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
+    """Load a monthly climatology field onto the model grid.
+
+    The array is transposed BY NAME rather than by position, so a file written
+    in any axis order loads correctly and a file written on the wrong grid is
+    rejected instead of being reinterpreted: a bare ``jnp.array(ds[var])`` would
+    silently accept any array whose shape happened to fit.
+
+    A field with only longitude and latitude dimensions is treated as constant
+    through the year and repeated into all 12 months, so a static map can be
+    used wherever a monthly climatology is expected.
+
+    Lives on the slab base module because every slab component reads its
+    boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
+    model grid: the ocean uses it for SST and Q-flux, the land model for its
+    surface temperature, snow, soil water and albedo.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to a netCDF file.
+    var : str
+        Name of the variable to read.
+    grid : SlabGrid
+        The model grid the file must already be on.
+
+    Returns
+    -------
+    jnp.ndarray
+        The field with shape ``(n_lon, n_lat, 12)``.
+
+    Raises
+    ------
+    ValueError
+        If the variable is missing, its dimensions are not recognisable as
+        longitude/latitude (plus an optional time), it has a time dimension
+        without exactly 12 records, or its coordinates do not match the
+        grid's. The message names the file and the check that failed.
+
+    """
+    field, time_name = _read_field_on_grid(path, var, grid)
+
+    # Only a genuinely absent time dimension is read as constant through the
+    # year: a time axis of any length other than 12, including 1, is rejected,
+    # since it is more likely a wrong file than a deliberate constant.
+    if time_name is None:
+        values = field.values
+        return jnp.asarray(
+            np.broadcast_to(values[..., None], values.shape + (_MONTHS_PER_YEAR,))
+        )
+
+    n_records = field.sizes[time_name]
+    if n_records != _MONTHS_PER_YEAR:
+        raise ValueError(
+            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has "
+            f"{n_records:d} \"{time_name:s}\" records; exactly "
+            f"{_MONTHS_PER_YEAR:d} monthly records are required."
+        )
+    return jnp.asarray(field.values)
+
+
+def load_static_field(path, var: str, grid: SlabGrid) -> jnp.ndarray:
+    """Load a time-invariant field onto the model grid.
+
+    For boundary data that must not vary in time, such as a glacier fraction.
+    The variable must have only longitude and latitude dimensions; a time
+    dimension of any length, even one with 12 identical months, is rejected,
+    so a monthly file cannot be passed off as a static one. The grid checks
+    are the same as :func:`load_monthly_climatology`'s.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to a netCDF file.
+    var : str
+        Name of the variable to read.
+    grid : SlabGrid
+        The model grid the file must already be on.
+
+    Returns
+    -------
+    jnp.ndarray
+        The field with shape ``(n_lon, n_lat)``.
+
+    Raises
+    ------
+    ValueError
+        If the variable is missing, has a time or any other extra dimension,
+        or its coordinates do not match the grid's.
+
+    """
+    field, time_name = _read_field_on_grid(path, var, grid)
+    if time_name is not None:
+        raise ValueError(
+            f"Climatology file \"{path!s:s}\": variable \"{var:s}\" has a "
+            f"\"{time_name:s}\" dimension, but it must be constant in time; "
+            "write it with longitude and latitude dimensions only."
+        )
+    return jnp.asarray(field.values)
 
 
 class SlabModelBase(ABC):
@@ -473,6 +547,11 @@ class SlabModelBase(ABC):
         and each data variable gets the CF ``coordinates`` attribute that
         points at them.
 
+        The grid's ``land_fraction``, ``binary_land_mask`` and
+        ``binary_ocean_mask`` are written as time-independent coordinates.
+        A coast cell has both binary masks set to 1, because the land and the
+        ocean models both integrate it.
+
         Parameters
         ----------
         diagnostics : Diagnostics
@@ -522,6 +601,33 @@ class SlabModelBase(ABC):
                 name: (dims, values, {**attrs, "coordinates": "lat lon"})
                 for name, (dims, values, attrs) in data_vars.items()
             }
+
+        # The land-sea mask is written as time-independent coordinates rather
+        # than data variables, so that combining chunk files along time does
+        # not give it a time dimension.
+        coords["land_fraction"] = (
+            grid_dims,
+            np.asarray(self.grid.land_fraction),
+            {"long_name": "Land area fraction", "units": "1"},
+        )
+        coords["binary_land_mask"] = (
+            grid_dims,
+            np.asarray(self.grid.binary_land_mask, dtype=np.int8),
+            {
+                "long_name": "Cells with any land",
+                "flag_values": np.array([0, 1], dtype=np.int8),
+                "flag_meanings": "no_land land",
+            },
+        )
+        coords["binary_ocean_mask"] = (
+            grid_dims,
+            np.asarray(self.grid.binary_ocean_mask, dtype=np.int8),
+            {
+                "long_name": "Cells with any ocean",
+                "flag_values": np.array([0, 1], dtype=np.int8),
+                "flag_meanings": "no_ocean ocean",
+            },
+        )
 
         return xr.Dataset(
             data_vars=data_vars,

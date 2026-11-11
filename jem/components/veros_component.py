@@ -28,6 +28,7 @@ import tree_math
 import xarray as xr
 from veros import runtime_settings
 
+from jem import constants
 from jem.base.component import (
     Carry,
     CouplingTime,
@@ -177,10 +178,22 @@ configure_veros_runtime()
 
 @tree_math.struct
 class VerosForcing:
-    """Surface forcing an exchanger writes for the ocean to integrate."""
+    """Surface forcing an exchanger writes for the ocean to integrate.
+
+    The water fluxes are kg m-2 s-1: ``precipitation`` positive downward,
+    ``evaporation`` positive upward, ``runoff`` (from the land) and
+    ``sea_ice_freshwater_flux`` (what a sea ice with a water budget passes on
+    from the atmosphere's E and P, in their place) positive into the
+    ocean. They are kept apart because each comes from a different
+    component or process, so every exchange row stays a plain copy. Veros'
+    single surface salt forcing takes their sum.
+    """
 
     heat_flux: jnp.ndarray
-    freshwater_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+    runoff: jnp.ndarray
+    sea_ice_freshwater_flux: jnp.ndarray
     surface_taux: jnp.ndarray
     surface_tauy: jnp.ndarray
     surface_air_temperature: jnp.ndarray
@@ -190,7 +203,10 @@ class VerosForcing:
         cls,
         shape,
         heat_flux=None,
-        freshwater_flux=None,
+        precipitation=None,
+        evaporation=None,
+        runoff=None,
+        sea_ice_freshwater_flux=None,
         surface_taux=None,
         surface_tauy=None,
         surface_air_temperature=None,
@@ -198,7 +214,10 @@ class VerosForcing:
         """Zero-filled forcing on a ``shape`` horizontal grid."""
         return cls(
             heat_flux if heat_flux is not None else jnp.zeros(shape),
-            freshwater_flux if freshwater_flux is not None else jnp.zeros(shape),
+            precipitation if precipitation is not None else jnp.zeros(shape),
+            evaporation if evaporation is not None else jnp.zeros(shape),
+            runoff if runoff is not None else jnp.zeros(shape),
+            sea_ice_freshwater_flux if sea_ice_freshwater_flux is not None else jnp.zeros(shape),
             surface_taux if surface_taux is not None else jnp.zeros(shape),
             surface_tauy if surface_tauy is not None else jnp.zeros(shape),
             surface_air_temperature if surface_air_temperature is not None else jnp.zeros(shape),
@@ -212,14 +231,17 @@ class VerosDerived:
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None,
+              ice_frazil_melt_energy=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
         )
 
 
@@ -268,6 +290,12 @@ class VerosComponent:
         :meth:`_barotropic_streamfunction`) and whether there is an ``ssh``
         output at all -- Veros carries a sea surface height only under the
         linear free surface.
+    enable_gm_streamfunction : bool
+        Whether the wrapped setup parameterises mesoscale eddies with GM as a
+        skew diffusion (``settings.enable_neutral_diffusion`` and
+        ``settings.enable_skew_diffusion``); it decides whether there is a
+        ``B1_gm`` output, the zonal component of the GM streamfunction that
+        the eddy-induced overturning is diagnosed from.
 
     """
 
@@ -314,6 +342,10 @@ class VerosComponent:
         # it is read once here as a Python bool and the `psi` branch in
         # `step` is taken at trace time rather than on a traced value.
         self.enable_streamfunction = bool(settings.enable_streamfunction)
+        # Likewise for GM: Veros only has `B1_gm` when the eddy-induced
+        # transport is applied as a skew diffusion.
+        self.enable_gm_streamfunction = bool(
+            settings.enable_neutral_diffusion and settings.enable_skew_diffusion)
 
         # Number of Veros tracer timesteps per coupling step; set by bind().
         self._steps_per_coupling_step: int | None = None
@@ -548,6 +580,20 @@ class VerosComponent:
         sea_surface_temperature = (
             variables.temp[interior, interior, -1, tau] + 273.15
         )
+        # Freeze/melt potential of the top cell, in the slab ocean's
+        # convention (CESM `frzmlt`, J m-2): positive is the heat deficit
+        # below freezing, negative the heat held above it. `step` reads it
+        # before it clamps the top cell at freezing, so a positive value is
+        # the heat that clamp adds back, the latent heat of the frazil ice a
+        # sea ice forms from it. Computed before the land substitution below,
+        # with the density and heat capacity Veros' own surface heat flux
+        # uses.
+        surface_mask = variables.maskT[interior, interior, -1]
+        ice_frazil_melt_energy = (
+            (constants.seawater_freezing_point_K - sea_surface_temperature)
+            * state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * self.dzt[-1]
+            * surface_mask
+        )
         # Intended to replace a land column's fill value with a plausible
         # constant, so downstream components never read an unphysical SST
         # through the mask. It does not fire for either shipped setup: both
@@ -566,6 +612,7 @@ class VerosComponent:
 
         return VerosDerived(  # type: ignore[call-arg]
             sea_surface_temperature, sea_surface_u, sea_surface_v,
+            ice_frazil_melt_energy,
         )
 
     def initialize(self) -> Carry:
@@ -687,11 +734,16 @@ class VerosComponent:
                 -forcing.heat_flux * surface_mask
                 / SEAWATER_HEAT_CAPACITY / settings.rho_0,
             )
-            # Freshwater flux is positive upward, so a positive flux removes
-            # fresh water and must increase salinity.
+            # Net fresh water leaving the ocean, positive upward: removing
+            # fresh water increases salinity. Evaporation leaves; the
+            # precipitation, the runoff and the sea ice's water come in.
+            freshwater_out = (
+                forcing.evaporation - forcing.precipitation
+                - forcing.runoff - forcing.sea_ice_freshwater_flux
+            )
             variables.forc_salt_surface = update(
                 variables.forc_salt_surface, at[interior, interior],
-                forcing.freshwater_flux * surface_mask
+                freshwater_out * surface_mask
                 / settings.rho_0 * REFERENCE_SALINITY,
             )
 
@@ -708,7 +760,30 @@ class VerosComponent:
         variables = state.variables
         tau = variables.tau
 
-        derived = self._derived_fields(state)
+        # The top cell is clamped at the freezing point once per coupling
+        # step, as the slab ocean's mixed layer is: seawater does not stay
+        # below freezing, because the frazil ice that forms releases latent
+        # heat that warms it back. The heat the clamp adds is the positive
+        # part of the freeze/melt potential read just before it, which a sea
+        # ice turns into ice without returning any heat, so it is counted
+        # once. The clamp is at the current time level, `tau`: Veros steps
+        # the temperature from `temp[tau]` and the tendencies at `tau` and
+        # `taum1`, so the next step starts from the clamped value.
+        freeze_melt_potential = self._derived_fields(state).ice_frazil_melt_energy
+        freezing_point_celsius = constants.seawater_freezing_point_K - 273.15
+        with variables.unlock():
+            top = variables.temp[interior, interior, -1, tau]
+            ocean_top = variables.maskT[interior, interior, -1] > 0
+            variables.temp = update(
+                variables.temp, at[interior, interior, -1, tau],
+                npx.where(ocean_top, npx.maximum(top, freezing_point_celsius), top),
+            )
+
+        clamped = self._derived_fields(state)
+        derived = VerosDerived(  # type: ignore[call-arg]
+            clamped.sea_surface_temperature, clamped.sea_surface_u,
+            clamped.sea_surface_v, freeze_melt_potential,
+        )
         sea_surface_temperature = derived.sea_surface_temperature
         sea_surface_u = derived.sea_surface_u
         sea_surface_v = derived.sea_surface_v
@@ -729,6 +804,7 @@ class VerosComponent:
             "sea_surface_salinity": sea_surface_salinity,
             "sea_surface_u": sea_surface_u,
             "sea_surface_v": sea_surface_v,
+            "ice_frazil_melt_energy": derived.ice_frazil_melt_energy,
             "temp": variables.temp[interior, interior, :, tau],
             "salt": variables.salt[interior, interior, :, tau],
             "u": zonal_velocity,
@@ -738,7 +814,10 @@ class VerosComponent:
             "surface_taux": forcing.surface_taux,
             "surface_tauy": forcing.surface_tauy,
             "heat_flux": forcing.heat_flux,
-            "freshwater_flux": forcing.freshwater_flux,
+            "precipitation": forcing.precipitation,
+            "evaporation": forcing.evaporation,
+            "runoff": forcing.runoff,
+            "sea_ice_freshwater_flux": forcing.sea_ice_freshwater_flux,
         }
         # Under the linear free surface Veros solves for a surface pressure,
         # and the sea surface height that goes with it is that pressure over
@@ -764,6 +843,21 @@ class VerosComponent:
             diagnostics["ssh"] = (
                 variables.psi[interior, interior, tau] / state.settings.grav
             )
+        # Veros' own driver no longer calls `isoneutral_diag_streamfunction`
+        # (its diagnostics block is commented out to keep the step jittable),
+        # so `B1_gm` is never filled in by the model; the kernel is evaluated
+        # here on the evolved state instead, from the slopes and `K_gm` of the
+        # last sub-step. It only reads the state, so the integration is
+        # unchanged. As with `ssh` the branch is static.
+        if self.enable_gm_streamfunction:
+            # Imported here: importing `veros.core` at module level would lock
+            # Veros' runtime settings before `configure_veros_runtime` runs.
+            from veros.core.isoneutral.isoneutral import (
+                isoneutral_diag_streamfunction_kernel,
+            )
+
+            diagnostics["B1_gm"] = isoneutral_diag_streamfunction_kernel(
+                state).B1_gm[interior, interior, :]
 
         return (
             {
@@ -1037,6 +1131,7 @@ class VerosComponent:
                 "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
+                "ice_frazil_melt_energy": (["time", "lon", "lat"], diagnostics["ice_frazil_melt_energy"]),
                 "psi": (["time", "lon", "lat"], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
                     ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
@@ -1046,8 +1141,11 @@ class VerosComponent:
                     ["time", "lon", "lat"], diagnostics["surface_tauy"]),
                 forcing_variable("heat_flux"): (
                     ["time", "lon", "lat"], diagnostics["heat_flux"]),
-                forcing_variable("freshwater_flux"): (
-                    ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                **{
+                    forcing_variable(name): (["time", "lon", "lat"], diagnostics[name])
+                    for name in ("precipitation", "evaporation", "runoff",
+                                 "sea_ice_freshwater_flux")
+                },
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
                 "mask_U": (["lon", "lat", "depth"], self.mask_U),
@@ -1127,6 +1225,12 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
+            "ice_frazil_melt_energy": {
+                "long_name": "Freeze/melt potential (frzmlt): positive forms ice, negative melts ice",
+                "units": "J m-2",
+                "comment": "of the top cell, read before it is clamped at freezing; positive is the heat the clamp added",
+                **role_attrs("derived"),
+            },
             "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
                     "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {
@@ -1143,8 +1247,20 @@ class VerosComponent:
             forcing_variable("heat_flux"): {
                 "long_name": "net surface heat flux forcing (upward positive)", "units": "W/m^2",
                 **role_attrs("forcing")},
-            forcing_variable("freshwater_flux"): {
-                "long_name": "net surface freshwater flux forcing (upward positive)",
+            forcing_variable("precipitation"): {
+                "long_name": "precipitation forcing (downward positive)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("evaporation"): {
+                "long_name": "evaporation forcing (upward positive)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("runoff"): {
+                "long_name": "runoff from the land (positive into the ocean)",
+                "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("sea_ice_freshwater_flux"): {
+                "long_name": "water the sea ice gives the ocean (positive into the ocean)",
                 "units": "kg/m^2/s",
                 **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
@@ -1178,6 +1294,29 @@ class VerosComponent:
                     " False), where `variables.psi` holds the surface"
                     " pressure; a streamfunction run has no sea surface"
                     " height to publish."
+                ),
+                **role_attrs("derived"),
+            }
+
+        # The GM streamfunction exists only where `step` emitted one.
+        if self.enable_gm_streamfunction:
+            dataset["B1_gm"] = (["time", "lon", "lat", "depth"], diagnostics["B1_gm"])
+            var_attrs["B1_gm"] = {
+                "long_name": "zonal component of the GM (eddy-induced) streamfunction",
+                "units": "m^2/s",
+                "comment": (
+                    "Veros' `B1_gm` (isoneutral_diag_streamfunction), on the"
+                    " V grid in the horizontal and at the top face of each"
+                    " `depth` cell in the vertical, labelled with the T-grid"
+                    " `lon`/`lat` and cell-centre `depth` like `v`. Its"
+                    " zonal integral, sum(B1_gm * dxt * cos(lat_u)), is the"
+                    " eddy-induced meridional overturning streamfunction on"
+                    " geopotentials in Veros' convention (Veros'"
+                    " `bolus_depth`), the counterpart of the Eulerian"
+                    " `vsf_depth` = bottom-up integral of `v`; their sum is"
+                    " the residual overturning. Present only for a run with"
+                    " GM skew diffusion (settings.enable_neutral_diffusion"
+                    " and settings.enable_skew_diffusion)."
                 ),
                 **role_attrs("derived"),
             }
