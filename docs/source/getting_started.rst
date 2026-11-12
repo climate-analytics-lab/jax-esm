@@ -98,7 +98,9 @@ package spelled out.
    * - Choose a surface component
      - ``ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Drop one
-     - ``land=none``
+     - ``seaice=none``
+   * - Evolve the soil water (the bucket land)
+     - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component

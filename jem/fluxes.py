@@ -232,7 +232,12 @@ class VerosExchange:
     as well as thermodynamically, forced. On another grid the fluxes and
     stress are weighted by the sea part of each atmosphere cell and the SST
     by Veros' own wet mask (:func:`jem.exchangers.regrid_weighted`), so
-    neither side takes the other's land. It does not touch a sea-ice
+    neither side takes the other's land. With a land component present it
+    also makes the table's land rows: the precipitation and the land tile's
+    evaporation to the land, its soil water availability back to the
+    atmosphere (list ``soilw_am`` in ``coupling.exchanged_forcing``, since
+    this exchanger cannot be read off the way a table can), and its runoff to
+    the ocean. It does not touch a sea-ice
     component: :data:`VEROS_OCEAN_EXCHANGES`'s ``seaice`` rows have no
     counterpart here, because the configurations this exchanger serves
     compose ``seaice=none``; a hand-written exchanger replaces the
@@ -441,7 +446,46 @@ class VerosExchange:
         atm = dict(atm, forcing=atm["forcing"].replace(
             sea_surface_temperature=sea_surface_temperature_on_atm,
         ))
-        return dict(components, atm=atm, ocn=ocn)
+        exchanged = dict(components, atm=atm, ocn=ocn)
+        if "lnd" in components:
+            exchanged = self._exchange_with_land(components, exchanged)
+        return exchanged
+
+    @staticmethod
+    def _exchange_with_land(
+        incoming: dict[str, Carry], exchanged: dict[str, Carry]
+    ) -> dict[str, Carry]:
+        """Apply the land rows of :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES`.
+
+        The same copies the declarative table makes, all on the atmosphere's
+        grid: the precipitation and the land tile's evaporation to the land,
+        its soil water availability back to the atmosphere, and its runoff,
+        as a mass rate over its whole grid, to the ocean, which spreads it
+        over its own wet surface. Sources are read from ``incoming``, so the
+        result does not depend on what was written before.
+        """
+        atm, lnd = incoming["atm"], incoming["lnd"]
+
+        def like(value, current):
+            return jnp.asarray(value, dtype=current.dtype)
+
+        land_forcing = lnd["forcing"]
+        lnd = dict(lnd, forcing=land_forcing.replace(
+            precipitation=like(atm["derived"].precipitation,
+                               land_forcing.precipitation),
+            evaporation=like(atm["derived"].land_evaporation,
+                             land_forcing.evaporation),
+        ))
+        atm_out, ocn_out = exchanged["atm"], exchanged["ocn"]
+        atm_out = dict(atm_out, forcing=atm_out["forcing"].replace(
+            soilw_am=like(incoming["lnd"]["derived"].soil_water_availability,
+                          atm_out["forcing"].soilw_am),
+        ))
+        ocn_out = dict(ocn_out, forcing=ocn_out["forcing"].replace(
+            runoff_mass_rate=like(incoming["lnd"]["derived"].runoff_mass_rate,
+                                  ocn_out["forcing"].runoff_mass_rate),
+        ))
+        return dict(exchanged, atm=atm_out, ocn=ocn_out, lnd=lnd)
 
     def _a2o_sea(self, field: jax.Array, sea_fraction: jax.Array) -> jax.Array:
         """Map a field over the sea part of the atmosphere's cells onto the ocean.

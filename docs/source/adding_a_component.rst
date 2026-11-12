@@ -136,6 +136,7 @@ objects. So the carry structure the adapter adopts is
             sea_evaporation,
             sea_eastward_wind_stress, sea_northward_wind_stress,
             sea_fraction,           # the sea part of the cell they are over
+            land_evaporation,       # the land tile's evaporation, for a land
         ),
     }
 

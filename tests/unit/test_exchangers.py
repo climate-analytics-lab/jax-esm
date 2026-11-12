@@ -172,6 +172,7 @@ class _VerosLikeForcing:
     surface_taux: jnp.ndarray
     surface_tauy: jnp.ndarray
     surface_air_temperature: jnp.ndarray
+    runoff_mass_rate: jnp.ndarray
 
 
 class StubVerosOcean:
@@ -197,7 +198,8 @@ class StubVerosOcean:
         return {
             "state": _VerosLikeState(zeros + 285.0),
             "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros, zeros + 1.0),
-            "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros),
+            "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros,
+                                         jnp.zeros(())),
         }
 
     def step(self, carry, time):
@@ -300,8 +302,9 @@ def test_default_exchanges_is_the_documented_table(components):
     [
         (("atm", "ocn"), 2),
         (("atm", "ocn", "seaice"), 4),
-        # The land is the atmosphere's own: a land component has no rows.
-        (("atm", "ocn", "lnd"), 2),
+        # A land (the bucket) exchanges its water with the atmosphere only.
+        (("atm", "ocn", "lnd"), 5),
+        (("atm", "ocn", "seaice", "lnd"), 7),
         (("ocn", "seaice"), 1),
     ],
 )
@@ -817,11 +820,42 @@ def test_a_weight_off_the_source_grid_is_refused_at_validate():
 
 def test_a_standard_component_with_no_rows_is_named(caplog):
     """A component under a standard name that no row mentions -- a land
-    with no land rows -- is stepped unforced, which is worth a warning.
+    with no atmosphere to exchange with -- is stepped unforced, which is
+    worth a warning.
     """
     with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
-        default_exchanges(("atm", "ocn", "lnd"))
+        default_exchanges(("ocn", "lnd"))
     assert "'lnd'" in caplog.text and "no row" in caplog.text
+
+
+def test_a_land_is_wired_to_the_atmosphere_on_its_grid():
+    """The bucket takes the precipitation and the land tile's evaporation
+    and hands back the soil water availability, never regridded; a Veros
+    ocean also takes its runoff, as one mass rate.
+    """
+    specs = default_exchanges(("atm", "ocn", "lnd"),
+                              regrid={"a2o": "a2o", "o2a": "o2a"})
+    land = {(spec.src, spec.dst): spec.regrid for spec in specs
+            if "lnd" in spec.src + spec.dst}
+    assert land == {
+        ("atm.derived.precipitation", "lnd.forcing.precipitation"): None,
+        ("atm.derived.land_evaporation", "lnd.forcing.evaporation"): None,
+        ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am"): None,
+    }
+    veros_land = [(src, dst) for src, dst, _ in VEROS_OCEAN_EXCHANGES
+                  if "lnd" in src + dst]
+    assert ("lnd.derived.runoff_mass_rate", "ocn.forcing.runoff_mass_rate") in veros_land
+
+
+def test_a_land_under_an_atmosphere_with_no_land_tile_is_refused():
+    """ECHAM publishes no land flux tile: forcing the soil with the cell
+    mean would charge it with the sea's evaporation, so the pairing fails.
+    """
+    class _NoLandTile:
+        publishes_land_evaporation = False
+
+    with pytest.raises(ValueError, match="no land flux tile"):
+        default_exchanges({"atm": _NoLandTile(), "lnd": object()})
 
 
 def test_a_slab_ocean_still_gets_the_slab_table(components, veros_module):
