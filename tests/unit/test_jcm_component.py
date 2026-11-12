@@ -477,6 +477,114 @@ def test_without_flux_tiles_the_ocean_fields_are_the_grid_mean():
         exchange.sea_eastward_wind_stress, exchange.eastward_wind_stress)
 
 
+def test_what_a_sea_ice_reads_is_the_contracts_own():
+    """The state a thermodynamic sea ice reads passes through unchanged: the
+    radiation, the wind speed, the surface pressure over p0, and the air over
+    the sea part, which with SPEEDY's tiles is the sea tile's.
+    """
+    _, fraction, tile = _tiled(0.0, 0.0)
+    se = _jcm_surface_exchange(
+        10.0, 0.0, 0.0, tile_names=("sea", "land"), tile_fraction=fraction,
+        air_temperature_tile=tile(271.0, 260.0),
+        air_specific_humidity_tile=tile(3e-3, 1e-3),
+    ).replace(surface_pressure=jnp.full(GRID_SHAPE, 9.5e4))
+    exchange = exchange_fields.from_diagnostics(
+        {"surface_exchange": se}, nodal_shape=GRID_SHAPE)
+
+    np.testing.assert_allclose(exchange.downward_shortwave_flux, 150.0)
+    np.testing.assert_allclose(exchange.downward_longwave_flux, 300.0)
+    np.testing.assert_allclose(exchange.wind_speed, np.hypot(1.5, -2.5), rtol=1e-6)
+    np.testing.assert_allclose(exchange.normalized_surface_pressure, 0.95, rtol=1e-6)
+    np.testing.assert_allclose(exchange.sea_air_temperature, 271.0)
+    np.testing.assert_allclose(exchange.sea_air_specific_humidity, 3e-3)
+
+
+def test_one_reference_air_stands_for_the_seas_where_the_air_is_untiled():
+    """ECHAM's surface layer has one reference air for every tile."""
+    exchange = exchange_fields.from_diagnostics(
+        _fake_echam_diagnostics(), nodal_shape=GRID_SHAPE)
+    np.testing.assert_allclose(exchange.sea_air_temperature, 288.0)
+    np.testing.assert_allclose(exchange.sea_air_specific_humidity, 0.008)
+
+
+def test_liquid_only_precipitation_is_split_by_mitgcm_aims_rule():
+    """SPEEDY condenses liquid only: a cell's precipitation is all snow where
+    the lowest level brought dry-adiabatically to the surface,
+    ``theta (ps / p0)**kappa``, is below 273.15 K, and all rain otherwise.
+    """
+    import jcm.constants as jcm_constants
+
+    theta = jnp.linspace(265.0, 290.0, GRID_SHAPE[0] * GRID_SHAPE[1]).reshape(GRID_SHAPE)
+    se = _jcm_surface_exchange(0.0, 0.0, 2e-5).replace(
+        air_potential_temperature=theta,
+        surface_pressure=jnp.full(GRID_SHAPE, 9.0e4))
+    exchange = exchange_fields.from_diagnostics(
+        {"surface_exchange": se}, nodal_shape=GRID_SHAPE)
+
+    surface_air = np.asarray(theta) * 0.9 ** float(jcm_constants.akap)
+    snow = surface_air < exchange_fields.SNOW_TEMPERATURE_THRESHOLD
+    assert snow.any() and (~snow).any()
+    np.testing.assert_allclose(np.asarray(exchange.snowfall)[snow], 2e-5)
+    np.testing.assert_allclose(np.asarray(exchange.snowfall)[~snow], 0.0)
+    np.testing.assert_allclose(
+        np.asarray(exchange.rainfall + exchange.snowfall), 2e-5, rtol=1e-6)
+
+
+def test_a_packages_own_phase_split_is_taken():
+    se = _jcm_surface_exchange(0.0, 0.0, 4e-5).replace(
+        precip_rain=jnp.full(GRID_SHAPE, 3e-5),
+        precip_snow=jnp.full(GRID_SHAPE, 1e-5))
+    exchange = exchange_fields.from_diagnostics(
+        {"surface_exchange": se}, nodal_shape=GRID_SHAPE)
+    np.testing.assert_allclose(exchange.rainfall, 3e-5)
+    np.testing.assert_allclose(exchange.snowfall, 1e-5)
+
+
+def test_the_first_steps_state_fields_are_the_initial_atmospheres(model):
+    """Before its first step the atmosphere has published no fluxes, so those
+    seed at zero; its state fields seed from the initial atmosphere, not zero,
+    or a sea ice's bulk formula would see air at 0 K and 0 Pa.
+    """
+    import jcm.constants as jcm_constants
+
+    derived = JCMComponent(model).initialize()["derived"]
+    state = model.dycore.to_physics_state(model.bootstrap_state()[0])
+    lowest_temperature = np.asarray(state.temperature[-1]).reshape(GRID_SHAPE)
+    np.testing.assert_allclose(derived.sea_air_temperature, lowest_temperature)
+    assert float(derived.sea_air_temperature.min()) > 150.0
+    np.testing.assert_allclose(
+        derived.normalized_surface_pressure,
+        np.asarray(state.normalized_surface_pressure).reshape(GRID_SHAPE))
+    np.testing.assert_allclose(
+        derived.downward_longwave_flux,
+        jcm_constants.sbc * lowest_temperature**4, rtol=1e-6)
+    np.testing.assert_allclose(derived.downward_shortwave_flux, 0.0)
+    np.testing.assert_allclose(derived.total_heat_flux, 0.0)
+
+
+def test_the_ice_temperature_is_seeded_with_speedys_own_stand_in():
+    """jax-gcm leaves ``sea_ice_surface_temperature`` None without a coupled
+    ice; exchanged, it is seeded with what SPEEDY uses in its absence, the
+    SST capped at its freezing point, so the first step is the uncoupled one.
+    A None field with no known stand-in is refused by name.
+    """
+    from jem.components.jcm.component import (
+        SPEEDY_SEA_ICE_STAND_IN_K,
+        _collapse_exchanged_forcing,
+    )
+
+    sst = jnp.linspace(268.0, 300.0, GRID_SHAPE[0] * GRID_SHAPE[1]).reshape(GRID_SHAPE)
+    forcing = ForcingData.zeros(GRID_SHAPE, sea_surface_temperature=sst)
+    assert forcing.sea_ice_surface_temperature is None
+    collapsed = _collapse_exchanged_forcing(
+        forcing, ("sea_ice_surface_temperature",), START_DATE)
+    np.testing.assert_allclose(
+        np.asarray(collapsed.sea_ice_surface_temperature),
+        np.minimum(np.asarray(sst), SPEEDY_SEA_ICE_STAND_IN_K))
+    with pytest.raises(ValueError, match="soilw_rel"):
+        _collapse_exchanged_forcing(forcing, ("soilw_rel",), START_DATE)
+
+
 def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
     """A column-vectorized package's flat fields land on the right grid cell.
 

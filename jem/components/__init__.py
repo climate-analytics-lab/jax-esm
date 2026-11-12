@@ -1,7 +1,7 @@
 """The components JAX-ESM can couple, and what it takes to configure them.
 
 Everything a coupled run needs is importable from here: the JCM atmosphere
-wrapper, the slab models and the bucket land with their parameter structs, the grid they run
+wrapper, the slab models, the bucket land and the Winton sea ice with their parameter structs, the grid they run
 on and the loader for their boundary climatologies. Veros is the exception --
 it is an optional dependency, so ``VerosComponent`` is resolved lazily by
 ``__getattr__`` and only fails if it is actually asked for.
@@ -20,6 +20,8 @@ from jem.components.slab import (
     SlabOceanParameters,
     SlabSeaiceModel,
     SlabSeaiceParameters,
+    WintonSeaiceModel,
+    WintonSeaiceParameters,
     load_monthly_climatology,
 )
 
@@ -37,6 +39,8 @@ __all__ = [
     "SlabSeaiceModel",
     "SlabSeaiceParameters",
     "VerosComponent",
+    "WintonSeaiceModel",
+    "WintonSeaiceParameters",
     "load_monthly_climatology",
 ]
 

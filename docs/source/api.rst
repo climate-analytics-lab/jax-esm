@@ -67,6 +67,10 @@ Components
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereParameters
    jem.components.slab.bucket_land_model.BucketLandModel
    jem.components.slab.bucket_land_model.BucketLandParameters
+   jem.components.slab.winton_seaice_model.WintonSeaiceModel
+   jem.components.slab.winton_seaice_model.WintonSeaiceParameters
+   jem.components.slab.winton_seaice_model.IceSurfaceFluxParameters
+   jem.components.slab.winton_seaice_model.IceTransportGrid
 
    jem.components.slab.grid.SlabGrid
    jem.components.slab.base.SlabModelBase

@@ -232,6 +232,55 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("lnd.derived.runoff_mass_rate", "ocn.forcing.runoff_mass_rate", "flux"),
 )
 
+#: What a :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
+#: registered as ``"seaice"`` changes in the standard table. The Winton ice
+#: solves its own surface energy balance, so it takes the atmosphere's state
+#: rather than its fluxes -- the surface radiation, the air over the sea part,
+#: the wind speed and surface pressure, rain and snow -- and the atmosphere's
+#: net heat flux and evaporation over the sea part, which it passes on to the
+#: ocean less what the ice keeps (:data:`WINTON_REPLACES`). It forms frazil ice
+#: from the deficit the ocean's clamp at freezing removed. It hands the
+#: atmosphere its skin temperature, which SPEEDY blends with the SST by the ice
+#: fraction (``sea_model.f90``'s ``tice_am``); regridded, that temperature is
+#: weighted by the ice's share of each cell (:data:`ROW_WEIGHTS`), so an
+#: atmosphere cell's ``sice_am * T_ice`` is the ice-area mean of the ocean
+#: cells under it. ``docs/source/design/winton_seaice.md`` is the contract.
+WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("atm.derived.downward_shortwave_flux", "seaice.forcing.rsds", "flux"),
+    ("atm.derived.downward_longwave_flux", "seaice.forcing.rlds", "flux"),
+    ("atm.derived.sea_air_temperature", "seaice.forcing.air_temperature", "state"),
+    ("atm.derived.sea_air_specific_humidity",
+     "seaice.forcing.air_specific_humidity", "state"),
+    ("atm.derived.wind_speed", "seaice.forcing.wind_speed", "state"),
+    ("atm.derived.normalized_surface_pressure",
+     "seaice.forcing.normalized_surface_pressure", "state"),
+    ("atm.derived.sea_total_heat_flux", "seaice.forcing.total_heat_flux", "flux"),
+    ("atm.derived.sea_evaporation", "seaice.forcing.evaporation", "flux"),
+    ("atm.derived.rainfall", "seaice.forcing.liquid_precipitation", "flux"),
+    ("atm.derived.snowfall", "seaice.forcing.frozen_precipitation", "flux"),
+    ("ocn.derived.ice_frazil_melt_energy",
+     "seaice.forcing.ice_frazil_melt_energy", "flux"),
+    ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.total_heat_flux", "flux"),
+    ("seaice.derived.ice_surface_temperature_K",
+     "atm.forcing.sea_ice_surface_temperature", "state"),
+)
+
+#: The standard row a Winton sea ice replaces: the ocean takes the
+#: atmosphere's flux through the ice (``seaice.derived.ocean_heat_flux_up``).
+WINTON_REPLACES = ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux")
+
+#: The weight of a regridded row whose destination is listed here, in place
+#: of the sea fraction :func:`default_exchanges` gives a row by default.
+ROW_WEIGHTS = {
+    "atm.forcing.sea_ice_surface_temperature": "seaice.derived.ice_area_fraction",
+}
+
+#: Module holding the Winton sea ice, looked up in ``sys.modules`` for the
+#: reason :data:`VEROS_COMPONENT_MODULE` is: if it was never imported, nothing
+#: in the process is a Winton model.
+WINTON_COMPONENT_MODULE = (
+    "jem.components.slab.winton_seaice_model.winton_seaice_model")
+
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
 #: describes. It is looked up in ``sys.modules`` rather than imported: Veros is
 #: an optional dependency and :mod:`jem.components.veros_component` imports it
@@ -833,6 +882,13 @@ def default_exchanges(
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
 
+    A :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
+    registered as ``"seaice"`` changes the slab table: the ocean's heat-flux
+    row is replaced by :data:`WINTON_SEAICE_EXCHANGES`, which force the ice
+    from the atmosphere and route the ocean's flux through it. The pairing is
+    refused over an ocean that does not clamp at freezing, over Veros
+    (jax-esm#160) and under a physics package with no sea flux tile.
+
     Regridding
     ----------
     ``regrid`` names a regridder for the specs that cross the
@@ -908,7 +964,9 @@ def default_exchanges(
         if direction is not None:
             name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
         weight = None
-        if name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
+        if name is not None and dst in ROW_WEIGHTS:
+            weight = ROW_WEIGHTS[dst]
+        elif name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
             weight = ATMOSPHERE_SEA_FRACTION
         elif name is not None and direction == "o2a":
             weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
@@ -942,6 +1000,7 @@ def default_exchanges(
             )
     _check_freezing_deficit_is_taken(components, specs)
     _check_land_is_forced_by_a_land_tile(components, specs)
+    _check_winton_coupling(components)
     return specs
 
 
@@ -1008,16 +1067,84 @@ def _check_freezing_deficit_is_taken(
     )
 
 
+def _is_winton(components: Mapping[str, Component] | Iterable[str]) -> bool:
+    """Whether ``"seaice"`` is a Winton sea ice (never, for a list of names)."""
+    if not isinstance(components, Mapping):
+        return False
+    module = sys.modules.get(WINTON_COMPONENT_MODULE)
+    return module is not None and isinstance(
+        components.get("seaice"), module.WintonSeaiceModel)
+
+
+def _check_winton_coupling(
+    components: Mapping[str, Component] | Iterable[str],
+) -> None:
+    """Refuse a Winton sea ice the table cannot couple faithfully.
+
+    The ice forms frazil from the deficit an ocean's clamp at freezing removes
+    and passes the ocean everything the ocean receives, so its ocean has to be
+    a clamping slab ocean: an ocean that kept the deficit would freeze it a
+    second time, and Veros neither clamps nor publishes it. Its forcing is the
+    atmosphere's flux over the sea part of each cell, so the atmosphere has to
+    publish its sea tile: ECHAM delivers its fluxes untiled and integrates its
+    own sea ice.
+    """
+    if not _is_winton(components):
+        return
+    assert isinstance(components, Mapping)
+    ocean = components.get("ocn")
+    if ocean is not None:
+        if _is_veros_ocean(ocean):
+            raise ValueError(
+                "A Winton sea ice cannot be coupled to the Veros ocean yet: "
+                "Veros neither clamps its top cell at the freezing point nor "
+                "publishes the deficit the ice forms frazil from "
+                "(jax-esm#160). Couple it to a slab ocean "
+                "(ocean=slab*), or use seaice=slab."
+            )
+        if not getattr(getattr(ocean, "params", None), "clamp_at_freezing", False):
+            raise ValueError(
+                "A Winton sea ice forms frazil ice from the deficit the ocean "
+                "removes by clamping its mixed layer at the freezing point, but "
+                "this ocean keeps the deficit (params.clamp_at_freezing=False), "
+                "so freezing would be counted twice. Construct the ocean with "
+                "SlabOceanParameters(clamp_at_freezing=True) "
+                "(+ocean.params.clamp_at_freezing=true)."
+            )
+    atmosphere = components.get("atm")
+    if atmosphere is not None and not getattr(atmosphere, "publishes_sea_tiles", True):
+        raise ValueError(
+            "A Winton sea ice is forced by the atmosphere's fluxes over the sea "
+            "part of each cell, but the atmosphere's physics publishes no sea "
+            "flux tile -- ECHAM delivers its fluxes untiled and integrates its "
+            "own sea ice on its sea-ice tile. Couple the Winton ice to SPEEDY "
+            "physics."
+        )
+
+
+def _is_veros_ocean(ocean: Any) -> bool:
+    """Whether ``ocean`` is the Veros wrapper (see VEROS_COMPONENT_MODULE)."""
+    module = sys.modules.get(VEROS_COMPONENT_MODULE)
+    return module is not None and isinstance(ocean, module.VerosComponent)
+
+
 def _exchange_table(
     components: Mapping[str, Component] | Iterable[str],
 ) -> tuple[tuple[str, str, str], ...]:
-    """Return the standard table matching the ocean ``components`` holds.
+    """Return the standard table matching the components.
 
     :data:`VEROS_OCEAN_EXCHANGES` when ``"ocn"`` is a
     :class:`~jem.components.veros_component.VerosComponent`, and
     :data:`STANDARD_EXCHANGES` otherwise -- including when the caller passed
     names rather than components, since a name says nothing about a carry.
+    With a Winton sea ice, the slab table's ocean heat-flux row is replaced
+    by :data:`WINTON_SEAICE_EXCHANGES` (:func:`_check_winton_coupling`
+    refuses the Veros case).
     """
+    if _is_winton(components):
+        return tuple(
+            row for row in STANDARD_EXCHANGES if row[:2] != WINTON_REPLACES
+        ) + WINTON_SEAICE_EXCHANGES
     if not isinstance(components, Mapping):
         return STANDARD_EXCHANGES
     ocean = components.get("ocn")

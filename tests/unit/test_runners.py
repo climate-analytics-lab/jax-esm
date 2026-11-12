@@ -523,6 +523,30 @@ def test_earth_slab_with_the_bucket_land_couples_the_soil_water():
     assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
 
 
+def test_earth_slab_winton_couples_the_ice_both_ways():
+    """`+configuration=earth-slab-winton`: a clamping ocean, the Winton ice
+    started from the observed cover, the atmosphere declared to take the
+    ice's skin temperature (seeded, since jax-gcm leaves it None without an
+    ice), and a coupled step that keeps the carry's structure.
+    """
+    from jem.components import WintonSeaiceModel
+
+    coupler = runners.build_coupler(composed(["+configuration=earth-slab-winton"]))
+    assert isinstance(coupler.components["seaice"], WintonSeaiceModel)
+    assert coupler.components["ocn"].params.clamp_at_freezing
+    assert set(coupler.components["atm"].exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am", "sea_ice_surface_temperature",
+    }
+    carry = coupler.initialize()
+    seaice = carry.components["seaice"]["state"]
+    assert 0.0 < float(seaice.ice_fraction.mean()) < 1.0
+    tice = carry.components["atm"]["forcing"].sea_ice_surface_temperature
+    assert tice is not None and tice.shape == seaice.ice_fraction.shape
+
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
 def test_earth_slab_couples_its_file_forcing(caplog):
     """The one shipped configuration with `forcing=from_file` builds and scans.
 

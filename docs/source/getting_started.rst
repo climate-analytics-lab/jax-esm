@@ -12,7 +12,7 @@ Install JEM
     # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git checkout 932d9cc2f331faebcbab745895f347c4de295b3b
+    git checkout 4367f8589c3801bdfc692eed56dba382f650bb98
     pip install -e "."
     cd ..
 
@@ -101,6 +101,9 @@ package spelled out.
      - ``seaice=none``
    * - Evolve the soil water (the bucket land)
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
+   * - Use the thermodynamic Winton sea ice
+     - ``+configuration=earth-slab-winton``, or ``seaice=winton
+       +ocean.params.clamp_at_freezing=true`` in another composition
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component

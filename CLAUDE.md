@@ -186,6 +186,7 @@ jem/                             # Main package
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
 │       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
 │       ├── bucket_land_model/   # BucketLandModel (soil water; the land's temperature is SPEEDY's)
+│       ├── winton_seaice_model/ # WintonSeaiceModel (thsice port: snow + two ice layers, frazil)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
@@ -338,8 +339,14 @@ including the three whose value changed.
 - `ice_frazil_melt_energy` follows CESM's `frzmlt`: positive means the mixed
   layer went sub-freezing and new ice forms; negative means surplus heat is
   available to melt existing ice. A slab ocean clamps at freezing
-  (`clamp_at_freezing`) only for a sea ice that takes that deficit;
-  otherwise the mixed layer keeps it, so no heat is created.
+  (`clamp_at_freezing`) only for a sea ice that takes that deficit (the
+  Winton ice, which requires it); otherwise the mixed layer keeps it, so no
+  heat is created.
+- A sea ice's fraction is a fraction of the *sea part* of a cell (SPEEDY's
+  `sice_am`), and its fluxes are per unit sea area. The atmosphere sees an ice
+  through its fraction and, for the Winton ice, its skin temperature
+  (`sea_ice_surface_temperature`), never an effective SST: SPEEDY blends the
+  two with the SST itself.
 - A `SlabGrid`'s `fractional_mask` is the land fraction of each cell
   (1 = all land). A cell can hold both surfaces: `land_mask` is
   `fractional_mask > 0` and `ocean_mask` is `fractional_mask < 1`, and each
