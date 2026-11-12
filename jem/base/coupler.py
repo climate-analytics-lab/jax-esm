@@ -951,7 +951,7 @@ class Coupler:
 
             This is how an **initial-condition** parameter is varied: a
             parameter a component reads only in ``initialize`` (the slab
-            ocean's ``initial_sst``, the sea ice's ``initial_ice_thickness``)
+            ocean's ``initial_sst``, the slab atmosphere's ``initial_*``)
             has already been copied into the state by the time a carry exists,
             so replacing that leaf in ``carry["params"]`` afterwards does
             nothing. Passing it here builds the initial state from it, and

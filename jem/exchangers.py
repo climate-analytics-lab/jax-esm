@@ -138,13 +138,16 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # the JCM wrapper) drives both surfaces.
     ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
-    # The mixed layer's freeze/melt potential (CESM's `frzmlt`) is what the
-    # sea ice grows and melts on.
-    ("ocn.derived.ice_frazil_melt_energy",
-     "seaice.forcing.ice_frazil_melt_energy", "flux"),
+    # The slab sea ice diagnoses its ice fraction from the sea surface
+    # temperature alone, so SST is the one field the ocean hands it. The two
+    # share the ocean grid, so this row never crosses a grid boundary.
+    ("ocn.state.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
     # The surface state the atmosphere's surface-flux scheme reads. In an
     # uncoupled JCM run these are prescribed boundary conditions; here the
-    # surface components provide them, under JCM's own field names.
+    # surface components provide them, under JCM's own field names. The ice
+    # fraction is an areal quantity, hence "flux": regridded conservatively
+    # so the ice-covered area is the same on both grids.
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
@@ -159,8 +162,9 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: ``forcing.heat_flux`` rather than ``forcing.total_heat_flux``, the ocean
 #: takes a freshwater flux as well, and the sea surface temperature is
 #: published from ``derived`` (Veros' ``state`` is Veros' own ``VerosState``
-#: object, which is not a struct of exchangeable fields). The rows that do not
-#: involve the ocean are the same as :data:`STANDARD_EXCHANGES`'.
+#: object, which is not a struct of exchangeable fields) -- which is also
+#: where the sea ice's row reads it from. The rows that do not involve the
+#: ocean are the same as :data:`STANDARD_EXCHANGES`'.
 #:
 #: What this table deliberately does **not** carry, because no copy of a field
 #: can express it -- each needs a hand-written exchanger
@@ -179,10 +183,6 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: - **the "swamp" sea-ice insulation** the example drivers apply, which
 #:   masks the heat and freshwater fluxes wherever the surface has reached the
 #:   freezing point.
-#: - **the freeze/melt potential a slab sea ice runs on.** Veros publishes no
-#:   ``ice_frazil_melt_energy``, so there is no ``ocn`` to ``seaice`` row and
-#:   a sea-ice component coupled to a Veros ocean is not driven by it;
-#:   :func:`default_exchanges` warns when it sees that combination.
 #:
 #: ``forcing.surface_air_temperature`` has no row either: Veros carries it
 #: only to write it back out as a diagnostic, and nothing in the integration
@@ -191,6 +191,8 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux", "flux"),
     ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
     ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
@@ -682,7 +684,7 @@ def default_exchanges(
     ==========================================  =======================================
     ``atm.derived.total_heat_flux``             ``ocn.forcing.total_heat_flux``
     ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
-    ``ocn.derived.ice_frazil_melt_energy``      ``seaice.forcing.ice_frazil_melt_energy``
+    ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
     ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
     ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
@@ -720,8 +722,8 @@ def default_exchanges(
     - *kind* is the row's own ``"flux"``/``"state"`` (:data:`KINDS`).
 
     That split is the one the mixed-grid example makes by hand: extensive
-    quantities -- heat fluxes, the freeze/melt energy, an areal ice fraction
-    -- are regridded conservatively to keep their budgets, while an intensive
+    quantities -- heat fluxes, an areal ice fraction -- are regridded
+    conservatively to keep their budgets, while an intensive
     state variable such as the sea surface temperature is interpolated
     bilinearly. So the mixed-grid configuration is::
 
@@ -791,16 +793,42 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
-    if table is VEROS_OCEAN_EXCHANGES and "seaice" in present:
-        logger.warning(
-            "A sea-ice component is coupled to a Veros ocean, which publishes "
-            "no freeze/melt potential (`ice_frazil_melt_energy`), so the "
-            "default coupling has no row that drives it: the ice will only "
-            "respond to what it computes itself. Write the exchange out by "
-            "hand (coupling.exchanger) if the ice is meant to grow on the "
-            "ocean's heat budget."
-        )
+    _check_freezing_deficit_is_taken(components, specs)
     return specs
+
+
+#: Where a clamping ocean publishes the deficit its clamp removed.
+FREEZING_DEFICIT = "ocn.derived.ice_frazil_melt_energy"
+
+
+def _check_freezing_deficit_is_taken(
+    components: Mapping[str, Component] | Iterable[str],
+    specs: list[ExchangeSpec],
+) -> None:
+    """Refuse an ocean that clamps at freezing with nothing taking its deficit.
+
+    An ocean with ``params.clamp_at_freezing`` holds its mixed layer at the
+    freezing point and hands the deficit to a sea ice as
+    :data:`FREEZING_DEFICIT`; if no row moves that field, the clamp creates
+    the heat it removes the deficit with, every step it acts, and nothing in
+    the run says so. Only real components carry parameters, so a list of
+    names is never refused.
+    """
+    if not isinstance(components, Mapping) or "ocn" not in components:
+        return
+    params = getattr(components["ocn"], "params", None)
+    if not getattr(params, "clamp_at_freezing", False):
+        return
+    if any(spec.src == FREEZING_DEFICIT for spec in specs):
+        return
+    raise ValueError(
+        "The ocean clamps its mixed layer at the freezing point "
+        "(params.clamp_at_freezing=True), but no exchange takes the deficit "
+        f"the clamp removes ({FREEZING_DEFICIT}), so the clamp would create "
+        "heat. Couple a sea ice that forms ice from it, or construct the "
+        "ocean with clamp_at_freezing=False, which keeps the deficit in the "
+        "mixed layer (the choice for SlabSeaiceModel)."
+    )
 
 
 def _exchange_table(

@@ -85,7 +85,7 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | --- | --- |
 | `atm.derived.total_heat_flux` | `ocn.forcing.total_heat_flux` |
 | `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
-| `ocn.derived.ice_frazil_melt_energy` | `seaice.forcing.ice_frazil_melt_energy` |
+| `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
 | `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
 | `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
@@ -100,6 +100,16 @@ misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
 simply never receives anything.
 
+**The freezing point is an energy-budget decision.** The slab sea ice
+diagnoses its fraction from the SST and has no energy budget, so it takes no
+freeze/melt potential, and the standard table has no row for
+`ocn.derived.ice_frazil_melt_energy`. The ocean beside it therefore keeps
+its deficit below freezing (`clamp_at_freezing=False`): clamping it there
+would create the heat it removed the deficit with. `default_exchanges`
+raises for an ocean that clamps (`clamp_at_freezing=True`) when no row takes
+that deficit, since nothing else in a run would say the energy is not
+conserved.
+
 **One table per carry layout.** Component wrappers do not all name the same
 physical field the same way, nor keep it in the same section: the Veros
 ocean takes its surface heat flux as `forcing.heat_flux` and publishes its
@@ -108,8 +118,8 @@ sea surface temperature from `derived` (its `state` is Veros' own
 `forcing.total_heat_flux` and `state.sea_surface_temperature`. So a
 `VerosComponent` registered as `"ocn"` selects `VEROS_OCEAN_EXCHANGES`
 instead — the same wiring in Veros' names, plus the freshwater flux Veros
-also takes, and with no `ocn` → `seaice` row because Veros publishes no
-freeze/melt potential (that combination is warned about). The choice is made
+also takes; the `ocn` → `seaice` row reads the sea surface temperature from
+`derived` like the atmosphere's does. The choice is made
 by *type*, which needs real components: called with a list of names,
 `default_exchanges` cannot tell one ocean from another and gives the slab
 table. The check looks the wrapper's module up in `sys.modules` rather than
@@ -165,8 +175,8 @@ name a regridder, and `default_exchanges` names one from a mapping keyed by
 kind. The kind is written on each row of the table rather than inferred from
 the carry section the field is read from, because the two do not agree — the
 same intensive sea surface temperature comes from `state` on a slab and from
-`derived` on a Veros ocean. Extensive quantities (heat fluxes, the
-freeze/melt energy, an areal ice fraction) are mapped conservatively so their
+`derived` on a Veros ocean. Extensive quantities (heat fluxes, an areal ice
+fraction) are mapped conservatively so their
 budgets survive the interface, while an intensive state variable such as SST
 is interpolated bilinearly, which does not leave a conservative map's
 staircase in a smooth field. Rows that stay on one grid never get a

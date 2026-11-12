@@ -136,8 +136,8 @@ components = {
 # below builds: the standard rows filtered to the components present.
 table = Exchange([
     ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-    ExchangeSpec("ocn.derived.ice_frazil_melt_energy",
-                 "seaice.forcing.ice_frazil_melt_energy"),
+    ExchangeSpec("ocn.state.sea_surface_temperature",
+                 "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "atm.forcing.sea_surface_temperature"),
     ExchangeSpec("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
@@ -164,13 +164,24 @@ coupler.initialize()` — before building the coupler's trajectory function; it
 names a mistyped component, section, field or regridder rather than letting
 it fail inside a traced step. And the wiring is by *name*:
 `SlabSeaiceModel`'s `name` must be `"seaice"` (its default) for
-`default_exchangers` to route the ocean's freeze/melt potential to it — a
+`default_exchangers` to route the ocean's sea surface temperature to it — a
 sea-ice model registered under any other name is left unconnected, silently
 unless the name is one of the near-misses (`ice`, `sea_ice`, `sic`) the
 default wiring recognises and warns about.
 
 See {doc}`design/exchange` for the full table (including the Veros
 variant), the regridding keys a mixed-grid run uses, and the lag in full.
+
+**Sea ice and the freezing point.** `SlabSeaiceModel` diagnoses its ice
+fraction from the ocean's sea surface temperature, ramping from open water at
+`SlabSeaiceParameters.ice_free_sst_excess` (1.8 K) above freezing to full
+cover at freezing; it has no energy budget. So the slab ocean beside it
+keeps its own deficit when it cools below freezing
+(`SlabOceanParameters.clamp_at_freezing=False`, the default) rather than
+being clamped at freezing with nothing to account for the heat the clamp
+would add. `clamp_at_freezing=True` is for a sea ice that turns the ocean's
+`derived.ice_frazil_melt_energy` into ice, and `default_exchanges` refuses it
+when no exchange takes that field.
 
 ## Parameters: process and initial condition
 
