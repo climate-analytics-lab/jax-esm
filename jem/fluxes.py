@@ -242,7 +242,7 @@ class VerosExchange:
     counterpart here, because the configurations this exchanger serves
     compose ``seaice=none``; a hand-written exchanger replaces the
     declarative table entirely, so a sea ice composed into one of them is
-    stepped unforced (jax-esm#128).
+    stepped unforced (jax-esm#160).
 
     Parameters
     ----------
