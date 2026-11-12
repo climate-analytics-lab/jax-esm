@@ -51,9 +51,27 @@ repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
      - --
      - --
    * - ``wind_speed``
-     - m s-1, scalar
-     - (not exchanged -- ``wind_u``/``wind_v`` already carry the direction)
-     - --
+     - m s-1, scalar, at ``wind_reference``
+     - ``wind_speed``
+     - m s-1, unchanged
+   * - ``downward_shortwave_flux``, ``downward_longwave_flux``
+     - W m-2, positive down; the longwave incident
+     - same names
+     - unchanged
+   * - ``surface_pressure``
+     - Pa
+     - ``normalized_surface_pressure``
+     - over jax-gcm's ``p0``, dimensionless
+   * - ``air_temperature``/``air_specific_humidity`` (``sea`` tile where
+       published)
+     - K, kg kg-1, at ``air_reference``
+     - ``sea_air_temperature``/``sea_air_specific_humidity``
+     - unchanged
+   * - ``precip_rain``/``precip_snow``, or ``precipitation`` split by
+       ``air_potential_temperature`` and ``surface_pressure``
+     - kg m-2 s-1, positive down
+     - ``rainfall``/``snowfall``
+     - unchanged (:func:`split_precipitation`)
 
 - **``total_heat_flux = -net_heat_flux``.** The only sign flip needed: jax-gcm
   publishes the net downward flux into the surface medium (SPEEDY's
@@ -81,12 +99,21 @@ repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
   across the interface up to the regrid, which the ocean coupling does
   conservatively. That is why :class:`jem.fluxes.VerosExchange` uses it
   instead of deriving a stress of its own from ``u0``/``v0`` (jax-esm#132).
-- **``sensible_heat_flux``/``latent_heat_flux``/``wind_speed`` are on the
-  contract but JEM does not exchange them separately**: the slab
-  ocean/sea-ice models and ``jem.exchangers`` couple on the *net*
-  ``total_heat_flux``, and ``wind_speed`` is redundant once the vector is
-  available (``hypot(wind_u, wind_v) == wind_speed`` is a contract
-  invariant).
+- **``sensible_heat_flux``/``latent_heat_flux`` are on the contract but JEM
+  does not exchange them separately**: the slab ocean/sea-ice models and
+  ``jem.exchangers`` couple on the *net* ``total_heat_flux``.
+- **What a thermodynamic sea ice reads.** A sea ice that solves its own
+  surface energy balance (the Winton ice) needs the atmosphere's state rather
+  than its fluxes, and takes it unchanged from the contract: the downward
+  shortwave and the incident downward longwave (``downward_shortwave_flux``,
+  ``downward_longwave_flux``), the scalar ``wind_speed`` at the package's
+  reference, the surface pressure divided by jax-gcm's ``p0``
+  (``normalized_surface_pressure``) and the air the sea's fluxes were
+  computed against (``sea_air_temperature``, ``sea_air_specific_humidity``:
+  the ``sea`` tile of ``air_temperature_tile``/``air_specific_humidity_tile``,
+  else the grid value). It also needs precipitation by phase:
+  ``rainfall``/``snowfall`` are the package's own split where it publishes
+  one, else MITgcm AIM's rule (:func:`split_precipitation`).
 - **The unprefixed fields are grid-box means over land, sea and sea ice**;
   the ``sea_*`` fields are the same fluxes over the sea part of the cell
   alone (open water and sea ice together), which is what an ocean takes. They
@@ -139,7 +166,45 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 import jax.numpy as jnp
+import jcm.constants as jcm_constants
 from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+
+#: The temperature below which MITgcm's AIM (SPEEDY's physics in MITgcm) makes
+#: a cell's precipitation snow for its thermodynamic sea ice: the freezing point
+#: of pure water, ``tFreeze = celsius2K`` (``pkg/aim_v23/phy_inphys.F``).
+SNOW_TEMPERATURE_THRESHOLD = 273.15
+
+
+def split_precipitation(exchange: Any) -> tuple[Any, Any]:
+    """Return ``(rainfall, snowfall)``, ``kg m-2 s-1``, in the publisher's layout.
+
+    A package that splits its precipitation by phase (``precip_rain``,
+    ``precip_snow``; ECHAM's microphysics) is taken at its word. SPEEDY
+    condenses liquid only, so its precipitation is split as MITgcm's AIM
+    splits SPEEDY's for its thermodynamic sea ice
+    (``pkg/aim_v23/phy_snow_precip.F``, ``aim_aim2sioce.F``): all of a cell's
+    precipitation is snow where the lowest level's potential temperature
+    brought to the surface pressure, ``theta (ps / p0)**kappa``, is below
+    :data:`SNOW_TEMPERATURE_THRESHOLD`, and rain otherwise. That is the
+    lowest level's temperature extrapolated dry-adiabatically to the
+    surface, AIM's ``ThA(kGrd) * PSA**kappa``.
+
+    AIM also corrects the atmosphere's condensation heating for the latent
+    heat of fusion of the snow it makes. SPEEDY in jax-gcm does not, so the
+    snow arrives as water that never released that heat, and the ice that
+    stores it has to account for it
+    (``WintonSeaiceModel(frozen_precipitation_latent_heat_release_mode=True)``,
+    its default).
+    """
+    precipitation = exchange.precipitation
+    if exchange.precip_rain is not None and exchange.precip_snow is not None:
+        return exchange.precip_rain, exchange.precip_snow
+    surface_air = (exchange.air_potential_temperature
+                   * (exchange.surface_pressure / jcm_constants.p0) ** jcm_constants.akap)
+    snow = surface_air < SNOW_TEMPERATURE_THRESHOLD
+    return (jnp.where(snow, 0.0, precipitation),
+            jnp.where(snow, precipitation, 0.0))
 
 
 class SurfaceExchange(NamedTuple):
@@ -182,6 +247,22 @@ class SurfaceExchange(NamedTuple):
         The stress on the sea part of the cell, in the same conventions.
     land_evaporation : jax.Array
         ``evaporation`` over the land part of the cell (the ``land`` tile).
+    downward_shortwave_flux : jax.Array
+        Downward shortwave at the surface, ``W m-2``, positive down.
+    downward_longwave_flux : jax.Array
+        Incident downward longwave at the surface, ``W m-2``, positive down:
+        the flux in the air, before a surface's emissivity takes its share.
+    wind_speed : jax.Array
+        Near-surface wind speed, ``m s-1``, at the same reference as
+        ``u0``/``v0``.
+    normalized_surface_pressure : jax.Array
+        Surface pressure over jax-gcm's reference ``p0``, dimensionless.
+    sea_air_temperature, sea_air_specific_humidity : jax.Array
+        The air, ``K`` and ``kg kg-1``, the sea's fluxes were computed
+        against, at the package's ``air_reference``.
+    rainfall, snowfall : jax.Array
+        Precipitation by phase, ``kg m-2 s-1``, positive down; they sum to
+        ``precipitation`` (:func:`split_precipitation`).
 
     """
 
@@ -197,6 +278,14 @@ class SurfaceExchange(NamedTuple):
     sea_eastward_wind_stress: jnp.ndarray
     sea_northward_wind_stress: jnp.ndarray
     land_evaporation: jnp.ndarray
+    downward_shortwave_flux: jnp.ndarray
+    downward_longwave_flux: jnp.ndarray
+    wind_speed: jnp.ndarray
+    normalized_surface_pressure: jnp.ndarray
+    sea_air_temperature: jnp.ndarray
+    sea_air_specific_humidity: jnp.ndarray
+    rainfall: jnp.ndarray
+    snowfall: jnp.ndarray
 
 
 def sea_tile(exchange: Any, field: str) -> Any:
@@ -310,6 +399,15 @@ def from_diagnostics(
         values: jnp.ndarray = getattr(exchange, field) if sea is None else sea
         return values.reshape(nodal_shape)
 
+    def sea_air(field: str) -> jnp.ndarray:
+        # The air the sea's fluxes were computed against: the sea tile where
+        # the package publishes per-tile air (SPEEDY), else its one reference
+        # air (ECHAM).
+        sea = sea_tile(exchange, field)
+        values: jnp.ndarray = getattr(exchange, field) if sea is None else sea
+        return values.reshape(nodal_shape)
+
+    rainfall, snowfall = split_precipitation(exchange)
     return SurfaceExchange(
         total_heat_flux=(-exchange.net_heat_flux).reshape(nodal_shape),
         evaporation=exchange.evaporation.reshape(nodal_shape),
@@ -323,4 +421,13 @@ def from_diagnostics(
         sea_eastward_wind_stress=over_sea("stress_u"),
         sea_northward_wind_stress=over_sea("stress_v"),
         land_evaporation=over_land("evaporation"),
+        downward_shortwave_flux=exchange.downward_shortwave_flux.reshape(nodal_shape),
+        downward_longwave_flux=exchange.downward_longwave_flux.reshape(nodal_shape),
+        wind_speed=exchange.wind_speed.reshape(nodal_shape),
+        normalized_surface_pressure=(
+            exchange.surface_pressure / jcm_constants.p0).reshape(nodal_shape),
+        sea_air_temperature=sea_air("air_temperature"),
+        sea_air_specific_humidity=sea_air("air_specific_humidity"),
+        rainfall=rainfall.reshape(nodal_shape),
+        snowfall=snowfall.reshape(nodal_shape),
     )

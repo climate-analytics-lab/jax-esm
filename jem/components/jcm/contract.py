@@ -23,7 +23,7 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 --------------------------------------------
-``JCM_SUPPORTED_REV`` is ``932d9cc2f331faebcbab745895f347c4de295b3b``. A sha is
+``JCM_SUPPORTED_REV`` is ``4367f8589c3801bdfc692eed56dba382f650bb98``. A sha is
 the most precise thing there is to name; ``pyproject.toml``'s
 ``jcm>=3.0.0rc1`` floor is the loosest true statement of the same fact,
 since jax-gcm's version string is bumped only at release. The policy,
@@ -37,7 +37,8 @@ raise the ``pyproject.toml`` floor to match.
 
 This revision is the head of jax-gcm#1213, which publishes SPEEDY's land
 and sea flux tiles and a coupled sea ice's forcing on ``SurfaceExchange``,
-stacked on
+and lets SPEEDY's sea tile take a coupled sea ice's skin temperature
+(``ForcingData.sea_ice_surface_temperature``, jax-esm#141), stacked on
 jax-gcm#1199 (SPEEDY's own slab land, ``land_model.f90``, as
 ``SpeedySurfaceFlux``'s default) and on ``dev``. It is a temporary exception
 to the policy above: those two pull requests are what this repository's ocean
@@ -92,7 +93,7 @@ from typing import NamedTuple
 #:
 #: This ``dev`` commit is validated as a whole against this repository's own
 #: gates -- see "Why a ``dev`` revision rather than a release" above.
-JCM_SUPPORTED_REV = "932d9cc2f331faebcbab745895f347c4de295b3b"
+JCM_SUPPORTED_REV = "4367f8589c3801bdfc692eed56dba382f650bb98"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -546,6 +547,64 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " tile axis itself.",
     ),
     IntegrationPoint(
+        "surface_exchange", "downward_shortwave_flux", "diagnostics",
+        "Downward shortwave at the surface, W m-2: the Winton sea ice's"
+        " rsds (JCMDerived.downward_shortwave_flux).",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "downward_longwave_flux", "diagnostics",
+        "Incident downward longwave at the surface, W m-2: the Winton sea"
+        " ice's rlds, of which it absorbs its emissivity.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "wind_speed", "diagnostics",
+        "Near-surface wind speed at the package's reference: the Winton"
+        " ice's bulk formula.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "surface_pressure", "diagnostics",
+        "Surface pressure, Pa; over jcm.constants.p0 it is the Winton"
+        " ice's normalized_surface_pressure.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "air_temperature", "diagnostics",
+        "The air the package's fluxes were computed against, at its"
+        " air_reference: the Winton ice's air where no sea tile is published.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "air_specific_humidity", "diagnostics",
+        "Same reference as air_temperature.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "air_temperature_tile", "diagnostics",
+        "Per-tile air; the 'sea' tile is the air SPEEDY's sea fluxes"
+        " were computed against, JCMDerived.sea_air_temperature.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "air_specific_humidity_tile", "diagnostics",
+        "Same note as air_temperature_tile.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "air_potential_temperature", "diagnostics",
+        "Lowest-level potential temperature: brought to the surface"
+        " pressure, it decides rain or snow by MITgcm AIM's rule"
+        " (exchange_fields.split_precipitation).",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "precip_rain", "diagnostics",
+        "A package's own rain/snow split, taken where published.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "precip_snow", "diagnostics",
+        "Same note as precip_rain.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "sea_ice_surface_temperature", "public",
+        "The skin temperature a coupled sea ice hands SPEEDY, which blends it"
+        " with the SST by sice_am; the Winton ice writes it, and JCMComponent"
+        " seeds it with SPEEDY's own stand-in while jax-gcm leaves it None.",
+    ),
+    IntegrationPoint(
         "jcm.physics_interface", "POST_PHYSICS_STATE_KEY", "public",
         "The cloud schemes' post-physics anchor: it stays in the physics"
         " carry but jax-gcm never saves it, so JCMComponent's diagnostics"
@@ -649,5 +708,28 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     IntegrationPoint(
         "jcm.constants", "alhf", "public",
         "Latent heat of fusion, SlabSeaiceModel.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "rearth", "public",
+        "Earth's radius: the bucket land's runoff mass rate and the Winton"
+        " ice's transport metrics.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "p0", "public",
+        "Reference pressure: the normalised surface pressure, and the rain/snow"
+        " split's dry-adiabatic extrapolation.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "akap", "public",
+        "R/cp of dry air, the same extrapolation's exponent.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "physical_constants", "public",
+        "The live constants the Winton ice's bulk formula reads when traced"
+        " (cpd, rd, p0, sbc, alhc), so a set_constants override reaches it.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "sbc", "public",
+        "Stefan-Boltzmann constant: the Winton ice's seed longwave.",
     ),
 )

@@ -41,7 +41,7 @@ JAX-ESM is developed and tested against **one** jax-gcm revision, recorded in
 
 ```bash
 git clone https://github.com/climate-analytics-lab/jax-gcm
-cd jax-gcm && git checkout 932d9cc2f331faebcbab745895f347c4de295b3b && pip install -e "." && cd ..
+cd jax-gcm && git checkout 4367f8589c3801bdfc692eed56dba382f650bb98 && pip install -e "." && cd ..
 
 git clone https://github.com/climate-analytics-lab/jax-esm
 cd jax-esm && pip install -e "." && cd ..

@@ -1,0 +1,30 @@
+# @package _global_
+#
+# `earth-slab` with the Winton thermodynamic sea ice in place of the
+# SST-diagnosed slab ice.
+#
+#   python -m jem.main +configuration=earth-slab-winton
+#
+# WHY each setting (everything else is earth-slab's, and its comments apply):
+#  - seaice=winton: the ice has an energy budget, grows from the ocean's
+#    freezing deficit and by conduction, and hands the atmosphere its skin
+#    temperature as well as its fraction (docs/source/design/winton_seaice.md).
+#  - ocean clamp_at_freezing: the Winton ice forms frazil from the deficit the
+#    ocean's clamp removes; an ocean that kept it would freeze it twice, and
+#    the coupling refuses one.
+#  - ice_clim_file + initial_ice_thickness: start from the observed cover of
+#    the start month, as earth-slab does, at a uniform 1.5 m -- between
+#    January's Arctic and Antarctic thicknesses. The thickness is spun up by
+#    the run; the first season shows the adjustment.
+defaults:
+  - earth-slab
+  - override /seaice: winton
+
+ocean:
+  params:
+    clamp_at_freezing: true
+
+seaice:
+  ice_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
+  params:
+    initial_ice_thickness: 1.5

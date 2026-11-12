@@ -12,7 +12,7 @@ shadow it:
 .. code-block:: bash
 
    git clone https://github.com/climate-analytics-lab/jax-gcm.git
-   git -C jax-gcm checkout 932d9cc2f331faebcbab745895f347c4de295b3b   # JCM_SUPPORTED_REV
+   git -C jax-gcm checkout 4367f8589c3801bdfc692eed56dba382f650bb98   # JCM_SUPPORTED_REV
    pip install -e ./jax-gcm
 
    git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git

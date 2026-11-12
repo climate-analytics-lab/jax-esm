@@ -59,6 +59,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import jcm.constants as jcm_constants
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -96,6 +97,7 @@ logger = logging.getLogger(__name__)
 FORCING_VARIABLE_NAMES = (
     "sea_surface_temperature",
     "sice_am",
+    "sea_ice_surface_temperature",
     "stl_am",
     "snowc_am",
     "soilw_am",
@@ -117,7 +119,10 @@ class JCMDerived:
     ``sea_*`` ones are over the sea part of the cell alone, which is what an
     ocean takes (see :mod:`jem.components.jcm.exchange_fields`).
     ``land_evaporation`` is the evaporation over the land part, the land
-    tile, which a land component's soil supplies.
+    tile, which a land component's soil supplies. The surface radiation, wind
+    speed, normalised surface pressure, the air over the sea part and the
+    precipitation by phase (``rainfall``, ``snowfall``) are what a sea ice
+    that solves its own surface energy balance reads.
     ``sea_fraction`` is the sea part, ``1 - fmask`` of the atmosphere's terrain
     (the fraction SPEEDY's sea tile covers): a regridder weights the
     ``sea_*`` fields by it, so an ocean cell on another grid takes nothing
@@ -147,6 +152,14 @@ class JCMDerived:
     sea_northward_wind_stress: jnp.ndarray
     sea_fraction: jnp.ndarray
     land_evaporation: jnp.ndarray
+    downward_shortwave_flux: jnp.ndarray
+    downward_longwave_flux: jnp.ndarray
+    wind_speed: jnp.ndarray
+    normalized_surface_pressure: jnp.ndarray
+    sea_air_temperature: jnp.ndarray
+    sea_air_specific_humidity: jnp.ndarray
+    rainfall: jnp.ndarray
+    snowfall: jnp.ndarray
 
     @classmethod
     def zeros(cls, shape, physics, **overrides):
@@ -183,6 +196,14 @@ class JCMDerived:
                 "sea_northward_wind_stress",
                 "sea_fraction",
                 "land_evaporation",
+                "downward_shortwave_flux",
+                "downward_longwave_flux",
+                "wind_speed",
+                "normalized_surface_pressure",
+                "sea_air_temperature",
+                "sea_air_specific_humidity",
+                "rainfall",
+                "snowfall",
             )
         }
         return cls(physics, **fields)
@@ -303,10 +324,45 @@ def _collapse_exchanged_forcing(
     if not names:
         return forcing
     at_date = forcing.select(DateData.set_date(date))
+    values = {}
+    for name in names:
+        value = getattr(at_date, name)
+        if value is None:
+            value = _seed_absent_forcing(at_date, name)
+        values[name] = value
     # ``tree_math.struct`` generates ``replace`` at runtime, so mypy cannot
     # see it on the struct.
-    return forcing.replace(  # type: ignore[no-any-return]
-        **{name: getattr(at_date, name) for name in names}
+    return forcing.replace(**values)  # type: ignore[no-any-return]
+
+
+#: SPEEDY's saline freezing point, ``sstfr = 273.2 - 1.8`` K
+#: (``jcm.physics.surface.speedy_surface_flux``), at which it takes its sea
+#: ice to be when no ice model supplies a temperature.
+SPEEDY_SEA_ICE_STAND_IN_K = 273.2 - 1.8
+
+
+def _seed_absent_forcing(forcing: ForcingData, name: str) -> jnp.ndarray:
+    """Seed an exchanged field that jax-gcm leaves ``None`` without a coupler.
+
+    An optional field is ``None`` in an uncoupled run, and the carry needs an
+    array there from the start, or its structure would change at the first
+    exchange. The seed is what the atmosphere uses in the field's absence,
+    so the first step is the uncoupled one: for the sea-ice surface
+    temperature, the SST capped at SPEEDY's freezing point.
+
+    Raises
+    ------
+    ValueError
+        For a field with no known stand-in.
+
+    """
+    if name == "sea_ice_surface_temperature":
+        return jnp.minimum(
+            jnp.asarray(forcing.sea_surface_temperature), SPEEDY_SEA_ICE_STAND_IN_K)
+    raise ValueError(
+        f"jcm.forcing.ForcingData.{name} is None in this atmosphere's forcing, "
+        "and JAX-ESM has no stand-in to seed it with before the first exchange. "
+        "Build the forcing with that field set."
     )
 
 
@@ -421,6 +477,17 @@ class JCMComponent:
         exchange = _diagnostics_template(self.model).get(SURFACE_EXCHANGE_KEY)
         return exchange is not None and exchange_fields.publishes_land_evaporation(
             exchange)
+
+    @functools.cached_property
+    def publishes_sea_tiles(self) -> bool:
+        """Whether the physics publishes its fluxes over the sea part.
+
+        Read off the structural diagnostics template, like
+        :attr:`publishes_land_evaporation`. A thermodynamic sea ice needs them
+        (:func:`jem.exchangers.default_exchanges` checks).
+        """
+        exchange = _diagnostics_template(self.model).get(SURFACE_EXCHANGE_KEY)
+        return exchange is not None and exchange_fields.publishes_sea_tiles(exchange)
 
     @property
     def sea_fraction(self) -> jnp.ndarray:
@@ -603,12 +670,43 @@ class JCMComponent:
             "time": self.model.start_time,
             "step": jnp.int32(0),
             "derived": JCMDerived.zeros(
-                self.nodal_shape, template, sea_fraction=self.sea_fraction),
+                self.nodal_shape, template, sea_fraction=self.sea_fraction,
+                **self._initial_surface_state(dycore_state)),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
                 self.model.start_time,
             ),
+        }
+
+    def _initial_surface_state(self, dycore_state: Any) -> dict[str, jnp.ndarray]:
+        """Return the state fields of ``derived`` before the first step.
+
+        Under the standard workflow the exchange runs before the components,
+        so on the first coupling step the other components are handed this
+        seed. Its fluxes are zero: no flux has been computed. A state field
+        of zero is no state at all, though -- a sea ice's bulk formula would
+        see air at 0 K and 0 Pa -- so the state fields are the initial
+        atmosphere's own, read off its dycore state: the lowest model level's
+        temperature, humidity and wind speed and the surface pressure. The
+        incident longwave is the black-body flux of that level, an optically
+        thick near-surface sky; no sunlight has been computed, so the
+        shortwave stays zero. From the first step on, every field is the one
+        the physics published.
+        """
+        state = self.model.dycore.to_physics_state(dycore_state)
+
+        def lowest(field: jnp.ndarray) -> jnp.ndarray:
+            return jnp.asarray(field[-1]).reshape(self.nodal_shape)
+
+        air_temperature = lowest(state.temperature)
+        return {
+            "sea_air_temperature": air_temperature,
+            "sea_air_specific_humidity": lowest(state.specific_humidity),
+            "wind_speed": jnp.hypot(lowest(state.u_wind), lowest(state.v_wind)),
+            "normalized_surface_pressure": jnp.asarray(
+                state.normalized_surface_pressure).reshape(self.nodal_shape),
+            "downward_longwave_flux": jcm_constants.sbc * air_temperature**4,
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -679,6 +777,14 @@ class JCMComponent:
             sea_northward_wind_stress=exchange.sea_northward_wind_stress,
             sea_fraction=self.sea_fraction,
             land_evaporation=exchange.land_evaporation,
+            downward_shortwave_flux=exchange.downward_shortwave_flux,
+            downward_longwave_flux=exchange.downward_longwave_flux,
+            wind_speed=exchange.wind_speed,
+            normalized_surface_pressure=exchange.normalized_surface_pressure,
+            sea_air_temperature=exchange.sea_air_temperature,
+            sea_air_specific_humidity=exchange.sea_air_specific_humidity,
+            rainfall=exchange.rainfall,
+            snowfall=exchange.snowfall,
         )
         return (
             {

@@ -22,13 +22,14 @@ on:
 # below still tracks `dev`, so drift is visible without blocking a PR.
 #
 # This commit is the head of the jax-gcm pull request that publishes SPEEDY's
-# land and sea flux tiles on `SurfaceExchange`, stacked on jax-gcm PR 1199
+# land and sea flux tiles on `SurfaceExchange` and takes a coupled sea ice's
+# skin temperature (`ForcingData.sea_ice_surface_temperature`), stacked on jax-gcm PR 1199
 # (SPEEDY's slab land) and dev; it moves to the dev merge commit carrying both
 # once they merge. It also carries jax-gcm PR 946 (ECHAM physics traces under
 # `jax_enable_x64`) and PR 911/914 (the wind vector on `SurfaceExchange`). See
 # JCM_SUPPORTED_REV's docstring in contract.py.
 env:
-  JCM_REV: 932d9cc2f331faebcbab745895f347c4de295b3b
+  JCM_REV: 4367f8589c3801bdfc692eed56dba382f650bb98
 
 jobs:
   lint:
@@ -115,9 +116,20 @@ jobs:
         pip install -e ".[dev]"
         pip install -r veros-jittable/requirements.txt
 
+    - name: Build the thsice Fortran oracle
+      # The Winton sea ice is compared at machine precision with the
+      # unmodified MITgcm thsice routines (tests/reference/thsice), which this
+      # builds; JEM_REQUIRE_THSICE_ORACLE below makes that comparison fail,
+      # rather than skip, if the build left no executable.
+      run: |
+        command -v gfortran || (sudo apt-get update && sudo apt-get install -y gfortran)
+        tests/reference/thsice/build.sh
+
     - name: Run unit tests with pytest
       # veros-jittable is a source checkout, not a pip install, so it still
       # needs PYTHONPATH; jax-gcm no longer does.
+      env:
+        JEM_REQUIRE_THSICE_ORACLE: "1"
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         pytest tests/unit -q -m "not slow" --cov=jem --cov-report=xml --cov-report=term
