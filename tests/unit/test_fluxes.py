@@ -546,3 +546,77 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
     assert "a2o_flux=identity" in text  # no regrid was given to this instance
     assert "o2a_state=identity" in text
     assert "rotates=yes" in text
+
+
+@struct.dataclass
+class _LandForcing:
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _LandDerived:
+    soil_water_availability: jnp.ndarray
+    runoff_mass_rate: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmLandDerived:
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    precipitation: jnp.ndarray
+    land_evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmLandForcing:
+    sea_surface_temperature: jnp.ndarray
+    soilw_am: jnp.ndarray
+
+
+@struct.dataclass
+class _OcnRunoffForcing:
+    surface_taux: jnp.ndarray
+    surface_tauy: jnp.ndarray
+    heat_flux: jnp.ndarray
+    freshwater_flux: jnp.ndarray
+    runoff_mass_rate: jnp.ndarray
+
+
+def test_veros_exchange_couples_a_land_with_the_table_s_rows():
+    """With a land present the exchanger makes the land rows the declarative
+    Veros table has: precipitation and the land tile's evaporation to the
+    land, its availability to the atmosphere, its runoff to the ocean.
+    """
+    shape = (4,)
+    components = {
+        "atm": {
+            "derived": _AtmLandDerived(
+                *(jnp.zeros(shape) for _ in range(4)), sea_fraction=jnp.ones(shape),
+                precipitation=jnp.full(shape, 3e-5),
+                land_evaporation=jnp.full(shape, 1e-5)),
+            "forcing": _AtmLandForcing(jnp.full(shape, 290.0), jnp.zeros(shape)),
+        },
+        "ocn": {
+            "forcing": _OcnRunoffForcing(*(jnp.zeros(shape) for _ in range(4)),
+                                         runoff_mass_rate=jnp.zeros(())),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0),
+                                   sea_fraction=jnp.ones(shape)),
+        },
+        "lnd": {
+            "forcing": _LandForcing(jnp.zeros(shape), jnp.zeros(shape)),
+            "derived": _LandDerived(jnp.full(shape, 0.4), jnp.asarray(2.5e6)),
+        },
+    }
+    result = VerosExchange()(components, TIME)
+    np.testing.assert_allclose(result["lnd"]["forcing"].precipitation, 3e-5)
+    np.testing.assert_allclose(result["lnd"]["forcing"].evaporation, 1e-5)
+    np.testing.assert_allclose(result["atm"]["forcing"].soilw_am, 0.4)
+    np.testing.assert_allclose(result["ocn"]["forcing"].runoff_mass_rate, 2.5e6)
+    # The ocean rows are made as before.
+    np.testing.assert_allclose(result["atm"]["forcing"].sea_surface_temperature, 285.0)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(
+        components)

@@ -112,6 +112,13 @@ class SlabGrid:
         *metadata*, and the degrees written into the output coordinates have to
         match JCM's bit for bit or ``xr.merge`` of two components' datasets
         would align on nothing.
+    cell_solid_angle : jax.Array or None
+        Each cell's solid angle (steradian), matching ``fractional_mask.shape``
+        and summing to ``4 pi`` over a global grid; multiply by the squared
+        radius for an area. What a component needs to integrate a flux over
+        the grid (the land's runoff). :meth:`from_coords` takes it from the
+        atmosphere's Gaussian quadrature weights and :meth:`from_scrip` from
+        the file's ``grid_area``; ``None`` where neither is known.
 
     """
 
@@ -120,6 +127,7 @@ class SlabGrid:
     longitude_radian: Array
     longitude_axis_radian: np.ndarray | None = field(default=None)
     latitude_axis_radian: np.ndarray | None = field(default=None)
+    cell_solid_angle: Array | None = field(default=None)
 
     def __post_init__(self):
         """Check the shapes agree and work out whether the grid is separable."""
@@ -150,6 +158,16 @@ class SlabGrid:
                 "fractional_mask must lie in [0, 1] (1 = land); got values in "
                 f"[{mask.min():g}, {mask.max():g}]."
             )
+
+        if self.cell_solid_angle is not None:
+            solid_angle = np.asarray(self.cell_solid_angle)
+            if solid_angle.shape != mask.shape:
+                raise ValueError(
+                    f"cell_solid_angle has shape {solid_angle.shape} but "
+                    f"fractional_mask has shape {mask.shape}."
+                )
+            if not np.all(np.isfinite(solid_angle)) or np.any(solid_angle <= 0.0):
+                raise ValueError("cell_solid_angle must be finite and positive.")
 
         if self.longitude_axis_radian is None or self.latitude_axis_radian is None:
             axes = _separable_axes(self.longitude_radian, self.latitude_radian)
@@ -247,6 +265,11 @@ class SlabGrid:
 
         longitude_2d = jnp.asarray(np.broadcast_to(longitude_axis[:, None], shape))
         latitude_2d = jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape))
+        # The Gaussian quadrature weights are each node's solid angle, on the
+        # same (n_lon, n_lat) layout: they sum to 4 pi, and integrating with
+        # them is the atmosphere's own global mean.
+        solid_angle = np.broadcast_to(
+            np.asarray(horizontal.quadrature_weights, dtype=np.float64), shape)
 
         return cls(
             fractional_mask=fractional_mask,
@@ -254,6 +277,7 @@ class SlabGrid:
             longitude_radian=longitude_2d,
             longitude_axis_radian=longitude_axis,
             latitude_axis_radian=latitude_axis,
+            cell_solid_angle=jnp.asarray(solid_angle),
         )
 
     @classmethod
@@ -340,11 +364,17 @@ class SlabGrid:
 
         if fractional_mask is None:
             fractional_mask = _load_scrip_fractional_mask(ds, ni, nj)
+        # SCRIP's grid_area is in steradians; it is optional in the format.
+        solid_angle = (
+            jnp.asarray(_reshape_scrip_field(ds["grid_area"].values, ni, nj))
+            if "grid_area" in ds else None
+        )
 
         return cls(
             fractional_mask=fractional_mask,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
+            cell_solid_angle=solid_angle,
         )
 
 

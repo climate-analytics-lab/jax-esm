@@ -65,6 +65,8 @@ Components
    jem.components.slab.slab_seaice_model.SlabSeaiceParameters
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereModel
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereParameters
+   jem.components.slab.bucket_land_model.BucketLandModel
+   jem.components.slab.bucket_land_model.BucketLandParameters
 
    jem.components.slab.grid.SlabGrid
    jem.components.slab.base.SlabModelBase

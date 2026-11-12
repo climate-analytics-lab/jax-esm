@@ -136,6 +136,10 @@ ATMOSPHERE_SEA_FRACTION = "atm.derived.sea_fraction"
 #: read one take :data:`ATMOSPHERE_SEA_FRACTION` as their ``weight``.
 ATMOSPHERE_SEA_PREFIX = "atm.derived.sea_"
 
+#: The atmosphere's evaporation over the land part of each cell, which a land
+#: component's soil supplies.
+ATMOSPHERE_LAND_EVAPORATION = "atm.derived.land_evaporation"
+
 #: The sea part of each cell of a component on the ocean grid, with the
 #: component's name filled in: ``1 - fractional_mask`` for a slab ocean or sea
 #: ice, the wet mask for Veros. A regridded row from one of them onto the
@@ -170,6 +174,14 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    # The soil water of a land component (the bucket): the atmosphere's
+    # precipitation, one value per cell, and its evaporation over the land
+    # part, the land tile; the land hands back SPEEDY's soil water
+    # availability. All on the atmosphere's grid. The land's temperature is
+    # the atmosphere's own (SPEEDY's slab land), so no row carries it.
+    ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
+    (ATMOSPHERE_LAND_EVAPORATION, "lnd.forcing.evaporation", "flux"),
+    ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
 )
 
 #: The standard coupling when the ocean is the **Veros** GCM
@@ -211,6 +223,13 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
+    (ATMOSPHERE_LAND_EVAPORATION, "lnd.forcing.evaporation", "flux"),
+    ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
+    # The land's runoff, as a mass rate over its whole grid: Veros spreads it
+    # over its own wet surface, so no regridding is involved and the water
+    # the land loses is the water the ocean gains.
+    ("lnd.derived.runoff_mass_rate", "ocn.forcing.runoff_mass_rate", "flux"),
 )
 
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
@@ -792,6 +811,9 @@ def default_exchanges(
     ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
     ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
+    ``atm.derived.precipitation``               ``lnd.forcing.precipitation``
+    ``atm.derived.land_evaporation``            ``lnd.forcing.evaporation``
+    ``lnd.derived.soil_water_availability``     ``atm.forcing.soilw_am``
     ==========================================  =======================================
 
     A row survives only if **both** its components are present, so an
@@ -919,7 +941,37 @@ def default_exchanges(
                 standard, standard, name, name, standard,
             )
     _check_freezing_deficit_is_taken(components, specs)
+    _check_land_is_forced_by_a_land_tile(components, specs)
     return specs
+
+
+def _check_land_is_forced_by_a_land_tile(
+    components: Mapping[str, Component] | Iterable[str],
+    specs: list[ExchangeSpec],
+) -> None:
+    """Refuse a land component under an atmosphere with no land tile.
+
+    The land takes the atmosphere's evaporation over the land part of each
+    cell. A physics package that publishes no land flux tile (ECHAM delivers
+    its fluxes untiled) leaves ``land_evaporation`` at the grid-cell mean,
+    which would charge the soil with the sea's evaporation on every coastal
+    cell. Only a real atmosphere can be asked: one without
+    ``publishes_land_evaporation`` (a stand-in, or names alone) is not checked.
+    """
+    if not isinstance(components, Mapping):
+        return
+    if not any(spec.src == ATMOSPHERE_LAND_EVAPORATION for spec in specs):
+        return
+    if getattr(components.get("atm"), "publishes_land_evaporation", True):
+        return
+    raise ValueError(
+        "The land component takes the atmosphere's evaporation over the land "
+        f"part of each cell ({ATMOSPHERE_LAND_EVAPORATION}), but the "
+        "atmosphere's physics publishes no land flux tile -- ECHAM delivers its "
+        "fluxes untiled -- so the soil would be charged with the grid-cell "
+        "mean, the sea's evaporation included. Couple a land to SPEEDY "
+        "physics, or leave land=none."
+    )
 
 
 #: Where a clamping ocean publishes the deficit its clamp removed.
