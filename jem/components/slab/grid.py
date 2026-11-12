@@ -2,8 +2,8 @@
 
 Slab models do no advection, so unlike a full coupling-layer grid they only
 need a fractional (land) mask and the coordinates that go with it -- shape and
-the binary mask are both derived from ``fractional_mask``, so nothing here can
-drift out of sync.
+the land and ocean masks are all derived from ``fractional_mask``, so nothing
+here can drift out of sync.
 
 Two constructors cover every grid JEM runs on:
 
@@ -81,10 +81,20 @@ class SlabGrid:
     """Grid information needed by slab models.
 
     ``fractional_mask``, ``latitude_radian`` and ``longitude_radian`` fully
-    specify the grid: shape, the derived binary mask, whether the grid is
+    specify the grid: shape, the land and ocean masks, whether the grid is
     separable and the dimension names of its output all come from those three
     alone, so there is a single source of truth instead of several attributes
     that could drift out of sync.
+
+    The two masks overlap on coast cells. :attr:`land_mask` holds every cell
+    with any land and :attr:`ocean_mask` every cell with any ocean, so a
+    partly-land cell has both surfaces, each over its own part of the cell
+    and forced with the flux over that surface: an ocean takes the
+    atmosphere's sea tile, and the land is the atmosphere's own (see
+    ``docs/source/design/exchange.md``). Assigning such a cell to one
+    surface by a threshold instead would hand that surface the other one's
+    flux, and leave the atmosphere's sea part of a mostly-land cell with no
+    ocean under it.
 
     Attributes
     ----------
@@ -95,9 +105,6 @@ class SlabGrid:
         2-D latitudes in radians, matching ``fractional_mask.shape``.
     longitude_radian : jax.Array
         2-D longitudes in radians, matching ``fractional_mask.shape``.
-    threshold : float
-        Fractional-mask value at or above which a cell counts as land in
-        :attr:`binary_mask`.
     longitude_axis_radian, latitude_axis_radian : numpy.ndarray or None
         The 1-D axes of a separable grid, in radians, in float64. Derived in
         ``__post_init__`` when not given, and ``None`` for a curvilinear grid.
@@ -111,7 +118,6 @@ class SlabGrid:
     fractional_mask: Array
     latitude_radian: Array
     longitude_radian: Array
-    threshold: float = 1.0
     longitude_axis_radian: np.ndarray | None = field(default=None)
     latitude_axis_radian: np.ndarray | None = field(default=None)
 
@@ -134,7 +140,7 @@ class SlabGrid:
             )
         # Every construction path ends here, so the value check lives here
         # too: a fill value (-1), a percentage or a NaN would otherwise pass
-        # straight into `binary_mask` and the land-fraction arithmetic as a
+        # straight into the masks and the land-fraction arithmetic as a
         # plausible-looking but wrong land/ocean domain.
         mask = np.asarray(self.fractional_mask)
         if not np.all(np.isfinite(mask)):
@@ -176,16 +182,20 @@ class SlabGrid:
         return ("lon", "lat") if self.is_separable else ("x", "y")
 
     @property
-    def binary_mask(self) -> Array:
-        """Binary land(1)/ocean(0) mask, derived from ``fractional_mask``."""
-        return jnp.where(self.fractional_mask >= self.threshold, 1.0, 0.0)
+    def land_mask(self) -> Array:
+        """Boolean: the cells with any land (``fractional_mask > 0``)."""
+        return self.fractional_mask > 0.0
+
+    @property
+    def ocean_mask(self) -> Array:
+        """Boolean: the cells with any ocean (``fractional_mask < 1``)."""
+        return self.fractional_mask < 1.0
 
     @classmethod
     def from_coords(
         cls,
         horizontal,
         fractional_mask: Array | None = None,
-        threshold: float = 0.5,
     ) -> "SlabGrid":
         """Build a SlabGrid on an atmosphere's horizontal grid.
 
@@ -204,8 +214,6 @@ class SlabGrid:
             ``TerrainData.from_file(path, coords).fmask`` or
             ``TerrainData.aquaplanet(coords).fmask`` -- which is already on
             this layout and orientation. Defaults to all-ocean.
-        threshold : float
-            Land fraction at or above which a cell counts as land.
 
         Returns
         -------
@@ -244,7 +252,6 @@ class SlabGrid:
             fractional_mask=fractional_mask,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            threshold=threshold,
             longitude_axis_radian=longitude_axis,
             latitude_axis_radian=latitude_axis,
         )
@@ -254,7 +261,6 @@ class SlabGrid:
         cls,
         scrip_file: str,
         fractional_mask: Array | None = None,
-        threshold: float = 0.5,
     ) -> "SlabGrid":
         """Build a SlabGrid from a SCRIP-convention grid file.
 
@@ -275,8 +281,6 @@ class SlabGrid:
             Land fraction in [0, 1] matching the file's shape. If None, it is
             derived from the file's own ``grid_imask`` (see
             :func:`_load_scrip_fractional_mask` for the assumed polarity).
-        threshold : float
-            Land fraction at or above which a cell counts as land.
 
         Returns
         -------
@@ -341,7 +345,6 @@ class SlabGrid:
             fractional_mask=fractional_mask,
             latitude_radian=latitude_2d,
             longitude_radian=longitude_2d,
-            threshold=threshold,
         )
 
 

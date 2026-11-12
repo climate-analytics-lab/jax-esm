@@ -84,7 +84,8 @@ class SlabAtmosphereModel(SlabModelBase):
         dT_air/dt = (H_ocean + H_land) / (M_air * cp_air)
 
     where ``T_air`` is the mean air temperature, ``H_ocean`` and ``H_land``
-    are the sensible heat fluxes from the surface below, ``M_air`` is the
+    are the sensible heat fluxes from the sea and land parts of the cell,
+    each weighted by its share of the cell area, ``M_air`` is the
     atmospheric column mass, and ``cp_air`` is the specific heat capacity of
     dry air at constant pressure, taken from ``jcm.constants.cpd`` -- the same
     value the real atmosphere uses.
@@ -205,10 +206,9 @@ class SlabAtmosphereModel(SlabModelBase):
         state = carry["state"]
         forcing = carry["forcing"]
 
-        # Land and ocean cells exchange heat with different surfaces, so each
-        # bulk flux is computed everywhere and then kept only where its surface
-        # actually is. ``binary_mask == 1`` is land (jem CLAUDE.md).
-        land = self.grid.binary_mask == 1.0
+        # The column exchanges heat with the land and the sea part of its cell
+        # separately, and the cell-mean flux is their area-weighted sum.
+        land_fraction = self.grid.fractional_mask
 
         wind_speed = (
             state.mean_zonal_wind_velocity**2 + state.mean_meridional_wind_velocity**2
@@ -222,8 +222,11 @@ class SlabAtmosphereModel(SlabModelBase):
 
         # Positive upward: a surface warmer than the air heats the air, and the
         # column's own heat budget takes the flux with the opposite sign below.
-        surface_temperature = jnp.where(
-            land, forcing.land_surface_temperature, forcing.sea_surface_temperature
+        # The bulk flux is linear in the surface temperature, so weighting the
+        # two temperatures is weighting the two fluxes.
+        surface_temperature = (
+            land_fraction * forcing.land_surface_temperature
+            + (1.0 - land_fraction) * forcing.sea_surface_temperature
         )
         total_heat_flux = bulk_conductance * (
             surface_temperature - state.mean_air_temperature

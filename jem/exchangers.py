@@ -127,17 +127,35 @@ DEFAULT_EXCHANGER_NAME = "exchange"
 #: is the same intensive field either way.
 KINDS = ("flux", "state")
 
+#: The fraction of each atmosphere cell its ``sea_*`` fields are over.
+#: :func:`default_exchanges` names it as the ``weight`` of every regridded row
+#: that reads one of them (see :func:`regrid_weighted`).
+ATMOSPHERE_SEA_FRACTION = "atm.derived.sea_fraction"
+
+#: Source fields over the sea part of the atmosphere's cells: the rows that
+#: read one take :data:`ATMOSPHERE_SEA_FRACTION` as their ``weight``.
+ATMOSPHERE_SEA_PREFIX = "atm.derived.sea_"
+
+#: The sea part of each cell of a component on the ocean grid, with the
+#: component's name filled in: ``1 - fractional_mask`` for a slab ocean or sea
+#: ice, the wet mask for Veros. A regridded row from one of them onto the
+#: atmosphere is weighted by it, so an atmosphere cell takes the SST and ice
+#: of the sea under it and nothing of the ocean grid's land cells.
+OCEAN_GRID_SEA_FRACTION = "{component}.derived.sea_fraction"
+
 #: The standard coupling, as ``(src, dst, kind)`` rows. Kept as strings rather
 #: than built :class:`ExchangeSpec` objects so that this table reads as the
 #: documentation it is; :func:`default_exchanges` turns the rows that apply
 #: into specs. This is the table for JAX-ESM's own slab components; an ocean
 #: with a carry of its own has its own (:data:`VEROS_OCEAN_EXCHANGES`).
 STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
-    # Surface energy: the atmosphere's net surface heat flux (upward
-    # positive, already converted from JCM's downward-positive `hfluxn` by
-    # the JCM wrapper) drives both surfaces.
-    ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
-    ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
+    # Surface energy: the atmosphere's net heat flux over the sea part of
+    # the cell (upward positive, already converted from JCM's
+    # downward-positive `hfluxn` by the JCM wrapper) drives the mixed layer.
+    # On a partly-land cell the land part's flux stays with the atmosphere's
+    # own land (SPEEDY's slab land), so on one grid no part of the cell's
+    # flux is applied twice.
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux", "flux"),
     # The slab sea ice diagnoses its ice fraction from the sea surface
     # temperature alone, so SST is the one field the ocean hands it. The two
     # share the ocean grid, so this row never crosses a grid boundary.
@@ -146,14 +164,12 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # The surface state the atmosphere's surface-flux scheme reads. In an
     # uncoupled JCM run these are prescribed boundary conditions; here the
     # surface components provide them, under JCM's own field names. The ice
-    # fraction is an areal quantity, hence "flux": regridded conservatively
-    # so the ice-covered area is the same on both grids.
+    # fraction is an areal quantity, hence "flux": regridded conservatively,
+    # and, like the SST, weighted by the sea part of the ocean-grid cells,
+    # since SPEEDY reads `sice_am` as the ice fraction of the sea part.
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
-    ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
 )
 
 #: The standard coupling when the ocean is the **Veros** GCM
@@ -188,17 +204,13 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: only to write it back out as a diagnostic, and nothing in the integration
 #: reads it.
 VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
-    ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux", "flux"),
-    ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
-    ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux", "flux"),
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux", "flux"),
+    ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux", "flux"),
     ("ocn.derived.sea_surface_temperature",
      "seaice.forcing.sea_surface_temperature", "state"),
     ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
-    ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
 )
 
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
@@ -244,21 +256,45 @@ class ExchangeSpec:
         :class:`Exchange` was built with. ``None`` (the default) copies the
         field unchanged, which is right whenever the two components share a
         grid.
+    weight : str or None
+        For a source that is defined over only part of each source cell --
+        the atmosphere's flux over the sea part, say -- the path of that
+        fraction, in the same ``"component.section.field"`` form, on the
+        source grid. The field is then regridded with :func:`regrid_weighted`,
+        so a destination cell takes the value over that part of the source
+        cells it overlaps and nothing from a source cell with none of it.
+        Requires ``regrid``: on one grid each destination cell is its own
+        source cell and there is nothing to weight. ``None`` (the default)
+        regrids the field as it is.
 
     """
 
     src: str
     dst: str
     regrid: str | None = None
+    weight: str | None = None
 
     def __post_init__(self) -> None:
         """Reject a malformed path at construction rather than at trace time."""
         _parse_path(self.src, "source", self)
         _parse_path(self.dst, "destination", self)
+        if self.weight is not None:
+            _parse_path(self.weight, "weight", self)
+            if self.regrid is None:
+                raise ValueError(
+                    f"Exchange spec {self} names a weight but no regridder; a "
+                    "weight only changes how a field is regridded, so it would "
+                    "be silently unused."
+                )
 
     def __str__(self) -> str:
         """Return the spec as one line of the coupling table."""
-        via = f"  [{self.regrid}]" if self.regrid else ""
+        if not self.regrid:
+            via = ""
+        elif self.weight:
+            via = f"  [{self.regrid}, weighted by {self.weight}]"
+        else:
+            via = f"  [{self.regrid}]"
         return f"{self.src} -> {self.dst}{via}"
 
     @property
@@ -271,6 +307,13 @@ class ExchangeSpec:
         """Return the destination as ``(component, section, field)``."""
         return _parse_path(self.dst, "destination", self)
 
+    @property
+    def weight_parts(self) -> tuple[str, str, str] | None:
+        """Return the weight as ``(component, section, field)``, or None."""
+        if self.weight is None:
+            return None
+        return _parse_path(self.weight, "weight", self)
+
 
 def _as_spec(spec: ExchangeSpec | Mapping[str, Any]) -> ExchangeSpec:
     """Return ``spec`` as an :class:`ExchangeSpec`, accepting a mapping.
@@ -282,12 +325,12 @@ def _as_spec(spec: ExchangeSpec | Mapping[str, Any]) -> ExchangeSpec:
     if isinstance(spec, ExchangeSpec):
         return spec
     if isinstance(spec, Mapping):
-        unknown = set(spec) - {"src", "dst", "regrid"}
+        unknown = set(spec) - {"src", "dst", "regrid", "weight"}
         if unknown:
             raise ValueError(
                 f"Exchange spec {dict(spec)!r} has unknown key(s) "
                 f"{sorted(unknown)!r}; an exchange spec has `src`, `dst` and "
-                "an optional `regrid`."
+                "an optional `regrid` and `weight`."
             )
         try:
             return ExchangeSpec(**spec)
@@ -384,6 +427,47 @@ def _reconcile_leaf_dtype(current_leaf: Any, value_leaf: Any) -> Any:
     if jnp.result_type(value_leaf) != current_dtype:
         value_leaf = jnp.asarray(value_leaf, dtype=current_dtype)
     return value_leaf
+
+
+def regrid_weighted(
+    regridder: Callable[[Any], Any], value: Any, weight: Any
+) -> Any:
+    """Regrid a field defined over the ``weight`` fraction of each source cell.
+
+    The atmosphere's flux over the sea part of a cell says nothing about a
+    cell with no sea, yet a plain conservative map averages every source cell
+    a destination cell overlaps by area alone. On a coast that hands an ocean
+    cell the "sea" flux of an all-land atmosphere cell -- a value computed
+    against whatever surface temperature was written there, with no sea under
+    it. Normalising by the mapped fraction, as CESM's coupler maps the fluxes
+    it computes over the ocean fraction of a cell::
+
+        R(weight * value) / R(weight)
+
+    weighs each source cell by the area of its sea part instead. On one grid
+    it is ``value`` wherever ``weight > 0``. A destination cell that overlaps
+    no sea at all on the source grid (``R(weight) == 0``) takes ``R(value)``,
+    the only estimate there is.
+
+    Parameters
+    ----------
+    regridder : Callable
+        A map with non-negative weights (first-order conservative or
+        bilinear, as every regridder JAX-ESM ships), so the normalised value
+        is a weighted mean of the source values and stays within their range.
+    value, weight : jax.Array
+        The field and its fraction in ``[0, 1]``, both on the source grid.
+
+    Returns
+    -------
+    jax.Array
+        ``value`` on the destination grid.
+
+    """
+    mapped_weight = regridder(weight)
+    covered = mapped_weight > 0.0
+    weighted = regridder(weight * value) / jnp.where(covered, mapped_weight, 1.0)
+    return jnp.where(covered, weighted, regridder(value))
 
 
 class Exchange:
@@ -490,7 +574,10 @@ class Exchange:
             self._require_field(source, field, spec, spec.src)
             value = getattr(source, field)
             regridder = self._regridder(spec)
-            if regridder is not None:
+            if regridder is not None and spec.weight is not None:
+                value = regrid_weighted(
+                    regridder, value, self._weight(components, spec))
+            elif regridder is not None:
                 value = regridder(value)
             component, section, field = spec.dst_parts
             # Resolve the destination section too, so a typo there is caught
@@ -615,6 +702,15 @@ class Exchange:
                 self._require_field(resolved, field, spec, path)
                 values[end] = getattr(resolved, field)
             self._require_same_structure(spec, values["src"], values["dst"])
+            if spec.weight is not None:
+                weight_shape = jnp.shape(self._weight(components, spec))
+                if weight_shape != jnp.shape(values["src"]):
+                    raise ValueError(
+                        f"Exchange spec {spec} weights a field of shape "
+                        f"{jnp.shape(values['src'])} by {spec.weight} of shape "
+                        f"{weight_shape}; the weight is the fraction of each "
+                        "source cell, so it has to be on the source grid."
+                    )
 
     @staticmethod
     def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
@@ -652,6 +748,16 @@ class Exchange:
                 f"{sorted(self.regridders)!r})."
             ) from None
 
+    def _weight(self, components: Mapping[str, Carry], spec: ExchangeSpec) -> Any:
+        """Return the fraction ``spec`` weights its field by, or raise naming it."""
+        parts, path = spec.weight_parts, spec.weight
+        if parts is None or path is None:
+            raise ValueError(f"Exchange spec {spec} has no weight.")
+        component, section, field = parts
+        resolved = self._section(components, component, section, spec)
+        self._require_field(resolved, field, spec, path)
+        return getattr(resolved, field)
+
     @staticmethod
     def _section(
         components: Mapping[str, Carry], name: str, section: str, spec: ExchangeSpec
@@ -682,19 +788,14 @@ def default_exchanges(
     ==========================================  =======================================
     source                                      destination
     ==========================================  =======================================
-    ``atm.derived.total_heat_flux``             ``ocn.forcing.total_heat_flux``
-    ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
+    ``atm.derived.sea_total_heat_flux``         ``ocn.forcing.total_heat_flux``
     ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
     ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
-    ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
-    ``lnd.state.snowc``                         ``atm.forcing.snowc_am``
-    ``lnd.state.soilw``                         ``atm.forcing.soilw_am``
     ==========================================  =======================================
 
     A row survives only if **both** its components are present, so an
-    aquaplanet without a land model gets the four rows that do not mention
-    ``lnd``, and an atmosphere/ocean pair gets two. The names are
+    atmosphere/ocean pair gets two rows. The names are
     :data:`STANDARD_COMPONENT_NAMES`; a component registered under any other
     name is not wired by this function.
 
@@ -735,7 +836,16 @@ def default_exchanges(
 
     and a configuration with one regridder per direction is
     ``regrid={"a2o": "a2o", "o2a": "o2a"}``. Rows that stay on one grid
-    (``ocn`` to ``seaice``, ``atm`` to ``lnd``) never get a regridder.
+    (``ocn`` to ``seaice``) never get a regridder.
+
+    A regridded row that reads one of the atmosphere's ``sea_*`` fields
+    (:data:`ATMOSPHERE_SEA_PREFIX`) -- a flux over the sea part of each cell
+    -- is weighted by that part, :data:`ATMOSPHERE_SEA_FRACTION`, so a coastal
+    ocean cell takes nothing from an atmosphere cell that has no sea in it
+    (:func:`regrid_weighted`). A regridded row from the ocean grid is
+    weighted the same way by its source's own sea fraction
+    (:data:`OCEAN_GRID_SEA_FRACTION`): the SST and ice an atmosphere cell
+    receives are those of the sea under it.
 
     Parameters
     ----------
@@ -775,7 +885,22 @@ def default_exchanges(
         name = None
         if direction is not None:
             name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
-        specs.append(ExchangeSpec(src, dst, name))
+        weight = None
+        if name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
+            weight = ATMOSPHERE_SEA_FRACTION
+        elif name is not None and direction == "o2a":
+            weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
+        specs.append(ExchangeSpec(src, dst, name, weight))
+
+    wired = {part for spec in specs
+             for part in (spec.src_parts[0], spec.dst_parts[0])}
+    for name in sorted(present & set(STANDARD_COMPONENT_NAMES)):
+        if name not in wired:
+            logger.warning(
+                "The default coupling has no row for the %r component, so it "
+                "is stepped unforced and nothing reads it. Write its exchange "
+                "out by hand, or leave it out.", name,
+            )
 
     skipped = [name for name in STANDARD_COMPONENT_NAMES if name not in present]
     if skipped:

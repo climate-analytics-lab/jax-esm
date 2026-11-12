@@ -6,6 +6,7 @@ and share it across the module: construction plus the first compiled step
 dominates the runtime.
 """
 
+import logging
 from types import SimpleNamespace
 
 import jax
@@ -286,11 +287,13 @@ def test_initialize_does_not_integrate(model, monkeypatch):
 
 def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
                           u0=1.5, v0=-2.5, stress_u=0.08, stress_v=-0.03,
-                          wind_reference="lowest_level"):
+                          wind_reference="lowest_level", **tiles):
     """Build a real jax-gcm ``SurfaceExchange`` with hand-chosen values.
 
     The other guaranteed fields are filled with placeholders: JEM's
     translation does not read them (see ``exchange_fields``'s docstring).
+    ``tiles`` are optional tile fields (``tile_names``, ``tile_fraction``,
+    ``*_tile``), absent unless given.
     """
     field = lambda value: jnp.full(GRID_SHAPE, value)  # noqa: E731
     return JcmSurfaceExchange(
@@ -305,8 +308,15 @@ def _jcm_surface_exchange(net_heat_flux, evaporation, precipitation,
         wind_u=field(u0),
         wind_v=field(v0),
         wind_reference=wind_reference,
+        air_reference="lowest_level",
         air_density=field(1.2),
         air_potential_temperature=field(290.0),
+        downward_shortwave_flux=field(150.0),
+        downward_longwave_flux=field(300.0),
+        air_temperature=field(288.0),
+        air_specific_humidity=field(0.008),
+        surface_pressure=field(1.0e5),
+        **tiles,
     )
 
 
@@ -390,6 +400,80 @@ def test_echam_exchange_translates_identically_to_speedy():
     np.testing.assert_allclose(exchange.v0, 1.0)
 
 
+def _tiled(sea_value, land_value, land_fraction=0.25):
+    """Tile fields over ("sea", "land") whose weighted sum is the grid mean."""
+    fraction = jnp.stack([jnp.full(GRID_SHAPE, 1.0 - land_fraction),
+                          jnp.full(GRID_SHAPE, land_fraction)], axis=-1)
+    tile = lambda sea, land: jnp.stack(  # noqa: E731
+        [jnp.full(GRID_SHAPE, sea), jnp.full(GRID_SHAPE, land)], axis=-1)
+    mean = (1.0 - land_fraction) * sea_value + land_fraction * land_value
+    return mean, fraction, tile
+
+
+def test_the_ocean_fields_are_the_sea_tile():
+    """With SPEEDY's (sea, land) tiles the ``sea_*`` fields are the sea tile,
+    in JEM's conventions, while the unprefixed ones stay the grid mean.
+    """
+    mean_heat, fraction, tile = _tiled(20.0, -40.0)
+    mean_evap, _, _ = _tiled(4e-5, 1e-5)
+    mean_stress, _, _ = _tiled(0.05, 0.25)
+    se = _jcm_surface_exchange(
+        mean_heat, mean_evap, 1e-5, stress_u=mean_stress, stress_v=-mean_stress,
+        tile_names=("sea", "land"), tile_fraction=fraction,
+        net_heat_flux_tile=tile(20.0, -40.0),
+        evaporation_tile=tile(4e-5, 1e-5),
+        stress_u_tile=tile(0.05, 0.25), stress_v_tile=tile(-0.05, -0.25))
+    se.validate()
+    exchange = exchange_fields.from_diagnostics(
+        {"surface_exchange": se}, nodal_shape=GRID_SHAPE)
+
+    np.testing.assert_allclose(exchange.sea_total_heat_flux, -20.0)
+    np.testing.assert_allclose(exchange.sea_evaporation, 4e-5)
+    np.testing.assert_allclose(exchange.sea_eastward_wind_stress, 0.05)
+    np.testing.assert_allclose(exchange.sea_northward_wind_stress, -0.05)
+    np.testing.assert_allclose(exchange.total_heat_flux, -mean_heat)
+    np.testing.assert_allclose(exchange.eastward_wind_stress, mean_stress)
+    assert exchange_fields.publishes_sea_tiles(se)
+    # The ocean's share and the atmosphere's own land share add up to
+    # exactly the grid-cell mean the atmosphere lost, so no part of a coastal
+    # cell's flux is applied twice (jax-esm#147).
+    land_heat_flux_up = -se.tile("net_heat_flux", "land")
+    np.testing.assert_allclose(
+        0.75 * exchange.sea_total_heat_flux + 0.25 * land_heat_flux_up,
+        exchange.total_heat_flux, rtol=1e-6)
+
+
+def test_water_and_sea_ice_tiles_combine_into_the_sea_part():
+    """A package that tiles the sea as water and sea ice (ECHAM's axis) gives
+    the ocean their fraction-weighted mean over the sea part of the cell.
+    """
+    names = ("water", "sea_ice", "land")
+    fraction = jnp.broadcast_to(jnp.array([0.45, 0.15, 0.4]), GRID_SHAPE + (3,))
+    values = jnp.broadcast_to(jnp.array([30.0, -10.0, -50.0]), GRID_SHAPE + (3,))
+    mean = float(jnp.sum(fraction[0, 0] * values[0, 0]))
+    se = _jcm_surface_exchange(
+        mean, 0.0, 0.0, tile_names=names, tile_fraction=fraction,
+        net_heat_flux_tile=values)
+
+    sea = exchange_fields.sea_tile(se, "net_heat_flux")
+    np.testing.assert_allclose(sea, (0.45 * 30.0 - 0.15 * 10.0) / 0.6, rtol=1e-6)
+    # Only the heat flux is tiled here, so the reader falls back for the rest.
+    assert exchange_fields.sea_tile(se, "evaporation") is None
+    assert not exchange_fields.publishes_sea_tiles(se)
+
+
+def test_without_flux_tiles_the_ocean_fields_are_the_grid_mean():
+    """A package with no flux tiles (ECHAM's delivered fluxes) leaves the
+    ``sea_*`` fields equal to the grid mean rather than absent.
+    """
+    exchange = exchange_fields.from_diagnostics(
+        _fake_echam_diagnostics(), nodal_shape=GRID_SHAPE)
+    np.testing.assert_array_equal(exchange.sea_total_heat_flux, exchange.total_heat_flux)
+    np.testing.assert_array_equal(exchange.sea_evaporation, exchange.evaporation)
+    np.testing.assert_array_equal(
+        exchange.sea_eastward_wind_stress, exchange.eastward_wind_stress)
+
+
 def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
     """A column-vectorized package's flat fields land on the right grid cell.
 
@@ -413,7 +497,10 @@ def test_flat_column_diagnostics_reshape_onto_the_grid_with_no_transpose():
             stress_u=10 * flat, stress_v=-10 * flat,
             wind_speed=jnp.hypot(flat, flat), wind_u=flat, wind_v=-flat,
             air_density=zeros, air_potential_temperature=zeros,
-            wind_reference="lowest_level",
+            downward_shortwave_flux=zeros, downward_longwave_flux=zeros,
+            air_temperature=zeros, air_specific_humidity=zeros,
+            surface_pressure=zeros, wind_reference="lowest_level",
+            air_reference="speedy_surface_layer",
         ),
     }
     # jax-gcm's own flatten is a plain C-order reshape(ncols) of an (ix, il)
@@ -477,6 +564,8 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
             evaporation=jnp.full((ncols,), evaporation),
             momentum_flux_u=jnp.full((ncols,), 0.02),
             momentum_flux_v=jnp.full((ncols,), -0.01),
+            temperature_2m=jnp.full((ncols,), 288.0),
+            humidity_2m=jnp.full((ncols,), 0.008),
         ),
         "vertical_diffusion": SimpleNamespace(
             wind_10m=jnp.full((ncols,), wind_10m),
@@ -486,6 +575,9 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
             wind_10m_u_tile=jnp.full((ncols, nsfc_type), wind_10m_u),
             wind_10m_v_tile=jnp.full((ncols, nsfc_type), wind_10m_v),
             wind_10m_tile=jnp.full((ncols, nsfc_type), wind_10m),
+            # The open-water speed relative to the ocean current (jax-gcm#915);
+            # JEM does not read it, but the publisher does.
+            wind_10m_current_relative=jnp.full((ncols,), wind_10m),
         ),
         "radiation": SimpleNamespace(
             surface_sw_down=jnp.full((ncols,), sw_down),
@@ -498,8 +590,10 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
             precip_snow=jnp.full((ncols,), precip_snow),
         ),
         "convection": SimpleNamespace(
-            precip_conv=jnp.full((ncols,), precip_conv)),
+            precip_conv=jnp.full((ncols,), precip_conv),
+            precip_conv_snow=jnp.zeros((ncols,))),
         "pressure_full": jnp.full(shape_3d, 95000.0),
+        "surface_pressure": jnp.full((ncols,), 100000.0),
     }
     _tendency, diagnostics = EchamSurfaceExchange()(
         state, diagnostics, None, None)
@@ -594,7 +688,9 @@ def test_derived_fields_are_finite_and_consistent(stepped):
     derived = carry1["derived"]
 
     for name in ("total_heat_flux", "evaporation", "precipitation",
-                 "eastward_wind_stress", "northward_wind_stress", "u0", "v0"):
+                 "eastward_wind_stress", "northward_wind_stress", "u0", "v0",
+                 "sea_total_heat_flux", "sea_evaporation",
+                 "sea_eastward_wind_stress", "sea_northward_wind_stress"):
         field = getattr(derived, name)
         assert field.shape == GRID_SHAPE
         assert bool(jnp.all(jnp.isfinite(field))), name
@@ -604,6 +700,49 @@ def test_derived_fields_are_finite_and_consistent(stepped):
         derived.evaporation - derived.precipitation,
         rtol=1e-6, atol=1e-12,
     )
+    np.testing.assert_allclose(
+        derived.sea_total_freshwater_flux,
+        derived.sea_evaporation - derived.precipitation,
+        rtol=1e-6, atol=1e-12,
+    )
+
+
+def test_the_ocean_fluxes_are_speedys_sea_tile(stepped):
+    """``JCMDerived``'s ``sea_*`` fields are SPEEDY's published sea tile.
+
+    On this aquaplanet every cell is sea, so the sea tile is also the grid
+    mean -- the coast-cell case, where they differ, is pinned against
+    hand-built tiles by ``test_the_ocean_fields_are_the_sea_tile``.
+    """
+    from jcm.physics.surface.surface_exchange import surface_exchange_from
+
+    carry0, carry1, _, _, _ = stepped
+    derived = carry1["derived"]
+    contract = surface_exchange_from(derived.physics)
+
+    assert exchange_fields.publishes_sea_tiles(contract)
+    # The part of the cell they are over: all of it, on an aquaplanet, from
+    # the very first exchange (`initialize`) on.
+    np.testing.assert_array_equal(np.asarray(derived.sea_fraction), 1.0)
+    np.testing.assert_array_equal(np.asarray(carry0["derived"].sea_fraction), 1.0)
+    np.testing.assert_array_equal(
+        np.asarray(derived.sea_total_heat_flux),
+        -np.asarray(contract.tile("net_heat_flux", "sea")))
+    np.testing.assert_array_equal(
+        np.asarray(derived.sea_evaporation),
+        np.asarray(contract.tile("evaporation", "sea")))
+    np.testing.assert_array_equal(
+        np.asarray(derived.sea_eastward_wind_stress),
+        np.asarray(contract.tile("stress_u", "sea")))
+    np.testing.assert_allclose(
+        derived.sea_total_heat_flux, derived.total_heat_flux, rtol=1e-5, atol=1e-4)
+
+
+def test_initialize_does_not_warn_for_a_tiled_atmosphere(model, caplog):
+    """SPEEDY publishes sea tiles, so the grid-mean fallback warning is quiet."""
+    with caplog.at_level(logging.WARNING, logger="jem.components.jcm.component"):
+        _bound_component(model).initialize()
+    assert "sea-tile" not in caplog.text
 
 
 @pytest.mark.slow
@@ -695,6 +834,10 @@ def test_derived_wind_matches_the_published_contract_echam(echam_stepped):
 
     contract = surface_exchange_from(derived.physics)
     assert contract.wind_reference == "10m"
+    # ECHAM delivers no flux tiles, so the ocean's fields are the grid mean.
+    assert not exchange_fields.publishes_sea_tiles(contract)
+    np.testing.assert_array_equal(
+        np.asarray(derived.sea_total_heat_flux), np.asarray(derived.total_heat_flux))
     # ECHAM's default composition is vectorize_columns=True, so
     # contract.wind_u/.wind_v come back flat and derived.u0/.v0 are already
     # reshaped onto the grid -- the comparison reshapes the raw contract
@@ -1019,8 +1162,9 @@ def test_validate_passes_once_the_forcing_is_declared(model, file_forcing):
 def test_earth_slab_runs_from_the_command_line(tmp_path):
     """`+configuration=earth-slab` runs end to end with its file forcing.
 
-    The shipped configuration that couples a from-file-forced atmosphere to a
-    slab ocean, land and sea ice -- the one the structure mismatch stopped
+    The shipped configuration that couples a from-file-forced atmosphere,
+    with SPEEDY's own slab land, to a slab ocean and sea ice -- the one the
+    structure mismatch stopped
     before it had integrated a single step. A subprocess, like the aquaplanet
     smoke test in `test_driver.py`, because Hydra's composition from the
     installed package and the `${jcm_data:}` resolver are part of what is
@@ -1047,9 +1191,9 @@ def test_earth_slab_runs_from_the_command_line(tmp_path):
     run_directories = sorted((tmp_path / "outputs").glob("*/*"))
     assert len(run_directories) == 1, run_directories
     written = sorted(path.name for path in run_directories[0].glob("*.nc"))
+    # No land component: the land is the atmosphere's own.
     assert written == [
-        "atm-00000000.nc", "lnd-00000000.nc",
-        "ocn-00000000.nc", "seaice-00000000.nc",
+        "atm-00000000.nc", "ocn-00000000.nc", "seaice-00000000.nc",
     ]
 
     # The polar surface the run starts from, end to end. Every record is the
@@ -1076,3 +1220,34 @@ def test_earth_slab_runs_from_the_command_line(tmp_path):
         # kelvin below.
         sst = ocean["sea_surface_temperature"].isel(time=0).values
         assert float(sst.min()) > constants.seawater_freezing_point_K - 2.0
+
+    with xr.open_dataset(run_directories[0] / "atm-00000000.nc") as atmosphere:
+        # SPEEDY's slab land is live inside the coupled atmosphere: its
+        # temperature anomaly from the `stl` climatology has moved over land
+        # (it is held at zero where a cell has too little land to carry one).
+        anomaly = atmosphere["land_model.stl_anom"].values
+        assert np.isfinite(anomaly).all()
+        assert float(np.abs(anomaly[-1]).max()) > 0.0
+
+        # On this land-bearing grid the sea and land tiles partition each
+        # cell's flux (#147): the ocean takes the first, SPEEDY's land the
+        # second, and their weighted sum is what the atmosphere lost.
+        sea_name = "surface_exchange.net_heat_flux_tile.0"
+        assert atmosphere[sea_name].attrs["surface_type"] == "sea"
+        land_fraction = atmosphere["surface_exchange.tile_fraction.1"].values
+        sea = atmosphere[sea_name].values
+        land = atmosphere["surface_exchange.net_heat_flux_tile.1"].values
+        mean = atmosphere["surface_exchange.net_heat_flux"].values
+        assert ((land_fraction > 0) & (land_fraction < 1)).any()
+        np.testing.assert_array_less(
+            np.abs((1 - land_fraction) * sea + land_fraction * land - mean),
+            1e-5 * ((1 - land_fraction) * np.abs(sea)
+                    + land_fraction * np.abs(land)) + 1e-3)
+
+    with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
+        # The ocean was forced with the sea tile, not the grid mean, one
+        # coupling step late (the exchange runs before the atmosphere).
+        applied = ocean["total_heat_flux"].values
+    wet = land_fraction[0] < 1.0
+    np.testing.assert_allclose(
+        applied[1:][:, wet], -sea[:-1][:, wet], rtol=1e-5, atol=1e-3)

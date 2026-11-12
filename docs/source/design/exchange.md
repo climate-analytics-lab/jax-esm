@@ -71,7 +71,7 @@ coupler = Coupler(components, default_exchangers(components),
                   start_date=start_date)
 ```
 
-`ExchangeSpec(src, dst, regrid=None)` is one row, addressing a field as
+`ExchangeSpec(src, dst, regrid=None, weight=None)` is one row, addressing a field as
 `"component.section.field"` with `section` one of `state`, `derived`,
 `forcing` — the carry layout every packaged component shares. `Exchange(specs,
 regridders)` executes a list of rows and *is* an ordinary `Exchanger`, so
@@ -83,22 +83,81 @@ shaped differently can still be coupled, with a hand-written exchanger.
 
 | source | destination |
 | --- | --- |
-| `atm.derived.total_heat_flux` | `ocn.forcing.total_heat_flux` |
-| `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
+| `atm.derived.sea_total_heat_flux` | `ocn.forcing.total_heat_flux` |
 | `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
 | `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
-| `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
-| `lnd.state.snowc` | `atm.forcing.snowc_am` |
-| `lnd.state.soilw` | `atm.forcing.soilw_am` |
 
 A row survives only if **both** its components are present, so an
-aquaplanet with no land model gets the four rows that do not mention `lnd`,
-and an atmosphere/ocean pair gets two. The wiring is by *name* — `("atm",
-"ocn", "lnd", "seaice")` — and a component registered under a name that just
+atmosphere/ocean pair gets two. The wiring is by *name* — `("atm", "ocn",
+"lnd", "seaice")` — and a component registered under a name that just
 misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
 simply never receives anything.
+
+**Each surface takes the flux over its own part of the cell.** A slab ocean
+integrates every cell with any sea in it (`SlabGrid.ocean_mask`,
+`land_fraction < 1`), so on a coastal cell it shares the cell with land. It
+is forced by the atmosphere's `sea_*` fields — the fluxes over the sea part
+of the cell — not by the grid-cell mean, which also contains the land part's
+flux. The adapter reads them from the tiles jax-gcm's `SurfaceExchange`
+publishes, by tile name: SPEEDY's `sea` tile, or the fraction-weighted mean
+of a `water` and a `sea_ice` tile
+(`jem.components.jcm.exchange_fields.sea_tile`). The land part stays with
+the atmosphere: SPEEDY integrates its own slab land (`SpeedySurfaceFlux`'s
+default `land_model="slab"`, jax-gcm's `step_slab_land` after
+`land_model.f90`), forced by its own land tile, so there is no `lnd`
+component in the standard configurations and no land row in the table.
+SPEEDY's grid mean is exactly `(1 - land_fraction) * sea + land_fraction *
+land`, so on one grid the ocean's share and the land's are disjoint and
+together are the cell's flux: no part of it is applied twice (#147). What the
+land does with its share is SPEEDY's: it holds its anomaly at zero on cells
+with less than `flandmin` of land, and its relaxation to the climatology is
+itself a source and a sink. A physics package that publishes no flux tiles (ECHAM's
+delivered fluxes) leaves the `sea_*` fields equal to the grid mean; the
+adapter warns about it at `initialize`, because an ocean on a coastal cell
+then also receives the land part's flux.
+
+**On another grid the sea fluxes are weighted by the sea part.** A plain
+conservative map averages every atmosphere cell an ocean cell overlaps by
+area alone, so a coastal ocean cell would take the "sea" flux of an all-land
+atmosphere cell, which is computed against whatever surface temperature was
+written there, with no sea under it. A row's optional `weight` names the
+fraction of each source cell its field is over, and the field is then
+regridded as `R(weight * value) / R(weight)` (`regrid_weighted`, the
+fraction-normalised mapping CESM's coupler applies to the fluxes it computes
+over the ocean fraction of a cell): each atmosphere cell counts by the area of
+its sea part, and an ocean cell that overlaps no sea at all takes
+`R(value)`, the only estimate there is. `default_exchanges` gives every
+regridded row reading an `atm.derived.sea_*` field the weight
+`atm.derived.sea_fraction` (`1 - fmask` of the atmosphere's terrain), and
+`VerosExchange` weights its stress and fluxes the same way. On one grid a row
+is a copy and takes no weight: each ocean cell is its own atmosphere cell.
+The rows back onto the atmosphere are weighted by the sea part of the
+ocean-grid cells (`<component>.derived.sea_fraction`: `1 - fractional_mask`
+for a slab ocean or sea ice, the wet mask for Veros), so an atmosphere cell
+takes the SST of the sea under it rather than a land cell's fill value, and
+`sice_am` stays the ice fraction of the sea part, which is how SPEEDY reads
+it. A YAML `coupling.exchangers` table is taken as written: give its rows a
+`weight` to get the same.
+
+**Veros' mask is its own.** Veros decides its wet and dry columns from its
+own land–sea mask (land where the fraction is at least 0.5,
+`jem.components.veros.setups.earth`), and a wet column is wholly water,
+while the atmosphere's sea part is `1 - fmask` of its terrain. Where the two
+disagree, the weighted map hands a wet column the flux per unit of the
+atmosphere's sea area over all of the column, and the sea flux over a dry
+column reaches no water. For `veros-earth` (the packaged
+`terrain_JCM_T31.nc` against the rotated Gaussian ocean grid) that is
+0.375 sr of wet columns taking the sea flux over what the atmosphere counts
+as land (723 of 3018 wet columns have a mapped sea fraction below 0.99), and
+0.359 sr of the atmosphere's sea whose flux reaches no wet column (681 dry
+columns), against 8.98 sr of ocean: about 4 % each way, mostly cancelling in
+the global sum. Removing it means making the two masks agree -- deriving the
+atmosphere's land fraction from the ocean's wet mask, as CESM derives its
+surface fractions -- which is a change to the configuration's boundary data,
+not to the exchange. `veros-double-drake` uses one mask on one grid and is
+exact.
 
 **The freezing point is an energy-budget decision.** The slab sea ice
 diagnoses its fraction from the SST and has no energy budget, so it takes no

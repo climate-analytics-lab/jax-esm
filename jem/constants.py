@@ -64,10 +64,6 @@ class SurfaceConstants:
         Seawater density (kg/m3).
     ocean_specific_heat_capacity : float
         Specific heat capacity of seawater (J/kg/K).
-    land_density : float
-        Effective density of the land surface slab (kg/m3).
-    land_specific_heat_capacity : float
-        Effective specific heat capacity of the land surface slab (J/kg/K).
     surface_air_density : float
         Air density at the surface, for bulk flux formulas (kg/m3).
     bulk_drag_coefficient : float
@@ -85,21 +81,16 @@ class SurfaceConstants:
 
     Notes
     -----
-    ``land_density``, ``land_specific_heat_capacity`` and
-    ``ice_thermal_conductivity`` are not read by any component today:
-    :class:`~jem.components.slab.slab_land_model.SlabLandModel` uses SPEEDY's
-    volumetric heat capacities directly (they are per-layer tunables, so they
-    live in ``SlabLandParameters``), and the sea-ice model has no conductive
-    temperature profile. They are kept because they are the material properties
-    any richer surface slab needs, and because deleting and re-deriving them is
-    more error-prone than keeping them documented in one place.
+    ``ice_thermal_conductivity`` is not read by any component today: the slab
+    sea ice has no conductive temperature profile. It is kept because it is
+    the material property any thermodynamic slab ice needs. The land has no
+    constants here: its temperature is the atmosphere's own (SPEEDY's slab
+    land in jax-gcm).
 
     """
 
     ocean_density: float = 1025.0  # kg/m3
     ocean_specific_heat_capacity: float = 3985.0  # J/kg/K
-    land_density: float = 3000.0  # kg/m3
-    land_specific_heat_capacity: float = 830.0  # J/kg/K
     surface_air_density: float = 1.22  # kg/m3
     bulk_drag_coefficient: float = 1e-3  # dimensionless
     atmosphere_column_mass: float = 1e4  # kg/m2

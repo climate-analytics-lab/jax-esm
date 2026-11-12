@@ -1,7 +1,7 @@
 # @package _global_
 #
 # Earth-like: realistic orography and a climatological surface, SPEEDY T31L8
-# over a relaxed slab ocean and SPEEDY's slab land.
+# over a relaxed slab ocean, with SPEEDY's own slab land.
 #
 #   python -m jem.main +configuration=earth-slab
 #
@@ -18,10 +18,17 @@
 #    validated setting of the notebook this configuration comes from -- at T31
 #    the slower relaxation lets the tropical SST drift before the seasonal
 #    cycle turns it around.
-#  - land=slab_speedy on the same file's `stl`/`snowc`/`soilw`, with
-#    tdland = 1 day rather than SPEEDY's 40: the land temperature anomaly runs
-#    unrealistically hot and cold at this resolution (jax-esm#1), and the
-#    strong relaxation is the stopgap the notebook validated.
+#  - no land component (land=none, the default): the land is the
+#    atmosphere's own. SPEEDY runs its slab land (`land_model.f90`, jax-gcm's
+#    `SpeedySurfaceFlux` default) on the same file's `stl` climatology, with
+#    the file's `snowc` and `soilw_am`, forced by the flux over the land part
+#    of each cell. The ocean takes the flux over the sea part, so the two
+#    surfaces of a coast cell each take their own share. The anomaly relaxes
+#    on jax-gcm's validated 40 days (SPEEDY's own; jax-gcm's
+#    docs/source/design/speedy_retune.md); the 1 day this configuration used
+#    with JAX-ESM's former land component was a stopgap for that component.
+#    The relaxation is `SpeedySurfaceFlux`'s `land_params.tdland`, under
+#    `atmosphere.physics.terms.speedy_surface_flux` like any jax-gcm term.
 #  - seaice=slab on the same file's `icec`: the sea-ice cover the atmosphere
 #    sees comes from this component, not from the forcing file -- the
 #    exchange overwrites `atm.forcing.sice_am` with the slab's `ice_fraction`
@@ -36,7 +43,6 @@ defaults:
   - override /terrain@atmosphere.terrain: from_file
   - override /forcing@atmosphere.forcing: from_file
   - override /ocean: slab_relax
-  - override /land: slab_speedy
   - override /seaice: slab
 
 atmosphere:
@@ -49,11 +55,6 @@ ocean:
   sst_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
   params:
     relaxation_time: 2592000    # 30 days, in seconds
-
-land:
-  land_clim_file: ${jcm_data:bc/t30/clim/forcing.nc}
-  params:
-    tdland: 86400.0             # 1 day, in seconds
 
 seaice:
   # The same file's `icec`, for the initial ice cover only; this component has

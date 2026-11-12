@@ -18,15 +18,10 @@ class SlabSeaiceParameters:
         Width (K) of the linear ramp from full ice cover at the seawater
         freezing point to open water: a cell is ice-free once its sea surface
         temperature is this far above freezing. Default 1.8 K.
-    ocean_mask_value : float
-        Value of the grid's binary mask that marks an ocean cell (0 = ocean,
-        1 = land). Static: it selects which cells the model integrates at trace
-        time, and is a mask convention rather than a physical tunable.
 
     """
 
     ice_free_sst_excess: float | jnp.ndarray = 1.8
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
 
     @classmethod
     def default(cls) -> "SlabSeaiceParameters":

@@ -28,18 +28,20 @@
 #    case (the original standalone driver's `run.sh`), slower than the
 #    12 min default because the coupled run is long and T31 tolerates it.
 #  - seaice=none, land=none: neither is part of this experiment -- the
-#    idealized continents carry no land model, and no sea ice is formed. The
+#    idealized continents carry no JAX-ESM land component (SPEEDY's own slab
+#    land runs inside the atmosphere, below), and no sea ice is formed. The
 #    driver this configuration replaces stood a `fakelnd` slab in for the
 #    atmosphere's land boundary condition; that stand-in is gone (there is no
 #    configuration group for a fourth "fake" component), so with `land=none`
 #    and the atmosphere's `forcing` group left at `default`, those boundary
 #    conditions stay at what `jcm.forcing.ForcingData.zeros` put there for
-#    the whole integration -- land surface temperature 288.15 K everywhere,
+#    the whole integration -- a land climatology of 288.15 K everywhere,
 #    zero snow cover, zero soil water, zero bare-land albedo. That is a
-#    deliberate simplification of THIS experiment, not a land model: over the
-#    continents the surface neither warms, cools nor carries a seasonal
-#    cycle. `forcing@atmosphere.forcing=from_file` gives a PRESCRIBED land
-#    surface instead (declare in `coupling.exchanged_forcing` any field an
+#    deliberate simplification of THIS experiment: SPEEDY's own slab land
+#    still warms and cools the continents with its heat budget, relaxing
+#    to that flat 288.15 K, but they carry no seasonal climatology and no
+#    soil water. `forcing@atmosphere.forcing=from_file` gives an observed
+#    land climatology instead (declare in `coupling.exchanged_forcing` any field an
 #    exchanger also writes, as this configuration already does for the SST).
 #    A user following this override also has to set `atmosphere.forcing.file`
 #    AND, in most cases, `atmosphere.forcing.align` explicitly (jax-gcm#884,
@@ -52,12 +54,8 @@
 #    (`${jcm_data:bc/t30/clim/forcing.nc}`, the same file `+configuration=
 #    earth-slab` uses) needs no `align` -- it resolves via the manifest, like
 #    `earth-slab`'s forcing does. Any other file does.
-#    A RESPONDING one is not available here: composing `land=slab_speedy`
-#    would build and step a land model, but a hand-written
-#    `coupling.exchanger` replaces the declarative table entirely and
-#    `VerosExchange` carries no `lnd` rows, so that model would receive zero
-#    forcing and its surface temperature would never reach the atmosphere --
-#    an inert component, not a land surface. See jax-esm#128.
+#    The land temperature responds without a land component: it is
+#    SPEEDY's own slab land, inside the atmosphere.
 #  - coupling.exchanger names `jem.fluxes.VerosExchange`, which hands the
 #    ocean the surface wind stress the atmosphere itself received (jax-gcm's
 #    published, stability-corrected stress, so momentum is conserved across

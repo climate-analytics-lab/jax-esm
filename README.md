@@ -11,7 +11,7 @@ A fully differentiable Earth-system coupler in JAX.
 JAX-ESM (`jem`) does not implement a climate model of its own: it couples
 independently-developed components — the JCM spectral atmosphere from
 [jax-gcm](https://github.com/climate-analytics-lab/jax-gcm) (SPEEDY or
-ICON/ECHAM physics), JEM's own slab ocean, land and sea-ice models, and the
+ICON/ECHAM physics), JEM's own slab ocean and sea-ice models, and the
 [Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM — into
 one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory. Every
 component's physical parameters travel in the scan carry as pytrees, so
@@ -41,7 +41,7 @@ JAX-ESM is developed and tested against **one** jax-gcm revision, recorded in
 
 ```bash
 git clone https://github.com/climate-analytics-lab/jax-gcm
-cd jax-gcm && git checkout f378069090b127badbb158b06e2767f3be8f436c && pip install -e "." && cd ..
+cd jax-gcm && git checkout 932d9cc2f331faebcbab745895f347c4de295b3b && pip install -e "." && cd ..
 
 git clone https://github.com/climate-analytics-lab/jax-esm
 cd jax-esm && pip install -e "." && cd ..

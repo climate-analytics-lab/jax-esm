@@ -22,14 +22,12 @@ the CI workflow checks out is this one, so the pin and the workflow cannot
 drift apart.
 
 Why a ``dev`` revision rather than a release
--------------------------------------------
-``JCM_SUPPORTED_REV`` is ``f378069090b127badbb158b06e2767f3be8f436c``, a
-``dev`` commit. jax-gcm has no 3.x tag yet -- ``3.0.0rc1`` is reported from
-the source tree, not cut as a release -- so a sha is the most precise thing
-there is to name; ``pyproject.toml``'s ``jcm>=3.0.0rc1`` floor is the loosest
-true statement of the same fact, since jax-gcm's version string is bumped
-only at release and a release-candidate floor is satisfied by every later
-3.x release too. The policy, stated once here: pin to a ``dev`` commit that
+--------------------------------------------
+``JCM_SUPPORTED_REV`` is ``932d9cc2f331faebcbab745895f347c4de295b3b``. A sha is
+the most precise thing there is to name; ``pyproject.toml``'s
+``jcm>=3.0.0rc1`` floor is the loosest true statement of the same fact,
+since jax-gcm's version string is bumped only at release. The policy,
+stated once here: pin to a ``dev`` commit that
 has actually been validated as a whole against this repository's own gates
 -- not to the merge commit of one motivating pull request, and not to
 whatever ``dev`` happens to be at bump time, either of which can carry
@@ -37,10 +35,18 @@ commits this branch has never been run against. When a tagged jax-gcm
 release finally contains this revision, replace the sha with the tag and
 raise the ``pyproject.toml`` floor to match.
 
-This revision is needed because ECHAM physics traces under
-``jax_enable_x64`` (jax-gcm#946), so an ECHAM atmosphere couples to Veros,
-and because jax-gcm's package-independent ``SurfaceExchange`` contract
-(``diagnostics["surface_exchange"]``) publishes a near-surface wind vector,
+This revision is the head of jax-gcm#1213, which publishes SPEEDY's land
+and sea flux tiles and a coupled sea ice's forcing on ``SurfaceExchange``,
+stacked on
+jax-gcm#1199 (SPEEDY's own slab land, ``land_model.f90``, as
+``SpeedySurfaceFlux``'s default) and on ``dev``. It is a temporary exception
+to the policy above: those two pull requests are what this repository's ocean
+coupling now reads (the ``sea`` tile, jax-esm#147) and what its land is
+(SPEEDY's slab, in place of the land temperature JAX-ESM used to integrate
+itself), and the pin moves to the ``dev`` merge commit that carries both as
+soon as they are merged. The earlier needs still hold: ECHAM physics traces
+under ``jax_enable_x64`` (jax-gcm#946), so an ECHAM atmosphere couples to
+Veros, and ``SurfaceExchange`` publishes a near-surface wind vector,
 ``wind_u``/``wind_v``, identically from every physics package
 (jax-gcm#911/#914); see :mod:`jem.components.jcm.exchange_fields` for the
 translation and ``docs/source/design/jcm_adapter.md`` for the full adapter
@@ -86,7 +92,7 @@ from typing import NamedTuple
 #:
 #: This ``dev`` commit is validated as a whole against this repository's own
 #: gates -- see "Why a ``dev`` revision rather than a release" above.
-JCM_SUPPORTED_REV = "f378069090b127badbb158b06e2767f3be8f436c"
+JCM_SUPPORTED_REV = "932d9cc2f331faebcbab745895f347c4de295b3b"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
@@ -97,7 +103,7 @@ JCM_SUPPORTED_REV = "f378069090b127badbb158b06e2767f3be8f436c"
 #: when it is installed, so the metadata of a checkout that has since moved
 #: to another revision is stale, which is exactly the situation a pin bump
 #: creates.
-JCM_SUPPORTED_VERSION = "3.0.0rc1"
+JCM_SUPPORTED_VERSION = "3.1.0"
 
 
 class IntegrationPoint(NamedTuple):
@@ -479,7 +485,8 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " surface; westerlies give stress_u > 0) -- already JAX-ESM's"
         " convention. The stress the atmosphere column was given, so the"
         " ocean receives the momentum the atmosphere lost: feeds"
-        " JCMDerived.eastward_wind_stress, which jem.fluxes.VerosExchange"
+        " JCMDerived.eastward_wind_stress, and its sea tile"
+        " JCMDerived.sea_eastward_wind_stress, which jem.fluxes.VerosExchange"
         " hands to Veros as surface_taux (jax-esm#132).",
     ),
     IntegrationPoint(
@@ -499,6 +506,58 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "surface_exchange", "wind_v", "diagnostics",
         "Near-surface northward wind, m s-1; same note as wind_u. Feeds"
         " JCMDerived.v0.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "tile_names", "diagnostics",
+        "Static names of the tile axis (jcm's TILE_NAMES): JAX-ESM selects"
+        " the 'sea' tile by name, or combines 'water' and 'sea_ice', never"
+        " by an assumed index.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "tile_fraction", "diagnostics",
+        "Tile fractions; weight the 'water' and 'sea_ice' tiles when a"
+        " package publishes those rather than one 'sea' tile.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "net_heat_flux_tile", "diagnostics",
+        "Per-tile net heat flux; the 'sea' tile feeds"
+        " JCMDerived.sea_total_heat_flux, the ocean's heat flux"
+        " (jax-esm#147).",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "evaporation_tile", "diagnostics",
+        "Per-tile evaporation; the 'sea' tile feeds"
+        " JCMDerived.sea_evaporation and the ocean's freshwater flux.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "stress_u_tile", "diagnostics",
+        "Per-tile eastward stress; the 'sea' tile is the stress"
+        " jem.fluxes.VerosExchange hands the ocean.",
+    ),
+    IntegrationPoint(
+        "surface_exchange", "stress_v_tile", "diagnostics",
+        "Per-tile northward stress; same note as stress_u_tile.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.surface.surface_exchange.SurfaceExchange", "tile",
+        "public",
+        "Selects one tile of a *_tile field by its surface type, so"
+        " jem.components.jcm.exchange_fields.sea_tile never indexes the"
+        " tile axis itself.",
+    ),
+    IntegrationPoint(
+        "jcm.physics_interface", "POST_PHYSICS_STATE_KEY", "public",
+        "The cloud schemes' post-physics anchor: it stays in the physics"
+        " carry but jax-gcm never saves it, so JCMComponent's diagnostics"
+        " template leaves it out, or JCMDerived.physics would change"
+        " structure after the first step (ECHAM).",
+    ),
+    IntegrationPoint(
+        "jcm.physics.surface.surface_exchange", "SURFACE_EXCHANGE_KEY",
+        "public",
+        "The diagnostics key the struct is published under: JCMComponent"
+        " reads the struct off the structural diagnostics template at"
+        " initialize, to warn when the package publishes no sea tiles.",
     ),
     IntegrationPoint(
         "jcm.physics.surface.surface_exchange", "surface_exchange_from",

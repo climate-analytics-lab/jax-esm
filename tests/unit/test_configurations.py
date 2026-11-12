@@ -222,15 +222,15 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(exp.config["seaice"], None)
 
     def test_earth_slab_applies_its_tuned_overrides(self):
-        # Two of the three documented tunables in earth-slab.yaml (the ocean
-        # relaxation time and the land tdland) reach the built components,
-        # proving the door builds the SAME objects `+configuration=earth-slab`
-        # would -- not a lighter approximation of them.
+        # The documented ocean relaxation time in earth-slab.yaml reaches the
+        # built ocean, proving the door builds the SAME objects
+        # `+configuration=earth-slab` would -- not a lighter approximation of
+        # them. Its land is the atmosphere's own, so there is no land
+        # component to build.
         exp = configurations.load("earth-slab")
         ocn_params = exp.coupler.components["ocn"].params
-        lnd_params = exp.coupler.components["lnd"].params
         self.assertAlmostEqual(float(ocn_params.relaxation_time), 2592000.0)
-        self.assertAlmostEqual(float(lnd_params.tdland), 86400.0)
+        self.assertNotIn("lnd", exp.coupler.components)
 
     def test_restores_host_hydra_context(self):
         """F3: a host application's own, DIFFERENT Hydra context survives ``load()``.

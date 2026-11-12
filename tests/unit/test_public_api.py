@@ -65,8 +65,6 @@ COMPONENT_NAMES = (
     "SlabAtmosphereModel",
     "SlabAtmosphereParameters",
     "SlabGrid",
-    "SlabLandModel",
-    "SlabLandParameters",
     "SlabOceanModel",
     "SlabOceanParameters",
     "SlabSeaiceModel",

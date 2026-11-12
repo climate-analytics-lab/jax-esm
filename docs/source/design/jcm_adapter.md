@@ -61,7 +61,10 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
     "derived": JCMDerived(physics, total_heat_flux, total_freshwater_flux,
                           evaporation, precipitation,
                           eastward_wind_stress, northward_wind_stress,
-                          u0, v0),
+                          u0, v0,
+                          sea_total_heat_flux, sea_total_freshwater_flux,
+                          sea_evaporation, sea_eastward_wind_stress,
+                          sea_northward_wind_stress, sea_fraction),
 }
 ```
 
@@ -117,9 +120,25 @@ positive eastward stress), which is JEM's convention for a stress and the one
 Veros integrates. It is the stress the atmosphere column was actually given
 that step, which is why `jem.fluxes.VerosExchange` hands it to the ocean
 instead of applying a drag law of its own to the wind (jax-esm#132; see
-{doc}`exchange`). Like every guaranteed field it is a grid-box mean over
-land, sea and sea ice, so a coastal ocean cell receives some of the land's
-drag (jax-esm#147).
+{doc}`exchange`).
+
+**The ocean's fields are over the sea part of the cell.** Every guaranteed
+field is a grid-cell mean over land, sea and sea ice, so on a coastal cell it
+contains the land part's flux and drag. `JCMDerived` therefore also carries
+`sea_total_heat_flux`, `sea_evaporation`, `sea_total_freshwater_flux`
+(`sea_evaporation - precipitation`) and `sea_eastward_wind_stress`/
+`sea_northward_wind_stress`, in the same conventions, read from the
+contract's per-tile fields by tile *name* (`SurfaceExchange.tile`, never an
+assumed index): SPEEDY's `sea` tile, or the fraction-weighted mean of a
+`water` and a `sea_ice` tile (`exchange_fields.sea_tile`). They are what the
+standard exchange tables hand an ocean; the land part's flux stays with the
+atmosphere's own land surface (SPEEDY's slab land). `sea_fraction` is the
+part of the cell they are over, `1 - fmask` of the atmosphere's terrain, by
+which a regridder weights them ({doc}`exchange`). Precipitation is one
+field over the whole cell, so it has no sea tile. A package that publishes
+no flux tiles (ECHAM delivers its fluxes untiled) leaves the `sea_*` fields
+equal to the grid mean, and `initialize` logs a warning that a coastal ocean
+cell will then also receive the land part's flux (jax-esm#147).
 
 `wind_u` and `wind_v` sit at whichever reference the *publishing* package's
 own surface closure defines — the contract's static `wind_reference` field
@@ -134,7 +153,10 @@ RRTMGP radiation in 64-bit mode; jax-gcm supports that from the pinned
 revision on (jax-gcm#927, fixed by jax-gcm#946).
 `tests/unit/test_veros_setups.py::test_echam_veros_earth_configuration_steps`
 steps `+configuration=veros-earth physics@atmosphere.physics=echam` twice and
-checks every carry field is finite.
+checks every carry field is finite, with ECHAM's prescribed-moisture land
+(`atmosphere.physics.land_model=prescribed`): jax-gcm's default SLIM land
+reads surface properties that exist only on T63 and finer grids, and
+`veros-earth` is T31.
 
 **Public surface.** Every JCM attribute the wrapper touches is public at the
 pinned revision: the initial state and physics carry come from
