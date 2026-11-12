@@ -51,7 +51,7 @@ Your first coupled run
 This composes a coupled model from the shipped ``aquaplanet-slab``
 configuration (the JCM atmosphere and JEM's slab ocean, coupled with
 ``default_exchangers`` -- :doc:`python_api`'s worked example plus the
-thermodynamic sea ice that page leaves out) and integrates two coupled days --
+SST-diagnosed sea ice) and integrates two coupled days --
 ``short_run`` is the shortest run that exercises the whole path, meant to
 check a machine can run anything at all before committing to a real
 integration. It writes into a fresh Hydra run directory,

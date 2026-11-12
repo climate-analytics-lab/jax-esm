@@ -172,6 +172,17 @@ default wiring recognises and warns about.
 See {doc}`design/exchange` for the full table (including the Veros
 variant), the regridding keys a mixed-grid run uses, and the lag in full.
 
+**Sea ice and the freezing point.** `SlabSeaiceModel` diagnoses its ice
+fraction from the ocean's sea surface temperature, ramping from open water at
+`SlabSeaiceParameters.ice_free_sst_excess` (1.8 K) above freezing to full
+cover at freezing; it has no energy budget. So the slab ocean beside it
+keeps its own deficit when it cools below freezing
+(`SlabOceanParameters.clamp_at_freezing=False`, the default) rather than
+being clamped at freezing with nothing to account for the heat the clamp
+would add. `clamp_at_freezing=True` is for a sea ice that turns the ocean's
+`derived.ice_frazil_melt_energy` into ice, and `default_exchanges` refuses it
+when no exchange takes that field.
+
 ## Parameters: process and initial condition
 
 A component's `flax.struct` parameters travel in the carry, so `jax.grad`

@@ -9,6 +9,7 @@ writes -- rather than on a real atmosphere or ocean, since nothing here needs
 either model to be built.
 """
 
+import dataclasses
 from importlib import resources
 
 import jax
@@ -63,6 +64,26 @@ def test_mask_fluxes_under_ice_blocks_a_cooling_flux_at_the_freezing_point():
     masked_heat, masked_fresh = mask_fluxes_under_ice(sst, heat_flux, freshwater_flux)
     np.testing.assert_allclose(masked_heat, jnp.array([0.0, 50.0]))
     np.testing.assert_allclose(masked_fresh, jnp.array([0.0, 1e-6]))
+
+
+def test_the_ice_mask_uses_the_coupled_model_s_freezing_point(monkeypatch):
+    """With no freezing point given, the mask reads
+    ``jem.constants.seawater_freezing_point_K`` when it runs -- the freezing
+    point the slab ocean and slab ice use -- so an override reaches it.
+    """
+    from jem import constants
+
+    sst = jnp.array([271.30])
+    heat_flux = jnp.array([50.0])
+    freshwater_flux = jnp.array([1e-6])
+    masked, _ = mask_fluxes_under_ice(sst, heat_flux, freshwater_flux)
+    np.testing.assert_allclose(masked, 0.0)
+
+    monkeypatch.setattr(
+        constants, "surface_constants",
+        dataclasses.replace(constants.surface_constants, seawater_freezing_point_K=271.2))
+    masked, _ = mask_fluxes_under_ice(sst, heat_flux, freshwater_flux)
+    np.testing.assert_allclose(masked, 50.0)
 
 
 # ---------------------------------------------------------------------------

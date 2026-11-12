@@ -793,7 +793,42 @@ def default_exchanges(
                 "exchange out by hand.",
                 standard, standard, name, name, standard,
             )
+    _check_freezing_deficit_is_taken(components, specs)
     return specs
+
+
+#: Where a clamping ocean publishes the deficit its clamp removed.
+FREEZING_DEFICIT = "ocn.derived.ice_frazil_melt_energy"
+
+
+def _check_freezing_deficit_is_taken(
+    components: Mapping[str, Component] | Iterable[str],
+    specs: list[ExchangeSpec],
+) -> None:
+    """Refuse an ocean that clamps at freezing with nothing taking its deficit.
+
+    An ocean with ``params.clamp_at_freezing`` holds its mixed layer at the
+    freezing point and hands the deficit to a sea ice as
+    :data:`FREEZING_DEFICIT`; if no row moves that field, the clamp creates
+    the heat it removes the deficit with, every step it acts, and nothing in
+    the run says so. Only real components carry parameters, so a list of
+    names is never refused.
+    """
+    if not isinstance(components, Mapping) or "ocn" not in components:
+        return
+    params = getattr(components["ocn"], "params", None)
+    if not getattr(params, "clamp_at_freezing", False):
+        return
+    if any(spec.src == FREEZING_DEFICIT for spec in specs):
+        return
+    raise ValueError(
+        "The ocean clamps its mixed layer at the freezing point "
+        "(params.clamp_at_freezing=True), but no exchange takes the deficit "
+        f"the clamp removes ({FREEZING_DEFICIT}), so the clamp would create "
+        "heat. Couple a sea ice that forms ice from it, or construct the "
+        "ocean with clamp_at_freezing=False, which keeps the deficit in the "
+        "mixed layer (the choice for SlabSeaiceModel)."
+    )
 
 
 def _exchange_table(

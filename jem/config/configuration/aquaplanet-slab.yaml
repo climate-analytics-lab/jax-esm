@@ -1,6 +1,6 @@
 # @package _global_
 #
-# Aquaplanet: SPEEDY T31L8 over a slab ocean with thermodynamic sea ice --
+# Aquaplanet: SPEEDY T31L8 over a slab ocean with SST-diagnosed sea ice --
 # the README's quick start, plus the ice the quick start leaves out.
 #
 #   python -m jem.main +configuration=aquaplanet-slab

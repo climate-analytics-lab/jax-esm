@@ -316,6 +316,26 @@ def test_default_exchanges_filters_to_present_components(present, expected):
         assert spec.dst_parts[0] in present
 
 
+def test_a_clamping_ocean_with_nothing_to_take_its_deficit_is_refused(components):
+    """The slab ice takes no freeze/melt energy, so an ocean that clamps at
+    freezing beside it would create heat; the default table refuses it.
+    """
+    from jem.components.slab import SlabOceanParameters
+
+    grid = half_land_grid()
+    components = dict(components, ocn=SlabOceanModel(
+        grid, SlabOceanParameters(clamp_at_freezing=True)))
+    with pytest.raises(ValueError, match="clamp_at_freezing"):
+        default_exchanges(components)
+    # A list of names carries no parameters and is never refused.
+    default_exchanges(["atm", "ocn", "seaice"])
+
+
+def test_the_default_ocean_keeps_its_deficit_and_couples(components):
+    assert components["ocn"].params.clamp_at_freezing is False
+    default_exchanges(components)
+
+
 def test_default_exchanges_ignores_components_it_has_no_wiring_for():
     """An unrecognised component name is simply not wired, not an error."""
     specs = default_exchanges(("atm", "ocn", "spring", "chemistry"))

@@ -65,6 +65,7 @@ import jax
 import jax.numpy as jnp
 import xarray as xr
 
+from jem import constants
 from jem.base.component import Carry, CouplingTime
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ def mask_fluxes_under_ice(
     heat_flux: jax.Array,
     freshwater_flux: jax.Array,
     *,
-    freezing_point: float = 271.35,
+    freezing_point: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Zero the fluxes that would cool an ocean already at the freezing point.
 
@@ -127,8 +128,10 @@ def mask_fluxes_under_ice(
     means the ocean is losing heat), so a flux that would *warm* the ocean
     (melt the ice) is negative and is always let through regardless of
     temperature -- only a *cooling* flux at or below the freezing point is
-    masked. ``freezing_point`` defaults to ``271.35`` K, i.e. ``273.15 -
-    1.8``, the freezing point of seawater at typical salinity.
+    masked. ``freezing_point`` defaults to
+    ``jem.constants.seawater_freezing_point_K``, the freezing point every slab
+    component uses, read at call time so a ``set_constants`` override
+    reaches it.
 
     This is a condition on two fields, not a component's state: it reads
     ``sea_surface_temperature`` and returns the masked ``(heat_flux,
@@ -141,9 +144,9 @@ def mask_fluxes_under_ice(
     heat_flux, freshwater_flux : jax.Array
         The fluxes to mask, upward-positive, broadcastable against
         ``sea_surface_temperature``.
-    freezing_point : float
+    freezing_point : float, optional
         The freezing point below which a cooling flux is masked, K. Default
-        ``271.35`` (``273.15 - 1.8``).
+        ``jem.constants.seawater_freezing_point_K``.
 
     Returns
     -------
@@ -151,6 +154,8 @@ def mask_fluxes_under_ice(
         The masked ``(heat_flux, freshwater_flux)``.
 
     """
+    if freezing_point is None:
+        freezing_point = constants.seawater_freezing_point_K
     not_frozen = sea_surface_temperature > freezing_point
     would_warm = heat_flux < 0
     ice_free = jnp.logical_or(not_frozen, would_warm)
@@ -253,8 +258,10 @@ class VerosExchange:
         means no rotation -- the identity -- which is right for a grid whose
         axes already are true east/north (the double-drake configuration's
         uniform lat-lon ocean grid).
-    freezing_point : float
-        Passed to :func:`mask_fluxes_under_ice`.
+    freezing_point : float, optional
+        Passed to :func:`mask_fluxes_under_ice`; ``None`` (the default) is
+        ``jem.constants.seawater_freezing_point_K``, the freezing point the
+        rest of the coupled model uses.
 
     Notes
     -----
@@ -282,7 +289,7 @@ class VerosExchange:
         *,
         regrid: Mapping[str, Callable[[Any], Any]] | None = None,
         rotation_grid_file: str | None = None,
-        freezing_point: float = 271.35,
+        freezing_point: float | None = None,
     ) -> None:
         """Build the exchanger; see the class docstring for the parameters."""
         regrid = regrid or {}

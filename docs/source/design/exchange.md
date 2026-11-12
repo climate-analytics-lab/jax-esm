@@ -100,6 +100,16 @@ misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
 simply never receives anything.
 
+**The freezing point is an energy-budget decision.** The slab sea ice
+diagnoses its fraction from the SST and has no energy budget, so it takes no
+freeze/melt potential, and the standard table has no row for
+`ocn.derived.ice_frazil_melt_energy`. The ocean beside it therefore keeps
+its deficit below freezing (`clamp_at_freezing=False`): clamping it there
+would create the heat it removed the deficit with. `default_exchanges`
+raises for an ocean that clamps (`clamp_at_freezing=True`) when no row takes
+that deficit, since nothing else in a run would say the energy is not
+conserved.
+
 **One table per carry layout.** Component wrappers do not all name the same
 physical field the same way, nor keep it in the same section: the Veros
 ocean takes its surface heat flux as `forcing.heat_flux` and publishes its

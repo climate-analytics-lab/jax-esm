@@ -829,9 +829,8 @@ def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
 def test_earth_slab_ocean_starts_at_or_above_freezing():
     """The packaged SST climatology is sub-freezing under ice; the ocean is not.
 
-    Taken verbatim the mixed layer would start tens of kelvin below the floor
-    `step` holds it to, and the first step would turn the whole deficit into
-    frazil ice.
+    Taken verbatim the mixed layer would start tens of kelvin below freezing,
+    a heat deficit the run never had.
     """
     from jem import constants
 

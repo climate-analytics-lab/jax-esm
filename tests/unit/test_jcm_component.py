@@ -1069,6 +1069,10 @@ def test_earth_slab_runs_from_the_command_line(tmp_path):
 
     with xr.open_dataset(run_directories[0] / "ocn-00000000.nc") as ocean:
         # The whole field: land carries the 288.15 K fill value, which is
-        # above the floor and so cannot hide an ocean cell below it.
+        # above freezing and so cannot hide an ocean cell below it. The
+        # mixed layer keeps its own deficit (no clamp: the slab ice has no
+        # energy budget), so the first record may sit a little below
+        # freezing, but a climatology taken verbatim would put it tens of
+        # kelvin below.
         sst = ocean["sea_surface_temperature"].isel(time=0).values
-        assert float(sst.min()) >= constants.seawater_freezing_point_K
+        assert float(sst.min()) > constants.seawater_freezing_point_K - 2.0
