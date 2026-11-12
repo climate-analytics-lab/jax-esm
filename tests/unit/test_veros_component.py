@@ -107,6 +107,15 @@ def free_surface_veros_model(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
+def no_gm_veros_model(tmp_path_factory):
+    """``acc_basic`` with its eddy-induced transport switched off."""
+    yield from _acc_basic_model(
+        tmp_path_factory.mktemp("veros_no_gm"),
+        enable_skew_diffusion=False,
+    )
+
+
+@pytest.fixture(scope="module")
 def grid_shape(veros_model):
     return (veros_model.state.dimensions["xt"],
             veros_model.state.dimensions["yt"])
@@ -164,10 +173,13 @@ def _labelling_diagnostics(component, n_records):
             "heat_flux", "freshwater_flux",
         )
     })
-    # `step` emits a sea surface height only where Veros carries one, so the
-    # layout handed to `to_xarray` has to follow the same branch.
+    # `step` emits a sea surface height only where Veros carries one, and a
+    # GM streamfunction only for a run with GM skew diffusion, so the layout
+    # handed to `to_xarray` has to follow the same branches.
     if not component.enable_streamfunction:
         diagnostics["ssh"] = surface
+    if component.enable_gm_streamfunction:
+        diagnostics["B1_gm"] = volume
     return diagnostics
 
 
@@ -340,6 +352,35 @@ def test_to_xarray_publishes_the_external_mode_outputs(
         assert dataset.ssh.attrs["jem_role"] == "derived"
         assert "psi / grav" in dataset.ssh.attrs["comment"]
         np.testing.assert_array_equal(dataset.ssh.values, np.asarray(ssh))
+
+
+def test_to_xarray_labels_the_gm_streamfunction(component):
+    """``B1_gm`` is a 3-D derived field, labelled and documented like ``v``."""
+    assert component.enable_gm_streamfunction  # acc_basic runs GM skew diffusion
+    nx, ny = component.horizontal_shape
+    nz = int(component.dzt.shape[0])
+    diagnostics = _labelling_diagnostics(component, 2)
+    diagnostics["B1_gm"] = jnp.asarray(
+        np.linspace(-1.0, 1.0, 2 * nx * ny * nz).reshape(2, nx, ny, nz))
+
+    dataset = component.to_xarray(
+        diagnostics, TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP))
+
+    assert dataset.B1_gm.dims == ("time", "lon", "lat", "depth")
+    assert dataset.B1_gm.attrs["units"] == "m^2/s"
+    assert dataset.B1_gm.attrs["jem_role"] == "derived"
+    assert "bolus_depth" in dataset.B1_gm.attrs["comment"]
+    np.testing.assert_array_equal(
+        dataset.B1_gm.values, np.asarray(diagnostics["B1_gm"]))
+
+
+def test_without_gm_skew_diffusion_there_is_no_gm_streamfunction(no_gm_veros_model):
+    component = _bound(no_gm_veros_model)
+    assert not component.enable_gm_streamfunction
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 1),
+        TimeAxis(START_DATE, np.arange(1), COUPLING_TIMESTEP))
+    assert "B1_gm" not in dataset
 
 
 def test_to_xarray_publishes_the_masks_psi_is_read_with(component):
@@ -638,6 +679,21 @@ def test_step_advances_and_returns_a_stackable_carry(component, grid_shape):
     assert sst.shape == grid_shape
     assert bool(jnp.all(jnp.isfinite(sst)))
     assert diagnostics["temp"].shape[:2] == grid_shape
+
+
+@pytest.mark.slow
+def test_a_step_publishes_the_gm_streamfunction_of_the_evolved_state(component):
+    """``B1_gm`` comes out of a real step: finite, on ``v``'s layout, and not
+    the zeros Veros leaves it at, since its driver never fills it.
+    """
+    nx, ny = component.horizontal_shape
+    nz = int(component.dzt.shape[0])
+    _, diagnostics = _step_under_wind(component, 2)
+
+    gm = np.asarray(diagnostics["B1_gm"])
+    assert gm.shape == (nx, ny, nz)
+    assert np.isfinite(gm).all()
+    assert np.abs(gm).max() > 0.0
 
 
 @pytest.mark.slow

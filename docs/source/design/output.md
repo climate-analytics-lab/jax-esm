@@ -92,7 +92,14 @@ The conventions, which are JCM's:
   which of the two the file holds, with the masks a reader needs
   (`mask_surface_Z`, `mask_U`) published beside it. A free-surface run also
   publishes the sea surface height of its surface-pressure solve as `ssh`
-  (m, `ssh = psi / grav`); a streamfunction run publishes no `ssh`.
+  (m, `ssh = psi / grav`); a streamfunction run publishes no `ssh`. A run
+  with GM skew diffusion (`settings.enable_neutral_diffusion` and
+  `enable_skew_diffusion`, every shipped Veros setup) also publishes `B1_gm`,
+  the zonal component of the GM streamfunction (m² s⁻¹, on `v`'s layout),
+  which the eddy-induced overturning is the zonal integral of. Veros' own
+  driver no longer evaluates it, so the wrapper runs Veros'
+  `isoneutral_diag_streamfunction_kernel` on the evolved state each coupling
+  step; it only reads the state.
 - **A variable's role is metadata, not a name to parse.** Every packaged
   component tags each output variable with `jem_role`
   (`jem.base.component.role_attrs`), whose value is the section of the carry
