@@ -87,7 +87,7 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `atm.derived.total_heat_flux` | `lnd.forcing.total_heat_flux` |
 | `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
-| `seaice.state.ice_fraction` | `atm.forcing.sice_am` |
+| `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
 | `lnd.state.land_surface_temperature` | `atm.forcing.stl_am` |
 | `lnd.state.snowc` | `atm.forcing.snowc_am` |
 | `lnd.state.soilw` | `atm.forcing.soilw_am` |

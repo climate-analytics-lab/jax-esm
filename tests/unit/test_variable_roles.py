@@ -109,7 +109,7 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "forcing_total_heat_flux": "forcing",
         },
         "seaice": {
-            "ice_fraction": "state",
+            "ice_fraction": "derived",
             "forcing_sea_surface_temperature": "forcing",
         },
     }

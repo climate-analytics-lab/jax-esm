@@ -140,7 +140,7 @@ table = Exchange([
                  "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "atm.forcing.sea_surface_temperature"),
-    ExchangeSpec("seaice.state.ice_fraction", "atm.forcing.sice_am"),
+    ExchangeSpec("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
 ])
 
 coupler = Coupler(

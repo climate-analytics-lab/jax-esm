@@ -150,7 +150,7 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # so the ice-covered area is the same on both grids.
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
     ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
     ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
@@ -195,7 +195,7 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
      "seaice.forcing.sea_surface_temperature", "state"),
     ("ocn.derived.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
-    ("seaice.state.ice_fraction", "atm.forcing.sice_am", "flux"),
+    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
     ("lnd.state.snowc", "atm.forcing.snowc_am", "state"),
     ("lnd.state.soilw", "atm.forcing.soilw_am", "state"),
@@ -686,7 +686,7 @@ def default_exchanges(
     ``atm.derived.total_heat_flux``             ``lnd.forcing.total_heat_flux``
     ``ocn.state.sea_surface_temperature``       ``seaice.forcing.sea_surface_temperature``
     ``ocn.state.sea_surface_temperature``       ``atm.forcing.sea_surface_temperature``
-    ``seaice.state.ice_fraction``               ``atm.forcing.sice_am``
+    ``seaice.derived.ice_fraction``             ``atm.forcing.sice_am``
     ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
     ``lnd.state.snowc``                         ``atm.forcing.snowc_am``
     ``lnd.state.soilw``                         ``atm.forcing.soilw_am``

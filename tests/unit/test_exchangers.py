@@ -59,7 +59,7 @@ EXPECTED_SPECS = (
     ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"),
     ("ocn.state.sea_surface_temperature", "seaice.forcing.sea_surface_temperature"),
     ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
-    ("seaice.state.ice_fraction", "atm.forcing.sice_am"),
+    ("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
     ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"),
     ("lnd.state.snowc", "atm.forcing.snowc_am"),
     ("lnd.state.soilw", "atm.forcing.soilw_am"),
@@ -377,7 +377,7 @@ def test_exchange_roundtrip(components):
         atmosphere_forcing.sea_surface_temperature
         is incoming["ocn"]["state"].sea_surface_temperature
     )
-    assert atmosphere_forcing.sice_am is incoming["seaice"]["state"].ice_fraction
+    assert atmosphere_forcing.sice_am is incoming["seaice"]["derived"].ice_fraction
     assert (
         atmosphere_forcing.stl_am
         is incoming["lnd"]["state"].land_surface_temperature
@@ -392,9 +392,11 @@ def test_exchange_roundtrip(components):
     after = jax.tree_util.tree_leaves(incoming)
     assert len(after) == len(leaves_before)
     assert all(new is old for new, old in zip(after, leaves_before))
-    # And the state sections, which no spec writes, are the same objects.
+    # And the state sections, which no spec writes, are the same objects
+    # (the SST-diagnosed sea ice has none).
     for name in incoming:
-        assert exchanged[name]["state"] is incoming[name]["state"]
+        if "state" in incoming[name]:
+            assert exchanged[name]["state"] is incoming[name]["state"]
 
 
 def test_exchange_runs_in_a_real_coupled_trajectory(components):
@@ -441,7 +443,7 @@ def readme_style_exchange(components, time):
     ))
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
-        sice_am=seaice["state"].ice_fraction,
+        sice_am=seaice["derived"].ice_fraction,
         stl_am=lnd["state"].land_surface_temperature,
         snowc_am=lnd["state"].snowc,
         soilw_am=lnd["state"].soilw,
@@ -553,7 +555,7 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
          "seaice.forcing.sea_surface_temperature"): None,
         ("ocn.state.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
-        ("seaice.state.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
+        ("seaice.derived.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
         ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"): None,
         ("lnd.state.snowc", "atm.forcing.snowc_am"): None,
         ("lnd.state.soilw", "atm.forcing.soilw_am"): None,
@@ -688,7 +690,7 @@ def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components, caplo
         "seaice.forcing.sea_surface_temperature",
     )] is None
     assert by_route[
-        ("seaice.state.ice_fraction", "atm.forcing.sice_am")
+        ("seaice.derived.ice_fraction", "atm.forcing.sice_am")
     ] == "o2a_conserve"
     assert caplog.text == ""
 
@@ -708,7 +710,7 @@ def test_a_bare_direction_key_covers_both_kinds():
     assert by_route[
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature")
     ] == "o2a"
-    assert by_route[("seaice.state.ice_fraction", "atm.forcing.sice_am")] == "o2a"
+    assert by_route[("seaice.derived.ice_fraction", "atm.forcing.sice_am")] == "o2a"
     # The ocean and the sea ice share a grid, so the SST between them is
     # never regridded, whatever the direction keys say.
     assert by_route[(

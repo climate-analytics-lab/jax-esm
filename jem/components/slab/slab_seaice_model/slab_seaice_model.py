@@ -1,6 +1,7 @@
 """Slab sea-ice model component."""
 
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -21,14 +22,16 @@ from jem.utils.cycles import evaluate_cyclic_linear
 
 logger = logging.getLogger(__name__)
 
-#: How far above the seawater freezing point (K) the sea surface has to be
-#: for a cell to be ice-free; the ice fraction ramps linearly to full cover
-#: across this range. See :class:`SlabSeaiceModel`.
-ICE_FREE_SST_EXCESS = 1.8
-
 
 @tree_math.struct
-class SeaiceState:
+class SeaiceDerived:
+    """What the ice diagnoses and the other components read.
+
+    The ice fraction is diagnosed from this step's forcing and carries no
+    memory, so it is a derived field, not state: nothing in :meth:`step`
+    reads its previous value.
+    """
+
     ice_fraction: jnp.ndarray
 
     @classmethod
@@ -58,23 +61,28 @@ class SlabSeaiceModel(SlabModelBase):
     cools to the seawater freezing point ``T_f``
     (``jem.constants.seawater_freezing_point_K``)::
 
-        ice_fraction = clip((T_f + ICE_FREE_SST_EXCESS - SST) / ICE_FREE_SST_EXCESS, 0, 1)
+        ice_fraction = clip((T_f + w - SST) / w, 0, 1)
 
-    so a cell at or below ``T_f`` is fully covered, one
-    :data:`ICE_FREE_SST_EXCESS` kelvin or more above it is ice-free, and land
-    cells carry no ice. The fraction is the model's only state field,
-    ``state.ice_fraction``; ``forcing.sea_surface_temperature`` is its only
+    with ``w = params.ice_free_sst_excess``, so a cell at or below ``T_f`` is
+    fully covered, one ``w`` kelvin or more above it is ice-free, and land
+    cells carry no ice. The fraction is published as
+    ``derived.ice_fraction``; ``forcing.sea_surface_temperature`` is its only
     input, and wiring an ocean's SST to it through an exchanger is required
     for the model to do anything
     (``ocn.state.sea_surface_temperature -> seaice.forcing.sea_surface_temperature``
     in :data:`jem.exchangers.STANDARD_EXCHANGES`).
 
-    The ice does not feed back on the ocean: it takes no energy to form and
-    releases none when it goes, so the ocean's own freeze/melt diagnostic
-    (``derived.ice_frazil_melt_energy``) is not consumed by this model. What
+    The ice has no energy budget: it takes no energy to form and releases
+    none when it goes, so it does not take the ocean's freeze/melt potential
+    (``derived.ice_frazil_melt_energy``). The ocean it is coupled to must
+    therefore not clamp its mixed layer at the freezing point
+    (``SlabOceanParameters.clamp_at_freezing=False``, the default): the
+    mixed layer then keeps its own deficit below freezing, which is where
+    this model reads full ice cover from, and the energy stays in the ocean
+    rather than being created by a clamp with no ice to account for it. What
     the ice changes is the atmosphere's surface, through the fraction an
     exchanger routes to the atmosphere's ice-cover forcing (jcm's
-    ``sice_am``).
+    ``sice_am``, the ice fraction of the sea part of a cell).
 
     Initial condition
     -----------------
@@ -126,13 +134,23 @@ class SlabSeaiceModel(SlabModelBase):
         Raises
         ------
         ValueError
-            If the climatology has NaNs over this grid's ocean points.
+            If ``params.ice_free_sst_excess`` is not finite and strictly
+            positive, or the climatology has NaNs over this grid's ocean
+            points.
         FileNotFoundError
             If ``ice_clim_file`` does not exist.
 
         """
         super().__init__(name=name, grid=grid)
         self.params = SlabSeaiceParameters.default() if params is None else params
+        # The ramp divides by its width; checked here, where the value is
+        # concrete, because inside `step` it is a traced leaf.
+        width = float(self.params.ice_free_sst_excess)
+        if not math.isfinite(width) or width <= 0.0:
+            raise ValueError(
+                "params.ice_free_sst_excess must be a finite positive "
+                f"temperature difference in kelvin; got {width!r}."
+            )
 
         self.ice_clim_file = ice_clim_file
         self.ice_climatology = self._load(ice_clim_file, "icec")
@@ -193,10 +211,10 @@ class SlabSeaiceModel(SlabModelBase):
 
         return {
             "params": params,
-            "state": SeaiceState.zeros(
+            "forcing": SeaiceForcing.zeros(self.grid.shape),
+            "derived": SeaiceDerived.zeros(
                 self.grid.shape, ice_fraction=ice_fraction,
             ),
-            "forcing": SeaiceForcing.zeros(self.grid.shape),
         }
 
     def step(self, carry: Carry, time: CouplingTime) -> tuple[Carry, Diagnostics]:
@@ -207,36 +225,26 @@ class SlabSeaiceModel(SlabModelBase):
         apply and no seasonal cycle to look up.
         """
         params = carry["params"]
-        state = carry["state"]
         forcing = carry["forcing"]
         ocean = self._ocean_cells(params)
 
-        sea_surface_temperature = forcing.sea_surface_temperature
-
-        all_closed_temperature = constants.seawater_freezing_point_K
-        all_opened_temperature = all_closed_temperature + ICE_FREE_SST_EXCESS
-
-        ice_fraction = (
-            (all_opened_temperature - sea_surface_temperature)
-            / ICE_FREE_SST_EXCESS
+        width = params.ice_free_sst_excess
+        ice_free_temperature = constants.seawater_freezing_point_K + width
+        ice_fraction = jnp.clip(
+            (ice_free_temperature - forcing.sea_surface_temperature) / width,
+            0.0, 1.0,
         )
-        ice_fraction = jnp.clip(ice_fraction, 0.0, 1.0)
-        ice_fraction = jnp.where(ocean, ice_fraction, 0.0)
-
-        new_state = state.replace(
-            ice_fraction=ice_fraction,
+        derived = SeaiceDerived.zeros(
+            self.grid.shape, ice_fraction=jnp.where(ocean, ice_fraction, 0.0),
         )
 
-        diagnostics = {
-            "state": new_state,
-            "forcing": forcing,
-        }
+        diagnostics = {"forcing": forcing, "derived": derived}
         return {"params": params, **diagnostics}, diagnostics
 
     def _create_xarray_data_vars(self, diagnostics: Diagnostics) -> dict[str, Any]:
         """Create xarray data variables for sea-ice output."""
-        state = diagnostics["state"]
         forcing = diagnostics["forcing"]
+        derived = diagnostics["derived"]
         dims = ("time",) + self.grid.dims
 
         return {
@@ -257,11 +265,11 @@ class SlabSeaiceModel(SlabModelBase):
             ),
             "ice_fraction": (
                 dims,
-                state.ice_fraction,
+                derived.ice_fraction,
                 {
-                    "long_name": "Sea ice areal fraction",
+                    "long_name": "Sea ice fraction of the sea part of the cell",
                     "units": "1",
-                    **role_attrs("state"),
+                    **role_attrs("derived"),
                 },
             ),
         }

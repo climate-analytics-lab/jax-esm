@@ -7,7 +7,6 @@ import pytest
 
 from jem import constants
 from jem.components.slab.slab_seaice_model import (
-    ICE_FREE_SST_EXCESS,
     SlabSeaiceModel,
     SlabSeaiceParameters,
 )
@@ -18,6 +17,9 @@ from tests.unit.slab_test_utils import (
     make_grid,
     tree_signature,
 )
+
+#: The default ramp width, in kelvin.
+ICE_FREE_SST_EXCESS = SlabSeaiceParameters.default().ice_free_sst_excess
 
 
 @pytest.fixture
@@ -69,7 +71,7 @@ def test_ice_fraction_ramps_from_the_freezing_point(uniform_grid, excess, expect
         model, constants.seawater_freezing_point_K + excess)
 
     np.testing.assert_allclose(
-        np.asarray(stepped["state"].ice_fraction), expected, atol=1e-4
+        np.asarray(stepped["derived"].ice_fraction), expected, atol=1e-4
     )
 
 
@@ -82,7 +84,7 @@ def test_ice_fraction_follows_the_sst_cell_by_cell(uniform_grid):
     stepped = _step_with_sst(
         model, constants.seawater_freezing_point_K + excess)
 
-    fraction = np.asarray(stepped["state"].ice_fraction)
+    fraction = np.asarray(stepped["derived"].ice_fraction)
     np.testing.assert_allclose(
         fraction,
         np.clip(1.0 - np.asarray(excess) / ICE_FREE_SST_EXCESS, 0.0, 1.0),
@@ -98,7 +100,7 @@ def test_land_cells_carry_no_ice(half_land_grid):
     stepped = _step_with_sst(
         model, constants.seawater_freezing_point_K - 10.0)
 
-    fraction = np.asarray(stepped["state"].ice_fraction)
+    fraction = np.asarray(stepped["derived"].ice_fraction)
     land = np.asarray(half_land_grid.binary_mask == 1.0)
     np.testing.assert_allclose(fraction[land], 0.0)
     np.testing.assert_allclose(fraction[~land], 1.0)
@@ -112,7 +114,7 @@ def test_the_ice_has_no_memory(uniform_grid):
     """
     model = SlabSeaiceModel(uniform_grid)
     carry = model.initialize()
-    carry["state"] = carry["state"].replace(
+    carry["derived"] = carry["derived"].replace(
         ice_fraction=jnp.ones(uniform_grid.shape))
     carry["forcing"] = carry["forcing"].replace(
         sea_surface_temperature=jnp.full(
@@ -122,7 +124,7 @@ def test_the_ice_has_no_memory(uniform_grid):
     )
     stepped, _ = model.step(carry, coupling_time(0))
 
-    np.testing.assert_allclose(np.asarray(stepped["state"].ice_fraction), 0.0)
+    np.testing.assert_allclose(np.asarray(stepped["derived"].ice_fraction), 0.0)
 
 
 def test_params_default_equivalence(uniform_grid):
@@ -141,22 +143,23 @@ def test_params_default_equivalence(uniform_grid):
         np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
 
 
-def test_state_has_no_clock(uniform_grid):
-    """State carries no time, and the step does not depend on the date.
+def test_the_carry_has_no_state_and_no_clock(uniform_grid):
+    """Nothing evolves, and the step does not depend on the date.
 
-    The ice fraction is diagnosed from the SST the model is handed, so unlike
-    the ocean and land models it reads nothing from the clock at all.
+    The ice fraction is diagnosed from the SST the model is handed, so the
+    carry holds no state at all, and unlike the ocean it reads nothing from
+    the clock.
     """
     model = SlabSeaiceModel(uniform_grid)
-    assert "sim_time" not in model.initialize()["state"].asdict()
+    assert set(model.initialize()) == {"params", "forcing", "derived"}
 
     sst = constants.seawater_freezing_point_K + 0.5 * ICE_FREE_SST_EXCESS
     first = _step_with_sst(model, sst, step=0)
     later = _step_with_sst(model, sst, step=182)
 
     np.testing.assert_array_equal(
-        np.asarray(first["state"].ice_fraction),
-        np.asarray(later["state"].ice_fraction),
+        np.asarray(first["derived"].ice_fraction),
+        np.asarray(later["derived"].ice_fraction),
     )
 
 
@@ -182,7 +185,7 @@ def test_two_steps_scan_with_a_stable_carry(uniform_grid):
     def body(carry, step):
         new_carry, diagnostics = model.step(carry, coupling_time(0))
         del step
-        return new_carry, diagnostics["state"].ice_fraction
+        return new_carry, diagnostics["derived"].ice_fraction
 
     final, fractions = jax.lax.scan(body, carry, jnp.arange(2))
 
@@ -201,7 +204,7 @@ def test_step_is_differentiable_in_the_sst(uniform_grid):
             sea_surface_temperature=jnp.full(uniform_grid.shape, sst)
         )
         stepped, _ = model.step(carry, coupling_time(0))
-        return jnp.mean(stepped["state"].ice_fraction)
+        return jnp.mean(stepped["derived"].ice_fraction)
 
     freezing = constants.seawater_freezing_point_K
     on_ramp = jax.grad(mean_fraction)(freezing + 0.5 * ICE_FREE_SST_EXCESS)
@@ -213,8 +216,35 @@ def test_step_is_differentiable_in_the_sst(uniform_grid):
     assert float(jax.grad(mean_fraction)(freezing + 3.0 * ICE_FREE_SST_EXCESS)) == 0.0
 
 
+def test_the_ramp_width_is_a_differentiable_parameter(uniform_grid):
+    """The width travels in the carry: a wider ramp gives more cover at the
+    same SST, and jax.grad reaches it.
+    """
+    model = SlabSeaiceModel(uniform_grid)
+    sst = constants.seawater_freezing_point_K + 0.9
+
+    def mean_fraction(width):
+        carry = model.initialize(SlabSeaiceParameters(ice_free_sst_excess=width))
+        carry["forcing"] = carry["forcing"].replace(
+            sea_surface_temperature=jnp.full(uniform_grid.shape, sst))
+        stepped, _ = model.step(carry, coupling_time(0))
+        return jnp.mean(stepped["derived"].ice_fraction)
+
+    np.testing.assert_allclose(float(mean_fraction(1.8)), 0.5, atol=1e-4)
+    np.testing.assert_allclose(float(mean_fraction(3.6)), 0.75, atol=1e-4)
+    # d/dw (1 - x/w) = x / w**2 with x = 0.9 K.
+    np.testing.assert_allclose(
+        float(jax.grad(mean_fraction)(1.8)), 0.9 / 1.8**2, rtol=1e-3)
+
+
+@pytest.mark.parametrize("width", [0.0, -1.0, float("inf"), float("nan")])
+def test_a_ramp_width_that_cannot_divide_is_refused(uniform_grid, width):
+    with pytest.raises(ValueError, match="ice_free_sst_excess"):
+        SlabSeaiceModel(uniform_grid, SlabSeaiceParameters(ice_free_sst_excess=width))
+
+
 def test_output_variables_and_roles(uniform_grid):
-    """The dataset holds the fraction as state and the SST as a forcing."""
+    """The dataset holds the fraction as derived and the SST as a forcing."""
     import jax_datetime as jdt
 
     from jem.base.component import TimeAxis
@@ -233,7 +263,7 @@ def test_output_variables_and_roles(uniform_grid):
 
     assert set(dataset.data_vars) == {
         "ice_fraction", "forcing_sea_surface_temperature"}
-    assert dataset["ice_fraction"].attrs["jem_role"] == "state"
+    assert dataset["ice_fraction"].attrs["jem_role"] == "derived"
     assert dataset["forcing_sea_surface_temperature"].attrs["jem_role"] == "forcing"
     np.testing.assert_allclose(dataset["ice_fraction"].values, 0.5, atol=1e-4)
 
@@ -282,7 +312,7 @@ def test_initial_fraction_reproduces_the_climatology_at_the_start_date(
 
     model = _bind(SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file))
 
-    fraction = np.asarray(model.initialize()["state"].ice_fraction)
+    fraction = np.asarray(model.initialize()["derived"].ice_fraction)
     expected = np.asarray(evaluate_cyclic_linear(
         model.start_year_fraction,
         load_monthly_climatology(ice_clim_file, "icec", uniform_grid),
@@ -295,7 +325,7 @@ def test_initial_fraction_reproduces_the_climatology_at_the_start_date(
     january = _bind(
         SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
         start="2000-01-01",
-    ).initialize()["state"].ice_fraction
+    ).initialize()["derived"].ice_fraction
     assert float(np.asarray(january).min()) > fraction.max()
 
 
@@ -303,8 +333,8 @@ def test_without_a_climatology_the_run_starts_ice_free(uniform_grid):
     """No file, no ice: the first step's SST is what puts any there."""
     carry = _bind(SlabSeaiceModel(uniform_grid)).initialize()
 
-    assert np.asarray(carry["state"].ice_fraction).shape == uniform_grid.shape
-    np.testing.assert_array_equal(np.asarray(carry["state"].ice_fraction), 0.0)
+    assert np.asarray(carry["derived"].ice_fraction).shape == uniform_grid.shape
+    np.testing.assert_array_equal(np.asarray(carry["derived"].ice_fraction), 0.0)
 
 
 def test_the_first_step_replaces_the_climatological_cover(
@@ -315,11 +345,11 @@ def test_the_first_step_replaces_the_climatological_cover(
         SlabSeaiceModel(uniform_grid, ice_clim_file=ice_clim_file),
         start="2000-01-01",
     )
-    assert float(np.asarray(model.initialize()["state"].ice_fraction).min()) > 0.9
+    assert float(np.asarray(model.initialize()["derived"].ice_fraction).min()) > 0.9
 
     stepped = _step_with_sst(
         model, constants.seawater_freezing_point_K + 2.0 * ICE_FREE_SST_EXCESS)
-    np.testing.assert_allclose(np.asarray(stepped["state"].ice_fraction), 0.0)
+    np.testing.assert_allclose(np.asarray(stepped["derived"].ice_fraction), 0.0)
 
 
 def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
@@ -328,7 +358,7 @@ def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
         SlabSeaiceModel(half_land_grid, ice_clim_file=ice_clim_file),
         start="2000-01-01",
     )
-    fraction = np.asarray(model.initialize()["state"].ice_fraction)
+    fraction = np.asarray(model.initialize()["derived"].ice_fraction)
 
     land = np.asarray(half_land_grid.binary_mask == 1.0)
     assert fraction[land].max() == 0.0
@@ -376,7 +406,7 @@ def test_a_nan_land_fill_value_stays_out_of_the_initial_state(
 
     # Construction succeeds: the NaNs are over land, not ocean.
     model = _bind(SlabSeaiceModel(half_land_grid, ice_clim_file=path))
-    fraction = np.asarray(model.initialize()["state"].ice_fraction)
+    fraction = np.asarray(model.initialize()["derived"].ice_fraction)
 
     ocean = np.asarray(half_land_grid.binary_mask == 0.0)
     assert bool(np.all(np.isfinite(fraction)))

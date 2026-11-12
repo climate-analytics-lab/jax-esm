@@ -809,7 +809,7 @@ def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
     carries = coupler.initialize().components
 
-    ice_fraction = carries["seaice"]["state"].ice_fraction
+    ice_fraction = carries["seaice"]["derived"].ice_fraction
     assert float(jnp.max(ice_fraction)) > 0.9
     assert float(jnp.mean(ice_fraction)) > 0.01
     # A concentration: finite and within [0, 1] everywhere, land included.
