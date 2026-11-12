@@ -31,7 +31,6 @@ from jem import runners
 from jem.base.component import Carry, CouplingTime
 from jem.components.slab import (
     SlabAtmosphereParameters,
-    SlabLandParameters,
     SlabOceanParameters,
     SlabSeaiceParameters,
 )
@@ -153,7 +152,6 @@ def test_runners_has_no_component_kwargs():
         field.name
         for parameters in (
             SlabOceanParameters,
-            SlabLandParameters,
             SlabSeaiceParameters,
             SlabAtmosphereParameters,
         )
@@ -383,21 +381,19 @@ def test_the_shipped_ocean_options_ask_for_what_they_take():
 
 def test_missing_component_filters_exchanges():
     """A component the config leaves out takes its exchange rows with it."""
-    cfg = composed(["land=none"])
-    assert cfg.land is None
+    cfg = composed(["seaice=none"])
+    assert cfg.seaice is None
 
-    exchangers = runners.build_exchangers(
-        cfg, {"atm": None, "ocn": None, "seaice": None}, {}
-    )
+    exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
     specs = exchangers["exchange"].specs
     assert specs, "the remaining components still have rows to exchange"
-    assert not [spec for spec in specs if "lnd" in (spec.src + spec.dst)]
+    assert not [spec for spec in specs if "seaice" in (spec.src + spec.dst)]
 
-    with_land = runners.build_exchangers(
-        composed([]), {"atm": None, "ocn": None, "lnd": None}, {}
+    with_ice = runners.build_exchangers(
+        composed([]), {"atm": None, "ocn": None, "seaice": None}, {}
     )
-    assert [spec for spec in with_land["exchange"].specs
-            if "lnd" in (spec.src + spec.dst)]
+    assert [spec for spec in with_ice["exchange"].specs
+            if "seaice" in (spec.src + spec.dst)]
 
 
 def test_exchanger_path_replaces_the_list():
@@ -505,8 +501,8 @@ def test_earth_slab_couples_its_file_forcing(caplog):
 
     `earth-slab` gives the atmosphere jax-gcm's packaged T30 climatology, in
     which every surface boundary condition is a time-varying `TimeSeries`,
-    and then has the surface components overwrite five of them with plain
-    arrays every step. The runner has to tell the atmosphere which five, or
+    and then has the ocean and sea ice overwrite two of them with plain
+    arrays every step. The runner has to tell the atmosphere which two, or
     the carry changes pytree structure at the first exchange and no step can
     be scanned at all. Traced with `jax.eval_shape`: the structure check is a
     trace-time check, and tracing it costs no compilation.
@@ -523,8 +519,10 @@ def test_earth_slab_couples_its_file_forcing(caplog):
 
     # Read off the coupling table, not assumed: these are exactly the rows of
     # `jem.exchangers.STANDARD_EXCHANGES` that write into `atm.forcing`.
+    # The land fields stay the atmosphere's own climatology (SPEEDY's slab
+    # land integrates its anomaly about `stl_am`), so nothing writes them.
     assert set(coupler.components["atm"].exchanged_forcing) == {
-        "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am",
     }
     assert "derived from the exchanger table" in caplog.text
     for name in coupler.components["atm"].exchanged_forcing:
@@ -837,7 +835,7 @@ def test_earth_slab_ocean_starts_at_or_above_freezing():
     coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
     carries = coupler.initialize().components
 
-    ocean = np.asarray(coupler.components["ocn"].grid.binary_mask == 0.0)
+    ocean = np.asarray(coupler.components["ocn"].grid.ocean_mask)
     sea_surface_temperature = np.asarray(
         carries["ocn"]["state"].sea_surface_temperature
     )

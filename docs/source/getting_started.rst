@@ -12,7 +12,7 @@ Install JEM
     # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git checkout f378069090b127badbb158b06e2767f3be8f436c
+    git checkout 932d9cc2f331faebcbab745895f347c4de295b3b
     pip install -e "."
     cd ..
 

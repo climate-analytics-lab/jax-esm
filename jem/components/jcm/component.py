@@ -63,6 +63,8 @@ import xarray as xr
 from jcm.date import DateData
 from jcm.forcing import ForcingData, TimeSeries, default_forcing
 from jcm.model import Model
+from jcm.physics.surface.surface_exchange import SURFACE_EXCHANGE_KEY
+from jcm.physics_interface import POST_PHYSICS_STATE_KEY
 from jcm.predictions import ModelPredictions
 
 from jem.base.component import (
@@ -110,10 +112,20 @@ class JCMDerived:
     JEM's conventions (see
     :class:`~jem.components.jcm.exchange_fields.SurfaceExchange`).
 
-    ``total_freshwater_flux`` is ``evaporation - precipitation``: positive
-    upward, ``kg m-2 s-1``. It is stored rather than recomputed by each
-    exchanger because that is the quantity an ocean or land surface takes,
-    and one definition of the sign is safer than several.
+    The unprefixed fluxes are grid-cell means over land and sea; the
+    ``sea_*`` ones are over the sea part of the cell alone, which is what an
+    ocean takes (see :mod:`jem.components.jcm.exchange_fields`).
+    ``sea_fraction`` is that part, ``1 - fmask`` of the atmosphere's terrain
+    (the fraction SPEEDY's sea tile covers): a regridder weights the
+    ``sea_*`` fields by it, so an ocean cell on another grid takes nothing
+    from an atmosphere cell with no sea in it
+    (:func:`jem.exchangers.regrid_weighted`).
+
+    ``total_freshwater_flux`` is ``evaporation - precipitation`` and
+    ``sea_total_freshwater_flux`` is ``sea_evaporation - precipitation``:
+    positive upward, ``kg m-2 s-1``. They are stored rather than recomputed
+    by each exchanger because that is the quantity an ocean takes, and one
+    definition of the sign is safer than several.
     """
 
     physics: Any
@@ -125,6 +137,12 @@ class JCMDerived:
     northward_wind_stress: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_evaporation: jnp.ndarray
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
     def zeros(cls, shape, physics, **overrides):
@@ -154,6 +172,12 @@ class JCMDerived:
                 "northward_wind_stress",
                 "u0",
                 "v0",
+                "sea_total_heat_flux",
+                "sea_total_freshwater_flux",
+                "sea_evaporation",
+                "sea_eastward_wind_stress",
+                "sea_northward_wind_stress",
+                "sea_fraction",
             )
         }
         return cls(physics, **fields)
@@ -188,9 +212,11 @@ def _with_model_context(predictions: ModelPredictions,
 def _diagnostics_template(model: Model) -> Any:
     """Structural template matching one step's saved physics diagnostics.
 
-    Built from ``Physics.get_empty_data(coords)``, minus the
-    ``_sampler_state`` entry, which stays in the integration carry but is
-    never saved. That lets :meth:`JCMComponent.initialize` seed
+    Built from ``Physics.get_empty_data(coords)``, minus the two entries that
+    stay in the integration carry but are never saved: the ``_sampler_state``
+    snapshot and the cloud schemes' post-physics anchor
+    (``POST_PHYSICS_STATE_KEY``; jax-gcm strips both, as
+    ``jcm.model._UNSAVED_CARRY_SLOTS``). That lets :meth:`JCMComponent.initialize` seed
     ``JCMDerived.physics`` with the exact structure, shapes and dtypes step 1
     will produce without integrating a step to find out.
 
@@ -206,7 +232,8 @@ def _diagnostics_template(model: Model) -> Any:
     rather than assumed.
     """
     template = model.physics.get_empty_data(model.coords)
-    template = {k: v for k, v in template.items() if k != "_sampler_state"}
+    unsaved = {"_sampler_state", POST_PHYSICS_STATE_KEY}
+    template = {k: v for k, v in template.items() if k not in unsaved}
     return jax.tree.map(
         lambda leaf: (
             jnp.zeros_like(leaf, dtype=float)
@@ -379,6 +406,12 @@ class JCMComponent:
         self._coupling_days: float | None = None
 
     @property
+    def sea_fraction(self) -> jnp.ndarray:
+        """The sea part of each cell, ``1 - terrain.fmask``, on ``nodal_shape``."""
+        fmask = jnp.asarray(self.model.terrain.fmask)
+        return 1.0 - fmask.reshape(self.nodal_shape)
+
+    @property
     def exchanged_forcing(self) -> tuple[str, ...]:
         """Forcing fields the coupled model supplies, in the order declared."""
         return self._exchanged_forcing
@@ -539,13 +572,21 @@ class JCMComponent:
         dycore_state, physics_carry = self.model.bootstrap_state(self.initial_state)
         if self.initial_physics_state is not None:
             physics_carry = self.initial_physics_state
+        template = _diagnostics_template(self.model)
+        exchange = template.get(SURFACE_EXCHANGE_KEY)
+        if exchange is not None and not exchange_fields.publishes_sea_tiles(exchange):
+            logger.warning(
+                "%s: the atmosphere's physics publishes no sea-tile fluxes, so "
+                "its sea_* fields are the grid-cell means and an ocean on a "
+                "partly-land cell also receives the land part's flux "
+                "(docs/source/design/exchange.md).", self.name)
         return {
             "state": dycore_state,
             "physics": physics_carry,
             "time": self.model.start_time,
             "step": jnp.int32(0),
             "derived": JCMDerived.zeros(
-                self.nodal_shape, _diagnostics_template(self.model)),
+                self.nodal_shape, template, sea_fraction=self.sea_fraction),
             "forcing": _collapse_exchanged_forcing(
                 self.forcing,
                 self._exchanged_forcing,
@@ -613,6 +654,13 @@ class JCMComponent:
             northward_wind_stress=exchange.northward_wind_stress,
             u0=exchange.u0,
             v0=exchange.v0,
+            sea_total_heat_flux=exchange.sea_total_heat_flux,
+            sea_total_freshwater_flux=(
+                exchange.sea_evaporation - exchange.precipitation),
+            sea_evaporation=exchange.sea_evaporation,
+            sea_eastward_wind_stress=exchange.sea_eastward_wind_stress,
+            sea_northward_wind_stress=exchange.sea_northward_wind_stress,
+            sea_fraction=self.sea_fraction,
         )
         return (
             {

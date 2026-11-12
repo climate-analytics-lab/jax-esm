@@ -79,11 +79,18 @@ class OceanDerived:
     constant zero presented as an active forcing in a run that applies none.
     It travels instead as the :data:`_Q_FLUX_SNAPSHOT` key of the step's
     diagnostics, which is present only when a Q-flux was actually applied.
+
+    ``sea_fraction`` is the sea part of each cell, ``1 - fractional_mask`` of
+    the grid: what a regridded row from this ocean onto another grid is
+    weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
+    cell takes the SST of the sea under it and nothing of the land cells'
+    fill value.
     """
 
     mixed_layer_depth: jnp.ndarray
     ice_frazil_melt_energy: jnp.ndarray
     effective_total_heat_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -92,11 +99,13 @@ class OceanDerived:
         mixed_layer_depth=None,
         ice_frazil_melt_energy=None,
         effective_total_heat_flux=None,
+        sea_fraction=None,
     ):
         return cls(
             mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
             ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
             effective_total_heat_flux if effective_total_heat_flux is not None else jnp.zeros(shape),
+            sea_fraction if sea_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -322,7 +331,7 @@ class SlabOceanModel(SlabModelBase):
         self.q_flux_climatology = self._load(q_flux_file, "qflux")
 
         if self.sst_climatology is not None:
-            ocean = self._ocean_cells(self.params)
+            ocean = self._ocean_cells()
             if bool(jnp.any(jnp.isnan(self.sst_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
@@ -411,9 +420,11 @@ class SlabOceanModel(SlabModelBase):
         logger.info("%s: loading %r climatology from %s", self.name, var, path)
         return load_monthly_climatology(path, var, self.grid)
 
-    def _ocean_cells(self, params: SlabOceanParameters) -> jnp.ndarray:
-        """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
+    def _ocean_cells(self) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates: every cell with
+        any ocean, coast cells included (see :class:`SlabGrid`).
+        """
+        return self.grid.ocean_mask
 
     def initialize(self, params: SlabOceanParameters | None = None) -> Carry:
         """Build the initial ocean carry.
@@ -443,7 +454,7 @@ class SlabOceanModel(SlabModelBase):
         """
         params = self._initial_params(params)
         self._check_forcing_configuration(params)
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
 
         if self.sst_climatology is not None:
             sea_surface_temperature = evaluate_cyclic_linear(
@@ -482,6 +493,7 @@ class SlabOceanModel(SlabModelBase):
             "derived": OceanDerived.zeros(
                 self.grid.shape,
                 mixed_layer_depth=self._mixed_layer_depth(params),
+                sea_fraction=1.0 - self.grid.fractional_mask,
             ),
         }
 
@@ -501,7 +513,7 @@ class SlabOceanModel(SlabModelBase):
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
 
         # From the CARRIED parameters, every step: a depth cached at
         # initialization would make `mixed_layer_depth_min/max` dead
@@ -581,6 +593,7 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth=mixed_layer_depth,
             ice_frazil_melt_energy=ice_frazil_melt_energy,
             effective_total_heat_flux=total_heat_flux,
+            sea_fraction=1.0 - self.grid.fractional_mask,
         )
 
         new_carry = {

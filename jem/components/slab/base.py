@@ -200,8 +200,8 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
 
     Lives on the slab base module because every slab component reads its
     boundary conditions as ``(n_lon, n_lat, 12)`` monthly climatologies on the
-    model grid: the ocean uses it for SST and Q-flux, the land model for its
-    surface temperature, snow and soil water.
+    model grid: the ocean uses it for SST and Q-flux, the sea ice for its
+    initial ice cover.
 
     Parameters
     ----------
@@ -310,7 +310,8 @@ class SlabModelBase(ABC):
 
     - **Process parameters** are read by :meth:`step` out of
       ``carry["params"]`` every step (the ocean's ``relaxation_time``, the
-      land's ``tdland``). Vary one by replacing that leaf in the carry.
+      sea ice's ``ice_free_sst_excess``). Vary one by replacing that leaf in
+      the carry.
     - **Initial-condition parameters** are read once, by :meth:`initialize`,
       and never again (the ocean's ``initial_sst``, the slab atmosphere's
       ``initial_*``). Replacing such a leaf in a carry that

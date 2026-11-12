@@ -135,7 +135,7 @@ components = {
 # Written out by hand, this is exactly what default_exchangers(components)
 # below builds: the standard rows filtered to the components present.
 table = Exchange([
-    ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
+    ExchangeSpec("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"),
     ExchangeSpec("ocn.state.sea_surface_temperature",
                  "seaice.forcing.sea_surface_temperature"),
     ExchangeSpec("ocn.state.sea_surface_temperature",

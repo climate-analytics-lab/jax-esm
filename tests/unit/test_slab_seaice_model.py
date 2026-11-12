@@ -101,7 +101,7 @@ def test_land_cells_carry_no_ice(half_land_grid):
         model, constants.seawater_freezing_point_K - 10.0)
 
     fraction = np.asarray(stepped["derived"].ice_fraction)
-    land = np.asarray(half_land_grid.binary_mask == 1.0)
+    land = np.asarray(half_land_grid.land_mask)
     np.testing.assert_allclose(fraction[land], 0.0)
     np.testing.assert_allclose(fraction[~land], 1.0)
 
@@ -360,7 +360,7 @@ def test_land_cells_carry_no_climatological_ice(half_land_grid, ice_clim_file):
     )
     fraction = np.asarray(model.initialize()["derived"].ice_fraction)
 
-    land = np.asarray(half_land_grid.binary_mask == 1.0)
+    land = np.asarray(half_land_grid.land_mask)
     assert fraction[land].max() == 0.0
     assert fraction[~land].min() > 0.9
 
@@ -399,7 +399,7 @@ def test_a_nan_land_fill_value_stays_out_of_the_initial_state(
     # `half_land_grid`'s land half is the eastern two of its four longitudes
     # (see the fixture); write the file in its own (time, lat, lon) order and
     # NaN exactly those columns, leaving the ocean half a plain 0.5 everywhere.
-    land_lat_lon = np.asarray(half_land_grid.binary_mask == 1.0).T
+    land_lat_lon = np.asarray(half_land_grid.land_mask).T
     values = np.full((12,) + half_land_grid.shape[::-1], 0.5, dtype=np.float32)
     values[:, land_lat_lon] = np.nan
     path = write_climatology(tmp_path / "icec_nan_land.nc", "icec", values)
@@ -408,7 +408,7 @@ def test_a_nan_land_fill_value_stays_out_of_the_initial_state(
     model = _bind(SlabSeaiceModel(half_land_grid, ice_clim_file=path))
     fraction = np.asarray(model.initialize()["derived"].ice_fraction)
 
-    ocean = np.asarray(half_land_grid.binary_mask == 0.0)
+    ocean = np.asarray(half_land_grid.ocean_mask)
     assert bool(np.all(np.isfinite(fraction)))
     np.testing.assert_array_equal(fraction[~ocean], 0.0)
     np.testing.assert_allclose(fraction[ocean], 0.5, atol=1e-6)

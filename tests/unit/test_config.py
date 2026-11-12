@@ -331,7 +331,8 @@ def test_named_configurations_set_non_default_values():
     assert earth.ocean.params.forcing_method == "relaxation"
     # 30 days, against the model's own 60.
     assert earth.ocean.params.relaxation_time == 30 * 86400
-    assert earth.land.params.tdland == 86400.0
+    # The land is the atmosphere's own (SPEEDY's slab): no land component.
+    assert earth.land is None
 
 
 # ---------------------------------------------------------------------------

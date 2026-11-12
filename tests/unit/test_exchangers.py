@@ -1,12 +1,11 @@
 """Tests for ``jem.exchangers`` -- the declarative form of an exchanger.
 
-The components here are the three real slab surface models (ocean, land, sea
-ice) on a 4x3 grid, coupled to a **stub atmosphere**. The stub exists because
-the standard wiring is defined against the atmosphere JAX-ESM couples in
+The components here are the two real slab surface models (ocean, sea ice) on a
+4x3 grid, coupled to a **stub atmosphere**. The stub exists because the
+standard wiring is defined against the atmosphere JAX-ESM couples in
 practice, which is JCM: the fields it receives are JCM's own boundary
-conditions (``sice_am``, ``stl_am``, ``snowc_am``, ``soilw_am``,
-``sea_surface_temperature``) and the flux it publishes is
-``derived.total_heat_flux``. ``SlabAtmosphereModel`` is a toy with its own,
+conditions (``sice_am``, ``sea_surface_temperature``) and the flux an ocean
+takes from it is ``derived.sea_total_heat_flux``. ``SlabAtmosphereModel`` is a toy with its own,
 different names -- it has no ``sice_am`` and calls its flux
 ``internal_total_heat_flux`` -- so it cannot stand in for JCM here, and
 building a real JCM model would make these tests a minute long apiece for no
@@ -32,11 +31,11 @@ from jem.base.component import CoupledCarry
 from jem.base.coupler import Coupler
 from jem.components.slab import (
     SlabGrid,
-    SlabLandModel,
     SlabOceanModel,
     SlabSeaiceModel,
 )
 from jem.exchangers import (
+    ATMOSPHERE_SEA_FRACTION,
     VEROS_OCEAN_EXCHANGES,
     Exchange,
     ExchangeSpec,
@@ -44,6 +43,7 @@ from jem.exchangers import (
     default_exchanges,
     default_workflow,
     read_field,
+    regrid_weighted,
     replace_field,
 )
 from tests.unit.slab_test_utils import make_grid
@@ -55,14 +55,10 @@ COUPLING_TIMESTEP = jdt.to_timedelta(1, "day")
 #: test: if a spec is added, removed or re-pointed, this table has to be
 #: edited too, deliberately.
 EXPECTED_SPECS = (
-    ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
-    ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"),
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"),
     ("ocn.state.sea_surface_temperature", "seaice.forcing.sea_surface_temperature"),
     ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am"),
-    ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"),
-    ("lnd.state.snowc", "atm.forcing.snowc_am"),
-    ("lnd.state.soilw", "atm.forcing.soilw_am"),
 )
 
 
@@ -79,19 +75,21 @@ class _AtmosphereState:
 @tree_math.struct
 class _AtmosphereDerived:
     total_heat_flux: jnp.ndarray
-    # Published by `JCMDerived` too, and taken by a Veros ocean (a slab does
-    # not read it), so the stub has to carry it or the Veros table could not
-    # be checked against a JCM-shaped atmosphere at all.
-    total_freshwater_flux: jnp.ndarray
+    # The fluxes over the sea part of the cell, which is what an ocean takes
+    # (`JCMDerived.sea_*`); the freshwater flux is taken by a Veros ocean (a
+    # slab does not read it), so the stub has to carry it or the Veros table
+    # could not be checked against a JCM-shaped atmosphere at all.
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    # The part of each cell the `sea_*` fields are over (`JCMDerived`'s);
+    # a regridded row weights them by it.
+    sea_fraction: jnp.ndarray
 
 
 @tree_math.struct
 class _AtmosphereForcing:
     sea_surface_temperature: jnp.ndarray
     sice_am: jnp.ndarray
-    stl_am: jnp.ndarray
-    snowc_am: jnp.ndarray
-    soilw_am: jnp.ndarray
 
 
 class StubAtmosphere:
@@ -110,25 +108,25 @@ class StubAtmosphere:
         zeros = jnp.zeros(self.shape)
         return {
             "state": _AtmosphereState(zeros + 280.0),
-            "derived": _AtmosphereDerived(zeros, zeros),
-            "forcing": _AtmosphereForcing(zeros, zeros, zeros, zeros, zeros),
+            "derived": _AtmosphereDerived(zeros, zeros, zeros, zeros + 1.0),
+            "forcing": _AtmosphereForcing(zeros, zeros),
         }
 
     def step(self, carry, time):
         del time
         forcing = carry["forcing"]
         state = carry["state"]
-        surface_temperature = (
-            forcing.sea_surface_temperature * (1.0 - forcing.sice_am)
-            + forcing.stl_am * forcing.sice_am
-        )
+        # The ice fraction enters weakly, so it too is load-bearing.
+        surface_temperature = forcing.sea_surface_temperature * (
+            1.0 - 0.01 * forcing.sice_am)
         flux = 10.0 * (surface_temperature - state.air_temperature)
-        # The snow and soil fields enter weakly, so they too are load-bearing.
-        flux = flux * (1.0 + 0.01 * forcing.snowc_am + 0.01 * forcing.soilw_am)
         new_state = _AtmosphereState(state.air_temperature + 1e-3 * flux)
+        # The sea-part flux differs from the cell mean, so a row that moved
+        # the mean in its place would change the run.
         new_carry = {
             "state": new_state,
-            "derived": _AtmosphereDerived(flux, 1e-5 * flux),
+            "derived": _AtmosphereDerived(
+                flux, 0.9 * flux, 0.9e-5 * flux, carry["derived"].sea_fraction),
             "forcing": forcing,
         }
         return new_carry, {"air_temperature": new_state.air_temperature}
@@ -141,8 +139,8 @@ class StubAtmosphere:
 #: The Veros rows of the standard wiring, written out independently of the
 #: module under test, exactly as EXPECTED_SPECS is for the slab table.
 EXPECTED_VEROS_SPECS = (
-    ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"),
-    ("atm.derived.total_freshwater_flux", "ocn.forcing.freshwater_flux"),
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux"),
+    ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux"),
     ("ocn.derived.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
 )
 
@@ -164,6 +162,7 @@ class _VerosLikeDerived:
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
 
 @tree_math.struct
@@ -197,7 +196,7 @@ class StubVerosOcean:
         zeros = jnp.zeros(self.shape)
         return {
             "state": _VerosLikeState(zeros + 285.0),
-            "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros),
+            "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros, zeros + 1.0),
             "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros),
         }
 
@@ -216,7 +215,7 @@ class StubVerosOcean:
             "state": _VerosLikeState(temperature),
             "derived": _VerosLikeDerived(
                 temperature, carry["derived"].sea_surface_u,
-                carry["derived"].sea_surface_v,
+                carry["derived"].sea_surface_v, carry["derived"].sea_fraction,
             ),
             "forcing": forcing,
         }
@@ -257,7 +256,6 @@ def build_components() -> dict:
     return {
         "atm": StubAtmosphere(grid.fractional_mask.shape),
         "ocn": SlabOceanModel(grid),
-        "lnd": SlabLandModel(grid),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
     }
 
@@ -302,9 +300,9 @@ def test_default_exchanges_is_the_documented_table(components):
     [
         (("atm", "ocn"), 2),
         (("atm", "ocn", "seaice"), 4),
-        (("atm", "ocn", "lnd"), 6),
-        (("atm", "ocn", "lnd", "seaice"), 8),
-        (("ocn", "lnd"), 0),
+        # The land is the atmosphere's own: a land component has no rows.
+        (("atm", "ocn", "lnd"), 2),
+        (("ocn", "seaice"), 1),
     ],
 )
 def test_default_exchanges_filters_to_present_components(present, expected):
@@ -340,7 +338,7 @@ def test_default_exchanges_ignores_components_it_has_no_wiring_for():
     """An unrecognised component name is simply not wired, not an error."""
     specs = default_exchanges(("atm", "ocn", "spring", "chemistry"))
     assert [(spec.src, spec.dst) for spec in specs] == [
-        ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"),
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature"),
     ]
 
@@ -351,7 +349,7 @@ def test_default_workflow_matches_coupler_default(components):
     coupler = build_coupler(components, exchangers)
     assert coupler.workflow == tuple(default_workflow(components, exchangers))
     assert list(default_workflow(components, exchangers)) == [
-        "exchange", "atm", "ocn", "lnd", "seaice",
+        "exchange", "atm", "ocn", "seaice",
     ]
 
 
@@ -382,11 +380,7 @@ def test_exchange_roundtrip(components):
     # Values moved: each destination now holds the very array the source did.
     assert (
         exchanged["ocn"]["forcing"].total_heat_flux
-        is incoming["atm"]["derived"].total_heat_flux
-    )
-    assert (
-        exchanged["lnd"]["forcing"].total_heat_flux
-        is incoming["atm"]["derived"].total_heat_flux
+        is incoming["atm"]["derived"].sea_total_heat_flux
     )
     assert (
         exchanged["seaice"]["forcing"].sea_surface_temperature
@@ -398,12 +392,6 @@ def test_exchange_roundtrip(components):
         is incoming["ocn"]["state"].sea_surface_temperature
     )
     assert atmosphere_forcing.sice_am is incoming["seaice"]["derived"].ice_fraction
-    assert (
-        atmosphere_forcing.stl_am
-        is incoming["lnd"]["state"].land_surface_temperature
-    )
-    assert atmosphere_forcing.snowc_am is incoming["lnd"]["state"].snowc
-    assert atmosphere_forcing.soilw_am is incoming["lnd"]["state"].soilw
 
     # Nothing was written in place: the mapping, the carries and every leaf
     # the exchanger was handed are exactly as they were.
@@ -443,20 +431,16 @@ def readme_style_exchange(components, time):
 
     Assembled from the exchangers in ``README.md``,
     ``examples/01_basic/01_aquaplanet.ipynb`` and
-    ``examples/02_experimental/01_earth.ipynb`` -- the same eight fields the
+    ``examples/02_experimental/01_earth.ipynb`` -- the same four fields the
     declarative default moves, in the same direction.
     """
     del time
     atm = components["atm"]
     ocn = components["ocn"]
-    lnd = components["lnd"]
     seaice = components["seaice"]
 
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
-        total_heat_flux=atm["derived"].total_heat_flux,
-    ))
-    lnd = dict(lnd, forcing=lnd["forcing"].replace(
-        total_heat_flux=atm["derived"].total_heat_flux,
+        total_heat_flux=atm["derived"].sea_total_heat_flux,
     ))
     seaice = dict(seaice, forcing=seaice["forcing"].replace(
         sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
@@ -464,11 +448,8 @@ def readme_style_exchange(components, time):
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=components["ocn"]["state"].sea_surface_temperature,
         sice_am=seaice["derived"].ice_fraction,
-        stl_am=lnd["state"].land_surface_temperature,
-        snowc_am=lnd["state"].snowc,
-        soilw_am=lnd["state"].soilw,
     ))
-    return dict(components, atm=atm, ocn=ocn, lnd=lnd, seaice=seaice)
+    return dict(components, atm=atm, ocn=ocn, seaice=seaice)
 
 
 def test_default_exchange_matches_the_readme_exchanger():
@@ -561,7 +542,7 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
     hand -- and the rows that stay on one grid get no regridder at all.
     """
     specs = default_exchanges(
-        ("atm", "ocn", "lnd", "seaice"),
+        ("atm", "ocn", "seaice"),
         regrid={
             "a2o_flux": "a2o_conserve",
             "o2a_flux": "o2a_conserve",
@@ -569,17 +550,132 @@ def test_default_exchanges_places_regridders_by_direction_and_kind():
         },
     )
     assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
-        ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"): "a2o_conserve",
-        ("atm.derived.total_heat_flux", "lnd.forcing.total_heat_flux"): None,
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"): "a2o_conserve",
         ("ocn.state.sea_surface_temperature",
          "seaice.forcing.sea_surface_temperature"): None,
         ("ocn.state.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
         ("seaice.derived.ice_fraction", "atm.forcing.sice_am"): "o2a_conserve",
-        ("lnd.state.land_surface_temperature", "atm.forcing.stl_am"): None,
-        ("lnd.state.snowc", "atm.forcing.snowc_am"): None,
-        ("lnd.state.soilw", "atm.forcing.soilw_am"): None,
     }
+    # Every regridded row is weighted by the sea part of its source's cells:
+    # the atmosphere's for its flux, the ocean grid's for the SST and ice.
+    assert {(spec.src, spec.dst): spec.weight for spec in specs if spec.weight} == {
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"):
+            ATMOSPHERE_SEA_FRACTION,
+        ("ocn.state.sea_surface_temperature",
+         "atm.forcing.sea_surface_temperature"): "ocn.derived.sea_fraction",
+        ("seaice.derived.ice_fraction", "atm.forcing.sice_am"):
+            "seaice.derived.sea_fraction",
+    }
+
+
+def test_rows_on_one_grid_are_not_weighted():
+    """With no regridder a row is a copy, so it carries no weight either."""
+    specs = default_exchanges(("atm", "ocn", "seaice"))
+    assert all(spec.weight is None for spec in specs)
+
+
+# ---------------------------------------------------------------------------
+# Regridding a field defined over part of each cell
+# ---------------------------------------------------------------------------
+
+
+def _pair_mean(field):
+    """Map 4 equal source cells conservatively onto 2: each pair's mean."""
+    return 0.5 * (field[0::2] + field[1::2])
+
+
+def test_regrid_weighted_ignores_source_cells_without_the_fraction():
+    """A destination cell takes the value over the weighted part only.
+
+    The first destination cell overlaps one all-sea and one all-land source
+    cell: it takes the sea cell's value, not their mean. The second overlaps
+    two partly-sea cells: their values weighted by each one's sea part.
+    """
+    value = jnp.array([10.0, 1000.0, 20.0, 40.0])
+    weight = jnp.array([1.0, 0.0, 0.25, 0.75])
+    np.testing.assert_allclose(
+        regrid_weighted(_pair_mean, value, weight),
+        [10.0, (0.25 * 20.0 + 0.75 * 40.0) / 1.0],
+    )
+    # Unweighted, the all-land cell's value would have been averaged in.
+    np.testing.assert_allclose(_pair_mean(value)[0], 505.0)
+
+
+def test_regrid_weighted_falls_back_where_there_is_no_fraction_at_all():
+    """A destination cell over source cells with none of the fraction takes
+    the plain regridded value: there is nothing else to give it, and it must
+    not be a division by zero.
+    """
+    value = jnp.array([10.0, 30.0, 20.0, 40.0])
+    weight = jnp.array([0.0, 0.0, 1.0, 1.0])
+    result = regrid_weighted(_pair_mean, value, weight)
+    np.testing.assert_allclose(result, [20.0, 30.0])
+    gradient = jax.grad(
+        lambda v: jnp.sum(regrid_weighted(_pair_mean, v, weight)))(value)
+    assert bool(jnp.all(jnp.isfinite(gradient)))
+
+
+def test_regrid_weighted_conserves_the_weighted_integral():
+    """On equal-area cells, the destination's weighted total is the source's."""
+    value = jnp.array([10.0, 1000.0, 20.0, 40.0])
+    weight = jnp.array([1.0, 0.0, 0.25, 0.75])
+    mapped_weight = _pair_mean(weight)
+    np.testing.assert_allclose(
+        jnp.sum(mapped_weight * regrid_weighted(_pair_mean, value, weight)) * 2,
+        jnp.sum(weight * value),
+    )
+
+
+def test_an_exchange_regrids_a_weighted_spec_by_its_weight():
+    """``Exchange`` reads the weight from the incoming carries and uses it."""
+    @tree_math.struct
+    class _Fields:
+        flux: jnp.ndarray
+        fraction: jnp.ndarray
+
+    @tree_math.struct
+    class _Forcing:
+        flux: jnp.ndarray
+
+    carries = {
+        "atm": {"derived": _Fields(jnp.array([10.0, 1000.0, 20.0, 40.0]),
+                                   jnp.array([1.0, 0.0, 0.25, 0.75]))},
+        "ocn": {"forcing": _Forcing(jnp.zeros(2))},
+    }
+    exchange = Exchange(
+        [ExchangeSpec("atm.derived.flux", "ocn.forcing.flux", "a2o",
+                      weight="atm.derived.fraction")],
+        {"a2o": _pair_mean},
+    )
+    exchange.validate(carries)
+    out = exchange(carries, None)
+    np.testing.assert_allclose(out["ocn"]["forcing"].flux, [10.0, 35.0])
+
+    bad = Exchange(
+        [ExchangeSpec("atm.derived.flux", "ocn.forcing.flux", "a2o",
+                      weight="atm.derived.sea_fraction")],
+        {"a2o": _pair_mean},
+    )
+    with pytest.raises(ValueError, match="atm.derived.sea_fraction"):
+        bad.validate(carries)
+
+
+def test_a_weight_without_a_regridder_is_refused():
+    """On one grid a weight would be silently unused, so it is an error."""
+    with pytest.raises(ValueError, match="no regridder"):
+        ExchangeSpec("atm.derived.flux", "ocn.forcing.flux",
+                     weight="atm.derived.fraction")
+
+
+def test_a_yaml_spec_can_name_a_weight():
+    spec = exchangers._as_spec({
+        "src": "atm.derived.flux", "dst": "ocn.forcing.flux",
+        "regrid": "a2o", "weight": "atm.derived.fraction",
+    })
+    assert spec.weight == "atm.derived.fraction"
+    assert str(spec) == (
+        "atm.derived.flux -> ocn.forcing.flux  [a2o, weighted by atm.derived.fraction]")
 
 
 # ---------------------------------------------------------------------------
@@ -661,12 +757,71 @@ def test_the_veros_sst_is_regridded_as_a_state_though_it_comes_from_derived(
         regrid={"a2o_flux": "a2o_conserve", "o2a_state": "o2a_bilinear"},
     )
     assert {(spec.src, spec.dst): spec.regrid for spec in specs} == {
-        ("atm.derived.total_heat_flux", "ocn.forcing.heat_flux"): "a2o_conserve",
-        ("atm.derived.total_freshwater_flux",
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux"): "a2o_conserve",
+        ("atm.derived.sea_total_freshwater_flux",
          "ocn.forcing.freshwater_flux"): "a2o_conserve",
         ("ocn.derived.sea_surface_temperature",
          "atm.forcing.sea_surface_temperature"): "o2a_bilinear",
     }
+    assert {(spec.src, spec.dst): spec.weight for spec in specs if spec.weight} == {
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux"):
+            ATMOSPHERE_SEA_FRACTION,
+        ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux"):
+            ATMOSPHERE_SEA_FRACTION,
+        ("ocn.derived.sea_surface_temperature",
+         "atm.forcing.sea_surface_temperature"): "ocn.derived.sea_fraction",
+    }
+
+
+def test_the_ocean_grid_rows_validate_with_their_weights(components):
+    """The weights the slab table names exist on the slab carries, on the
+    source grid; a mixed-grid table built from it passes the pre-flight.
+    """
+    identity = lambda field: field  # noqa: E731 - a stand-in regridder
+    exchange = default_exchangers(components, regrid={
+        "a2o": identity, "o2a": identity})["exchange"]
+    carries = {name: component.initialize()
+               for name, component in components.items()}
+    exchange.validate(carries)
+    for name in ("ocn", "seaice"):
+        np.testing.assert_array_equal(
+            carries[name]["derived"].sea_fraction,
+            1.0 - components[name].grid.fractional_mask)
+
+
+def test_a_weight_off_the_source_grid_is_refused_at_validate():
+    """A weight on another grid is named at the pre-flight, not left to a
+    broadcasting error at trace time.
+    """
+    @tree_math.struct
+    class _Fields:
+        flux: jnp.ndarray
+        fraction: jnp.ndarray
+
+    @tree_math.struct
+    class _Forcing:
+        flux: jnp.ndarray
+
+    carries = {
+        "atm": {"derived": _Fields(jnp.zeros(4), jnp.zeros(2))},
+        "ocn": {"forcing": _Forcing(jnp.zeros(2))},
+    }
+    exchange = Exchange(
+        [ExchangeSpec("atm.derived.flux", "ocn.forcing.flux", "a2o",
+                      weight="atm.derived.fraction")],
+        {"a2o": _pair_mean},
+    )
+    with pytest.raises(ValueError, match="source grid"):
+        exchange.validate(carries)
+
+
+def test_a_standard_component_with_no_rows_is_named(caplog):
+    """A component under a standard name that no row mentions -- a land
+    with no land rows -- is stepped unforced, which is worth a warning.
+    """
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        default_exchanges(("atm", "ocn", "lnd"))
+    assert "'lnd'" in caplog.text and "no row" in caplog.text
 
 
 def test_a_slab_ocean_still_gets_the_slab_table(components, veros_module):
@@ -738,7 +893,7 @@ def test_a_bare_direction_key_covers_both_kinds():
         "seaice.forcing.sea_surface_temperature",
     )] is None
     assert by_route[
-        ("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux")
+        ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux")
     ] is None
 
 
@@ -806,7 +961,7 @@ def test_exchange_unknown_section_raises(components):
         [ExchangeSpec("ocn.state.sea_surface_temperature",
                       "atm.forcing.sea_surface_temperature")]
     )
-    carries = {"atm": {"forcing": _AtmosphereForcing(*([jnp.zeros(3)] * 5))},
+    carries = {"atm": {"forcing": _AtmosphereForcing(*([jnp.zeros(3)] * 2))},
                "ocn": {"derived": None}}
     with pytest.raises(KeyError, match="state"):
         exchange.validate(carries)
@@ -852,12 +1007,12 @@ def test_an_unknown_section_name_is_rejected_at_construction():
 def test_specs_may_be_written_as_mappings():
     """A coupling table can come straight out of YAML."""
     exchange = Exchange([
-        {"src": "atm.derived.total_heat_flux", "dst": "ocn.forcing.total_heat_flux"},
+        {"src": "atm.derived.sea_total_heat_flux", "dst": "ocn.forcing.total_heat_flux"},
         ExchangeSpec("ocn.state.sea_surface_temperature",
                      "atm.forcing.sea_surface_temperature"),
     ])
     assert exchange.specs == (
-        ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
+        ExchangeSpec("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"),
         ExchangeSpec("ocn.state.sea_surface_temperature",
                      "atm.forcing.sea_surface_temperature"),
     )

@@ -29,15 +29,19 @@ class SeaiceDerived:
 
     The ice fraction is diagnosed from this step's forcing and carries no
     memory, so it is a derived field, not state: nothing in :meth:`step`
-    reads its previous value.
+    reads its previous value. It is the ice fraction of the sea part of the
+    cell, ``sea_fraction`` (``1 - fractional_mask``), which is what a
+    regridded row onto another grid is weighted by.
     """
 
     ice_fraction: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, ice_fraction=None):
+    def zeros(cls, shape, ice_fraction=None, sea_fraction=None):
         return cls(
             ice_fraction if ice_fraction is not None else jnp.zeros(shape),
+            sea_fraction if sea_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -156,7 +160,7 @@ class SlabSeaiceModel(SlabModelBase):
         self.ice_climatology = self._load(ice_clim_file, "icec")
 
         if self.ice_climatology is not None:
-            ocean = self._ocean_cells(self.params)
+            ocean = self._ocean_cells()
             if bool(jnp.any(jnp.isnan(self.ice_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"Sea-ice climatology file \"{ice_clim_file!s:s}\" has NaNs over "
@@ -173,9 +177,11 @@ class SlabSeaiceModel(SlabModelBase):
         logger.info("%s: loading %r climatology from %s", self.name, var, path)
         return load_monthly_climatology(path, var, self.grid)
 
-    def _ocean_cells(self, params: SlabSeaiceParameters) -> jnp.ndarray:
-        """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
+    def _ocean_cells(self) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates: every cell with
+        any ocean, coast cells included (see :class:`SlabGrid`).
+        """
+        return self.grid.ocean_mask
 
     def initialize(self, params: SlabSeaiceParameters | None = None) -> Carry:
         """Build the initial sea-ice carry.
@@ -191,7 +197,7 @@ class SlabSeaiceModel(SlabModelBase):
         """
         params = self._initial_params(params)
 
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
         if self.ice_climatology is not None:
             # The observed concentration at the month the run starts in. It
             # is what the atmosphere is handed on its first step, before this
@@ -214,6 +220,7 @@ class SlabSeaiceModel(SlabModelBase):
             "forcing": SeaiceForcing.zeros(self.grid.shape),
             "derived": SeaiceDerived.zeros(
                 self.grid.shape, ice_fraction=ice_fraction,
+                sea_fraction=1.0 - self.grid.fractional_mask,
             ),
         }
 
@@ -226,7 +233,7 @@ class SlabSeaiceModel(SlabModelBase):
         """
         params = carry["params"]
         forcing = carry["forcing"]
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
 
         width = params.ice_free_sst_excess
         ice_free_temperature = constants.seawater_freezing_point_K + width
@@ -236,6 +243,7 @@ class SlabSeaiceModel(SlabModelBase):
         )
         derived = SeaiceDerived.zeros(
             self.grid.shape, ice_fraction=jnp.where(ocean, ice_fraction, 0.0),
+            sea_fraction=1.0 - self.grid.fractional_mask,
         )
 
         diagnostics = {"forcing": forcing, "derived": derived}

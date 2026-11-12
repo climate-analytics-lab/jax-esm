@@ -95,15 +95,33 @@ def test_from_coords_takes_the_mask_from_terrain_data(t31_coords):
     assert land_fraction[:, 0].mean() == pytest.approx(1.0)   # Antarctica
     assert land_fraction[:, -1].mean() == pytest.approx(0.0)  # Arctic ocean
 
-    # binary_mask == 1 is land (jem CLAUDE.md).
-    assert float(np.asarray(grid.binary_mask)[:, 0].mean()) == pytest.approx(1.0)
-    assert float(np.asarray(grid.binary_mask)[:, -1].mean()) == pytest.approx(0.0)
+    assert bool(np.asarray(grid.land_mask)[:, 0].all())
+    assert not bool(np.asarray(grid.ocean_mask)[:, 0].any())
+    assert bool(np.asarray(grid.ocean_mask)[:, -1].all())
+    assert not bool(np.asarray(grid.land_mask)[:, -1].any())
 
 
 def test_from_coords_defaults_to_all_ocean(t31_coords):
     """A grid built with no mask is all ocean, not all land."""
     grid = SlabGrid.from_coords(t31_coords.horizontal)
-    assert float(jnp.sum(grid.binary_mask)) == 0.0
+    assert not bool(jnp.any(grid.land_mask))
+    assert bool(jnp.all(grid.ocean_mask))
+
+
+def test_the_land_and_ocean_masks_overlap_on_coast_cells():
+    """Any land puts a cell in the land mask, any ocean in the ocean mask:
+    a partly-land cell is in both, and every cell is in at least one.
+    """
+    fraction = np.array([[0.0, 0.3, 1.0]] * 4)
+    grid = make_grid(fractional_mask=fraction)
+    land = np.asarray(grid.land_mask)
+    ocean = np.asarray(grid.ocean_mask)
+
+    assert land.dtype == bool and ocean.dtype == bool
+    np.testing.assert_array_equal(land, fraction > 0.0)
+    np.testing.assert_array_equal(ocean, fraction < 1.0)
+    np.testing.assert_array_equal(land & ocean, (fraction > 0.0) & (fraction < 1.0))
+    assert bool((land | ocean).all())
 
 
 def test_from_coords_rejects_a_mask_that_is_not_on_the_grid(t31_coords):
