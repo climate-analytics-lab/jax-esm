@@ -41,18 +41,26 @@ def time_axis(n_records: int, dt: float = TIMESTEP) -> TimeAxis:
 
 
 def make_grid(fractional_mask=None) -> SlabGrid:
-    """Return a 4x3 lon-lat grid, all ocean unless a land fraction is given."""
+    """Return a 4x3 lon-lat grid, all ocean unless a land fraction is given.
+
+    The cells are latitude bands bounded half way between the centres (at
+    -90, -30, 30, 90 degrees), so their solid angles sum to ``4 pi``.
+    """
     shape = (len(LONGITUDE_DEGREES), len(LATITUDE_DEGREES))
     longitude_axis = np.deg2rad(LONGITUDE_DEGREES)
     latitude_axis = np.deg2rad(LATITUDE_DEGREES)
     if fractional_mask is None:
         fractional_mask = jnp.zeros(shape)
+    band_edges = np.sin(np.deg2rad([-90.0, -30.0, 30.0, 90.0]))
+    solid_angle = np.broadcast_to(
+        (2.0 * np.pi / shape[0]) * np.diff(band_edges)[None, :], shape)
     return SlabGrid(
         fractional_mask=jnp.asarray(fractional_mask),
         latitude_radian=jnp.asarray(np.broadcast_to(latitude_axis[None, :], shape)),
         longitude_radian=jnp.asarray(np.broadcast_to(longitude_axis[:, None], shape)),
         longitude_axis_radian=longitude_axis,
         latitude_axis_radian=latitude_axis,
+        cell_solid_angle=jnp.asarray(solid_angle),
     )
 
 

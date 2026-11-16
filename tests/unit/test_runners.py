@@ -496,6 +496,33 @@ def test_an_explicit_coupling_table_is_used_as_given():
 # ---------------------------------------------------------------------------
 
 
+def test_earth_slab_with_the_bucket_land_couples_the_soil_water():
+    """`land=bucket` on `earth-slab`: the land is built on the atmosphere's
+    grid, with its cell areas, the atmosphere's `soilw_am` is declared
+    exchanged (a plain array, no longer the file's time series), and a
+    coupled step keeps the carry's structure.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed([
+        "+configuration=earth-slab", "land=bucket",
+        "+land.soil_water_clim_file=${jcm_data:bc/t30/clim/forcing.nc}",
+    ]))
+    assert set(coupler.components) == {"atm", "ocn", "seaice", "lnd"}
+    assert coupler.components["lnd"].grid.cell_solid_angle is not None
+    assert coupler.components["atm"].publishes_land_evaporation
+    assert set(coupler.components["atm"].exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am", "soilw_am",
+    }
+    carry = coupler.initialize()
+    forcing = carry.components["atm"]["forcing"]
+    assert not isinstance(forcing.soilw_am, TimeSeries)
+    assert isinstance(forcing.stl_am, TimeSeries)
+
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
 def test_earth_slab_couples_its_file_forcing(caplog):
     """The one shipped configuration with `forcing=from_file` builds and scans.
 

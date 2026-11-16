@@ -185,6 +185,7 @@ jem/                             # Main package
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
 │       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
 │       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
+│       ├── bucket_land_model/   # BucketLandModel (soil water; the land's temperature is SPEEDY's)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
@@ -344,8 +345,9 @@ including the three whose value changed.
   `fractional_mask > 0` and `ocean_mask` is `fractional_mask < 1`, and each
   surface is forced by the atmosphere's flux over its own part of the cell
   (the `sea_*` fields for an ocean), never by the grid-cell mean.
-- The land surface of a JCM run is the atmosphere's own (SPEEDY's slab
-  land, inside jax-gcm): there is no JEM land component to couple it to.
+- The land's temperature in a JCM run is the atmosphere's own (SPEEDY's slab
+  land, inside jax-gcm). A JEM land component (`BucketLandModel`) evolves
+  only the soil water, forced by the land tile's evaporation.
 
 ### Output conventions
 A coupled run writes one dataset per component, and they are only useful

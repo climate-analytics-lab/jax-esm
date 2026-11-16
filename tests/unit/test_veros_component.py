@@ -164,6 +164,8 @@ def _labelling_diagnostics(component, n_records):
             "heat_flux", "freshwater_flux",
         )
     })
+    # The land's runoff is one mass rate per record.
+    diagnostics["runoff_mass_rate"] = jnp.zeros((n_records,))
     # `step` emits a sea surface height only where Veros carries one, so the
     # layout handed to `to_xarray` has to follow the same branch.
     if not component.enable_streamfunction:
@@ -638,6 +640,26 @@ def test_step_advances_and_returns_a_stackable_carry(component, grid_shape):
     assert sst.shape == grid_shape
     assert bool(jnp.all(jnp.isfinite(sst)))
     assert diagnostics["temp"].shape[:2] == grid_shape
+
+
+@pytest.mark.slow
+def test_a_land_s_runoff_freshens_the_wet_surface(component):
+    """``forcing.runoff_mass_rate`` is fresh water spread over the wet
+    surface: against the same step without it, every wet surface cell is
+    fresher and no dry cell changes.
+    """
+    carry0 = component.initialize()
+    with_runoff = dict(carry0, forcing=carry0["forcing"].replace(
+        runoff_mass_rate=jnp.asarray(1e9, dtype=carry0["forcing"].runoff_mass_rate.dtype)))
+    plain, diagnostics_plain = component.step(carry0, _coupling_time(0))
+    fresh, diagnostics_fresh = component.step(with_runoff, _coupling_time(0))
+
+    wet = np.asarray(component.mask_T[:, :, -1]) > 0
+    salt_plain = np.asarray(diagnostics_plain["salt"][:, :, -1])
+    salt_fresh = np.asarray(diagnostics_fresh["salt"][:, :, -1])
+    assert np.all(salt_fresh[wet] < salt_plain[wet])
+    assert np.all(salt_fresh[~wet] == salt_plain[~wet])
+    assert float(diagnostics_fresh["runoff_mass_rate"]) == 1e9
 
 
 @pytest.mark.slow

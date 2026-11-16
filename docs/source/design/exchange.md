@@ -87,9 +87,14 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `ocn.state.sea_surface_temperature` | `seaice.forcing.sea_surface_temperature` |
 | `ocn.state.sea_surface_temperature` | `atm.forcing.sea_surface_temperature` |
 | `seaice.derived.ice_fraction` | `atm.forcing.sice_am` |
+| `atm.derived.precipitation` | `lnd.forcing.precipitation` |
+| `atm.derived.land_evaporation` | `lnd.forcing.evaporation` |
+| `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
 A row survives only if **both** its components are present, so an
-atmosphere/ocean pair gets two. The wiring is by *name* — `("atm", "ocn",
+atmosphere/ocean pair gets two. The land rows are the bucket's soil water
+({doc}`bucket_land`): the land tile's evaporation, never the cell mean, so
+`default_exchanges` refuses them under an atmosphere with no land tile. The wiring is by *name* — `("atm", "ocn",
 "lnd", "seaice")` — and a component registered under a name that just
 misses one of those (`ice`, `ocean`, `land`) is left unconnected with a
 warning, because the failure it would otherwise cause is silent: the sea ice
@@ -106,8 +111,9 @@ of a `water` and a `sea_ice` tile
 (`jem.components.jcm.exchange_fields.sea_tile`). The land part stays with
 the atmosphere: SPEEDY integrates its own slab land (`SpeedySurfaceFlux`'s
 default `land_model="slab"`, jax-gcm's `step_slab_land` after
-`land_model.f90`), forced by its own land tile, so there is no `lnd`
-component in the standard configurations and no land row in the table.
+`land_model.f90`), forced by its own land tile, so no row carries the land's
+temperature; a land component (`land=bucket`) evolves only the soil water
+SPEEDY prescribes.
 SPEEDY's grid mean is exactly `(1 - land_fraction) * sea + land_fraction *
 land`, so on one grid the ocean's share and the land's are disjoint and
 together are the cell's flux: no part of it is applied twice (#147). What the

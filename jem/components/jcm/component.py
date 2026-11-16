@@ -51,6 +51,7 @@ internals would break on a JCM refactor that broke nothing else.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 from collections.abc import Iterable
 from typing import Any
@@ -115,7 +116,9 @@ class JCMDerived:
     The unprefixed fluxes are grid-cell means over land and sea; the
     ``sea_*`` ones are over the sea part of the cell alone, which is what an
     ocean takes (see :mod:`jem.components.jcm.exchange_fields`).
-    ``sea_fraction`` is that part, ``1 - fmask`` of the atmosphere's terrain
+    ``land_evaporation`` is the evaporation over the land part, the land
+    tile, which a land component's soil supplies.
+    ``sea_fraction`` is the sea part, ``1 - fmask`` of the atmosphere's terrain
     (the fraction SPEEDY's sea tile covers): a regridder weights the
     ``sea_*`` fields by it, so an ocean cell on another grid takes nothing
     from an atmosphere cell with no sea in it
@@ -143,6 +146,7 @@ class JCMDerived:
     sea_eastward_wind_stress: jnp.ndarray
     sea_northward_wind_stress: jnp.ndarray
     sea_fraction: jnp.ndarray
+    land_evaporation: jnp.ndarray
 
     @classmethod
     def zeros(cls, shape, physics, **overrides):
@@ -178,6 +182,7 @@ class JCMDerived:
                 "sea_eastward_wind_stress",
                 "sea_northward_wind_stress",
                 "sea_fraction",
+                "land_evaporation",
             )
         }
         return cls(physics, **fields)
@@ -404,6 +409,18 @@ class JCMComponent:
         # ``total_time`` as static arguments of a jit, so they cannot be
         # traced values. ``None`` until bind() has run.
         self._coupling_days: float | None = None
+
+    @functools.cached_property
+    def publishes_land_evaporation(self) -> bool:
+        """Whether the physics publishes its evaporation over the land part.
+
+        Read off the structural diagnostics template, so nothing is
+        integrated. A land component needs it
+        (:func:`jem.exchangers.default_exchanges` checks).
+        """
+        exchange = _diagnostics_template(self.model).get(SURFACE_EXCHANGE_KEY)
+        return exchange is not None and exchange_fields.publishes_land_evaporation(
+            exchange)
 
     @property
     def sea_fraction(self) -> jnp.ndarray:
@@ -661,6 +678,7 @@ class JCMComponent:
             sea_eastward_wind_stress=exchange.sea_eastward_wind_stress,
             sea_northward_wind_stress=exchange.sea_northward_wind_stress,
             sea_fraction=self.sea_fraction,
+            land_evaporation=exchange.land_evaporation,
         )
         return (
             {

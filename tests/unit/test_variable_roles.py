@@ -22,6 +22,7 @@ from jem.base.component import (
     role_attrs,
 )
 from jem.components.slab import (
+    BucketLandModel,
     SlabAtmosphereModel,
     SlabGrid,
     SlabOceanModel,
@@ -55,6 +56,7 @@ def slab_models() -> dict:
             grid, SlabOceanParameters(forcing_method="qflux"), name="ocn"
         ),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
+        "lnd": BucketLandModel(grid),
     }
 
 
@@ -104,6 +106,17 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "ice_fraction": "derived",
             "forcing_sea_surface_temperature": "forcing",
         },
+        "lnd": {
+            "soil_water_content": "state",
+            "soil_water_availability": "derived",
+            "deep_drainage": "derived",
+            "soil_water_overflow": "derived",
+            "runoff": "derived",
+            "unmet_evaporation": "derived",
+            "runoff_mass_rate": "derived",
+            "forcing_precipitation": "forcing",
+            "forcing_evaporation": "forcing",
+        },
     }
     for name, roles in expected.items():
         dataset = datasets[name]
@@ -147,6 +160,8 @@ def test_the_roles_survive_a_merge_of_all_the_slabs(datasets):
         "forcing_total_heat_flux",
         "forcing_q_flux",
         "forcing_sea_surface_temperature",
+        "forcing_precipitation",
+        "forcing_evaporation",
     }
     assert "sea_surface_temperature" in map(
         str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "state"})

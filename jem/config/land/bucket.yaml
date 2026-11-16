@@ -1,0 +1,22 @@
+# Two-layer soil-water bucket under the atmosphere's own land: SPEEDY keeps
+# integrating the land's temperature (its slab land, inside jax-gcm), and this
+# component evolves the soil water from the precipitation and the evaporation
+# over the land part of each cell, handing the atmosphere back its soil water
+# availability (`soilw_am`). The runner injects `grid=` (the atmosphere's).
+#
+# The atmosphere has to publish its land tile (SPEEDY does; ECHAM does not,
+# and default_exchanges refuses the pairing). The soil starts half full unless
+# `+land.soil_water_clim_file=<file>` names a monthly `soilw_am`, such as the
+# atmosphere's own forcing file, for the initial condition.
+#
+# The drainage time scales default to (10, 365) days, tuned in 90-day runs
+# against the prescribed climatology; with SPEEDY's 28 cm of soil the land
+# still evaporates about a quarter less than with the climatology
+# (docs/source/design/bucket_land.md, "Tuning the drainage").
+#
+# A Veros configuration couples through `jem.fluxes.VerosExchange`, which
+# cannot be read off like a table: add `soilw_am` to its
+# `coupling.exchanged_forcing` when composing `land=bucket` into it.
+_target_: jem.components.BucketLandModel
+params:
+  _target_: jem.components.slab.BucketLandParameters

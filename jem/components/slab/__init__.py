@@ -1,6 +1,10 @@
 """Slab model components with shared base class."""
 
 from jem.components.slab.base import SlabModelBase, load_monthly_climatology
+from jem.components.slab.bucket_land_model import (
+    BucketLandModel,
+    BucketLandParameters,
+)
 from jem.components.slab.grid import SlabGrid
 from jem.components.slab.slab_atmosphere_model import (
     SlabAtmosphereModel,
@@ -13,6 +17,8 @@ from jem.components.slab.slab_seaice_model import (
 )
 
 __all__ = [
+    "BucketLandModel",
+    "BucketLandParameters",
     "SlabAtmosphereModel",
     "SlabAtmosphereParameters",
     "SlabGrid",

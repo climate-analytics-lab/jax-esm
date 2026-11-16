@@ -64,7 +64,8 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
                           u0, v0,
                           sea_total_heat_flux, sea_total_freshwater_flux,
                           sea_evaporation, sea_eastward_wind_stress,
-                          sea_northward_wind_stress, sea_fraction),
+                          sea_northward_wind_stress, sea_fraction,
+                          land_evaporation),
 }
 ```
 
@@ -139,6 +140,11 @@ field over the whole cell, so it has no sea tile. A package that publishes
 no flux tiles (ECHAM delivers its fluxes untiled) leaves the `sea_*` fields
 equal to the grid mean, and `initialize` logs a warning that a coastal ocean
 cell will then also receive the land part's flux (jax-esm#147).
+
+`land_evaporation` is the land tile's evaporation, which a land component's
+soil supplies ({doc}`bucket_land`); with no land tile it is the grid mean, and
+`JCMComponent.publishes_land_evaporation` is `False`, which
+`default_exchanges` refuses to force a land with.
 
 `wind_u` and `wind_v` sit at whichever reference the *publishing* package's
 own surface closure defines — the contract's static `wind_reference` field

@@ -434,6 +434,9 @@ def test_the_ocean_fields_are_the_sea_tile():
     np.testing.assert_allclose(exchange.total_heat_flux, -mean_heat)
     np.testing.assert_allclose(exchange.eastward_wind_stress, mean_stress)
     assert exchange_fields.publishes_sea_tiles(se)
+    # The land's evaporation is the land tile, not the cell mean.
+    np.testing.assert_allclose(exchange.land_evaporation, 1e-5)
+    assert exchange_fields.publishes_land_evaporation(se)
     # The ocean's share and the atmosphere's own land share add up to
     # exactly the grid-cell mean the atmosphere lost, so no part of a coastal
     # cell's flux is applied twice (jax-esm#147).

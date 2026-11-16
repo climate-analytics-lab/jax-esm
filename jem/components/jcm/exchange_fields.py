@@ -97,8 +97,12 @@ repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
   (ECHAM: its implicit vertical-diffusion solve delivers only the grid mean)
   leaves the ``sea_*`` fields equal to the grid mean, so an ocean on a coast
   cell then also receives the land part's flux; :class:`JCMComponent` logs
-  that once when it builds its carry. See ``docs/source/design/exchange.md``
-  and jax-gcm's ``docs/source/design/surface_exchange.md``.
+  that once when it builds its carry. ``land_evaporation`` is the evaporation
+  over the land part, the ``land`` tile, which a land component's soil
+  supplies; it falls back to the grid mean the same way, and
+  :func:`jem.exchangers.default_exchanges` refuses to couple a land to a
+  package that has no land tile. See ``docs/source/design/exchange.md`` and
+  jax-gcm's ``docs/source/design/surface_exchange.md``.
 
 Column-vectorized packages publish flat, not gridded
 ------------------------------------------------------
@@ -176,6 +180,8 @@ class SurfaceExchange(NamedTuple):
         cell (see :func:`sea_tile`), in the same conventions.
     sea_eastward_wind_stress, sea_northward_wind_stress : jax.Array
         The stress on the sea part of the cell, in the same conventions.
+    land_evaporation : jax.Array
+        ``evaporation`` over the land part of the cell (the ``land`` tile).
 
     """
 
@@ -190,6 +196,7 @@ class SurfaceExchange(NamedTuple):
     sea_evaporation: jnp.ndarray
     sea_eastward_wind_stress: jnp.ndarray
     sea_northward_wind_stress: jnp.ndarray
+    land_evaporation: jnp.ndarray
 
 
 def sea_tile(exchange: Any, field: str) -> Any:
@@ -217,6 +224,15 @@ def sea_tile(exchange: Any, field: str) -> Any:
         / jnp.where(sea_fraction > 0.0, sea_fraction, 1.0),
         0.0,
     )
+
+
+def publishes_land_evaporation(exchange: Any) -> bool:
+    """Whether the package publishes its evaporation over the land part.
+
+    Read off the struct's static tile names and which tile fields are filled,
+    like :func:`publishes_sea_tiles`.
+    """
+    return exchange.tile("evaporation", "land") is not None
 
 
 def publishes_sea_tiles(exchange: Any) -> bool:
@@ -280,6 +296,13 @@ def from_diagnostics(
     """
     exchange = surface_exchange_from(diagnostics)
 
+    def over_land(field: str) -> jnp.ndarray:
+        # The grid mean stands in where the package publishes no land tile;
+        # default_exchanges refuses to force a land component with it.
+        land = exchange.tile(field, "land")
+        values: jnp.ndarray = getattr(exchange, field) if land is None else land
+        return values.reshape(nodal_shape)
+
     def over_sea(field: str) -> jnp.ndarray:
         # The grid mean stands in where the package publishes no sea tile
         # (see the module docstring); which case applies is static.
@@ -299,4 +322,5 @@ def from_diagnostics(
         sea_evaporation=over_sea("evaporation"),
         sea_eastward_wind_stress=over_sea("stress_u"),
         sea_northward_wind_stress=over_sea("stress_v"),
+        land_evaporation=over_land("evaporation"),
     )
