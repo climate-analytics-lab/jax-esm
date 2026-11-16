@@ -345,7 +345,7 @@ including the three whose value changed.
 - A sea ice's fraction is a fraction of the *sea part* of a cell (SPEEDY's
   `sice_am`), and its fluxes are per unit sea area. The atmosphere sees an ice
   through its fraction and, for the Winton ice, its skin temperature
-  (`sea_ice_surface_temperature`), never an effective SST: SPEEDY blends the
+  (`sea_ice_temperature`), never an effective SST: SPEEDY blends the
   two with the SST itself.
 - A `SlabGrid`'s `fractional_mask` is the land fraction of each cell
   (1 = all land). A cell can hold both surfaces: `land_mask` is

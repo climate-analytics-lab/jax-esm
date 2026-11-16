@@ -563,24 +563,23 @@ def test_the_first_steps_state_fields_are_the_initial_atmospheres(model):
 
 
 def test_the_ice_temperature_is_seeded_with_speedys_own_stand_in():
-    """jax-gcm leaves ``sea_ice_surface_temperature`` None without a coupled
+    """jax-gcm leaves ``sea_ice_temperature`` None without a coupled
     ice; exchanged, it is seeded with what SPEEDY uses in its absence, the
     SST capped at its freezing point, so the first step is the uncoupled one.
     A None field with no known stand-in is refused by name.
     """
-    from jem.components.jcm.component import (
-        SPEEDY_SEA_ICE_STAND_IN_K,
-        _collapse_exchanged_forcing,
-    )
+    from jcm.physics.surface.speedy_surface_flux import SEA_ICE_FREEZING_TEMPERATURE
+
+    from jem.components.jcm.component import _collapse_exchanged_forcing
 
     sst = jnp.linspace(268.0, 300.0, GRID_SHAPE[0] * GRID_SHAPE[1]).reshape(GRID_SHAPE)
     forcing = ForcingData.zeros(GRID_SHAPE, sea_surface_temperature=sst)
-    assert forcing.sea_ice_surface_temperature is None
+    assert forcing.sea_ice_temperature is None
     collapsed = _collapse_exchanged_forcing(
-        forcing, ("sea_ice_surface_temperature",), START_DATE)
+        forcing, ("sea_ice_temperature",), START_DATE)
     np.testing.assert_allclose(
-        np.asarray(collapsed.sea_ice_surface_temperature),
-        np.minimum(np.asarray(sst), SPEEDY_SEA_ICE_STAND_IN_K))
+        np.asarray(collapsed.sea_ice_temperature),
+        np.minimum(np.asarray(sst), SEA_ICE_FREEZING_TEMPERATURE))
     with pytest.raises(ValueError, match="soilw_rel"):
         _collapse_exchanged_forcing(forcing, ("soilw_rel",), START_DATE)
 

@@ -262,7 +262,7 @@ WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
      "seaice.forcing.ice_frazil_melt_energy", "flux"),
     ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.total_heat_flux", "flux"),
     ("seaice.derived.ice_surface_temperature_K",
-     "atm.forcing.sea_ice_surface_temperature", "state"),
+     "atm.forcing.sea_ice_temperature", "state"),
 )
 
 #: The standard row a Winton sea ice replaces: the ocean takes the
@@ -272,7 +272,7 @@ WINTON_REPLACES = ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_fl
 #: The weight of a regridded row whose destination is listed here, in place
 #: of the sea fraction :func:`default_exchanges` gives a row by default.
 ROW_WEIGHTS = {
-    "atm.forcing.sea_ice_surface_temperature": "seaice.derived.ice_area_fraction",
+    "atm.forcing.sea_ice_temperature": "seaice.derived.ice_area_fraction",
 }
 
 #: Module holding the Winton sea ice, looked up in ``sys.modules`` for the

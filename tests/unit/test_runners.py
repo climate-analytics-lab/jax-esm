@@ -535,12 +535,12 @@ def test_earth_slab_winton_couples_the_ice_both_ways():
     assert isinstance(coupler.components["seaice"], WintonSeaiceModel)
     assert coupler.components["ocn"].params.clamp_at_freezing
     assert set(coupler.components["atm"].exchanged_forcing) == {
-        "sea_surface_temperature", "sice_am", "sea_ice_surface_temperature",
+        "sea_surface_temperature", "sice_am", "sea_ice_temperature",
     }
     carry = coupler.initialize()
     seaice = carry.components["seaice"]["state"]
     assert 0.0 < float(seaice.ice_fraction.mean()) < 1.0
-    tice = carry.components["atm"]["forcing"].sea_ice_surface_temperature
+    tice = carry.components["atm"]["forcing"].sea_ice_temperature
     assert tice is not None and tice.shape == seaice.ice_fraction.shape
 
     final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)

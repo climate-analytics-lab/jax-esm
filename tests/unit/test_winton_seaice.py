@@ -403,12 +403,22 @@ def half_land_grid():
     return make_grid(fractional_mask=fraction)
 
 
-def global_grid(nx=24, ny=12, land_blocks=True):
-    """Return a coarse global lon/lat grid with polar land rows and an island."""
+def global_grid(nx=24, ny=12, land_blocks=True, coasts=False):
+    """Return a coarse global lon/lat grid with polar land rows and an island.
+
+    ``coasts`` gives the island and the polar rows partly-land neighbours, so
+    cells with different sea parts sit side by side.
+    """
     land = np.zeros((nx, ny))
     land[:, 0] = land[:, -1] = 1.0
     if land_blocks:
         land[5:8, 4:7] = 1.0
+    if coasts:
+        land[:, 1] = 0.6
+        land[:, -2] = 0.3
+        if land_blocks:
+            land[4, 4:7] = land[8, 4:7] = 0.5
+            land[5:8, 3] = 0.8
     latitude = np.deg2rad(np.linspace(-80, 80, ny))
     longitude = np.deg2rad(np.linspace(0, 360, nx, endpoint=False))
     return SlabGrid(
@@ -885,9 +895,15 @@ def random_ice_state(grid, seed=0):
     return WintonState(*(jnp.asarray(a) for a in (h, hs, f, T1, T2, Ts))), jnp.asarray(u), jnp.asarray(v)
 
 
-def test_ice_transport_conserves_mass_and_energy(x64):
-    """Transport moves ice between cells but changes neither the global ice/snow mass nor the enthalpy."""
-    grid = global_grid()
+@pytest.mark.parametrize("coasts", [False, True])
+def test_ice_transport_conserves_mass_and_energy(x64, coasts):
+    """Transport moves ice between cells but changes neither the global ice/snow mass nor the enthalpy.
+
+    The amounts are per unit sea area, so the totals are over each cell's sea
+    part; with ``coasts`` the ice crosses between cells with different land
+    fractions, where conserving over the whole cell would create or destroy it.
+    """
+    grid = global_grid(coasts=coasts)
     diffusive = WintonSeaiceParameters(transport_diffusivity=5e4)
     with_transport = WintonSeaiceModel(grid, diffusive, transport=True)
     without = WintonSeaiceModel(grid, diffusive)
@@ -898,7 +914,8 @@ def test_ice_transport_conserves_mass_and_energy(x64):
     moved, _ = with_transport.step(with_state_and_forcing(with_transport, state, forcing), coupling_time(0))
     stayed, _ = without.step(with_state_and_forcing(without, state, forcing), coupling_time(0))
 
-    area = np.asarray(with_transport.transport.dx * with_transport.transport.dy) * np.asarray(grid.ocean_mask)
+    area = (np.asarray(with_transport.transport.dx * with_transport.transport.dy)
+            * (1.0 - np.asarray(grid.fractional_mask)))
 
     def mass(s):
         return float((np.asarray(s.ice_fraction) * (
@@ -1226,7 +1243,7 @@ def test_the_standard_table_forces_every_field_the_ice_reads():
     assert ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.total_heat_flux") in rows
     assert ("seaice.derived.ice_fraction", "atm.forcing.sice_am") in rows
     assert ("seaice.derived.ice_surface_temperature_K",
-            "atm.forcing.sea_ice_surface_temperature") in rows
+            "atm.forcing.sea_ice_temperature") in rows
 
 
 def test_a_regridded_ice_temperature_is_weighted_by_the_ice_area():
@@ -1238,7 +1255,7 @@ def test_a_regridded_ice_temperature_is_weighted_by_the_ice_area():
     specs = default_exchanges(
         _winton_components(), regrid={"a2o": "a2o", "o2a": "o2a"})
     weight = {spec.dst: spec.weight for spec in specs}
-    assert weight["atm.forcing.sea_ice_surface_temperature"] == (
+    assert weight["atm.forcing.sea_ice_temperature"] == (
         "seaice.derived.ice_area_fraction")
     assert weight["atm.forcing.sice_am"] == "seaice.derived.sea_fraction"
     assert weight["seaice.forcing.air_temperature"] == "atm.derived.sea_fraction"
@@ -1356,7 +1373,7 @@ def test_winton_ice_under_jcm_and_a_slab_ocean_is_forced_both_ways():
     }
     exchangers = default_exchangers(components)
     components["atm"].set_exchanged_forcing(exchanged_fields(exchangers, "atm"))
-    assert "sea_ice_surface_temperature" in components["atm"].exchanged_forcing
+    assert "sea_ice_temperature" in components["atm"].exchanged_forcing
     coupler = Coupler(
         components, exchangers,
         coupling_timestep=COUPLING_TIMESTEP, start_date=start,
@@ -1380,7 +1397,7 @@ def test_winton_ice_under_jcm_and_a_slab_ocean_is_forced_both_ways():
     previous = jax.tree.map(lambda leaf: leaf[-2], diagnostics["seaice"]["derived"])
     np.testing.assert_array_equal(np.asarray(atm_forcing.sice_am),
                                   np.asarray(previous.ice_fraction))
-    np.testing.assert_array_equal(np.asarray(atm_forcing.sea_ice_surface_temperature),
+    np.testing.assert_array_equal(np.asarray(atm_forcing.sea_ice_temperature),
                                   np.asarray(previous.ice_surface_temperature_K))
     assert np.asarray(atm_forcing.sice_am).max() > 0.0
 

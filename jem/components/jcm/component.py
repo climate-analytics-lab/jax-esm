@@ -65,6 +65,7 @@ import xarray as xr
 from jcm.date import DateData
 from jcm.forcing import ForcingData, TimeSeries, default_forcing
 from jcm.model import Model
+from jcm.physics.surface.speedy_surface_flux import SEA_ICE_FREEZING_TEMPERATURE
 from jcm.physics.surface.surface_exchange import SURFACE_EXCHANGE_KEY
 from jcm.physics_interface import POST_PHYSICS_STATE_KEY
 from jcm.predictions import ModelPredictions
@@ -97,7 +98,7 @@ logger = logging.getLogger(__name__)
 FORCING_VARIABLE_NAMES = (
     "sea_surface_temperature",
     "sice_am",
-    "sea_ice_surface_temperature",
+    "sea_ice_temperature",
     "stl_am",
     "snowc_am",
     "soilw_am",
@@ -335,20 +336,15 @@ def _collapse_exchanged_forcing(
     return forcing.replace(**values)  # type: ignore[no-any-return]
 
 
-#: SPEEDY's saline freezing point, ``sstfr = 273.2 - 1.8`` K
-#: (``jcm.physics.surface.speedy_surface_flux``), at which it takes its sea
-#: ice to be when no ice model supplies a temperature.
-SPEEDY_SEA_ICE_STAND_IN_K = 273.2 - 1.8
-
-
 def _seed_absent_forcing(forcing: ForcingData, name: str) -> jnp.ndarray:
     """Seed an exchanged field that jax-gcm leaves ``None`` without a coupler.
 
     An optional field is ``None`` in an uncoupled run, and the carry needs an
     array there from the start, or its structure would change at the first
     exchange. The seed is what the atmosphere uses in the field's absence,
-    so the first step is the uncoupled one: for the sea-ice surface
-    temperature, the SST capped at SPEEDY's freezing point.
+    so the first step is the uncoupled one: for the sea-ice temperature, the
+    SST capped at SPEEDY's saline freezing point
+    (``SEA_ICE_FREEZING_TEMPERATURE``, ``sstfr``).
 
     Raises
     ------
@@ -356,9 +352,10 @@ def _seed_absent_forcing(forcing: ForcingData, name: str) -> jnp.ndarray:
         For a field with no known stand-in.
 
     """
-    if name == "sea_ice_surface_temperature":
+    if name == "sea_ice_temperature":
         return jnp.minimum(
-            jnp.asarray(forcing.sea_surface_temperature), SPEEDY_SEA_ICE_STAND_IN_K)
+            jnp.asarray(forcing.sea_surface_temperature),
+            SEA_ICE_FREEZING_TEMPERATURE)
     raise ValueError(
         f"jcm.forcing.ForcingData.{name} is None in this atmosphere's forcing, "
         "and JAX-ESM has no stand-in to seed it with before the first exchange. "

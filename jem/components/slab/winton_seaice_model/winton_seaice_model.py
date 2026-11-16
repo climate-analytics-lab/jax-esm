@@ -23,7 +23,7 @@ coefficients as JCM's ``speedy_surface_flux``) from the atmosphere's near-surfac
 state, so ``F(Ts)`` and ``dF/dTs`` are available inside the implicit solve. The
 atmosphere sees the ice through two fields this component publishes: its fraction
 (``derived.ice_fraction``, JCM's ``sice_am``) and its skin temperature
-(``derived.ice_surface_temperature_K``, JCM's ``sea_ice_surface_temperature``),
+(``derived.ice_surface_temperature_K``, JCM's ``sea_ice_temperature``),
 which SPEEDY blends with the SST into one sea-surface temperature, as its own sea
 model blends its ice (``sea_model.f90``). The atmosphere evaluates its flux over the
 sea part of the cell at that blended temperature.
@@ -843,9 +843,12 @@ class WintonSeaiceModel(SlabModelBase):
         # all transported quantities must be non-negative (the scheme clips at zero): Ts is in degC <= 0, so carry -Ts
         fields = (f, V, f * hs, 0.5 * V * q_from_T1(s.upper_ice_temperature), 0.5 * V * q_from_T2(s.lower_ice_temperature),
                   -f * s.ice_surface_temperature)
+        # The amounts are per unit sea area, so they are conserved over each cell's sea part.
+        sea_area = jnp.asarray(tr.dx) * jnp.asarray(tr.dy) * (1.0 - self.grid.fractional_mask)
         fn, Vn, Vsn, Q1n, Q2n, FTn = transport_fields(
             fields, fc.ice_velocity_u, fc.ice_velocity_v, jnp.asarray(tr.dx), jnp.asarray(tr.dy), ocean, coupling_dt,
-            params.transport_diffusivity, params.transport_n_substeps, tr.cyclic_x, compact_threshold=0.98)
+            params.transport_diffusivity, params.transport_n_substeps, tr.cyclic_x, compact_threshold=0.98,
+            area=sea_area)
         # Ice arriving in (nearly) empty cells comes with a diluted fraction; give it at least the lead-closing
         # thickness h0 (fraction from volume) and a fraction above the thermodynamics' threshold. Nothing is
         # discarded here: sub-threshold slivers are kept by the next thermodynamic step while the ocean freezes,

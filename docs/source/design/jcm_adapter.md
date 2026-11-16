@@ -164,10 +164,13 @@ package publishes its sea tile, which `default_exchanges` requires of a
 Winton ice.
 
 The atmosphere takes the ice's skin temperature in
-`ForcingData.sea_ice_surface_temperature`, which jax-gcm leaves `None` in an
-uncoupled run. An exchanged field must be an array from the first step, so
-`initialize` seeds it with SPEEDY's own stand-in, the SST capped at its
-freezing point, and the first step is the uncoupled one.
+`ForcingData.sea_ice_temperature`, the field a forcing file can also fill
+(jax-gcm#1205). jax-gcm leaves it `None` when no file does, as the packaged
+T30 climatology does not. An exchanged field must be an array from the first
+step, so `initialize` then seeds it with SPEEDY's own stand-in
+(`SEA_ICE_FREEZING_TEMPERATURE`, the SST capped at the saline freezing
+point), and the first step is the uncoupled one; a file's value, if there is
+one, is collapsed to the start date like any other exchanged field.
 
 `wind_u` and `wind_v` sit at whichever reference the *publishing* package's
 own surface closure defines — the contract's static `wind_reference` field

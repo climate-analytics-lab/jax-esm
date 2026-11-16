@@ -52,7 +52,7 @@ its word.
 ## What the ice publishes
 
 - `ice_fraction` → `atm.forcing.sice_am`, and `ice_surface_temperature_K` →
-  `atm.forcing.sea_ice_surface_temperature`. SPEEDY blends the two with the
+  `atm.forcing.sea_ice_temperature`. SPEEDY blends the two with the
   SST into one sea-surface temperature, `tsea = (1 − f) SST + f T_ice`, as its
   own sea model blends its ice (`sea_model.f90`), and evaluates its sea fluxes
   there. Without an ice model SPEEDY takes `T_ice` as the SST capped at the

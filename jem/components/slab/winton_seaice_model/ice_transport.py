@@ -119,21 +119,29 @@ def _shift(x, axis, n, cyclic):
     return y.at[tuple(idx)].set(0.0)
 
 
-def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12, cyclic_x=True, compact_threshold=None):
-    """Advect and diffuse per-cell-area quantities.
+def transport_fields(fields, u, v, dx, dy, ocean, dt, diffusivity, n_substeps=12, cyclic_x=True, compact_threshold=None,
+                     area=None):
+    """Advect and diffuse quantities given per unit of each cell's ``area``.
 
     compact_threshold: if given, fields[0] is the ice fraction and no advective flux may enter a cell whose fraction
     is at or above the threshold, re-evaluated every substep (the cavitating-fluid idea of Flato & Hibler 1992: no
     tensile strength, no convergence once the cover is compact), which stops free drift from piling ice up against
     coasts. Diffusion still acts.
 
-    fields: tuple of (nx, ny) arrays (amount per unit cell area); u, v: cell-centred velocities (m/s) along the
+    fields: tuple of (nx, ny) arrays (amount per unit of ``area``); u, v: cell-centred velocities (m/s) along the
     grid's own x and y; dx, dy: cell sizes (m) at centres; ocean: bool mask. All fields see the same linear,
     positive operator, so ratios of transported fields are weighted averages of the originals.
+
+    area: the area (m^2) each cell's amounts are per unit of, and over which they are conserved: ``sum(X * area)``
+    is unchanged to roundoff. The default is the whole cell, ``dx * dy``. The Winton ice passes the sea part of
+    each cell, since its amounts are per unit sea area: conserving them over the whole cell would create or destroy
+    ice wherever it crosses between cells with different land fractions.
     """
     oc = ocean.astype(u.dtype)
     dts = dt / n_substeps
-    area = dx * dy
+    area = dx * dy if area is None else area
+    # Cells outside the mask have no sea and no ice; a stand-in area keeps their (discarded) update finite.
+    area = jnp.where(oc > 0, area, 1.0)
     # faces: east face of cell i sits between i and i+1, north face of cell j between j and j+1
     east = lambda x: _shift(x, 0, -1, cyclic_x)
     north = lambda x: _shift(x, 1, -1, False)
