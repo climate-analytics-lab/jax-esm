@@ -7,8 +7,9 @@ things a Veros ocean needs cannot be table rows at all:
 
 - **the surface wind stress** Veros integrates (``forcing.surface_taux`` /
   ``surface_tauy``) is a *vector*. The atmosphere publishes it
-  (``derived.eastward_wind_stress`` / ``northward_wind_stress``, jax-gcm's
-  own delivered surface stress), but in true east/north components, while
+  (``derived.sea_eastward_wind_stress`` / ``sea_northward_wind_stress``,
+  jax-gcm's own delivered surface stress over the sea part of the cell), but
+  in true east/north components, while
   an ocean on a rotated-pole grid integrates it in that grid's own local
   x/y frame. Getting from one to the other mixes the two components
   (:func:`rotate_vector`), which a row moving one field at a time cannot
@@ -67,6 +68,7 @@ import xarray as xr
 
 from jem import constants
 from jem.base.component import Carry, CouplingTime
+from jem.exchangers import regrid_weighted
 
 logger = logging.getLogger(__name__)
 
@@ -219,21 +221,23 @@ class VerosExchange:
 
     Reproduces the ``atm``/``ocn`` rows of
     :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` -- the surface heat and
-    freshwater fluxes onto the ocean, the sea surface temperature back onto
-    the atmosphere -- and adds the two things that table cannot express: the
-    atmosphere's published surface wind stress, regridded onto the ocean grid
+    freshwater fluxes over the sea part of each cell onto the ocean, the sea
+    surface temperature back onto the atmosphere -- and adds the two things
+    that table cannot express: the atmosphere's published surface wind stress
+    over the sea part of the cell, regridded onto the ocean grid
     and rotated into its local frame when ``rotation_grid_file`` is given
     (see the module docstring for why the ocean takes that stress rather than
     one of its own), and :func:`mask_fluxes_under_ice` applied to the heat
     and freshwater fluxes. It is what makes a Veros configuration mechanically,
-    as well as thermodynamically, forced. It does not touch a land or
-    sea-ice component -- :data:`VEROS_OCEAN_EXCHANGES`'s ``lnd``/``seaice``
-    rows have no counterpart here, because the configurations this exchanger
-    serves compose ``land=none``/``seaice=none``. Composing a land component
-    into one of them therefore does not couple it -- a hand-written
-    exchanger replaces the declarative table entirely, so the component is
-    stepped with zero forcing and never read back. Adding those rows is
-    tracked in jax-esm#128.
+    as well as thermodynamically, forced. On another grid the fluxes and
+    stress are weighted by the sea part of each atmosphere cell and the SST
+    by Veros' own wet mask (:func:`jem.exchangers.regrid_weighted`), so
+    neither side takes the other's land. It does not touch a sea-ice
+    component: :data:`VEROS_OCEAN_EXCHANGES`'s ``seaice`` rows have no
+    counterpart here, because the configurations this exchanger serves
+    compose ``seaice=none``; a hand-written exchanger replaces the
+    declarative table entirely, so a sea ice composed into one of them is
+    stepped unforced (jax-esm#128).
 
     Parameters
     ----------
@@ -243,7 +247,10 @@ class VerosExchange:
         gives them. Two roles are used: ``"a2o_flux"`` for the two stress
         components and the two fluxes going onto the ocean grid (mapped
         **conservatively**, so a flux's budget -- momentum included --
-        survives the interface), and ``"o2a_state"`` for the
+        survives the interface; each is over the sea part of the
+        atmosphere's cells, so it is weighted by that part,
+        ``atm.derived.sea_fraction``, with
+        :func:`jem.exchangers.regrid_weighted`), and ``"o2a_state"`` for the
         sea surface temperature coming back (mapped **bilinearly**, so it is
         not left with a conservative map's staircase -- see
         :mod:`jem.regrid` for the same reasoning applied to the declarative
@@ -345,8 +352,8 @@ class VerosExchange:
         # while the atmosphere's carry is *mixed* -- whatever jax-gcm had
         # already allocated at `Model` construction (built first) stays
         # float32, and anything allocated after the flip (every per-step
-        # diagnostic, including `derived.eastward_wind_stress` and
-        # `derived.total_heat_flux`)
+        # diagnostic, including `derived.sea_eastward_wind_stress` and
+        # `derived.sea_total_heat_flux`)
         # comes out float64 too. So which atmosphere fields are float32
         # depends on build order, not on any promise this module makes.
         # `jax.lax.scan` requires a step's output carry to match its input
@@ -358,10 +365,14 @@ class VerosExchange:
         # place a value is known to cross the boundary, and reading the
         # destination's dtype at trace time (rather than assuming one) is
         # what makes the coupling robust to that ordering.
-        eastward_wind_stress = atm["derived"].eastward_wind_stress
-        northward_wind_stress = atm["derived"].northward_wind_stress
-        total_heat_flux = atm["derived"].total_heat_flux
-        total_freshwater_flux = atm["derived"].total_freshwater_flux
+        # The fluxes over the sea part of each cell, not the cell means: on a
+        # partly-land cell the land part's flux and drag stay with the
+        # atmosphere's own land (jem.components.jcm.exchange_fields).
+        eastward_wind_stress = atm["derived"].sea_eastward_wind_stress
+        northward_wind_stress = atm["derived"].sea_northward_wind_stress
+        total_heat_flux = atm["derived"].sea_total_heat_flux
+        total_freshwater_flux = atm["derived"].sea_total_freshwater_flux
+        sea_fraction = atm["derived"].sea_fraction
         ocean_sea_surface_temperature = ocn["derived"].sea_surface_temperature
         ocean_forcing_dtypes = {
             "surface_taux": ocn["forcing"].surface_taux.dtype,
@@ -377,8 +388,11 @@ class VerosExchange:
         # then rotate it into that grid's local frame if it has one. The
         # stress is a flux of momentum, so it goes through the conservative
         # a2o map like the heat and freshwater fluxes, which keeps the
-        # area-integrated momentum the atmosphere lost equal to what the
-        # ocean receives. Regridding *before* rotating (never the other way
+        # area-integrated momentum the atmosphere lost over the sea equal to
+        # what the ocean receives, to the extent the two grids agree on where
+        # the sea is. Like them it is weighted by the sea part of each
+        # atmosphere cell (`_a2o_sea`), so a coastal ocean cell is not handed
+        # the drag of an atmosphere cell with no sea in it. Regridding *before* rotating (never the other way
         # around) is deliberate: JCM's own grid is unrotated, so the two
         # components are true east/north everywhere on it, which is what makes
         # a component-wise conservative regrid of each of them well defined
@@ -389,8 +403,8 @@ class VerosExchange:
         # stress is already sitting on that grid. The rotation re-expresses
         # the same vector in the ocean's own frame, so it does not change the
         # momentum delivered either.
-        surface_taux = self._a2o_flux(eastward_wind_stress)
-        surface_tauy = self._a2o_flux(northward_wind_stress)
+        surface_taux = self._a2o_sea(eastward_wind_stress, sea_fraction)
+        surface_tauy = self._a2o_sea(northward_wind_stress, sea_fraction)
         if self._rotation_angles is not None:
             cos_angle, sin_angle = self._rotation_angles
             surface_taux, surface_tauy = rotate_vector(
@@ -401,14 +415,16 @@ class VerosExchange:
         # freezing point.
         heat_flux, freshwater_flux = mask_fluxes_under_ice(
             ocean_sea_surface_temperature,
-            self._a2o_flux(total_heat_flux),
-            self._a2o_flux(total_freshwater_flux),
+            self._a2o_sea(total_heat_flux, sea_fraction),
+            self._a2o_sea(total_freshwater_flux, sea_fraction),
             freezing_point=self.freezing_point,
         )
 
         # Sea surface temperature: regrid back onto the atmosphere's grid.
-        sea_surface_temperature_on_atm = self._o2a_state(
-            ocean_sea_surface_temperature
+        # Weighted by Veros' wet mask, so an atmosphere cell on the coast
+        # takes the SST of the water under it, not the land columns' fill.
+        sea_surface_temperature_on_atm = self._o2a_sea(
+            ocean_sea_surface_temperature, ocn["derived"].sea_fraction
         )
 
         ocn = dict(ocn, forcing=ocn["forcing"].replace(
@@ -426,6 +442,30 @@ class VerosExchange:
             sea_surface_temperature=sea_surface_temperature_on_atm,
         ))
         return dict(components, atm=atm, ocn=ocn)
+
+    def _a2o_sea(self, field: jax.Array, sea_fraction: jax.Array) -> jax.Array:
+        """Map a field over the sea part of the atmosphere's cells onto the ocean.
+
+        Weighted by that part (:func:`jem.exchangers.regrid_weighted`), so a
+        coastal ocean cell takes nothing from an atmosphere cell with no sea
+        in it. On one grid every ocean cell is its own atmosphere cell, so
+        the field passes through unchanged.
+        """
+        if self._a2o_flux is _identity:
+            return field
+        mapped: jax.Array = regrid_weighted(self._a2o_flux, field, sea_fraction)
+        return mapped
+
+    def _o2a_sea(self, field: jax.Array, wet: jax.Array) -> jax.Array:
+        """Map a field over Veros' wet columns onto the atmosphere's grid.
+
+        Weighted by Veros' wet mask (``derived.sea_fraction``); on one grid
+        the field passes through unchanged.
+        """
+        if self._o2a_state is _identity:
+            return field
+        mapped: jax.Array = regrid_weighted(self._o2a_state, field, wet)
+        return mapped
 
     def __repr__(self) -> str:
         """Name the regridders this exchange holds and whether it rotates."""

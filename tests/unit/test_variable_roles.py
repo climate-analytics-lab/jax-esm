@@ -24,7 +24,6 @@ from jem.base.component import (
 from jem.components.slab import (
     SlabAtmosphereModel,
     SlabGrid,
-    SlabLandModel,
     SlabOceanModel,
     SlabOceanParameters,
     SlabSeaiceModel,
@@ -55,7 +54,6 @@ def slab_models() -> dict:
         "ocn": SlabOceanModel(
             grid, SlabOceanParameters(forcing_method="qflux"), name="ocn"
         ),
-        "lnd": SlabLandModel(grid),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
     }
 
@@ -102,12 +100,6 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "ice_frazil_melt_energy": "derived",
             "forcing_q_flux": "forcing",
         },
-        "lnd": {
-            "land_surface_temperature": "state",
-            "snowc": "state",
-            "soilw": "state",
-            "forcing_total_heat_flux": "forcing",
-        },
         "seaice": {
             "ice_fraction": "derived",
             "forcing_sea_surface_temperature": "forcing",
@@ -135,7 +127,7 @@ def test_the_prefixed_variables_are_exactly_the_forcing_ones(datasets):
         assert prefixed, name
 
 
-def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
+def test_the_roles_survive_a_merge_of_all_the_slabs(datasets):
     """A merged coupled dataset is still queryable by role.
 
     ``xr.merge`` keeps a variable's attributes, so the role is what a reader
@@ -187,7 +179,6 @@ def test_a_curvilinear_grid_keeps_the_role_beside_the_coordinates_attribute():
         fractional_mask=jnp.zeros((4, 3)),
         latitude_radian=jnp.asarray(latitude),
         longitude_radian=jnp.asarray(longitude),
-        threshold=0.5,
     )
     assert not curvilinear.is_separable
     model = SlabSeaiceModel(curvilinear, name="seaice")

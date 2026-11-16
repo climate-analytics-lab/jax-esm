@@ -207,19 +207,29 @@ class VerosForcing:
 
 @tree_math.struct
 class VerosDerived:
-    """What the ocean publishes for the other components to read."""
+    """What the ocean publishes for the other components to read.
+
+    ``sea_fraction`` is Veros' wet mask at the surface (1 for a wet column, 0
+    for land): what a regridded row from this ocean onto the atmosphere is
+    weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
+    cell takes the SST of the water under it and nothing of the land
+    columns' fill value.
+    """
 
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None,
+              sea_surface_v=None, sea_fraction=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
+            sea_fraction if sea_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -564,8 +574,11 @@ class VerosComponent:
         sea_surface_u = zonal_velocity[:, :, -1]
         sea_surface_v = variables.v[interior, interior, -1, tau]
 
+        sea_fraction = variables.maskT[interior, interior, -1].astype(
+            sea_surface_temperature.dtype)
+
         return VerosDerived(  # type: ignore[call-arg]
-            sea_surface_temperature, sea_surface_u, sea_surface_v,
+            sea_surface_temperature, sea_surface_u, sea_surface_v, sea_fraction,
         )
 
     def initialize(self) -> Carry:

@@ -68,8 +68,7 @@ The conventions, which are JCM's:
   the prefix unchanged. Two components legitimately hold the same physical
   field — one produced it, the other received it — and without the prefix
   the merge of their datasets collides on the shared name. So the slab
-  atmosphere and the slab land model write `forcing_total_heat_flux` while
-  the ocean writes its own derived `total_heat_flux`; the sea ice writes
+  atmosphere writes `forcing_total_heat_flux` while the ocean writes its own derived `total_heat_flux`; the sea ice writes
   `forcing_sea_surface_temperature` for the field the ocean published as
   `sea_surface_temperature`; and Veros writes `forcing_heat_flux`,
   `forcing_freshwater_flux`, `forcing_surface_taux`, `forcing_surface_tauy`

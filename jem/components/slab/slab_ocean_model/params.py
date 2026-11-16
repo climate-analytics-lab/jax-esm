@@ -49,10 +49,6 @@ class SlabOceanParameters:
         create the heat it removes the deficit with, and
         :func:`jem.exchangers.default_exchanges` refuses that combination.
         Default False, which leaves the deficit in the mixed layer.
-    ocean_mask_value : float
-        Value of the grid's binary mask that marks an ocean cell (0 = ocean,
-        1 = land). Static: it selects which cells the model integrates at trace
-        time, and is a mask convention rather than a physical tunable.
 
     """
 
@@ -62,7 +58,6 @@ class SlabOceanParameters:
     initial_sst: float | jnp.ndarray = 288.15
     forcing_method: str = struct.field(pytree_node=False, default="none")
     clamp_at_freezing: bool = struct.field(pytree_node=False, default=False)
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
 
     @classmethod
     def default(cls) -> "SlabOceanParameters":

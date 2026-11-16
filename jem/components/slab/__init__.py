@@ -6,7 +6,6 @@ from jem.components.slab.slab_atmosphere_model import (
     SlabAtmosphereModel,
     SlabAtmosphereParameters,
 )
-from jem.components.slab.slab_land_model import SlabLandModel, SlabLandParameters
 from jem.components.slab.slab_ocean_model import SlabOceanModel, SlabOceanParameters
 from jem.components.slab.slab_seaice_model import (
     SlabSeaiceModel,
@@ -17,8 +16,6 @@ __all__ = [
     "SlabAtmosphereModel",
     "SlabAtmosphereParameters",
     "SlabGrid",
-    "SlabLandModel",
-    "SlabLandParameters",
     "SlabModelBase",
     "SlabOceanModel",
     "SlabOceanParameters",

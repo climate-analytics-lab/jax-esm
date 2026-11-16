@@ -31,7 +31,6 @@ from jem.components.jcm import JCMComponent
 from jem.components.slab import (
     SlabAtmosphereModel,
     SlabGrid,
-    SlabLandModel,
     SlabOceanModel,
     SlabOceanParameters,
     SlabSeaiceModel,
@@ -62,7 +61,8 @@ def atmosphere_ocean_exchange(components, time):
     The minimal exchange that closes the loop between a JCM atmosphere and a
     slab ocean, and the one every coupled JCM run starts from:
 
-    - ``atm.derived.total_heat_flux`` -> ``ocn.forcing.total_heat_flux``. The
+    - ``atm.derived.sea_total_heat_flux`` -> ``ocn.forcing.total_heat_flux``,
+      the flux over the sea part of each cell. The
       JCM wrapper has already converted JCM's downward-positive ``hfluxn``
       into JEM's upward-positive convention, which is the sense
       :class:`~jem.components.slab.slab_ocean_model.SlabOceanModel` cools its
@@ -93,19 +93,20 @@ def atmosphere_ocean_exchange(components, time):
         ocn=dict(
             ocean,
             forcing=ocean["forcing"].replace(
-                total_heat_flux=atmosphere["derived"].total_heat_flux
+                total_heat_flux=atmosphere["derived"].sea_total_heat_flux
             ),
         ),
     )
 
 
 def slab_exchange(components, time):
-    """Wire the four slab models to each other.
+    """Wire the three slab models to each other.
 
-    The slab atmosphere computes the surface heat flux itself, from the
-    surface temperatures the ocean and the land hand it, so it is the source
-    of the flux the other two are forced with. The sea ice is driven purely by
-    the ocean's sea surface temperature.
+    The slab atmosphere computes the surface heat flux itself, from the sea
+    surface temperature the ocean hands it and a prescribed land surface
+    temperature (there is no land component: the land is the atmosphere's
+    own), so it is the source of the flux the ocean is forced with. The sea
+    ice is driven purely by the ocean's sea surface temperature.
 
     ``atm.forcing.total_heat_flux`` is set from the atmosphere's own
     ``derived.internal_total_heat_flux`` for one reason only: that forcing
@@ -115,7 +116,6 @@ def slab_exchange(components, time):
     del time
     atmosphere = components["atm"]
     ocean = components["ocn"]
-    land = components["lnd"]
     seaice = components["ice"]
 
     heat_flux = atmosphere["derived"].internal_total_heat_flux
@@ -125,12 +125,12 @@ def slab_exchange(components, time):
             atmosphere,
             forcing=atmosphere["forcing"].replace(
                 sea_surface_temperature=ocean["state"].sea_surface_temperature,
-                land_surface_temperature=land["state"].land_surface_temperature,
+                land_surface_temperature=jnp.full_like(
+                    ocean["state"].sea_surface_temperature, 288.15),
                 total_heat_flux=heat_flux,
             ),
         ),
         ocn=dict(ocean, forcing=ocean["forcing"].replace(total_heat_flux=heat_flux)),
-        lnd=dict(land, forcing=land["forcing"].replace(total_heat_flux=heat_flux)),
         ice=dict(
             seaice,
             forcing=seaice["forcing"].replace(
@@ -360,16 +360,16 @@ def test_continuous_equals_chunked_with_jcm(atmosphere_ocean):
 
 
 # ---------------------------------------------------------------------------
-# The four slab models coupled to each other
+# The three slab models coupled to each other
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def slab_coupler(speedy_coords, tmp_path) -> Coupler:
-    """All four slab models on a half-land T21 grid, ocean relaxing to a climatology.
+    """All three slab models on a half-land T21 grid, ocean relaxing to a climatology.
 
     Half the grid is land so that both branches of every mask run: the ocean
-    and the sea ice integrate the western half, the land model the eastern.
+    and the sea ice integrate the western half and leave the eastern alone.
     """
     n_lon, n_lat = speedy_coords.horizontal.nodal_shape
     fractional_mask = jnp.where(
@@ -391,7 +391,6 @@ def slab_coupler(speedy_coords, tmp_path) -> Coupler:
         {
             "atm": SlabAtmosphereModel(grid),
             "ocn": ocean,
-            "lnd": SlabLandModel(grid),
             "ice": SlabSeaiceModel(grid),
         },
         {"exchange": slab_exchange},
@@ -400,8 +399,8 @@ def slab_coupler(speedy_coords, tmp_path) -> Coupler:
     )
 
 
-def test_four_slab_components_run_coupled(slab_coupler):
-    """Four components, one exchanger, three steps under ``jax.jit``.
+def test_three_slab_components_run_coupled(slab_coupler):
+    """Three components, one exchanger, three steps under ``jax.jit``.
 
     ``generate_trajectory_function`` jits the whole coupled trajectory, so a
     component that branched on a traced value, allocated a shape that depends
@@ -409,23 +408,23 @@ def test_four_slab_components_run_coupled(slab_coupler):
     fail here rather than at the first long run.
     """
     initial = slab_coupler.initialize()
-    assert slab_coupler.workflow == ("exchange", "atm", "ocn", "lnd", "ice")
+    assert slab_coupler.workflow == ("exchange", "atm", "ocn", "ice")
 
     final, diagnostics = slab_coupler.generate_trajectory_function(3)(initial)
 
     assert jax.eval_shape(lambda: final) == jax.eval_shape(lambda: initial)
     assert int(final.step) == 3
-    assert set(diagnostics) == {"atm", "ocn", "lnd", "ice"}
+    assert set(diagnostics) == {"atm", "ocn", "ice"}
     for name, component_diagnostics in diagnostics.items():
         for leaf in jax.tree_util.tree_leaves(component_diagnostics):
             assert jnp.shape(leaf)[0] == 3, name
             assert bool(jnp.all(jnp.isfinite(leaf))), name
 
 
-def test_all_four_slab_datasets_merge(slab_coupler):
+def test_all_three_slab_datasets_merge(slab_coupler):
     """Every component of a coupled run merges into one dataset.
 
-    Three of these four components are forced with a heat flux and two of them
+    Two of these three components are forced with a heat flux and two of them
     are handed the ocean's sea surface temperature, so without a naming convention the
     same physical name would arrive from several components carrying different
     values -- coupling is lagged, so a received copy is a step behind the
@@ -437,7 +436,7 @@ def test_all_four_slab_datasets_merge(slab_coupler):
     _, diagnostics = slab_coupler.generate_trajectory_function(3)(initial)
 
     datasets = slab_coupler.to_xarray(diagnostics)
-    assert set(datasets) == {"atm", "ocn", "lnd", "ice"}
+    assert set(datasets) == {"atm", "ocn", "ice"}
 
     merged = xr.merge(datasets.values(), join="exact", compat="no_conflicts")
 
@@ -448,7 +447,6 @@ def test_all_four_slab_datasets_merge(slab_coupler):
     for name in (
         "mean_air_temperature",
         "sea_surface_temperature",
-        "land_surface_temperature",
         "ice_fraction",
         "internal_total_heat_flux",
         "total_heat_flux",
@@ -494,7 +492,7 @@ def test_grad_of_sst_wrt_relaxation_time_through_the_coupler(slab_coupler):
     The parameters travel in the component's carry rather than in a closure
     over the model object, precisely so this works with no special casing in
     the coupler: perturb one leaf of the initial coupled carry, run three
-    coupled steps of four components and an exchanger, and differentiate the
+    coupled steps of three components and an exchanger, and differentiate the
     result with respect to it.
     """
     initial = slab_coupler.initialize()

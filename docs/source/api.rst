@@ -61,8 +61,6 @@ Components
 
    jem.components.slab.slab_ocean_model.SlabOceanModel
    jem.components.slab.slab_ocean_model.SlabOceanParameters
-   jem.components.slab.slab_land_model.SlabLandModel
-   jem.components.slab.slab_land_model.SlabLandParameters
    jem.components.slab.slab_seaice_model.SlabSeaiceModel
    jem.components.slab.slab_seaice_model.SlabSeaiceParameters
    jem.components.slab.slab_atmosphere_model.SlabAtmosphereModel

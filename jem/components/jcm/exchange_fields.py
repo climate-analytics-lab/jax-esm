@@ -13,23 +13,47 @@ coupling rather than failing loudly, so the mapping is spelled out field by
 field, against ``docs/source/design/surface_exchange.md`` (jax-gcm) and this
 repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
 
-============================  =================================  ========================================  ========================
-Contract field (jax-gcm)      jax-gcm sign / units                JEM field                                  JEM sign / units
-============================  =================================  ========================================  ========================
-``net_heat_flux``             W m-2, **positive down** (into the  ``total_heat_flux``                        W m-2, **positive up**
-                               surface medium)
-``evaporation``                kg m-2 s-1, positive up            ``evaporation``                            kg m-2 s-1, positive up
-``precipitation``              kg m-2 s-1, positive down, >= 0     ``precipitation``                          kg m-2 s-1, positive down
-``stress_u``/``stress_v``     N m-2, **positive down**: the       ``eastward_wind_stress``/                  N m-2, the stress ON the
-                               eastward/northward momentum flux    ``northward_wind_stress``                  surface, unchanged
-                               into the surface
-``wind_u``/``wind_v``          m s-1, at the package's own         ``u0``/``v0``                              m s-1, unchanged
-                               reference (``wind_reference``)
-``sensible_heat_flux``        (not exchanged -- folded into        --                                         --
-``latent_heat_flux``           jem's own ``total_heat_flux``)
-``wind_speed``                m s-1, scalar                        (not exchanged -- ``wind_u``/``wind_v``
-                                                                     already carry the direction)
-============================  =================================  ========================================  ========================
+.. list-table::
+   :header-rows: 1
+
+   * - Contract field (jax-gcm)
+     - jax-gcm sign / units
+     - JEM field
+     - JEM sign / units
+   * - ``net_heat_flux``
+     - W m-2, **positive down** (into the surface medium)
+     - ``total_heat_flux``
+     - W m-2, **positive up**
+   * - ``evaporation``
+     - kg m-2 s-1, positive up
+     - ``evaporation``
+     - kg m-2 s-1, positive up
+   * - ``precipitation``
+     - kg m-2 s-1, positive down, >= 0
+     - ``precipitation``
+     - kg m-2 s-1, positive down
+   * - ``stress_u``/``stress_v``
+     - N m-2, **positive down**: the eastward/northward momentum flux into
+       the surface
+     - ``eastward_wind_stress``/``northward_wind_stress``
+     - N m-2, the stress ON the surface, unchanged
+   * - ``wind_u``/``wind_v``
+     - m s-1, at the package's own reference (``wind_reference``)
+     - ``u0``/``v0``
+     - m s-1, unchanged
+   * - the same fields' ``sea`` tile (or ``water`` + ``sea_ice``)
+     - as the grid-mean field, over the sea part of the cell
+     - ``sea_total_heat_flux``, ``sea_evaporation``,
+       ``sea_eastward_wind_stress``/``sea_northward_wind_stress``
+     - as the unprefixed field
+   * - ``sensible_heat_flux``, ``latent_heat_flux``
+     - (not exchanged -- folded into JEM's own ``total_heat_flux``)
+     - --
+     - --
+   * - ``wind_speed``
+     - m s-1, scalar
+     - (not exchanged -- ``wind_u``/``wind_v`` already carry the direction)
+     - --
 
 - **``total_heat_flux = -net_heat_flux``.** The only sign flip needed: jax-gcm
   publishes the net downward flux into the surface medium (SPEEDY's
@@ -59,16 +83,22 @@ Contract field (jax-gcm)      jax-gcm sign / units                JEM field     
   instead of deriving a stress of its own from ``u0``/``v0`` (jax-esm#132).
 - **``sensible_heat_flux``/``latent_heat_flux``/``wind_speed`` are on the
   contract but JEM does not exchange them separately**: the slab
-  ocean/land/sea-ice models and ``jem.exchangers`` couple on the *net*
+  ocean/sea-ice models and ``jem.exchangers`` couple on the *net*
   ``total_heat_flux``, and ``wind_speed`` is redundant once the vector is
   available (``hypot(wind_u, wind_v) == wind_speed`` is a contract
   invariant).
-- **Every field is a grid-box mean over land, sea and sea ice** -- the only
-  thing the contract guarantees. An ocean coupled through a coastal cell
-  therefore receives that cell's *mean* heat, freshwater and momentum flux,
-  land fraction included, rather than an open-water one; the contract's
-  per-tile fields are where an open-water flux would come from, and neither
-  package fills them for the fluxes yet (jax-esm#147).
+- **The unprefixed fields are grid-box means over land, sea and sea ice**;
+  the ``sea_*`` fields are the same fluxes over the sea part of the cell
+  alone (open water and sea ice together), which is what an ocean takes. They
+  come from the contract's per-tile fields, read by tile name: the ``sea``
+  tile where the package publishes one (SPEEDY, whose grid mean is exactly
+  ``(1 - fmask) * sea + fmask * land``), or the fraction-weighted mean of
+  its ``water`` and ``sea_ice`` tiles. A package that publishes no flux tile
+  (ECHAM: its implicit vertical-diffusion solve delivers only the grid mean)
+  leaves the ``sea_*`` fields equal to the grid mean, so an ocean on a coast
+  cell then also receives the land part's flux; :class:`JCMComponent` logs
+  that once when it builds its carry. See ``docs/source/design/exchange.md``
+  and jax-gcm's ``docs/source/design/surface_exchange.md``.
 
 Column-vectorized packages publish flat, not gridded
 ------------------------------------------------------
@@ -112,9 +142,9 @@ class SurfaceExchange(NamedTuple):
     """Surface fluxes, wind stress and near-surface wind, in JEM's conventions.
 
     Every field is a ``(ix, il)`` horizontal map on the atmosphere's nodal
-    grid (the grid-cell mean over land and sea -- jax-gcm's contract
-    guarantees only the grid mean; see
-    ``docs/source/design/surface_exchange.md``), reshaped onto it by
+    grid -- the grid-cell mean over land and sea, or for the ``sea_*``
+    fields the mean over the sea part of the cell (see the module
+    docstring) -- reshaped onto it by
     :func:`from_diagnostics` if the publishing package built it flat (see the
     module docstring's "Column-vectorized packages publish flat, not
     gridded" section).
@@ -141,6 +171,11 @@ class SurfaceExchange(NamedTuple):
         reference (see the module docstring's "near-surface wind" section).
     v0 : jax.Array
         Near-surface meridional wind, ``m s-1``. Same reference as ``u0``.
+    sea_total_heat_flux, sea_evaporation : jax.Array
+        ``total_heat_flux`` and ``evaporation`` over the sea part of the
+        cell (see :func:`sea_tile`), in the same conventions.
+    sea_eastward_wind_stress, sea_northward_wind_stress : jax.Array
+        The stress on the sea part of the cell, in the same conventions.
 
     """
 
@@ -151,6 +186,50 @@ class SurfaceExchange(NamedTuple):
     northward_wind_stress: jnp.ndarray
     u0: jnp.ndarray
     v0: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_evaporation: jnp.ndarray
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+
+
+def sea_tile(exchange: Any, field: str) -> Any:
+    """``field`` over the sea part of the cell, or ``None`` if not published.
+
+    The sea part is open water and sea ice together: the ``sea`` tile where a
+    package publishes one, else the fraction-weighted mean of its ``water``
+    and ``sea_ice`` tiles (zero where the cell has no sea, which no ocean
+    cell is). ``exchange`` is jax-gcm's
+    :class:`~jcm.physics.surface.surface_exchange.SurfaceExchange`; tiles are
+    selected by name with its ``tile`` method, never by an assumed index.
+    """
+    sea = exchange.tile(field, "sea")
+    if sea is not None:
+        return sea
+    water, ice = exchange.tile(field, "water"), exchange.tile(field, "sea_ice")
+    if water is None or ice is None:
+        return None
+    water_fraction = exchange.tile("tile_fraction", "water")
+    ice_fraction = exchange.tile("tile_fraction", "sea_ice")
+    sea_fraction = water_fraction + ice_fraction
+    return jnp.where(
+        sea_fraction > 0.0,
+        (water_fraction * water + ice_fraction * ice)
+        / jnp.where(sea_fraction > 0.0, sea_fraction, 1.0),
+        0.0,
+    )
+
+
+def publishes_sea_tiles(exchange: Any) -> bool:
+    """Whether every flux :func:`from_diagnostics` reads has a sea tile.
+
+    Read off the struct's static tile names and which tile fields are filled,
+    so a structural template (``Physics.get_empty_data``) answers it without
+    a step being integrated.
+    """
+    return all(
+        sea_tile(exchange, field) is not None
+        for field in ("net_heat_flux", "evaporation", "stress_u", "stress_v")
+    )
 
 
 def from_diagnostics(
@@ -200,6 +279,14 @@ def from_diagnostics(
 
     """
     exchange = surface_exchange_from(diagnostics)
+
+    def over_sea(field: str) -> jnp.ndarray:
+        # The grid mean stands in where the package publishes no sea tile
+        # (see the module docstring); which case applies is static.
+        sea = sea_tile(exchange, field)
+        values: jnp.ndarray = getattr(exchange, field) if sea is None else sea
+        return values.reshape(nodal_shape)
+
     return SurfaceExchange(
         total_heat_flux=(-exchange.net_heat_flux).reshape(nodal_shape),
         evaporation=exchange.evaporation.reshape(nodal_shape),
@@ -208,4 +295,8 @@ def from_diagnostics(
         northward_wind_stress=exchange.stress_v.reshape(nodal_shape),
         u0=exchange.wind_u.reshape(nodal_shape),
         v0=exchange.wind_v.reshape(nodal_shape),
+        sea_total_heat_flux=-over_sea("net_heat_flux"),
+        sea_evaporation=over_sea("evaporation"),
+        sea_eastward_wind_stress=over_sea("stress_u"),
+        sea_northward_wind_stress=over_sea("stress_v"),
     )

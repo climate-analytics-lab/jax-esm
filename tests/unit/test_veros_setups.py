@@ -208,6 +208,10 @@ def test_echam_veros_earth_configuration_steps():
     initializes and steps twice, and every atmosphere and ocean field stays
     finite.
 
+    ECHAM's land is the prescribed-moisture tile here: jax-gcm's default
+    SLIM land reads surface properties that exist only on T63 and finer
+    Gaussian grids, and `veros-earth`'s atmosphere is T31.
+
     Importing `veros` sets `jax_enable_x64` process-wide, so this traces ECHAM's
     Tiedtke-Nordeng convection and RRTMGP radiation in 64-bit mode -- the
     dtype-sensitive path a slab-coupled ECHAM step (float32) never exercises.
@@ -221,6 +225,7 @@ def test_echam_veros_earth_configuration_steps():
         cfg = compose(config_name="config", overrides=[
             "+configuration=veros-earth",
             "physics@atmosphere.physics=echam",
+            "atmosphere.physics.land_model=prescribed",
         ])
     coupler = runners.build_coupler(cfg)
     assert set(coupler.components) == {"atm", "ocn"}
