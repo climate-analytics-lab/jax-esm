@@ -41,10 +41,14 @@ class SlabOceanParameters:
         ``initialize``.
     forcing_method : str
         One of ``"none"``, ``"qflux"`` or ``"relaxation"``; static.
-    ocean_mask_value : float
-        Value of the grid's binary mask that marks an ocean cell (0 = ocean,
-        1 = land). Static: it selects which cells the model integrates at trace
-        time, and is a mask convention rather than a physical tunable.
+    clamp_at_freezing : bool
+        Hold the mixed layer at or above the seawater freezing point and hand
+        the deficit to a sea ice as ``derived.ice_frazil_melt_energy``, which
+        that ice turns into new ice. Static. Set it exactly when the coupled
+        sea ice takes that deficit: without such an ice the clamp would
+        create the heat it removes the deficit with, and
+        :func:`jem.exchangers.default_exchanges` refuses that combination.
+        Default False, which leaves the deficit in the mixed layer.
 
     """
 
@@ -53,7 +57,7 @@ class SlabOceanParameters:
     mixed_layer_depth_max: float | jnp.ndarray = 60.0
     initial_sst: float | jnp.ndarray = 288.15
     forcing_method: str = struct.field(pytree_node=False, default="none")
-    ocean_mask_value: float = struct.field(pytree_node=False, default=0.0)
+    clamp_at_freezing: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
     def default(cls) -> "SlabOceanParameters":

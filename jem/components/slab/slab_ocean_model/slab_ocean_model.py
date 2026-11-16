@@ -79,11 +79,18 @@ class OceanDerived:
     constant zero presented as an active forcing in a run that applies none.
     It travels instead as the :data:`_Q_FLUX_SNAPSHOT` key of the step's
     diagnostics, which is present only when a Q-flux was actually applied.
+
+    ``sea_fraction`` is the sea part of each cell, ``1 - fractional_mask`` of
+    the grid: what a regridded row from this ocean onto another grid is
+    weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
+    cell takes the SST of the sea under it and nothing of the land cells'
+    fill value.
     """
 
     mixed_layer_depth: jnp.ndarray
     ice_frazil_melt_energy: jnp.ndarray
     effective_total_heat_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -92,11 +99,13 @@ class OceanDerived:
         mixed_layer_depth=None,
         ice_frazil_melt_energy=None,
         effective_total_heat_flux=None,
+        sea_fraction=None,
     ):
         return cls(
             mixed_layer_depth if mixed_layer_depth is not None else jnp.zeros(shape),
             ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
             effective_total_heat_flux if effective_total_heat_flux is not None else jnp.zeros(shape),
+            sea_fraction if sea_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -140,14 +149,14 @@ class SlabOceanModel(SlabModelBase):
     With an SST climatology, the initial SST is that climatology sampled at
     the month the run starts in (:attr:`SlabModelBase.start_year_fraction`,
     which the coupler sets through ``bind``), held at or above the seawater
-    freezing point. That floor is the same one ``step`` maintains, and it
-    matters because an observed "SST" climatology is generally a *surface*
-    temperature: where the surface is sea ice the file reports the ice
-    surface, tens of kelvin below freezing, which is not a temperature a
-    mixed layer can have. Taken verbatim it would be handed to the first step
-    as a heat deficit and converted, in one coupling interval, into tens of
-    metres of ice. The ice that such a cell really carries is the business of
-    a sea-ice component started from an ice-concentration climatology
+    freezing point. The floor matters because an observed "SST" climatology
+    is generally a *surface* temperature: where the surface is sea ice the
+    file reports the ice surface, tens of kelvin below freezing, which is not
+    a temperature a mixed layer can have. Taken verbatim it would be a heat
+    deficit of tens of metres of ice in the first step -- frozen out at once
+    by a clamping ocean, or carried for years by one that keeps its deficit.
+    The ice that such a cell really carries is the business of a sea-ice
+    component started from an ice-concentration climatology
     (``SlabSeaiceModel(..., ice_clim_file=...)``), not of the mixed layer's
     temperature.
 
@@ -157,9 +166,8 @@ class SlabOceanModel(SlabModelBase):
     reads that same climatology as the RELAXATION TARGET on every subsequent
     step (``_climatology_at``), not only at ``t=0``; a target left sub-freezing
     would pull the mixed layer down towards an ice-surface temperature every
-    step, have ``step`` clamp the result back to freezing, and report the
-    difference as frazil energy each time -- regenerating that "initial
-    deficit" for the life of the run instead of it being a one-off transient.
+    step, regenerating that "initial deficit" for the life of the run instead
+    of it being a one-off transient.
     Flooring the source once means every reader of ``self.sst_climatology``
     (the initial condition and the relaxation target alike) sees a physically
     valid target: under sea ice the mixed layer sits at the freezing point, so
@@ -176,24 +184,36 @@ class SlabOceanModel(SlabModelBase):
 
     Freeze/melt potential
     ---------------------
-    Following CESM's slab-ocean/CICE coupling convention: after the update
-    above, ``sea_surface_temperature`` is clamped so it never drops below the
-    seawater freezing point, and the heat that clamp removes (or, symmetrically,
-    the heat available above freezing) is reported as a single signed
-    diagnostic, ``ice_frazil_melt_energy`` (J/m^2, energy released over this
-    coupling step -- not a flux)::
+    After the update above the ocean publishes its freeze/melt potential,
+    CESM's ``frzmlt``, as one signed quantity, ``ice_frazil_melt_energy``
+    (J/m^2 over this coupling step -- not a flux)::
 
-        ice_frazil_melt_energy = (T_freezing - T_unclamped)
+        ice_frazil_melt_energy = (T_freezing - T)
             * mixed_layer_depth * ocean_density * ocean_specific_heat_capacity
 
-    Positive values mean the mixed layer would have gone sub-freezing -- that
-    deficit forms new (frazil) ice. Negative values mean the mixed layer sits
-    above freezing -- that surplus is available to melt existing ice from below.
-    This is exactly CESM's ``frzmlt``: one signed quantity, computed once per
-    coupling step with no separate relaxation timescale (the coupling step
-    itself is the timescale). This ocean model has no ice physics of its own,
-    so ``ice_frazil_melt_energy`` is meant to be consumed by a sea-ice
-    component (e.g. ``SlabSeaiceModel``) through the coupler.
+    Positive values are a deficit below freezing, which forms new (frazil)
+    ice; negative values are heat above freezing, available to melt ice from
+    below.
+
+    What happens to a deficit depends on the sea ice the ocean is coupled
+    to, and ``params.clamp_at_freezing`` (static) says which:
+
+    - ``True``: the mixed layer is clamped at the freezing point, as CESM's
+      slab ocean does under CICE, and the deficit the clamp removed is the
+      positive part of ``ice_frazil_melt_energy``. A sea ice with an energy
+      budget (one that takes ``ice_frazil_melt_energy`` and forms that much
+      ice) must be coupled, or the clamp creates the heat it removes the
+      deficit with.
+    - ``False`` (the default): the mixed layer keeps its deficit and may
+      cool below freezing. This is the choice for a sea ice with no energy
+      budget, such as ``SlabSeaiceModel``, which diagnoses full cover from a
+      sub-freezing mixed layer: the energy then stays in the ocean, and the
+      coupled system conserves it. The atmosphere sees such a surface through
+      the ice fraction, with the ice-surface temperature it derives from the
+      SST itself (SPEEDY's ``min(SST, freezing)``).
+
+    :func:`jem.exchangers.default_exchanges` refuses a clamping ocean whose
+    ``ice_frazil_melt_energy`` no component takes.
     """
 
     def __init__(
@@ -311,7 +331,7 @@ class SlabOceanModel(SlabModelBase):
         self.q_flux_climatology = self._load(q_flux_file, "qflux")
 
         if self.sst_climatology is not None:
-            ocean = self._ocean_cells(self.params)
+            ocean = self._ocean_cells()
             if bool(jnp.any(jnp.isnan(self.sst_climatology) & ocean[..., None])):
                 raise ValueError(
                     f"SST climatology file \"{sst_clim_file!s:s}\" has NaNs over ocean "
@@ -353,11 +373,10 @@ class SlabOceanModel(SlabModelBase):
             # (`_climatology_at`) reads `self.sst_climatology` directly as the
             # RELAXATION TARGET every step, not only at t=0; leaving it
             # sub-freezing would relax the mixed layer down towards an
-            # ice-surface temperature it can never physically have, `step`
-            # would clamp the result back to freezing and report the
-            # difference as frazil energy, and that heat deficit would
-            # regenerate every coupling step for the life of the run instead
-            # of being a one-off transient at initialization. Flooring the
+            # ice-surface temperature it can never physically have, and that
+            # heat deficit would regenerate every coupling step for the life
+            # of the run instead of being a one-off transient at
+            # initialization. Flooring the
             # source once makes "the mixed layer's target is never
             # sub-freezing" a structural invariant that every reader of
             # `self.sst_climatology` gets for free, rather than something each
@@ -401,9 +420,11 @@ class SlabOceanModel(SlabModelBase):
         logger.info("%s: loading %r climatology from %s", self.name, var, path)
         return load_monthly_climatology(path, var, self.grid)
 
-    def _ocean_cells(self, params: SlabOceanParameters) -> jnp.ndarray:
-        """Boolean mask of the cells this model integrates."""
-        return self.grid.binary_mask == params.ocean_mask_value
+    def _ocean_cells(self) -> jnp.ndarray:
+        """Boolean mask of the cells this model integrates: every cell with
+        any ocean, coast cells included (see :class:`SlabGrid`).
+        """
+        return self.grid.ocean_mask
 
     def initialize(self, params: SlabOceanParameters | None = None) -> Carry:
         """Build the initial ocean carry.
@@ -433,7 +454,7 @@ class SlabOceanModel(SlabModelBase):
         """
         params = self._initial_params(params)
         self._check_forcing_configuration(params)
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
 
         if self.sst_climatology is not None:
             sea_surface_temperature = evaluate_cyclic_linear(
@@ -443,11 +464,10 @@ class SlabOceanModel(SlabModelBase):
             sea_surface_temperature = params.initial_sst + IDEALIZED_SST_RANGE * (
                 positive_cosine_cubic_latitude_squared(self.grid.latitude_radian)
             )
-        # The run starts inside the state space it is integrated in. `step`
-        # holds the mixed layer at or above the seawater freezing point and
-        # reports the heat that clamp removes as this step's freeze/melt
-        # potential, so a sub-freezing INITIAL temperature is not a cold ocean
-        # -- it is a whole run's worth of frazil energy released in step one.
+        # A sub-freezing INITIAL temperature is not a cold ocean but a heat
+        # deficit the run never had -- frozen out in step one by a clamping
+        # ocean, carried for years by one that keeps its deficit -- so the
+        # run starts at or above freezing (see the class docstring).
         # `self.sst_climatology` is already floored (see __init__), so this is
         # a no-op on the climatology branch above; it is load-bearing only for
         # the idealized-profile branch, which has no climatology to floor at
@@ -473,6 +493,7 @@ class SlabOceanModel(SlabModelBase):
             "derived": OceanDerived.zeros(
                 self.grid.shape,
                 mixed_layer_depth=self._mixed_layer_depth(params),
+                sea_fraction=1.0 - self.grid.fractional_mask,
             ),
         }
 
@@ -492,7 +513,7 @@ class SlabOceanModel(SlabModelBase):
         params = carry["params"]
         state = carry["state"]
         forcing = carry["forcing"]
-        ocean = self._ocean_cells(params)
+        ocean = self._ocean_cells()
 
         # From the CARRIED parameters, every step: a depth cached at
         # initialization would make `mixed_layer_depth_min/max` dead
@@ -553,15 +574,18 @@ class SlabOceanModel(SlabModelBase):
             0.0,
         )
 
-        # The ocean itself never carries a sub-freezing SST -- that deficit was
-        # just diverted into ice_frazil_melt_energy above.
-        sea_surface_temperature = jnp.where(
-            ocean,
-            jnp.maximum(
-                sea_surface_temperature, constants.seawater_freezing_point_K
-            ),
-            sea_surface_temperature,
-        )
+        # A clamping ocean hands the deficit to the sea ice as the positive
+        # part of ice_frazil_melt_energy above, so it never carries a
+        # sub-freezing SST; otherwise the deficit stays in the mixed layer
+        # (see the class docstring). Static, so only one branch is traced.
+        if params.clamp_at_freezing:
+            sea_surface_temperature = jnp.where(
+                ocean,
+                jnp.maximum(
+                    sea_surface_temperature, constants.seawater_freezing_point_K
+                ),
+                sea_surface_temperature,
+            )
 
         new_state = state.replace(sea_surface_temperature=sea_surface_temperature)
         new_derived = OceanDerived.zeros(
@@ -569,6 +593,7 @@ class SlabOceanModel(SlabModelBase):
             mixed_layer_depth=mixed_layer_depth,
             ice_frazil_melt_energy=ice_frazil_melt_energy,
             effective_total_heat_flux=total_heat_flux,
+            sea_fraction=1.0 - self.grid.fractional_mask,
         )
 
         new_carry = {

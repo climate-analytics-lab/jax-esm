@@ -9,6 +9,7 @@ writes -- rather than on a real atmosphere or ocean, since nothing here needs
 either model to be built.
 """
 
+import dataclasses
 from importlib import resources
 
 import jax
@@ -65,6 +66,26 @@ def test_mask_fluxes_under_ice_blocks_a_cooling_flux_at_the_freezing_point():
     np.testing.assert_allclose(masked_fresh, jnp.array([0.0, 1e-6]))
 
 
+def test_the_ice_mask_uses_the_coupled_model_s_freezing_point(monkeypatch):
+    """With no freezing point given, the mask reads
+    ``jem.constants.seawater_freezing_point_K`` when it runs -- the freezing
+    point the slab ocean and slab ice use -- so an override reaches it.
+    """
+    from jem import constants
+
+    sst = jnp.array([271.30])
+    heat_flux = jnp.array([50.0])
+    freshwater_flux = jnp.array([1e-6])
+    masked, _ = mask_fluxes_under_ice(sst, heat_flux, freshwater_flux)
+    np.testing.assert_allclose(masked, 0.0)
+
+    monkeypatch.setattr(
+        constants, "surface_constants",
+        dataclasses.replace(constants.surface_constants, seawater_freezing_point_K=271.2))
+    masked, _ = mask_fluxes_under_ice(sst, heat_flux, freshwater_flux)
+    np.testing.assert_allclose(masked, 50.0)
+
+
 # ---------------------------------------------------------------------------
 # rotate_vector / read_rotation_angles
 # ---------------------------------------------------------------------------
@@ -107,10 +128,11 @@ def test_read_rotation_angles_names_the_file_when_unrotated():
 
 @struct.dataclass
 class _AtmDerived:
-    eastward_wind_stress: jnp.ndarray
-    northward_wind_stress: jnp.ndarray
-    total_heat_flux: jnp.ndarray
-    total_freshwater_flux: jnp.ndarray
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
 
 @struct.dataclass
@@ -129,16 +151,18 @@ class _OcnForcing:
 @struct.dataclass
 class _OcnDerived:
     sea_surface_temperature: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
 
 def _fake_components():
     shape = (4,)
     atm = {
         "derived": _AtmDerived(
-            eastward_wind_stress=jnp.array([0.1, -0.05, 0.02, 0.0]),
-            northward_wind_stress=jnp.array([-0.03, 0.04, 0.0, 0.01]),
-            total_heat_flux=jnp.full(shape, 20.0),
-            total_freshwater_flux=jnp.full(shape, 1e-6),
+            sea_eastward_wind_stress=jnp.array([0.1, -0.05, 0.02, 0.0]),
+            sea_northward_wind_stress=jnp.array([-0.03, 0.04, 0.0, 0.01]),
+            sea_total_heat_flux=jnp.full(shape, 20.0),
+            sea_total_freshwater_flux=jnp.full(shape, 1e-6),
+            sea_fraction=jnp.ones(shape),
         ),
         "forcing": _AtmForcing(sea_surface_temperature=jnp.full(shape, 290.0)),
     }
@@ -149,7 +173,8 @@ def _fake_components():
             heat_flux=jnp.zeros(shape),
             freshwater_flux=jnp.zeros(shape),
         ),
-        "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0)),
+        "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0),
+                               sea_fraction=jnp.ones(shape)),
     }
     return {"atm": atm, "ocn": ocn}
 
@@ -217,10 +242,11 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
         shape = (4,)
         atm = {
             "derived": _AtmDerived(
-                eastward_wind_stress=jnp.full(shape, 0.1, dtype=jnp.float32),
-                northward_wind_stress=jnp.full(shape, -0.03, dtype=jnp.float32),
-                total_heat_flux=jnp.full(shape, 20.0, dtype=jnp.float32),
-                total_freshwater_flux=jnp.full(shape, 1e-6, dtype=jnp.float32),
+                sea_eastward_wind_stress=jnp.full(shape, 0.1, dtype=jnp.float32),
+                sea_northward_wind_stress=jnp.full(shape, -0.03, dtype=jnp.float32),
+                sea_total_heat_flux=jnp.full(shape, 20.0, dtype=jnp.float32),
+                sea_total_freshwater_flux=jnp.full(shape, 1e-6, dtype=jnp.float32),
+                sea_fraction=jnp.ones(shape, dtype=jnp.float32),
             ),
             "forcing": _AtmForcing(
                 sea_surface_temperature=jnp.full(shape, 290.0, dtype=jnp.float32)
@@ -234,7 +260,8 @@ def test_veros_exchange_casts_to_the_destination_carrys_dtype():
                 freshwater_flux=jnp.zeros(shape, dtype=jnp.float64),
             ),
             "derived": _OcnDerived(
-                sea_surface_temperature=jnp.full(shape, 285.0, dtype=jnp.float64)
+                sea_surface_temperature=jnp.full(shape, 285.0, dtype=jnp.float64),
+                sea_fraction=jnp.ones(shape, dtype=jnp.float64),
             ),
         }
         components = {"atm": atm, "ocn": ocn}
@@ -268,17 +295,20 @@ def test_veros_exchange_uses_the_regridders_it_was_given():
     exchange(components, TIME)
 
     # Both stress components and both fluxes cross the conservative a2o map
-    # -- the stress is a momentum flux, so it is regridded like one.
-    assert len(a2o_calls) == 4
+    # -- the stress is a momentum flux, so it is regridded like one -- each
+    # weighted by the sea part of the cell: R(fraction), R(fraction * field)
+    # and R(field), the fallback where no sea is mapped (regrid_weighted).
+    assert len(a2o_calls) == 4 * 3
     derived = components["atm"]["derived"]
-    for field in (derived.eastward_wind_stress, derived.northward_wind_stress,
-                  derived.total_heat_flux, derived.total_freshwater_flux):
+    for field in (derived.sea_eastward_wind_stress, derived.sea_northward_wind_stress,
+                  derived.sea_total_heat_flux, derived.sea_total_freshwater_flux):
         assert any(call is field for call in a2o_calls)
-    # The sea surface temperature crosses o2a exactly once.
-    assert len(o2a_calls) == 1
-    np.testing.assert_allclose(
-        o2a_calls[0], components["ocn"]["derived"].sea_surface_temperature
-    )
+    assert any(call is derived.sea_fraction for call in a2o_calls)
+    # The sea surface temperature crosses o2a weighted by Veros' wet mask:
+    # R(wet), R(wet * SST) and the fallback R(SST).
+    assert len(o2a_calls) == 3
+    assert any(call is components["ocn"]["derived"].sea_surface_temperature
+               for call in o2a_calls)
 
 
 def test_veros_exchange_without_regridders_is_the_identity_path():
@@ -291,11 +321,11 @@ def test_veros_exchange_without_regridders_is_the_identity_path():
     # the atmosphere published -- no drag law, no rescaling, no sign flip.
     np.testing.assert_array_equal(
         result["ocn"]["forcing"].surface_taux,
-        components["atm"]["derived"].eastward_wind_stress,
+        components["atm"]["derived"].sea_eastward_wind_stress,
     )
     np.testing.assert_array_equal(
         result["ocn"]["forcing"].surface_tauy,
-        components["atm"]["derived"].northward_wind_stress,
+        components["atm"]["derived"].sea_northward_wind_stress,
     )
 
 
@@ -309,8 +339,8 @@ def test_veros_exchange_passes_the_stress_sign_through():
     """
     components = _fake_components()
     components["atm"]["derived"] = components["atm"]["derived"].replace(
-        eastward_wind_stress=jnp.full((4,), 0.1),
-        northward_wind_stress=jnp.full((4,), -0.2),
+        sea_eastward_wind_stress=jnp.full((4,), 0.1),
+        sea_northward_wind_stress=jnp.full((4,), -0.2),
     )
     result = VerosExchange()(components, TIME)
     assert bool(jnp.all(result["ocn"]["forcing"].surface_taux > 0))
@@ -334,10 +364,11 @@ def test_veros_exchange_conserves_momentum_through_a_conservative_regrid():
 
     components = _fake_components()
     components["atm"]["derived"] = _AtmDerived(
-        eastward_wind_stress=jnp.array([0.12, -0.04]),
-        northward_wind_stress=jnp.array([0.03, 0.05]),
-        total_heat_flux=jnp.array([20.0, 30.0]),
-        total_freshwater_flux=jnp.array([1e-6, 2e-6]),
+        sea_eastward_wind_stress=jnp.array([0.12, -0.04]),
+        sea_northward_wind_stress=jnp.array([0.03, 0.05]),
+        sea_total_heat_flux=jnp.array([20.0, 30.0]),
+        sea_total_freshwater_flux=jnp.array([1e-6, 2e-6]),
+        sea_fraction=jnp.ones((2,)),
     )
     components["atm"]["forcing"] = _AtmForcing(
         sea_surface_temperature=jnp.full((2,), 290.0))
@@ -351,10 +382,76 @@ def test_veros_exchange_conserves_momentum_through_a_conservative_regrid():
     forcing = result["ocn"]["forcing"]
     np.testing.assert_allclose(
         jnp.sum(forcing.surface_taux * ocn_area),
-        jnp.sum(derived.eastward_wind_stress * atm_area))
+        jnp.sum(derived.sea_eastward_wind_stress * atm_area))
     np.testing.assert_allclose(
         jnp.sum(forcing.surface_tauy * ocn_area),
-        jnp.sum(derived.northward_wind_stress * atm_area))
+        jnp.sum(derived.sea_northward_wind_stress * atm_area))
+
+
+def test_veros_exchange_takes_nothing_from_an_atmosphere_cell_with_no_sea():
+    """On a mixed grid a coastal ocean cell gets the flux over sea only.
+
+    Two atmosphere cells map onto one ocean cell: one all sea, one all land
+    whose "sea" flux was computed against a surface with no sea under it. The
+    ocean takes the sea cell's flux and stress, not the area mean of the two.
+    """
+    def a2o_flux(value):
+        return value.mean(keepdims=True)
+
+    def o2a_state(value):
+        return jnp.repeat(value, 2)
+
+    land = 500.0
+    components = {
+        "atm": {
+            "derived": _AtmDerived(
+                sea_eastward_wind_stress=jnp.array([0.1, land]),
+                sea_northward_wind_stress=jnp.array([-0.05, land]),
+                sea_total_heat_flux=jnp.array([20.0, land]),
+                sea_total_freshwater_flux=jnp.array([1e-6, land]),
+                sea_fraction=jnp.array([1.0, 0.0]),
+            ),
+            "forcing": _AtmForcing(sea_surface_temperature=jnp.full((2,), 290.0)),
+        },
+        "ocn": {
+            "forcing": _OcnForcing(*(jnp.zeros((1,)) for _ in range(4))),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.full((1,), 285.0),
+                                   sea_fraction=jnp.ones((1,))),
+        },
+    }
+    exchange = VerosExchange(regrid={"a2o_flux": a2o_flux, "o2a_state": o2a_state})
+    forcing = exchange(components, TIME)["ocn"]["forcing"]
+    np.testing.assert_allclose(forcing.surface_taux, [0.1])
+    np.testing.assert_allclose(forcing.surface_tauy, [-0.05])
+    np.testing.assert_allclose(forcing.heat_flux, [20.0])
+    np.testing.assert_allclose(forcing.freshwater_flux, [1e-6])
+
+
+def test_veros_exchange_hands_the_atmosphere_the_sst_of_the_water():
+    """An atmosphere cell over one wet and one land Veros column takes the
+    wet column's SST, not its mean with the land's fill value.
+    """
+    def a2o_flux(value):
+        return jnp.repeat(value, 2)
+
+    def o2a_state(value):
+        return value.mean(keepdims=True)
+
+    components = {
+        "atm": {
+            "derived": _AtmDerived(
+                *(jnp.zeros((1,)) for _ in range(4)), sea_fraction=jnp.ones((1,))),
+            "forcing": _AtmForcing(sea_surface_temperature=jnp.full((1,), 280.0)),
+        },
+        "ocn": {
+            "forcing": _OcnForcing(*(jnp.zeros((2,)) for _ in range(4))),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.array([290.0, 273.15]),
+                                   sea_fraction=jnp.array([1.0, 0.0])),
+        },
+    }
+    exchange = VerosExchange(regrid={"a2o_flux": a2o_flux, "o2a_state": o2a_state})
+    result = exchange(components, TIME)
+    np.testing.assert_allclose(result["atm"]["forcing"].sea_surface_temperature, [290.0])
 
 
 def test_veros_exchange_rotates_the_stress_into_the_ocean_frame(tmp_path):
@@ -379,10 +476,11 @@ def test_veros_exchange_rotates_the_stress_into_the_ocean_frame(tmp_path):
     components = dict(components, atm=dict(
         components["atm"],
         derived=_AtmDerived(
-            eastward_wind_stress=jnp.full((4, 1), 0.1),
-            northward_wind_stress=jnp.full((4, 1), 0.05),
-            total_heat_flux=jnp.full((4, 1), 20.0),
-            total_freshwater_flux=jnp.full((4, 1), 1e-6),
+            sea_eastward_wind_stress=jnp.full((4, 1), 0.1),
+            sea_northward_wind_stress=jnp.full((4, 1), 0.05),
+            sea_total_heat_flux=jnp.full((4, 1), 20.0),
+            sea_total_freshwater_flux=jnp.full((4, 1), 1e-6),
+            sea_fraction=jnp.ones((4, 1)),
         ),
     ))
     result = VerosExchange(rotation_grid_file=str(path))(components, TIME)
@@ -415,12 +513,12 @@ def test_veros_exchange_stress_is_differentiable():
 
     def total_ocean_stress(eastward):
         atm = dict(components["atm"], derived=components["atm"]["derived"].replace(
-            eastward_wind_stress=eastward))
+            sea_eastward_wind_stress=eastward))
         result = VerosExchange()(dict(components, atm=atm), TIME)
         return jnp.sum(result["ocn"]["forcing"].surface_taux)
 
     gradient = jax.grad(total_ocean_stress)(
-        components["atm"]["derived"].eastward_wind_stress)
+        components["atm"]["derived"].sea_eastward_wind_stress)
     np.testing.assert_array_equal(gradient, jnp.ones(4))
 
 
@@ -448,3 +546,77 @@ def test_veros_exchange_repr_names_its_regridders_and_rotation():
     assert "a2o_flux=identity" in text  # no regrid was given to this instance
     assert "o2a_state=identity" in text
     assert "rotates=yes" in text
+
+
+@struct.dataclass
+class _LandForcing:
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _LandDerived:
+    soil_water_availability: jnp.ndarray
+    runoff_mass_rate: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmLandDerived:
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    precipitation: jnp.ndarray
+    land_evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmLandForcing:
+    sea_surface_temperature: jnp.ndarray
+    soilw_am: jnp.ndarray
+
+
+@struct.dataclass
+class _OcnRunoffForcing:
+    surface_taux: jnp.ndarray
+    surface_tauy: jnp.ndarray
+    heat_flux: jnp.ndarray
+    freshwater_flux: jnp.ndarray
+    runoff_mass_rate: jnp.ndarray
+
+
+def test_veros_exchange_couples_a_land_with_the_table_s_rows():
+    """With a land present the exchanger makes the land rows the declarative
+    Veros table has: precipitation and the land tile's evaporation to the
+    land, its availability to the atmosphere, its runoff to the ocean.
+    """
+    shape = (4,)
+    components = {
+        "atm": {
+            "derived": _AtmLandDerived(
+                *(jnp.zeros(shape) for _ in range(4)), sea_fraction=jnp.ones(shape),
+                precipitation=jnp.full(shape, 3e-5),
+                land_evaporation=jnp.full(shape, 1e-5)),
+            "forcing": _AtmLandForcing(jnp.full(shape, 290.0), jnp.zeros(shape)),
+        },
+        "ocn": {
+            "forcing": _OcnRunoffForcing(*(jnp.zeros(shape) for _ in range(4)),
+                                         runoff_mass_rate=jnp.zeros(())),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0),
+                                   sea_fraction=jnp.ones(shape)),
+        },
+        "lnd": {
+            "forcing": _LandForcing(jnp.zeros(shape), jnp.zeros(shape)),
+            "derived": _LandDerived(jnp.full(shape, 0.4), jnp.asarray(2.5e6)),
+        },
+    }
+    result = VerosExchange()(components, TIME)
+    np.testing.assert_allclose(result["lnd"]["forcing"].precipitation, 3e-5)
+    np.testing.assert_allclose(result["lnd"]["forcing"].evaporation, 1e-5)
+    np.testing.assert_allclose(result["atm"]["forcing"].soilw_am, 0.4)
+    np.testing.assert_allclose(result["ocn"]["forcing"].runoff_mass_rate, 2.5e6)
+    # The ocean rows are made as before.
+    np.testing.assert_allclose(result["atm"]["forcing"].sea_surface_temperature, 285.0)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(
+        components)

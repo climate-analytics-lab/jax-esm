@@ -22,9 +22,9 @@ from jem.base.component import (
     role_attrs,
 )
 from jem.components.slab import (
+    BucketLandModel,
     SlabAtmosphereModel,
     SlabGrid,
-    SlabLandModel,
     SlabOceanModel,
     SlabOceanParameters,
     SlabSeaiceModel,
@@ -55,8 +55,8 @@ def slab_models() -> dict:
         "ocn": SlabOceanModel(
             grid, SlabOceanParameters(forcing_method="qflux"), name="ocn"
         ),
-        "lnd": SlabLandModel(grid),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
+        "lnd": BucketLandModel(grid),
     }
 
 
@@ -102,17 +102,20 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "ice_frazil_melt_energy": "derived",
             "forcing_q_flux": "forcing",
         },
-        "lnd": {
-            "land_surface_temperature": "state",
-            "snowc": "state",
-            "soilw": "state",
-            "forcing_total_heat_flux": "forcing",
-        },
         "seaice": {
-            "ice_thickness": "state",
-            "ice_surface_temperature": "state",
-            "forcing_ice_frazil_melt_energy": "forcing",
             "ice_fraction": "derived",
+            "forcing_sea_surface_temperature": "forcing",
+        },
+        "lnd": {
+            "soil_water_content": "state",
+            "soil_water_availability": "derived",
+            "deep_drainage": "derived",
+            "soil_water_overflow": "derived",
+            "runoff": "derived",
+            "unmet_evaporation": "derived",
+            "runoff_mass_rate": "derived",
+            "forcing_precipitation": "forcing",
+            "forcing_evaporation": "forcing",
         },
     }
     for name, roles in expected.items():
@@ -137,7 +140,7 @@ def test_the_prefixed_variables_are_exactly_the_forcing_ones(datasets):
         assert prefixed, name
 
 
-def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
+def test_the_roles_survive_a_merge_of_all_the_slabs(datasets):
     """A merged coupled dataset is still queryable by role.
 
     ``xr.merge`` keeps a variable's attributes, so the role is what a reader
@@ -156,7 +159,9 @@ def test_the_roles_survive_a_merge_of_all_four_slabs(datasets):
     assert forcing == {
         "forcing_total_heat_flux",
         "forcing_q_flux",
-        "forcing_ice_frazil_melt_energy",
+        "forcing_sea_surface_temperature",
+        "forcing_precipitation",
+        "forcing_evaporation",
     }
     assert "sea_surface_temperature" in map(
         str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "state"})
@@ -189,7 +194,6 @@ def test_a_curvilinear_grid_keeps_the_role_beside_the_coordinates_attribute():
         fractional_mask=jnp.zeros((4, 3)),
         latitude_radian=jnp.asarray(latitude),
         longitude_radian=jnp.asarray(longitude),
-        threshold=0.5,
     )
     assert not curvilinear.is_separable
     model = SlabSeaiceModel(curvilinear, name="seaice")

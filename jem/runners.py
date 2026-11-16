@@ -282,15 +282,9 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
             atm.model.coords.horizontal, atm.model.terrain.fmask
         )
     mask_file = _runner_only_value(node, "land_fraction_file")
-    # 0.5 rather than `from_scrip`'s own default, so that a cell counts as
-    # land on a SCRIP grid under the same rule as on the atmosphere's grid
-    # (`from_coords` defaults to 0.5); a coupled run that applied two
-    # different land/ocean splits either side of the interface would be
-    # exchanging fluxes with cells the other side thinks are dry.
     return SlabGrid.from_scrip(
         str(grid_file),
         fractional_mask=None if mask_file is None else _land_fraction(mask_file),
-        threshold=0.5,
     )
 
 
@@ -405,7 +399,9 @@ def build_exchangers(
       single-grid hand-written exchanger that takes no ``regrid`` at all is
       still a valid node instead of failing on an unexpected keyword.
     - ``coupling.exchangers`` -- an explicit coupling table in YAML, a list of
-      ``{src, dst, regrid}`` mappings.
+      ``{src, dst, regrid, weight}`` mappings (``regrid`` and ``weight``
+      optional; see :class:`jem.exchangers.ExchangeSpec`). It is taken as
+      written: rows get no automatic weight.
     - neither (both ``null``, the default) --
       :func:`jem.exchangers.default_exchangers` for whichever components were
       built, which is where the standard wiring is written down once.
@@ -480,7 +476,7 @@ def build_exchangers(
     if not isinstance(table, list):
         raise TypeError(
             "coupling.exchangers is the coupling table: a list of "
-            "`{src, dst, regrid}` mappings, or null for the default. Got a "
+            "`{src, dst, regrid, weight}` mappings, or null for the default. Got a "
             f"{type(table).__name__}."
         )
     return {DEFAULT_EXCHANGER_NAME: Exchange(table, regridders)}

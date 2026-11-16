@@ -162,9 +162,11 @@ def test_jcm_configuration_composes_under_the_atmosphere():
     cfg = composed(["+configuration@atmosphere=speedy-t31"])
     assert cfg.atmosphere.grid.spectral_truncation == 31
     assert "speedy_convection" in cfg.atmosphere.physics.terms
-    # The bundle's own non-default settings land too.
+    # The bundle's own non-default settings land too. Its time step is read
+    # off jax-gcm's file rather than restated: it is jax-gcm's to retune.
+    bundle = OmegaConf.load(JCM_CONFIG_DIR / "configuration" / "speedy-t31.yaml")
     assert cfg.atmosphere.terrain.kind == "from_file"
-    assert cfg.atmosphere.run.time_step == 15
+    assert cfg.atmosphere.run.time_step == bundle.run.time_step
     # ... and the top-level (coupled) config is untouched by it.
     assert cfg.coupled_run.total_time == "30 days"
 
@@ -331,7 +333,8 @@ def test_named_configurations_set_non_default_values():
     assert earth.ocean.params.forcing_method == "relaxation"
     # 30 days, against the model's own 60.
     assert earth.ocean.params.relaxation_time == 30 * 86400
-    assert earth.land.params.tdland == 86400.0
+    # The land is the atmosphere's own (SPEEDY's slab): no land component.
+    assert earth.land is None
 
 
 # ---------------------------------------------------------------------------

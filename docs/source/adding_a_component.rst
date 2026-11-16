@@ -131,6 +131,12 @@ objects. So the carry structure the adapter adopts is
             eastward_wind_stress,   # N/m^2, the stress ON the surface
             northward_wind_stress,
             u0, v0,                 # near-surface wind, package's own height
+            sea_total_heat_flux,    # the same fluxes over the sea part of
+            sea_total_freshwater_flux,  # the cell alone: what an ocean takes
+            sea_evaporation,
+            sea_eastward_wind_stress, sea_northward_wind_stress,
+            sea_fraction,           # the sea part of the cell they are over
+            land_evaporation,       # the land tile's evaporation, for a land
         ),
     }
 
@@ -261,7 +267,7 @@ wiring):
     from jem import Exchange, ExchangeSpec
 
     exchangers = {"exchange": Exchange([
-        ExchangeSpec("atm.derived.total_heat_flux", "ocn.forcing.total_heat_flux"),
+        ExchangeSpec("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux"),
         ExchangeSpec("ocn.state.sea_surface_temperature",
                      "atm.forcing.sea_surface_temperature"),
     ])}

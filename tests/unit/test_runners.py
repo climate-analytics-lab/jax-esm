@@ -31,7 +31,6 @@ from jem import runners
 from jem.base.component import Carry, CouplingTime
 from jem.components.slab import (
     SlabAtmosphereParameters,
-    SlabLandParameters,
     SlabOceanParameters,
     SlabSeaiceParameters,
 )
@@ -153,7 +152,6 @@ def test_runners_has_no_component_kwargs():
         field.name
         for parameters in (
             SlabOceanParameters,
-            SlabLandParameters,
             SlabSeaiceParameters,
             SlabAtmosphereParameters,
         )
@@ -383,21 +381,19 @@ def test_the_shipped_ocean_options_ask_for_what_they_take():
 
 def test_missing_component_filters_exchanges():
     """A component the config leaves out takes its exchange rows with it."""
-    cfg = composed(["land=none"])
-    assert cfg.land is None
+    cfg = composed(["seaice=none"])
+    assert cfg.seaice is None
 
-    exchangers = runners.build_exchangers(
-        cfg, {"atm": None, "ocn": None, "seaice": None}, {}
-    )
+    exchangers = runners.build_exchangers(cfg, {"atm": None, "ocn": None}, {})
     specs = exchangers["exchange"].specs
     assert specs, "the remaining components still have rows to exchange"
-    assert not [spec for spec in specs if "lnd" in (spec.src + spec.dst)]
+    assert not [spec for spec in specs if "seaice" in (spec.src + spec.dst)]
 
-    with_land = runners.build_exchangers(
-        composed([]), {"atm": None, "ocn": None, "lnd": None}, {}
+    with_ice = runners.build_exchangers(
+        composed([]), {"atm": None, "ocn": None, "seaice": None}, {}
     )
-    assert [spec for spec in with_land["exchange"].specs
-            if "lnd" in (spec.src + spec.dst)]
+    assert [spec for spec in with_ice["exchange"].specs
+            if "seaice" in (spec.src + spec.dst)]
 
 
 def test_exchanger_path_replaces_the_list():
@@ -500,13 +496,40 @@ def test_an_explicit_coupling_table_is_used_as_given():
 # ---------------------------------------------------------------------------
 
 
+def test_earth_slab_with_the_bucket_land_couples_the_soil_water():
+    """`land=bucket` on `earth-slab`: the land is built on the atmosphere's
+    grid, with its cell areas, the atmosphere's `soilw_am` is declared
+    exchanged (a plain array, no longer the file's time series), and a
+    coupled step keeps the carry's structure.
+    """
+    from jcm.forcing import TimeSeries
+
+    coupler = runners.build_coupler(composed([
+        "+configuration=earth-slab", "land=bucket",
+        "+land.soil_water_clim_file=${jcm_data:bc/t30/clim/forcing.nc}",
+    ]))
+    assert set(coupler.components) == {"atm", "ocn", "seaice", "lnd"}
+    assert coupler.components["lnd"].grid.cell_solid_angle is not None
+    assert coupler.components["atm"].publishes_land_evaporation
+    assert set(coupler.components["atm"].exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am", "soilw_am",
+    }
+    carry = coupler.initialize()
+    forcing = carry.components["atm"]["forcing"]
+    assert not isinstance(forcing.soilw_am, TimeSeries)
+    assert isinstance(forcing.stl_am, TimeSeries)
+
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+
+
 def test_earth_slab_couples_its_file_forcing(caplog):
     """The one shipped configuration with `forcing=from_file` builds and scans.
 
     `earth-slab` gives the atmosphere jax-gcm's packaged T30 climatology, in
     which every surface boundary condition is a time-varying `TimeSeries`,
-    and then has the surface components overwrite five of them with plain
-    arrays every step. The runner has to tell the atmosphere which five, or
+    and then has the ocean and sea ice overwrite two of them with plain
+    arrays every step. The runner has to tell the atmosphere which two, or
     the carry changes pytree structure at the first exchange and no step can
     be scanned at all. Traced with `jax.eval_shape`: the structure check is a
     trace-time check, and tracing it costs no compilation.
@@ -523,8 +546,10 @@ def test_earth_slab_couples_its_file_forcing(caplog):
 
     # Read off the coupling table, not assumed: these are exactly the rows of
     # `jem.exchangers.STANDARD_EXCHANGES` that write into `atm.forcing`.
+    # The land fields stay the atmosphere's own climatology (SPEEDY's slab
+    # land integrates its anomaly about `stl_am`), so nothing writes them.
     assert set(coupler.components["atm"].exchanged_forcing) == {
-        "sea_surface_temperature", "sice_am", "stl_am", "snowc_am", "soilw_am",
+        "sea_surface_temperature", "sice_am",
     }
     assert "derived from the exchanger table" in caplog.text
     for name in coupler.components["atm"].exchanged_forcing:
@@ -800,10 +825,11 @@ def test_a_declared_field_with_a_writer_is_accepted():
 def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     """The ice the atmosphere is handed on step 0 is the file's, not zero.
 
-    The exchange runs before the components and a `derived` field is only
-    rewritten at the end of a step, so `seaice.initialize()`'s `ice_fraction`
-    is what `atm.forcing.sice_am` holds for the first two coupling steps. An
-    Earth-like run must not begin with ice-free poles.
+    The exchange runs before the components, so `seaice.initialize()`'s
+    `ice_fraction` -- not one diagnosed from an SST the sea ice has not been
+    handed yet -- is what `atm.forcing.sice_am` holds on the atmosphere's
+    first coupling step. An Earth-like run must not begin with ice-free
+    poles.
     """
     coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
     carries = coupler.initialize().components
@@ -811,13 +837,10 @@ def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
     ice_fraction = carries["seaice"]["derived"].ice_fraction
     assert float(jnp.max(ice_fraction)) > 0.9
     assert float(jnp.mean(ice_fraction)) > 0.01
-    # Finite, because the fraction closure's inverse is capped: a fully
-    # covered cell would otherwise be infinitely thick.
-    thickness = carries["seaice"]["state"].ice_thickness
-    assert bool(jnp.all(jnp.isfinite(thickness)))
-    assert float(jnp.max(thickness)) <= float(
-        coupler.components["seaice"].params.max_initial_ice_thickness
-    )
+    # A concentration: finite and within [0, 1] everywhere, land included.
+    assert bool(jnp.all(jnp.isfinite(ice_fraction)))
+    assert float(jnp.min(ice_fraction)) >= 0.0
+    assert float(jnp.max(ice_fraction)) <= 1.0
 
     # And it reaches the atmosphere: the exchange puts it in `sice_am`.
     exchanged = coupler.exchangers["exchange"](
@@ -831,16 +854,15 @@ def test_earth_slab_starts_its_sea_ice_from_the_observed_cover():
 def test_earth_slab_ocean_starts_at_or_above_freezing():
     """The packaged SST climatology is sub-freezing under ice; the ocean is not.
 
-    Taken verbatim the mixed layer would start tens of kelvin below the floor
-    `step` holds it to, and the first step would turn the whole deficit into
-    frazil ice.
+    Taken verbatim the mixed layer would start tens of kelvin below freezing,
+    a heat deficit the run never had.
     """
     from jem import constants
 
     coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
     carries = coupler.initialize().components
 
-    ocean = np.asarray(coupler.components["ocn"].grid.binary_mask == 0.0)
+    ocean = np.asarray(coupler.components["ocn"].grid.ocean_mask)
     sea_surface_temperature = np.asarray(
         carries["ocn"]["state"].sea_surface_temperature
     )

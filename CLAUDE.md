@@ -120,7 +120,7 @@ JAX-ESM (`jem`) is a fully differentiable **coupler** for Earth system
 components, written in JAX. It does not implement a climate model of its own:
 it connects independently-developed components — the JCM spectral atmosphere
 from the sibling project [jax-gcm](https://github.com/climate-analytics-lab/jax-gcm)
-(package `jcm`), JEM's own slab ocean / land / sea-ice models, and the Veros
+(package `jcm`), JEM's own slab ocean and sea-ice models, and the Veros
 ocean GCM — into one JIT-compilable, end-to-end differentiable simulation loop.
 
 - **Package name:** `jem`
@@ -183,9 +183,9 @@ jem/                             # Main package
 │   └── slab/
 │       ├── base.py              # SlabModelBase: grid, climatologies, xarray output
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
-│       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, frazil diagnostic)
-│       ├── slab_land_model/     # SlabLandModel
-│       ├── slab_seaice_model/   # SlabSeaiceModel (basal-only thickness)
+│       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
+│       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
+│       ├── bucket_land_model/   # BucketLandModel (soil water; the land's temperature is SPEEDY's)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
@@ -302,7 +302,7 @@ c; ... c.grav`) rather than `from`-import, so a process-global
 `set_constants(...)` override is honoured.
 
 `jem/constants.py` holds only what `jcm.constants` genuinely does not define:
-the properties of a seawater / land / ice *surface slab* and the bulk-formula
+the properties of a seawater / ice *surface slab* and the bulk-formula
 coefficients the idealized slab atmosphere uses. It follows the same pattern as
 JCM's module — a frozen `SurfaceConstants` dataclass, a live singleton, a
 `set_constants(...)` override (a whole instance or individual keyword fields)
@@ -337,8 +337,17 @@ including the three whose value changed.
   so momentum is conserved across the exchange.
 - `ice_frazil_melt_energy` follows CESM's `frzmlt`: positive means the mixed
   layer went sub-freezing and new ice forms; negative means surplus heat is
-  available to melt existing ice.
-- In a `SlabGrid`, `binary_mask == 1` means land and `0` means ocean.
+  available to melt existing ice. A slab ocean clamps at freezing
+  (`clamp_at_freezing`) only for a sea ice that takes that deficit;
+  otherwise the mixed layer keeps it, so no heat is created.
+- A `SlabGrid`'s `fractional_mask` is the land fraction of each cell
+  (1 = all land). A cell can hold both surfaces: `land_mask` is
+  `fractional_mask > 0` and `ocean_mask` is `fractional_mask < 1`, and each
+  surface is forced by the atmosphere's flux over its own part of the cell
+  (the `sea_*` fields for an ocean), never by the grid-cell mean.
+- The land's temperature in a JCM run is the atmosphere's own (SPEEDY's slab
+  land, inside jax-gcm). A JEM land component (`BucketLandModel`) evolves
+  only the soil water, forced by the land tile's evaporation.
 
 ### Output conventions
 A coupled run writes one dataset per component, and they are only useful

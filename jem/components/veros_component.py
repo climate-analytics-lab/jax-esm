@@ -184,6 +184,10 @@ class VerosForcing:
     surface_taux: jnp.ndarray
     surface_tauy: jnp.ndarray
     surface_air_temperature: jnp.ndarray
+    #: A land's runoff (kg s-1 over its whole grid), spread uniformly over the
+    #: wet surface: there are no rivers, and spreading it over this ocean's
+    #: own area keeps the water the land lost equal to the water gained.
+    runoff_mass_rate: jnp.ndarray
 
     @classmethod
     def zeros(
@@ -202,24 +206,35 @@ class VerosForcing:
             surface_taux if surface_taux is not None else jnp.zeros(shape),
             surface_tauy if surface_tauy is not None else jnp.zeros(shape),
             surface_air_temperature if surface_air_temperature is not None else jnp.zeros(shape),
+            jnp.zeros(()),
         )
 
 
 @tree_math.struct
 class VerosDerived:
-    """What the ocean publishes for the other components to read."""
+    """What the ocean publishes for the other components to read.
+
+    ``sea_fraction`` is Veros' wet mask at the surface (1 for a wet column, 0
+    for land): what a regridded row from this ocean onto the atmosphere is
+    weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
+    cell takes the SST of the water under it and nothing of the land
+    columns' fill value.
+    """
 
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
+    sea_fraction: jnp.ndarray
 
     @classmethod
-    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None, sea_surface_v=None):
+    def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None,
+              sea_surface_v=None, sea_fraction=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
+            sea_fraction if sea_fraction is not None else jnp.zeros(shape),
         )
 
 
@@ -574,8 +589,11 @@ class VerosComponent:
         sea_surface_u = zonal_velocity[:, :, -1]
         sea_surface_v = variables.v[interior, interior, -1, tau]
 
+        sea_fraction = variables.maskT[interior, interior, -1].astype(
+            sea_surface_temperature.dtype)
+
         return VerosDerived(  # type: ignore[call-arg]
-            sea_surface_temperature, sea_surface_u, sea_surface_v,
+            sea_surface_temperature, sea_surface_u, sea_surface_v, sea_fraction,
         )
 
     def initialize(self) -> Carry:
@@ -698,10 +716,13 @@ class VerosComponent:
                 / SEAWATER_HEAT_CAPACITY / settings.rho_0,
             )
             # Freshwater flux is positive upward, so a positive flux removes
-            # fresh water and must increase salinity.
+            # fresh water and must increase salinity. A land's runoff is fresh
+            # water in, spread over the wet surface's own area.
+            wet_area = npx.sum(variables.area_t[interior, interior] * surface_mask)
+            runoff_flux = forcing.runoff_mass_rate / wet_area
             variables.forc_salt_surface = update(
                 variables.forc_salt_surface, at[interior, interior],
-                forcing.freshwater_flux * surface_mask
+                (forcing.freshwater_flux - runoff_flux) * surface_mask
                 / settings.rho_0 * REFERENCE_SALINITY,
             )
 
@@ -749,6 +770,7 @@ class VerosComponent:
             "surface_tauy": forcing.surface_tauy,
             "heat_flux": forcing.heat_flux,
             "freshwater_flux": forcing.freshwater_flux,
+            "runoff_mass_rate": forcing.runoff_mass_rate,
         }
         # Under the linear free surface Veros solves for a surface pressure,
         # and the sea surface height that goes with it is that pressure over
@@ -1071,6 +1093,8 @@ class VerosComponent:
                     ["time", "lon", "lat"], diagnostics["heat_flux"]),
                 forcing_variable("freshwater_flux"): (
                     ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                forcing_variable("runoff_mass_rate"): (
+                    ["time"], diagnostics["runoff_mass_rate"]),
                 "mask_T": (["lon", "lat", "depth"], self.mask_T),
                 "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
                 "mask_U": (["lon", "lat", "depth"], self.mask_U),
@@ -1169,6 +1193,10 @@ class VerosComponent:
             forcing_variable("freshwater_flux"): {
                 "long_name": "net surface freshwater flux forcing (upward positive)",
                 "units": "kg/m^2/s",
+                **role_attrs("forcing")},
+            forcing_variable("runoff_mass_rate"): {
+                "long_name": "land runoff spread over the wet surface",
+                "units": "kg/s",
                 **role_attrs("forcing")},
             "mask_T": {"long_name": "land-sea mask on T grid", "units": "1"},
             "mask_surface_T": {"long_name": "land-sea mask on T grid, surface level", "units": "1"},

@@ -48,7 +48,7 @@ def test_each_cell_feels_the_surface_beneath_it(half_land_grid):
     )
     stepped, _ = model.step(carry, coupling_time(0))
 
-    land = np.asarray(half_land_grid.binary_mask) == 1.0
+    land = np.asarray(half_land_grid.land_mask)
     heat_flux = np.asarray(stepped["derived"].internal_total_heat_flux)
     assert np.all(heat_flux[land] > 0.0), "warm land must heat the air above it"
     assert np.all(heat_flux[~land] < 0.0), "cold ocean must cool the air above it"
@@ -58,6 +58,27 @@ def test_each_cell_feels_the_surface_beneath_it(half_land_grid):
     )
     assert np.all(warming[land] > 0.0)
     assert np.all(warming[~land] < 0.0)
+
+
+def test_a_coast_cell_feels_both_surfaces_by_area():
+    """A partly-land cell's flux is the area-weighted land and sea fluxes."""
+    fraction = np.full((4, 3), 0.25)
+    grid = make_grid(fractional_mask=fraction)
+    model = SlabAtmosphereModel(grid)
+
+    def flux(land_temperature, sea_temperature):
+        carry = model.initialize()
+        carry["forcing"] = carry["forcing"].replace(
+            land_surface_temperature=jnp.full(grid.shape, land_temperature),
+            sea_surface_temperature=jnp.full(grid.shape, sea_temperature),
+        )
+        stepped, _ = model.step(carry, coupling_time(0))
+        return np.asarray(stepped["derived"].internal_total_heat_flux, dtype=np.float64)
+
+    np.testing.assert_allclose(
+        flux(400.0, 200.0),
+        0.25 * flux(400.0, 400.0) + 0.75 * flux(200.0, 200.0),
+        rtol=1e-5)
 
 
 def test_bulk_flux_matches_the_analytic_formula(half_land_grid):

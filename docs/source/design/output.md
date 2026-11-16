@@ -68,14 +68,15 @@ The conventions, which are JCM's:
   the prefix unchanged. Two components legitimately hold the same physical
   field — one produced it, the other received it — and without the prefix
   the merge of their datasets collides on the shared name. So the slab
-  atmosphere and the slab land model write `forcing_total_heat_flux` while
-  the ocean writes its own derived `total_heat_flux`; the sea ice writes
-  `forcing_ice_frazil_melt_energy` for the field the ocean published as
-  `ice_frazil_melt_energy`; and Veros writes `forcing_heat_flux`,
-  `forcing_freshwater_flux`, `forcing_surface_taux`, `forcing_surface_tauy`
-  and `forcing_surface_air_temperature` for the five fields an exchanger
-  hands it, keeping plain names for the `temp`, `salt`, `u`, `v`, `psi` and
-  sea-surface fields it computes.
+  atmosphere writes `forcing_total_heat_flux` while the ocean writes its own
+  derived `total_heat_flux`; the sea ice writes
+  `forcing_sea_surface_temperature` for the field the ocean published as
+  `sea_surface_temperature`; the bucket land writes `forcing_precipitation`
+  and `forcing_evaporation`; and Veros writes `forcing_heat_flux`,
+  `forcing_freshwater_flux`, `forcing_surface_taux`, `forcing_surface_tauy`,
+  `forcing_surface_air_temperature` and `forcing_runoff_mass_rate` for the
+  six fields an exchanger hands it, keeping plain names for the `temp`,
+  `salt`, `u`, `v`, `psi` and sea-surface fields it computes.
 
   The ocean's `psi` is the barotropic streamfunction, and which of two
   things it is depends on how the setup solves the external mode. With

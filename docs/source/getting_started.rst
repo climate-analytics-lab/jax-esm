@@ -12,7 +12,7 @@ Install JEM
     # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
-    git checkout f378069090b127badbb158b06e2767f3be8f436c
+    git checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97
     pip install -e "."
     cd ..
 
@@ -51,7 +51,7 @@ Your first coupled run
 This composes a coupled model from the shipped ``aquaplanet-slab``
 configuration (the JCM atmosphere and JEM's slab ocean, coupled with
 ``default_exchangers`` -- :doc:`python_api`'s worked example plus the
-thermodynamic sea ice that page leaves out) and integrates two coupled days --
+SST-diagnosed sea ice) and integrates two coupled days --
 ``short_run`` is the shortest run that exercises the whole path, meant to
 check a machine can run anything at all before committing to a real
 integration. It writes into a fresh Hydra run directory,
@@ -98,7 +98,9 @@ package spelled out.
    * - Choose a surface component
      - ``ocean=slab_relax ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Drop one
-     - ``land=none``
+     - ``seaice=none``
+   * - Evolve the soil water (the bucket land)
+     - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component
