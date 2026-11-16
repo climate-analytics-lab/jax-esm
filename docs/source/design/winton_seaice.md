@@ -77,6 +77,9 @@ its word.
   which weight regridded rows back onto the atmosphere: the ice fraction by
   the sea part, the skin temperature by the ice area, so that an atmosphere
   cell's `sice_am · T_ice` is the ice-area mean of the ocean cells under it.
+  That holds only if both are mapped by the same operator, so the skin
+  temperature, a state, is mapped conservatively like the fraction rather
+  than bilinearly like the SST.
 
 ## Frazil ice and the ocean's clamp
 

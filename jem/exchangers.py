@@ -242,9 +242,10 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: from the deficit the ocean's clamp at freezing removed. It hands the
 #: atmosphere its skin temperature, which SPEEDY blends with the SST by the ice
 #: fraction (``sea_model.f90``'s ``tice_am``); regridded, that temperature is
-#: weighted by the ice's share of each cell (:data:`ROW_WEIGHTS`), so an
-#: atmosphere cell's ``sice_am * T_ice`` is the ice-area mean of the ocean
-#: cells under it. ``docs/source/design/winton_seaice.md`` is the contract.
+#: weighted by the ice's share of each cell (:data:`ROW_WEIGHTS`) and mapped
+#: conservatively, as the fraction is, so an atmosphere cell's
+#: ``sice_am * T_ice`` is the ice-area mean of the ocean cells under it.
+#: ``docs/source/design/winton_seaice.md`` is the contract.
 WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("atm.derived.downward_shortwave_flux", "seaice.forcing.rsds", "flux"),
     ("atm.derived.downward_longwave_flux", "seaice.forcing.rlds", "flux"),
@@ -261,8 +262,14 @@ WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.derived.ice_frazil_melt_energy",
      "seaice.forcing.ice_frazil_melt_energy", "flux"),
     ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.total_heat_flux", "flux"),
+    # A temperature, but mapped conservatively ("flux"), with the operator of
+    # the ice fraction it is blended with: R(a f T) / R(a f) times the
+    # fraction's R(a f) / R(a) is the ice-area mean R(a f T) / R(a) only when
+    # both R are the same map. Interpolated bilinearly instead, an atmosphere
+    # cell whose bilinear stencil holds only open water would take that
+    # water's freezing-point value while its conservative fraction says ice.
     ("seaice.derived.ice_surface_temperature_K",
-     "atm.forcing.sea_ice_temperature", "state"),
+     "atm.forcing.sea_ice_temperature", "flux"),
 )
 
 #: The standard row a Winton sea ice replaces: the ocean takes the

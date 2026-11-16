@@ -1262,6 +1262,47 @@ def test_a_regridded_ice_temperature_is_weighted_by_the_ice_area():
     assert weight["seaice.forcing.rsds"] is None
 
 
+def test_a_regridded_ice_temperature_takes_the_fractions_operator():
+    """On the runners' split mixed-grid configuration (states bilinear,
+    fluxes conservative) the skin temperature takes the ice fraction's
+    conservative map: ``sice_am * T_ice`` is the ice-area mean only if both
+    are mapped by the same operator.
+
+    The identity itself, on a conservative map ``R`` that lets a destination
+    cell see ice the other map's stencil misses: with ``R`` for both the
+    product is ``R(a f T) / R(a)``; with the other map for the temperature, the
+    cell whose stencil holds only open water takes that water's 271 K.
+    """
+    from jem.exchangers import regrid_weighted
+
+    specs = default_exchanges(_winton_components(), regrid={
+        "a2o_flux": "a2o_conserve", "o2a_flux": "o2a_conserve",
+        "o2a_state": "o2a_bilinear"})
+    regrid = {spec.dst: spec.regrid for spec in specs}
+    assert regrid["atm.forcing.sea_ice_temperature"] == regrid["atm.forcing.sice_am"]
+    assert regrid["atm.forcing.sice_am"] == "o2a_conserve"
+
+    # Three ocean cells, all sea; ice only in the last. Destination 0 overlaps
+    # all three conservatively; the other map's stencil for it is the first two.
+    conserve = jnp.asarray([[0.4, 0.3, 0.3]])
+    stencil = jnp.asarray([[0.5, 0.5, 0.0]])
+    sea = jnp.ones(3)
+    fraction = jnp.asarray([0.0, 0.0, 0.5])
+    skin = jnp.asarray([271.0, 271.0, 240.0])
+    ice_area = sea * fraction
+
+    def apply(matrix):
+        return lambda x: matrix @ x
+
+    sice_am = regrid_weighted(apply(conserve), fraction, sea)
+    expected = apply(conserve)(ice_area * skin) / apply(conserve)(sea)
+    same = regrid_weighted(apply(conserve), skin, ice_area)
+    np.testing.assert_allclose(sice_am * same, expected, rtol=1e-6)
+    np.testing.assert_allclose(same, 240.0, rtol=1e-6)
+    other = regrid_weighted(apply(stencil), skin, ice_area)
+    np.testing.assert_allclose(other, 271.0, rtol=1e-6)
+
+
 def test_a_winton_ice_over_an_ocean_that_does_not_clamp_is_refused():
     with pytest.raises(ValueError, match="clamp_at_freezing"):
         default_exchanges(_winton_components(clamp_at_freezing=False))
