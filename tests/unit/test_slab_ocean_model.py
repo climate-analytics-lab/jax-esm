@@ -233,23 +233,59 @@ def test_relaxation_matches_analytic(tmp_path, uniform_grid):
     )
 
 
-def test_freeze_melt_energy_sign(uniform_grid):
-    """A large upward heat flux drives the mixed layer to the freezing point."""
-    model = SlabOceanModel(uniform_grid)
+def _cool_hard(model, uniform_grid):
+    """One step under an upward flux that removes tens of kelvin."""
     carry = model.initialize()
-
-    # Big enough to remove tens of kelvin from the mixed layer in one step.
+    start = np.asarray(carry["state"].sea_surface_temperature, dtype=np.float64)
     carry["forcing"] = carry["forcing"].replace(
         total_heat_flux=jnp.full(uniform_grid.shape, 1.0e5),
     )
-    new_carry, _ = model.step(carry, coupling_time(0))
+    stepped, _ = model.step(carry, coupling_time(0))
+    return start, stepped
 
-    assert bool(jnp.all(new_carry["derived"].ice_frazil_melt_energy > 0.0))
+
+def test_a_clamping_ocean_hands_its_deficit_to_the_ice(uniform_grid):
+    """With clamp_at_freezing the mixed layer stops at freezing, and the
+    deficit the clamp removed is the positive freeze/melt potential.
+    """
+    model = SlabOceanModel(
+        uniform_grid, SlabOceanParameters(clamp_at_freezing=True))
+    start, stepped = _cool_hard(model, uniform_grid)
+
     np.testing.assert_allclose(
-        np.asarray(new_carry["state"].sea_surface_temperature),
+        np.asarray(stepped["state"].sea_surface_temperature),
         constants.seawater_freezing_point_K,
         rtol=1e-6,
     )
+    # What the clamp removed plus what the SST lost is what the flux took.
+    heat_capacity = (constants.ocean_density * constants.ocean_specific_heat_capacity
+                     * np.asarray(stepped["derived"].mixed_layer_depth, dtype=np.float64))
+    lost = heat_capacity * (start - constants.seawater_freezing_point_K)
+    np.testing.assert_allclose(
+        lost + np.asarray(stepped["derived"].ice_frazil_melt_energy, dtype=np.float64),
+        1.0e5 * TIMESTEP, rtol=1e-4)
+
+
+def test_by_default_the_mixed_layer_keeps_its_deficit(uniform_grid):
+    """Without the clamp the mixed layer cools below freezing by exactly what
+    the flux took: no heat is created, and the freeze/melt potential reports
+    the deficit it now carries.
+    """
+    model = SlabOceanModel(uniform_grid)
+    assert model.params.clamp_at_freezing is False
+    start, stepped = _cool_hard(model, uniform_grid)
+
+    sea_surface_temperature = np.asarray(
+        stepped["state"].sea_surface_temperature, dtype=np.float64)
+    assert sea_surface_temperature.max() < constants.seawater_freezing_point_K
+    heat_capacity = (constants.ocean_density * constants.ocean_specific_heat_capacity
+                     * np.asarray(stepped["derived"].mixed_layer_depth, dtype=np.float64))
+    np.testing.assert_allclose(
+        heat_capacity * (start - sea_surface_temperature), 1.0e5 * TIMESTEP, rtol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(stepped["derived"].ice_frazil_melt_energy, dtype=np.float64),
+        heat_capacity * (constants.seawater_freezing_point_K - sea_surface_temperature),
+        rtol=1e-4)
 
 
 def test_qflux_positive_warms_ocean(tmp_path, uniform_grid):
@@ -694,10 +730,8 @@ def test_initial_sst_is_held_at_the_seawater_freezing_point(tmp_path, uniform_gr
 
     An observed "SST" climatology is generally a *surface* temperature: where
     the surface is sea ice the file reports the ice surface, tens of kelvin
-    below freezing. `step` holds the mixed layer at or above the seawater
-    freezing point and turns the heat that clamp removes into this step's
-    freeze/melt potential, so an initial state below the floor is not a cold
-    ocean -- it is a heat deficit the first step converts into ice.
+    below freezing, so an initial state below the floor is not a cold ocean
+    but a heat deficit the run never had.
     """
     deficit = 30.0
     sst_file = write_seasonal_sst(

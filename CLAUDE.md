@@ -183,9 +183,9 @@ jem/                             # Main package
 │   └── slab/
 │       ├── base.py              # SlabModelBase: grid, climatologies, xarray output
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
-│       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, frazil diagnostic)
+│       ├── slab_ocean_model/    # SlabOceanModel  (mixed layer, freeze/melt potential)
 │       ├── slab_land_model/     # SlabLandModel
-│       ├── slab_seaice_model/   # SlabSeaiceModel (basal-only thickness)
+│       ├── slab_seaice_model/   # SlabSeaiceModel (ice fraction diagnosed from SST)
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
@@ -337,7 +337,9 @@ including the three whose value changed.
   so momentum is conserved across the exchange.
 - `ice_frazil_melt_energy` follows CESM's `frzmlt`: positive means the mixed
   layer went sub-freezing and new ice forms; negative means surplus heat is
-  available to melt existing ice.
+  available to melt existing ice. A slab ocean clamps at freezing
+  (`clamp_at_freezing`) only for a sea ice that takes that deficit;
+  otherwise the mixed layer keeps it, so no heat is created.
 - In a `SlabGrid`, `binary_mask == 1` means land and `0` means ocean.
 
 ### Output conventions
