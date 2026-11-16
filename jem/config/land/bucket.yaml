@@ -9,9 +9,10 @@
 # `+land.soil_water_clim_file=<file>` names a monthly `soilw_am`, such as the
 # atmosphere's own forcing file, for the initial condition.
 #
-# The default 10-day drainage dries the soil well below the observed
-# availability within a month (docs/source/design/bucket_land.md, "What it
-# does to the climate"); tune `params.drainage_timescale` for a climate run.
+# The drainage time scales default to (10, 365) days, tuned in 90-day runs
+# against the prescribed climatology; with SPEEDY's 28 cm of soil the land
+# still evaporates about a quarter less than with the climatology
+# (docs/source/design/bucket_land.md, "Tuning the drainage").
 #
 # A Veros configuration couples through `jem.fluxes.VerosExchange`, which
 # cannot be read off like a table: add `soilw_am` to its

@@ -24,11 +24,12 @@ applies, in turn:
    deep layer only through vegetation, whose roots reach it. Dew (`E < 0`)
    goes into the surface layer. No layer is taken below its wilting point;
    what it cannot give is `derived.unmet_evaporation`.
-3. **Drainage** of each layer's water above its wilting point on a
-   10-day time scale `tau`: the surface layer into the deep one, the deep
-   layer out of the model. It is stepped implicitly in the drained water,
-   `e_new = e / (1 + dt / tau)`, so it is stable and never drains a layer
-   below its wilting point, whatever the ratio of the coupling step to `tau`.
+3. **Drainage** of each layer's water above its wilting point on its time
+   scale `tau = (10, 365)` days: the surface layer into the deep one
+   (percolation), the deep layer out of the model. It is stepped implicitly
+   in the drained water, `e_new = e / (1 + dt / tau)`, so it is stable and
+   never drains a layer below its wilting point, whatever the ratio of the
+   coupling step to `tau`.
 4. **Overflow**: each layer is capped at its field capacity and the excess
    leaves the model.
 
@@ -45,7 +46,7 @@ which with SPEEDY's depths is `rsw (W1 + veg idep2 max(W2 − swwil, 0))`,
 default, a stand-in for SPEEDY's `vegh + 0.8 vegl`, which jax-gcm's packaged
 T30 boundary conditions do not carry; a map can be passed instead. The drainage
 time scale is this model's own choice: SPEEDY prescribes its soil water, so it
-has none.
+has none; they are tuned below.
 
 ## What it is forced with
 
@@ -84,25 +85,63 @@ over its own wet surface, so the water the land loses is the water the ocean
 gains, whatever the two grids. A slab ocean carries no salinity, so with one
 the runoff leaves the coupled model and `runoff_mass_rate` is a diagnostic.
 
-## What it does to the climate: the soil dries
+## Tuning the drainage
 
-The bucket conserves water and couples as intended. In a 60-day
-`earth-slab` + `land=bucket` run from 1 January:
-- its budget closes to 1×10⁻¹⁰ kg m⁻² s⁻¹ per cell;
+The two time scales do different jobs. The surface one sets how fast rain
+reaches the deep layer; the deep one how long the deep layer keeps it. They
+were tuned against the atmosphere's own climatology: 90-day `earth-slab` runs
+from 1 January with `land=bucket` (the soil starting from the January
+`soilw_am`), against a control with the prescribed `soilw_am` (`land=none`).
+Both start the atmosphere from isothermal rest, so the table compares days
+30–90, after its first month. Land means (land-fraction weighted), fluxes in
+mm/day, the tropics 20°S–20°N:
+
+| tau (days) | availability | E | P | runoff | of which overflow | tropical E | tropical T_sfc (K) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| control (prescribed) | 0.61 (climatology) | 1.10 | 2.34 | | | 2.85 | 302.1 |
+| 10, 10 | 0.27 | 0.58 | 2.32 | 1.63 | 0.96 | 1.50 | 306.7 |
+| 30, 30 | 0.40 | 0.57 | 2.22 | 1.65 | 1.33 | 1.35 | 306.9 |
+| 60, 60 | 0.46 | 0.55 | 2.27 | 1.66 | 1.48 | 1.29 | 307.1 |
+| 120, 120 | 0.49 | 0.54 | 2.17 | 1.65 | 1.56 | 1.21 | 307.2 |
+| 1, 60 | 0.36 | 0.61 | 2.36 | 1.69 | 1.35 | 1.50 | 306.6 |
+| 3, 60 | 0.40 | 0.73 | 2.44 | 1.59 | 1.26 | 1.80 | 306.1 |
+| 3, 180 | 0.45 | 0.76 | 2.49 | 1.65 | 1.53 | 1.86 | 305.9 |
+| 3, 365 | 0.46 | 0.79 | 2.50 | 1.66 | 1.59 | 1.90 | 306.0 |
+| 5, 365 | 0.47 | 0.83 | 2.45 | 1.53 | 1.47 | 1.94 | 305.9 |
+| **10, 365** (default) | 0.50 | 0.83 | 2.42 | 1.54 | 1.48 | 1.91 | 306.0 |
+
+- **Equal time scales do not work.** Lengthening both raises the
+  availability only where the land barely evaporates (the northern winter)
+  and leaves the evaporation where it was. The deep layer stays near its
+  wilting point (0.19–0.22 against 0.17): it gives up its water to transpiration and its own drainage
+  as fast as the surface layer passes water down, and the rain the surface
+  layer cannot pass down overflows.
+- **The deep layer has to keep its water.** With its drainage on a yearly
+  time scale it fills where it rains (0.27 on average, against a field
+  capacity of 0.30), and the runoff is mostly overflow, as in a Manabe (1969) bucket. The evaporation then no
+  longer depends on the surface time scale between 3 and 10 days; the default
+  keeps 10, whose availability is nearest the climatology.
+
+**What tuning cannot fix.** Even tuned, the land evaporates about a quarter
+less than with the climatology, and tropical land is 4 K warmer. The deficit is
+in the dry season. Over 20°S–0° (the wet season, 8.2 mm/day of rain) the
+availability is 0.62 against an observed 0.67; over 0–20°N (the dry season)
+it is 0.34 against 0.66. The climatology carries the wet season's water
+through the dry season. The bucket cannot: SPEEDY's two layers hold 48 mm
+between wilting point and field capacity, which evaporation empties within
+weeks however slowly the soil drains. Carrying a season would take a deeper
+reservoir below SPEEDY's 28 cm, which the bucket does not have.
+
+Each row is one 90-day realisation from one start date, and the land fields
+are 3-daily snapshots, so the differences between the last few rows are
+within the weather's noise; those against the control and the first rows are
+not.
+
+The bucket conserves water and couples as intended. At the default drainage:
+- its budget closes on every land cell to 2×10⁻¹⁰ kg m⁻² s⁻¹ (days 30–40 of
+  a run keeping every daily record, with up to 68 mm/day of rain);
 - the land receives exactly the atmosphere's land-tile evaporation;
-- unmet evaporation is 4×10⁻⁵ of the total.
-
-But at the default 10-day drainage the soil empties. The runoff, 1.2–1.9 mm/day
-over land, nearly equals the precipitation, and the land-mean availability
-falls from the observed 0.65 to 0.21 by day 30 and 0.29 by day 60, against a
-climatology of 0.63–0.65 for those months. The atmosphere responds: over days
-21–30 the land evaporates 0.45 mm/day against 1.00 mm/day with the
-climatological soil, and receives 1.60 against 2.01 mm/day of precipitation.
-
-The drainage time scale is the lever. It is this model's own choice, since
-SPEEDY prescribes its soil water and has none, and it has not been tuned
-against observed soil moisture. Tune `drainage_timescale` before using the
-bucket for a climate run.
+- unmet evaporation is 6×10⁻⁶ of the total over the 90-day run.
 
 ## Initial condition
 
