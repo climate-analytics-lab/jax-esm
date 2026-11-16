@@ -231,6 +231,17 @@ def test_invalid_parameters_are_refused(grid, field, value):
         BucketLandModel(grid, params)
 
 
+def test_a_per_layer_pair_given_as_a_list_is_an_array():
+    """Hydra hands ``[a, b]`` over as a list; the struct holds the array, so
+    its pytree, and what ``jax.grad`` returns, are the default's.
+    """
+    from_list = BucketLandParameters(drainage_timescale=[2.0e6, 3.0e6])
+    assert isinstance(from_list.drainage_timescale, jax.Array)
+    np.testing.assert_allclose(from_list.drainage_timescale, (2.0e6, 3.0e6))
+    assert (jax.tree_util.tree_structure(from_list)
+            == jax.tree_util.tree_structure(BucketLandParameters()))
+
+
 def test_a_grid_without_cell_areas_is_refused():
     grid = dataclasses.replace(make_grid(LAND_FRACTION), cell_solid_angle=None)
     with pytest.raises(ValueError, match="cell areas"):

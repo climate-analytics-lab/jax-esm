@@ -30,10 +30,13 @@ class BucketLandParameters:
         Depth (m) of the surface and deep layer. Default (0.07, 0.21).
     drainage_timescale : jnp.ndarray, shape (2,)
         e-folding time (s) on which each layer's water above its wilting point
-        drains: the surface layer into the deep one, the deep layer out of the
-        model. Default 10 days each, untuned: in an Earth-like run it dries
-        the soil to about a third of the observed availability within a month
-        (``docs/source/design/bucket_land.md``).
+        drains: the surface layer into the deep one (percolation), the deep
+        layer out of the model. Default (10, 365) days: the deep layer has to
+        keep what percolates into it for the land to evaporate near the rate
+        the observed availability gives, so its drainage is slow and the
+        runoff is mostly overflow. Tuned in 90-day Earth-like runs against
+        the prescribed climatology (``docs/source/design/bucket_land.md``,
+        "Tuning the drainage").
     soil_water_field_capacity : jnp.ndarray, shape (2,)
         Volumetric water content (m3 m-3) each layer holds at most; what
         rises above it leaves as overflow. Default (0.30, 0.30).
@@ -56,13 +59,28 @@ class BucketLandParameters:
     soil_bucket_depth: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.asarray((0.07, 0.21)))
     drainage_timescale: jnp.ndarray = struct.field(
-        default_factory=lambda: jnp.asarray((10.0 * SECONDS_PER_DAY, 10.0 * SECONDS_PER_DAY)))
+        default_factory=lambda: jnp.asarray((10.0 * SECONDS_PER_DAY, 365.0 * SECONDS_PER_DAY)))
     soil_water_field_capacity: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.asarray((0.30, 0.30)))
     soil_water_wilting_point: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.asarray((0.0, 0.17)))
     vegetation_fraction: float | jnp.ndarray = 0.8
     initial_soil_water_fill: float | jnp.ndarray = 0.5
+
+    def __post_init__(self) -> None:
+        """Take a per-layer pair given as a list, as Hydra hands one over.
+
+        ``+land.params.drainage_timescale=[a,b]`` reaches the constructor as
+        a Python list, which would make the pair two leaves of the pytree
+        instead of the one array the default is, and change what
+        ``jax.grad`` returns. Only a list or tuple is converted: the arrays
+        and tracers JAX rebuilds the struct from pass through untouched.
+        """
+        for name in ("soil_bucket_depth", "drainage_timescale",
+                     "soil_water_field_capacity", "soil_water_wilting_point"):
+            value = getattr(self, name)
+            if isinstance(value, (list, tuple)):
+                object.__setattr__(self, name, jnp.asarray(value, dtype=float))
 
     @classmethod
     def default(cls) -> "BucketLandParameters":
