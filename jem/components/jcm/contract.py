@@ -23,7 +23,7 @@ drift apart.
 
 Why a ``dev`` revision rather than a release
 --------------------------------------------
-``JCM_SUPPORTED_REV`` is ``932d9cc2f331faebcbab745895f347c4de295b3b``. A sha is
+``JCM_SUPPORTED_REV`` is ``9764c56b36cd71b55c644aeb93cb787eb8c4db97``. A sha is
 the most precise thing there is to name; ``pyproject.toml``'s
 ``jcm>=3.0.0rc1`` floor is the loosest true statement of the same fact,
 since jax-gcm's version string is bumped only at release. The policy,
@@ -35,16 +35,14 @@ commits this branch has never been run against. When a tagged jax-gcm
 release finally contains this revision, replace the sha with the tag and
 raise the ``pyproject.toml`` floor to match.
 
-This revision is the head of jax-gcm#1213, which publishes SPEEDY's land
-and sea flux tiles and a coupled sea ice's forcing on ``SurfaceExchange``,
-stacked on
-jax-gcm#1199 (SPEEDY's own slab land, ``land_model.f90``, as
-``SpeedySurfaceFlux``'s default) and on ``dev``. It is a temporary exception
-to the policy above: those two pull requests are what this repository's ocean
-coupling now reads (the ``sea`` tile, jax-esm#147) and what its land is
-(SPEEDY's slab, in place of the land temperature JAX-ESM used to integrate
-itself), and the pin moves to the ``dev`` merge commit that carries both as
-soon as they are merged. The earlier needs still hold: ECHAM physics traces
+This revision is the ``dev`` merge commit of jax-gcm#1213, which publishes
+SPEEDY's land and sea flux tiles and a coupled sea ice's forcing on
+``SurfaceExchange``. It carries jax-gcm#1199 (SPEEDY's own slab land,
+``land_model.f90``, as ``SpeedySurfaceFlux``'s default) and jax-gcm#1205
+(``ForcingData.sea_ice_temperature``) with it: those are what this
+repository's ocean coupling reads (the ``sea`` tile, jax-esm#147) and what
+its land is (SPEEDY's slab, in place of the land temperature JAX-ESM used to
+integrate itself). The earlier needs still hold: ECHAM physics traces
 under ``jax_enable_x64`` (jax-gcm#946), so an ECHAM atmosphere couples to
 Veros, and ``SurfaceExchange`` publishes a near-surface wind vector,
 ``wind_u``/``wind_v``, identically from every physics package
@@ -92,7 +90,7 @@ from typing import NamedTuple
 #:
 #: This ``dev`` commit is validated as a whole against this repository's own
 #: gates -- see "Why a ``dev`` revision rather than a release" above.
-JCM_SUPPORTED_REV = "932d9cc2f331faebcbab745895f347c4de295b3b"
+JCM_SUPPORTED_REV = "9764c56b36cd71b55c644aeb93cb787eb8c4db97"
 
 #: The version string ``jcm`` reports at :data:`JCM_SUPPORTED_REV`. jax-gcm's
 #: version is only bumped at release, so it is a weaker statement than the sha
