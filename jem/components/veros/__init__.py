@@ -1,4 +1,4 @@
-"""Importable Veros case setups, for :data:`jem.config.ocean.veros`'s ``setup``.
+"""Importable Veros case setups, for ``jem/config/ocean/veros.yaml``'s ``setup``.
 
 The Veros *wrapper* -- the :class:`~jem.base.component.Component` adapter a
 coupled run actually steps -- is :mod:`jem.components.veros_component`, one
@@ -12,7 +12,7 @@ and importing it here would make ``import jem.components`` (and so
 ``import jem``) fail wherever Veros is not installed. Only a configuration
 that actually names a setup under this package pays for importing Veros.
 For the same reason it holds the one Veros-side constant JAX-ESM records,
-:data:`VEROS_SUPPORTED_REV`, as plain data.
+``VEROS_SUPPORTED_REV``, as plain data.
 """
 
 #: The jittable-Veros revision JAX-ESM is supported against.

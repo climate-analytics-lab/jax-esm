@@ -524,9 +524,9 @@ def _map_plot(
     caller gave, or matplotlib's default) has no ``.extend`` attribute at all
     to fall back on (verified in this environment:
     ``hasattr(matplotlib.colors.Normalize(0, 10), "extend")`` is ``False``).
-    With ``levels`` the ``norm`` *is* a ``BoundaryNorm`` and, since this fix,
-    it does carry the caller's real ``extend`` (see the comment where it is
-    built, in :func:`_map_plot` itself, for why giving it that is now safe --
+    With ``levels`` the ``norm`` *is* a ``BoundaryNorm`` and it carries the
+    caller's real ``extend`` (see the comment where it is built, in
+    :func:`_map_plot` itself, for why giving it that is safe --
     a `matplotlib.colorbar.Colorbar` built with no explicit ``extend`` even
     reads it from there automatically, verified:
     ``fig.colorbar(mesh)`` on a mesh normalized this way resolves
@@ -660,25 +660,22 @@ def _map_plot(
                     level_vmax = float(np.nanmax(data.values))
                 levels = _expand_level_count(levels, level_vmin, level_vmax)
             cmap = plt.get_cmap(plot_kwargs.get("cmap"))
-            # ee6ecb5 (this PR) built `BoundaryNorm(levels, cmap.N)` directly
-            # over the *resolved* colormap's own colour count. Codex round-19
-            # (finding A) showed that renders different colours from
-            # `contourf` on identical data whenever `cmap.N` does not equal
-            # the number of bands -- true for every continuous colormap
-            # (`cmap.N == 256`) with anything but a one-band-per-colour
-            # `levels`. Read empirically from matplotlib's own source rather
-            # than trusted from the finding's one-line description (see
+            # `BoundaryNorm(levels, cmap.N)` built directly over the
+            # *resolved* colormap's own colour count would render different
+            # colours from `contourf` on identical data whenever `cmap.N`
+            # does not equal the number of bands -- true for every continuous
+            # colormap (`cmap.N == 256`) with anything but a
+            # one-band-per-colour `levels`. So the norm is built to match what
+            # `contourf` does, read from matplotlib's own source (see
             # `matplotlib.contour.ContourSet._process_colors`/
-            # `_process_levels`, and the probe in this fix's PR description):
-            # `contourf` colours filled band *i* as
+            # `_process_levels`): `contourf` colours filled band *i* as
             # ``cmap(norm(0.5 * (levels[i] + levels[i + 1])))`` -- the
             # colormap sampled at each band's own numeric midpoint through a
             # `Normalize` whose `vmin`/`vmax` default to `min(levels)`/
             # `max(levels)` but defer to an explicit `vmin`/`vmax` kwarg
             # (`Normalize.autoscale_None` only fills in bounds that are still
-            # `None`) -- which is also finding B: those kwargs were being
-            # dropped here, silently, rather than folded into that
-            # normalization. An `extend`ed end's "band" has no second real
+            # `None`) -- so `vmin`/`vmax` kwargs are folded into that
+            # normalization rather than dropped. An `extend`ed end's "band" has no second real
             # level to average with; `contourf` instead inserts a sentinel
             # boundary (``+-1e250``, `_process_levels`) so that band's
             # midpoint is a huge (but finite) number whose normalized value
@@ -704,9 +701,8 @@ def _map_plot(
             # accepts these four literal strings; mypy needs telling that
             # explicitly since `extend` itself is forwarded through
             # `**kwargs` as `Any`. An invalid string is unaffected by this
-            # cast -- it still surfaces as matplotlib's own `ValueError` once
-            # a colorbar is drawn from `colorbar_extend` below, the same
-            # point and error as before this fix (verified: unrecognised
+            # cast -- it surfaces as matplotlib's own `ValueError` once
+            # a colorbar is drawn from `colorbar_extend` below (verified: unrecognised
             # `extend` values are simply ignored by the plain ``in (...)``
             # checks a few lines down, on both this and the `contourf` path,
             # so nothing here would catch one earlier).
@@ -728,8 +724,8 @@ def _map_plot(
             )
             # `pcolormesh` raises if hidden `vmin`/`vmax` and an explicit
             # `norm` are given together, so they cannot simply be forwarded
-            # alongside the `BoundaryNorm` built below (finding B's original
-            # bug: they were popped and never used at all) -- folded into
+            # alongside the `BoundaryNorm` built below (popping them and never
+            # using them would silently drop the caller's limits) -- folded into
             # the `Normalize` that resamples `cmap` instead, exactly the
             # role they play in `contourf`'s own normalization.
             vmin = plot_kwargs.pop("vmin", None)
@@ -746,10 +742,9 @@ def _map_plot(
             # `.boundaries`) and `ncolors` equal to that same band count,
             # `BoundaryNorm.__call__`'s own "fewer bins than colours"
             # stretch (`Ncmap > self._n_regions`, matplotlib.colors) never
-            # triggers -- unlike the earlier, since-reverted attempt this
-            # function's history records (passing `extend` to a
+            # triggers -- which it would if `extend` were passed to a
             # `BoundaryNorm` sized off the *original*, possibly tiny,
-            # `cmap.N`): here `ncolors` is built to equal the exact region
+            # `cmap.N`: here `ncolors` is built to equal the exact region
             # count `extend` implies, at any `cmap.N`, so region *i* maps to
             # colour *i* one-to-one regardless of how many colours the
             # caller's own colormap happens to have.
@@ -880,8 +875,8 @@ def map_plot(
         exactly the number of bands (ordinary bins plus any ``extend`` adds),
         so pairing it with a ``BoundaryNorm`` over exactly that many colours
         never hits ``BoundaryNorm``'s "fewer bins than colours" interpolation
-        (the bug an earlier version of this fix had -- see :func:`_map_plot`
-        for why a small discrete ``cmap`` made that visible). An integer
+        (which a small discrete ``cmap`` would make visible -- see
+        :func:`_map_plot`). An integer
         ``levels`` (a band *count* rather than explicit boundary values) is
         expanded into boundaries first, over the field's own
         ``[nanmin, nanmax]``, by :func:`_expand_level_count` -- the same
@@ -932,7 +927,7 @@ def map_plot(
         ``pcolormesh`` (regardless of whether ``levels`` is present, since
         leaving it behind raises the same ``AttributeError`` either way).
         With ``levels``, it *is* passed on to the ``BoundaryNorm`` built from
-        them -- unlike an earlier version of this fix, this is now safe
+        them -- this is safe
         because that norm's colour count is always built to match exactly
         (see above), so ``BoundaryNorm``'s own requirement (enough colours
         for the ordinary bins plus one per extended end) is met regardless of
@@ -953,7 +948,7 @@ def map_plot(
         such a value to the nearest edge band's colour via the same
         ``get_under()``/``get_over()`` fallback used for a genuine
         ``extend``. This is a pre-existing property of the two draw
-        functions, not something this fix changes or could remove without
+        functions, not something this function changes or could remove without
         leaving curvilinear cells unpainted; it affects which cells get any
         colour at all, never which colour a cell painted by both gets.
 
@@ -1024,7 +1019,7 @@ def animate_map(
     for another spanning ten times the range) while the one colorbar keeps
     showing the first frame's. So whenever ``vmin``/``vmax`` are computed
     here, shared band boundaries are computed alongside them, from the same
-    (now whole-field) bounds, and passed on as ``levels`` -- matplotlib's own
+    (whole-field) bounds, and passed on as ``levels`` -- matplotlib's own
     ``contourf`` locator (`matplotlib.ticker.MaxNLocator`, with the ``nbins``
     and ``min_n_ticks`` `ContourSet` itself hard-codes for its default
     levels) rather than a hand-rolled ``linspace``, so the default *look*
@@ -1046,7 +1041,7 @@ def animate_map(
     once, from the bounds actually in force, using the caller's own count in
     place of the ``7`` the default case hard-codes -- the same
     :func:`_expand_level_count` the curvilinear path in :func:`map_plot`
-    itself now uses -- and passed to every frame as explicit boundaries.
+    itself uses -- and passed to every frame as explicit boundaries.
     Passing ``levels`` as an explicit sequence of boundaries opts out of all
     of this entirely, since it already pins the whole scale on its own;
     passing ``vmin`` or ``vmax`` fixes that one bound and leaves the other --
@@ -1064,8 +1059,8 @@ def animate_map(
     increasing (as ``contourf`` itself requires of ``levels``) -- and this is
     in fact the same fallback ``contourf`` reaches internally
     (`ContourSet._autolev`) when it autoscales a genuinely constant field
-    with no explicit levels, so a constant field's appearance is unchanged
-    from before this shared scale existed.
+    with no explicit levels, so a constant field looks the same with or
+    without a shared scale.
 
     An explicit ``norm=None`` means the default normalization, exactly as if
     ``norm`` had been left out entirely -- one of matplotlib's own supported
@@ -1098,7 +1093,7 @@ def animate_map(
     vmin=1)`` -- is applied to the resolved norm object (before its other,
     still-open bound is autoscaled from the whole field) and removed from
     what is forwarded on, rather than being left in ``kwargs`` alongside the
-    now-resolved norm *instance*: matplotlib itself refuses a norm instance
+    already-resolved norm *instance*: matplotlib itself refuses a norm instance
     combined with ``vmin``/``vmax`` (``pcolormesh``'s curvilinear path
     raises ``ValueError`` for it; ``contourf``'s separable path does not
     raise, but only because it silently overwrites the shared instance's
@@ -1107,14 +1102,13 @@ def animate_map(
     when given a *string* scale name. A ``vmin``/``vmax`` given alongside a
     norm *instance* the caller built themselves is left exactly as
     matplotlib treats it -- rejected on the curvilinear path -- since that
-    combination was never valid and is not this function's regression to
-    paper over.
+    combination is not valid and this function does not paper over it.
 
     Deriving shared *band boundaries* for an arbitrary norm is still
     deliberately not attempted here, open bounds or not: ``contourf`` takes
     its band boundaries from each frame's own data even with a ``norm``
     given, so on the separable path the bands can still differ between
-    frames; the colours do not, since every frame now shares the same norm
+    frames; the colours do not, since every frame shares the same norm
     object. The boundaries would have to come from the norm's own scale, and
     guessing at it goes wrong in ways that are worse than the gap: a linear
     locator applied to a ``LogNorm(1, 1000)`` yields ``[0, 150, ..., 1050]``
@@ -1196,8 +1190,8 @@ def animate_map(
     # `map_plot`'s own `levels`+`norm` curvilinear conflict guard (which
     # otherwise misfires on a `norm=None` that describes no actual norm).
     # Left as `"norm" in kwargs`, an explicit `None` reached
-    # `norm.autoscale_None(...)` below and raised `AttributeError` -- that
-    # was this branch's own bug, not a case matplotlib itself ever rejected.
+    # `norm.autoscale_None(...)` below and raised `AttributeError`, although
+    # matplotlib itself accepts an explicit `norm=None`.
     if kwargs.get("norm") is None:
         kwargs = {name: value for name, value in kwargs.items() if name != "norm"}
 
@@ -1258,7 +1252,7 @@ def animate_map(
             kwargs = {"vmin": vmin, "vmax": vmax, **kwargs, "levels": levels}
         # else: every value is NaN -- there is no range to compute, so this
         # leaves `map_plot` to autoscale each (equally NaN) frame on its own,
-        # which is exactly today's behaviour for that degenerate case.
+        # which is the right behaviour for that degenerate case.
 
     if "norm" in kwargs:
         # `kwargs` is forwarded straight through to `_map_plot` for every
@@ -1292,7 +1286,7 @@ def animate_map(
             # norm of this kind and let `vmin`/`vmax` set its bounds" --
             # verified in this environment, `contourf(..., norm="log",
             # vmin=1)` builds a `LogNorm` and applies `vmin` to it. But
-            # `norm` above is no longer a string past this point; it is the
+            # `norm` above is not a string past this point; it is the
             # `Normalize` *instance* just resolved from it, and matplotlib
             # refuses `vmin`/`vmax` alongside a norm instance -- verified
             # empirically here too: `pcolormesh(..., norm=LogNorm(),
@@ -1421,8 +1415,7 @@ def animate_map(
             # always be trusted to carry `.extend` itself, unlike a
             # separable `ContourSet`, whose own `extend` a colorbar already
             # reads with no help from here (`colorbar_extend` is `None`
-            # there, so this falls through to the plain call below,
-            # unchanged from before this fix).
+            # there, so this falls through to the plain call below).
             if colorbar_extend is not None:
                 fig.colorbar(mappable, ax=ax, extend=colorbar_extend)
             else:

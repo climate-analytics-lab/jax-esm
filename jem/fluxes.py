@@ -45,7 +45,7 @@ smaller than the mean of the instantaneous stress, which is what the
 published field is. The two differed by 30-40 % in magnitude on a T21
 SPEEDY aquaplanet (jax-esm#132), and over the open ocean of
 ``+configuration=veros-double-drake`` after 30 days the published stress is
-about 1.6 times the old ``Cd = 1e-3`` law's (RMS), with the same sign
+about 1.6 times a constant ``Cd = 1e-3`` law's (RMS), with the same sign
 everywhere and a pattern correlation of 0.92. JAX-ESM therefore has one
 stress law for every package: the atmosphere's.
 
@@ -273,7 +273,7 @@ class VerosExchange:
       freezing point (``VerosComponent(clamp_at_freezing=True)``), or the
       ice would freeze the deficit a second time; :meth:`validate` refuses
       the pairing otherwise.
-    - an SST-diagnosed :class:`~jem.components.slab.SlabSeaiceModel` takes the
+    - an SST-diagnosed :class:`~jem.components.slab.slab_seaice_model.slab_seaice_model.SlabSeaiceModel` takes the
       ocean's SST and hands the atmosphere its fraction
       (:data:`~jem.exchangers.VEROS_SLAB_SEAICE_EXCHANGES`). It has no energy
       budget, so the ocean keeps its own fluxes, the swamp mask stays, and a
@@ -766,10 +766,10 @@ class VerosExchange:
 
         Parameters
         ----------
-        sea_fraction : array-like
+        sea_fraction : jax.Array
             The atmosphere's sea fraction per cell (``1 - fmask`` of its
             terrain), on the atmosphere's grid.
-        reached : array-like
+        reached : jax.Array
             Veros' wet mask mapped onto the atmosphere's grid: positive
             where some wet column overlaps (or, for a bilinear map, is
             sampled by) the cell.

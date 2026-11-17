@@ -2,14 +2,14 @@
 
 A run produces stacked diagnostics; :meth:`jem.base.coupler.Coupler.to_xarray`
 turns those into one labelled :class:`xarray.Dataset` per component. What is
-left -- and what every driver has had to re-invent -- is the last step:
+left -- and what every driver would otherwise have to re-invent -- is the last step:
 thinning or averaging the records, and writing them out under names that say
 which component they came from and where on the run's clock they start. That
 is this module:
 
 - :func:`chunk_datasets` labels a chunk's diagnostics -- ``Coupler.to_xarray``
   with the chunk's first step -- and reduces nothing,
-- :func:`postprocess` reduces one dataset (subsample, chunk mean) and
+- :func:`~jem.output.postprocess` reduces one dataset (subsample, chunk mean) and
   :func:`postprocess_datasets` does that to a whole mapping of them,
 - :func:`write_chunk` writes a mapping of datasets to
   ``<output_dir>/<component>-<first step>.nc``, naming each file with
@@ -59,7 +59,7 @@ memory and restart granularity alone. And a component the workflow runs ``n``
 times per coupled step -- or a nested coupler's inner steps -- keeps all of a
 kept step's records and none of a dropped step's, rather than being thinned at
 a different rate from everyone else; the stride is in coupled steps, not in
-records. :func:`postprocess` therefore takes the chunk's ``first_step`` and
+records. :func:`~jem.output.postprocess` therefore takes the chunk's ``first_step`` and
 its number of coupled ``steps``, and reads each component's records per step
 off its own record count.
 
@@ -117,7 +117,7 @@ logger = logging.getLogger(__name__)
 #: labels its records with it (:class:`jem.base.component.TimeAxis`).
 TIME_DIMENSION = "time"
 
-#: CF cell method :func:`postprocess` stamps on an averaged variable.
+#: CF cell method :func:`~jem.output.postprocess` stamps on an averaged variable.
 TIME_MEAN_CELL_METHOD = f"{TIME_DIMENSION}: mean"
 
 # Characters allowed in the component part of an output file name. A dataset
@@ -152,7 +152,7 @@ def _safe_name(name: str) -> str:
 
 #: Name of the ``(time, bounds)`` interval-bounds variable JCM's output
 #: carries. It is not data to average -- a mean of a lower and an upper bound
-#: is neither -- so :func:`postprocess` replaces it with the chunk's own
+#: is neither -- so :func:`~jem.output.postprocess` replaces it with the chunk's own
 #: bounds.
 TIME_BOUNDS_VARIABLE = "time_bounds"
 
@@ -179,7 +179,7 @@ def check_subsample(subsample: Any) -> int:
     """Return ``subsample`` if it is a valid coupled-step stride, else raise.
 
     The rule lives here, beside the reduction that applies it, and is called
-    both by :func:`postprocess` and -- before anything is compiled -- by
+    both by :func:`~jem.output.postprocess` and -- before anything is compiled -- by
     :func:`jem.driver.run_chunked`, so a run configured with a nonsensical
     stride is refused up front rather than after a chunk has been integrated.
 
@@ -287,7 +287,7 @@ def _dataset_is_empty(dataset: xr.Dataset) -> bool:
     """Return whether ``dataset`` has a time dimension holding no record.
 
     The one definition of "nothing to write", shared by :func:`write_chunk`,
-    which skips such a dataset, and by :func:`postprocess`, which has nothing
+    which skips such a dataset, and by :func:`~jem.output.postprocess`, which has nothing
     to average in one. A dataset with **no** time dimension is not empty in
     this sense: it is a grid or a mask, and it is written and passed through
     as it always is.
@@ -675,7 +675,7 @@ def chunk_datasets(
 
     This is the form anything that *inspects* a chunk must be given: it still
     holds the chunk's last record, and every value in it, which neither
-    reduction in :func:`postprocess` promises to preserve. Reduce with
+    reduction in :func:`~jem.output.postprocess` promises to preserve. Reduce with
     :func:`postprocess_datasets` only what is written out.
 
     Parameters
@@ -704,7 +704,7 @@ def postprocess_datasets(
     first_step: int = 0,
     steps: int | None = None,
 ) -> dict[str, xr.Dataset]:
-    """Apply :func:`postprocess` to every dataset of a chunk.
+    """Apply :func:`~jem.output.postprocess` to every dataset of a chunk.
 
     The reductions are the same ones, applied with the same options to each
     component: a chunk is one interval of the run's clock, so a run whose
@@ -712,7 +712,7 @@ def postprocess_datasets(
 
     ``first_step`` and ``steps`` describe the **chunk**, so they are one pair
     for all of its datasets even though the components need not record at the
-    same rate: :func:`postprocess` reads each component's records-per-step off
+    same rate: :func:`~jem.output.postprocess` reads each component's records-per-step off
     its own record count, and a component the workflow runs ``n`` times per
     coupled step keeps or drops all ``n`` of a step's records together with
     everyone else's.
@@ -729,14 +729,14 @@ def postprocess_datasets(
         A chunk's datasets, keyed by component name -- from
         :func:`chunk_datasets`.
     output_averages : bool
-        Passed to :func:`postprocess`.
+        Passed to :func:`~jem.output.postprocess`.
     subsample : int
-        Passed to :func:`postprocess`.
+        Passed to :func:`~jem.output.postprocess`.
     first_step : int
-        The coupled step the chunk starts at; passed to :func:`postprocess`,
+        The coupled step the chunk starts at; passed to :func:`~jem.output.postprocess`,
         where it places the chunk in the run's stride period.
     steps : int, optional
-        Coupled steps in the chunk; passed to :func:`postprocess`.
+        Coupled steps in the chunk; passed to :func:`~jem.output.postprocess`.
 
     Returns
     -------
@@ -789,9 +789,9 @@ def datasets_for_chunk(
         Coupled steps in the chunk; passed to :func:`postprocess_datasets`.
         Defaults to one coupled step per record.
     output_averages : bool
-        Passed to :func:`postprocess`.
+        Passed to :func:`~jem.output.postprocess`.
     subsample : int
-        Passed to :func:`postprocess`.
+        Passed to :func:`~jem.output.postprocess`.
 
     Returns
     -------

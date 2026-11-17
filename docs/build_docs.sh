@@ -6,10 +6,11 @@
 # with dependency installation, a clean option, and optional
 # auto-open of the built HTML in a browser.
 #
-# The build is strict: docs/Makefile passes `-W --keep-going` to Sphinx, so any
-# warning fails it (all of them are still reported); SPHINXOPTS overrides that,
-# e.g. SPHINXOPTS="-W --keep-going -n" also fails on an unresolved
-# cross-reference. CI runs this same script, so a local pass is a CI pass. It needs
+# The build is strict: docs/Makefile passes `-W --keep-going -n` to Sphinx, so
+# any warning fails it (all of them are still reported), an unresolved
+# cross-reference included; SPHINXOPTS overrides that, e.g.
+# SPHINXOPTS="--keep-going" for a lenient build. CI runs this same script, so a
+# local pass is a CI pass. It needs
 # `pandoc` on PATH (nbsphinx converts the example notebooks with it).
 #
 # Usage:

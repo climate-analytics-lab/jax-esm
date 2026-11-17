@@ -88,20 +88,28 @@ class GridInfo:
 
     Attributes
     ----------
-    nx, ny : int
-        Grid shape, from the SCRIP file's own ``grid_dims``.
+    nx : int
+        Number of cells in longitude, from the SCRIP file's own ``grid_dims``.
+    ny : int
+        Number of cells in latitude, from the same ``grid_dims``.
     dxt : float
         Uniform zonal spacing, degrees.
     dyt : numpy.ndarray
         Per-row meridional spacing, degrees, shape ``(ny,)`` -- non-uniform,
         since the native axis is Gaussian.
-    x_origin, y_origin : float
+    x_origin : float
         What Veros' own grid-spacing reconstruction needs to reproduce the
-        native axis exactly; see :meth:`get_grid_info`.
-    true_lat_xy, true_lon_xy : numpy.ndarray
-        Each cell's true (post-rotation) geographic latitude and longitude in
-        degrees, ``(nx, ny)``: the latitude for the Coriolis parameter, and
-        both for labelling the output, whose own axes are the rotated ones.
+        native longitude axis exactly; see :meth:`get_grid_info`.
+    y_origin : float
+        The same for the native latitude axis.
+    true_lat_xy : numpy.ndarray
+        Each cell's true (post-rotation) geographic latitude in degrees,
+        ``(nx, ny)``: used for the Coriolis parameter and, with
+        ``true_lon_xy``, for labelling the output, whose own axes are the
+        rotated ones.
+    true_lon_xy : numpy.ndarray
+        Each cell's true (post-rotation) geographic longitude in degrees,
+        ``(nx, ny)``.
     landsea_mask : numpy.ndarray
         ``(nx, ny)``, ``1`` = ocean / ``0`` = land (Veros' ``kbot``
         convention), from the matching land-sea mask file thresholded at
@@ -257,7 +265,7 @@ def earth_setup(
         Fraction at or above which a cell counts as land. Default ``0.5``.
     layer_thicknesses : Sequence[float]
         Vertical layer thicknesses in metres, surface first. Default
-        :data:`jem.components.veros.setups._layers.LAYER_THICKNESSES` (15
+        ``jem.components.veros.setups._layers.LAYER_THICKNESSES`` (15
         layers, 50 m to 690 m); a shallower ocean is
         ``layer_thicknesses=LAYER_THICKNESSES[:n]``.
     dt_mom, dt_tracer : float

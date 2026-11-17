@@ -13,7 +13,8 @@ drift apart:
 ``curvilinear``
     A grid whose axes are not (a displaced pole, a rotated pole). Index
     dimensions ``("x", "y")`` and 2-D auxiliary coordinates named
-    :data:`CURVILINEAR_LONGITUDE` / :data:`CURVILINEAR_LATITUDE`
+    :data:`~jem.components.coordinates.CURVILINEAR_LONGITUDE` /
+    :data:`~jem.components.coordinates.CURVILINEAR_LATITUDE`
     (``longitude``/``latitude``), listed in each variable's CF ``coordinates``
     attribute.
 
@@ -40,7 +41,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
-#: Dimension names of a curvilinear grid: positions in index space.
+#: Dimension names of a curvilinear grid, which are positions in index space.
 CURVILINEAR_DIMS = ("x", "y")
 
 #: Dimension and coordinate names of a separable grid -- JCM's own.
@@ -50,6 +51,7 @@ SEPARABLE_DIMS = ("lon", "lat")
 #: from :data:`SEPARABLE_DIMS` so that they can never collide in a merge with
 #: the atmosphere's 1-D ``lon``/``lat`` (see the module docstring).
 CURVILINEAR_LONGITUDE = "longitude"
+#: The latitude counterpart of :data:`CURVILINEAR_LONGITUDE`.
 CURVILINEAR_LATITUDE = "latitude"
 
 #: The CF ``coordinates`` attribute a variable on a curvilinear grid carries.

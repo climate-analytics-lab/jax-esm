@@ -1,6 +1,6 @@
 """Surface exchange fields, read off jax-gcm's package-independent contract.
 
-:class:`jcm.physics.surface.surface_exchange.SurfaceExchange` is published
+``jcm.physics.surface.surface_exchange.SurfaceExchange`` is published
 identically under ``diagnostics["surface_exchange"]`` by every physics
 package that resolves a surface (SPEEDY and ECHAM; Held-Suarez opts out
 because it has no surface fluxes at all), so this module has exactly one
@@ -123,7 +123,7 @@ repository's own ``CLAUDE.md`` ("Sign and mask conventions"):
   its ``water`` and ``sea_ice`` tiles. A package that publishes no flux tile
   (ECHAM: its implicit vertical-diffusion solve delivers only the grid mean)
   leaves the ``sea_*`` fields equal to the grid mean, so an ocean on a coast
-  cell then also receives the land part's flux; :class:`JCMComponent` logs
+  cell then also receives the land part's flux; :class:`~jem.components.jcm.component.JCMComponent` logs
   that once when it builds its carry. ``land_evaporation`` is the evaporation
   over the land part, the ``land`` tile, which a land component's soil
   supplies; it falls back to the grid mean the same way, and
@@ -342,8 +342,8 @@ def from_diagnostics(
 ) -> SurfaceExchange:
     """Read the surface exchange out of one step's physics diagnostics.
 
-    Every guaranteed field of :class:`jcm.physics.surface.surface_exchange.
-    SurfaceExchange` is filled identically by every physics package that
+    Every guaranteed field of ``jcm.physics.surface.surface_exchange.SurfaceExchange``
+    is filled identically by every physics package that
     resolves a surface, so this function needs no knowledge of which package
     produced ``diagnostics`` beyond the grid it is on. See the module
     docstring for the field-by-field sign/unit mapping and for why every

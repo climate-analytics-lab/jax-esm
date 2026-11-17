@@ -159,9 +159,10 @@ def _record_axes(coupler: Any) -> dict[str, Any]:
     step to bin it by its own label rather than by the step's.
 
     The nested coupler is recognised by duck-typing rather than by an
-    ``isinstance`` check, because importing :mod:`jem.base.coupler` here would
-    pull in jax-gcm (and with it the whole atmosphere) just to import this
-    module; :func:`_duration_seconds` defers its import for the same reason.
+    ``isinstance`` check, so that this module depends on nothing but the two
+    attributes it reads (``components`` and ``multiplicities()``) and not on
+    :mod:`jem.base.coupler`; :func:`_duration_seconds` defers its jax-gcm
+    import so that importing this module does not pull the atmosphere in.
     """
     multiplicities = coupler.multiplicities()
     axes: dict[str, Any] = {}
@@ -281,7 +282,7 @@ def fold_records(means: Any, counts: Any) -> Any:
     means : pytree
         One component's entry in what :meth:`BinnedMean.finalize` returned:
         leaves shaped ``(n_bins, *sub-step axes, ...)``, empty bins NaN.
-    counts : array
+    counts : jax.Array
         That component's entry in the accumulator's counts, shaped
         ``(n_bins, *sub-step axes)``. A component that records once per
         coupled step has no sub-step axes, and folding it then returns its

@@ -47,6 +47,12 @@ template: |
     the atmosphere's own run config and a ``run`` group here would shadow
     JAX-GCM's.
 
+    The process's JAX precision is the top-level key ``jax_enable_x64``: the
+    default (null) leaves it as the process has it (float32); ``true`` runs
+    the whole model in double precision (``jax_enable_x64=true``); ``false``
+    forces float32. ``ocean=veros`` selects ``true`` itself, since Veros
+    cannot run in single precision.
+
   The atmosphere: JAX-GCM's own config groups, re-rooted under `atmosphere`:
   -------------------------------------------------------------------------
     physics, grid, dycore, run, init, terrain, forcing, nudging, diffusion

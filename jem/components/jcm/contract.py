@@ -52,8 +52,8 @@ SPEEDY's land and sea flux tiles and a coupled sea ice's forcing on
 ``land_model.f90``, as ``SpeedySurfaceFlux``'s default) and jax-gcm#1205
 (``ForcingData.sea_ice_temperature``) with it: those are what this
 repository's ocean coupling reads (the ``sea`` tile, jax-esm#147) and what
-its land is (SPEEDY's slab, in place of the land temperature JAX-ESM used to
-integrate itself). The earlier needs still hold: ECHAM physics traces
+its land is (SPEEDY's own slab; JAX-ESM integrates no land temperature of its
+own for the atmosphere). It also relies on: ECHAM physics tracing
 under ``jax_enable_x64`` (jax-gcm#946), so an ECHAM atmosphere couples to
 Veros, and ``SurfaceExchange`` publishes a near-surface wind vector,
 ``wind_u``/``wind_v``, identically from every physics package
@@ -511,8 +511,9 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     # ------------------------------------------------------------------
     IntegrationPoint(
         "jcm.cf_metadata", "_COORD_ATTRS", "private",
-        "The CF attributes jax-gcm gives its horizontal coordinates. The slab"
-        " components' _LONGITUDE_ATTRS / _LATITUDE_ATTRS are copies of these"
+        "The CF attributes jax-gcm gives its horizontal coordinates."
+        " jem.components.coordinates' _LONGITUDE_ATTRS / _LATITUDE_ATTRS (used"
+        " by every component's dataset) are copies of these"
         " values, so a slab dataset and an atmosphere dataset describe their"
         " shared axes identically. JAX-ESM copies rather than imports because"
         " a private mapping is not an API -- but it is still pinned to this"

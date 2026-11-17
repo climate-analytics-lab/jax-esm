@@ -47,8 +47,8 @@ class BucketLandState:
 
     Attributes
     ----------
-    soil_water_content : (n_lon, n_lat, 2) array
-        Volumetric water content (m3 m-3) of the surface and the deep layer.
+    soil_water_content : jax.Array
+        Shape ``(n_lon, n_lat, 2)``: volumetric water content (m3 m-3) of the surface and the deep layer.
         Zero where the cell has no land.
 
     """

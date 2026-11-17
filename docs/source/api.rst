@@ -50,6 +50,7 @@ Components
    :recursive:
 
    jem.components.clock
+   jem.components.coordinates
    jem.components.jcm.component
    jem.components.jcm.contract
    jem.components.jcm.exchange_fields
@@ -101,6 +102,10 @@ Constants and utilities
    jem.fluxes
    jem.plot
    jem.tools.idealised_terrain
+   jem.tools.ocean_bathymetry
+   jem.tools.ocean_initial_state
+   jem.tools.veros_earth_terrain
+   jem.tools.veros_earth_ice_mask
    jem.utils.esmf_regrid
    jem.utils.latlon_weights
    jem.utils.cycles

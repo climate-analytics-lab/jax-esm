@@ -122,12 +122,12 @@ def double_drake_setup(
     land_sea_mask_file : str
         A JCM-canonical terrain file (``jem.tools.idealised_terrain``'s
         output) whose ``lsm`` -- a **binary** 0/1 mask, 1 = land, 0 = ocean,
-        not a fractional one (unlike :func:`~jem.components.veros.setups.
-        earth.earth_setup`, this factory does not threshold) -- masks the
+        not a fractional one (unlike
+        :func:`~jem.components.veros.setups.earth.earth_setup`, this factory does not threshold) -- masks the
         ocean. It must have the shape of ``atmosphere_grid_file``'s grid.
     layer_thicknesses : Sequence[float]
         Vertical layer thicknesses in metres, surface first. Default
-        :data:`jem.components.veros.setups._layers.LAYER_THICKNESSES` (15
+        ``jem.components.veros.setups._layers.LAYER_THICKNESSES`` (15
         layers, 50 m to 690 m); a shallower ocean is
         ``layer_thicknesses=LAYER_THICKNESSES[:n]``.
     dt_mom, dt_tracer : float

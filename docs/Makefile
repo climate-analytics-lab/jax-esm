@@ -3,11 +3,11 @@
 
 # You can set these variables from the command line, and also
 # from the environment for the first two.
-# -W makes a warning an error and --keep-going still reports every one of them.
-# The build is run this way locally (docs/build_docs.sh) and in CI, so they
-# cannot differ. Add -n (nitpicky: every unresolved cross-reference is a
-# warning) with SPHINXOPTS="-W --keep-going -n".
-SPHINXOPTS    ?= -W --keep-going
+# -W makes a warning an error, --keep-going still reports every one of them,
+# and -n (nitpicky) makes every cross-reference that resolves to nothing a
+# warning. The build is run this way locally (docs/build_docs.sh) and in CI,
+# so they cannot differ.
+SPHINXOPTS    ?= -W --keep-going -n
 SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = source
 BUILDDIR      = build

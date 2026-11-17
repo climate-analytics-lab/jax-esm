@@ -1,4 +1,4 @@
-"""The :class:`Coupler`: the coupled-model definition, its clock and its step.
+"""The :class:`~jem.base.coupler.Coupler`: the coupled-model definition, its clock and its step.
 
 A ``Coupler`` is the whole definition of a coupled model:
 
@@ -24,7 +24,7 @@ component that provides those capabilities. A coupled model can therefore be
 a component of a slower coupled model -- the GFDL pattern of a fast
 atmosphere/land loop inside a daily ocean coupling -- with no wrapper class.
 The alternative for the same model is one coupler with a repeated workflow
-(see :class:`Coupler`); the two are equivalent, and which reads better
+(see :class:`~jem.base.coupler.Coupler`); the two are equivalent, and which reads better
 depends on whether the fast loop is a thing in its own right.
 
 The coupler produces *functions*, not runs: :meth:`Coupler.generate_step_function` and
@@ -34,10 +34,10 @@ run loop. Nothing here logs per step, holds a trajectory or mutates the
 coupler, because all of that would either break under tracing or make the
 returned function impure.
 
-See ``docs/source/design/architecture.md`` and, for the task numbering
-(T1.1, T1.3, T1.7), the API hardening plan, which lives on the review
-branch rather than in this repository:
-https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
+See ``docs/source/design/architecture.md`` for how the pieces fit,
+``docs/source/design/carry_and_clock.md`` for the carry and the clock, and
+``docs/source/design/nesting.md`` for a coupler as a component of a slower one
+and for repeated workflow entries.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ Accumulator = tuple[
 
 
 def _missing_component_attributes(component: Any) -> list[str]:
-    """Return the names of the :class:`Component` members ``component`` lacks."""
+    """Return the names of the :class:`~jem.base.component.Component` members ``component`` lacks."""
     return [
         attribute
         for attribute in _REQUIRED_COMPONENT_ATTRIBUTES
@@ -264,8 +264,8 @@ def nested_carry(
 ) -> Carry:
     """Return the carry of ``inner_name`` inside the nested coupler ``outer_name``.
 
-    An exchanger in an outer coupler sees a nested :class:`Coupler` as one
-    entry in the carries mapping, holding a whole :class:`CoupledCarry` rather
+    An exchanger in an outer coupler sees a nested :class:`~jem.base.coupler.Coupler` as one
+    entry in the carries mapping, holding a whole :class:`~jem.base.component.CoupledCarry` rather
     than a component carry. Reaching an inner component means going through
     ``.components``, and this is that step written once, with an error that
     says what was actually there when it is not a nested coupler.
@@ -297,7 +297,7 @@ def with_nested_carry(
 
     The counterpart of :func:`nested_carry`, and the only safe way for an
     exchanger to write into a nested model: nothing is mutated in place -- a
-    new inner carries dict, a new :class:`CoupledCarry` (via
+    new inner carries dict, a new :class:`~jem.base.component.CoupledCarry` (via
     ``dataclasses.replace``, so a field added to it later is carried through)
     and a new outer mapping -- because the carries an exchanger is handed are
     the ones a ``lax.scan`` is carrying.
@@ -368,7 +368,7 @@ class Coupler:
     ----------
     components : dict[str, Component]
         The components to couple. The **dict key is the component's name**
-        throughout: it keys the carries in :class:`CoupledCarry`, the
+        throughout: it keys the carries in :class:`~jem.base.component.CoupledCarry`, the
         diagnostics returned by a step, and the entries of ``workflow``. A
         value that does not satisfy the :class:`~jem.base.component.Component`
         protocol raises ``TypeError``.
@@ -387,7 +387,7 @@ class Coupler:
         Date of coupled step 0. The clock is a ``jax_datetime.Datetime``,
         on the proleptic Gregorian calendar.
     name : str
-        The coupler's own name, as the :class:`Component` protocol requires
+        The coupler's own name, as the :class:`~jem.base.component.Component` protocol requires
         it of anything a coupler steps -- a ``Coupler`` is a component (see
         the Notes), so it has one. It is *not* what an outer coupler keys it
         by: that is the dict key it is registered under, as for every other
@@ -430,7 +430,7 @@ class Coupler:
     at all.
 
     **A coupler is a component.** It has a ``name``, an ``initialize()``
-    returning its :class:`CoupledCarry` and a ``step(carry, time)``, and it
+    returning its :class:`~jem.base.component.CoupledCarry` and a ``step(carry, time)``, and it
     implements :class:`~jem.base.component.SupportsBind`,
     :class:`~jem.base.component.SupportsXarray` and
     :class:`~jem.base.component.SupportsCheckpoint`, so it can be registered
@@ -592,7 +592,7 @@ class Coupler:
         Raises
         ------
         TypeError
-            If ``component`` does not satisfy the :class:`Component`
+            If ``component`` does not satisfy the :class:`~jem.base.component.Component`
             protocol; the message names the missing attributes.
         ValueError
             If ``name`` is already an exchanger, or the component refuses the
@@ -884,7 +884,7 @@ class Coupler:
         of which components those are. A component with no clock in its carry
         needs nothing (the slab models read the season from the
         :class:`~jem.base.component.CouplingTime` every step). A nested
-        :class:`Coupler` is one of the former: it resets its own clock and its
+        :class:`~jem.base.coupler.Coupler` is one of the former: it resets its own clock and its
         components' in turn, and its start date is the outer one's (checked
         at :meth:`bind`).
 
@@ -960,7 +960,7 @@ class Coupler:
 
                 jax.grad(lambda p: loss(trajectory(model.initialize({"ice": p}))))
 
-            For a nested :class:`Coupler`, the value is itself a mapping over
+            For a nested :class:`~jem.base.coupler.Coupler`, the value is itself a mapping over
             *its* components, because that is what its own ``initialize``
             takes.
 
@@ -1023,7 +1023,7 @@ class Coupler:
         This is the coupled model as a function: ``step`` runs the workflow
         once -- every exchanger and every component, in order, on the clock
         the carry's step counter implies -- and returns the new
-        :class:`CoupledCarry` (``step`` incremented) with one diagnostics
+        :class:`~jem.base.component.CoupledCarry` (``step`` incremented) with one diagnostics
         pytree per component that ran. :meth:`generate_trajectory_function`
         is nothing more than this function scanned ``iterations`` times; call
         this one directly to advance a single step eagerly (debugging, a
@@ -1166,7 +1166,7 @@ class Coupler:
             diagnostics. ``init()`` returns the initial accumulator pytree,
             whose shapes must be static; ``update(accumulator, diagnostics,
             time)`` runs inside the ``lax.scan`` body on that step's
-            diagnostics, with the same :class:`CouplingTime` the step's
+            diagnostics, with the same :class:`~jem.base.component.CouplingTime` the step's
             components were handed, and returns the next accumulator.
             :func:`jem.accumulate.monthly_mean` and
             :func:`jem.accumulate.windowed_mean` build such a pair (and unpack
@@ -1344,7 +1344,7 @@ class Coupler:
     def _check_outer_clock(self, time: CouplingTime, ratio: int) -> None:
         """Check the outer clock is the one this coupler was bound to.
 
-        Only the static fields of a :class:`CouplingTime` can be checked: the
+        Only the static fields of a :class:`~jem.base.component.CouplingTime` can be checked: the
         step counter is a traced array, and the inner steps are driven by the
         inner carry's own counter anyway. The static fields are enough to
         catch the mistake that matters -- a clock from a different coupler,
@@ -1456,7 +1456,7 @@ class Coupler:
         Components that do not implement
         :class:`~jem.base.component.SupportsXarray` are skipped, so a coupled
         model with an output-less component still produces output. Every
-        dataset is labelled with a :class:`TimeAxis` built from the same
+        dataset is labelled with a :class:`~jem.base.component.TimeAxis` built from the same
         start date and coupled timestep, so the results can be merged.
 
         A component the workflow runs ``n > 1`` times per coupled step wrote
@@ -1467,7 +1467,7 @@ class Coupler:
         ``first_step * n``, so each record is stamped at the midpoint of its
         own sub-step rather than at the coupled step's.
 
-        A component that is itself a :class:`Coupler` returns one dataset per
+        A component that is itself a :class:`~jem.base.coupler.Coupler` returns one dataset per
         *its* components, and they are flattened into this coupler's result
         under those names; a name that collides with one already there is a
         ``ValueError``, because silently overwriting one component's output
@@ -1573,7 +1573,7 @@ class Coupler:
         capability, so a carry written by a component's ``save_carry`` is
         always read back by that component's ``load_carry``.
 
-        A nested :class:`Coupler` is loaded with the same ``check_clock`` as
+        A nested :class:`~jem.base.coupler.Coupler` is loaded with the same ``check_clock`` as
         the coupler that contains it: a checkpoint loaded unchecked, to be
         passed through :meth:`restart_clock`, is unchecked at every level, or
         the nested model would refuse the very carry the reset is about to
@@ -1621,11 +1621,11 @@ class Coupler:
         the single ``directory / carry.msgpack``, which is written last and is
         the checkpoint's completion marker (see :mod:`jem.checkpoint`).
 
-        A :class:`Coupler` implements the capability itself, so a **nested**
+        A :class:`~jem.base.coupler.Coupler` implements the capability itself, so a **nested**
         coupled model is checkpointed by recursion: the outer coupler hands
         the inner one the subdirectory named after it, and the inner one
         writes its own components and its own carry file there. Without that,
-        the outer save would treat the inner :class:`CoupledCarry` as a plain
+        the outer save would treat the inner :class:`~jem.base.component.CoupledCarry` as a plain
         pytree and serialise it -- which silently bypasses the HDF5 restart
         path a component like Veros requires.
 
@@ -1658,7 +1658,7 @@ class Coupler:
         The exact inverse: the loaders are derived from the same components,
         so a nested coupler reads its own subdirectory back and a component
         with a custom format is read by the code that wrote it. The result is
-        a :class:`CoupledCarry` that can be handed straight to a trajectory
+        a :class:`~jem.base.component.CoupledCarry` that can be handed straight to a trajectory
         function, which continues the run from the step the checkpoint holds.
 
         The components read are the ones registered *now*, and their present

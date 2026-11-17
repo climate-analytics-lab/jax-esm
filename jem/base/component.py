@@ -1,6 +1,6 @@
 """The component contract and the coupled-model state types.
 
-This module is the whole of the interface between the :class:`Coupler` and
+This module is the whole of the interface between the :class:`~jem.base.coupler.Coupler` and
 the things it couples. It is deliberately small:
 
 - :class:`Component` is a :class:`typing.Protocol`: a component is any object
@@ -26,10 +26,9 @@ the things it couples. It is deliberately small:
   simply copying a field. It is the *only* place where one component's carry
   is read by another.
 
-The design is recorded in ``docs/source/design/carry_and_clock.md`` and, for
-the task numbering (T1.1, T1.3), in the API hardening plan, which lives on
-the review branch rather than in this repository:
-https://github.com/climate-analytics-lab/jax-esm/blob/claude/jax-esm-api-review-jv7j7u/docs/source/design/api_hardening_plan.md
+The design is recorded in ``docs/source/design/carry_and_clock.md`` (the
+carry layout, the clock and the component contract) and
+``docs/source/design/exchange.md`` (the exchangers).
 """
 
 from __future__ import annotations
@@ -107,8 +106,9 @@ def forcing_variable(name: str) -> str:
 #: carry an output variable came from. See :func:`role_attrs`.
 ROLE_ATTRIBUTE = "jem_role"
 
-#: What a variable's role may be: the three sections of the carry layout the
-#: packaged components share (``jem.exchangers`` addresses fields by them).
+#: The role an output variable may have, one of the three sections of the carry
+#: layout the packaged components share (``jem.exchangers`` addresses fields by
+#: them).
 Role = Literal["state", "derived", "forcing"]
 
 #: The roles, as a tuple, for validation and for iterating in a test.
@@ -150,8 +150,9 @@ def role_attrs(role: Role) -> dict[str, str]:
 
     Parameters
     ----------
-    role : {"state", "derived", "forcing"}
-        Which section of the carry the variable was read from.
+    role : str
+        Which section of the carry the variable was read from: ``"state"``,
+        ``"derived"`` or ``"forcing"``.
 
     Returns
     -------

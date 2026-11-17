@@ -120,12 +120,10 @@ reported, and the ``docs`` CI job runs this same script. ``-i`` installs
 The API reference (``docs/source/api.rst``) is generated: every module listed
 there is rendered with all of its public members, so a new public function or
 class needs no docs change, but a new *module* must be added to ``api.rst``.
-The cross-references in docstrings and pages are also checkable under
-Sphinx's nitpicky mode, which reports every reference that resolves to nothing:
-
-.. code-block:: bash
-
-   SPHINXOPTS="--keep-going -n" docs/build_docs.sh -c
+The build also runs in Sphinx's nitpicky mode, so a cross-reference in a
+docstring or a page that resolves to nothing fails it: qualify the role with
+the object's full path, or use double backticks for a name that is not a
+documented object (a private helper, a configuration key).
 
 The example notebooks are checked in with their outputs cleared, so by default
 their pages show code only, which keeps an everyday build fast. To render the

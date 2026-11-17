@@ -9,11 +9,11 @@ becomes field Y of component B, optionally regridded on the way.
 
 :class:`ExchangeSpec` is one row of that table, :class:`Exchange` executes
 it, and :func:`default_exchanges` is the standard atmosphere/ocean/land/
-sea-ice wiring that every example in this repository writes out by hand
-today. A declarative exchange is not more capable than a hand-written one --
+sea-ice wiring, the one a hand-written exchanger would otherwise spell out
+per example. A declarative exchange is not more capable than a hand-written one --
 an exchanger that computes a flux, converts units or blends two fields still
 has to be a function -- but it is checkable: :meth:`Exchange.validate` names
-a mistyped field *before* a run starts, :meth:`Exchange.__repr__` prints
+a mistyped field *before* a run starts, ``Exchange.__repr__`` prints
 the whole coupling as a table, and :func:`exchanged_fields` answers, for one
 component, which of its fields somebody else supplies -- which is what a
 component needs to know before it builds a carry the coupled step can scan.
@@ -21,7 +21,7 @@ component needs to know before it builds a carry the coupled step can scan.
 Carry layout
 ------------
 A spec addresses a field as ``"component.section.field"``, where ``section``
-is one of :data:`SECTIONS` -- ``state``, ``derived`` or ``forcing``. That is
+is one of ``SECTIONS`` -- ``state``, ``derived`` or ``forcing``. That is
 the layout every packaged component uses: the carry is a mapping whose
 ``"state"``, ``"derived"`` and ``"forcing"`` entries are structs
 (``tree_math.struct``, ``flax.struct``) holding the fields, with anything
@@ -62,11 +62,11 @@ workflow couples with a lag of one coupling step. With the default workflow
   fluxes from the same step, at the cost of giving the atmosphere a
   two-step-old sea surface temperature. Neither order gives every component
   same-step information; that needs either an iterated (implicit) exchange or
-  a partitioned workflow, which is a follow-up.
+  a partitioned workflow, neither of which this module provides.
 
 Writing the default coupling down in one place is what makes that lag
-reviewable at all: before, every example spelled the same exchange out by
-hand and none of them said what step the fields came from.
+reviewable at all: a hand-written exchange says nothing about what step its
+fields came from.
 """
 
 from __future__ import annotations
@@ -269,11 +269,11 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: rather than its fluxes -- the surface radiation, the air over the sea part,
 #: the wind speed and surface pressure, rain and snow -- and the atmosphere's
 #: net heat flux and evaporation over the sea part, which it passes on to the
-#: ocean less what the ice keeps (:data:`WINTON_REPLACES`). It forms frazil ice
+#: ocean less what the ice keeps (``WINTON_REPLACES``). It forms frazil ice
 #: from the deficit the ocean's clamp at freezing removed. It hands the
 #: atmosphere its skin temperature, which SPEEDY blends with the SST by the ice
 #: fraction (``sea_model.f90``'s ``tice_am``); regridded, that temperature is
-#: weighted by the ice's share of each cell (:data:`ROW_WEIGHTS`) and mapped
+#: weighted by the ice's share of each cell (``ROW_WEIGHTS``) and mapped
 #: conservatively, as the fraction is, so an atmosphere cell's
 #: ``sice_am * T_ice`` is the ice-area mean of the ocean cells under it.
 #: ``docs/source/design/winton_seaice.md`` is the contract.
@@ -320,22 +320,24 @@ VEROS_WINTON_REPLACES = (
 )
 
 #: The sea-ice rows of a Veros coupling with the SST-diagnosed
-#: :class:`~jem.components.slab.SlabSeaiceModel`: the ice takes the ocean's SST
-#: and hands the atmosphere its fraction. The ocean keeps its own fluxes, and
-#: :func:`jem.fluxes.mask_fluxes_under_ice` is its insulation.
+#: :class:`~jem.components.slab.slab_seaice_model.slab_seaice_model.SlabSeaiceModel`.
+#: The ice takes the ocean's SST and hands the atmosphere its fraction. The
+#: ocean keeps its own fluxes, and :func:`jem.fluxes.mask_fluxes_under_ice` is
+#: its insulation.
 VEROS_SLAB_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.derived.sea_surface_temperature",
      "seaice.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
 )
 
-#: The sea-ice rows of a Veros coupling with a Winton ice: the slab ice's two
-#: rows, :data:`WINTON_SEAICE_EXCHANGES` (the ocean's deficit read from where
-#: Veros publishes it, ``derived``, as the slab ocean does), and the ocean's
-#: heat and freshwater forcing taken from the ice. The ocean's heat row is
-#: Veros' ``forcing.heat_flux`` where a slab ocean has ``forcing.total_heat_flux``;
-#: both are upward positive, W m-2. The freshwater flux is upward positive too,
-#: kg m-2 s-1, the sign and unit :meth:`VerosComponent.step` turns into a
+#: The sea-ice rows of a Veros coupling with a Winton ice, made of the slab
+#: ice's two rows, :data:`WINTON_SEAICE_EXCHANGES` (the ocean's deficit read from
+#: where Veros publishes it, ``derived``, as the slab ocean does), and the
+#: ocean's heat and freshwater forcing taken from the ice. The ocean's heat row
+#: is Veros' ``forcing.heat_flux`` where a slab ocean has
+#: ``forcing.total_heat_flux``; both are upward positive, W m-2. The freshwater
+#: flux is upward positive too, kg m-2 s-1, the sign and unit
+#: :meth:`~jem.components.veros_component.VerosComponent.step` turns into a
 #: salinity forcing.
 VEROS_WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     *VEROS_SLAB_SEAICE_EXCHANGES,
@@ -394,7 +396,7 @@ class ExchangeSpec:
     ----------
     src : str
         Where the value is read: ``"component.section.field"``, with
-        ``section`` one of :data:`SECTIONS`.
+        ``section`` one of ``SECTIONS``.
     dst : str
         Where it is written, in the same form.
     regrid : str or None
@@ -1093,13 +1095,13 @@ def default_exchanges(
 
     A row survives only if **both** its components are present, so an
     atmosphere/ocean pair gets two rows. The names are
-    :data:`STANDARD_COMPONENT_NAMES`; a component registered under any other
+    ``STANDARD_COMPONENT_NAMES``; a component registered under any other
     name is not wired by this function.
 
     Which table
     -----------
     The table above describes JAX-ESM's own slab components. A component with
-    a carry of its own needs its own rows, and there is one such table so far:
+    a carry of its own needs its own rows, and there is one such table:
     a :class:`~jem.components.veros_component.VerosComponent` registered as
     ``"ocn"`` selects :data:`VEROS_OCEAN_EXCHANGES` instead, which is the same
     wiring spelled in Veros' field names and with the freshwater flux Veros
@@ -1123,12 +1125,12 @@ def default_exchanges(
     ----------
     ``regrid`` names a regridder for the specs that cross the
     atmosphere/ocean-grid boundary -- the ones between ``atm`` and a
-    component of :data:`OCEAN_GRID_COMPONENTS`. Its keys are
+    component of ``OCEAN_GRID_COMPONENTS``. Its keys are
     ``"<direction>_<kind>"``, or a bare ``"<direction>"`` covering both
     kinds, where
 
     - *direction* is ``"a2o"`` (atmosphere to ocean grid) or ``"o2a"``, and
-    - *kind* is the row's own ``"flux"``/``"state"`` (:data:`KINDS`).
+    - *kind* is the row's own ``"flux"``/``"state"`` (``KINDS``).
 
     That split is the one the mixed-grid example makes by hand: extensive
     quantities -- heat fluxes, an areal ice fraction -- are regridded
@@ -1154,12 +1156,12 @@ def default_exchanges(
     single-grid run and every row is a copy.
 
     A regridded row that reads one of the atmosphere's ``sea_*`` fields
-    (:data:`ATMOSPHERE_SEA_PREFIX`) -- a flux over the sea part of each cell
+    (``ATMOSPHERE_SEA_PREFIX``) -- a flux over the sea part of each cell
     -- is weighted by that part, :data:`ATMOSPHERE_SEA_FRACTION`, so a coastal
     ocean cell takes nothing from an atmosphere cell that has no sea in it
     (:func:`regrid_weighted`). A regridded row from the ocean grid is
     weighted the same way by its source's own sea fraction
-    (:data:`OCEAN_GRID_SEA_FRACTION`): the SST and ice an atmosphere cell
+    (``OCEAN_GRID_SEA_FRACTION``): the SST and ice an atmosphere cell
     receives are those of the sea under it.
 
     Parameters
@@ -1611,7 +1613,7 @@ def read_field(carry: CoupledCarry | dict[str, Carry], path: str) -> Any:
         The coupled carry, or a mapping of component carries.
     path : str
         ``"component.section.field"``, with ``section`` one of
-        :data:`SECTIONS`.
+        ``SECTIONS``.
 
     Returns
     -------
@@ -1656,12 +1658,12 @@ def replace_field(
 ) -> CoupledCarry | dict[str, Carry]:
     """Return a coupled carry with one ``"component.section.field"`` replaced.
 
-    Every example that customises one initial condition -- a bumped initial
-    sea surface temperature, an SST an ``jax.jvp`` differentiates -- had to
-    rebuild three nested containers by hand to change a single field
+    Customising one initial condition -- a bumped initial sea surface
+    temperature, an SST a ``jax.jvp`` differentiates -- means rebuilding three
+    nested containers to change a single field
     (``dict(carry, components=dict(carry.components, ocn=dict(ocean_carry,
-    state=ocean_carry["state"].replace(...))))``), and every example did it
-    slightly differently. This is that rebuild, written once against the
+    state=ocean_carry["state"].replace(...))))``), which each caller would
+    write slightly differently. This is that rebuild, written once against the
     ``"component.section.field"`` vocabulary :class:`Exchange` already uses,
     so a notebook or a driver names the field it wants changed rather than the
     nested containers around it.
@@ -1675,7 +1677,7 @@ def replace_field(
     mapping an exchanger is handed, and the return is the same kind: a
     ``CoupledCarry`` is rebuilt with ``dataclasses.replace(carry,
     components=...)`` so that a field added to it later (it has
-    ``components``, ``step`` and ``time`` today) is carried through unchanged, and a
+    ``components``, ``step`` and ``time``) is carried through unchanged, and a
     bare mapping is returned as a new mapping.
 
     Parameters
@@ -1685,7 +1687,7 @@ def replace_field(
         replacement from.
     path : str
         ``"component.section.field"``, with ``section`` one of
-        :data:`SECTIONS`.
+        ``SECTIONS``.
     value : Any
         The new value for the field. Its pytree structure, and every leaf's
         shape and dtype, must match the field it replaces exactly --

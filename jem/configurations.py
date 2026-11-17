@@ -180,7 +180,7 @@ def _compose(name: str, overrides: list[str]):
     ``version_base`` given here (``"1.3"``) and ``jem.main``'s (``None``,
     which ``hydra.main`` resolves to the installed version -- also 1.3.6
     here) are IDENTICAL on this installed Hydra, so nothing about how an
-    override composes differs between the two calls today; where a base
+    override composes differs between the two calls; where a base
     below 1.2 would matter is deprecated *defaults-list* spellings
     (``optional: true``, ``_name_``, a bare ``hydra/`` default with no
     ``override`` keyword) that no jem or jax-gcm config uses.
@@ -457,7 +457,7 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     changes the physics of any model already built with the old value).
 
     The process's JAX precision follows the configuration, and persists
-    ------------------------------------------------------------------
+    -------------------------------------------------------------------
     ``jax_enable_x64`` is process-global too, and :func:`jem.runners.build_coupler`
     sets it from the configuration's ``jax_enable_x64`` key *before* it builds
     any component: ``load("veros-earth")`` (whose ``ocean=veros`` selects

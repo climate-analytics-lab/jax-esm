@@ -39,9 +39,9 @@ def evaluate_periodic(
 ) -> ArrayLike:
     """Interpolate sparse data to equally spaced positions on a periodic cycle over [0, 1).
 
-    Kept even while unused (maintainer request): it is the coordax-aware
-    interpolator for irregularly spaced records, and re-deriving it is more
-    error-prone than keeping it tested here. ``coordax`` is imported lazily so
+    Nothing in JEM calls this: it is the coordax-aware interpolator for
+    irregularly spaced records, kept (and tested) here because re-deriving it
+    is more error-prone than maintaining it. ``coordax`` is imported lazily so
     the core package does not depend on it; install it to use this function.
       
     Args:
@@ -61,7 +61,7 @@ def evaluate_periodic(
 
     reordered_data = data.order_as(name_of_interpolated_axis, ...)
     interpolated_axis = reordered_data.axes[name_of_interpolated_axis]
-    if not hasattr(interpolated_axis, "ticks"):  # Changed 'axis' to 'interpolated_axis'
+    if not hasattr(interpolated_axis, "ticks"):
         raise ValueError("The input data's interpolation axis must be `LabeledAxis`.")
 
     # LabeledAxis stores its ticks as a numpy array; convert once so the tick

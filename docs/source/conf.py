@@ -151,9 +151,12 @@ nitpick_ignore_regex = [
     # it: the typing aliases documented at jem.base.component.{Carry,
     # Diagnostics,Exchanger} and pathlib.Path.
     ('py:class', r'Carry|Diagnostics|Exchanger|Path'),
+    # `ESMFRegridders` subclasses `Mapping[str, ESMFRegridder]`; autodoc prints
+    # the base unqualified.
+    ('py:class', r'ESMFRegridder'),
     # Words napoleon turns into a type from a numpy-style "name : type" line
     # that is prose rather than a Python type ("optional", "path-like", ...).
-    ('py:class', r'optional|callables?|iterables?|mappings?|sequences?|pairs?|path-like|pytree|Boolean|default (True|False)'),
+    ('py:class', r'optional|callables?|iterables?|mappings?|sequences?|pairs?|path-like|pytree|Boolean|default .+'),
 ]
 
 

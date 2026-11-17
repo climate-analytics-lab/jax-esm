@@ -130,14 +130,13 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Depth of the two shallowest default layers (50 m + 70 m): the least a wet
-#: column may have; see the module docstring.
+#: Depth of the two shallowest default layers (50 m + 70 m), which is the
+#: least a wet column may have; see the module docstring.
 MINIMUM_DEPTH = 120.0
 
 #: The sum of the default layer thicknesses in
-#: :data:`jem.components.veros.setups._layers.LAYER_THICKNESSES` (restated
-#: here because importing that package pulls in Veros, which switches
-#: ``jax_enable_x64`` on for the process); a test pins the two together.
+#: ``jem.components.veros.setups._layers.LAYER_THICKNESSES``, the deepest a
+#: column can be; a test pins the two together.
 MAXIMUM_DEPTH = 5200.0
 
 #: Where ETOPO 2022 comes from, what it is called, and the terms it states;

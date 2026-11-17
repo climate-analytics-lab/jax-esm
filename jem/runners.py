@@ -632,7 +632,7 @@ def declare_exchanged_forcing(
     has no writer -- and this function raises. When *any* active exchanger is
     hand-written (not an ``Exchange``), nothing can be concluded -- that
     opacity is exactly why the explicit declaration exists in the first
-    place -- so this function stays silent there, same as today, and the
+    place -- so this function stays silent there, and the
     hand-written field is the user's to get right.
 
     This is an error rather than a warning, unlike the sibling checks: a
@@ -675,8 +675,8 @@ def declare_exchanged_forcing(
     # that is registered but that `workflow` never names (the uncoupled
     # comparison run the module docstring above describes) is exactly as
     # inert as one that was never built at all. `workflow=None` -- a caller
-    # with no coupler to resolve one from -- keeps the old behaviour of
-    # reading every registered exchanger.
+    # with no coupler to resolve one from -- reads every registered
+    # exchanger.
     active = (
         exchangers if workflow is None
         else {name: exchanger for name, exchanger in exchangers.items()
@@ -884,8 +884,8 @@ def _check_precision_unchanged(expected: bool) -> None:
     Something that was imported or constructed during the build flipped
     ``jax_enable_x64`` (the Veros ocean does, the first time its operators are
     imported). The components built *before* the flip -- always the
-    atmosphere -- have arrays of the old precision and would be stepped in the
-    new one, so the model is refused here, loudly, rather than run as a silent
+    atmosphere -- have arrays of the precision they were built in and would be stepped in
+    the other one, so the model is refused here, loudly, rather than run as a silent
     mix. This is an error and not a warning because nothing downstream can
     repair it: the arrays are already allocated.
     """

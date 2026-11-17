@@ -446,7 +446,7 @@ class SlabModelBase(ABC):
         before calling this, so every field is ``(time, *grid.dims)``.
 
         Variables a component was forced with are named with the
-        ``forcing_`` prefix :func:`forcing_variable` applies; its own state and
+        ``forcing_`` prefix :func:`~jem.base.component.forcing_variable` applies; its own state and
         derived diagnostics keep their plain names. That is what lets every
         component of a coupled run be merged into one dataset without two of
         them claiming the same variable. Every variable also carries the
@@ -466,7 +466,7 @@ class SlabModelBase(ABC):
         ``coordinates`` attribute that points at them. They are not called
         ``lon``/``lat`` because the atmosphere's 1-D axes already are, and a
         merge would keep those and drop the 2-D positions
-        (:mod:`jem.components.coordinates`).
+        (``jem.components.coordinates``).
 
         Parameters
         ----------

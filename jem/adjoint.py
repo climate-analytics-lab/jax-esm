@@ -1,6 +1,6 @@
 """Gradients of a coupled run too large to differentiate in one piece.
 
-``jax.grad`` of :meth:`Coupler.generate_trajectory_function` (with
+``jax.grad`` of :meth:`jem.base.coupler.Coupler.generate_trajectory_function` (with
 ``remat=True``) is the right tool while the coupled carry is small: the scan
 stores one carry per coupling step on the device and recomputes the rest.
 At high resolution that one carry per step is what does not fit. A T255

@@ -24,7 +24,7 @@ from jem.utils.esmf_regrid import ESMFRegridder
 
 
 class ESMFRegridders(Mapping[str, ESMFRegridder]):
-    """An immutable, named collection of :class:`ESMFRegridder` objects.
+    """An immutable, named collection of :class:`~jem.utils.esmf_regrid.ESMFRegridder` objects.
 
     Parameters
     ----------

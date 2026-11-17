@@ -64,7 +64,7 @@ What the file holds, and why
   the layers are up to 690 m thick, so each layer takes the mean of the
   profile (linear between WOA depths) over the layer's full thickness, not its
   value at the centre; at a thermocline the two differ by degrees.
-* **The same regridding as the bathymetry** (:mod:`jem.tools._rotated_grid`):
+* **The same regridding as the bathymetry** (``jem.tools._rotated_grid``):
   each WOA point belongs to the target cell whose centre is nearest on the
   sphere, and a cell's value at a WOA depth is the ``cos(latitude)``-weighted
   mean over its source points that have ocean at that depth.
@@ -74,7 +74,7 @@ What the file holds, and why
   has no source value (WOA's own sea floor is shallower there, or the cell
   holds only sea WOA does not resolve) is filled, first horizontally from the
   mean of its already-filled wet neighbours at the same layer
-  (:func:`jem.tools._rotated_grid.fill_from_wet_neighbours`), then, if no
+  (``jem.tools._rotated_grid.fill_from_wet_neighbours``), then, if no
   wet neighbour has one, from the layer above (or, at the surface, from the
   nearest filled wet cell on the sphere); the counts are recorded in the
   file (``cells_*``). Because the wet pattern depends on the bathymetry, the
@@ -137,14 +137,16 @@ from jem.tools.ocean_bathymetry import MINIMUM_DEPTH, read_depth
 
 logger = logging.getLogger(__name__)
 
-#: The fewest wet layers of a wet column: the layers of ``MINIMUM_DEPTH``
+#: The fewest wet layers a wet column has, which are the layers of
+#: ``MINIMUM_DEPTH``
 #: (:func:`jem.components.veros.setups.earth.kbot_from_depth`'s own minimum).
 MINIMUM_WET_LAYERS = 2
 
 # Conversion constants (TEOS-10; IOC, SCOR and IAPSO, 2010, "The international
 # thermodynamic equation of seawater - 2010: calculation and use of
 # thermodynamic properties", UNESCO).
-#: Reference-Composition Salinity per unit practical salinity: ``SR = SP * 35.16504 / 35``.
+#: Reference-Composition Salinity per unit practical salinity, so that
+#: ``SR = SP * 35.16504 / 35``.
 REFERENCE_SALINITY_FACTOR = 35.16504 / 35.0
 #: The specific heat that relates Conservative Temperature to potential enthalpy, J kg-1 K-1.
 CP0 = 3991.86795711963

@@ -3,8 +3,8 @@
 A :class:`~jem.base.coupler.Coupler` produces *functions*, not runs. Turning
 one into a run means deciding how far to integrate, how often to stop to write
 output and a checkpoint, and what to do when the state has gone bad -- and
-every example, notebook and experiment driver in this repository used to
-decide it again, slightly differently. :func:`run_chunked` is that loop,
+every example, notebook and experiment driver would otherwise decide it again,
+slightly differently. :func:`run_chunked` is that loop,
 written once:
 
     integrate a chunk -> label it -> write its (reduced) output ->
@@ -248,8 +248,8 @@ DEFAULT_CHECKPOINT_PATH = "checkpoint"
 #: name the default exchange table wires the atmosphere under.
 ATMOSPHERE_NAME = "atm"
 
-#: What a health check returns and is given: ``(datasets, chunk_index,
-#: elapsed_days) -> (ok, report)``, where ``datasets`` is the chunk's
+#: The signature of a health check, ``(datasets, chunk_index, elapsed_days) ->
+#: (ok, report)``, where ``datasets`` is the chunk's
 #: **unreduced** output -- every record it integrated, whatever
 #: ``output_averages`` and ``subsample`` do to the files. ``ok`` False stops
 #: the run when ``bail_on_unhealthy``; ``report`` is kept in

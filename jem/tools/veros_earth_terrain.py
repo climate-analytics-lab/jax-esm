@@ -51,7 +51,7 @@ import xarray as xr
 
 logger = logging.getLogger(__name__)
 
-#: The ocean's land-fraction threshold: a column is dry where the mask file's
+#: The ocean's land-fraction threshold. A column is dry where the mask file's
 #: land fraction is at least this. It is ``earth_setup``'s default
 #: ``landsea_mask_threshold``, and the value ``veros-earth`` uses.
 LANDSEA_MASK_THRESHOLD = 0.5

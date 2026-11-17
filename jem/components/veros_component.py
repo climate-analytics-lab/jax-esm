@@ -418,16 +418,16 @@ class VerosComponent:
           lines are not meridians and parallels (a rotated or displaced pole).
           The dataset is written on index dimensions ``("x", "y")`` with 2-D
           ``longitude``/``latitude`` coordinates (see
-          :mod:`jem.components.coordinates`) and Veros' own axes are kept as
+          ``jem.components.coordinates``) and Veros' own axes are kept as
           ``native_lon``/``native_lat``.
 
         Declaring the 1-D and the 2-D form together is refused.
     clamp_at_freezing : bool, optional
         Whether the top cell is held at the seawater freezing point
-        (:attr:`jem.constants.seawater_freezing_point_K`) once per coupling
+        (``jem.constants.seawater_freezing_point_K``) once per coupling
         step, with the heat that took published as
         ``derived.ice_frazil_melt_energy`` for a sea ice to turn into ice --
-        what :class:`~jem.components.slab.SlabOceanModel` does under
+        what :class:`~jem.components.slab.slab_ocean_model.slab_ocean_model.SlabOceanModel` does under
         ``params.clamp_at_freezing`` and what a Winton sea ice needs
         (``docs/source/design/winton_seaice.md``). Static, like the slab
         ocean's: it selects a code path at trace time. Default ``False``,
@@ -449,13 +449,17 @@ class VerosComponent:
         ``"ocn"``.
     clamp_at_freezing : bool
         The constructor argument of that name.
-    mask_T, mask_U : jax.Array
-        Land-sea masks on the T and u grids, halo cells removed.
+    mask_T : jax.Array
+        Land-sea mask on the T grid, halo cells removed.
+    mask_U : jax.Array
+        Land-sea mask on the u grid, halo cells removed.
     mask_surface_Z : jax.Array
         Surface land-sea mask on the zeta (corner) points -- where the
         barotropic streamfunction lives -- halo cells removed.
-    longitude, latitude : jax.Array
-        T-grid cell centres, halo cells removed.
+    longitude : jax.Array
+        T-grid cell centre longitudes, halo cells removed.
+    latitude : jax.Array
+        T-grid cell centre latitudes, halo cells removed.
     dlatitude : jax.Array
         T-grid cell heights, halo cells removed: Veros' ``dyt``, a true
         meridional **distance in metres** whichever coordinates are in use
@@ -1159,7 +1163,7 @@ class VerosComponent:
             diagnostics["ssh"] = (
                 variables.psi[interior, interior, tau] / state.settings.grav
             )
-        # Veros' own driver no longer calls `isoneutral_diag_streamfunction`
+        # Veros' own driver does not call `isoneutral_diag_streamfunction`
         # (its diagnostics block is commented out to keep the step jittable),
         # so `B1_gm` is never filled in by the model; the kernel is evaluated
         # here on the evolved state instead, from the slopes and `K_gm` of the
@@ -1528,7 +1532,7 @@ class VerosComponent:
         # configuration, not state, diagnostics or forcing -- so they carry no
         # role.
         var_attrs = {
-            "temp": {"long_name": "ocean potential temperature", "units": "deg C",
+            "temp": {"long_name": "ocean conservative temperature", "units": "deg C",
                      **role_attrs("state")},
             "salt": {"long_name": "ocean salinity", "units": "g/kg",
                      **role_attrs("state")},

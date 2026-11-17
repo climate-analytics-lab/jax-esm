@@ -47,7 +47,7 @@ def to_degrees(radians) -> np.ndarray:
     (``jcm.utils.data_to_xarray``), so a slab dataset must too: a last-bit
     difference in a coordinate value is enough for ``xr.merge`` to treat the
     two grids as different axes and produce a 119-point longitude union out of
-    two 96-point grids, which is exactly what happened before this existed.
+    two 96-point grids.
     """
     return np.asarray(radians, dtype=np.float64) * 180.0 / np.pi
 
