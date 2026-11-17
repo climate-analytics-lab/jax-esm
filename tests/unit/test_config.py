@@ -585,17 +585,18 @@ def test_veros_configurations_declare_the_atmosphere_field_their_exchanger_write
 
 
 @pytest.mark.slow
-def test_veros_earth_has_an_observed_land_climatology_and_double_drake_does_not(_veros_x64):
-    """``veros-earth`` runs on Earth's land boundary conditions; the idealised planet does not.
+def test_veros_earth_has_an_observed_land_climatology_and_double_drake_an_idealised_one(_veros_x64):
+    """``veros-earth`` runs on Earth's land boundary conditions; the idealised planet on its own.
 
     ``ForcingData.zeros`` -- what an atmosphere with no forcing file gets --
-    has a bare-land albedo of 0, so an Earth configuration left on it has
-    black continents. ``veros-earth`` therefore composes jax-gcm's packaged
+    has a bare-land albedo of 0, so a configuration left on it has black
+    continents. ``veros-earth`` therefore composes jax-gcm's packaged
     climatology, and its sea surface temperature is still the ocean's:
     ``sea_surface_temperature`` is one of the time-varying fields the
     coupling overwrites. ``veros-double-drake``'s continents are idealised,
-    so Earth's climatology would sit on the wrong geography, and it stays on
-    the default forcing (see its YAML).
+    so Earth's climatology would sit on the wrong geography; it composes the
+    packaged uniform land of ``jem.tools.idealised_terrain.idealised_forcing``
+    instead, replayed every year, and declares the same exchanged field.
     """
     import jem.runners as runners
 
@@ -607,9 +608,13 @@ def test_veros_earth_has_an_observed_land_climatology_and_double_drake_does_not(
     assert atm.exchanged_forcing == ("sea_surface_temperature",)
 
     drake = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
+    atm = drake.components["atm"]
     forcing = drake.initialize().components["atm"]["forcing"]
-    assert float(forcing.alb0.max()) == 0.0
-    assert drake.components["atm"].time_varying_forcing == ()
+    # A lit land (not ForcingData.zeros' black one), uniform, with no ice sheet.
+    assert float(forcing.alb0.min()) == pytest.approx(0.2)
+    assert float(forcing.alb0.max()) == pytest.approx(0.2)
+    assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
+    assert atm.exchanged_forcing == ("sea_surface_temperature",)
 
 
 @pytest.mark.slow

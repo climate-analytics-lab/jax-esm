@@ -30,10 +30,16 @@ GCM, each runnable as one command with no generated inputs and no
     index-to-index with no regridding. The continents are the packaged
     ``terrain_double_drake_T31.nc`` land-sea mask, which must have the
     atmosphere grid's shape. The atmosphere's land boundary conditions are
-    jax-gcm's defaults: bare-land albedo 0, no snow cover, no soil water and a
-    flat 288.15 K skin-temperature climatology, so SPEEDY's slab land absorbs
-    all the sunlight it receives. Earth's climatology is not used, because it
-    describes Earth's continents, not these.
+    one spatially uniform, time-constant land from the packaged
+    ``forcing_idealised_T31.nc`` (bare-land albedo 0.2, no snow cover,
+    soil-water availability 0.65 and a 290 K skin-temperature climatology: the
+    rounded means of Earth's ice-free land), written by
+    :func:`jem.tools.idealised_terrain.idealised_forcing`. Earth's climatology
+    is not used, because it describes Earth's continents, not these; left at
+    jax-gcm's defaults the land albedo would be 0 and the land would absorb all
+    the sunlight it receives. Another geography on the same grid reuses the
+    file; another resolution needs ``idealised_terrain`` and
+    ``idealised_forcing`` calls for its own grid.
 ``python -m jem.main +configuration=veros-earth``
     A rotated-pole global ocean read from a SCRIP grid, exchanged with the
     atmosphere through ESMF regridding weights. The atmosphere runs on

@@ -705,11 +705,10 @@ def test_forcing_align_auto_raises_for_an_undeclared_user_file():
     `jem/components/jcm/contract.py`'s note on jax-gcm#884). This test is the
     other half: a *user's* file -- anything the manifest does not
     recognise -- must raise jax-gcm's own named error rather than silently
-    guessing, so a user who copies `+configuration=veros-double-drake
-    forcing@atmosphere.forcing=from_file` (as its own comment documents) and
-    points `atmosphere.forcing.file` at their own archive is told to declare
-    `atmosphere.forcing.align` explicitly, not handed a silently mis-phased
-    forcing.
+    guessing, so a user who points `atmosphere.forcing.file` of
+    `+configuration=veros-double-drake` (which names its own file's `align`
+    explicitly) at their own archive and leaves `atmosphere.forcing.align=auto`
+    is told to declare it, not handed a silently mis-phased forcing.
 
     The file used here does not need to exist or even be a real netCDF: the
     manifest lookup (`jcm.data.input_resolution.manifest_alignment_for_paths`)
@@ -718,7 +717,7 @@ def test_forcing_align_auto_raises_for_an_undeclared_user_file():
     """
     cfg = composed([
         "+configuration=veros-double-drake",
-        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.align=auto",
         "atmosphere.forcing.file=${jem_data:terrain_double_drake_T31.nc}",
     ])
     with pytest.raises(ValueError, match="forcing.align=auto cannot resolve"):
@@ -736,7 +735,7 @@ def test_forcing_align_auto_resolves_jcms_own_packaged_climatology():
     """
     cfg = composed([
         "+configuration=veros-double-drake",
-        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.align=auto",
         "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
     ])
     atm = runners.build_atmosphere(cfg)
