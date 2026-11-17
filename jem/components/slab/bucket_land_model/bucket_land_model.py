@@ -36,10 +36,6 @@ from jem.utils.cycles import evaluate_cyclic_linear
 
 logger = logging.getLogger(__name__)
 
-#: Density of liquid water (kg m-3): converts a water flux (kg m-2 s-1) into a
-#: depth of water per second (m s-1).
-WATER_DENSITY = 1000.0
-
 #: The variable a soil-water-availability climatology is read from -- the
 #: name jax-gcm's packaged boundary conditions give SPEEDY's ``soilw_am``.
 SOIL_WATER_AVAILABILITY_VARIABLE = "soilw_am"
@@ -320,6 +316,10 @@ class BucketLandModel(SlabModelBase):
         water = carry["state"].soil_water_content
         land = self.grid.land_mask
         dt = time.dt
+        # Liquid-water density (kg m-3) converts a water flux (kg m-2 s-1) into a depth
+        # of water per second (m s-1). It is the atmosphere's own constant, read by
+        # attribute when the step is traced so a set_constants(...) override reaches it.
+        water_density = jcm_constants.rhow
 
         depth = params.soil_bucket_depth
         wilting = params.soil_water_wilting_point
@@ -327,7 +327,7 @@ class BucketLandModel(SlabModelBase):
         tau = params.drainage_timescale
 
         # 1. Precipitation, into the surface layer.
-        surface = water[..., 0] + forcing.precipitation / WATER_DENSITY * dt / depth[0]
+        surface = water[..., 0] + forcing.precipitation / water_density * dt / depth[0]
         deep = water[..., 1]
 
         # 2. Evaporation, shared by the water each layer can give; dew all to
@@ -336,14 +336,14 @@ class BucketLandModel(SlabModelBase):
         total = jnp.sum(available, axis=-1)
         surface_share = jnp.where(
             total > 0.0, available[..., 0] / jnp.where(total > 0.0, total, 1.0), 1.0)
-        evaporated = forcing.evaporation / WATER_DENSITY * dt
+        evaporated = forcing.evaporation / water_density * dt
         surface_share = jnp.where(evaporated < 0.0, 1.0, surface_share)
         surface_asked = surface - surface_share * evaporated / depth[0]
         deep_asked = deep - (1.0 - surface_share) * evaporated / depth[1]
         surface = jnp.maximum(surface_asked, wilting[0])
         deep = jnp.maximum(deep_asked, wilting[1])
         unmet = ((surface - surface_asked) * depth[0]
-                 + (deep - deep_asked) * depth[1]) * WATER_DENSITY / dt
+                 + (deep - deep_asked) * depth[1]) * water_density / dt
 
         # 3. Drainage of the water above the wilting point, implicit in it.
         surface_excess = surface - wilting[0]
@@ -359,11 +359,11 @@ class BucketLandModel(SlabModelBase):
         surface_capped = jnp.minimum(surface, capacity[0])
         deep_capped = jnp.minimum(deep, capacity[1])
         overflow = ((surface - surface_capped) * depth[0]
-                    + (deep - deep_capped) * depth[1]) * WATER_DENSITY / dt
+                    + (deep - deep_capped) * depth[1]) * water_density / dt
 
         new_water = jnp.where(
             land[..., None], jnp.stack([surface_capped, deep_capped], axis=-1), 0.0)
-        deep_drainage = jnp.where(land, drained * WATER_DENSITY / dt, 0.0)
+        deep_drainage = jnp.where(land, drained * water_density / dt, 0.0)
         overflow = jnp.where(land, overflow, 0.0)
         runoff = deep_drainage + overflow
         land_area = (self.grid.cell_solid_angle * jcm_constants.rearth ** 2

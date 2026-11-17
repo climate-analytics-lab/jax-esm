@@ -2,7 +2,9 @@
 
 Both codes are driven with identical inputs; thsice's surface flux enters as
 (F at Ts=0, F at current Ts, dF/dTs) and we use a linear flux so a single
-linearised solve (n_iter=1) is the same problem in both.
+linearised solve (n_iter=1) is the same problem in both. The flux the ice
+reports to the atmosphere (thsice's ``flxAtm``, the linearised flux carried to the new surface
+temperature) is compared too, since the energy budget is charged with it.
 """
 
 import sys
@@ -37,9 +39,10 @@ def thsice_fbot(toce, fzmloc, tfrz=W.T_FREEZE):
 def compare_temperature(h, hs, T1, T2, Ts, F0, dF, sw, dt):
     """Linear flux F(T) = F0 + dF (T - Ts). Returns (jax, thsice) dicts."""
     fj = lambda T: (F0 + dF * (T - Ts), dF * jnp.ones_like(T))
-    T1n, T2n, Tsn, M_s, F_cb, sw_ocn = W.winton_temperature_step(
+    T1n, T2n, Tsn, M_s, F_cb, sw_ocn, F_atm = W.winton_temperature_step(
         jnp.array(h), jnp.array(hs), jnp.array(T1), jnp.array(T2), jnp.array(Ts), fj, jnp.array(sw), dt, n_iter=1)
-    j = dict(tIc1=float(T1n), tIc2=float(T2n), tSrf=float(Tsn), sHeat=float(M_s), flxCnB=float(F_cb), flxSW=float(sw_ocn))
+    j = dict(tIc1=float(T1n), tIc2=float(T2n), tSrf=float(Tsn), sHeat=float(M_s), flxCnB=float(F_cb), flxSW=float(sw_ocn),
+             flxAtm=float(F_atm) + sw)
     o = O.solve4temp(icmask=1.0, hice=h, hsnow=hs, tfrz=W.T_FREEZE, flxexsw0=F0 + dF * (0.0 - Ts), flxexsw1=F0, flxexsw2=dF,
                      flxsw=sw, tsrf=Ts, qic1=O.qic1_from_tic1(T1), qic2=O.qic2_from_tic2(T2), dt=dt, **PARAMS)
     o = {k: o[k] for k in j}
@@ -70,6 +73,8 @@ TEMPERATURE_CASES = {
 }
 MASS_CASES = {
     # name: (h, hs, T1, T2, M_s, F_cb, toce, fzmloc, snowp, dt)
+    # the melting clamp overshot, so the surface conducts more than the atmosphere gave: thsice's esurp
+    "surface deficit (negative sHeat)": (1.5, 0.0, -1.0, -1.9, -30.0, 5.0, -1.8, 0.0, 0.0, 21600.0),
     "basal growth": (1.5, 0.0, -8.0, -4.0, 0.0, -45.0, -1.8, 0.0, 0.0, 21600.0),
     "surface melt, bare ice": (1.5, 0.0, -1.0, -1.9, 150.0, 5.0, -1.8, 0.0, 0.0, 21600.0),
     "surface melt through snow into ice": (1.0, 0.05, -1.0, -1.9, 400.0, 5.0, -1.8, 0.0, 0.0, 21600.0),

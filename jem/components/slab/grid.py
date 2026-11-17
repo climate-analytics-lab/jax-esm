@@ -293,9 +293,10 @@ class SlabGrid:
         reader: only SCRIP files with ``grid_rank == 2`` are supported.
         ``grid_dims = [n_lon, n_lat]`` already matches SlabGrid's convention;
         per-cell fields are stored flat in Fortran order (longitude varies
-        fastest) within that shape. Only ``grid_center_lat``/``grid_center_lon``
-        and ``grid_imask`` are read; ``grid_corner_*`` and ``grid_area`` exist
-        for computing regridding weights, which the slab models do not do.
+        fastest) within that shape. Only ``grid_center_lat``/``grid_center_lon``,
+        ``grid_imask`` and, when present, ``grid_area`` (kept as the cell
+        solid angle) are read; ``grid_corner_*`` exist for computing regridding
+        weights, which the slab models do not do.
 
         Parameters
         ----------

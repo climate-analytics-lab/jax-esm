@@ -340,3 +340,69 @@ def test_grad_wrt_initial_temperature_reaches_the_trajectory(half_land_grid):
 
     assert bool(jnp.isfinite(gradient))
     assert abs(float(gradient)) > 0.0
+
+
+def _air_temperature_after_two_steps(model, grid, zonal, meridional):
+    """Mean air temperature after two steps over a 300 K surface, for an initial wind."""
+    params = model.params.replace(initial_zonal_wind=zonal, initial_meridional_wind=meridional)
+    carry = model.initialize(params)
+    carry["forcing"] = carry["forcing"].replace(
+        land_surface_temperature=jnp.full(grid.shape, 300.0),
+        sea_surface_temperature=jnp.full(grid.shape, 300.0),
+    )
+    for step in range(2):
+        carry, _ = model.step(carry, coupling_time(step))
+    return jnp.mean(carry["state"].mean_air_temperature)
+
+
+def test_the_gradient_with_respect_to_the_initial_wind_is_finite_at_zero_wind(half_land_grid):
+    """The wind speed is a norm, whose derivative is infinite at zero: AD must not return NaN there."""
+    model = SlabAtmosphereModel(half_land_grid)
+
+    def loss(zonal, meridional):
+        return _air_temperature_after_two_steps(model, half_land_grid, zonal, meridional)
+
+    for point in [(0.0, 0.0), (0.0, 2.0), (2.0, 0.0)]:
+        gradient = jax.grad(loss, argnums=(0, 1))(jnp.float32(point[0]), jnp.float32(point[1]))
+        assert all(bool(jnp.isfinite(g)) for g in gradient), (point, gradient)
+    # Away from zero the speed is the norm and its gradient is the usual one.
+    gradient = jax.grad(loss, argnums=(0, 1))(jnp.float32(3.0), jnp.float32(4.0))
+    step = 1e-2
+    finite_difference = (loss(3.0 + step, 4.0) - loss(3.0 - step, 4.0)) / (2 * step)
+    np.testing.assert_allclose(float(gradient[0]), float(finite_difference), rtol=2e-2)
+
+
+def test_the_wind_speed_is_the_norm_of_the_wind_vector(half_land_grid):
+    """A 3-4 wind has speed 5, so the bulk flux uses 5 m/s."""
+    model = SlabAtmosphereModel(
+        half_land_grid, SlabAtmosphereParameters(initial_zonal_wind=3.0, initial_meridional_wind=-4.0)
+    )
+    carry = model.initialize()
+    carry["forcing"] = carry["forcing"].replace(
+        land_surface_temperature=jnp.full(half_land_grid.shape, 300.0),
+        sea_surface_temperature=jnp.full(half_land_grid.shape, 300.0),
+    )
+    stepped, _ = model.step(carry, coupling_time(0))
+    air = np.asarray(carry["state"].mean_air_temperature, dtype=np.float64)
+    expected = constants.surface_air_density * constants.bulk_drag_coefficient * 5.0 * jcm_constants.cpd * (300.0 - air)
+    np.testing.assert_allclose(
+        np.asarray(stepped["derived"].internal_total_heat_flux, dtype=np.float64), expected, rtol=1e-5
+    )
+
+
+def test_the_surfaces_start_at_the_air_temperature_not_at_zero_kelvin(half_land_grid):
+    """Nothing supplies the surface temperatures before the first coupling step.
+
+    A 0 K surface would make the first step cool the column hard; starting each
+    surface at the column's own temperature makes the first step exchange no heat.
+    """
+    model = SlabAtmosphereModel(half_land_grid)
+    carry = model.initialize()
+    air = np.asarray(carry["state"].mean_air_temperature)
+    np.testing.assert_array_equal(np.asarray(carry["forcing"].land_surface_temperature), air)
+    np.testing.assert_array_equal(np.asarray(carry["forcing"].sea_surface_temperature), air)
+    stepped, _ = model.step(carry, coupling_time(0))
+    np.testing.assert_allclose(np.asarray(stepped["derived"].internal_total_heat_flux), 0.0, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(stepped["state"].mean_air_temperature), air, atol=1e-6
+    )

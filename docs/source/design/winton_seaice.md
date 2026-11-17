@@ -44,8 +44,8 @@ thermodynamic sea ice: all of a cell's precipitation is snow where the lowest
 level's potential temperature brought to the surface pressure is below
 273.15 K (`pkg/aim_v23/phy_snow_precip.F`). AIM also corrects its
 condensation heating for the latent heat of fusion of that snow; SPEEDY in
-jax-gcm does not, so the ice charges that heat to the ocean when it stores
-the snow (`frozen_precipitation_latent_heat_release_mode=True`, thsice's
+jax-gcm does not, so the ice credits the ocean with that heat (`+f S L`, heat to the ocean)
+when it stores the snow (`frozen_precipitation_latent_heat_release_mode=True`, thsice's
 convention). A package that splits its own precipitation by phase is taken at
 its word.
 
@@ -61,17 +61,20 @@ its word.
 - `ocean_heat_flux_up` → `ocn.forcing.total_heat_flux` (W m⁻², upward): the
   atmosphere's downward flux over the sea part, minus what the ice absorbed,
   plus what it passes down (transmitted shortwave, melt surplus), minus the
-  basal heat it draws. The ice and the ocean together receive exactly the flux
-  the atmosphere lost. Where the atmosphere's flux over the ice part differs
-  from the ice's own (SPEEDY evaluates it at the blended temperature and with
-  its own ice albedo), the difference goes to the ocean.
+  basal heat it draws. The ice and the ocean together receive the flux the
+  atmosphere lost, to round-off (see "Energy budget" below). The ice is
+  charged the flux its implicit solve conducted, the linearised flux thsice
+  reports as `flxAtm`. The ice never hands that flux to the atmosphere: SPEEDY
+  evaluates its own sea flux at the blended temperature and with its own ice
+  albedo, and the difference between that flux and the ice's goes to the
+  ocean.
 - `ocean_freshwater_flux_up` (kg m⁻² s⁻¹, upward): the atmosphere's E − P over
   the sea part, plus the snow held on ice until it melts (`snowfall_on_ice`),
   plus the water ice growth takes. The ice has no sublimation term, so the
   evaporation over the ice-covered part is charged to the ocean. A slab ocean
   has no salinity, so this is a diagnostic.
 - Budget diagnostics: ice and snow volume, surface melt, basal growth, the
-  thermodynamic and transport enthalpy tendencies. They are exact for the
+  thermodynamic and transport enthalpy tendencies. They describe the
   thermodynamic state, so the ice–ocean–atmosphere budget can be closed.
 - `sea_fraction` and `ice_area_fraction` (the ice's share of the whole cell),
   which weight regridded rows back onto the atmosphere: the ice fraction by
@@ -80,6 +83,39 @@ its word.
   That holds only if both are mapped by the same operator, so the skin
   temperature, a state, is mapped conservatively like the fraction rather
   than bilinearly like the SST.
+
+## Energy budget
+
+The per-cell residual of one coupling step,
+`ice_energy_tendency − ocean_heat_flux_up + ocean_frazil_heating + total_heat_flux`,
+is zero to round-off. It was measured (float64, per-cell random states on a
+coastal global grid, eight coupling steps of a nonlinear, time-varying forcing
+that takes cells across the melting clamp in both directions) at 4e-12,
+8e-12 and 7e-12 W m⁻² for `(n_flux_iterations, n_substeps)` of (1, 1), (1, 4)
+and (3, 4); `test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged`
+asserts it below 1e-6. In float32, the dtype of a JEM run, the same
+experiment gives at most 4e-3 W m⁻² (2e-3, 4e-3 and 3e-3), float32 round-off
+of the enthalpy of columns a few metres thick.
+
+Two choices make that hold for a non-converged solve:
+
+- The ice-atmosphere flux is the one the implicit solve conducted: the flux and
+  its slope at the surface temperature the last iteration started from, carried
+  to the new temperature along that slope (thsice's
+  `flxAtm += flxTexSW + dFlxdT*dTsrf`). A melting surface sits at 0 °C and takes
+  the flux evaluated there. The nonlinear flux re-evaluated at the new surface
+  temperature is not what the ice absorbed; the two differ by the
+  linearisation error, tens of W m⁻² after one iteration of a long substep,
+  and charging the ocean the second leaks exactly that difference.
+- A negative surface residual (the melting clamp overshot, so the surface
+  conducts more than the atmosphere gave) is a deficit the ocean covers, as
+  thsice's `esurp`, rather than being clipped to zero.
+
+`n_flux_iterations` therefore changes the surface temperature and the fluxes
+(the solve is closer to the nonlinear one with more iterations), not whether the
+budget closes. The oracle comparison is unchanged: it drives a linear flux, for
+which one iteration is exact, and it now also compares `flxAtm` and the
+negative-`sHeat` case.
 
 ## Frazil ice and the ocean's clamp
 
@@ -143,9 +179,8 @@ forcing file:
 - The Winton ice holds an energy budget, so the NH cover declines over the
   summer and reaches its minimum in September, as observed. The slab ice
   follows the SST and is nearly gone by June (1.0×10⁶ km²).
-- The ice's budget closes on every cell it integrates: to 0.15 W m⁻² in a
-  float32 run, against fluxes of about 110 W m⁻². The residual is float32
-  round-off.
+- The ice's budget closes on every cell it integrates (see "Energy budget"
+  below).
 - Snow accumulates on the NH ice from February, reaching 2×10³ km³ in April.
 
 **What it does not fix.** Both runs share the atmosphere's biases:

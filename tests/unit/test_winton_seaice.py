@@ -56,6 +56,7 @@ from jem.components.slab.winton_seaice_model.winton_seaice_model import (
     T_MELT,
     column_enthalpy_to_melt,
     ice_surface_flux,
+    qsat_ice,
     q_from_T1,
     q_from_T2,
     winton_mass_step,
@@ -164,13 +165,13 @@ def pinned_flux(T_target, gain=1e4):
 
 def column_step(h, hs, T1, T2, Ts, flux, sw, F_b, snowfall, dt, n_iter=1):
     """One thermodynamic step of a single column: temperature solve, then mass step."""
-    T1, T2, Ts, M_s, F_cb, sw_ocn = winton_temperature_step(
+    T1, T2, Ts, M_s, F_cb, sw_ocn, F_atm = winton_temperature_step(
         h, hs, T1, T2, Ts, flux, sw, dt, n_iter=n_iter
     )
     h, hs, q1, q2, e_ocn, vanished = winton_mass_step(
         h, hs, q_from_T1(T1), q_from_T2(T2), M_s, F_b, F_cb, snowfall, dt
     )
-    return h, hs, T1_from_q(q1), T2_from_q(q2), Ts, sw_ocn, e_ocn, vanished
+    return h, hs, T1_from_q(q1), T2_from_q(q2), Ts, sw_ocn, e_ocn, vanished, F_atm
 
 
 def test_temperature_step_matches_thsice_transcription(x64):
@@ -206,10 +207,9 @@ def integrate_column(n_steps, dt, h, hs, T1, T2, Ts, flux_of_step, sw_of_step, F
     def body(carry, k):
         h, hs, T1, T2, Ts = carry
         flux, sw, F_b = flux_of_step(k), sw_of_step(k), F_b_of_step(k)
-        h, hs, T1, T2, Ts, sw_ocn, e_ocn, vanished = column_step(
+        h, hs, T1, T2, Ts, sw_ocn, e_ocn, vanished, F_atm = column_step(
             h, hs, T1, T2, Ts, flux, sw, F_b, zero, dt, n_iter=n_iter
         )
-        F_atm, _ = flux(Ts)
         return (h, hs, T1, T2, Ts), (sw_ocn, e_ocn, vanished, F_atm)
 
     return jax.lax.scan(body, (h, hs, T1, T2, Ts), jnp.arange(n_steps))
@@ -294,7 +294,7 @@ def test_complete_melt_returns_excess(x64):
     # An eager loop that stops at melt-out: a vanished column has no thickness
     # left to integrate, so it cannot be scanned past that point.
     for _ in range(40):
-        h, hs, T1, T2, Ts, _, e_ocn, vanished = column_step(
+        h, hs, T1, T2, Ts, _, e_ocn, vanished, _ = column_step(
             h, hs, T1, T2, Ts, pinned_flux(10.0, gain=100.0), jnp.array(300.0),
             jnp.array(50.0), jnp.array(0.0), dt,
         )
@@ -858,6 +858,73 @@ def test_energy_budget_closes_in_every_regime(x64):
         coupling_time(0),
     )
     assert float(jnp.max(stepped["state"].ice_fraction * stepped["state"].ice_thickness)) > 0.0
+
+
+def _nonlinear_forcing(grid, step, seed=3):
+    """Return a varying forcing, in space and time, whose surface flux is strongly nonlinear in Ts.
+
+    The air warms from deep winter to above freezing over the steps, with random
+    wind, humidity, shortwave and sea-surface temperature per cell, so the
+    implicit solve is far from linear and far from converged after one
+    iteration, and cells cross the melting clamp in both directions.
+    """
+    rng = np.random.default_rng(seed)
+    shape = grid.shape
+    air = 238.0 + 7.0 * step + rng.uniform(-6.0, 6.0, shape)
+    humidity = 0.7 * np.asarray(qsat_ice(air, jcm_constants.p0 * 1.0)[0]) * rng.uniform(0.5, 1.0, shape)
+    return make_forcing(
+        grid,
+        rsds=rng.uniform(0.0, 380.0, shape) * min(1.0, 0.2 * step),
+        rlds=rng.uniform(150.0, 330.0, shape),
+        air_temperature=air,
+        air_specific_humidity=humidity,
+        wind_speed=rng.uniform(1.0, 14.0, shape),
+        normalized_surface_pressure=rng.uniform(0.97, 1.02, shape),
+        frozen_precipitation=rng.uniform(0.0, 3e-5, shape),
+        sea_surface_temperature=KELVIN + rng.uniform(-1.8, 2.0, shape),
+        ice_frazil_melt_energy=rng.choice([-2e6, -2e5, 0.0, 2e5, 2e6], shape),
+        total_heat_flux=rng.uniform(-150.0, 150.0, shape),
+    )
+
+
+@pytest.mark.parametrize("n_flux_iterations, n_substeps", [(1, 1), (1, 4), (3, 4)])
+def test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged(
+    x64, n_flux_iterations, n_substeps
+):
+    """The ice is charged the flux its solve conducted, whatever the iteration count.
+
+    The linearised flux the implicit solve conducts into the ice and the true
+    flux re-evaluated at the new surface temperature differ by the
+    linearisation error, which is tens of W m-2 after one iteration of one
+    substep. If the ocean is charged the latter the ice+ocean budget leaks by
+    exactly that difference, so the residual below measures it: it is far above
+    1e-6 W m-2 then, and round-off (about 1e-9) when both use the same flux.
+    """
+    grid = global_grid(coasts=True)
+    model = WintonSeaiceModel(grid, WintonSeaiceParameters(
+        n_substeps=n_substeps, n_flux_iterations=n_flux_iterations))
+    ocean = np.asarray(grid.ocean_mask)
+    state = random_ice_state(grid, seed=1)[0]
+    step_fn = jax.jit(model.step)
+    carry = with_state_and_forcing(model, state)
+    worst = 0.0
+    melted = grown = 0
+    for step in range(8):
+        forcing = _nonlinear_forcing(grid, step)
+        carry = {**carry, "forcing": forcing}
+        new_carry, _ = step_fn(carry, coupling_time(step))
+        derived = new_carry["derived"]
+        residual = np.asarray(
+            derived.ice_energy_tendency - derived.ocean_heat_flux_up
+            + derived.ocean_frazil_heating + forcing.total_heat_flux
+        )[ocean]
+        assert np.all(np.isfinite(residual))
+        worst = max(worst, float(np.abs(residual).max()))
+        melted += int(np.sum(np.asarray(derived.surface_melt_flux)[ocean] > 0.0))
+        grown += int(np.sum(np.asarray(derived.basal_growth_flux)[ocean] > 0.0))
+        carry = new_carry
+    assert melted > 0 and grown > 0, "the forcing must exercise both melting and growth"
+    assert worst < 1e-6, f"energy residual {worst:.3e} W/m2 (n_flux_iterations={n_flux_iterations}, n_substeps={n_substeps})"
 
 
 def test_ice_growth_removes_water_from_the_ocean_and_melt_returns_it(grid):
