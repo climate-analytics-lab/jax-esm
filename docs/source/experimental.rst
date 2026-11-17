@@ -60,19 +60,25 @@ it is.
 The ocean is idealised in both, and a short run should be read with that in
 mind:
 
-* **A flat bottom, unless a bathymetry file is given.** The land-sea mask
-  decides which columns are ocean (for ``veros-earth`` the packaged ERA5 land
-  fraction, thresholded at 0.5), and as shipped every ocean column has the
-  same flat 5200 m bottom. ``jem.components.veros.setups.earth.earth_setup``
-  takes ``bathymetry_file=``: a depth file made on the same grid by
-  ``jem.tools.ocean_bathymetry.ocean_bathymetry`` from a regular lat-lon
-  bathymetry (Veros' ``global_1deg`` asset is one), which sets how many of
-  the 15 layers each ocean column holds (at least two) without changing which
-  columns are ocean. No such file is packaged with JEM, because the terms
-  under which that asset's bathymetry may be redistributed are not stated, so
-  ``+configuration=veros-earth`` keeps the flat bottom; point the setup at a
-  file you generated with
-  ``+ocean.bathymetry_file=/path/to/depth.nc``.
+* **Real bathymetry at the grid's resolution in** ``veros-earth``, **a flat
+  bottom in** ``veros-double-drake``. The land-sea mask decides which
+  columns are ocean (for ``veros-earth`` the packaged ERA5 land fraction,
+  thresholded at 0.5), and the packaged
+  ``jem/data/bathymetry_RotatedGaussianLatLon.nc`` decides how deep each of
+  them is: NOAA NCEI's ETOPO 2022 relief (60 arc-second, ice-surface
+  version; NOAA National Centers for Environmental Information, 2022,
+  https://doi.org/10.25921/fd45-gt74, a public-domain product released under
+  CC0) averaged onto the grid's cells, whose size is about 3.75 degrees, so
+  shelves, ridges and straits are not resolved. Each column holds as many of
+  the 15 layers as fit above its depth, at least two (a minimum depth of
+  120 m) and at most all of them (5200 m), without changing which columns
+  are ocean. The file's attributes record its source, terms and counts, and
+  ``jem.tools.ocean_bathymetry`` says how to regenerate it.
+  ``ocean.bathymetry_file=null`` restores the flat 5200 m bottom, and
+  ``ocean.bathymetry_file=/path/to/depth.nc`` takes a file made by
+  ``jem.tools.ocean_bathymetry.ocean_bathymetry`` from another source.
+  ``veros-double-drake`` has the same flat 5200 m bottom in every ocean
+  column.
 * **A uniform initial state.** Salinity is 35 and the sea surface temperature
   is 288.03 K in every ocean column, poles included. Temperature falls
   linearly with depth to zero at 4510 m, the top of the deepest layer, so the

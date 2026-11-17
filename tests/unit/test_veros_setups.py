@@ -502,6 +502,42 @@ def test_earth_kbot_matches_the_depths_and_the_wet_layers_the_depth_implies(_bat
     assert mask_t[..., -1][wet].all()
 
 
+def _composed_veros_earth(overrides=()):
+    from hydra import compose, initialize_config_module
+
+    with initialize_config_module(config_module="jem.config", version_base="1.3"):
+        return compose(config_name="config", overrides=["+configuration=veros-earth", *overrides])
+
+
+def test_veros_earth_configuration_selects_the_packaged_bathymetry_and_the_flat_bottom_is_one_override():
+    """The headline configuration reads the packaged ETOPO depths; ``ocean.bathymetry_file=null`` is the flat bottom."""
+    packaged = str(DATA / "bathymetry_RotatedGaussianLatLon.nc")
+    assert _composed_veros_earth().ocean.bathymetry_file == packaged
+    assert _composed_veros_earth(["ocean.bathymetry_file=null"]).ocean.bathymetry_file is None
+
+
+@pytest.mark.slow
+def test_earth_with_the_packaged_bathymetry_gives_real_depths_on_exactly_the_mask_wet_columns():
+    """The packaged ETOPO file drives ``kbot``: every wet column holds the layers its depth implies."""
+    from jem.components.veros.setups._layers import LAYER_THICKNESSES
+    from jem.tools.ocean_bathymetry import read_depth
+
+    packaged = str(DATA / "bathymetry_RotatedGaussianLatLon.nc")
+    vs = _earth_model_with_bathymetry(packaged).state.variables
+    flat_kbot = np.asarray(_earth_model().state.variables.kbot)[2:-2, 2:-2]
+    kbot = np.asarray(vs.kbot)[2:-2, 2:-2]
+    np.testing.assert_array_equal(kbot > 0, flat_kbot > 0)
+    n_wet = len(LAYER_THICKNESSES) - kbot + 1
+    thickness = np.asarray(LAYER_THICKNESSES)
+    centre = np.cumsum(thickness) - thickness / 2
+    depth = read_depth(packaged, 48, 96)
+    wet = kbot > 0
+    expected = np.maximum((centre[None, None, :] < depth[..., None]).sum(-1), 2)
+    np.testing.assert_array_equal(n_wet[wet], expected[wet])
+    # Real relief: columns of every layer count from the two-layer minimum to the full 15.
+    assert n_wet[wet].min() == 2 and n_wet[wet].max() == len(LAYER_THICKNESSES)
+
+
 @pytest.mark.slow
 def test_earth_initial_state_is_the_flat_profile_on_every_wet_layer_and_zero_below(_bathymetry_file):
     """A variable bottom does not change the profile; it only removes the layers under the floor."""

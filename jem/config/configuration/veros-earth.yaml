@@ -6,14 +6,17 @@
 #   python -m jem.main +configuration=veros-earth coupled_run=short_run
 #
 # WHAT THE OCEAN IS (it is an idealised ocean on Earth's land-sea mask):
-#  - Geometry: the land-sea mask is the only geometry read (the packaged
-#    ERA5 land fraction on the ocean grid, thresholded at 0.5 into a binary
-#    mask). There is no bathymetry: every ocean column has the same flat
-#    5200 m bottom (the sum of the 15 default layer thicknesses).
+#  - Geometry: the land-sea mask decides which columns are ocean (the
+#    packaged ERA5 land fraction on the ocean grid, thresholded at 0.5 into a
+#    binary mask); the packaged ETOPO 2022 bathymetry decides how deep each
+#    of them is, at this grid's resolution (about 3.75 degrees): a column
+#    holds as many of the 15 default layers as fit above its depth, between
+#    2 layers (120 m) and all 15 (5200 m).
 #  - Initial state: horizontally uniform -- SST 288.03 K in every ocean
 #    column, poles included, salinity 35 -- with temperature falling
-#    linearly with depth to zero at 4510 m (so the deepest layer starts at
-#    -1.15 degC). A short run therefore shows the atmosphere's fluxes
+#    linearly with depth to zero at 4510 m (so the deepest layer of a
+#    full-depth column starts at -1.15 degC; every column has the same profile
+#    over the layers it holds). A short run therefore shows the atmosphere's fluxes
 #    spinning up an ocean that has no meridional structure, not an
 #    equilibrated one.
 #  - No sea ice: seaice=none, and a Winton sea ice cannot be composed with
@@ -124,6 +127,15 @@ ocean:
   setup: jem.components.veros.setups.earth.earth_setup
   scrip_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
   landsea_mask_file: ${jem_data:landsea_mask_fraction_RotatedGaussianLatLon.nc}
+  # The ocean's bottom: the depth of each ocean column in metres, from NOAA
+  # NCEI's ETOPO 2022 (CC0 public domain; its citation and terms are in the
+  # file's attributes), averaged onto this grid by
+  # `jem.tools.ocean_bathymetry` and clipped to [120 m, 5200 m] (the model's
+  # two shallowest layers and its bottom). It only sets how deep a column is,
+  # never whether it is ocean: that stays the land-sea mask's. The flat
+  # alternative, every ocean column 5200 m deep, is selected from the command
+  # line with `ocean.bathymetry_file=null`.
+  bathymetry_file: ${jem_data:bathymetry_RotatedGaussianLatLon.nc}
 
 regrid:
   a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_RotatedGaussianLatLon.nc}

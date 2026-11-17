@@ -21,13 +21,14 @@ Veros ocean
     freezing.
 
 **``veros-earth`` is a prototype ocean.**
-    Its setup reads a binary land-sea mask, and unless it is given a
-    ``bathymetry_file`` (see :doc:`experimental`; none is packaged) every ocean
-    column gets the same flat bottom depth rather than real bathymetry. It starts from
-    a horizontally uniform temperature and salinity profile rather than an
-    observed state (``jem.components.veros.setups.earth``). Consequence: the
-    ocean has no bathymetry to steer its flow (by default) and starts from a state no
-    ocean is in, so a short run is mostly adjustment, not a climate. ``jem.components.veros.setups.global_latlon``
+    Its setup reads a binary land-sea mask and a packaged ETOPO 2022 bathymetry
+    averaged onto the grid's cells (see :doc:`experimental`), so the bottom is
+    real but at the grid's resolution of about 3.75 degrees, with a 120 m
+    minimum depth. It starts from a horizontally uniform temperature and
+    salinity profile rather than an observed state
+    (``jem.components.veros.setups.earth``), and has no sea ice. Consequence:
+    the ocean starts from a state no ocean is in, so a short run is mostly
+    adjustment, not a climate. ``jem.components.veros.setups.global_latlon``
     (Levitus bathymetry and initial state) is the setup to use when the
     ocean's realism matters.
 
