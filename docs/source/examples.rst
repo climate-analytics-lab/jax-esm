@@ -12,7 +12,7 @@ configuration through :mod:`jem.configurations`; see :doc:`python_api`'s
 Named configurations
 --------------------
 
-Six configurations ship in ``jem/config/configuration/``;
+Seven configurations ship in ``jem/config/configuration/``;
 ``jem.configurations.available()`` lists them from Python. Each is a command
 with no other setup, each file's comments say why every setting is what it
 is, and appending ``coupled_run=short_run`` turns any of them into a two-day
@@ -34,6 +34,14 @@ directory into ``outputs/<date>/<time>/``.
      - SPEEDY T31L8 (12-minute step) over a free slab ocean with
        SST-diagnosed slab sea ice; no land. The first thing to run.
      - ``python -m jem.main +configuration=aquaplanet-slab``
+   * - ``aquaplanet-slab-echam``
+     - ECHAM physics on its smallest grid (T42, eight sigma layers, 15-minute
+       step, dry Jablonowski-Williamson start) over a free slab ocean with
+       SST-diagnosed slab sea ice; no land, no data download. A two-day run
+       takes about eight minutes on a CPU, nearly all of it compilation. The
+       Winton sea ice and the bucket land need SPEEDY's flux tiles and are
+       refused with ECHAM.
+     - ``python -m jem.main +configuration=aquaplanet-slab-echam``
    * - ``aquaplanet-slab-mixed-grid``
      - The same, with the ocean and sea ice (every cell ocean) on a
        displaced-pole curvilinear grid and ESMF regridding weights mapping

@@ -1,0 +1,76 @@
+# @package _global_
+#
+# Aquaplanet with ECHAM physics: the ECHAM column physics (RRTMGP radiation,
+# Tiedtke-Nordeng convection, TTE-TKE vertical diffusion, 1-moment
+# microphysics) on its smallest grid, over a slab ocean with SST-diagnosed sea
+# ice.
+#
+#   python -m jem.main +configuration=aquaplanet-slab-echam
+#
+# WHY each setting:
+#  - physics=echam + grid=echam_t42_l8_sigma: jax-gcm's smallest ECHAM grid
+#    (T42, eight equidistant sigma layers), the one its own smoke tests
+#    compose. ECHAM's validated production grids carry 47 or 95 hybrid levels
+#    at T63 and above, which need data downloads and minutes per simulated
+#    day on a CPU; this one needs neither.
+#  - atmosphere.physics.land_model=prescribed: the default `slim` land solves
+#    a land surface from SLIM's surface dataset, which jax-gcm publishes only
+#    for the T63, T106, T127 and T255 Gaussian grids, so `auto` finds nothing
+#    on T42 and the model refuses to build. The aquaplanet has no land at all
+#    (terrain=aquaplanet below: an all-ocean mask), so the prescribed-moisture
+#    land is never used by any cell; it is the honest setting, not a
+#    workaround, and it needs no data file.
+#  - terrain=aquaplanet and forcing=default: zero orography, no land and an
+#    aquaplanet `ForcingData`; the SST the atmosphere sees comes from the
+#    coupled ocean, not from a boundary file, so nothing is fetched.
+#  - init=jw with init.rh=0.0: the Jablonowski-Williamson lapse-rate
+#    temperature with a fully DRY start, the initial condition jax-gcm's own
+#    ECHAM configurations use (jcm/config/configuration/t63-echam-1m.yaml):
+#    radiation and the surface fluxes moisten the column themselves. The
+#    default isothermal rest state is a poor start for ECHAM: in this
+#    configuration's own 10-day runs it left the top-of-atmosphere net flux
+#    between -85 and -200 W/m2 with a planetary albedo of 0.45 to 0.6, against
+#    about -3 W/m2 and 0.30 from the JW start on day 10. (jax-gcm reports isothermal ECHAM
+#    starts going NaN within days at L47.) Ten days are a spin-up, not a
+#    climate.
+#  - atmosphere.run.time_step=15 (minutes): it has to divide the one-day
+#    coupling step (96 steps per coupling day) and the 2 h radiation interval
+#    (8 steps). jax-gcm's shared ECHAM step is 12 min, validated from T63 to
+#    T119 (jcm/config/run/default.yaml); scaling it by the advective CFL
+#    (dt proportional to 1/truncation, the rule jax-gcm's own T127 grid file
+#    cites) gives 18 min at T42, so 15 min stays under that bound. It is
+#    this run's own validation, not jax-gcm's: no jax-gcm configuration bundle
+#    covers T42. The step jax-gcm's `smoke` run group uses (30 min) is for a
+#    one-day crash check and is not used here.
+#  - no forcing file, so nothing to align in time: the forcing is the
+#    aquaplanet default (a constant ocean surface the coupled ocean
+#    overwrites every step), so `forcing.align` and the `*_align` keys of
+#    jax-gcm's boundary-file groups do not apply. The ozone is jax-gcm's
+#    analytic profile, which is what `ozone_file: auto` selects on a sigma
+#    grid (no ozone product exists on sigma levels; jax-gcm warns once).
+#  - ocean=slab with no forcing term: the mixed layer responds to the coupled
+#    surface heat flux alone, as in `aquaplanet-slab`.
+#  - seaice=slab: ECHAM reads the ice fraction of the sea part from the same
+#    `sice_am` forcing field as SPEEDY, and the exchanger table writes the slab's
+#    diagnosed `ice_fraction` into it, so the ice cover follows the ocean. (The
+#    initial aquaplanet SST is nowhere below freezing, so the cover is zero in
+#    the first days; the wiring is exercised, the ice itself is not.)
+#    (Winton and the bucket land are not composed: both need SPEEDY's
+#    land/ice flux tiles, which ECHAM does not publish.)
+#  - land=none: there is no land component; see `land_model` above.
+defaults:
+  - override /physics@atmosphere.physics: echam
+  - override /grid@atmosphere.grid: echam_t42_l8_sigma
+  - override /terrain@atmosphere.terrain: aquaplanet
+  - override /init@atmosphere.init: jw
+  - override /ocean: slab
+  - override /seaice: slab
+  - override /land: none
+
+atmosphere:
+  init:
+    rh: 0.0
+  physics:
+    land_model: prescribed
+  run:
+    time_step: 15

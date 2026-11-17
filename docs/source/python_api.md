@@ -464,8 +464,8 @@ date. See {doc}`design/carry_and_clock` for what each component resets.
 The construction above builds a coupled model by hand -- the thing to do
 when writing a new experiment. To instead run one of the *validated*
 configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
-`aquaplanet-slab-mixed-grid`, `earth-slab`, `earth-slab-winton`,
-`veros-double-drake` and `veros-earth`, the same six
+`aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
+`earth-slab-winton`, `veros-double-drake` and `veros-earth`, the same seven
 `configurations.available()` returns, each with its command in
 {doc}`examples` -- without composing Hydra,
 `jem.configurations` is the recipe door onto them (issue #131):

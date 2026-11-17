@@ -36,10 +36,10 @@ class TestAvailable(unittest.TestCase):
             set(av),
             {p.stem for p in configurations.CONFIGURATION_DIR.glob("*.yaml")},
         )
-        # Six configurations are shipped today; a new one only has to land
-        # as a yaml file, this assertion included to catch the moment one
-        # goes missing from the recipe store rather than staying silent.
-        self.assertEqual(len(av), 6)
+        # Seven configurations are shipped; a new one only has to land as a
+        # yaml file, and this count is what catches one going missing from
+        # the recipe store rather than staying silent.
+        self.assertEqual(len(av), 7)
         self.assertTrue(all(isinstance(v, str) and v for v in av.values()))
         # The one-line summary is the yaml's first human comment.
         self.assertIn("SPEEDY", av["aquaplanet-slab"])

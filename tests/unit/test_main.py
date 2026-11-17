@@ -155,7 +155,8 @@ def test_help_lists_the_options_of_every_config_group(tmp_path):
     assert finished.returncode == 0, finished.stderr[-2000:]
     for option in (
         "winton", "bucket", "slab_relax", "slab_qflux", "veros", "short_run",
-        "long_run", "aquaplanet-slab", "aquaplanet-slab-mixed-grid",
+        "long_run", "aquaplanet-slab", "aquaplanet-slab-echam",
+        "aquaplanet-slab-mixed-grid",
         "earth-slab", "earth-slab-winton", "veros-earth", "veros-double-drake",
     ):
         assert option in finished.stdout, option

@@ -1,6 +1,6 @@
 # Examples
 
-Every example here (the table below lists all of them, the six named
+Every example here (the table below lists all of them, the seven named
 configurations among them) is either one `python -m jem.main` command, or a notebook
 built entirely in Python -- there is no Hydra in any notebook (issue #131).
 Python is JAX-ESM's primary interface; see `docs/source/python_api.md` for
@@ -31,6 +31,7 @@ drift the door exists to prevent.
 | Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
 | Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction of an all-ocean aquaplanet with the ocean and sea ice on a displaced-pole grid, with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
+| Aquaplanet with ECHAM physics | `python -m jem.main +configuration=aquaplanet-slab-echam` (ECHAM on T42 with eight sigma layers over the slab ocean; about eight minutes for two days on a CPU, mostly compilation) |
 | Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab` with the thermodynamic Winton ice and a freezing-clamped ocean) |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |

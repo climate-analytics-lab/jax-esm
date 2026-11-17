@@ -98,6 +98,11 @@ package spelled out.
      - ``+configuration@atmosphere=speedy-t31``
    * - Change one atmosphere group
      - ``diffusion@atmosphere.diffusion=strong``
+   * - Use ECHAM physics
+     - ``+configuration=aquaplanet-slab-echam``. ECHAM is more than one
+       override: it needs one of its own grids and, below T63, the
+       prescribed-moisture land (its default land model has no surface
+       dataset at T42), which that configuration sets and explains.
    * - Set one atmosphere key
      - ``atmosphere.run.time_step=15`` (minutes; it has to divide the
        coupling timestep)
@@ -254,7 +259,7 @@ and the log's first line says which one the run started from. See
 Where next
 -----------
 
-- :doc:`examples` -- the six named configurations, each with the one command
+- :doc:`examples` -- the seven named configurations, each with the one command
   that runs it and what it couples, and the example notebooks.
 - :doc:`issues` -- what 1.0 does not do yet, and the consequence of each.
 - :doc:`adding_a_component` -- wrapping an external model to join a coupled

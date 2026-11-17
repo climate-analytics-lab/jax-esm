@@ -143,10 +143,13 @@ def test_none_option_composes_to_none(group):
 def test_named_configuration_composes(name):
     """Every named coupled configuration composes, and sets something."""
     cfg = composed([f"+configuration={name}"])
-    assert cfg.atmosphere.grid.spectral_truncation == 31
+    # SPEEDY's T31 everywhere but the ECHAM aquaplanet, whose physics has no
+    # grid below T42.
+    expected_truncation = 42 if name == "aquaplanet-slab-echam" else 31
+    assert cfg.atmosphere.grid.spectral_truncation == expected_truncation
     # A configuration that composed but selected nothing would pass every
-    # other check in this file; the ocean is the one component all five
-    # configure.
+    # other check in this file; the ocean is the one component every one of
+    # them configures.
     assert cfg.ocean is not None
 
 
