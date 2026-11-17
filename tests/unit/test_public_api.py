@@ -98,17 +98,82 @@ def test_components_are_exported(name):
     assert hasattr(jem.components, name)
 
 
-def test_veros_is_exported_lazily():
-    """Veros is an optional dependency, so it may not be imported eagerly.
+def test_veros_is_reachable_but_not_star_exported():
+    """``VerosComponent`` is resolved lazily and is not in ``__all__``.
 
-    ``import jem.components`` must work without it installed, which means
-    ``VerosComponent`` is resolved by ``__getattr__`` on first use -- and it
-    still has to be reachable, or the export is a lie.
+    A name in ``__all__`` is looked up by ``from jem.components import *``,
+    which would then fail on an install without Veros, so the optional
+    component stays out of the list and reachable by attribute.
     """
-    assert "VerosComponent" in jem.components.__all__
-    veros = pytest.importorskip("veros")
-    del veros
+    assert "VerosComponent" not in jem.components.__all__
+    pytest.importorskip("veros")
     assert jem.components.VerosComponent.__name__ == "VerosComponent"
+
+
+# Runs `source` in a fresh interpreter in which `import veros` fails, as it does
+# on an install without the jittable fork.
+_WITHOUT_VEROS = "import sys; sys.modules['veros'] = None;"
+
+
+def test_star_import_works_without_veros():
+    source = _WITHOUT_VEROS + " from jem.components import *; JCMComponent"
+    subprocess.run([sys.executable, "-c", source], check=True)
+
+
+def test_missing_veros_says_which_veros_to_install():
+    """The error names the jittable fork, not the PyPI package that cannot work."""
+    source = _WITHOUT_VEROS + (
+        " import jem.components\n"
+        "try:\n"
+        "    jem.components.VerosComponent\n"
+        "except ImportError as error:\n"
+        "    assert 'veros-jittable' in str(error), error\n"
+        "    assert 'getting_started.rst' in str(error), error\n"
+        "    assert 'PyPI' in str(error), error\n"
+        "    assert isinstance(error.__cause__, ImportError), error.__cause__\n"
+        "else:\n"
+        "    raise SystemExit('no ImportError')\n"
+    )
+    subprocess.run([sys.executable, "-c", source], check=True)
+
+
+def test_a_broken_veros_install_is_not_relabelled_as_a_missing_one():
+    """Only a missing ``veros`` gets the install hint; any other import error passes.
+
+    A ``veros`` that imports but lacks ``runtime_settings`` is a different
+    problem, and telling its user to install the fork would hide it.
+    """
+    source = (
+        "import sys, types; sys.modules['veros'] = types.ModuleType('veros')\n"
+        "import jem.components\n"
+        "try:\n"
+        "    jem.components.VerosComponent\n"
+        "except ImportError as error:\n"
+        "    assert 'veros-jittable' not in str(error), error\n"
+    )
+    subprocess.run([sys.executable, "-c", source], check=True)
+
+
+def test_removed_deprecated_aliases_are_gone():
+    assert not hasattr(jem.components, "JCM")
+    assert not hasattr(jem.components, "Veros")
+    with pytest.raises(ImportError):
+        importlib.import_module("jem.components.jcm_component")
+
+
+def test_importing_jem_does_not_import_jcm():
+    """``import jem`` must not import the atmosphere package, nor Veros.
+
+    ``jcm/__init__`` imports ``jcm.model``, dinosaur and ``flax.nnx``; the
+    places jem needs ``jcm.date`` import it where they use it.
+    """
+    source = (
+        "import sys, jem;"
+        " heavy = sorted(m for m in sys.modules"
+        " if m.split('.')[0] in ('jcm', 'dinosaur', 'veros'));"
+        " assert not heavy, heavy"
+    )
+    subprocess.run([sys.executable, "-c", source], check=True)
 
 
 def test_importing_jem_does_not_import_the_components():

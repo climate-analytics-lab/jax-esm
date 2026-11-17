@@ -44,7 +44,6 @@ import jax_datetime as jdt
 import numpy as np
 import xarray as xr
 from flax import struct
-from jcm.date import fraction_of_year_elapsed
 
 # A component's carry is an arbitrary pytree; by convention the slab models
 # and the JCM wrapper use a dict with "state", "forcing" and "derived" keys
@@ -221,6 +220,12 @@ class CouplingTime:
         the function the atmosphere's own seasonal physics uses -- so a
         component's seasonal cycle and JCM's agree by construction.
         """
+        # Imported here rather than at module scope: `jcm.date` lives in the
+        # `jcm` package, whose `__init__` imports the whole atmosphere, and
+        # `import jem` is meant not to. The import is cached after the first
+        # call, so a traced step pays for it once, at trace time.
+        from jcm.date import fraction_of_year_elapsed
+
         return cast(jax.Array, fraction_of_year_elapsed(self.time))
 
 

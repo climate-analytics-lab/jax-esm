@@ -72,8 +72,6 @@ class SurfaceConstants:
         per grid cell; this is the value that forcing is initialized to.
     atmosphere_column_mass : float
         Mass of the atmospheric column the slab atmosphere heats (kg/m2).
-    ice_thermal_conductivity : float
-        Thermal conductivity of sea ice (W/m/K).
     seawater_freezing_point_K : float
         Freezing point of seawater at salinity ~34 psu (K); -1.8 degC. Distinct
         from ``jcm.constants.tmelt``, which is the *fresh*-water melting point
@@ -81,11 +79,8 @@ class SurfaceConstants:
 
     Notes
     -----
-    ``ice_thermal_conductivity`` is not read by any component today: the slab
-    sea ice has no conductive temperature profile. It is kept because it is
-    the material property any thermodynamic slab ice needs. The land has no
-    constants here: its temperature is the atmosphere's own (SPEEDY's slab
-    land in jax-gcm).
+    The land has no constants here: its temperature is the atmosphere's own
+    (SPEEDY's slab land in jax-gcm).
 
     """
 
@@ -94,7 +89,6 @@ class SurfaceConstants:
     surface_air_density: float = 1.22  # kg/m3
     bulk_drag_coefficient: float = 1e-3  # dimensionless
     atmosphere_column_mass: float = 1e4  # kg/m2
-    ice_thermal_conductivity: float = 2.03  # W/m/K
     seawater_freezing_point_K: float = 271.35  # K (-1.8 degC)
 
 

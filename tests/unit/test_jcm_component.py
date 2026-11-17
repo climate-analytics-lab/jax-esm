@@ -730,19 +730,6 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
     np.testing.assert_allclose(exchange.v0, wind_10m_v)
 
 
-def test_make_jem_compatible_is_deprecated(model):
-    """The old entry point still works, warns, and leaves the model alone."""
-    from jem.components import jcm_component
-
-    with pytest.warns(DeprecationWarning, match="JCMComponent"):
-        component = jcm_component.make_jem_compatible(model, COUPLING_TIMESTEP)
-
-    assert isinstance(component, JCMComponent)
-    assert component.model is model
-    # The wrapper no longer injects methods onto the jcm Model.
-    assert not hasattr(model, "generate_step_function")
-
-
 # --------------------------------------------------------------------------
 # Slow tests: these integrate the model.
 # --------------------------------------------------------------------------

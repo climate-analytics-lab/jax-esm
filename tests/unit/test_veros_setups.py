@@ -36,7 +36,7 @@ import xarray as xr
 
 pytest.importorskip("veros")
 
-from jem.components import veros_component  # noqa: E402
+from jem.components import veros_component  # noqa: E402, F401
 
 DATA = resources.files("jem.data")
 DOUBLE_DRAKE_MASK_FILE = str(DATA / "terrain_double_drake_T31.nc")
@@ -76,23 +76,6 @@ def _restore_jax_x64_after_this_module():
     jax.config.update("jax_enable_x64", True)
     yield
     jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_SETUP_IMPORT)
-
-
-def test_veros_lazy_alias_still_resolves():
-    """`jem.components.Veros` still resolves after the setups package is imported.
-
-    `jem.components.veros` (this setups package) and `jem.components.Veros`
-    (the lazy alias for `jem.components.veros_component`) differ only in
-    case; this checks that importing the former does not confuse the
-    latter's `__getattr__` resolution. Importing `.earth` here (rather than
-    the parent `jem.components.veros` package, which imports nothing) is
-    what actually exercises the case-collision this test is named for, and
-    is what flips `jax_enable_x64` -- see `_restore_jax_x64_after_this_module`.
-    """
-    import jem.components
-    import jem.components.veros.setups.earth  # noqa: F401
-
-    assert jem.components.Veros is veros_component
 
 
 @pytest.mark.slow
