@@ -15,7 +15,6 @@ handed it. That is done once, in the constructor, and said out loud there.
 import importlib
 import logging
 import os
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -93,7 +92,7 @@ def configure_veros_runtime() -> None:
     therefore have to be applied before *anything* in the process imports
     ``veros.core`` -- including a user's own ``VerosSetup`` module. That is
     why this module calls it at import time: importing
-    ``jem.components.veros_component`` (or ``jem.components.Veros``) is the
+    ``jem.components.veros_component`` is the
     documented way to make Veros JAX-backed, and it must come before the
     setup module is imported.
 
@@ -1411,6 +1410,20 @@ class VerosComponent:
         same file name a coupled checkpoint uses, so one directory has one
         carry file however deep in the model it sits.
 
+        Veros' restart omits the iteration counter ``itt`` (its ``Variable``
+        is not ``write_to_restart``), and the next step reads it:
+        ``solve_pressure`` takes ``itt == 0`` to mean "first ever step" and
+        overwrites every time level of the pressure/streamfunction. A state
+        loaded back with ``itt == 0`` would therefore re-initialise the
+        pressure history instead of continuing it, so ``itt`` is written
+        into the carry file with the other leaves Veros does not store.
+
+        Nothing here keeps a reference to ``directory``: the coupled
+        checkpoint writes into a staging directory that is renamed into place,
+        so the restart path Veros' settings were pointed at for the write is
+        put back afterwards rather than left naming a directory that no longer
+        exists.
+
         Parameters
         ----------
         carry : Carry
@@ -1425,21 +1438,26 @@ class VerosComponent:
         from veros.restart import write_restart
 
         state = carry["state"]
+        previous_filename = state.settings.restart_output_filename
+        restart_path = directory / VEROS_RESTART_FILENAME
         with state.settings.unlock():
-            state.settings.restart_output_filename = str(
-                directory / VEROS_RESTART_FILENAME
-            )
-            logger.info(
-                "Saving ocean restart file to %s",
-                state.settings.restart_output_filename,
-            )
-        write_restart(state, force=True)
+            state.settings.restart_output_filename = str(restart_path)
+        logger.info("Saving ocean restart file to %s", restart_path)
+        try:
+            write_restart(state, force=True)
+        finally:
+            with state.settings.unlock():
+                state.settings.restart_output_filename = previous_filename
 
         # The restart file first, the pytree carry file last: the coupled
         # checkpoint treats the carry file as the completion marker, and this
         # component keeps the same promise for its own directory.
         save_pytree(
-            {"derived": carry["derived"], "forcing": carry["forcing"]},
+            {
+                "derived": carry["derived"],
+                "forcing": carry["forcing"],
+                "iteration": jnp.asarray(state.variables.itt),
+            },
             directory / CARRY_FILENAME,
         )
 
@@ -1450,7 +1468,10 @@ class VerosComponent:
         returned carry shares that object -- as :meth:`initialize` does. The
         ``derived`` and ``forcing`` structs are poured back into the templates
         :meth:`initialize` builds, so a restart written on another grid is
-        refused by shape rather than silently adopted.
+        refused by shape rather than silently adopted. The iteration counter
+        ``itt``, which Veros' restart does not hold, is restored from the
+        carry file (see :meth:`save_carry` for why a step cannot do without
+        it).
 
         Parameters
         ----------
@@ -1467,6 +1488,7 @@ class VerosComponent:
         from veros.restart import read_restart
 
         state = self.model.state
+        previous_filename = state.settings.restart_input_filename
         with state.settings.unlock():
             state.settings.restart_input_filename = str(
                 directory / VEROS_RESTART_FILENAME
@@ -1474,52 +1496,22 @@ class VerosComponent:
         # Veros refuses to read a restart while `force_overwrite` is on, which
         # this module turns on so that a coupled run may rewrite its own
         # outputs; the context manager puts it back however the read ends.
-        with _veros_runtime_setting("force_overwrite", False):
-            read_restart(state)
+        try:
+            with _veros_runtime_setting("force_overwrite", False):
+                read_restart(state)
+        finally:
+            with state.settings.unlock():
+                state.settings.restart_input_filename = previous_filename
 
         template = {
             "derived": VerosDerived.zeros(self.horizontal_shape),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
+            "iteration": jnp.zeros_like(state.variables.itt),
         }
         stored = load_pytree(template, directory / CARRY_FILENAME)
+        iteration = stored.pop("iteration")
+        with state.variables.unlock():
+            state.variables.itt = jnp.asarray(
+                iteration, dtype=state.variables.itt.dtype
+            )
         return {"state": state, **stored}
-
-
-def make_jem_compatible(
-    model: Any,
-    coupling_timestep: jdt.Timedelta,
-) -> VerosComponent:
-    """Return a :class:`VerosComponent` for ``model``.
-
-    .. deprecated::
-        Construct ``VerosComponent(model)`` directly and register it with a
-        ``Coupler``, which binds the coupling timestep.
-
-    Parameters
-    ----------
-    model : veros.VerosSetup
-        The ocean to wrap.
-    coupling_timestep : jax_datetime.Timedelta
-        Ignored. The coupler now supplies the coupling timestep, together
-        with the start date, through :meth:`VerosComponent.bind`.
-
-    Returns
-    -------
-    VerosComponent
-        A new wrapper. Constructing it still replaces the setup's
-        ``set_forcing`` with a no-op, which a coupled run requires.
-
-    """
-    warnings.warn(
-        "make_jem_compatible() is deprecated: use"
-        " jem.components.veros_component.VerosComponent(model) and register"
-        " it with a Coupler. The returned component is a wrapper object --"
-        " unlike the old function it does not inject"
-        " initialize()/generate_step_function()/predictions_to_xarray()"
-        " onto the VerosSetup, so anything calling those on the model must"
-        " call them on the component instead. The coupling_timestep argument"
-        " is ignored; the Coupler passes it to VerosComponent.bind().",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return VerosComponent(model)

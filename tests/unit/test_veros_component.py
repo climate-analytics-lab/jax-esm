@@ -738,17 +738,37 @@ def test_clock_drift_of_a_day_is_reported(component, caplog):
     assert caplog.records and caplog.records[0].levelno == logging.ERROR
 
 
+#: The Veros variables `VerosComponent.step` writes the coupler's forcing into
+#: before it integrates.
+_FORCING_VARIABLES = (
+    "surface_taux", "surface_tauy", "forc_tke_surface",
+    "forc_temp_surface", "forc_salt_surface",
+)
+
+
 def _tke_surface_forcing(component, surface_taux):
     """Return the TKE surface forcing one step sets under ``surface_taux``.
 
     Only the forcing is under test, so the caller has stubbed the Veros step
     out: what comes back is what the ocean is about to be driven with.
+
+    `step` writes the forcing into the model's own state object, which this
+    module's tests share. Called under `jax.grad`, what it writes are tracers
+    of a transformation that has ended by the time the next test steps the
+    model, so the variables are put back as they were found.
     """
-    carry = component.initialize()
-    carry = dict(carry, forcing=carry["forcing"].replace(surface_taux=surface_taux))
-    new_carry, _ = component.step(carry, _coupling_time(0))
-    interior = slice(GHOST_CELLS, -GHOST_CELLS)
-    return new_carry["state"].variables.forc_tke_surface[interior, interior]
+    variables = component.model.state.variables
+    before = {name: getattr(variables, name) for name in _FORCING_VARIABLES}
+    try:
+        carry = component.initialize()
+        carry = dict(carry, forcing=carry["forcing"].replace(surface_taux=surface_taux))
+        new_carry, _ = component.step(carry, _coupling_time(0))
+        interior = slice(GHOST_CELLS, -GHOST_CELLS)
+        return new_carry["state"].variables.forc_tke_surface[interior, interior]
+    finally:
+        with variables.unlock():
+            for name, value in before.items():
+                setattr(variables, name, value)
 
 
 @pytest.mark.parametrize("stress", [0.02, 0.1, 0.5])
@@ -796,18 +816,6 @@ def test_the_tke_surface_forcing_is_differentiable_in_a_calm(component, monkeypa
     cells = int(np.prod(component.horizontal_shape))
     assert float(value) <= cells * (MIN_STRESS_MAGNITUDE / rho_0) ** 1.5 * (1 + 1e-6)
     assert np.isfinite(float(gradient))
-
-
-def test_make_jem_compatible_is_deprecated(veros_model):
-    """The old entry point still works and warns."""
-    from jem.components import veros_component
-
-    with pytest.warns(DeprecationWarning, match="VerosComponent"):
-        wrapper = veros_component.make_jem_compatible(
-            veros_model, COUPLING_TIMESTEP)
-
-    assert isinstance(wrapper, VerosComponent)
-    assert wrapper.model is veros_model
 
 
 @pytest.mark.slow
@@ -1055,6 +1063,7 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     from jem.components.veros_component import VEROS_RESTART_FILENAME
 
     carry = component.initialize()
+    carry, _ = component.step(carry, _coupling_time(0))
     carry = dict(
         carry,
         derived=carry["derived"].replace(
@@ -1062,6 +1071,8 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
         ),
         forcing=carry["forcing"].replace(heat_flux=jnp.full(grid_shape, -12.5)),
     )
+    iteration = int(carry["state"].variables.itt)
+    assert iteration > 0
 
     directory = tmp_path / "ocn"
     component.save_carry(carry, directory)
@@ -1076,6 +1087,10 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     # Veros' reader mutates the model's state in place, so the restored carry
     # shares that object rather than holding a copy of it.
     assert loaded["state"] is component.model.state
+    # Veros' restart does not hold the iteration counter; without it the next
+    # step would read `itt == 0` and re-initialise the pressure history.
+    assert int(loaded["state"].variables.itt) == iteration
+    assert float(loaded["state"].variables.time) == float(carry["state"].variables.time)
     np.testing.assert_array_equal(
         np.asarray(loaded["derived"].sea_surface_temperature),
         np.asarray(carry["derived"].sea_surface_temperature),
@@ -1084,6 +1099,79 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
         np.asarray(loaded["forcing"].heat_flux),
         np.asarray(carry["forcing"].heat_flux),
     )
+
+
+def _fresh_component(workdir, **setting_overrides) -> VerosComponent:
+    """Build a new ``acc_basic`` model of its own and bind a component to it.
+
+    The module-scoped fixtures share one model whose state a restart read
+    mutates in place; a resume has to start from a model nothing has touched,
+    which is what a new process has.
+    """
+    workdir.mkdir(parents=True)
+    generator = _acc_basic_model(workdir, **setting_overrides)
+    model = next(generator)
+    generator.close()  # restores the working directory
+    return _bound(model)
+
+
+def _wind_and_cooling(carry, grid_shape):
+    """Return ``carry`` with a steady wind stress and surface cooling applied."""
+    return dict(
+        carry,
+        forcing=carry["forcing"].replace(
+            surface_taux=jnp.full(grid_shape, 0.1),
+            heat_flux=jnp.full(grid_shape, 20.0),
+        ),
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("enable_streamfunction", [True, False])
+def test_a_run_resumed_from_disk_is_the_uninterrupted_run(
+    enable_streamfunction, grid_shape, tmp_path
+):
+    """Resuming from disk after k steps for N-k more equals N steps in a row.
+
+    Every Veros variable is compared, not just the tracers: a restart that
+    drops something the next step reads shows up first in a field no output
+    reports. The free-surface case is the one that carries the hazard, because
+    only there do the older time levels of ``psi`` enter the next step;
+    ``solve_pressure`` overwrites all of them when it reads ``itt == 0``.
+    """
+    overrides = {"enable_streamfunction": enable_streamfunction}
+    total, split = 3, 1
+
+    uninterrupted = _fresh_component(tmp_path / "a", **overrides)
+    carry = _wind_and_cooling(uninterrupted.initialize(), grid_shape)
+    for step in range(total):
+        carry, _ = uninterrupted.step(carry, _coupling_time(step))
+    expected = {k: np.asarray(v) for k, v in carry["state"].variables.items()}
+
+    first_leg = _fresh_component(tmp_path / "b", **overrides)
+    carry = _wind_and_cooling(first_leg.initialize(), grid_shape)
+    for step in range(split):
+        carry, _ = first_leg.step(carry, _coupling_time(step))
+    # Saved into a directory that is then renamed away, as a coupled
+    # checkpoint's staging directory is: nothing may depend on the path.
+    staging = tmp_path / "staging"
+    first_leg.save_carry(carry, staging)
+    staging.rename(tmp_path / "checkpoint")
+
+    resumed = _fresh_component(tmp_path / "c", **overrides)
+    carry = resumed.load_carry(tmp_path / "checkpoint")
+    assert int(carry["state"].variables.itt) == split * resumed._steps_per_coupling_step
+    for step in range(split, total):
+        carry, _ = resumed.step(carry, _coupling_time(step))
+    actual = {k: np.asarray(v) for k, v in carry["state"].variables.items()}
+
+    assert actual.keys() == expected.keys()
+    differing = {
+        name: float(np.max(np.abs(actual[name] - expected[name])))
+        for name in expected
+        if not np.array_equal(actual[name], expected[name], equal_nan=True)
+    }
+    assert not differing, f"resumed run differs from the uninterrupted one: {differing}"
 
 
 def test_a_runtime_setting_is_restored_even_when_the_block_raises():

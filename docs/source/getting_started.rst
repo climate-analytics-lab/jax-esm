@@ -24,10 +24,15 @@ Install JEM
     cd ..
 
     # Optional: the jittable Veros fork, only needed for the Veros
-    # configurations (+configuration=veros-double-drake / veros-earth)
+    # configurations (+configuration=veros-double-drake / veros-earth).
+    # Check out the revision CI tests (the fork's `main` is a different
+    # commit). Veros is used from the checkout, as in CI: install its pinned
+    # requirements and put the checkout on PYTHONPATH.
     git clone https://github.com/meteorologytoday/veros-jittable.git
     cd veros-jittable
-    pip install -e "."
+    git checkout 180366b73b0fc1938b3db8fbdb5426bc546905c6
+    pip install -r requirements.txt
+    export PYTHONPATH="$PWD:$PYTHONPATH"
     cd ..
 
 Plotting the examples needs the plotting extras, which are JEM's own, so

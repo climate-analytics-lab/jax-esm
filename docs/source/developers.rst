@@ -19,6 +19,17 @@ shadow it:
    cd jax-esm
    pip install -e ".[dev]"
 
+The Veros tests and configurations need the jittable Veros fork at the revision
+CI uses (``VEROS_SUPPORTED_REV`` in ``jem/components/veros/__init__.py``), used
+from its checkout:
+
+.. code-block:: bash
+
+   git clone https://github.com/meteorologytoday/veros-jittable.git
+   git -C veros-jittable checkout 180366b73b0fc1938b3db8fbdb5426bc546905c6   # VEROS_SUPPORTED_REV
+   pip install -r veros-jittable/requirements.txt
+   export PYTHONPATH="$PWD/veros-jittable:$PYTHONPATH"
+
 Gates
 -----
 

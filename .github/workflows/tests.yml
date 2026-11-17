@@ -27,8 +27,14 @@ on:
 # with it. It also carries jax-gcm PR 946 (ECHAM physics traces under
 # `jax_enable_x64`) and PR 911/914 (the wind vector on `SurfaceExchange`). See
 # JCM_SUPPORTED_REV's docstring in contract.py.
+#
+# The jittable Veros fork is pinned the same way: a branch name moves, and the
+# fork's `main` is a different commit from the one validated here. The
+# supported revision is VEROS_SUPPORTED_REV in `jem/components/veros/__init__.py`,
+# and tests/unit/test_veros_contract.py asserts that this value equals it.
 env:
   JCM_REV: 9764c56b36cd71b55c644aeb93cb787eb8c4db97
+  VEROS_REV: 180366b73b0fc1938b3db8fbdb5426bc546905c6
 
 jobs:
   lint:
@@ -97,7 +103,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
-        ref: dev/naive-fix-AD-needs-physical-justification
+        ref: ${{ env.VEROS_REV }}
         path: veros-jittable
 
     - name: Set up Python ${{ matrix.python-version }}
@@ -168,7 +174,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
-        ref: dev/naive-fix-AD-needs-physical-justification
+        ref: ${{ env.VEROS_REV }}
         path: veros-jittable
 
     - name: Set up Python
@@ -223,7 +229,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
-        ref: dev/naive-fix-AD-needs-physical-justification
+        ref: ${{ env.VEROS_REV }}
         path: veros-jittable
 
     - name: Set up Python
@@ -285,7 +291,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: meteorologytoday/veros-jittable
-        ref: dev/naive-fix-AD-needs-physical-justification
+        ref: ${{ env.VEROS_REV }}
         path: veros-jittable
 
     - name: Set up Python

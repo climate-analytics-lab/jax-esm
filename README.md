@@ -51,9 +51,13 @@ cd jax-gcm && git checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97 && pip insta
 git clone https://github.com/climate-analytics-lab/jax-esm
 cd jax-esm && pip install -e "." && cd ..
 
-# Optional: the jittable Veros fork, only needed for the Veros configurations
+# Optional: the jittable Veros fork, only needed for the Veros configurations.
+# Check out the revision CI tests (the fork's `main` is a different commit).
+# Veros is used from the checkout, as in CI: install its pinned requirements
+# and put the checkout on PYTHONPATH.
 git clone https://github.com/meteorologytoday/veros-jittable.git
-cd veros-jittable && pip install -e "."
+cd veros-jittable && git checkout 180366b73b0fc1938b3db8fbdb5426bc546905c6 && pip install -r requirements.txt
+export PYTHONPATH="$PWD:$PYTHONPATH"
 ```
 
 See [`docs/source/getting_started.rst`](docs/source/getting_started.rst) for

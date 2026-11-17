@@ -66,9 +66,9 @@ RUN git clone https://github.com/climate-analytics-lab/jax-gcm.git /opt/jax-gcm 
 # Install the jittable Veros fork (matching .github/workflows/tests.yml) so
 # Veros configurations (`+configuration=veros-earth` / `veros-double-drake`)
 # work out of the box.
-ARG VEROS_REF=dev/naive-fix-AD-needs-physical-justification
-RUN git clone --branch "${VEROS_REF}" --single-branch \
-        https://github.com/meteorologytoday/veros-jittable.git /opt/veros-jittable \
+ARG VEROS_REV=180366b73b0fc1938b3db8fbdb5426bc546905c6
+RUN git clone https://github.com/meteorologytoday/veros-jittable.git /opt/veros-jittable \
+    && git -C /opt/veros-jittable checkout "${VEROS_REV}" \
     && pip install --no-cache-dir -r /opt/veros-jittable/requirements.txt
 ENV PYTHONPATH="/opt/veros-jittable"
 

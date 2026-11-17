@@ -101,8 +101,30 @@ reads each destination field's dtype at trace time rather than assuming one,
 so the coupling itself is robust to that.
 
 Veros is an optional dependency -- the jittable fork this project is built
-against, cloned and ``pip install -e``d as shown in the main
-``README.md``'s install steps -- and is required for both configurations.
+against, checked out at the one revision recorded as ``VEROS_SUPPORTED_REV``
+in ``jem.components.veros`` and put on ``PYTHONPATH`` after
+``pip install -r requirements.txt``, as shown in the main ``README.md``'s
+install steps (and as CI does) -- and is required for both configurations.
+The fork's ``main`` is a different commit from that revision.
+
+The supported fork revision carries an AD fix its own ``PR.md`` marks as
+needing physical review before merge. The fix is
+``veros.core.utilities.sqrt_singularity_removed``, ``sqrt(maximum(x, 1e-12))``,
+which the fork uses in place of ``sqrt(maximum(0, x))`` for the buoyancy
+frequency ``Nsqr`` (in the TKE mixing length, and in the EKE and IDEMIX
+terms), the TKE and the EKE. Where ``Nsqr`` is negative -- a statically
+unstable water column -- or below ``1e-12``, the clamp is active and the
+derivative through that term is zero. The fork's authors have not confirmed
+that discarding the sensitivity of the convective-instability branch is
+physically right, rather than a smoother relaxation of ``Nsqr`` that keeps
+some of it. For a JAX-ESM user this means the gradient of a Veros-coupled run
+with respect to anything that acts through convectively unstable columns
+(``Nsqr`` below ``1e-12``) comes out of this clamp and is not a validated
+sensitivity; the forward (primal) solution is, per ``PR.md``, unchanged by
+that clamp. The same revision also floors sub-surface TKE at zero after the
+implicit solve, which does change the primal, by the undershoot
+(``PR.md`` quotes ~1e-7 against ~1e-4) it removes. Both ``veros-earth`` and
+``veros-double-drake`` enable TKE and EKE.
 
 
 A realistic Veros ocean for sensitivity studies
