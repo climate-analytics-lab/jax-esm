@@ -79,3 +79,11 @@ atmosphere:
   # The coupled components read the same singleton, so one setting here moves
   # the whole Earth system, not just the atmosphere.
   constants: {}
+
+# The process's JAX precision, applied by `jem.runners.apply_precision` before
+# any component is built. `true` runs the whole model, atmosphere included, in
+# float64 (`jax_enable_x64=true` on the command line); `false` forces float32.
+# `null` is the absence of a setting -- JAX stays as the process has it, which
+# is float32 -- so no default is repeated here. A component that cannot run in
+# float32 selects `true` in its own config group (`ocean=veros` does).
+jax_enable_x64: null

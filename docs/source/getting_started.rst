@@ -116,6 +116,11 @@ package spelled out.
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component
      - ``+atmosphere.constants.grav=9.7``
+   * - Run the whole model (atmosphere and slab components) in float64
+     - ``jax_enable_x64=true``. ``ocean=veros`` selects it itself, since
+       Veros cannot run in float32; ``jax_enable_x64=false`` with it is
+       refused. Left unset (the default) the model is float32. It is
+       process-wide and applied before any component is built.
    * - Choose the run settings
      - ``coupled_run=short_run``, or ``coupled_run.total_time="90 days"``
    * - Run to a calendar end date instead of a duration

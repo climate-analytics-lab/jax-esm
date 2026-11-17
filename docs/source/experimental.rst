@@ -110,12 +110,33 @@ it to the platform JAX would use anyway (``VEROS_DEVICE`` still chooses
 explicitly), so a Veros configuration runs on the GPU of a GPU host --
 atmosphere included -- rather than silently on its CPU.
 
-A Veros configuration also runs the **atmosphere** in double precision:
-importing Veros sets ``jax_enable_x64`` process-wide, and which of the
-atmosphere's own fields stay float32 depends on build order (whatever
-jax-gcm allocated before Veros was imported); :class:`~jem.fluxes.VerosExchange`
-reads each destination field's dtype at trace time rather than assuming one,
-so the coupling itself is robust to that.
+A Veros configuration runs the **whole model**, atmosphere included, in double
+precision, from the start. Veros runs float64 and switches JAX's process-wide
+``jax_enable_x64`` on when its operators are first imported, which happens
+while the ocean is built, after the atmosphere; so ``ocean=veros`` selects
+``jax_enable_x64=true``, and the runner applies it before any component is
+built (see :doc:`design/configuration`). Nothing is allocated in float32 and
+then stepped in float64, and :class:`~jem.fluxes.VerosExchange` has no mixed
+carry to reconcile. A configuration that asks for ``jax_enable_x64=false``
+with Veros is refused at build time. The few atmosphere leaves that stay
+float32 are the ones jax-gcm builds as float32 whatever the flag (the
+solar-geometry scalars, an empty analytic-ozone array and, under
+``forcing=from_file``, the arrays read from the forcing file): 6 of 246
+floating-point leaves in ``veros-double-drake`` and 12 in ``veros-earth``.
+
+The cost, measured for two coupled days on a CPU host that other jobs had
+loaded heavily (wall times are good to perhaps 20 %), is a few percent to a
+quarter in wall time and little memory: ``veros-earth`` took 68 s and 1.70 GB
+peak resident memory, ``veros-double-drake`` 56 s and 1.65 GB. Against the same
+runs whose atmosphere was built in float32 (54 s and
+1.71 GB, 52 s and 1.67 GB) the memory is unchanged, because Veros' own float64
+state dominates it, and the fields after two days differ at the level of
+single-precision round-off grown by the flow: relative differences of
+1e-6 to 1e-4 in temperature, wind and the ocean's temperature and velocity,
+and up to about 5e-3 in the clear-sky emissivities, with no NaN. The slab
+``aquaplanet-slab`` takes 38 s and 1.18 GB in float32 and 39 s and 1.29 GB with
+``jax_enable_x64=true``. A Veros run cannot share a process with a float32 run
+(:doc:`issues`).
 
 Veros is an optional dependency -- the jittable fork this project is built
 against, checked out at the one revision recorded as ``VEROS_SUPPORTED_REV``

@@ -46,12 +46,24 @@ Veros ocean
     on one grid and is exact.
 
 **A Veros run is double precision for the whole process.**
-    Importing Veros sets ``jax_enable_x64`` process-wide, so the atmosphere
-    and every other component also run in float64, and which of the
-    atmosphere's own fields stay float32 depends on build order. Consequence:
-    a Veros run costs more memory and time than the same atmosphere alone, and
-    it cannot share a process with a float32 run. Tests that import Veros run
-    in their own process for the same reason.
+    Veros runs in float64 and switches JAX's process-wide ``jax_enable_x64`` on,
+    so ``ocean=veros`` selects ``jax_enable_x64=true`` and the runner applies it
+    before any component is built: the atmosphere and every other component run
+    in float64 too (a handful of leaves jax-gcm builds as float32 whatever the
+    flag excepted). Consequence: a Veros run costs more than the same
+    atmosphere alone in float32 (a few percent to a quarter more wall time, and
+    about 9 % more memory for a slab run, in a measurement on a loaded host;
+    :doc:`experimental`), and it cannot share a process with a float32 run
+    -- the flag outlives the run, including a
+    :func:`jem.configurations.load` of a Veros configuration. Tests that build
+    Veros run in their own process, and restore the flag, for the same reason.
+    Asking for ``jax_enable_x64=false`` with Veros is refused when the Veros
+    operators are first imported in the process; in a process where they
+    already were, it is not detected and Veros' float64 arrays are held in
+    float32. A Python user who builds the atmosphere in float32 and then calls
+    ``VerosComponent.from_setup``, without the runner, gets an atmosphere
+    allocated in float32 and stepped in float64; they must set the flag before
+    building the atmosphere.
 
 **The Veros adjoint is spiky without an unmerged fix.**
     See :doc:`design/differentiating_long_runs`: the smoothing of the

@@ -1,3 +1,4 @@
+# @package _global_
 # The Veros ocean GCM (optional dependency; see the README for the install).
 #
 # `VerosComponent` takes an already-built Veros model, which is a Python
@@ -9,7 +10,21 @@
 #
 # Unlike the slab models, this component brings its own grid, so the runner
 # injects nothing.
-_target_: jem.components.VerosComponent.from_setup
-# Importable dotted path, never a file path: the module has to be on
-# PYTHONPATH like any other import.
-setup: ???
+#
+# The `_global_` package is here so this option can also select a root-level
+# key, `jax_enable_x64`. Veros runs in float64 and switches JAX's
+# process-global x64 mode on when its operators are first imported, which is
+# only reached while the ocean is being built -- after the atmosphere, built
+# in float32, is already allocated. Selecting `true` here makes the runner set
+# it before ANY component is built, so choosing `ocean=veros` (by itself or in
+# a named configuration) is enough for the whole model to be float64 from the
+# start. It is wiring that defines the option, not a tunable: this coupling
+# does not support a float32 Veros, and an explicit `jax_enable_x64=false` is
+# refused by the runner rather than honoured.
+jax_enable_x64: true
+
+ocean:
+  _target_: jem.components.VerosComponent.from_setup
+  # Importable dotted path, never a file path: the module has to be on
+  # PYTHONPATH like any other import.
+  setup: ???

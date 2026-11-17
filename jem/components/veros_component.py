@@ -116,6 +116,22 @@ def configure_veros_runtime() -> None:
     ``VEROS_DEVICE`` environment variable is Veros' own way of choosing a
     device and is honoured as given.
 
+    What it does **not** set is JAX's precision. Veros runs in float64 and
+    switches the process-global ``jax_enable_x64`` on when ``veros.core`` is
+    first imported -- a different, later moment than this call, and one that
+    is reached only when a Veros setup is built. This function deliberately
+    flips nothing: it runs at import time, and importing this module (a test
+    collecting it, a docs build) must not change the precision of a process
+    that never builds a Veros model. The precision of a coupled run is
+    therefore decided *before* any component is built, by the configuration
+    (``jax_enable_x64``, which ``ocean=veros`` selects; see
+    :func:`jem.runners.apply_precision`), so the atmosphere is allocated in the
+    precision it will be stepped in. A caller who builds the components in
+    Python, without the runner, must call
+    ``jax.config.update("jax_enable_x64", True)`` before constructing the
+    atmosphere; building a Veros model after an atmosphere built in float32
+    leaves a model whose arrays are a mix of both.
+
     Raises
     ------
     RuntimeError

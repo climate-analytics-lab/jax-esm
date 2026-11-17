@@ -96,12 +96,12 @@
 #    and is correct here because this exchanger writes none of those four
 #    with no land or sea-ice component (it would write `soilw_am` with a
 #    land component, which would then have to be declared too).
-#  - A Veros configuration also runs the atmosphere in double precision:
-#    importing Veros sets `jax_enable_x64` process-wide, and which of the
-#    atmosphere's own fields stay float32 depends on build order (whatever
-#    jax-gcm allocated before Veros was imported); `VerosExchange` reads each
-#    destination field's dtype at trace time rather than assuming one, so the
-#    coupling itself is robust to that.
+#  - A Veros configuration runs the whole model, atmosphere included, in
+#    double precision, from the start: `ocean=veros` selects
+#    `jax_enable_x64=true`, which the runner applies before building any
+#    component (Veros itself runs float64 and flips JAX's process-global x64
+#    mode when it is first imported, which would otherwise happen after the
+#    atmosphere was built in float32 and leave it a mix of the two).
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8

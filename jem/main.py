@@ -34,6 +34,13 @@ The single quotes matter: ``${...}`` is a resolver Hydra expands when the
 config is composed, and an unquoted one would be expanded by the shell first
 -- to nothing -- so the override would arrive empty.
 
+The whole model runs in float32 unless the configuration says otherwise.
+``jax_enable_x64=true`` makes it float64 (atmosphere and slab components
+included), and ``ocean=veros`` selects that itself because Veros cannot run in
+single precision; the runner applies the setting before any component is built::
+
+    python -m jem.main +configuration=earth-slab jax_enable_x64=true
+
 ``python -m jem.main --help`` lists the groups and the override spellings;
 ``--cfg job`` prints the fully composed config without running anything.
 

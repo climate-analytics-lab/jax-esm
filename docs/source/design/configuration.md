@@ -80,6 +80,48 @@ carry. `test_run_options_repeat_no_run_chunked_default` and
 `test_run_options_cover_every_configurable_run_chunked_keyword` hold both
 facts.
 
+**The precision is a configuration key, applied before anything is built.**
+`jax_enable_x64` is a root-level key (`null` in `config.yaml`, which means
+"leave JAX as the process has it" -- float32 -- so no default value is
+repeated in YAML) that `jem.runners.build_coupler` applies with
+`jax.config.update` *first*, before the atmosphere is constructed.
+The flag is process-global and fixes the dtype of every array JAX allocates
+afterwards, so a component that allocates while it is built (the
+atmosphere's `Model`, a slab's climatologies) takes the precision of that
+moment. `jax_enable_x64=true` on the command line gives a float64 slab run.
+
+`ocean=veros` selects `true` itself: the option's file has a
+`# @package _global_` header so it can set the root-level key next to its own
+`ocean:` node. It is on the option, not on the two named Veros
+configurations, because `ocean=veros` can be chosen without one, and Veros
+cannot run in single precision here. Veros flips the flag when its operators
+are first imported, which happens inside `VerosComponent.from_setup`, i.e.
+after the atmosphere was built, so without the key the atmosphere is built in
+float32 and stepped in float64 -- a mix whose composition depends on what
+jax-gcm had allocated at the flip. The runner has no `if ocean is veros`; it
+only applies the key.
+
+After the components are built the runner compares the flag with what it
+expected (the requested value, or what the process had when the key was
+`null`) and **raises** `RuntimeError` naming the key if they differ, because a
+component built before the flip is already allocated in the other precision and
+nothing downstream can repair it. So `ocean=veros jax_enable_x64=false` is
+refused rather than honoured. Two limits are worth knowing: the check needs
+the flag to move, so in a process where Veros was already imported (its flip
+spent) `false` is not detected and Veros' float64 arrays are silently held in
+float32; and a Python-API user who builds the atmosphere in float32 and *then*
+calls `VerosComponent.from_setup`, with no runner involved, is outside the
+runner's reach (they must call `jax.config.update("jax_enable_x64", True)`
+first; see `configure_veros_runtime`).
+
+The change outlives `build_coupler`, `jem.runners.run` and
+`jem.configurations.load` by design, like `atmosphere.constants`: the
+returned coupler is only valid in the precision it was built in. A failed
+`load()` restores the flag; tests that build a float64 configuration restore it
+themselves. jax-gcm itself builds a few of its forcing leaves (the
+solar-geometry scalars and an empty analytic-ozone array) as float32 whatever
+the flag, so "float64 throughout" means every field with a spatial extent.
+
 **A missing required input names its full key.** A `???` input (`ocean.sst_clim_file`
 under `ocean=slab_relax`, the four `regrid.*` weight files under `regrid=esmf`,
 `ocean.setup` under `ocean=veros`) is reported by OmegaConf as the bare leaf

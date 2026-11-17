@@ -1163,3 +1163,174 @@ def test_initial_condition_is_a_schema_key_that_defaults_to_none():
     assert composed([]).coupled_run.initial_condition is None
     kwargs = runners.build_run_kwargs(composed(["coupled_run.initial_condition=/x/y"]))
     assert kwargs["initial_condition"] == "/x/y"
+
+
+# ---------------------------------------------------------------------------
+# The precision of a run is part of its configuration (`jax_enable_x64`)
+# ---------------------------------------------------------------------------
+
+#: `jax_enable_x64` as this process had it when the module was collected. The
+#: last test of the module checks the process is left the way it was found.
+_X64_WHEN_COLLECTED = jax.config.read("jax_enable_x64")
+
+
+@pytest.fixture
+def restore_x64():
+    """Put `jax_enable_x64` back after a test that builds a coupler.
+
+    The flag is process-global and `runners.build_coupler` changes it by
+    design, so a test that builds one with a precision of its own would
+    otherwise decide the precision of every test that runs after it.
+    """
+    before = jax.config.read("jax_enable_x64")
+    yield
+    jax.config.update("jax_enable_x64", before)
+
+
+def _float_dtypes(tree, *, ignore_jcm_fixed_forcing: bool = False) -> set[str]:
+    """Return the dtype names of every floating-point leaf of ``tree``.
+
+    ``ignore_jcm_fixed_forcing`` skips the atmosphere's forcing leaves that
+    are scalars or empty. jax-gcm builds the solar-geometry scalars and the
+    empty analytic-ozone array as float32 whatever ``jax_enable_x64`` is
+    (``jcm.forcing`` passes ``dtype=jnp.float32`` explicitly), so they are
+    not something this layer can set.
+
+    """
+    found = set()
+    leaves = jax.tree_util.tree_leaves_with_path(tree)
+    for path, leaf in leaves:
+        array = jnp.asarray(leaf)
+        if not jnp.issubdtype(array.dtype, jnp.floating):
+            continue
+        if (ignore_jcm_fixed_forcing and "forcing" in jax.tree_util.keystr(path)
+                and (array.ndim == 0 or array.size == 0)):
+            continue
+        found.add(str(array.dtype))
+    return found
+
+
+def test_precision_key_is_null_by_default_and_a_schema_key():
+    """Unset means "leave JAX alone", and the key overrides without a `+`."""
+    assert composed([]).jax_enable_x64 is None
+    assert composed(["jax_enable_x64=true"]).jax_enable_x64 is True
+    assert composed(["jax_enable_x64=false"]).jax_enable_x64 is False
+
+
+@pytest.mark.parametrize("overrides", [
+    ["ocean=veros"],
+    ["+configuration=veros-earth"],
+    ["+configuration=veros-double-drake"],
+])
+def test_choosing_the_veros_ocean_selects_double_precision(overrides):
+    """`ocean=veros` carries the setting, with or without a named configuration."""
+    assert composed(overrides).jax_enable_x64 is True
+
+
+@pytest.mark.parametrize("configuration", [
+    "aquaplanet-slab", "aquaplanet-slab-mixed-grid", "earth-slab",
+    "earth-slab-winton",
+])
+def test_slab_configurations_leave_the_precision_alone(configuration):
+    assert composed([f"+configuration={configuration}"]).jax_enable_x64 is None
+
+
+def test_a_command_line_setting_beats_the_ocean_options_selection():
+    """An explicit `false` is still `false` in the composed config (the build refuses it)."""
+    assert composed(["ocean=veros", "jax_enable_x64=false"]).jax_enable_x64 is False
+
+
+def test_apply_precision_sets_the_flag_and_reports_what_it_must_stay(restore_x64):
+    jax.config.update("jax_enable_x64", False)
+    assert runners.apply_precision(composed(["jax_enable_x64=true"])) is True
+    assert jax.config.read("jax_enable_x64") is True
+    assert runners.apply_precision(composed(["jax_enable_x64=false"])) is False
+    assert jax.config.read("jax_enable_x64") is False
+    # null leaves it as the process has it, whichever way that is.
+    jax.config.update("jax_enable_x64", True)
+    assert runners.apply_precision(composed([])) is True
+    assert jax.config.read("jax_enable_x64") is True
+
+
+def test_apply_precision_refuses_a_non_boolean(restore_x64):
+    cfg = composed([])
+    cfg.jax_enable_x64 = "yes please"
+    with pytest.raises(TypeError, match="jax_enable_x64 must be true, false or null"):
+        runners.apply_precision(cfg)
+
+
+@pytest.mark.parametrize("x64, dtype", [(True, "float64"), (False, "float32")])
+def test_a_slab_run_is_the_precision_it_asks_for_from_the_start(
+    x64, dtype, restore_x64
+):
+    """Atmosphere and slab ocean carries hold one float dtype, the requested one.
+
+    The setting is applied before the atmosphere is built, so nothing is
+    allocated in the other precision.
+    """
+    coupler = runners.build_coupler(composed([f"jax_enable_x64={str(x64).lower()}"]))
+    carry = coupler.initialize()
+    assert _float_dtypes(carry.components["atm"], ignore_jcm_fixed_forcing=True) == {dtype}
+    assert _float_dtypes(carry.components["ocn"]) == {dtype}
+
+
+@pytest.mark.slow
+def test_a_float64_slab_run_scans_two_coupled_steps(restore_x64):
+    """The carry that leaves a float64 step has the structure and dtypes it entered with."""
+    coupler = runners.build_coupler(composed(["jax_enable_x64=true"]))
+    carry = coupler.initialize()
+    final, _ = coupler.generate_trajectory_function(2)(carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    assert [jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(final)] == [
+        jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(carry)
+    ]
+    assert _float_dtypes(final.components["atm"], ignore_jcm_fixed_forcing=True) == {"float64"}
+    sst = final.components["ocn"]["state"].sea_surface_temperature
+    assert bool(jnp.all(jnp.isfinite(sst)))
+
+
+@pytest.fixture
+def component_that_flips_x64(monkeypatch):
+    """Make building the ocean turn x64 on, as the first Veros import does."""
+    real = runners.build_component
+
+    def flipping(node, **kwargs):
+        built = real(node, **kwargs)
+        jax.config.update("jax_enable_x64", True)
+        return built
+
+    monkeypatch.setattr(runners, "build_component", flipping)
+
+
+@pytest.mark.parametrize("overrides", [["jax_enable_x64=false"], []])
+def test_a_component_that_changes_the_precision_mid_build_is_refused(
+    overrides, component_that_flips_x64, restore_x64
+):
+    """The mix is detected right after the build and the message names the key.
+
+    Both ways in: a configuration that asked for float32, and one that asked
+    for nothing and so expected the process's float32 to hold. The
+    atmosphere was built before the flip in both.
+    """
+    jax.config.update("jax_enable_x64", False)
+    with pytest.raises(RuntimeError, match=r"jax_enable_x64=true"):
+        runners.build_coupler(composed(overrides))
+
+
+def test_a_component_that_agrees_with_the_requested_precision_is_accepted(
+    component_that_flips_x64, restore_x64
+):
+    """Requesting `true` makes the same flip a no-op, so the build goes through."""
+    coupler = runners.build_coupler(composed(["jax_enable_x64=true"]))
+    assert "ocn" in coupler.components
+
+
+def test_zz_the_process_is_left_with_the_precision_it_was_collected_with():
+    """No test in this module leaks a changed `jax_enable_x64` into the next one.
+
+    `build_coupler` changes the flag by design and the tests above restore it;
+    composing a Veros configuration changes nothing (only building one does).
+    Kept last in the file so that it sees what the others left behind.
+    """
+    composed(["ocean=veros"])
+    assert jax.config.read("jax_enable_x64") == _X64_WHEN_COLLECTED

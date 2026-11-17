@@ -456,6 +456,23 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ``jcm.constants.physical_constants`` itself, understanding that this
     changes the physics of any model already built with the old value).
 
+    The process's JAX precision follows the configuration, and persists
+    ------------------------------------------------------------------
+    ``jax_enable_x64`` is process-global too, and :func:`jem.runners.build_coupler`
+    sets it from the configuration's ``jax_enable_x64`` key *before* it builds
+    any component: ``load("veros-earth")`` (whose ``ocean=veros`` selects
+    ``true``) switches the whole process to float64, and so does
+    ``load("earth-slab", jax_enable_x64=True)``. A configuration that leaves it
+    ``null`` -- the four slab ones -- builds in whatever precision the process
+    already has. Unlike a constants override, a ``load()`` that fails (including
+    the refusal when a component changes the precision mid-build) puts the flag
+    back to what it was, because no model was returned that could depend on the
+    change. A successful ``load()`` does not restore it: the returned coupler
+    is only valid in that precision, so a process should load either
+    float32 or float64 configurations, not both, and a test that loads a
+    float64 one must restore the flag itself (``jax.config.read`` before,
+    ``jax.config.update`` after).
+
     Other pre-build side effects of :func:`jem.runners.run`
     ---------------------------------------------------------
     Unlike jax-gcm's own door (:func:`jcm.configurations.load`), which has to
@@ -508,8 +525,9 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     cfg = _compose(name, overrides_list)
 
     # Everything that can fail on the config is resolved before the coupler
-    # is built, because building it applies `atmosphere.constants`
-    # process-globally: a `load()` that raises must leave them untouched.
+    # is built, because building it applies `atmosphere.constants` and
+    # `jax_enable_x64` process-globally: a `load()` that raises must leave
+    # them untouched.
     # `config` is the plain resolved dict for introspection; a still-unfilled
     # ``???`` key stays a string rather than raising on this read-only copy.
     config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
@@ -524,14 +542,18 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     if cfg.coupled_run.get("output_dir") is None:
         run_kwargs["output_dir"] = _fresh_output_dir()
     # A component can still fail while being built (a missing data file),
-    # after the atmosphere has applied the constants; put them back.
+    # after the atmosphere has applied the constants and the precision was set
+    # (or a component changed the precision mid-build); put both back.
+    import jax
     import jcm.constants as jcm_constants
 
     saved_constants = jcm_constants.physical_constants
+    saved_x64 = jax.config.read("jax_enable_x64")
     try:
         coupler = runners.build_coupler(cfg)
     except BaseException:
         jcm_constants.set_constants(saved_constants)
+        jax.config.update("jax_enable_x64", saved_x64)
         raise
     return LoadedConfiguration(name=name, coupler=coupler,
                                run_kwargs=run_kwargs, config=config)

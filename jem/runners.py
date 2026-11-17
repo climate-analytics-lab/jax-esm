@@ -31,6 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import hydra.utils
+import jax
 import jax_datetime as jdt
 import xarray as xr
 from hydra.core.hydra_config import HydraConfig
@@ -821,12 +822,97 @@ def declare_exchanged_forcing(
         atm.set_exchanged_forcing(())
 
 
+#: The top-level config key that sets the process's JAX precision. ``null``
+#: (the key's value in ``config.yaml``) is the absence of a setting: JAX stays
+#: as the process has it, which is float32 unless the caller turned x64 on.
+PRECISION_KEY = "jax_enable_x64"
+
+
+def apply_precision(cfg: DictConfig) -> bool:
+    """Set the process's JAX precision from ``cfg``, and return what it must stay.
+
+    ``jax_enable_x64`` is **process-global**, and it decides the dtype of
+    every array JAX allocates from then on. A component that allocates
+    arrays while it is being built (the atmosphere's ``Model``, every slab's
+    grid and climatologies) therefore inherits whatever the flag is *at that
+    moment*, so it has to be set before the first component is built, and
+    must not change afterwards: an atmosphere built in float32 and stepped
+    in float64 is a coupled model whose arrays are a mix of the two, which
+    ``jax.lax.scan`` rejects or, worse, accepts with a cast at one boundary.
+
+    ``cfg.jax_enable_x64`` is that setting. ``true`` and ``false`` are applied
+    with ``jax.config.update``; ``null`` leaves the flag as the process has
+    it. A component that cannot run in float32 selects ``true`` in its own
+    config group (``ocean=veros`` does), so the precision is a property of the
+    composed configuration and not of which module a component happens to
+    import first.
+
+    Parameters
+    ----------
+    cfg : omegaconf.DictConfig
+        A config composed from ``jem/config/config.yaml``.
+
+    Returns
+    -------
+    bool
+        The value ``jax_enable_x64`` must still have once the components are
+        built: the requested one, or, when nothing was requested, the one the
+        process already had. :func:`build_coupler` compares it with the flag
+        after the build.
+
+    Raises
+    ------
+    TypeError
+        If ``cfg.jax_enable_x64`` is neither ``null`` nor a boolean.
+
+    """
+    requested = cfg.get(PRECISION_KEY)
+    if requested is None:
+        return bool(jax.config.read("jax_enable_x64"))
+    if not isinstance(requested, bool):
+        raise TypeError(
+            f"{PRECISION_KEY} must be true, false or null; got {requested!r} "
+            f"({type(requested).__name__})."
+        )
+    jax.config.update("jax_enable_x64", requested)
+    return requested
+
+
+def _check_precision_unchanged(expected: bool) -> None:
+    """Raise if building the components changed the process's JAX precision.
+
+    Something that was imported or constructed during the build flipped
+    ``jax_enable_x64`` (the Veros ocean does, the first time its operators are
+    imported). The components built *before* the flip -- always the
+    atmosphere -- have arrays of the old precision and would be stepped in the
+    new one, so the model is refused here, loudly, rather than run as a silent
+    mix. This is an error and not a warning because nothing downstream can
+    repair it: the arrays are already allocated.
+    """
+    actual = bool(jax.config.read("jax_enable_x64"))
+    if actual != expected:
+        raise RuntimeError(
+            f"A component changed JAX's float64 mode from {expected} to "
+            f"{actual} while the coupled model was being built, so the "
+            "components built before it hold arrays of the other precision. "
+            f"Set `{PRECISION_KEY}={str(actual).lower()}` in the configuration "
+            "(it is applied before any component is built; a component that "
+            f"needs it selects it in its config group), or `{PRECISION_KEY}="
+            f"{str(expected).lower()}` if that is intended and the component "
+            "does not actually need to change it."
+        )
+
+
 def build_coupler(cfg: DictConfig) -> Coupler:
     """Build the whole coupled model from a composed config.
 
-    The atmosphere first (it owns the clock every other component is checked
-    against, and the grid they default to), then each surface group that is
-    not ``none``, then the exchange and the coupler itself.
+    First the process's JAX precision, from ``cfg.jax_enable_x64`` (see
+    :func:`apply_precision`) -- **a process-global change that outlives this
+    call** -- then the atmosphere (it owns the clock every other component is
+    checked against, and the grid they default to), then each surface group
+    that is not ``none``, then the exchange and the coupler itself. If a
+    component changes the precision while it is being built, the build is
+    refused (:func:`_check_precision_unchanged`).
 
     Parameters
     ----------
@@ -837,7 +923,13 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     -------
     jem.base.coupler.Coupler
 
+    Raises
+    ------
+    RuntimeError
+        If building a component changed ``jax_enable_x64``.
+
     """
+    expected_x64 = apply_precision(cfg)
     atm = build_atmosphere(cfg)
     components: dict[str, Any] = {atm.name: atm}
     for group, name in GROUP_TO_NAME.items():
@@ -848,6 +940,7 @@ def build_coupler(cfg: DictConfig) -> Coupler:
         components[name] = build_component(
             node, key=group, **_injected_grid(node, atm)
         )
+    _check_precision_unchanged(expected_x64)
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)

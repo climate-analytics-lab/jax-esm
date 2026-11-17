@@ -16,6 +16,7 @@ wrong without anyone noticing:
 
 import importlib
 import inspect
+import os
 import re
 import shutil
 import subprocess
@@ -523,33 +524,21 @@ def test_atmosphere_subgroup_options_match_jcm(group, option):
 # A Veros configuration declares what its hand-written exchanger writes
 # ---------------------------------------------------------------------------
 
-#: `jax_enable_x64` as it was before any test in this module built a real
-#: `VerosComponent`. Read once, at collection time, rather than inside the
-#: fixture below: importing `veros.core` (triggered the first time
-#: `runners.build_coupler` actually instantiates one) flips it to `True`
-#: process-wide as a side effect, and that flip is permanent for the rest of
-#: the process -- reading it fresh inside the fixture's own setup would
-#: capture the *already-flipped* value on the second of these tests to run.
-_JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST = jax.config.read("jax_enable_x64")
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 def _veros_x64():
-    """Force `jax_enable_x64` on for these tests, and restore it after all of them.
+    """Restore `jax_enable_x64` after a test that builds a Veros configuration.
 
-    Only requested by the two Veros tests below (not `autouse`), so it
-    neither forces every other test in this file to run in double precision
-    nor tears down between the two -- see `test_veros_setups.py`'s identical
-    fixture for why restoring *after each* test rather than once at the end
-    is actually the wrong thing here: doing so left the second of two Veros
-    tests silently degraded to float32 (`veros.core` is only imported once
-    per process, so only the *first* build re-triggers the `jax_enable_x64`
-    flip; restoring to `False` after it leaves nothing to flip it back for
-    the second).
+    `runners.build_coupler` sets the process-global flag from the
+    configuration (`ocean=veros` selects `true`), and Veros' own first import
+    of its operators turns it on as well, so a test that builds one changes the
+    precision of whatever runs next in the process. The value is read when the
+    test starts, so it is whatever the previous test left, and put back when
+    the test ends. Restoring after *each* test is safe because every build
+    sets the flag itself, rather than relying on Veros' once-per-process flip.
     """
-    jax.config.update("jax_enable_x64", True)
+    before = jax.config.read("jax_enable_x64")
     yield
-    jax.config.update("jax_enable_x64", _JAX_X64_BEFORE_ANY_VEROS_CONFIG_TEST)
+    jax.config.update("jax_enable_x64", before)
 
 
 @pytest.mark.slow
@@ -654,6 +643,66 @@ def test_veros_configurations_couple_a_responding_land_surface(configuration, _v
     # if the carry's structure changes across the step; a clean trace is the
     # assertion.
     jax.make_jaxpr(coupler.generate_trajectory_function(1))(carry)
+
+
+@pytest.mark.slow
+def test_a_veros_configuration_builds_the_atmosphere_in_double_precision(_veros_x64):
+    """Nothing is allocated in float32 before Veros turns x64 on.
+
+    `ocean=veros` selects `jax_enable_x64=true` and the runner applies it
+    before the atmosphere is built, so the atmosphere's arrays are float64
+    whichever order Veros' import and the atmosphere's construction happen in.
+    The atmosphere's prescribed forcing is not counted: jax-gcm builds its
+    solar-geometry scalars, the empty analytic-ozone array and every field it
+    loads from a forcing file as float32 on purpose, whatever the flag.
+    """
+    import jax.numpy as jnp
+
+    import jem.runners as runners
+
+    jax.config.update("jax_enable_x64", False)
+    coupler = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
+    assert jax.config.read("jax_enable_x64") is True
+    carry = coupler.initialize()
+    for component in ("atm", "ocn"):
+        dtypes = set()
+        for path, leaf in jax.tree_util.tree_leaves_with_path(carry.components[component]):
+            array = jnp.asarray(leaf)
+            fixed = component == "atm" and "forcing" in jax.tree_util.keystr(path)
+            if jnp.issubdtype(array.dtype, jnp.floating) and not fixed:
+                dtypes.add(str(array.dtype))
+        assert dtypes == {"float64"}, component
+
+
+@pytest.mark.slow
+def test_a_veros_configuration_that_asks_for_float32_is_refused():
+    """`ocean=veros jax_enable_x64=false` cannot be honoured, and says so.
+
+    Veros turns x64 on the first time its operators are imported, which is
+    only once per process, so the refusal is only reproducible in a process
+    that has not yet imported them: this runs one.
+    """
+    script = (
+        "from hydra import compose, initialize_config_module\n"
+        "import jem.config\n"
+        "from jem import runners\n"
+        "with initialize_config_module(config_module='jem.config', version_base='1.3'):\n"
+        "    cfg = compose(config_name='config', overrides=["
+        "'+configuration=veros-double-drake', 'jax_enable_x64=false'])\n"
+        "try:\n"
+        "    runners.build_coupler(cfg)\n"
+        "except RuntimeError as exc:\n"
+        "    print('REFUSED', exc)\n"
+        "else:\n"
+        "    print('BUILT')\n"
+    )
+    env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env,
+        timeout=600,
+    )
+    assert "REFUSED" in result.stdout, result.stdout + result.stderr[-2000:]
+    assert "jax_enable_x64=true" in result.stdout
 
 
 # ---------------------------------------------------------------------------
