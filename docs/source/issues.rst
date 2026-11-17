@@ -60,10 +60,16 @@ Veros ocean
     fraction where that file holds mixed or ocean-like values, and the
     orography of cells that turn to sea is kept. Consequence: a small, coastal
     error in the land surface (about 0.5 W m-2 of absorbed shortwave in the
-    global mean if all of it were wrong, 1.6 % of the sphere's area); the
-    mismatch between the heat the atmosphere gives up and the ocean receives
-    is about 0.3 W m-2 of ocean, not zero. ``veros-double-drake`` uses one mask
-    on one grid and is exact.
+    global mean if all of it were wrong, 1.6 % of the sphere's area).
+
+**``veros-earth``'s coastal flux map conserves to about 0.3 %, not exactly.**
+    The mismatch between the heat the atmosphere gives up and the ocean
+    receives is about 0.3 W m-2 of ocean, not zero, because jax-gcm rounds a
+    cell with at most a tenth of sea to all land, so the two components'
+    sea areas differ in a few coastal cells (:doc:`design/exchange`). The fix
+    needs jax-gcm's ``terrain.fmask_threshold``, which the pinned revision
+    does not have yet (jax-esm#164). ``veros-double-drake`` uses one mask on
+    one grid and is exact.
 
 **A Veros run is double precision for the whole process.**
     Veros runs in float64 and switches JAX's process-wide ``jax_enable_x64`` on,

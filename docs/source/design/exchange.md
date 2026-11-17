@@ -233,7 +233,13 @@ What the agreement does not remove:
   masks agree: hand a wet column `wet * R(s F / ofrac)`, where `ofrac` is the
   conservative map of the wet mask, which closes the heat budget to 2e-16 on a
   day's real fluxes but dilutes columns beside the cells JCM rounds to land;
-  it is not what the exchange does.
+  it is not what the exchange does. The rounding is the cause of both
+  shortcomings: jax-gcm makes a cell with at most a tenth of land all sea and
+  one with at most a tenth of sea all land when it builds the terrain, so wet
+  columns under a cell rounded to land have no sea tile above them. With
+  that threshold at 0 (jax-gcm's `terrain.fmask_threshold`, which the pinned
+  revision does not have yet) the plain conservative map is exact and gives
+  every wet column a flux; jax-esm#164 tracks the change.
 - **The atmosphere's land data describe the old coastline.** `veros-earth`
   takes its albedo, snow, soil water and land temperature from jax-gcm's
   `bc/t30/clim/forcing.nc`, defined for the original coast. 417 cells gain land
