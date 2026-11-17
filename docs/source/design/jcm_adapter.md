@@ -20,8 +20,11 @@ for, which is what makes it possible to decide whether an entry may be
 deleted. `tests/unit/test_jcm_contract.py` walks that list against the
 installed `jcm`, so a jax-gcm rename fails as "jax-gcm renamed or removed X,
 which JAX-ESM used for Y, at revision Z" — at the cheapest possible moment,
-rather than mid-run — and asserts that the revision the CI workflow checks
-out (`JCM_REV` in `.github/workflows/tests.yml`) equals `JCM_SUPPORTED_REV`,
+rather than mid-run. It also parses every `import` of `jcm` under `jem/` and
+fails naming any imported name that no entry covers, so the list cannot fall
+behind the code (it sees imports only; an attribute read off a value a
+jax-gcm function returned is listed by hand). Finally it asserts that the
+revision the CI workflow checks out (`JCM_REV` in `.github/workflows/tests.yml`) equals `JCM_SUPPORTED_REV`,
 so the pin and the workflow cannot drift apart. A non-blocking
 `canary-jcm-dev` job separately tracks jax-gcm's `dev` branch, so drift stays
 visible without blocking a pull request.
@@ -29,9 +32,10 @@ visible without blocking a pull request.
 The pin is a `dev` commit rather than a release -- the newest release,
 3.0.0, predates what the adapter needs, which is why `pyproject.toml`'s `jcm`
 floor is the 3.1.0 the pinned revision reports -- chosen and bumped by the
-policy in `contract.py`'s own module docstring: pin to a `dev` commit
-validated as a whole against this repository's gates, never to whatever `dev`
-happens to be at bump time. The current pin is needed for SPEEDY's land and
+policy in `contract.py`'s own module docstring: pin to a commit on `dev` (a
+merge commit there is fine) that this repository's required CI jobs run and
+pass at, never to a sha that is not on `dev` and never to whatever `dev`
+happens to be at bump time without running the gates at it. The current pin is needed for SPEEDY's land and
 sea flux tiles and a coupled sea ice's forcing on `SurfaceExchange`
 (jax-gcm#1213, with SPEEDY's own slab land, jax-gcm#1199, and
 `ForcingData.sea_ice_temperature`, jax-gcm#1205), on top of the
@@ -40,12 +44,16 @@ jax-gcm#911/#914) that lets JAX-ESM read the wind the same way for every
 physics package (see *The JCM adapter* below).
 
 **One consequence a coupled configuration has to set explicitly.**
-`jcm.forcing.resolve_align`'s `auto` resolves a boundary condition's
-alignment (climatology vs. transient) only when the file is a known
-mirror/packaged product; anything else needs `atmosphere.forcing.align` set
-by hand in the configuration, rather than guessed from the file's own time
-axis. See the `forcing.align` comments in
-`jem/config/configuration/{veros-double-drake,veros-earth}.yaml`.
+`jcm.forcing.resolve_align` is the one rule for the time alignment of an
+atmosphere boundary condition (climatology vs. transient). An explicit
+`wrap_year`, `by_date` or `by_date_interp` is taken as given. `auto`, the
+default, resolves only a data-mirror or packaged product, whose alignment the
+mirror manifest records; for any other file (a user's own, or an in-memory
+dataset) it raises `ValueError` instead of guessing from the file's own time
+axis, because a one-year transient archive and a monthly climatology look
+alike. A configuration that reads a user-supplied forcing file therefore sets
+`atmosphere.forcing.align` itself; the YAMLs under
+`jem/config/configuration/` that do so say which value and why.
 
 ## The JCM adapter
 

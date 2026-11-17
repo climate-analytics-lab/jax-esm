@@ -17,9 +17,11 @@ This module is the single place that records both halves of that contract:
 ``tests/unit/test_jcm_contract.py`` walks the second list against the
 installed ``jcm`` and fails with a message naming the missing name *and* the
 supported revision, so a jax-gcm rename is reported as "jax-gcm renamed or
-removed X" rather than as a mid-run crash. It also asserts that the revision
-the CI workflow checks out is this one, so the pin and the workflow cannot
-drift apart.
+removed X" rather than as a mid-run crash. It also reads every ``import`` of
+``jcm`` under ``jem/`` from the source and fails naming any that no entry
+covers, so the list cannot fall behind the code, and it asserts that the
+revision the CI workflow checks out is this one, so the pin and the workflow
+cannot drift apart.
 
 Why a ``dev`` revision rather than a release
 --------------------------------------------
@@ -28,16 +30,23 @@ the most precise thing there is to name; ``pyproject.toml``'s ``jcm`` floor,
 :data:`JCM_SUPPORTED_VERSION`, is the loosest true statement of the same
 fact, since jax-gcm's version string is bumped only at release. It is still
 load-bearing: it is what stops ``pip`` resolving to an older jcm release on
-PyPI that this package cannot import against. The policy,
-stated once here: pin to a ``dev`` commit that
-has actually been validated as a whole against this repository's own gates
--- not to the merge commit of one motivating pull request, and not to
-whatever ``dev`` happens to be at bump time, either of which can carry
-commits this branch has never been run against. When a tagged jax-gcm
-release finally contains this revision, replace the sha with the tag and
-raise the ``pyproject.toml`` floor to match.
+PyPI that this package cannot import against.
 
-This revision is the ``dev`` merge commit of jax-gcm#1213, which publishes
+The policy, stated once here: the pin is a commit on jax-gcm's ``dev`` branch
+(a merge commit there is fine: it is a point on ``dev`` that jax-gcm
+merged as a whole) that this repository's own gates -- the
+required CI jobs, which check out exactly ``JCM_SUPPORTED_REV`` -- have been
+run against and pass on. A commit is chosen because those gates pass at it,
+not because a pull request that JAX-ESM wanted merged there. The two things
+the policy rules out are a sha that is not on ``dev`` (a pull-request branch
+head, which may never be merged or may be rewritten) and ``dev``'s tip taken
+at bump time without running the gates at it, which can carry commits this
+repository has never been run against. When a tagged jax-gcm release
+finally contains this revision, replace the sha with the tag and raise the
+``pyproject.toml`` floor to match.
+
+The current pin is a ``dev`` merge commit -- the merge of jax-gcm#1213 -- and the
+required CI jobs run at exactly it, so it satisfies the policy. It publishes
 SPEEDY's land and sea flux tiles and a coupled sea ice's forcing on
 ``SurfaceExchange``. It carries jax-gcm#1199 (SPEEDY's own slab land,
 ``land_model.f90``, as ``SpeedySurfaceFlux``'s default) and jax-gcm#1205
@@ -54,20 +63,27 @@ design.
 
 Current behaviour a JEM user must know:
 
-* ``jcm.forcing.resolve_align``'s ``auto`` resolves a boundary condition's
-  alignment (climatology vs. transient) only for a known mirror/packaged
-  product; any other from-file atmosphere forcing needs
-  ``atmosphere.forcing.align`` set explicitly -- see the ``forcing.align``
-  comments in
-  ``jem/config/configuration/{earth-slab,veros-double-drake,veros-earth}
-  .yaml``.
-* jax-gcm configures no logging of its own; ``jem.main`` sets the ``jem``
-  logger's level, and ``jcm.runners`` sets the ``jcm`` logger's level from
-  ``run.log_level``.
+* ``jcm.forcing.resolve_align`` is the one rule for the time alignment of an
+  atmosphere boundary condition (climatology vs. transient). An explicit
+  ``wrap_year``, ``by_date`` or ``by_date_interp`` is taken as given.
+  ``auto`` (the default) resolves only a data-mirror or packaged product,
+  whose alignment the mirror manifest records; for any other file -- a
+  user's own, or an in-memory dataset -- ``auto`` raises ``ValueError``
+  rather than guess, so such a forcing needs ``atmosphere.forcing.align``
+  set explicitly. The configurations in ``jem/config/configuration/`` that
+  read a user-supplied forcing file say which value they use and why.
+* jax-gcm configures no logging of its own. ``jem.main`` sets the ``jem``
+  logger's level from ``coupled_run.log_level`` and nothing sets the ``jcm``
+  logger's: jax-gcm applies its ``run.log_level`` knob only in its own CLI
+  entry point (``jcm.runners.run``), which JAX-ESM does not call, so
+  jax-gcm's messages follow the root logger Hydra configures for the job.
 * ``JCMComponent`` threads jax-gcm's own :class:`~jcm.model.RunState`
-  (``time``, ``step``) through ``carry["time"]``/``carry["step"]`` and
-  ``Model.run_from_state_with_carry(initial_time=, initial_step=)`` every
-  coupled step, separately from the coupler's own clock.
+  (``dynamics``, ``physics``, ``time``, ``step``) through
+  ``carry["state"]``, ``carry["physics"]``, ``carry["time"]`` and
+  ``carry["step"]`` and ``Model.run_from_state_with_carry(initial_state=,
+  initial_physics_state=, initial_time=, initial_step=)`` every coupled
+  step; the ``time`` and ``step`` are jax-gcm's own clock, kept separately
+  from the coupler's.
 
 How to bump the pin
 -------------------
@@ -168,19 +184,21 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " at install time while the attribute tracks the checkout.",
     ),
     # ------------------------------------------------------------------
-    # Driver (jem.driver, T2.2): building a model and a forcing from a
-    # composed Hydra config, and running it in health-gated chunks.
+    # Driver (jem.runners, jem.driver, jem.accumulate): building a model and
+    # a forcing from a composed Hydra config, and running it in health-gated
+    # chunks.
     # ------------------------------------------------------------------
     IntegrationPoint(
         "jcm.runners", "build_model", "public",
         "Build the atmosphere Model from the composed `atmosphere` config"
-        " subtree, so JAX-ESM never reimplements jax-gcm's own wiring."
+        " subtree (jem.runners.build_atmosphere), so JAX-ESM never"
+        " reimplements jax-gcm's own wiring."
         " Signature: build_model(cfg: DictConfig) -> Model.",
     ),
     IntegrationPoint(
         "jcm.runners", "build_forcing", "public",
         "Build the atmosphere's ForcingData from the same config subtree and"
-        " the built coordinates."
+        " the built coordinates (jem.runners.build_atmosphere)."
         " Signature: build_forcing(cfg: DictConfig, coords, dycore=None).",
     ),
     IntegrationPoint(
@@ -201,24 +219,34 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     ),
     IntegrationPoint(
         "jcm.diagnostics", "check_health", "public",
-        "Per-chunk health gate on the atmosphere's output dataset, so a run"
-        " that has gone unstable stops instead of burning the queue."
+        "Per-chunk health gate on the atmosphere's output dataset"
+        " (jem.driver.default_health_check), so a run that has gone unstable"
+        " stops instead of burning the queue."
         " Signature: check_health(ds, chunk_idx: int, elapsed_days: float)"
         " -> tuple[bool, dict].",
     ),
     IntegrationPoint(
         "jcm.date", "parse_duration_seconds", "public",
         "Turn a run length, chunk, coupling interval or averaging window"
-        " ('12 hours', '10 days', or a number of days) into whole seconds;"
-        " refuses 'months'/'years' and fractional seconds."
+        " ('12 hours', '10 days', or a number of days) into whole seconds"
+        " (jem.driver.run_length_seconds and its whole-step helper,"
+        " jem.accumulate); refuses 'months'/'years' and fractional seconds."
         " Signature: parse_duration_seconds(value) -> int.",
+    ),
+    IntegrationPoint(
+        "jcm.date", "to_datetime", "public",
+        "Parse a run's `end_time` (and the coupler's start date) to a"
+        " datetime, so jem.driver.run_length_seconds subtracts the two as"
+        " datetimes, exact to the second, rather than as float days."
+        " Signature: to_datetime(value, *, name='time') -> jax_datetime.Datetime.",
     ),
     IntegrationPoint(
         "jcm.date", "fraction_of_year_elapsed", "public",
         "Position in the annual cycle in [0, 1), on the proleptic Gregorian"
-        " calendar. CouplingTime.year_fraction calls this directly, so a"
-        " component's seasonal cycle and the atmosphere's agree by"
-        " construction. Signature: fraction_of_year_elapsed(dt:"
+        " calendar. CouplingTime.year_fraction (jem.base.component) calls"
+        " this directly, and so does the slab models' base class"
+        " (jem.components.slab.base), so a component's seasonal cycle and the"
+        " atmosphere's agree by construction. Signature: fraction_of_year_elapsed(dt:"
         " jax_datetime.Datetime) -> jax.Array.",
     ),
     IntegrationPoint(
@@ -234,15 +262,33 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     # ------------------------------------------------------------------
     IntegrationPoint(
         "jcm.model", "Model", "public",
-        "The object JCMComponent wraps; also re-exported in JCMComponent's"
-        " type hints.",
+        "The object JCMComponent wraps (jem.components.jcm.component, and"
+        " the deprecated make_jem_compatible shim in"
+        " jem.components.jcm_component).",
     ),
     IntegrationPoint(
         "jcm.model", "RunState", "public",
-        "JCM's own resumable clock struct (dynamics, physics, time, step)."
-        " JCMComponent stores its 'time'/'step' fields in the atmosphere's"
-        " carry and threads them back into run_from_state_with_carry every"
-        " coupled step, exactly as jcm's own chunked runner does.",
+        "JCM's own resumable struct (dynamics, physics, time, step), the first"
+        " element of what run_from_state_with_carry returns. JCMComponent.step"
+        " stores all four fields in the atmosphere's carry and threads"
+        " 'time'/'step' back into run_from_state_with_carry every coupled"
+        " step, exactly as jcm's own chunked runner does.",
+    ),
+    IntegrationPoint(
+        "jcm.model.RunState", "dynamics", "public",
+        "The dycore state a step returns: carry['state'].",
+    ),
+    IntegrationPoint(
+        "jcm.model.RunState", "physics", "public",
+        "The cross-step physics carry a step returns: carry['physics'].",
+    ),
+    IntegrationPoint(
+        "jcm.model.RunState", "time", "public",
+        "jax-gcm's own clock after a step: carry['time'].",
+    ),
+    IntegrationPoint(
+        "jcm.model.RunState", "step", "public",
+        "jax-gcm's own step counter after a step: carry['step'].",
     ),
     IntegrationPoint(
         "jcm.model.Model", "bootstrap_state", "public",
@@ -254,17 +300,6 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " two objects are also installed on the model as `Model.dycore_state`"
         " / `Model.physics_carry`, which JAX-ESM deliberately does not read,"
         " so neither name is watched here.",
-    ),
-    IntegrationPoint(
-        "jcm.model.Model", "date_from_sim_time", "public",
-        "jax-gcm's own elapsed-seconds -> DateData conversion, and the method"
-        " jcm.model.Model calls internally for date-aware forcing on every"
-        " coupled step: JCMComponent.step (jem/components/jcm/component.py)"
-        " calls run_from_state_with_carry, which resolves this name"
-        " internally. An instance-level override of it -- the shape a"
-        " perpetual-season (frozen seasonal cycle) hook would take, tracked"
-        " as jax-esm#120 since JEM ships none today -- has to target this"
-        " public name.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "run_from_state_with_carry", "public",
@@ -285,25 +320,34 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     ),
     IntegrationPoint(
         "jcm.model.Model", "coords", "public",
-        "The nodal shape every exchanged field is on, the grid the default"
-        " forcing is built on, and part of the context re-attached to a"
-        " ModelPredictions after a pytree round trip.",
+        "The nodal shape every exchanged field is on (JCMComponent), the grid"
+        " the default forcing is built on, and the horizontal grid"
+        " jem.runners gives a surface component's SlabGrid when it shares the"
+        " atmosphere's grid.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "terrain", "public",
-        "The atmosphere's land-sea mask (`terrain.fmask`), which jem.runners"
-        " builds a surface component's SlabGrid from when that component"
-        " shares the atmosphere's grid.",
+        "The atmosphere's land-sea mask (`terrain.fmask`): JCMComponent's"
+        " sea_fraction, and the mask jem.runners builds a surface component's"
+        " SlabGrid from when that component shares the atmosphere's grid.",
     ),
     IntegrationPoint(
         "jcm.model.Model", "physics", "public",
-        "Source of the diagnostics template (see get_empty_data) and part of"
-        " the ModelPredictions context.",
+        "Source of the diagnostics template (see get_empty_data), and the"
+        " owner of require_surface_exchange (jem.runners.build_atmosphere).",
     ),
     IntegrationPoint(
         "jcm.model.Model", "dycore", "public",
-        "Part of the ModelPredictions context, and the owner of the state's"
-        " simulation clock (see DynamicalCore.sim_time).",
+        "The dynamical core: the owner of the state's simulation clock (see"
+        " DynamicalCore.sim_time) and of to_physics_state."
+        " ModelPredictions.with_context(model) reads it too.",
+    ),
+    IntegrationPoint(
+        "jcm.dycore.base.DynamicalCore", "to_physics_state", "public",
+        "Project the dycore state to a gridpoint PhysicsState:"
+        " JCMComponent._initial_surface_state reads the lowest level's air off"
+        " it to seed the derived fields before the first step."
+        " Signature: to_physics_state(state) -> PhysicsState.",
     ),
     IntegrationPoint(
         "jcm.dycore.base.DynamicalCore", "sim_time", "public",
@@ -392,6 +436,22 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " a local file, as jax-gcm's own CLI does.",
     ),
     IntegrationPoint(
+        "jcm.forcing.ForcingData", "sea_surface_temperature", "public",
+        "The prescribed SST an ocean overwrites every coupling step: the"
+        " target of the standard exchange tables (jem.exchangers), and the"
+        " field JCMComponent.set_exchanged_forcing validates against.",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "sice_am", "public",
+        "The ice fraction of the sea part of a cell, which a sea ice writes"
+        " (jem.exchangers' standard tables).",
+    ),
+    IntegrationPoint(
+        "jcm.forcing.ForcingData", "soilw_am", "public",
+        "SPEEDY's soil-water availability, which a land component writes"
+        " (jem.exchangers' standard tables).",
+    ),
+    IntegrationPoint(
         "jcm.forcing.ForcingData", "select", "public",
         "Collapse every TimeSeries leaf to one date's slice."
         " JCMComponent.initialize() takes the fields the coupling supplies"
@@ -438,8 +498,8 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         "jcm.predictions.ModelPredictions", "with_context", "public",
         "Re-attaches the coords/physics/dycore a JAX pytree round trip drops,"
         " so a ModelPredictions stacked by JAX-ESM's lax.scan can serialize"
-        " itself again. Public since jax-gcm#824 (closing jax-gcm#756); it"
-        " replaced JAX-ESM's read of the private `_predictions` payload.",
+        " itself again. Public since jax-gcm#824 (closing jax-gcm#756), so"
+        " JAX-ESM reads no private payload of ModelPredictions.",
     ),
     # ------------------------------------------------------------------
     # Private names. One is left: JAX-ESM copies its *values* rather than
@@ -657,6 +717,12 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " restating them.",
     ),
     IntegrationPoint(
+        "jcm.data", "bc/t30/clim/forcing.nc", "package data",
+        "The packaged T30 surface climatology that the `${jcm_data:...}`"
+        " config resolver (jem.config) points the configurations at, e.g."
+        " `ice_clim_file` of earth-slab-winton.",
+    ),
+    IntegrationPoint(
         "jcm", "data/bc", "package data",
         "The T30 boundary-condition climatology JAX-ESM's forcing and"
         " topography generation tool reads, located relative to the installed"
@@ -707,17 +773,20 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " jax-gcm already owns.",
     ),
     IntegrationPoint(
-        "jcm.constants", "tmelt", "public",
-        "Fresh-water melting point, the reference temperature of"
-        " SlabSeaiceModel.",
+        "jcm.constants", "rd", "public",
+        "Gas constant of dry air: the Winton ice's air density"
+        " (jem.components.slab.winton_seaice_model, read off"
+        " physical_constants).",
     ),
     IntegrationPoint(
-        "jcm.constants", "rhoi", "public",
-        "Sea-ice density, SlabSeaiceModel.",
+        "jcm.constants", "alhc", "public",
+        "Latent heat of condensation: the latent-heat term of the Winton"
+        " ice's bulk surface flux (read off physical_constants).",
     ),
     IntegrationPoint(
-        "jcm.constants", "alhf", "public",
-        "Latent heat of fusion, SlabSeaiceModel.",
+        "jcm.constants", "rhow", "public",
+        "Density of liquid water: the bucket land's water-mass accounting"
+        " (jem.components.slab.bucket_land_model).",
     ),
     IntegrationPoint(
         "jcm.constants", "rearth", "public",
@@ -726,8 +795,10 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     ),
     IntegrationPoint(
         "jcm.constants", "p0", "public",
-        "Reference pressure: the normalised surface pressure, and the rain/snow"
-        " split's dry-adiabatic extrapolation.",
+        "Reference pressure: the normalised surface pressure"
+        " (jem.components.jcm.exchange_fields), the rain/snow split's"
+        " dry-adiabatic extrapolation, and the Winton ice's air density and"
+        " seed humidity.",
     ),
     IntegrationPoint(
         "jcm.constants", "akap", "public",
@@ -735,11 +806,75 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     ),
     IntegrationPoint(
         "jcm.constants", "physical_constants", "public",
-        "The live constants the Winton ice's bulk formula reads when traced"
-        " (cpd, rd, p0, sbc, alhc), so a set_constants override reaches it.",
+        "The live constants singleton. The Winton ice reads cpd, rd, p0, sbc"
+        " and alhc off it when traced, so a set_constants override reaches it;"
+        " jem.configurations.load saves it before building a configuration so"
+        " a failed build can restore it.",
+    ),
+    IntegrationPoint(
+        "jcm.constants", "set_constants", "public",
+        "Restore the singleton jem.configurations.load saved, when building a"
+        " configuration fails after the atmosphere has applied its"
+        " `+atmosphere.constants.*` overrides, so a failed build does not"
+        " leave a later one running on the overridden constants.",
     ),
     IntegrationPoint(
         "jcm.constants", "sbc", "public",
-        "Stefan-Boltzmann constant: the Winton ice's seed longwave.",
+        "Stefan-Boltzmann constant: the Winton ice's longwave emission and the"
+        " seed longwave of JCMComponent's initial derived fields.",
+    ),
+    # ------------------------------------------------------------------
+    # SPEEDY's parameter structs, imported at module scope by the Winton
+    # ice, so a rename breaks `import jem.components`. The ice takes its
+    # defaults from jax-gcm's so the two surfaces cannot disagree.
+    # ------------------------------------------------------------------
+    IntegrationPoint(
+        "jcm.physics.speedy.params", "ModRadConParameters", "public",
+        "SPEEDY's radiation parameters; the source of the Winton ice's"
+        " emissivity default (jem.components.slab.winton_seaice_model.params"
+        " and winton_seaice_model).",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.ModRadConParameters", "default", "public",
+        "JCM's default radiation parameters, from which the ice's emissivity"
+        " default is taken. Signature: default() -> ModRadConParameters.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.ModRadConParameters", "emisfc", "public",
+        "The surface longwave emissivity the ice defaults to.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params", "SurfaceFluxParameters", "public",
+        "SPEEDY's surface-flux parameters; IceSurfaceFluxParameters"
+        " (jem.components.slab.winton_seaice_model.params) copies the ones the"
+        " ice reads.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "default", "public",
+        "JCM's default surface-flux parameters: the ice's defaults."
+        " Signature: default() -> SurfaceFluxParameters.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "chs", "public",
+        "Heat-exchange coefficient over sea: the ice's bulk formula.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "vgust", "public",
+        "Wind speed of sub-grid gusts, added in quadrature to the wind: the"
+        " ice's bulk formula.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "dtheta", "public",
+        "Potential-temperature gradient of the stability correction: the"
+        " ice's bulk formula.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "fstab", "public",
+        "Amplitude of the stability correction: the ice's bulk formula.",
+    ),
+    IntegrationPoint(
+        "jcm.physics.speedy.params.SurfaceFluxParameters", "lscasym", "public",
+        "Whether the stability correction is asymmetric: the ice reads it as a"
+        " static flag.",
     ),
 )
