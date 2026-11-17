@@ -245,8 +245,9 @@ Limits, which are the clamp's and the ice's rather than the exchange's:
   the atmosphere and the ocean, so the atmosphere's flux reaches the ocean two
   steps after the atmosphere computed it (one to the ice, one to the ocean),
   where `seaice=none` takes one. With no ice the ocean's forcing is therefore
-  exactly `seaice=none`'s, a step later: over 30 days of `veros-earth-winton`
-  the ocean's heat and freshwater forcing are the ice's passthrough to 0.0
+  exactly `seaice=none`'s, a step later: over 30 days of a `veros-earth` run
+  with SPEEDY's reference parameters, compared with the same run under
+  `seaice=none`, the ocean's heat and freshwater forcing are the ice's passthrough to 0.0
   (bit for bit), and equal to `seaice=none`'s of the step before, but the ocean's
   first step is unforced (the ice's initial flux is zero) and the SST trajectory
   differs from `seaice=none`'s by up to 0.9 K at day 30 for that reason alone.
@@ -254,20 +255,23 @@ Limits, which are the clamp's and the ice's rather than the exchange's:
   end of a run is counted (`tests/unit/test_veros_seaice.py`: 4e-13 of the heat
   exchanged);
 - the ice lives on the ocean's grid, and its `sea_fraction` has to be Veros'
-  wet mask. `veros-earth-winton` builds it on the ocean's SCRIP grid with
+  wet mask. `veros-earth` builds it on the ocean's SCRIP grid with
   `jem.tools.veros_earth_ice_mask`, the binary mask the ocean setup thresholds
   from the packaged land fraction.
 
-`+configuration=veros-earth-winton` is the Earth-like Veros configuration with
-the ice. The Veros ocean there starts from the observed annual-mean state with
-no ice on it, and the ice grows where the surface is at the freezing point: in
-a 90-day run started on 1 January it covers 4% of the northern ocean after 30
-days and 6.5% after 60 and 90, averaging 0.9 m thick poleward of 65N (1.9 m at
-most), with the first southern ice in March. The sea surface holds at the
-freezing point under it, where without the ice it drifts to -3.5 degC, and the
-ice's energy budget closes to 5e-12 W m-2 in every cell and record. That is a
-cover growing from nothing over an annual-mean ocean; an equilibrated seasonal
-cycle needs years of integration, which have not been run.
+`+configuration=veros-earth` is the Earth-like Veros configuration, with the
+ice and with the SPEEDY parameters jax-gcm calibrated for coupled use. The
+Veros ocean there starts from the observed annual-mean state with no ice on
+it, and the ice grows where the surface is at the freezing point: in a 90-day
+run started on 1 January it covers 4.7% of the northern ocean (by area) after
+30 days, 7.7% after 60 and 7.6% after 90, averaging 0.6 m, 1.0 m and 1.2 m
+thick poleward of 65N (2.6 m at most, on day 90). The first southern ice is on
+day 73, and covers 0.1% of the southern ocean on day 90. The sea surface holds
+at the freezing point under the ice (the run's minimum is -1.80 degC), and the
+ice's energy budget closes to 5e-12 W m-2 in every ocean cell and record
+(float64 output). That is a cover growing from nothing over an annual-mean
+ocean; an equilibrated seasonal cycle needs years of integration, which have
+not been run.
 
 Without an atmosphere (a forced or standalone ice) the fields the atmosphere
 would supply are the caller's to write. `+configuration=earth-slab-winton` is

@@ -844,9 +844,9 @@ def _compose_and_build(overrides):
 
 
 @pytest.mark.slow
-def test_veros_earth_winton_builds_with_the_ice_on_the_oceans_wet_mask():
-    """``+configuration=veros-earth-winton``: a clamping ocean, the ice on its grid and mask."""
-    coupler = _compose_and_build(["+configuration=veros-earth-winton"])
+def test_veros_earth_builds_with_the_ice_on_the_oceans_wet_mask():
+    """``+configuration=veros-earth``: a clamping ocean, the ice on its grid and mask."""
+    coupler = _compose_and_build(["+configuration=veros-earth"])
     assert coupler.components["ocn"].clamp_at_freezing is True
     carry = coupler.initialize().components
     np.testing.assert_array_equal(
@@ -858,21 +858,22 @@ def test_veros_earth_winton_builds_with_the_ice_on_the_oceans_wet_mask():
 
 
 @pytest.mark.slow
-def test_seaice_winton_on_veros_earth_alone_is_refused_with_the_fix():
-    """Composed by hand onto ``veros-earth``, the ice needs the clamp and the ocean's grid."""
+def test_a_veros_earth_ice_that_does_not_match_the_ocean_is_refused_with_the_fix():
+    """The ice needs the clamp and the ocean's wet mask; each is refused with the fix named."""
     with pytest.raises(ValueError, match=r"\+ocean\.clamp_at_freezing=true"):
-        _compose_and_build(["+configuration=veros-earth", "seaice=winton"])
+        _compose_and_build(["+configuration=veros-earth", "ocean.clamp_at_freezing=false"])
+    # The packaged land fraction is fractional, not Veros' thresholded wet mask.
     with pytest.raises(ValueError, match="differs from Veros' wet mask"):
         _compose_and_build([
-            "+configuration=veros-earth", "seaice=winton",
-            "+ocean.clamp_at_freezing=true",
-            "coupling.exchanged_forcing=[sea_surface_temperature,sice_am,sea_ice_temperature]"])
+            "+configuration=veros-earth",
+            "seaice.land_fraction_file=${jem_data:landsea_mask_fraction_RotatedGaussianLatLon.nc}"])
 
 
 @pytest.mark.slow
-def test_a_clamping_veros_earth_with_no_ice_is_refused():
-    with pytest.raises(ValueError, match="no sea ice to take the deficit"):
-        _compose_and_build(["+configuration=veros-earth", "+ocean.clamp_at_freezing=true"])
+def test_a_clamping_veros_earth_with_an_ice_that_takes_no_deficit_is_refused():
+    """The SST-diagnosed ice has no energy budget, so a clamp under it would create heat."""
+    with pytest.raises(ValueError, match="no energy budget and takes no deficit"):
+        _compose_and_build(["+configuration=veros-earth", "seaice=slab"])
 
 
 @pytest.mark.slow

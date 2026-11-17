@@ -9,6 +9,7 @@ import xarray as xr
 from jem.tools.idealised_terrain import (
     CAP_LATITUDE,
     earth_ice_free_land_means,
+    earth_ice_sheet_means,
     grid_axes,
     idealised_forcing,
     idealised_terrain,
@@ -193,31 +194,93 @@ def test_packaged_forcing_is_small():
     assert Path(PACKAGED_FORCING_FILE).stat().st_size < 200_000
 
 
-def test_forcing_defaults_are_rounded_from_earths_ice_free_land():
-    """The generator's defaults sit next to the numbers its docstring derives them from."""
+def _forcing_defaults():
     import inspect
 
-    earth = earth_ice_free_land_means()
-    defaults = {
+    return {
         name: parameter.default
         for name, parameter in inspect.signature(idealised_forcing).parameters.items()
         if parameter.default is not inspect.Parameter.empty
     }
-    assert defaults["bare_land_albedo"] == pytest.approx(earth["bare_land_albedo"], abs=0.02)
+
+
+def test_forcing_defaults_are_rounded_from_earths_land():
+    """The generator's defaults sit next to the numbers its docstring derives them from."""
+    land = earth_ice_free_land_means()
+    sheet = earth_ice_sheet_means()
+    defaults = _forcing_defaults()
+    assert defaults["bare_land_albedo"] == pytest.approx(land["bare_land_albedo"], abs=0.02)
     assert defaults["soil_water_availability"] == pytest.approx(
-        earth["soil_water_availability"], abs=0.02
+        land["soil_water_availability"], abs=0.02
     )
-    assert defaults["land_skin_temperature"] == pytest.approx(
-        earth["land_skin_temperature"], abs=1.0
+    assert defaults["land_skin_temperature_equator"] == pytest.approx(
+        land["land_skin_temperature_equator"], abs=1.0
     )
+    assert defaults["land_skin_temperature_pole_drop"] == pytest.approx(
+        land["land_skin_temperature_pole_drop"], abs=1.0
+    )
+    assert defaults["ice_cap_albedo"] == pytest.approx(sheet["ice_cap_albedo"], abs=0.02)
+    assert defaults["ice_cap_soil_water_availability"] == pytest.approx(
+        sheet["ice_cap_soil_water_availability"], abs=0.02
+    )
+    assert defaults["ice_cap_skin_temperature"] == pytest.approx(
+        sheet["ice_cap_skin_temperature"], abs=1.0
+    )
+    # The profile has the same area-weighted mean over Earth's land as the
+    # uniform 290 K it replaces, which is what makes it a fair fit.
+    assert land["land_skin_temperature"] == pytest.approx(290.0, abs=1.0)
+    assert land["land_skin_temperature_fit_rms"] < 3.0
+
+
+def test_the_forcing_is_the_documented_function_of_latitude():
+    """Ice-free land follows ``T_eq - drop sin^2(lat)``; the cap is a snow-covered ice sheet.
+
+    The cap is exactly the rows at or poleward of ``CAP_LATITUDE``, the rows
+    the terrain generator makes land in every geography, and nothing varies
+    along longitude or with the month.
+    """
+    forcing = xr.open_dataset(PACKAGED_FORCING_FILE)
+    defaults = _forcing_defaults()
+    lat = forcing["lat"].to_numpy()
+    cap = np.abs(lat) >= CAP_LATITUDE
+    assert cap.any() and not cap.all()
+    for name in ("alb", "snowc", "soilw_am", "stl"):
+        values = forcing[name].to_numpy()
+        # Zonally uniform, and constant in time where there is a time axis.
+        np.testing.assert_array_equal(values, np.broadcast_to(values[:1], values.shape))
+        if values.ndim == 3:
+            np.testing.assert_array_equal(values, np.broadcast_to(values[..., :1], values.shape))
+    row = lambda name: forcing[name].to_numpy()[0].reshape(lat.size, -1)[:, 0]  # noqa: E731
+    expected_temperature = (
+        defaults["land_skin_temperature_equator"]
+        - defaults["land_skin_temperature_pole_drop"] * np.sin(np.deg2rad(lat)) ** 2
+    )
+    np.testing.assert_allclose(row("stl")[~cap], expected_temperature[~cap], rtol=1e-6)
+    np.testing.assert_allclose(row("stl")[cap], defaults["ice_cap_skin_temperature"], rtol=1e-6)
+    np.testing.assert_allclose(row("alb")[~cap], defaults["bare_land_albedo"], rtol=1e-6)
+    np.testing.assert_allclose(row("alb")[cap], defaults["ice_cap_albedo"], rtol=1e-6)
+    np.testing.assert_allclose(row("snowc")[~cap], 0.0)
+    np.testing.assert_allclose(row("snowc")[cap], defaults["ice_cap_snow_cover"])
+    np.testing.assert_allclose(
+        row("soilw_am")[~cap], defaults["soil_water_availability"], rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        row("soilw_am")[cap], defaults["ice_cap_soil_water_availability"], rtol=1e-6
+    )
+    # The cap is a land ice for SPEEDY's slab land (background albedo >= 0.4),
+    # the temperate land is not, and the cap is colder than any ice-free land.
+    assert defaults["ice_cap_albedo"] >= 0.4 > defaults["bare_land_albedo"]
+    assert row("stl")[cap].max() < row("stl")[~cap].min()
+    assert row("stl")[cap].max() < 273.15
 
 
 def test_forcing_loads_as_a_climatology_with_a_lit_land():
     """JCM reads the file as a monthly climatology, and the land is not black.
 
     ``ForcingData.zeros`` has a bare-land albedo of 0; the file's land has a
-    non-zero one, no snow, and its time-varying fields can be selected on any
-    date of any year (``wrap_year`` replays the twelve records).
+    non-zero one, snow only on the polar cap, and its time-varying fields can
+    be selected on any date of any year (``wrap_year`` replays the twelve
+    records).
     """
     import datetime
 
@@ -229,22 +292,34 @@ def test_forcing_loads_as_a_climatology_with_a_lit_land():
     coords = get_speedy_coords()
     forcing = ForcingData.from_file(PACKAGED_FORCING_FILE, coords, align_mode="wrap_year")
     shape = coords.horizontal.nodal_shape
-    np.testing.assert_allclose(np.asarray(forcing.alb0), 0.2, rtol=1e-6)
+    defaults = _forcing_defaults()
+    lat = np.rad2deg(np.asarray(coords.horizontal.latitudes))
+    cap = np.abs(lat) >= CAP_LATITUDE
+    np.testing.assert_allclose(
+        np.asarray(forcing.alb0)[:, ~cap], defaults["bare_land_albedo"], rtol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.asarray(forcing.alb0)[:, cap], defaults["ice_cap_albedo"], rtol=1e-6
+    )
     for year in (2000, 2031):
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(datetime.datetime(year, 7, 15))
         )
         selected = forcing.select(date)
-        for name, value in (
-            ("snowc_am", 0.0),
-            ("sice_am", 0.0),
-            ("soilw_am", 0.65),
-            ("stl_am", 290.0),
-            ("sea_surface_temperature", 288.15),
+        for name, ice_free, ice_cap in (
+            ("snowc_am", 0.0, defaults["ice_cap_snow_cover"]),
+            ("sice_am", 0.0, 0.0),
+            ("soilw_am", defaults["soil_water_availability"],
+             defaults["ice_cap_soil_water_availability"]),
+            ("sea_surface_temperature", 288.15, 288.15),
         ):
             field = np.asarray(getattr(selected, name))
             assert field.shape == shape, name
-            np.testing.assert_allclose(field, value, rtol=1e-6, err_msg=name)
+            np.testing.assert_allclose(field[:, ~cap], ice_free, rtol=1e-6, err_msg=name)
+            np.testing.assert_allclose(field[:, cap], ice_cap, rtol=1e-6, err_msg=name)
+        stl = np.asarray(selected.stl_am)
+        assert stl.shape == shape
+        np.testing.assert_allclose(stl[:, cap], defaults["ice_cap_skin_temperature"], rtol=1e-6)
 
 
 def test_forcing_with_auto_align_is_refused():

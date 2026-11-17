@@ -22,16 +22,54 @@
 #  - No sea ice: seaice=none. The only ice effect on the ocean is the swamp
 #    mask in `jem.fluxes.mask_fluxes_under_ice`; the atmosphere sees no ice
 #    cover at all.
-#  - Land boundary conditions: one spatially uniform land, constant in time,
+#  - Land boundary conditions: two zonally uniform surfaces, constant in time,
 #    from `forcing_idealised_T31.nc` (below). SPEEDY's own slab land (inside
 #    the atmosphere) warms and cools the continents with its heat budget from
-#    that climatology: bare-land albedo 0.2, no snow, soil-water availability
-#    0.65 and a 290 K skin temperature -- the rounded means of Earth's
-#    ice-free land, and the same everywhere because this planet has no soils,
-#    vegetation or snowfields to map. The land has no seasonal cycle of its
+#    that climatology. The ice-free land (equatorward of 75 degrees) has
+#    bare-land albedo 0.2, no snow, soil-water availability 0.65 and a skin
+#    temperature climatology falling from 302 K at the equator to 265 K at the
+#    cap's edge as 302 - 40 sin^2(latitude): the rounded fit to Earth's
+#    ice-free land. The polar cap (poleward of 75 degrees, where the terrain
+#    is land in every geography) is an ice sheet: full snow cover, background
+#    albedo 0.47, soil-water availability 0.4 and a 237 K climatology, Earth's
+#    ice-sheet values. Nothing else varies, because this planet has no soils,
+#    vegetation or snowfields to map, and the land has no seasonal cycle of its
 #    own boundary conditions, only the seasonal cycle of the sunlight it gets.
+#    The slab land is SPEEDY's (`land_model: slab`, the SpeedySurfaceFlux
+#    default): a 1 m soil slab (5 m where the background albedo is at least
+#    0.4, the land-ice test) whose temperature anomaly from the climatology
+#    relaxes on 40 days. Snow is a prescribed cover, not a prognostic
+#    quantity: it only moves the albedo from the bare-land value to the snow
+#    albedo (0.6), and soil water is a prescribed evaporation availability.
+#
+# WHAT A RUN SHOWS (two years from 1 January, `coupled_run.total_time="730
+# days"`, finite throughout). The land is tuned to three criteria and meets
+# them: no land skin temperature above 315 K (the warmest is 301.7 K); the
+# polar cap below freezing in the mean of its cells in every month (its
+# warmest day is 264.4 K, with single cells at most 278.3 K at the cap's edge,
+# as Earth's ice-sheet margins reach, and its coldest cell 217 K); and the
+# ice-free land within what Earth's land reaches at those latitudes (its
+# warmest day in the mean of its cells is 292.9 K, and its warmest single cell
+# 301.7 K, 3 K above the 299 K that the warmest month's zonal mean of Earth's
+# 30-45 degree land reaches in the T30 climatology, as a cell may be warmer than
+# a zonal mean). The land's heat budget closes in every latitude band
+# (absorbed shortwave plus net longwave less sensible and latent heat is the
+# net flux into the land tile). The slab land is not at its seasonal cycle
+# until the second year: the cap's mean net surface flux is 26 W m-2 in the
+# first year against 22 W m-2 of relaxation to the climatology, its temperature
+# anomaly rising from 2 K to 11 K, and 23 against 23 W m-2 in the second.
 #
 # WHY each setting:
+#  - atmosphere: jax-gcm's `speedy-t31` configuration bundle, composed first in
+#    the defaults list so that this file's own choices below override its
+#    terrain and forcing (Hydra refuses the other order). It carries SPEEDY
+#    T31L8 with the parameters jax-gcm calibrated for coupled use -- the
+#    top-of-atmosphere budget and the surface fluxes handed to an ocean -- at
+#    the 30-minute time step it also sets (`atmosphere.run.time_step`). They
+#    are fitted at T31 and 30 minutes against observations with prescribed
+#    SSTs, so a coupled run is not guaranteed drift-free. The values live in
+#    jax-gcm only (docs/source/design/speedy_retune.md there) and are not
+#    restated here, so a retune reaches this configuration without an edit.
 #  - ocean=veros: the point of the experiment is a dynamical ocean; a slab
 #    cannot transport heat between the two basins.
 #  - ocean.setup names `jem.components.veros.setups.double_drake
@@ -60,21 +98,32 @@
 #    absorb all the sunlight it receives. Earth's climatology
 #    (`veros-earth`'s file) is not an option: it describes Earth's
 #    continents, and on this mask 442 of the 896 land cells are Earth ocean
-#    cells, which it gives an ocean albedo and no soil water. A different
-#    geography keeps this forcing (it is uniform) or calls
+#    cells, which it gives an ocean albedo and no soil water. The polar cap
+#    must be an ice sheet and not a bare land: with the ice-free values on the
+#    cap (albedo 0.2, no snow, a uniform 290 K climatology, 0.65 soil water)
+#    its land warms to 315 K in the summer, where the sun is up for 24 hours
+#    and the surface evaporates at over 100 W m-2; SPEEDY's calibrated
+#    parameters do not change that, the boundary conditions do. A different
+#    geography keeps this forcing (it depends on latitude alone and the cap
+#    is land in every geography the terrain tool makes) or calls
 #    `idealised_forcing(terrain_file, output_file, ...)` for other values;
 #    the file must be on the atmosphere's grid.
-#  - atmosphere.forcing.align = wrap_year: the file's twelve records are a
-#    climatology replayed every model year. `auto` resolves only jax-gcm's own
-#    packaged products and raises for any other file, so the choice has to be
-#    named; `by_date` would instead read the file's (arbitrary) 2001 dates and
-#    refuse a run that starts in any other year.
+#  - atmosphere.forcing.align = wrap_year, which the `speedy-t31` bundle sets
+#    (below): the file's twelve records are a climatology replayed every model
+#    year. `auto` resolves only jax-gcm's own packaged products and raises for
+#    any other file, so a mode has to be named; `by_date` would instead read
+#    the file's (arbitrary) 2001 dates and refuse a run that starts in any
+#    other year.
+#  - atmosphere.terrain.interpolate stays at the bundle's `true`, which is
+#    the right value although the file is already on the T31 grid: resampling
+#    a field onto its own grid returns it (this mask exactly), and it is what
+#    brings the terrain to the model's float64 like every other array of a
+#    Veros configuration; read as it is, the packaged float32 terrain file
+#    would leave float32 leaves in the atmosphere's carry.
 #  - The file's `sst` is not used: the exchanger overwrites the atmosphere's
 #    sea surface temperature from Veros every coupling step (see
 #    `coupling.exchanged_forcing`). Its sea-ice concentration is zero, as no
 #    sea ice is formed (seaice=none).
-#  - atmosphere.run.time_step = 30 min: the value this configuration has been
-#    run with, longer than the 12 min default; it is not otherwise tuned.
 #  - seaice=none, land=none: neither is part of this experiment -- the
 #    idealized continents carry no JAX-ESM land component (SPEEDY's own slab
 #    land runs inside the atmosphere), and no sea ice is formed.
@@ -109,8 +158,7 @@
 #    mode when it is first imported, which would otherwise happen after the
 #    atmosphere was built in float32 and leave it a mix of the two).
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: from_file
   - override /forcing@atmosphere.forcing: from_file
   - override /ocean: veros
@@ -122,9 +170,6 @@ atmosphere:
     file: ${jem_data:terrain_double_drake_T31.nc}
   forcing:
     file: ${jem_data:forcing_idealised_T31.nc}
-    align: wrap_year
-  run:
-    time_step: 30
 
 ocean:
   setup: jem.components.veros.setups.double_drake.double_drake_setup

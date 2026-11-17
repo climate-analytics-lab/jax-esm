@@ -30,32 +30,53 @@ GCM, each runnable as one command with no generated inputs and no
     index-to-index with no regridding. The continents are the packaged
     ``terrain_double_drake_T31.nc`` land-sea mask, which must have the
     atmosphere grid's shape. The atmosphere's land boundary conditions are
-    one spatially uniform, time-constant land from the packaged
-    ``forcing_idealised_T31.nc`` (bare-land albedo 0.2, no snow cover,
-    soil-water availability 0.65 and a 290 K skin-temperature climatology: the
-    rounded means of Earth's ice-free land), written by
-    :func:`jem.tools.idealised_terrain.idealised_forcing`. Earth's climatology
-    is not used, because it describes Earth's continents, not these; left at
-    jax-gcm's defaults the land albedo would be 0 and the land would absorb all
-    the sunlight it receives. Another geography on the same grid reuses the
-    file; another resolution needs ``idealised_terrain`` and
-    ``idealised_forcing`` calls for its own grid.
+    two zonally uniform, time-constant surfaces from the packaged
+    ``forcing_idealised_T31.nc``, written by
+    :func:`jem.tools.idealised_terrain.idealised_forcing`: the ice-free land
+    (bare-land albedo 0.2, no snow, soil-water availability 0.65, and a
+    skin-temperature climatology falling from 302 K at the equator to 265 K at
+    75 degrees as ``302 - 40 sin(latitude)**2``: the rounded fit to Earth's
+    ice-free land) and the polar cap poleward of 75 degrees, an ice sheet with
+    full snow cover, background albedo 0.47, soil-water availability 0.4 and a
+    237 K climatology (Earth's ice-sheet values). The land is SPEEDY's own
+    slab land inside the atmosphere, whose snow cover and soil water are
+    prescribed (snow only changes the albedo to 0.6) and whose temperature is
+    the climatology plus an anomaly driven by the land's heat budget and
+    relaxed to it on 40 days; a cap that had the ice-free land's values would
+    warm to 315 K in its summer (with the polar cap as an ice sheet, a two-year
+    run keeps every land skin temperature below 302 K, the cap's mean below
+    265 K in every month, and the slab land in a repeating seasonal cycle by
+    its second year). Earth's climatology is not used, because it
+    describes Earth's continents, not these; left at jax-gcm's defaults the
+    land albedo would be 0 and the land would absorb all the sunlight it
+    receives. Another geography on the same grid reuses the file; another
+    resolution needs ``idealised_terrain`` and ``idealised_forcing`` calls for
+    its own grid.
 ``python -m jem.main +configuration=veros-earth``
     A rotated-pole global ocean read from a SCRIP grid, exchanged with the
     atmosphere through ESMF regridding weights. The atmosphere runs on
     jax-gcm's packaged T30 observed climatology (the file ``earth-slab``
     uses): bare-land albedo, snow cover, soil water and land skin
     temperature. Its sea surface temperature comes from the ocean, not from
-    that file, which also holds the observed sea-ice cover the atmosphere
-    sees.
+    that file, and its sea-ice cover is the Winton ice's, formed on the
+    ocean's grid, not the observed cover that file holds.
 
 Both compose ``ocean=veros`` with a case setup importable from
 :mod:`jem.components.veros.setups`
 (:mod:`~jem.components.veros.setups.double_drake` /
-:mod:`~jem.components.veros.setups.earth`), and neither has a land or
-sea-ice component (``veros-earth-winton`` adds one): the land is SPEEDY's
-own slab land inside the atmosphere. Each configuration's own comment says why every setting is what
-it is.
+:mod:`~jem.components.veros.setups.earth`), and neither has a land component:
+the land is SPEEDY's own slab land inside the atmosphere. ``veros-earth`` has
+the Winton sea ice and ``veros-double-drake`` none. Each configuration's own
+comment says why every setting is what it is.
+
+Both run SPEEDY with the parameters jax-gcm calibrated for coupled use, at the
+30-minute step the calibration was made at. They arrive by composing jax-gcm's
+``speedy-t31`` configuration bundle under ``atmosphere`` and are not restated
+in JEM's YAML, so a retune in jax-gcm reaches both configurations. The values
+are fitted at T31 and 30 minutes against observations with prescribed SSTs
+(the top-of-atmosphere budget and the surface fluxes handed to an ocean), so a
+coupled run is not guaranteed to be drift-free. Each configuration reads its
+own terrain and forcing files, not the bundle's.
 
 The ocean is idealised in both, and a short run should be read with that in
 mind:
@@ -112,8 +133,8 @@ mind:
   -2.2 m within days and stays there). Over a 90-day
   January run the band-mean sea surface temperature moves by 0.4 to 2.9
   degrees (the annual mean is not January's state), and the polar surface
-  reaches and passes the freezing point with no sea ice to stop it: that is
-  the state a sea-ice component would start from. The file holds values for
+  reaches the freezing point within days, where the Winton ice forms. The
+  file holds values for
   exactly the wet cells of the packaged bathymetry, so it is valid only with it: the setup refuses a
   file made for another bathymetry, and
   ``jem.tools.ocean_initial_state`` says how to regenerate one.
@@ -121,15 +142,22 @@ mind:
   and 288.03 K at the surface in every ocean column, falling linearly with depth to zero at
   4510 m, so the deepest layer starts at -1.15 degC). ``veros-double-drake``
   always starts uniformly.
-* **No sea ice by default.** ``veros-earth`` and ``veros-double-drake`` have
-  no sea-ice component; the only ice effect on the ocean is the "swamp" mask on
-  the heat and freshwater fluxes once the surface reaches the freezing point,
-  which stops the surface cooling but not the water under it, so the polar
-  surface of ``veros-earth`` drifts below the freezing point.
-  ``+configuration=veros-earth-winton`` composes the Winton ice on the ocean's
-  grid: the ocean then clamps its top cell at the freezing point and hands the
-  ice the deficit, and the ice hands the ocean its heat and freshwater (see
-  :doc:`design/winton_seaice`).
+* **A Winton sea ice in** ``veros-earth``, **none in**
+  ``veros-double-drake``. ``veros-earth`` composes the Winton ice on the
+  ocean's grid: the ocean clamps its top cell at the freezing point and hands
+  the ice the deficit, and the ice hands the ocean its heat and freshwater and
+  the atmosphere its cover and skin temperature (see
+  :doc:`design/winton_seaice`). It starts ice-free over the observed ocean and
+  grows from there: in a 90-day run from 1 January it covers 4.7 % of the
+  northern ocean after 30 days, 7.7 % after 60 and 7.6 % after 90, 1.2 m thick
+  on average poleward of 65N on day 90 (2.6 m at most), the sea surface holds
+  at the -1.8 degC freezing point under it, and the ice's energy budget closes
+  to round-off (5e-12 W m-2). That is a cover growing over an annual-mean ocean, not an
+  equilibrated seasonal cycle, which needs years of integration.
+  ``veros-double-drake`` has no sea-ice component; the only ice effect on its
+  ocean is the "swamp" mask on the heat and freshwater fluxes once the surface
+  reaches the freezing point, which stops the surface cooling but not the
+  water under it.
 
 The two components are coupled through :class:`jem.fluxes.VerosExchange`,
 named as ``coupling.exchanger``: it hands the ocean the surface wind stress
@@ -138,8 +166,9 @@ stress, the same for every physics package, so momentum is conserved across
 the interface -- regridded conservatively and rotated into the ocean grid's
 local frame for ``veros-earth``, whose grid is not true east/north;
 applies a "swamp" sea-ice mask to the heat and freshwater fluxes once the
-surface reaches the freezing point (unless a Winton ice is composed, which is
-then the insulation and passes the ocean its own fluxes), and carries the rest of
+surface reaches the freezing point (unless a Winton ice is composed, as in
+``veros-earth``, which is then the insulation and passes the ocean its own
+fluxes), and carries the rest of
 :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` (the fluxes onto the ocean, its
 sea surface temperature back) -- so the ocean is mechanically as well as
 thermodynamically forced.

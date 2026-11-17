@@ -90,12 +90,19 @@ def test_the_veros_earth_coastlines_agree(coupler):
 
 @pytest.mark.slow
 def test_one_exchange_conserves_the_sea_tile_heat_and_freshwater(coupler):
-    """What the atmosphere's sea tile gives up, the ocean receives.
+    """What the atmosphere's sea tile gives up, the sea ice receives.
+
+    The ocean takes its heat and freshwater from the Winton ice, which takes
+    the atmosphere's sea-tile heat flux and evaporation through the same
+    conservative map the ocean would have used (the ice is on the ocean's grid
+    and wet mask), so the atmosphere-to-ice leg is what this checks; the ice's
+    own budget is the subject of ``test_veros_seaice.py``.
 
     The real exchanger on the initial carry with a *non-uniform* synthetic
-    heat flux (zonal and meridional structure plus a wave) and freshwater flux.
+    heat flux (zonal and meridional structure plus a wave) and evaporation
+    (standing for the freshwater flux).
     The atmosphere's integral is ``sum(area_atm * sea_fraction * flux)``, the
-    ocean's ``sum(area_t * wet * flux)`` with Veros' own ``area_t``, both in
+    ice's ``sum(area_t * wet * flux)`` with Veros' own ``area_t``, both in
     m2 (the atmosphere's cell areas are the weight file's, in steradians,
     times the radius squared that makes Veros' grid sum to the sphere). The
     residual is the second-order one the sea-fraction normalisation of a
@@ -115,7 +122,7 @@ def test_one_exchange_conserves_the_sea_tile_heat_and_freshwater(coupler):
     dtype = atm["derived"].sea_total_heat_flux.dtype
     atm = dict(atm, derived=atm["derived"].replace(
         sea_total_heat_flux=jnp.asarray(heat, dtype),
-        sea_total_freshwater_flux=jnp.asarray(freshwater, dtype)))
+        sea_evaporation=jnp.asarray(freshwater, dtype)))
     components = dict(carry.components, atm=atm)
 
     exchange = next(iter(coupler.exchangers.values()))
@@ -128,9 +135,9 @@ def test_one_exchange_conserves_the_sea_tile_heat_and_freshwater(coupler):
     atmosphere_area = atmosphere_area * (area_t.sum() / (4 * np.pi))
     sea = np.asarray(atm["derived"].sea_fraction, np.float64)
     wet = np.asarray(ocn["derived"].sea_fraction, np.float64)
-    forcing = exchanged["ocn"]["forcing"]
-    for given_field, received_field in ((heat, forcing.heat_flux),
-                                        (freshwater, forcing.freshwater_flux)):
+    forcing = exchanged["seaice"]["forcing"]
+    for given_field, received_field in ((heat, forcing.total_heat_flux),
+                                        (freshwater, forcing.evaporation)):
         given = np.sum(atmosphere_area * sea * given_field)
         received = np.sum(area_t * wet * np.asarray(received_field, np.float64))
         assert abs(received - given) / abs(given) < 1e-3, (received, given)

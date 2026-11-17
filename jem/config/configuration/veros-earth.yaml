@@ -1,12 +1,14 @@
 # @package _global_
 #
-# Earth with a dynamical ocean: SPEEDY T31L8 over the Veros ocean GCM on a
-# rotated Gaussian lon/lat grid, exchanging through ESMF weights.
+# Earth with a dynamical ocean and a sea ice: SPEEDY T31L8 over the Veros ocean
+# GCM on a rotated Gaussian lon/lat grid, with the Winton thermodynamic sea ice
+# on the ocean's grid, exchanging through ESMF weights.
 #
 #   python -m jem.main +configuration=veros-earth coupled_run=short_run
 #
 # WHAT THE OCEAN IS (an ocean on Earth's land-sea mask, bathymetry and
-# observed mean state, without sea ice or realistic forcing history):
+# observed mean state, with a thermodynamic sea ice, without realistic forcing
+# history):
 #  - Geometry: the land-sea mask decides which columns are ocean (the
 #    packaged ERA5 land fraction on the ocean grid, thresholded at 0.5 into a
 #    binary mask); the packaged ETOPO 2022 bathymetry decides how deep each
@@ -23,18 +25,49 @@
 #    meridional and vertical structure, not spinning one up from nothing. It
 #    is a climatological mean, not January's or any particular year's
 #    state, and the currents start at rest, so the first days are a
-#    geostrophic adjustment of the observed density field. With no sea ice
-#    to stop it, the polar surface then cools to and past the freezing point
-#    (about 60 % of the surface poleward of 70 degrees is at or below the
-#    swamp mask's -1.8 degC after 30 days).
-#  - No sea ice: seaice=none. `+configuration=veros-earth-winton` is this
-#    configuration with the Winton sea ice on the ocean's grid and an ocean
-#    that clamps at freezing. Here the only ice effect on the ocean is the swamp mask
-#    in `jem.fluxes.mask_fluxes_under_ice` (no cooling flux below the
-#    freezing point). The ice cover the ATMOSPHERE sees is the observed
-#    climatology in its forcing file (below), not something this ocean forms.
+#    geostrophic adjustment of the observed density field.
+#  - Sea ice: the Winton ice (snow, two ice layers, an energy budget;
+#    docs/source/design/winton_seaice.md, "What the standard coupling does";
+#    docs/source/design/exchange.md) on the ocean's own grid. It is the
+#    ocean's insulation and its source of heat and freshwater: it forms
+#    frazil from the freezing deficit a clamping Veros removes, passes the
+#    ocean the heat and freshwater it receives in place of the atmosphere's
+#    sea-tile fluxes (so the swamp mask of `jem.fluxes.mask_fluxes_under_ice`
+#    is not applied), and hands the atmosphere its fraction and its skin
+#    temperature. It starts ice-free over the observed ocean, which is at the
+#    freezing point where the ice should form, so the ice appears within days.
+#    The ice cover the ATMOSPHERE sees is therefore the ice this ocean forms,
+#    not the observed climatology in the forcing file (below).
+#
+# WHAT A RUN SHOWS: a 90-day run started on 1 January
+# (`coupled_run.total_time="90 days"`) is finite throughout. The ice is a cover
+# growing from nothing over an annual-mean ocean, not an equilibrated seasonal
+# cycle (that needs years of integration, which have not been run): it covers
+# 4.7 % of the northern ocean (by area) after 30 days, 7.7 % after 60 and 7.6 %
+# after 90, with a mean thickness poleward of 65N of 0.6 m, 1.0 m and 1.2 m
+# (2.6 m at most, on day 90); the first southern ice is on day 73 and covers
+# 0.1 % of the southern ocean on day 90. The sea surface holds at the -1.8 degC
+# freezing point under it (the run's minimum is -1.80 degC), and the ice's
+# energy budget closes to 5e-12 W m-2 in every cell and record. The global-mean
+# SST rises 0.9 K (17.8 to 18.7 degC). The atmosphere starts from isothermal
+# rest and spends its first month settling: its net top-of-atmosphere flux
+# is -78 W m-2 over the first ten days and +1 W m-2 over the last thirty, and
+# the surface heat flux into the ocean falls from 72 W m-2 in the second ten
+# days to 4 W m-2 in the last ten, so the budgets of a short run are the
+# spin-up's, not an equilibrium's. The warmest land skin temperature is 313.6 K
+# (40 degC), in eastern Australia on day 7.
 #
 # WHY each setting:
+#  - atmosphere: jax-gcm's `speedy-t31` configuration bundle, composed first in
+#    the defaults list so that this file's own choices below override its
+#    terrain and forcing (Hydra refuses the other order). It carries SPEEDY
+#    T31L8 with the parameters jax-gcm calibrated for coupled use -- the
+#    top-of-atmosphere budget and the surface fluxes handed to an ocean -- at
+#    the 30-minute time step it also sets (`atmosphere.run.time_step`). They
+#    are fitted at T31 and 30 minutes against observations with prescribed
+#    SSTs, so a coupled run is not guaranteed drift-free. The values live in
+#    jax-gcm only (docs/source/design/speedy_retune.md there) and are not
+#    restated here, so a retune reaches this configuration without an edit.
 #  - ocean=veros on the packaged `RotatedGaussianLatLon` SCRIP grid: rotating
 #    the grid moves its pole onto land, and the ocean's land-sea mask comes
 #    from the matching packaged land-fraction file.
@@ -62,6 +95,12 @@
 #    latitude, not the ocean's rotated one. (The forcing file below still
 #    describes the original coastline's land surface; the size of that is
 #    given in docs/source/design/exchange.md.)
+#  - atmosphere.terrain.interpolate stays at the bundle's `true`, which is
+#    the right value although the file is already on the T31 grid: resampling
+#    a field onto its own grid returns it (the mask exactly, the orography to
+#    1e-4 m), and it is what brings the terrain to the model's float64 like
+#    every other array of a Veros configuration; read as it is, a float32
+#    terrain file would leave float32 leaves in the atmosphere's carry.
 #  - atmosphere.forcing is jax-gcm's packaged T30 climatology, the same file
 #    `+configuration=earth-slab` uses, because this is an Earth
 #    configuration and the atmosphere needs Earth's land surface: bare-land
@@ -70,44 +109,64 @@
 #    inside the atmosphere, so there is no land component: land=none).
 #    Left at the default `ForcingData.zeros`, the land albedo would be 0
 #    everywhere. The T30 climatology lives on the T31 grid's own 96x48
-#    Gaussian grid, and `forcing.align` needs no setting: jax-gcm resolves
-#    `auto` for a packaged product from the kind its manifest records
-#    (a climatology, replayed every year); any other file needs
-#    `atmosphere.forcing.align` set explicitly. The file's `sst` is NOT used:
-#    the exchanger overwrites the atmosphere's sea surface temperature from
-#    Veros every coupling step (see `coupling.exchanged_forcing`).
-#  - atmosphere.run.time_step = 30 min: the value this configuration has
-#    been run with, longer than the 12 min default; it is not otherwise
-#    tuned.
-#  - seaice=none, land=none: this configuration couples the ocean only.
+#    Gaussian grid. The bundle's `forcing.align: wrap_year` is the right
+#    mode for it: it is a twelve-record climatology replayed every year,
+#    which is what jax-gcm records for this packaged file. The file's `sst`
+#    is NOT used: the exchanger overwrites the atmosphere's sea surface
+#    temperature from Veros every coupling step (see
+#    `coupling.exchanged_forcing`), and its observed ice cover is replaced
+#    by the Winton ice's.
+#  - seaice=winton: see above. The refusal in `jem.exchangers`/`VerosExchange`
+#    for any other pairing (an SST-diagnosed ice over a clamping ocean, a
+#    Winton ice over one that does not clamp) points back here.
+#  - ocean.clamp_at_freezing: the ice forms frazil from the deficit the
+#    ocean's clamp removes from the top cell; an ocean that kept its deficit
+#    would have it frozen twice, and `VerosExchange.validate` refuses that.
+#    (It is off by default: a clamp with no ice taking the deficit creates the
+#    heat it removes it with.)
+#  - seaice.grid_file / land_fraction_file: the ice lives on the OCEAN's grid,
+#    not the atmosphere's (the group default), and its sea must be exactly
+#    Veros' wet mask. The packaged land-fraction file is not that mask (it is
+#    fractional, thresholded by the ocean setup), so the thresholded one,
+#    generated by `jem.tools.veros_earth_ice_mask`, is named. The SCRIP file is
+#    the ocean's own, by reference, so the two cannot drift.
+#  - the ice is started ice-free (its `initial_ice_thickness` default of 0):
+#    `ice_clim_file` would read the atmosphere's forcing file, which is on the
+#    atmosphere's grid, not this one. `+seaice.params.initial_ice_thickness=
+#    <metres>` covers EVERY ocean cell at that thickness, which is a melting
+#    experiment, not an initial cover.
+#  - land=none: the land is SPEEDY's own slab land inside the atmosphere.
 #  - coupling.exchanger names `jem.fluxes.VerosExchange` with
 #    `rotation_grid_file` set to the same SCRIP file `regrid` uses: it hands
 #    the ocean the surface wind stress the atmosphere itself received
 #    (jax-gcm's published, stability-corrected stress, so momentum is
 #    conserved across the interface -- jax-esm#132), regridded
 #    conservatively and rotated into the ocean grid's local frame using that
-#    file's per-cell rotation angles, masks the heat and freshwater fluxes
-#    wherever the surface has reached the freezing point, and carries the
-#    rest of `jem.exchangers.VEROS_OCEAN_EXCHANGES` (regridded through the
+#    file's per-cell rotation angles, routes the heat and freshwater through
+#    the sea ice, and carries the rest of
+#    `jem.exchangers.VEROS_OCEAN_EXCHANGES` (regridded through the
 #    weights above: conservatively for the fluxes, bilinearly for the sea
 #    surface temperature) -- so the ocean is mechanically as well as
 #    thermodynamically forced.
-#  - coupling.exchanged_forcing = [sea_surface_temperature]: the one
-#    atmosphere forcing field `jem.fluxes.VerosExchange` writes when no land
-#    or sea-ice component is composed (its ocean-facing fields
+#  - coupling.exchanged_forcing = [sea_surface_temperature, sice_am,
+#    sea_ice_temperature]: the atmosphere forcing fields `VerosExchange`
+#    writes with a sea ice composed (its ocean-facing fields
 #    `surface_taux`/`surface_tauy`/`heat_flux`/`freshwater_flux` are the
-#    ocean's forcing, not the atmosphere's). It is declared by hand because
+#    ocean's forcing, not the atmosphere's). They are declared by hand because
 #    `VerosExchange` is a function, not an exchange table, so
-#    `declare_exchanged_forcing` cannot read its writes off it. It is
+#    `declare_exchanged_forcing` cannot read its writes off it. They are
 #    required, not decoration: the forcing file makes
-#    `sea_surface_temperature` a `jcm.forcing.TimeSeries`, and an exchanger
-#    overwriting it with a plain array would change the carry's pytree
-#    structure, which `lax.scan` refuses. The runner still logs a warning
-#    that the exchanger is hand-written while `sice_am`, `snowc_am`,
-#    `soilw_am` and `stl_am` stay time-varying: that is a generic reminder,
-#    and is correct here because this exchanger writes none of those four
-#    with no land or sea-ice component (it would write `soilw_am` with a
-#    land component, which would then have to be declared too).
+#    `sea_surface_temperature` and `sice_am` `jcm.forcing.TimeSeries`, and an
+#    exchanger overwriting one with a plain array would change the carry's
+#    pytree structure, which `lax.scan` refuses; `sea_ice_temperature` is None
+#    in the file's forcing and the atmosphere seeds it, so the declaration can
+#    hold a value the ice then overwrites each step. The runner logs two
+#    warnings that follow from the hand declaration: that `sea_ice_temperature`
+#    is not time-varying in the atmosphere's forcing, and that `snowc_am`,
+#    `soilw_am` and `stl_am` stay time-varying. Both are generic reminders and
+#    correct here: the exchanger writes none of those three with no land
+#    component (it would write `soilw_am` with one, which would then have to
+#    be declared too).
 #  - A Veros configuration runs the whole model, atmosphere included, in
 #    double precision, from the start: `ocean=veros` selects
 #    `jax_enable_x64=true`, which the runner applies before building any
@@ -115,12 +174,11 @@
 #    mode when it is first imported, which would otherwise happen after the
 #    atmosphere was built in float32 and leave it a mix of the two).
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: from_file
   - override /forcing@atmosphere.forcing: from_file
   - override /ocean: veros
-  - override /seaice: none
+  - override /seaice: winton
   - override /land: none
   - override /regrid: esmf
 
@@ -129,10 +187,9 @@ atmosphere:
     file: ${jem_data:terrain_veros_earth_T31.nc}
   forcing:
     file: ${jcm_data:bc/t30/clim/forcing.nc}
-  run:
-    time_step: 30
 
 ocean:
+  clamp_at_freezing: true
   setup: jem.components.veros.setups.earth.earth_setup
   scrip_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
   landsea_mask_file: ${jem_data:landsea_mask_fraction_RotatedGaussianLatLon.nc}
@@ -166,8 +223,12 @@ regrid:
   o2a_conserve: ${jem_data:weight_algo-conserve_RotatedGaussianLatLon_to_JCM_T31.nc}
   o2a_bilinear: ${jem_data:weight_algo-bilinear_RotatedGaussianLatLon_to_JCM_T31.nc}
 
+seaice:
+  grid_file: ${ocean.scrip_grid_file}
+  land_fraction_file: ${jem_data:landsea_mask_binary_RotatedGaussianLatLon.nc}
+
 coupling:
   exchanger:
     _target_: jem.fluxes.VerosExchange
     rotation_grid_file: ${jem_data:RotatedGaussianLatLon.SCRIP.nc}
-  exchanged_forcing: [sea_surface_temperature]
+  exchanged_forcing: [sea_surface_temperature, sice_am, sea_ice_temperature]
