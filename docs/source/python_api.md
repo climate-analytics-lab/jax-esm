@@ -67,16 +67,19 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   touching it — no methods are attached to the model. The coupler calls its
   `bind()` when it is registered, which is where the model's start date and
   timestep are checked against the coupler's.
-- **The atmosphere's own timestep.** `Model(...)` above passes no
-  `time_step`, so it picks the active physics' *stable* step — 30 minutes for
-  SPEEDY at T31L8 — rather than any particular jax-gcm configuration's own
-  choice. `python -m jem.main`'s atmosphere instead reads `atmosphere.run.time_step`
-  from its composed config (12 minutes by jax-gcm's own `run/default.yaml`
-  default), so a script that means to match a specific `+configuration=<name>`
-  bit for bit — not just build *an* aquaplanet — should pass that recipe's own
-  `time_step` explicitly, in minutes, rather than rely on this page's
-  no-configuration default; see `jem.configurations` below for loading the
-  recipe itself instead of reproducing it by hand.
+- **The atmosphere's own timestep and parameters.** `Model(...)` above passes
+  no `time_step`, so it picks the active physics' *stable* step — 30 minutes
+  for SPEEDY at T31L8 — and `speedy_physics()` runs SPEEDY's *reference*
+  parameter values. The named SPEEDY configurations (`aquaplanet-slab`,
+  `aquaplanet-slab-mixed-grid`, `earth-slab`, `earth-slab-winton`) run the same
+  30-minute step but jax-gcm's parameters calibrated for coupled use, taken
+  whole from its `speedy-t31` configuration bundle; so does
+  `python -m jem.main +configuration@atmosphere=speedy-t31`. A bare
+  `python -m jem.main` composition runs the reference values, at jax-gcm's
+  default run step (12 minutes). A script that means to reproduce a
+  `+configuration=<name>` — not just build *an* aquaplanet — should therefore
+  load the recipe itself (`jem.configurations.load`, below) rather than
+  rebuild it by hand.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
@@ -384,7 +387,7 @@ atm.set_exchanged_forcing(["sea_surface_temperature", "sice_am", "sea_ice_temper
 
 `VerosExchange.validate(coupler.initialize().components)` refuses the pairings
 that would be wrong (a Winton ice over a non-clamping ocean, a clamping ocean
-with no ice or an SST-diagnosed one). `+configuration=veros-earth-winton` is the
+with no ice or an SST-diagnosed one). `+configuration=veros-earth` is the
 validated composition; its limits are in {doc}`issues`.
 
 ## Surface constants
@@ -486,8 +489,8 @@ The construction above builds a coupled model by hand -- the thing to do
 when writing a new experiment. To instead run one of the *validated*
 configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
 `aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
-`earth-slab-winton`, `veros-double-drake`, `veros-earth` and
-`veros-earth-winton`, the same eight
+`earth-slab-echam`, `earth-slab-winton`, `veros-double-drake` and
+`veros-earth`, the same eight
 `configurations.available()` returns, each with its command in
 {doc}`examples` -- without composing Hydra,
 `jem.configurations` is the recipe door onto them (issue #131):
@@ -528,6 +531,22 @@ The docstring is rendered in the API reference ({doc}`api_superset`); in short,
 the door builds the same coupler and the same run settings as the command
 line, and differs only in where the run writes by default and in leaving the
 logger alone.
+
+The six SPEEDY configurations (all but the two `-echam`) run jax-gcm's
+coupled-calibrated SPEEDY,
+so `load("aquaplanet-slab")` is not the same atmosphere as a hand-built
+`jcm.model.Model(...)`, which runs the reference values. The calibrated set is
+jax-gcm's `speedy-t31` bundle at a 30-minute step (jax-gcm's
+`docs/source/design/speedy_retune.md`): 29 values fitted at T31 against
+observations (CERES, GPCP, ERA5 and others) with *prescribed* SSTs, so that the
+top-of-atmosphere budget and the surface fluxes handed to an ocean are
+credible. A coupled run, whose SST responds, is not guaranteed drift-free. The
+bundle alone is `+configuration@atmosphere=speedy-t31` on the command line.
+Another jax-gcm bundle can replace it with
+`load("aquaplanet-slab", **{"configuration@atmosphere": "<bundle>"})`
+(`configuration@atmosphere=<bundle>` on the command line); the bundle's
+physics, grid and step come with it, but the files tied to the old grid and the
+surface components' constraints on the physics do not follow.
 
 A notebook that *runs* a validated configuration to demonstrate something
 else -- perturbing an initial condition, differentiating through a

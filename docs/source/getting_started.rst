@@ -96,13 +96,20 @@ package spelled out.
      - ``+configuration=earth-slab``
    * - Compose a whole jax-gcm bundle as the atmosphere
      - ``+configuration@atmosphere=speedy-t31``
+   * - Swap the atmosphere of a named SPEEDY slab configuration for another
+       jax-gcm bundle
+     - ``+configuration=earth-slab configuration@atmosphere=<bundle>``; see
+       below for what else has to change
    * - Change one atmosphere group
      - ``diffusion@atmosphere.diffusion=strong``
    * - Use ECHAM physics
-     - ``+configuration=aquaplanet-slab-echam``. ECHAM is more than one
-       override: it needs one of its own grids and, below T63, the
-       prescribed-moisture land (its default land model has no surface
-       dataset at T42), which that configuration sets and explains.
+     - ``+configuration=aquaplanet-slab-echam`` or
+       ``+configuration=earth-slab-echam``: jax-gcm's ``t63-echam-1m``
+       atmosphere, composed whole, over the slab ocean. Any other jax-gcm
+       configuration bundle is one more override,
+       ``configuration@atmosphere=t63-echam-2m``. ECHAM is more than a
+       ``physics`` override -- it needs its own grid, initial state, step and
+       sponge -- which is why the bundle is taken as a unit.
    * - Set one atmosphere key
      - ``atmosphere.run.time_step=15`` (minutes; it has to divide the
        coupling timestep)
@@ -115,10 +122,10 @@ package spelled out.
    * - Evolve the soil water (the bucket land)
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Use the thermodynamic Winton sea ice
-     - ``+configuration=earth-slab-winton`` (or ``veros-earth-winton``), or
+     - ``+configuration=earth-slab-winton`` (or ``veros-earth``), or
        ``seaice=winton +ocean.params.clamp_at_freezing=true`` in another slab
        composition; a Veros ocean's clamp is ``+ocean.clamp_at_freezing=true``
-       and its ice has to be on the ocean's grid, which ``veros-earth-winton``
+       and its ice has to be on the ocean's grid, which ``veros-earth``
        does
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
@@ -142,6 +149,33 @@ Several things worth knowing:
   'physics'. Did you mean to override physics@atmosphere.physics?``). The
   atmosphere's groups always carry their package:
   ``<group>@atmosphere.<group>=<option>``.
+- **The named SPEEDY configurations run jax-gcm's coupled-calibrated
+  SPEEDY.** ``aquaplanet-slab``, ``aquaplanet-slab-mixed-grid``, ``earth-slab``
+  and ``earth-slab-winton`` take their atmosphere whole from jax-gcm's
+  ``speedy-t31`` configuration bundle: SPEEDY at T31L8 with 29 parameters
+  calibrated for coupled use, at the 30-minute atmosphere step the calibration
+  was made at (jax-gcm's ``docs/source/design/speedy_retune.md``). That
+  calibration was a fit at T31 against observations (CERES, GPCP, ERA5 and
+  others) with *prescribed* SSTs, so that the top-of-atmosphere budget and the
+  surface fluxes handed to an ocean are credible; a coupled run, whose SST
+  responds, is therefore not guaranteed drift-free. The bare
+  ``python -m jem.main`` composition (``physics@atmosphere.physics=speedy`` at
+  jax-gcm's default run step) and a Python-built ``jcm.model.Model()`` run
+  SPEEDY's *reference* values instead. The calibrated atmosphere alone is
+  ``+configuration@atmosphere=speedy-t31``, and from Python
+  ``jem.configurations.load("<name>")``. The values live once, in jax-gcm; a
+  JEM configuration file does not restate them.
+- **Swapping the atmosphere of a named configuration** for another jax-gcm
+  bundle is ``configuration@atmosphere=<bundle>`` (the configuration lists the
+  bundle first in its defaults, which is what makes it overridable by name).
+  The bundle's physics, grid and step arrive with it, and the configuration's
+  own overrides (terrain, forcing, ocean, sea ice, land) still apply on top.
+  What does not follow automatically: files tied to the old grid (the Earth
+  configurations' T30 terrain and climatology are on the T31 grid, and the
+  mixed-grid configuration's regridding weights are for T31), the surface
+  components' constraints on the physics (the Winton ice and the bucket land
+  need SPEEDY's flux tiles), and the parameter fit, which belongs to SPEEDY at
+  T31.
 - **The atmosphere has to have a surface.** A physics package is coupled
   through the surface fluxes it publishes: SPEEDY, the default, and ECHAM do,
   while ``physics@atmosphere.physics=held_suarez`` resolves none and is

@@ -9,8 +9,8 @@ Veros ocean
 -----------
 
 **The sea ice under a Veros ocean is a demonstration, with limits.**
-    A Winton sea ice can be coupled to Veros (``+configuration=veros-earth-winton``;
-    ``jem.fluxes.VerosExchange``, ``VerosComponent(clamp_at_freezing=True)``;
+    A Winton sea ice is coupled to Veros in ``+configuration=veros-earth``
+    (``jem.fluxes.VerosExchange``, ``VerosComponent(clamp_at_freezing=True)``;
     jax-esm#160). Consequences, each enforced or documented where named:
 
     - the clamp holds the **top cell only** at the freezing point; sub-freezing
@@ -27,17 +27,16 @@ Veros ocean
       exactly only with the energy in transit counted
       (``tests/unit/test_veros_seaice.py``);
     - the ice's grid must be the ocean's and its sea exactly Veros' wet mask
-      (``VerosExchange.check_ice_mask``); ``veros-earth-winton`` uses the binary
+      (``VerosExchange.check_ice_mask``); ``veros-earth`` uses the binary
       mask of ``jem.tools.veros_earth_ice_mask``, which duplicates the
       thresholding the ocean setup does;
     - the ice starts from nothing over the observed annual-mean ocean and has
-      been run for 90 days (it grows to 6.5% of the northern ocean, with a
+      been run for 90 days (it grows to 7.6% of the northern ocean, with a
       closed energy budget); the **equilibrated seasonal cycle of the ice has
       not been validated**, which needs years of integration;
-    - ``veros-double-drake`` and ``veros-earth`` themselves still set
-      ``seaice=none`` (no ice, the swamp mask), and a Winton ice composed without
-      the ocean's clamp, or an SST-diagnosed ice over a clamping ocean, is refused
-      when the coupling is built.
+    - ``veros-double-drake`` sets ``seaice=none`` (no ice, the swamp mask), and
+      a Winton ice composed without the ocean's clamp, or an SST-diagnosed ice
+      over a clamping ocean, is refused when the coupling is built.
 
 **``veros-earth`` is a prototype ocean.**
     Its setup reads a binary land-sea mask and a packaged ETOPO 2022 bathymetry
@@ -45,7 +44,7 @@ Veros ocean
     real but at the grid's resolution of about 3.75 degrees, with a 120 m
     minimum depth. It starts from the World Ocean Atlas 2018 annual-mean
     temperature and salinity (see :doc:`experimental`) with the currents at
-    rest, and has no sea ice. Consequence: the starting state is a
+    rest, with the Winton sea ice growing from nothing. Consequence: the starting state is a
     climatological mean that this model has not been spun up to, so a short run
     is the atmosphere's fluxes and the model's own adjustment acting on it, not
     an equilibrated climate. ``jem.components.veros.setups.global_latlon``
@@ -95,15 +94,27 @@ Surface components and the atmosphere
 -------------------------------------
 
 **The Winton sea ice and the bucket land need SPEEDY physics.**
-    ``default_exchangers`` raises for the Winton ice under an atmosphere that
-    publishes no sea flux tile and for the bucket land under one that
-    publishes no land tile; ECHAM delivers its fluxes untiled and integrates
-    its own sea ice (``jem.exchangers._check_winton_coupling`` and
-    ``_check_land_is_forced_by_a_land_tile``). Consequence: of the slab
+    ``default_exchangers`` and ``VerosExchange`` raise for the Winton ice
+    under an atmosphere that publishes no sea flux tile and for the bucket
+    land under one that publishes no land tile; ECHAM delivers its fluxes
+    untiled and integrates its own sea ice
+    (``jem.exchangers.check_winton_coupling`` and ``check_land_coupling``).
+    Consequence: of the slab
     components, only the ocean and the SST-diagnosed slab ice can be coupled
     to ECHAM, and the ocean's heat flux there is the grid-cell mean, so a
     coastal ocean cell also receives the land part's flux
     (:doc:`design/exchange`).
+
+**The calibrated SPEEDY of the named configurations was fitted with prescribed SSTs.**
+    The six SPEEDY configurations (all but the two ``-echam``) run jax-gcm's
+    coupled-calibrated SPEEDY parameters
+    (its ``speedy-t31`` bundle, at the 30-minute step). That fit was made at T31
+    against observations with the SST prescribed, not coupled, so a run in which
+    the SST responds is not guaranteed to stay at the observed climate: the
+    top-of-atmosphere imbalance and the surface fluxes it hands the ocean are
+    credible, not drift-free (jax-gcm's ``docs/source/design/speedy_retune.md``
+    records the biases that remain). The fit belongs to SPEEDY at T31 and does
+    not carry to another grid, such as the T106 command in :doc:`examples`.
 
 **A coupling timestep is a whole number of seconds.**
     The coupler's clock is a ``jax_datetime`` one, which counts whole

@@ -143,9 +143,9 @@ def test_none_option_composes_to_none(group):
 def test_named_configuration_composes(name):
     """Every named coupled configuration composes, and sets something."""
     cfg = composed([f"+configuration={name}"])
-    # SPEEDY's T31 everywhere but the ECHAM aquaplanet, whose physics has no
-    # grid below T42.
-    expected_truncation = 42 if name == "aquaplanet-slab-echam" else 31
+    # SPEEDY's T31 everywhere but the ECHAM configurations, which run
+    # jax-gcm's T63 `t63-echam-1m` atmosphere.
+    expected_truncation = 63 if name.endswith("-echam") else 31
     assert cfg.atmosphere.grid.spectral_truncation == expected_truncation
     # A configuration that composed but selected nothing would pass every
     # other check in this file; the ocean is the one component every one of
@@ -368,8 +368,15 @@ def test_config_has_no_python_defaults(overrides):
     default *and* is what the named option is about.
     """
     cfg = composed(overrides)
-    # The atmosphere is JAX-GCM's own config, tested in JAX-GCM.
-    coupled = {key: cfg[key] for key in cfg if key != "atmosphere"}
+    # The atmosphere is JAX-GCM's own config, tested in JAX-GCM. Each other
+    # node is resolved while the atmosphere is still beside it: a surface
+    # component may name one of the atmosphere's files by interpolation
+    # (`sst_clim_file: ${atmosphere.forcing.file}`).
+    coupled = {
+        key: OmegaConf.to_container(cfg[key], resolve=True)
+        if OmegaConf.is_config(cfg[key]) else cfg[key]
+        for key in cfg if key != "atmosphere"
+    }
     nodes = 0
     for path, node in _target_nodes(OmegaConf.create(coupled)):
         try:
@@ -416,19 +423,20 @@ def test_named_configurations_set_non_default_values():
     "name",
     ["aquaplanet-slab", "aquaplanet-slab-mixed-grid", "earth-slab", "earth-slab-winton"],
 )
-def test_slab_configurations_state_the_atmosphere_timestep(name):
-    """A slab configuration names the atmosphere's step instead of inheriting it.
+def test_slab_configurations_take_the_atmosphere_step_from_the_bundle(name):
+    """A slab configuration's step is the one jax-gcm's calibration was made at.
 
-    The step comes from jax-gcm's ``run/default.yaml`` otherwise, which would
-    move every configuration the day that default moves. A key that is present
-    in the composed config is not enough -- the group supplies one -- so the
-    configuration file itself is checked. ``earth-slab-winton`` is
-    ``earth-slab`` with the ice swapped and states nothing of its own.
+    The configuration states no step of its own: it composes the ``speedy-t31``
+    bundle, whose ``run.time_step`` is the step its parameters were fitted at,
+    and the value is read off that file rather than restated here.
+    ``tests/unit/test_slab_calibrated_atmosphere.py`` checks the rest of what
+    the bundle brings.
     """
+    bundle = OmegaConf.load(JCM_CONFIG_DIR / "configuration" / "speedy-t31.yaml")
     if name != "earth-slab-winton":
         raw = OmegaConf.load(CONFIG_DIR / "configuration" / f"{name}.yaml")
-        assert raw.atmosphere.run.time_step == 12
-    assert composed([f"+configuration={name}"]).atmosphere.run.time_step == 12
+        assert "run" not in raw.get("atmosphere", {})
+    assert composed([f"+configuration={name}"]).atmosphere.run.time_step == bundle.run.time_step
 
 
 # ---------------------------------------------------------------------------
@@ -544,36 +552,49 @@ def _veros_x64():
     jax.config.update("jax_enable_x64", before)
 
 
+#: The atmosphere forcing fields each Veros configuration's hand-written
+#: exchanger writes: the ocean's SST, and with `veros-earth`'s Winton ice the
+#: ice's fraction and skin temperature.
+EXCHANGED_FORCING = {
+    "veros-double-drake": ("sea_surface_temperature",),
+    "veros-earth": ("sea_surface_temperature", "sice_am", "sea_ice_temperature"),
+}
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("configuration", ["veros-double-drake", "veros-earth"])
 def test_veros_configurations_declare_the_atmosphere_field_their_exchanger_writes(
     configuration, caplog, _veros_x64
 ):
-    """``coupling.exchanged_forcing`` is set, and does nothing under the default.
+    """``coupling.exchanged_forcing`` names what the hand-written exchanger writes.
 
     Both shipped Veros configurations use the hand-written
     ``jem.fluxes.VerosExchange`` (``coupling.exchanger``), which
     ``declare_exchanged_forcing`` cannot read a field set off of the way it
     reads ``jem.exchangers.Exchange``'s table -- so, unlike every other
     shipped configuration, they have to declare ``coupling.exchanged_forcing``
-    by hand. `VerosExchange` writes exactly one atmosphere-facing field,
-    ``sea_surface_temperature`` (see `jem.fluxes.VerosExchange.__call__`; its
-    other writes are onto the *ocean's* own forcing).
+    by hand. `VerosExchange` writes the ocean's ``sea_surface_temperature``
+    into the atmosphere and, with a Winton ice composed (``veros-earth``), the
+    ice's ``sice_am`` and ``sea_ice_temperature`` (see
+    `jem.fluxes.VerosExchange.__call__`; its other writes are onto the
+    *ocean's* own forcing).
 
-    With the default `forcing@atmosphere.forcing` (`ForcingData.zeros()`,
-    already all plain arrays) the declaration has nothing to collapse, so
-    this also checks that declaring a field the default forcing never makes
-    time-varying does not trip the "declared but not time-varying" warning
-    (`declare_exchanged_forcing`'s `if pinned and atm.time_varying_forcing`
-    guard, which only fires when *something* is still a `TimeSeries`) --
-    that would otherwise fire on every shipped Veros run.
+    ``sea_ice_temperature`` is not a time series in the forcing file (the
+    atmosphere seeds it), so the runner warns that declaring it is only
+    meaningful if something writes it -- here the ice does. That warning is
+    expected for ``veros-earth`` about that one field and for nothing else, and
+    never for ``veros-double-drake``, whose one field is time-varying.
     """
     import jem.runners as runners
 
     with caplog.at_level("WARNING", logger="jem.runners"):
         coupler = runners.build_coupler(composed([f"+configuration={configuration}"]))
-    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
-    assert "not time-varying" not in caplog.text
+    assert coupler.components["atm"].exchanged_forcing == EXCHANGED_FORCING[configuration]
+    warned = [r.getMessage() for r in caplog.records if "not time-varying" in r.getMessage()]
+    if configuration == "veros-earth":
+        assert len(warned) == 1 and "names sea_ice_temperature," in warned[0]
+    else:
+        assert not warned
 
 
 @pytest.mark.slow
@@ -597,14 +618,23 @@ def test_veros_earth_has_an_observed_land_climatology_and_double_drake_an_ideali
     forcing = earth.initialize().components["atm"]["forcing"]
     assert float(forcing.alb0.max()) > 0.4
     assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
-    assert atm.exchanged_forcing == ("sea_surface_temperature",)
+    assert atm.exchanged_forcing == EXCHANGED_FORCING["veros-earth"]
 
     drake = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
     atm = drake.components["atm"]
     forcing = drake.initialize().components["atm"]["forcing"]
-    # A lit land (not ForcingData.zeros' black one), uniform, with no ice sheet.
-    assert float(forcing.alb0.min()) == pytest.approx(0.2)
-    assert float(forcing.alb0.max()) == pytest.approx(0.2)
+    # A lit land (not ForcingData.zeros' black one): the generator's ice-free
+    # albedo everywhere except the polar ice cap, which has its ice sheet's.
+    import inspect
+
+    from jem.tools.idealised_terrain import idealised_forcing
+
+    defaults = {
+        name: parameter.default
+        for name, parameter in inspect.signature(idealised_forcing).parameters.items()
+    }
+    assert float(forcing.alb0.min()) == pytest.approx(defaults["bare_land_albedo"])
+    assert float(forcing.alb0.max()) == pytest.approx(defaults["ice_cap_albedo"])
     assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
     assert atm.exchanged_forcing == ("sea_surface_temperature",)
 
@@ -640,7 +670,7 @@ def test_veros_configurations_couple_a_responding_land_surface(configuration, _v
         "forcing@atmosphere.forcing=from_file",
         "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
     ]))
-    assert coupler.components["atm"].exchanged_forcing == ("sea_surface_temperature",)
+    assert coupler.components["atm"].exchanged_forcing == EXCHANGED_FORCING[configuration]
     carry = coupler.initialize()
     # Raises (a `RuntimeError` from `lax.scan`, naming the workflow element)
     # if the carry's structure changes across the step; a clean trace is the

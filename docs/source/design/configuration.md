@@ -29,6 +29,65 @@ JAX-ESM's own groups (`ocean`, `land`, `seaice`, `coupling`, `regrid`,
 `coupled_run`) sit at the top level, and `configuration` composes a named
 coupled model out of all of them.
 
+**A named configuration composes a jax-gcm atmosphere whole.** Every file in
+`jem/config/configuration/` lists a jax-gcm configuration bundle *first* in
+its defaults -- `/configuration@atmosphere: speedy-t31` for the six SPEEDY
+configurations, `/configuration@atmosphere: t63-echam-1m` for
+`aquaplanet-slab-echam` and `earth-slab-echam` -- so the atmosphere a coupled
+run integrates is one jax-gcm validates, not a restatement of it, and
+`configuration@atmosphere=<another bundle>` on the command line swaps it.
+(A bare `physics@atmosphere.physics=<option>` override on a named
+configuration does not: the bundle's parameter values for its own physics
+terms would be merged into the other package's term list, and jax-gcm
+refuses the result.)
+
+**The SPEEDY configurations compose jax-gcm's calibrated atmosphere.**
+`aquaplanet-slab`, `aquaplanet-slab-mixed-grid`, `earth-slab`, (through
+`earth-slab`) `earth-slab-winton`, `veros-earth` and `veros-double-drake`
+list jax-gcm's `speedy-t31` configuration
+bundle *first* in their defaults, `/configuration@atmosphere: speedy-t31`, and
+their own overrides (`override /terrain@atmosphere.terrain: ...`, the ocean,
+the sea ice, the land) after it. Hydra refuses the other order, since an
+override acts on a group the list has already selected. The bundle brings
+SPEEDY at T31L8, the calibrated `physics.terms.*` values and `run.time_step: 30`,
+and none of it is restated in JEM's YAML: the parameters live once, in
+jax-gcm, and `tests/unit/test_slab_calibrated_atmosphere.py` and
+`tests/unit/test_veros_configurations.py` read them from the bundle file
+rather than from a copy.
+
+What the calibration is (jax-gcm's `docs/source/design/speedy_retune.md`): 29
+SPEEDY values, fitted at T31 against CERES, GPCP, ERA5 and other observations
+with prescribed SSTs, at the 30-minute step, so that the top-of-atmosphere
+budget and the surface fluxes handed to an ocean are credible. That is why the
+step is 30 minutes and not stated per configuration: it is the step the fit was
+made at. A coupled run, whose SST responds, is not guaranteed drift-free. The
+bare `python -m jem.main` composition (`config.yaml` mirrors jax-gcm's own
+default list) and a Python-built `jcm.model.Model()` run SPEEDY's reference
+values (`speedy_physics()` "keeps SPEEDY's reference values; only the
+`speedy-t31` configuration carries the fit"). The calibrated atmosphere alone
+is `+configuration@atmosphere=speedy-t31`; from Python it is
+`jem.configurations.load("<name>")`.
+
+The bundle also names its own boundary-condition files
+(`terrain.file: hf://bundles/t63/terrain.nc` with `terrain.interpolate: true`,
+`forcing.file: hf://bundles/t63/forcing_pd.nc` with `forcing.align: wrap_year`),
+so each configuration says what it uses instead. The aquaplanets read no file:
+their terrain and forcing groups are `aquaplanet` and `default`, the two `file`
+keys the bundle leaves behind are set to null, and `interpolate`/`align` are
+read only together with a file. `earth-slab` points both at jax-gcm's packaged
+T30 climatology (`${jcm_data:...}`), which is on the T31 grid itself and so
+needs no network; `interpolate` is then a no-op and `align: wrap_year` is the
+twelve-month replay a climatology is.
+
+Another jax-gcm bundle replaces the atmosphere with
+`configuration@atmosphere=<bundle>` (the entry is an ordinary default, so it is
+overridable by name). Everything the bundle selects comes with it, and the
+configuration's own overrides still apply on top; what does not follow is a
+file tied to the old grid (the T30 climatology, the mixed-grid ESMF weights),
+a surface component the new physics cannot couple (the Winton ice and the
+bucket land need SPEEDY's flux tiles), and the fit itself, which belongs to
+SPEEDY at T31.
+
 **The group-name collision, and why the run group is `coupled_run`.** Hydra
 resolves a group option from the first search-path entry that has it, and the
 primary config package precedes `pkg://jcm.config`. A group called `run` here

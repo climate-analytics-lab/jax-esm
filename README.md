@@ -122,9 +122,10 @@ python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 ```
 
 It is not the identical run. `aquaplanet-slab` adds an SST-diagnosed slab sea
-ice, steps the atmosphere at 12 minutes (the `Model(...)` above, given no
-`time_step`, takes SPEEDY T31L8's stable 30 minutes), and `short_run`
-integrates 2 days where the script above integrates 10. To reproduce the
+ice, runs SPEEDY with jax-gcm's coupled-calibrated parameters (the `Model(...)`
+above runs SPEEDY's reference values; see the note under the named
+configurations below), and `short_run` integrates 2 days where the script above
+integrates 10. Both step the atmosphere at 30 minutes. To reproduce the
 configuration from Python, load it with `jem.configurations`
 ([`docs/source/python_api.md`](docs/source/python_api.md)).
 
@@ -153,9 +154,25 @@ protocol):
 Named configurations (`python -m jem.main +configuration=<name>`, or
 `jem.configurations.load("<name>")` from Python): `aquaplanet-slab`,
 `aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
-`earth-slab-winton`, `veros-double-drake`, `veros-earth` and
-`veros-earth-winton`. [Examples](docs/source/examples.rst)
+`earth-slab-echam`, `earth-slab-winton`, `veros-double-drake` and
+`veros-earth`.
+[Examples](docs/source/examples.rst)
 tabulates what each couples and its command.
+
+Every named configuration takes its atmosphere whole from a jax-gcm
+configuration bundle. The six SPEEDY ones (all but the two `-echam`) run
+jax-gcm's parameters for SPEEDY calibrated for coupled use, at the 30-minute
+atmosphere step they were calibrated at, from its `speedy-t31` bundle
+(jax-gcm's `docs/source/design/speedy_retune.md`); the two ECHAM ones run its
+`t63-echam-1m` bundle, and `configuration@atmosphere=<bundle>` swaps in
+another. The
+calibration was a fit of 29 values at T31 against observations (CERES, GPCP,
+ERA5 and others) with *prescribed* SSTs, so that the top-of-atmosphere budget
+and the surface fluxes handed to an ocean are credible; a coupled run is
+therefore not guaranteed drift-free. A bare `python -m jem.main` composition
+and a Python-built `jcm.model.Model()` run SPEEDY's reference values instead.
+The calibrated atmosphere alone is `+configuration@atmosphere=speedy-t31`, and
+from Python `jem.configurations.load("<name>")`.
 
 Also:
 

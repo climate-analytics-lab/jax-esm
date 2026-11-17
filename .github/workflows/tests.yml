@@ -159,9 +159,15 @@ jobs:
     # Notebooks and configuration smoke runs execute whole coupled models, so
     # they are far too slow for every push; a pull request is the point at
     # which it is worth knowing whether the examples still run. This job also
-    # already installs everything the 23 @pytest.mark.slow tests under
+    # already installs everything the @pytest.mark.slow tests under
     # tests/unit need (the [plot] extra, veros-jittable, jupyter), so it runs
     # those too rather than leaving them uncovered by any job.
+    #
+    # The ECHAM slab configurations are integrated exactly once in this job:
+    # the slow test in tests/unit/test_echam_configuration.py, on jax-gcm's
+    # smallest ECHAM grid. The configuration smoke runs skip them (a T63 L47
+    # atmosphere, minutes per simulated day here, reading jax-gcm's data
+    # mirror), so the same compile is not paid twice.
     if: github.event_name == 'pull_request'
     timeout-minutes: 180
     runs-on: ubuntu-latest

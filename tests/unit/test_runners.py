@@ -363,6 +363,43 @@ def test_a_missing_required_input_names_its_full_key_and_the_override(
     assert hint in message
 
 
+def test_a_component_is_handed_the_local_copy_of_a_mirror_file(monkeypatch):
+    """An ``hf://`` value reaches the constructor as the fetched file's path.
+
+    jax-gcm's configuration bundles name their forcing on its data mirror, and
+    a surface component that reads the same file is handed that name by
+    interpolation (``sst_clim_file: ${atmosphere.forcing.file}``). xarray
+    cannot open the scheme, so the runner fetches through jax-gcm's own
+    ``fetch`` -- at any depth of the node, and leaving every other value alone.
+    """
+    import jcm.data.remote
+
+    fetched = []
+
+    def fake_fetch(relative_path):
+        fetched.append(relative_path)
+        return f"/cache/{relative_path}"
+
+    monkeypatch.setattr(jcm.data.remote, "fetch", fake_fetch)
+    node = OmegaConf.create(
+        {
+            "_target_": "builtins.dict",
+            "sst_clim_file": "hf://bundles/t63/forcing_pd.nc",
+            "local_file": "/somewhere/forcing.nc",
+            "nested": {"files": ["hf://bundles/t63/terrain.nc", "plain.nc"]},
+        }
+    )
+    built = runners.build_component(node, key="ocean")
+    assert built == {
+        "sst_clim_file": "/cache/bundles/t63/forcing_pd.nc",
+        "local_file": "/somewhere/forcing.nc",
+        "nested": {"files": ["/cache/bundles/t63/terrain.nc", "plain.nc"]},
+    }
+    assert fetched == ["bundles/t63/forcing_pd.nc", "bundles/t63/terrain.nc"]
+    # The composed config a caller may still be reading keeps what it was given.
+    assert node.sst_clim_file == "hf://bundles/t63/forcing_pd.nc"
+
+
 def test_a_missing_input_is_named_by_the_coupler_build_too():
     """`build_coupler` passes each group's key, so the CLI error is the full key."""
     from omegaconf.errors import MissingMandatoryValue

@@ -432,8 +432,10 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
     ),
     IntegrationPoint(
         "jcm.data.remote", "fetch", "public",
-        "Resolve an hf:// data-mirror path given as atmosphere.init.file to"
-        " a local file, as jax-gcm's own CLI does.",
+        "Resolve an hf:// data-mirror path to a local file, as jax-gcm's own"
+        " CLI does: atmosphere.init.file, and any file a surface component"
+        " is handed by that name (a slab ocean's sst_clim_file set to"
+        " ${atmosphere.forcing.file}).",
     ),
     IntegrationPoint(
         "jcm.forcing.ForcingData", "sea_surface_temperature", "public",

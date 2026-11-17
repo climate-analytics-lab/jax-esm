@@ -26,28 +26,34 @@ drift the door exists to prevent.
 
 | Example | How to run it |
 | --- | --- |
-| Aquaplanet (`01_basic/01_aquaplanet.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice); equivalent to `python -m jem.main +configuration=aquaplanet-slab` |
+| Aquaplanet (`01_basic/01_aquaplanet.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice) with SPEEDY's reference parameters; the same coupled structure as `python -m jem.main +configuration=aquaplanet-slab`, which runs jax-gcm's calibrated SPEEDY |
 | Custom initial SST (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: `configurations.load("aquaplanet-slab")`, then one field of the initial carry is replaced before the run |
 | Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
-| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction of an all-ocean aquaplanet with the ocean and sea ice on a displaced-pole grid, with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
+| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction of an all-ocean aquaplanet with the ocean and sea ice on a displaced-pole grid, with ESMF regridding, at SPEEDY's reference parameters; the same coupled structure as `python -m jem.main +configuration=aquaplanet-slab-mixed-grid`, which runs jax-gcm's calibrated SPEEDY |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
-| Aquaplanet with ECHAM physics | `python -m jem.main +configuration=aquaplanet-slab-echam` (ECHAM on T42 with eight sigma layers over the slab ocean; about eight minutes for two days on a CPU, mostly compilation) |
-| Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab` with the thermodynamic Winton ice and a freezing-clamped ocean) |
+| Aquaplanet with ECHAM physics | `python -m jem.main +configuration=aquaplanet-slab-echam` (jax-gcm's `t63-echam-1m` atmosphere, T63 with 47 levels, over the free slab ocean; about half an hour per simulated day on 16 CPU threads, and the first run fetches jax-gcm's data mirror) |
+| Earth-like with ECHAM physics | `python -m jem.main +configuration=earth-slab-echam` (jax-gcm's `t63-echam-1m` configuration unchanged, over a slab ocean relaxed to its forcing file's SST; append `configuration@atmosphere=t63-echam-2m` for another jax-gcm atmosphere) |
+| Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab`, so calibrated SPEEDY at the 30-minute step, with the thermodynamic Winton ice and a freezing-clamped ocean) |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |
-| Earth with a Veros ocean | `python -m jem.main +configuration=veros-earth` |
-| Earth with a Veros ocean and the Winton sea ice | `python -m jem.main +configuration=veros-earth-winton` (`veros-earth` with the thermodynamic Winton ice on the ocean's grid and a freezing-clamped ocean) |
+| Earth with a Veros ocean and the Winton sea ice | `python -m jem.main +configuration=veros-earth` (the thermodynamic Winton ice on the ocean's grid, a freezing-clamped ocean, and SPEEDY's coupled-calibrated parameters) |
 | Coupled springs (`03_non_geoscience/01_SpringSystem.ipynb`) | notebook: the coupler with no climate in it at all |
 
 The `python -m jem.main` commands above remain exactly valid; the "How to run
 it" column says how each *notebook* gets to the same model, since none of
-them compose Hydra any more. "Equivalent to" for the two directly-built
-notebooks (01, 04) includes the atmosphere's physics timestep: both pass
-`time_step=12` (minutes) explicitly, matching `atmosphere.run.time_step` in
-the configuration they claim to reproduce -- without it, `jcm.model.Model`
-would instead pick SPEEDY T31L8's own stable step (30 minutes), a materially
-different model. `tests/unit/test_notebook_equivalence.py` checks the claim
-structurally, `dt` included.
+them compose Hydra any more. The two directly-built notebooks (01, 04) build
+the same coupled structure as their configuration, `dt` included: a plain
+`jcm.model.Model(...)` takes SPEEDY T31L8's stable 30-minute step, which is the
+step the configurations run at.
+`tests/unit/test_notebook_equivalence.py` checks that structurally. They do
+not build the same atmosphere parameters. The SPEEDY configurations (all but the two `-echam`) run jax-gcm's SPEEDY parameters calibrated for coupled use
+(its `speedy-t31` bundle; jax-gcm's `docs/source/design/speedy_retune.md`),
+while a Python-built `Model(...)` runs SPEEDY's reference values. The
+notebooks that load a configuration (02, 03, `02_experimental/01_earth`) run
+the calibrated set; 01 and 04 are teaching builds of the wiring and make no
+claim to a calibrated or realistic climate. The calibration was a fit at T31
+against observations with prescribed SSTs, so a coupled run is not guaranteed
+drift-free, and it does not carry to the T106 command above.
 
 jax-gcm ships T106 grid options only for ECHAM physics
 (`echam_t106_l47_hybrid`, `echam_t106_l95_hybrid`); it has no SPEEDY T106

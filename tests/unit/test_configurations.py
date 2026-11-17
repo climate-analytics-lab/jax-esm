@@ -45,7 +45,7 @@ class TestAvailable(unittest.TestCase):
         self.assertIn("SPEEDY", av["aquaplanet-slab"])
         self.assertIn("Earth", av["earth-slab"])
         self.assertIn("Winton", av["earth-slab-winton"])
-        self.assertIn("Winton", av["veros-earth-winton"])
+        self.assertIn("Winton", av["veros-earth"])
 
     def test_summaries_are_whole_sentences_in_name_order(self):
         av = configurations.available()

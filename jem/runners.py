@@ -337,13 +337,40 @@ def _missing_input_message(node: Any, key: str | None) -> str:
     )
 
 
+def _fetch_mirror_files(value: Any) -> Any:
+    """Replace every ``hf://`` path in a resolved config by a local file.
+
+    jax-gcm's configuration bundles name their boundary files on its data
+    mirror (``hf://bundles/t63/forcing_pd.nc``), and jax-gcm fetches them into
+    the local Hugging Face cache when it builds the atmosphere. A surface
+    component that reads the same file -- a slab ocean relaxing to the SST of
+    ``${atmosphere.forcing.file}`` -- is handed the name by interpolation, and
+    opens files with xarray, which does not know the scheme. Fetching here,
+    through jax-gcm's own :func:`jcm.data.remote.fetch`, hands the component
+    the very file the atmosphere reads, at the mirror revision the process is
+    pinned to.
+    """
+    if isinstance(value, dict):
+        return {key: _fetch_mirror_files(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fetch_mirror_files(item) for item in value]
+    if isinstance(value, str) and value.startswith("hf://"):
+        from jcm.data.remote import fetch
+
+        return fetch(value.removeprefix("hf://"))
+    return value
+
+
 def build_component(node: Any, *, key: str | None = None, **injected: Any) -> Any:
     """Instantiate one component (or None) from its config node.
 
     ``hydra.utils.instantiate`` on everything but the runner-only keys, with
     the objects this module made passed as keyword arguments. A ``None`` node
     -- what ``ocean=none`` composes to -- builds nothing, so a configuration
-    drops a component by selecting an option rather than by a flag here.
+    drops a component by selecting an option rather than by a flag here. A
+    value naming a file on jax-gcm's data mirror (``hf://...``) reaches the
+    constructor as the path of the fetched local file
+    (:func:`_fetch_mirror_files`).
 
     Parameters
     ----------
@@ -386,6 +413,7 @@ def build_component(node: Any, *, key: str | None = None, **injected: Any) -> An
         )
     for key in RUNNER_ONLY_KEYS:
         config.pop(key, None)
+    config = _fetch_mirror_files(config)
     # `_convert_="object"` for two reasons: a constructor is handed plain
     # Python values rather than OmegaConf containers, which behave differently
     # under JAX and numpy; and an *injected* object survives as itself. The
@@ -1214,7 +1242,11 @@ def _coupling_timestep(cfg: DictConfig) -> jdt.Timedelta:
 
 
 def _validate_exchangers(coupler: Coupler) -> None:
-    """Check every declarative exchange against the model's real carries.
+    """Check every exchange against the model's components and real carries.
+
+    An exchanger with a ``check_components`` method (a hand-written one whose
+    pairings the standard table's own checks never see, such as
+    :class:`jem.fluxes.VerosExchange`) is handed the component objects.
 
     :meth:`jem.exchangers.Exchange.validate` turns a mistyped component,
     section, field or regridder into an error naming the spec, before the
@@ -1241,6 +1273,12 @@ def _validate_exchangers(coupler: Coupler) -> None:
         name: exchanger for name, exchanger in coupler.exchangers.items()
         if name in coupler.workflow
     }
+    # The component objects first: a pairing an exchanger refuses outright
+    # (a Winton ice under an atmosphere with no sea flux tile) is reported
+    # before any initial carry is built for it.
+    for exchanger in active.values():
+        if hasattr(exchanger, "check_components"):
+            exchanger.check_components(coupler.components)
     checkable = [
         exchanger
         for exchanger in active.values()
