@@ -1518,6 +1518,35 @@ def test_a_winton_ice_under_an_atmosphere_with_no_sea_tile_is_refused():
         default_exchanges(_winton_components(atmosphere=_Untiled()))
 
 
+def test_the_veros_exchange_refuses_what_the_table_refuses():
+    """A hand-written exchange applies the table's rule to the same components.
+
+    `VerosExchange` is a function, so `default_exchanges` never sees its
+    components; the runner hands them to `check_components` instead, and a
+    Winton ice under an atmosphere with no sea flux tile is refused there as
+    it is by the table, while the tiled pairing is accepted.
+    """
+    from jem.fluxes import VerosExchange
+
+    class _Untiled(_TiledAtmosphere):
+        publishes_sea_tiles = False
+
+    exchange = VerosExchange()
+    exchange.check_components(_winton_components())
+    with pytest.raises(ValueError, match="no sea"):
+        exchange.check_components(_winton_components(atmosphere=_Untiled()))
+    with pytest.raises(ValueError, match="clamp_at_freezing"):
+        exchange.check_components(_winton_components(clamp_at_freezing=False))
+
+    class _NoLandTile(_TiledAtmosphere):
+        publishes_land_evaporation = False
+
+    with_land = dict(_winton_components(atmosphere=_NoLandTile()), lnd=object())
+    with pytest.raises(ValueError, match="no land flux tile"):
+        exchange.check_components(with_land)
+    exchange.check_components(dict(_winton_components(), lnd=object()))
+
+
 def test_a_winton_ice_over_a_veros_ocean_that_does_not_clamp_is_refused(monkeypatch):
     """Veros keeps its deficit unless it is built to clamp; the ice would freeze it twice.
 

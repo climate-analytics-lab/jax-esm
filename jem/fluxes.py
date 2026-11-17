@@ -79,6 +79,8 @@ from jem.exchangers import (
     VEROS_SLAB_SEAICE_EXCHANGES,
     VEROS_WINTON_SEAICE_EXCHANGES,
     Exchange,
+    check_land_coupling,
+    check_winton_coupling,
     regrid_weighted,
     table_specs,
 )
@@ -701,8 +703,31 @@ class VerosExchange:
                 "the packaged earth setup, seaice.grid_file="
                 "'${ocean.scrip_grid_file}' and seaice.land_fraction_file="
                 "'${jem_data:landsea_mask_binary_RotatedGaussianLatLon.nc}', "
-                "as +configuration=veros-earth-winton does."
+                "as +configuration=veros-earth does."
             )
+
+    def check_components(self, components: Mapping[str, Any]) -> None:
+        """Check the component objects, before any carry is built.
+
+        Called by :func:`jem.runners.build_coupler` with the coupled model's
+        components. What a carry cannot say is checked here: whether the
+        atmosphere's physics publishes the sea flux tile a Winton ice is
+        forced by and the land tile a land's soil is charged from. The rules
+        are the standard table's (:func:`jem.exchangers.check_winton_coupling`
+        and :func:`jem.exchangers.check_land_coupling`), so the two exchanges
+        refuse the same pairings.
+
+        Raises
+        ------
+        ValueError
+            For a Winton ice under an atmosphere that publishes no sea tile
+            (ECHAM) or over an ocean that does not clamp at freezing, and for
+            a land under an atmosphere that publishes no land tile.
+
+        """
+        check_winton_coupling(components)
+        if "lnd" in components:
+            check_land_coupling(components)
 
     def validate(self, components: dict[str, Carry]) -> None:
         """Check the coupled model's carries, before anything is integrated.

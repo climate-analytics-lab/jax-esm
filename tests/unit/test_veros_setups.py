@@ -270,13 +270,23 @@ def test_earth_setup_coriolis_is_periodic_across_the_seam():
 
 @pytest.mark.slow
 def test_echam_veros_earth_configuration_steps():
-    """`+configuration=veros-earth physics@atmosphere.physics=echam` builds,
-    initializes and steps twice, and every atmosphere and ocean field stays
-    finite.
+    """`veros-earth`'s ocean under ECHAM physics builds, initializes and steps
+    twice, and every atmosphere and ocean field stays finite.
 
-    ECHAM's land is the prescribed-moisture tile here: jax-gcm's default
-    SLIM land reads surface properties that exist only on T63 and finer
-    Gaussian grids, and `veros-earth`'s atmosphere is T31.
+    Two parts of `veros-earth` belong to SPEEDY and are taken out of the
+    composed config here, which no command-line override can do:
+
+    - its atmosphere is jax-gcm's `speedy-t31` bundle, whose calibrated
+      values sit in `atmosphere.physics.terms` (Hydra would merge them into
+      the term list of a `physics=echam` override), so the composed
+      `atmosphere.physics` node is replaced as a whole by the ECHAM group's;
+    - its Winton sea ice is forced by the sea flux tile ECHAM does not
+      publish, and `VerosExchange` refuses the pairing, so the ice, the
+      ocean's clamp at freezing and the ice's two exchanged fields go.
+
+    ECHAM's land is the prescribed-moisture tile: jax-gcm's default SLIM
+    land reads surface properties that exist only on T63 and finer Gaussian
+    grids, and `veros-earth`'s atmosphere is T31.
 
     Importing `veros` sets `jax_enable_x64` process-wide, so this traces ECHAM's
     Tiedtke-Nordeng convection and RRTMGP radiation in 64-bit mode -- the
@@ -288,11 +298,19 @@ def test_echam_veros_earth_configuration_steps():
     import jem.runners as runners
 
     with initialize_config_module(config_module="jem.config", version_base="1.3"):
-        cfg = compose(config_name="config", overrides=[
-            "+configuration=veros-earth",
+        cfg = compose(config_name="config", overrides=["+configuration=veros-earth"])
+        echam = compose(config_name="config", overrides=[
             "physics@atmosphere.physics=echam",
             "atmosphere.physics.land_model=prescribed",
         ])
+    cfg.atmosphere.physics = echam.atmosphere.physics
+
+    with pytest.raises(ValueError, match="no sea"):
+        runners.build_coupler(cfg)
+
+    cfg.seaice = None
+    cfg.ocean.clamp_at_freezing = False
+    cfg.coupling.exchanged_forcing = ["sea_surface_temperature"]
     coupler = runners.build_coupler(cfg)
     assert set(coupler.components) == {"atm", "ocn"}
     carry = coupler.initialize()

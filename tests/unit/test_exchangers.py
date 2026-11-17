@@ -1587,7 +1587,7 @@ def test_a_non_mapping_gets_an_error_not_an_assert(monkeypatch):
     """The Winton check raises a real error for a non-mapping."""
     monkeypatch.setattr(exchangers, "_is_winton", lambda components: True)
     with pytest.raises(TypeError, match="mapping"):
-        exchangers._check_winton_coupling(["atm"])
+        exchangers.check_winton_coupling(["atm"])
 
 
 # ---------------------------------------------------------------------------

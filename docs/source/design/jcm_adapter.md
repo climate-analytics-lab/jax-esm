@@ -195,10 +195,16 @@ so a Veros-coupled ECHAM atmosphere traces its Tiedtke-Nordeng convection and
 RRTMGP radiation in 64-bit mode; jax-gcm supports that from the pinned
 revision on (jax-gcm#927, fixed by jax-gcm#946).
 `tests/unit/test_veros_setups.py::test_echam_veros_earth_configuration_steps`
-steps `+configuration=veros-earth physics@atmosphere.physics=echam` twice and
-checks every carry field is finite, with ECHAM's prescribed-moisture land
-(`atmosphere.physics.land_model=prescribed`): jax-gcm's default SLIM land
-reads surface properties that exist only on T63 and finer grids, and
+steps `veros-earth`'s ocean under ECHAM physics twice and checks every carry
+field is finite. It is built in the test, not from the command line:
+`veros-earth` composes jax-gcm's calibrated `speedy-t31` bundle, whose
+parameter values a `physics@atmosphere.physics=echam` override would be
+merged into, and its Winton sea ice is forced by the sea flux tile ECHAM
+does not publish (`VerosExchange` refuses the pairing, as the standard table
+does), so the test replaces the composed physics node with the ECHAM
+group's and drops the ice. ECHAM's land is the prescribed-moisture tile
+there (`atmosphere.physics.land_model=prescribed`): jax-gcm's default SLIM
+land reads surface properties that exist only on T63 and finer grids, and
 `veros-earth` is T31.
 
 **Public surface.** Every JCM attribute the wrapper touches is public at the

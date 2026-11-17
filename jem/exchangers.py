@@ -101,6 +101,8 @@ __all__ = [
     "WINTON_SEAICE_EXCHANGES",
     "Exchange",
     "ExchangeSpec",
+    "check_land_coupling",
+    "check_winton_coupling",
     "default_exchangers",
     "default_exchanges",
     "default_workflow",
@@ -1228,7 +1230,7 @@ def default_exchanges(
             )
     _check_freezing_deficit_is_taken(components, specs)
     _check_land_is_forced_by_a_land_tile(components, specs)
-    _check_winton_coupling(components)
+    check_winton_coupling(components)
     return specs
 
 
@@ -1236,7 +1238,20 @@ def _check_land_is_forced_by_a_land_tile(
     components: Mapping[str, Component] | Iterable[str],
     specs: list[ExchangeSpec],
 ) -> None:
+    """Apply :func:`check_land_coupling` to a table with a land-evaporation row."""
+    if not any(spec.src == ATMOSPHERE_LAND_EVAPORATION for spec in specs):
+        return
+    check_land_coupling(components)
+
+
+def check_land_coupling(
+    components: Mapping[str, Component] | Iterable[str],
+) -> None:
     """Refuse a land component under an atmosphere with no land tile.
+
+    One rule for every exchange that forces a land: the standard table
+    (:func:`default_exchanges`) and :class:`jem.fluxes.VerosExchange` both
+    call it.
 
     The land takes the atmosphere's evaporation over the land part of each
     cell. A physics package that publishes no land flux tile (ECHAM delivers
@@ -1246,8 +1261,6 @@ def _check_land_is_forced_by_a_land_tile(
     ``publishes_land_evaporation`` (a stand-in, or names alone) is not checked.
     """
     if not isinstance(components, Mapping):
-        return
-    if not any(spec.src == ATMOSPHERE_LAND_EVAPORATION for spec in specs):
         return
     if getattr(components.get("atm"), "publishes_land_evaporation", True):
         return
@@ -1303,10 +1316,14 @@ def _is_winton(components: Mapping[str, Component] | Iterable[str]) -> bool:
         components.get("seaice"), module.WintonSeaiceModel)
 
 
-def _check_winton_coupling(
+def check_winton_coupling(
     components: Mapping[str, Component] | Iterable[str],
 ) -> None:
-    """Refuse a Winton sea ice the table cannot couple faithfully.
+    """Refuse a Winton sea ice that cannot be coupled faithfully.
+
+    One rule for every exchange that carries a Winton ice: the standard
+    table (:func:`default_exchanges`) and :class:`jem.fluxes.VerosExchange`
+    both call it.
 
     The ice forms frazil from the deficit an ocean's clamp at freezing removes
     and passes the ocean everything the ocean receives, so its ocean has to
@@ -1389,7 +1406,7 @@ def _exchange_table(
     With a Winton sea ice the ocean's heat-flux row is replaced by
     :data:`WINTON_SEAICE_EXCHANGES`' (the slab table) or, over Veros, the
     heat and freshwater rows by :data:`VEROS_WINTON_SEAICE_EXCHANGES`'
-    (:func:`_check_winton_coupling` refuses an ocean that does not clamp).
+    (:func:`check_winton_coupling` refuses an ocean that does not clamp).
     """
     winton = _is_winton(components)
     ocean = components.get("ocn") if isinstance(components, Mapping) else None
