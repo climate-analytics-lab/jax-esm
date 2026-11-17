@@ -1,6 +1,6 @@
 # Examples
 
-Every example here (the table below lists all of them, the seven named
+Every example here (the table below lists all of them, the eight named
 configurations among them) is either one `python -m jem.main` command, or a notebook
 built entirely in Python -- there is no Hydra in any notebook (issue #131).
 Python is JAX-ESM's primary interface; see `docs/source/python_api.md` for
@@ -36,6 +36,7 @@ drift the door exists to prevent.
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |
 | Earth with a Veros ocean | `python -m jem.main +configuration=veros-earth` |
+| Earth with a Veros ocean and the Winton sea ice | `python -m jem.main +configuration=veros-earth-winton` (`veros-earth` with the thermodynamic Winton ice on the ocean's grid and a freezing-clamped ocean) |
 | Coupled springs (`03_non_geoscience/01_SpringSystem.ipynb`) | notebook: the coupler with no climate in it at all |
 
 The `python -m jem.main` commands above remain exactly valid; the "How to run

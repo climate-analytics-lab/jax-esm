@@ -12,7 +12,7 @@ configuration through :mod:`jem.configurations`; see :doc:`python_api`'s
 Named configurations
 --------------------
 
-Seven configurations ship in ``jem/config/configuration/``;
+Eight configurations ship in ``jem/config/configuration/``;
 ``jem.configurations.available()`` lists them from Python. Each is a command
 with no other setup, each file's comments say why every setting is what it
 is, and appending ``coupled_run=short_run`` turns any of them into a two-day
@@ -72,6 +72,14 @@ directory into ``outputs/<date>/<time>/``.
        Gaussian global grid read from a SCRIP file, exchanged through ESMF
        weights. No land or sea-ice component. Needs Veros.
      - ``python -m jem.main +configuration=veros-earth``
+   * - ``veros-earth-winton``
+     - ``veros-earth`` with the Winton thermodynamic sea ice on the ocean's
+       own grid: the Veros ocean clamps its top cell at the freezing point and
+       hands the ice its freezing deficit, and the ice hands the ocean the
+       heat and freshwater it receives. Starts ice-free over the uniform
+       15 degC ocean, so it shows the coupling, not a sea-ice climate. Needs
+       Veros.
+     - ``python -m jem.main +configuration=veros-earth-winton``
 
 The Veros configurations are experimental and have known limitations; see
 :doc:`experimental` and :doc:`issues`. A longer, higher-resolution run is the

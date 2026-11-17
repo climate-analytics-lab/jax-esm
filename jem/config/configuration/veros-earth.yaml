@@ -19,8 +19,9 @@
 #    over the layers it holds). A short run therefore shows the atmosphere's fluxes
 #    spinning up an ocean that has no meridional structure, not an
 #    equilibrated one.
-#  - No sea ice: seaice=none, and a Winton sea ice cannot be composed with
-#    Veros (jax-esm#160). The only ice effect on the ocean is the swamp mask
+#  - No sea ice: seaice=none. `+configuration=veros-earth-winton` is this
+#    configuration with the Winton sea ice on the ocean's grid and an ocean
+#    that clamps at freezing. Here the only ice effect on the ocean is the swamp mask
 #    in `jem.fluxes.mask_fluxes_under_ice` (no cooling flux below the
 #    freezing point). The ice cover the ATMOSPHERE sees is the observed
 #    climatology in its forcing file (below), not something this ocean forms.

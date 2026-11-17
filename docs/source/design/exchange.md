@@ -290,6 +290,34 @@ It therefore goes through a hand-written exchanger,
 configurations — which also applies the sea-ice mask, a condition rather
 than a copy. The declarative table above carries the rest of the coupling.
 
+**A sea ice under a Veros ocean** goes through the same hand-written exchanger.
+`VerosExchange` makes the sea-ice rows of the Veros table itself, by running
+them through `jem.exchangers.table_specs` and `Exchange`, so they are weighted
+and regridded exactly as `default_exchanges` would (the atmosphere's fluxes by
+its sea fraction, the ice's fraction by its own sea part, its skin temperature
+by its ice area). Which rows depends on the ice's carry:
+
+- a Winton ice (`VEROS_WINTON_SEAICE_EXCHANGES`) is forced from the
+  atmosphere's state, given the ocean's SST and the freeze/melt energy
+  `ocn.derived.ice_frazil_melt_energy`, hands the atmosphere its fraction and
+  skin temperature, and passes the ocean its heat and freshwater flux
+  (`forcing.heat_flux`, `forcing.freshwater_flux`) **in place of** the
+  atmosphere's sea-tile fluxes. The swamp mask is not applied, because there is
+  a real ice to take the deficit. The ocean has to clamp
+  (`VerosComponent(clamp_at_freezing=True)`);
+- the SST-diagnosed slab ice (`VEROS_SLAB_SEAICE_EXCHANGES`) takes the SST and
+  hands the atmosphere its fraction; it has no energy budget, so the ocean keeps
+  its own fluxes and the swamp mask, and a clamping ocean is refused.
+
+`VerosExchange.validate` refuses the mismatched pairs, and an ice whose sea
+fraction differs from Veros' wet mask: the ice and the ocean have to be on one
+sea, which for the packaged Earth grid means the ice's `land_fraction_file` is
+the binary mask `jem.tools.veros_earth_ice_mask` writes. Because
+`VerosExchange` is a function, the atmosphere fields it writes
+(`sea_surface_temperature`, `sice_am`, and `sea_ice_temperature` for a Winton
+ice) must be listed in `coupling.exchanged_forcing`. See {doc}`winton_seaice`
+for the clamp and its limits.
+
 The ocean takes the atmosphere's stress rather than applying a drag law of
 its own to the near-surface wind (jax-esm#132). The published stress is the
 one the atmosphere column received, stability-corrected and averaged over the

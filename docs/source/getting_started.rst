@@ -115,8 +115,11 @@ package spelled out.
    * - Evolve the soil water (the bucket land)
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Use the thermodynamic Winton sea ice
-     - ``+configuration=earth-slab-winton``, or ``seaice=winton
-       +ocean.params.clamp_at_freezing=true`` in another composition
+     - ``+configuration=earth-slab-winton`` (or ``veros-earth-winton``), or
+       ``seaice=winton +ocean.params.clamp_at_freezing=true`` in another slab
+       composition; a Veros ocean's clamp is ``+ocean.clamp_at_freezing=true``
+       and its ice has to be on the ocean's grid, which ``veros-earth-winton``
+       does
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component
@@ -259,7 +262,7 @@ and the log's first line says which one the run started from. See
 Where next
 -----------
 
-- :doc:`examples` -- the seven named configurations, each with the one command
+- :doc:`examples` -- the eight named configurations, each with the one command
   that runs it and what it couples, and the example notebooks.
 - :doc:`issues` -- what 1.0 does not do yet, and the consequence of each.
 - :doc:`adding_a_component` -- wrapping an external model to join a coupled

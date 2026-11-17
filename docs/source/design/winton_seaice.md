@@ -143,14 +143,93 @@ layer holds above freezing. The heat it does draw is part of
 
 With a Winton ice registered as `"seaice"`, `default_exchanges` uses the slab
 table with its ocean heat-flux row replaced by `WINTON_SEAICE_EXCHANGES`: the
-rows above. It refuses three compositions it cannot couple faithfully:
+rows above. It refuses two compositions it cannot couple faithfully:
 
-- **an ocean that does not clamp** (`clamp_at_freezing=False`): it keeps its
-  deficit, and the ice would freeze it a second time;
-- **the Veros ocean**: Veros neither clamps its top cell nor publishes the
-  deficit;
+- **an ocean that does not clamp** (`params.clamp_at_freezing=False` for a slab
+  ocean, `clamp_at_freezing=False` for Veros): it keeps its deficit, and the
+  ice would freeze it a second time;
 - **an atmosphere with no sea flux tile** (ECHAM): the ice would be forced by
   the cell mean, and ECHAM integrates its own sea ice on its sea-ice tile.
+
+### Over the Veros ocean
+
+The Veros ocean is coupled to a Winton ice by `jem.fluxes.VerosExchange`
+(which every Veros configuration uses), through the same table rows weighted
+and regridded by the same code (`jem.exchangers.table_specs`,
+`VEROS_WINTON_SEAICE_EXCHANGES`). Three things differ from the slab ocean:
+
+- **The clamp is the Veros wrapper's.** `VerosComponent(model,
+  clamp_at_freezing=True)` (`+ocean.clamp_at_freezing=true`; off by default)
+  raises the top cell to the freezing point once per coupling step and
+  publishes the deficit as `derived.ice_frazil_melt_energy`,
+  `(T_f - T_top) rho_0 c_p dz_top` in J m⁻², evaluated before the clamp, with
+  the slab ocean's sign (positive: the clamp added that heat and the ice must
+  freeze it; negative: heat above freezing, which only caps the ice's basal
+  heat draw). It is applied to the temperature at the time level `tau` the step
+  has just made current, which is the level the next step reads (Veros reads
+  `temp` only at `tau`, and its Adams-Bashforth step reads the *tendencies* at
+  `tau` and `taum1`; `taum1` temperature is never read), and to wet surface
+  cells only. `rho_0` and the heat capacity are those the wrapper divides the
+  surface heat flux by, so the energy a clamp adds equals the energy the ice
+  is told it received to round-off whatever the seawater constants are
+  (`jem.constants`' slab values, 1025 kg m⁻³ and 3985 J kg⁻¹ K⁻¹, differ from
+  Veros' by about 0.2 %: that changes the temperature at which an energy
+  leaves the ocean, not the conservation between the two). The freezing point
+  is `jem.constants.seawater_freezing_point_K`, the slab ocean's and the
+  Winton ice's own `T_FREEZE`; not the saline freezing point of Veros'
+  equation of state (about -1.9 degC) nor the atmosphere's
+  `SEA_ICE_FREEZING_TEMPERATURE`, which only applies where no ice is coupled.
+- **The ocean takes both fluxes from the ice**, in place of the atmosphere's
+  sea-tile fluxes: `ocean_heat_flux_up` (`forcing.heat_flux`, W m⁻², upward) and
+  `ocean_freshwater_flux_up` (`forcing.freshwater_flux`, kg m⁻² s⁻¹, upward),
+  which `VerosComponent.step` turns into the salinity forcing
+  `forc_salt_surface = fw / rho_0 * 35`. A slab ocean has no salinity, so for it
+  the freshwater flux is a diagnostic; for Veros it is part of the coupling.
+  Ice growth is water the ocean loses, so it concentrates the top cell (a
+  virtual salt flux at the reference salinity; the ice carries no salt in this
+  budget).
+- **The swamp mask is not applied.** It is the ocean's insulation when there is
+  no ice taking the deficit; with the ice, the ice is the insulation.
+
+`VerosExchange.validate` (which `jem.runners` calls on the initial carries)
+refuses a Winton ice over a Veros ocean that does not clamp, a clamping ocean
+with an ice that takes no deficit (the SST-diagnosed `SlabSeaiceModel`) or with
+no ice, and an ice whose sea fraction is not Veros' wet mask. The SST-diagnosed
+slab ice is coupled too (the ocean's SST in, its fraction out, the swamp mask
+kept) so that no composed ice is silently unforced.
+
+Limits, which are the clamp's and the ice's rather than the exchange's:
+
+- the clamp acts on the **top cell only**. Sub-freezing water below it is not
+  frazil ice here; it reaches the surface through the ocean's own mixing and is
+  clamped then. A column initialised or driven below freezing in the interior
+  keeps that heat deficit until it is mixed up;
+- the ice sees the wind stress the atmosphere delivered over the sea tile
+  unchanged (there is no ice-ocean stress), and does not drift unless built
+  with transport;
+- the coupling is lagged by one step like every other, and the ice sits between
+  the atmosphere and the ocean, so the atmosphere's flux reaches the ocean two
+  steps after the atmosphere computed it (one to the ice, one to the ocean),
+  where `seaice=none` takes one. With no ice the ocean's forcing is therefore
+  exactly `seaice=none`'s, a step later: over 30 days of `veros-earth-winton`
+  the ocean's heat and freshwater forcing are the ice's passthrough to 0.0
+  (bit for bit), and equal to `seaice=none`'s of the step before, but the ocean's
+  first step is unforced (the ice's initial flux is zero) and the SST trajectory
+  differs from `seaice=none`'s by up to 0.9 K at day 30 for that reason alone.
+  The pair's energy budget closes exactly only once the energy in transit at the
+  end of a run is counted (`tests/unit/test_veros_seaice.py`: 4e-13 of the heat
+  exchanged);
+- the ice lives on the ocean's grid, and its `sea_fraction` has to be Veros'
+  wet mask. `veros-earth-winton` builds it on the ocean's SCRIP grid with
+  `jem.tools.veros_earth_ice_mask`, the binary mask the ocean setup thresholds
+  from the packaged land fraction.
+
+`+configuration=veros-earth-winton` is the Earth-like Veros configuration with
+the ice. The Veros ocean there starts from a horizontally uniform 15 degC state,
+so no ice forms in it for months, and the ice starts ice-free: it demonstrates
+the coupling (the budgets close, the ice and ocean exchange what they should)
+but a seasonal cycle of the ice needs an ocean with a realistic initial state,
+which the configuration does not have.
 
 Without an atmosphere (a forced or standalone ice) the fields the atmosphere
 would supply are the caller's to write. `+configuration=earth-slab-winton` is

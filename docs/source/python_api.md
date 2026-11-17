@@ -336,8 +336,12 @@ ocean = SlabOceanModel(grid, SlabOceanParameters(forcing_method="qflux"), q_flux
 `VerosComponent` wraps an already-built Veros model, a live Python object no
 configuration can name; `VerosComponent.from_setup` is the door that takes an
 importable setup instead. It needs the optional jittable Veros fork
-({doc}`getting_started`), and importing Veros makes the whole process double
-precision, so this block is not executed here; its signatures are those of
+({doc}`getting_started`), and a Veros ocean makes the whole process double
+precision: `jem.configurations.load("veros-earth")` and `ocean=veros` set
+`jax_enable_x64` before the atmosphere is built and leave it set, and a model
+assembled by hand, as below, has to call
+`jax.config.update("jax_enable_x64", True)` before constructing its
+atmosphere. So this block is not executed here; its signatures are those of
 `jem.components.VerosComponent.from_setup`, `jem.fluxes.VerosExchange` and
 `double_drake_setup`:
 
@@ -347,6 +351,9 @@ from jem.fluxes import VerosExchange
 
 ocean = VerosComponent.from_setup(
     "jem.components.veros.setups.double_drake.double_drake_setup",
+    # The ocean is built on the atmosphere's own cell centres, read from the
+    # SCRIP file of the atmosphere's grid.
+    atmosphere_grid_file=package_data_path("jem.data", "JCM_T31.SCRIP.nc"),
     land_sea_mask_file=package_data_path("jem.data", "terrain_double_drake_T31.nc"),
 )
 # `default_exchangers` supplies the table in Veros' field names, but not the wind
@@ -363,8 +370,22 @@ atm.set_exchanged_forcing(["sea_surface_temperature"])
 (`atmosphere.terrain.file` in the configuration) and with a 30-minute
 `time_step`, as `+configuration=veros-double-drake` does; the configuration
 is the validated way to get all of that right, and its comments say why each
-setting is what it is. There is no sea ice to couple to a Veros ocean yet
-({doc}`issues`).
+setting is what it is.
+
+A sea ice is coupled to the Veros ocean through the same `VerosExchange`
+(registered as `"seaice"`, on the ocean's grid, with its sea part exactly
+Veros' wet mask). A Winton ice needs the ocean to clamp its top cell at the
+freezing point, which is a constructor argument, off by default:
+
+```python
+ocean = VerosComponent(veros_model, clamp_at_freezing=True)   # or from_setup(..., clamp_at_freezing=True)
+atm.set_exchanged_forcing(["sea_surface_temperature", "sice_am", "sea_ice_temperature"])
+```
+
+`VerosExchange.validate(coupler.initialize().components)` refuses the pairings
+that would be wrong (a Winton ice over a non-clamping ocean, a clamping ocean
+with no ice or an SST-diagnosed one). `+configuration=veros-earth-winton` is the
+validated composition; its limits are in {doc}`issues`.
 
 ## Surface constants
 
@@ -465,7 +486,8 @@ The construction above builds a coupled model by hand -- the thing to do
 when writing a new experiment. To instead run one of the *validated*
 configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
 `aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
-`earth-slab-winton`, `veros-double-drake` and `veros-earth`, the same seven
+`earth-slab-winton`, `veros-double-drake`, `veros-earth` and
+`veros-earth-winton`, the same eight
 `configurations.available()` returns, each with its command in
 {doc}`examples` -- without composing Hydra,
 `jem.configurations` is the recipe door onto them (issue #131):

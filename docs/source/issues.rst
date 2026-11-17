@@ -8,17 +8,35 @@ lifted, removed.
 Veros ocean
 -----------
 
-**No sea ice under a Veros ocean.**
-    ``veros-double-drake`` and ``veros-earth`` set ``seaice=none``, and the
-    Winton sea ice refuses a Veros ocean when the coupling is built
-    (``jem.exchangers._check_winton_coupling``, jax-esm#160): Veros neither
-    clamps its top cell at the freezing point nor publishes the freezing
-    deficit the ice forms from. Consequence: a Veros run has no coupled ice
-    cover, and the atmosphere's sea-ice boundary condition stays whatever its
-    own forcing holds (zero in the shipped configurations).
-    :class:`jem.fluxes.VerosExchange` applies a "swamp" mask instead, which
-    removes the heat and freshwater fluxes where the surface has reached
-    freezing.
+**The sea ice under a Veros ocean is a demonstration, with limits.**
+    A Winton sea ice can be coupled to Veros (``+configuration=veros-earth-winton``;
+    ``jem.fluxes.VerosExchange``, ``VerosComponent(clamp_at_freezing=True)``;
+    jax-esm#160). Consequences, each enforced or documented where named:
+
+    - the clamp holds the **top cell only** at the freezing point; sub-freezing
+      water below it is not frazil ice and is clamped only when mixed to the
+      surface (:doc:`design/winton_seaice`);
+    - the freezing point is the constant -1.8 degC the slab ocean and the ice use,
+      not Veros' salinity-dependent one;
+    - the ocean receives the atmosphere's wind stress over the sea tile whether or
+      not ice covers it (no ice-ocean stress), and the ice does not drift unless
+      built with transport;
+    - ice growth is a virtual salt flux on the top cell (the ice carries no salt in
+      the water budget);
+    - the coupling is lagged by one step, so ocean plus ice conserve energy
+      exactly only with the energy in transit counted
+      (``tests/unit/test_veros_seaice.py``);
+    - the ice's grid must be the ocean's and its sea exactly Veros' wet mask
+      (``VerosExchange.check_ice_mask``); ``veros-earth-winton`` uses the binary
+      mask of ``jem.tools.veros_earth_ice_mask``, which duplicates the
+      thresholding the ocean setup does;
+    - ``veros-earth``'s ocean starts uniform at 15 degC, so no ice forms in it for
+      months and the **seasonal cycle of the ice has not been validated**: that
+      needs an ocean with a realistic initial state;
+    - ``veros-double-drake`` and ``veros-earth`` themselves still set
+      ``seaice=none`` (no ice, the swamp mask), and a Winton ice composed without
+      the ocean's clamp, or an SST-diagnosed ice over a clamping ocean, is refused
+      when the coupling is built.
 
 **``veros-earth`` is a prototype ocean.**
     Its setup reads a binary land-sea mask and a packaged ETOPO 2022 bathymetry

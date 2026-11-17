@@ -163,6 +163,8 @@ class _VerosLikeDerived:
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
     sea_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+    clamps_at_freezing: jnp.ndarray
 
 
 @tree_math.struct
@@ -189,15 +191,18 @@ class StubVerosOcean:
 
     name = "ocn"
 
-    def __init__(self, shape):
+    def __init__(self, shape, clamp_at_freezing=False):
         """Remember the horizontal shape the carry is built on."""
         self.shape = shape
+        self.clamp_at_freezing = clamp_at_freezing
 
     def initialize(self):
         zeros = jnp.zeros(self.shape)
         return {
             "state": _VerosLikeState(zeros + 285.0),
-            "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros, zeros + 1.0),
+            "derived": _VerosLikeDerived(
+                zeros + 285.0, zeros, zeros, zeros + 1.0, zeros,
+                jnp.asarray(float(self.clamp_at_freezing))),
             "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros,
                                          jnp.zeros(())),
         }
@@ -218,6 +223,8 @@ class StubVerosOcean:
             "derived": _VerosLikeDerived(
                 temperature, carry["derived"].sea_surface_u,
                 carry["derived"].sea_surface_v, carry["derived"].sea_fraction,
+                carry["derived"].ice_frazil_melt_energy,
+                carry["derived"].clamps_at_freezing,
             ),
             "forcing": forcing,
         }
@@ -1581,3 +1588,74 @@ def test_a_non_mapping_gets_an_error_not_an_assert(monkeypatch):
     monkeypatch.setattr(exchangers, "_is_winton", lambda components: True)
     with pytest.raises(TypeError, match="mapping"):
         exchangers._check_winton_coupling(["atm"])
+
+
+# ---------------------------------------------------------------------------
+# A Winton sea ice over a Veros ocean (jax-esm#160)
+# ---------------------------------------------------------------------------
+
+
+class _TiledAtmosphere(StubAtmosphere):
+    """The stub atmosphere, which says its physics publishes sea tiles."""
+
+    publishes_sea_tiles = True
+    publishes_land_evaporation = True
+
+
+def _veros_winton_components(clamp):
+    from jem.components.slab import WintonSeaiceModel
+
+    grid = make_grid()
+    return {
+        "atm": _TiledAtmosphere(grid.shape),
+        "ocn": StubVerosOcean(grid.shape, clamp_at_freezing=clamp),
+        "seaice": WintonSeaiceModel(grid),
+    }
+
+
+def test_a_winton_ice_over_a_clamping_veros_ocean_takes_over_its_heat_and_freshwater(
+    veros_module,
+):
+    """The ice's fluxes replace the atmosphere's two rows; the deficit is read from ``derived``."""
+    del veros_module
+    specs = default_exchanges(_veros_winton_components(clamp=True))
+    rows = {(spec.src, spec.dst) for spec in specs}
+    assert ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux") not in rows
+    assert ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux") not in rows
+    assert ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.heat_flux") in rows
+    assert ("seaice.derived.ocean_freshwater_flux_up", "ocn.forcing.freshwater_flux") in rows
+    assert ("ocn.derived.ice_frazil_melt_energy",
+            "seaice.forcing.ice_frazil_melt_energy") in rows
+    assert ("ocn.derived.sea_surface_temperature",
+            "seaice.forcing.sea_surface_temperature") in rows
+    assert ("ocn.derived.sea_surface_temperature",
+            "atm.forcing.sea_surface_temperature") in rows
+    assert ("seaice.derived.ice_fraction", "atm.forcing.sice_am") in rows
+    assert ("seaice.derived.ice_surface_temperature_K",
+            "atm.forcing.sea_ice_temperature") in rows
+    # The slab ocean's names are not Veros'.
+    assert not any(spec.dst == "ocn.forcing.total_heat_flux" for spec in specs)
+    # Nothing is written twice. (That every row names a field the carries have
+    # is checked against real ones: `tests/unit/test_fluxes.py` and
+    # `tests/unit/test_veros_seaice.py`; this stub atmosphere has no Winton fields.)
+    assert len({spec.dst for spec in specs}) == len(specs)
+
+
+def test_a_winton_ice_over_a_veros_ocean_that_does_not_clamp_is_refused(veros_module):
+    del veros_module
+    with pytest.raises(ValueError, match=r"VerosComponent\(model, clamp_at_freezing=True\)"):
+        default_exchanges(_veros_winton_components(clamp=False))
+
+
+def test_a_clamping_veros_ocean_with_no_ice_to_take_the_deficit_is_refused(veros_module):
+    """Without a Winton ice the clamp would create the heat it removes the deficit with."""
+    del veros_module
+    shape = (4, 3)
+    components = {"atm": StubAtmosphere(shape), "ocn": StubVerosOcean(shape, clamp_at_freezing=True)}
+    with pytest.raises(ValueError, match="no exchange takes the deficit"):
+        default_exchanges(components)
+    components["seaice"] = SlabSeaiceModel(make_grid(), name="seaice")
+    with pytest.raises(ValueError, match="no exchange takes the deficit"):
+        default_exchanges(components)
+    components["ocn"] = StubVerosOcean(shape, clamp_at_freezing=False)
+    default_exchanges(components)

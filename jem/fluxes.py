@@ -16,7 +16,9 @@ things a Veros ocean needs cannot be table rows at all:
   express;
 - **the "swamp" sea-ice mask** is not a field either -- it is a condition
   (has the surface reached the freezing point?) applied to two fields the
-  table already knows how to move.
+  table already knows how to move. It is the ocean's insulation when no sea
+  ice takes the freezing deficit: with a Winton ice the ice itself is
+  that insulation, and passes the ocean the heat and freshwater it receives.
 
 This module is where that computed half of the coupling lives, so that an
 exchanger built from it is wiring -- which regridder, which grid file --
@@ -73,7 +75,13 @@ import xarray as xr
 
 from jem import constants
 from jem.base.component import Carry, CouplingTime
-from jem.exchangers import regrid_weighted
+from jem.exchangers import (
+    VEROS_SLAB_SEAICE_EXCHANGES,
+    VEROS_WINTON_SEAICE_EXCHANGES,
+    Exchange,
+    regrid_weighted,
+    table_specs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -242,12 +250,44 @@ class VerosExchange:
     evaporation to the land, its soil water availability back to the
     atmosphere (list ``soilw_am`` in ``coupling.exchanged_forcing``, since
     this exchanger cannot be read off the way a table can), and its runoff to
-    the ocean. It does not touch a sea-ice
-    component: :data:`VEROS_OCEAN_EXCHANGES`'s ``seaice`` rows have no
-    counterpart here, because the configurations this exchanger serves
-    compose ``seaice=none``; a hand-written exchanger replaces the
-    declarative table entirely, so a sea ice composed into one of them is
-    stepped unforced (jax-esm#160).
+    the ocean.
+
+    **A sea ice**, registered as ``"seaice"`` and on the ocean's grid, is
+    coupled here too, with the rows of the declarative table
+    (:func:`jem.exchangers.table_specs` weights and regrids them exactly as
+    :func:`jem.exchangers.default_exchanges` does, so a mixed-grid run is
+    weighted by the same sea fractions). Which rows is decided by the ice's
+    carry:
+
+    - a Winton ice (it publishes ``derived.ocean_heat_flux_up``) is the
+      ocean's insulation and its source of heat and freshwater.
+      :data:`~jem.exchangers.VEROS_WINTON_SEAICE_EXCHANGES` force it from the
+      atmosphere's state, give it the ocean's SST and its freeze/melt energy
+      (``ocn.derived.ice_frazil_melt_energy``), and hand the atmosphere its
+      fraction and skin temperature. The ocean's heat and freshwater forcing
+      are the ice's ``ocean_heat_flux_up`` and ``ocean_freshwater_flux_up``
+      **in place of** the atmosphere's sea-tile fluxes (the ice passes on
+      everything the ocean receives: what the ice absorbed, the basal heat it
+      draws, the water its growth takes), and the swamp mask is not applied:
+      there is a real ice to take the deficit. The ocean has to clamp at the
+      freezing point (``VerosComponent(clamp_at_freezing=True)``), or the
+      ice would freeze the deficit a second time; :meth:`validate` refuses
+      the pairing otherwise.
+    - an SST-diagnosed :class:`~jem.components.slab.SlabSeaiceModel` takes the
+      ocean's SST and hands the atmosphere its fraction
+      (:data:`~jem.exchangers.VEROS_SLAB_SEAICE_EXCHANGES`). It has no energy
+      budget, so the ocean keeps its own fluxes, the swamp mask stays, and a
+      clamping ocean is refused.
+
+    Without a sea ice, a clamping ocean is refused too: its clamp would create
+    the heat it removes the deficit with.
+
+    The atmosphere forcing fields these rows write (``sice_am``, and
+    ``sea_ice_temperature`` for a Winton ice) have to be declared in
+    ``coupling.exchanged_forcing``, like ``sea_surface_temperature``: this
+    exchanger is a function, so the runner cannot read its writes off a table.
+    The ice lives on the ocean's grid and its ``derived.sea_fraction`` must
+    be Veros' wet mask (:meth:`check_ice_mask`).
 
     Parameters
     ----------
@@ -274,7 +314,12 @@ class VerosExchange:
         entirely -- falls back to the identity, which is exactly the
         single-grid double-drake configuration (``regrid=same_grid``
         composes to ``None``, which :func:`jem.runners.build_regridders`
-        turns into an empty mapping).
+        turns into an empty mapping). A sea ice's rows additionally use
+        ``"o2a_flux"`` (its fraction and skin temperature, conservatively),
+        ``"a2o_flux"`` (the atmosphere's radiation, rain, snow and heat flux onto the
+        ice's grid) and ``"a2o_state"`` (the air temperature, humidity, wind and
+        pressure, bilinearly). On a mixed grid every row that crosses the grid
+        boundary must find its key here, or the ice's rows are refused.
     rotation_grid_file : str or None
         A SCRIP grid file to read :func:`read_rotation_angles` from, when the
         ocean grid's axes are not true east/north (a rotated-pole grid, such
@@ -335,6 +380,9 @@ class VerosExchange:
         # judged by.
         self._o2a_cover: Callable[[Any], Any] = regrid.get(
             "o2a_flux", self._o2a_state)
+        # The regridders the sea-ice rows are run through; their keys double as
+        # the names `table_specs` puts in the specs.
+        self._regridders: dict[str, Callable[[Any], Any]] = dict(regrid)
         self.rotation_grid_file = rotation_grid_file
         self._rotation_angles: tuple[jax.Array, jax.Array] | None = (
             None if rotation_grid_file is None
@@ -351,8 +399,9 @@ class VerosExchange:
         Parameters
         ----------
         components : dict[str, jem.base.component.Carry]
-            Every component's carry, as the coupler hands it over. Only
-            ``"atm"`` and ``"ocn"`` are read or written.
+            Every component's carry, as the coupler hands it over. ``"atm"``
+            and ``"ocn"`` are read and written, ``"lnd"`` and ``"seaice"``
+            when present.
         time : jem.base.component.CouplingTime
             The coupler's clock. Only ``time.step`` is read (to check the
             masks once, on step 0); the coupling does not depend on the
@@ -362,8 +411,9 @@ class VerosExchange:
         Returns
         -------
         dict[str, jem.base.component.Carry]
-            ``components`` with ``"atm"`` and ``"ocn"`` replaced; every other
-            entry is passed through unchanged. Nothing is mutated in place,
+            ``components`` with ``"atm"`` and ``"ocn"`` (and ``"lnd"`` and
+            ``"seaice"`` when present) replaced; every other entry is passed
+            through unchanged. Nothing is mutated in place,
             and every source is read from the incoming carries before
             anything is written, so the result does not depend on the order
             the fields happen to be touched in (the same rule
@@ -375,31 +425,23 @@ class VerosExchange:
 
         atm = components["atm"]
         ocn = components["ocn"]
+        seaice = components.get("seaice")
+        # Which ice, from its carry (this runs under a trace, where the
+        # component object is not at hand): only a Winton ice publishes what it
+        # passes on to the ocean.
+        winton = seaice is not None and hasattr(
+            seaice["derived"], "ocean_heat_flux_up")
 
         # Read every source first, before any carry is replaced. The target
-        # dtypes are read here too, from the untouched forcing sections:
-        # Veros runs double precision internally (importing its JAX backend
-        # flips `jax.config.jax_enable_x64` to True process-wide as a side
-        # effect the first time `veros.core` is imported -- see
-        # `jem.components.veros_component.configure_veros_runtime`), and that
-        # flip lands wherever `build_coupler` happens to be when it fires: the
-        # ocean's own carry is built afterward and so is entirely float64,
-        # while the atmosphere's carry is *mixed* -- whatever jax-gcm had
-        # already allocated at `Model` construction (built first) stays
-        # float32, and anything allocated after the flip (every per-step
-        # diagnostic, including `derived.sea_eastward_wind_stress` and
-        # `derived.sea_total_heat_flux`)
-        # comes out float64 too. So which atmosphere fields are float32
-        # depends on build order, not on any promise this module makes.
-        # `jax.lax.scan` requires a step's output carry to match its input
-        # dtype exactly regardless, so a value written across the atm/ocn
-        # boundary without a matching cast breaks the *very first* coupled
-        # step with an opaque dtype-mismatch error from deep inside
-        # `Coupler.generate_trajectory_function` -- not a physics bug, but
-        # one this exchanger is the right place to close, since it is the one
-        # place a value is known to cross the boundary, and reading the
-        # destination's dtype at trace time (rather than assuming one) is
-        # what makes the coupling robust to that ordering.
+        # dtypes are read here too, from the untouched forcing sections,
+        # rather than assumed. A Veros run is double precision throughout
+        # when it is built through the runner (`ocean=veros` selects
+        # `jax_enable_x64`, applied before any component exists), but the
+        # atmosphere's prescribed forcing is float32 whatever the flag
+        # (jax-gcm loads it so), and a model assembled by hand can have built
+        # its atmosphere before Veros switched x64 on. `jax.lax.scan` requires
+        # a step's output carry to match its input dtype exactly, so each
+        # value that crosses the boundary is cast to its destination's dtype.
         # The fluxes over the sea part of each cell, not the cell means: on a
         # partly-land cell the land part's flux and drag stay with the
         # atmosphere's own land (jem.components.jcm.exchange_fields).
@@ -447,13 +489,20 @@ class VerosExchange:
 
         # Heat and freshwater fluxes: regrid onto the ocean grid, then mask
         # wherever the ocean the flux is destined for has reached the
-        # freezing point.
-        heat_flux, freshwater_flux = mask_fluxes_under_ice(
-            ocean_sea_surface_temperature,
-            self._a2o_sea(total_heat_flux, sea_fraction),
-            self._a2o_sea(total_freshwater_flux, sea_fraction),
-            freezing_point=self.freezing_point,
-        )
+        # freezing point. A Winton ice is the real insulation and passes the
+        # ocean its own fluxes (`_exchange_with_seaice`), so neither the
+        # atmosphere's flux nor the mask is applied; the ocean's forcing is
+        # left as it is until the ice's rows write it.
+        if winton:
+            heat_flux = ocn["forcing"].heat_flux
+            freshwater_flux = ocn["forcing"].freshwater_flux
+        else:
+            heat_flux, freshwater_flux = mask_fluxes_under_ice(
+                ocean_sea_surface_temperature,
+                self._a2o_sea(total_heat_flux, sea_fraction),
+                self._a2o_sea(total_freshwater_flux, sea_fraction),
+                freezing_point=self.freezing_point,
+            )
 
         # Sea surface temperature: regrid back onto the atmosphere's grid.
         # Weighted by Veros' wet mask, so an atmosphere cell on the coast
@@ -468,6 +517,8 @@ class VerosExchange:
             ocean_sea_surface_temperature, wet
         )
         self._guard_masks(time.step, sea_fraction, wet)
+        if seaice is not None:
+            self._guard_ice_mask(time.step, wet, seaice["derived"].sea_fraction)
 
         ocn = dict(ocn, forcing=ocn["forcing"].replace(
             surface_taux=surface_taux.astype(ocean_forcing_dtypes["surface_taux"]),
@@ -486,7 +537,30 @@ class VerosExchange:
         exchanged = dict(components, atm=atm, ocn=ocn)
         if "lnd" in components:
             exchanged = self._exchange_with_land(components, exchanged)
+        if seaice is not None:
+            exchanged = self._exchange_with_seaice(exchanged, time, winton)
         return exchanged
+
+    def _exchange_with_seaice(
+        self, exchanged: dict[str, Carry], time: CouplingTime, winton: bool
+    ) -> dict[str, Carry]:
+        """Apply the sea-ice rows of the Veros table through the declarative path.
+
+        The rows are :data:`~jem.exchangers.VEROS_WINTON_SEAICE_EXCHANGES` or
+        :data:`~jem.exchangers.VEROS_SLAB_SEAICE_EXCHANGES`, turned into specs
+        by :func:`~jem.exchangers.table_specs` and run by
+        :class:`~jem.exchangers.Exchange`, so they are weighted, regridded and
+        dtype-cast exactly as the standard table's rows are. Every row's
+        source is a ``derived`` field and every destination a ``forcing``
+        field, and nothing above wrote a ``derived`` field, so reading the
+        sources from ``exchanged`` is reading the incoming ones.
+        """
+        rows = (VEROS_WINTON_SEAICE_EXCHANGES if winton
+                else VEROS_SLAB_SEAICE_EXCHANGES)
+        names = {key: key for key in self._regridders}
+        specs = table_specs(rows, set(exchanged), names)
+        result: dict[str, Carry] = Exchange(specs, self._regridders)(exchanged, time)
+        return result
 
     @staticmethod
     def _exchange_with_land(
@@ -578,6 +652,113 @@ class VerosExchange:
             lambda: jax.debug.callback(self.check_masks, sea_fraction, reached),
             lambda: None,
         )
+
+    def _guard_ice_mask(
+        self, step: jax.Array, wet: jax.Array, ice_sea_fraction: jax.Array
+    ) -> None:
+        """Run :meth:`check_ice_mask` on a run's first coupling step.
+
+        The same host callback under a ``lax.cond`` on ``step == 0`` as
+        :meth:`_guard_masks`, for the same reasons (the masks are carry values,
+        the check reads and changes nothing, and it costs one copy per run).
+        The ice and the ocean share a grid, so unlike the atmosphere's mask
+        this one is checked on a single grid too.
+        """
+        jax.lax.cond(
+            jnp.asarray(step) == 0,
+            lambda: jax.debug.callback(self.check_ice_mask, wet, ice_sea_fraction),
+            lambda: None,
+        )
+
+    @staticmethod
+    def check_ice_mask(wet: Any, ice_sea_fraction: Any) -> None:
+        """Raise unless the sea ice's sea part is exactly Veros' wet mask.
+
+        The ice is integrated per unit area of the sea part of each cell and
+        the ocean takes the ice's fluxes over its own wet columns; they are one
+        sea only if the two masks are one. A column the ice calls land would
+        pass the ocean no flux, and a column the ice calls (partly) sea but
+        Veros calls dry would hold ice over no water. A fractional land
+        fraction is a disagreement too: Veros' mask is binary.
+
+        Raises
+        ------
+        ValueError
+            If any cell's ``derived.sea_fraction`` differs from the wet mask.
+
+        """
+        wet_cells = np.asarray(wet)
+        sea = np.asarray(ice_sea_fraction)
+        if wet_cells.shape != sea.shape or not np.array_equal(wet_cells, sea):
+            differ = (int(np.sum(wet_cells != sea))
+                      if wet_cells.shape == sea.shape else wet_cells.size)
+            raise ValueError(
+                f"The sea ice's sea fraction (1 - the grid's fractional_mask) "
+                f"differs from Veros' wet mask in {differ} cell(s): the ice and "
+                "the ocean under it must be on one sea, or the ice's fluxes "
+                "reach the wrong columns. Build the ice on the ocean's grid with "
+                "the ocean's binary land-sea mask as its land fraction -- for "
+                "the packaged earth setup, seaice.grid_file="
+                "'${ocean.scrip_grid_file}' and seaice.land_fraction_file="
+                "'${jem_data:landsea_mask_binary_RotatedGaussianLatLon.nc}', "
+                "as +configuration=veros-earth-winton does."
+            )
+
+    def validate(self, components: dict[str, Carry]) -> None:
+        """Check the coupled model's carries, before anything is integrated.
+
+        Called by :func:`jem.runners.build_coupler` with the initial carries
+        (like :meth:`jem.exchangers.Exchange.validate`), where the values are
+        concrete and a configuration that would run but be wrong can be
+        refused. It raises for:
+
+        - a Winton ice over an ocean that does not clamp at the freezing point
+          (the ice would freeze a deficit the ocean kept, a second time);
+        - a clamping ocean with an ice that does not take the deficit, or no ice
+          at all (the clamp would create the heat it removes it with);
+        - a sea ice whose sea part is not Veros' wet mask (:meth:`check_ice_mask`);
+        - a sea-ice row that names a field its carry lacks, or whose ends
+          have different structure (an atmosphere field a time series that
+          ``coupling.exchanged_forcing`` did not declare).
+
+        Raises
+        ------
+        ValueError
+            In each of those cases, naming the fix.
+
+        """
+        ocn = components["ocn"]
+        seaice = components.get("seaice")
+        clamps = bool(np.asarray(getattr(ocn["derived"], "clamps_at_freezing", 0.0)))
+        winton = seaice is not None and hasattr(
+            seaice["derived"], "ocean_heat_flux_up")
+        if winton and not clamps:
+            raise ValueError(
+                "A Winton sea ice forms frazil ice from the deficit the ocean "
+                "removes by clamping its top cell at the freezing point, but "
+                "this Veros ocean keeps the deficit (clamp_at_freezing=False), "
+                "so freezing would be counted twice. Construct the ocean with "
+                "clamp_at_freezing=True (+ocean.clamp_at_freezing=true)."
+            )
+        if clamps and not winton:
+            raise ValueError(
+                "The Veros ocean clamps its top cell at the freezing point "
+                "(clamp_at_freezing=True), but "
+                + ("the sea ice here has no energy budget and takes no deficit"
+                   if seaice is not None else "there is no sea ice to take the deficit")
+                + ", so the clamp would create the heat it removes it with. "
+                "Couple a Winton sea ice (seaice=winton), or leave "
+                "clamp_at_freezing=False."
+            )
+        if seaice is None:
+            return
+        self.check_ice_mask(ocn["derived"].sea_fraction,
+                            seaice["derived"].sea_fraction)
+        rows = (VEROS_WINTON_SEAICE_EXCHANGES if winton
+                else VEROS_SLAB_SEAICE_EXCHANGES)
+        specs = table_specs(rows, set(components),
+                            {key: key for key in self._regridders})
+        Exchange(specs, self._regridders).validate(components)
 
     @staticmethod
     def check_masks(sea_fraction: Any, reached: Any) -> None:

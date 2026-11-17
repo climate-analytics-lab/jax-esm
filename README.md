@@ -153,7 +153,8 @@ protocol):
 Named configurations (`python -m jem.main +configuration=<name>`, or
 `jem.configurations.load("<name>")` from Python): `aquaplanet-slab`,
 `aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
-`earth-slab-winton`, `veros-double-drake` and `veros-earth`. [Examples](docs/source/examples.rst)
+`earth-slab-winton`, `veros-double-drake`, `veros-earth` and
+`veros-earth-winton`. [Examples](docs/source/examples.rst)
 tabulates what each couples and its command.
 
 Also:

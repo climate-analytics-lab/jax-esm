@@ -1385,22 +1385,26 @@ def test_a_winton_ice_under_an_atmosphere_with_no_sea_tile_is_refused():
         default_exchanges(_winton_components(atmosphere=_Untiled()))
 
 
-def test_a_winton_ice_over_the_veros_ocean_is_refused(monkeypatch):
-    """Veros neither clamps nor publishes the deficit the ice freezes."""
+def test_a_winton_ice_over_a_veros_ocean_that_does_not_clamp_is_refused(monkeypatch):
+    """Veros keeps its deficit unless it is built to clamp; the ice would freeze it twice.
+
+    The refusal names the Veros fix, not the slab ocean's
+    (``tests/unit/test_exchangers.py`` has the clamping case, which is accepted).
+    """
     import sys
     import types
 
     from jem import exchangers
 
     class _StubVeros:
-        pass
+        clamp_at_freezing = False
 
     module = types.ModuleType(exchangers.VEROS_COMPONENT_MODULE)
     module.VerosComponent = _StubVeros
     monkeypatch.setitem(sys.modules, exchangers.VEROS_COMPONENT_MODULE, module)
     components = _winton_components()
     components["ocn"] = _StubVeros()
-    with pytest.raises(ValueError, match="Veros"):
+    with pytest.raises(ValueError, match=r"\+ocean\.clamp_at_freezing=true"):
         default_exchanges(components)
 
 

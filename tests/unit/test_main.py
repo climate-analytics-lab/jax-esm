@@ -157,7 +157,8 @@ def test_help_lists_the_options_of_every_config_group(tmp_path):
         "winton", "bucket", "slab_relax", "slab_qflux", "veros", "short_run",
         "long_run", "aquaplanet-slab", "aquaplanet-slab-echam",
         "aquaplanet-slab-mixed-grid",
-        "earth-slab", "earth-slab-winton", "veros-earth", "veros-double-drake",
+        "earth-slab", "earth-slab-winton", "veros-earth", "veros-earth-winton",
+        "veros-double-drake",
     ):
         assert option in finished.stdout, option
     # jax-gcm's groups appear under the spelling an override needs.

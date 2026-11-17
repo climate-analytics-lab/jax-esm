@@ -53,8 +53,8 @@ Both compose ``ocean=veros`` with a case setup importable from
 :mod:`jem.components.veros.setups`
 (:mod:`~jem.components.veros.setups.double_drake` /
 :mod:`~jem.components.veros.setups.earth`), and neither has a land or
-sea-ice component: the land is SPEEDY's own slab land inside the
-atmosphere. Each configuration's own comment says why every setting is what
+sea-ice component (``veros-earth-winton`` adds one): the land is SPEEDY's
+own slab land inside the atmosphere. Each configuration's own comment says why every setting is what
 it is.
 
 The ocean is idealised in both, and a short run should be read with that in
@@ -84,10 +84,15 @@ mind:
   linearly with depth to zero at 4510 m, the top of the deepest layer, so the
   deepest layer starts at -1.15 degC. The meridional structure comes from the
   atmosphere's fluxes during the run.
-* **No sea ice.** There is no sea-ice component (the Winton ice cannot be
-  composed with Veros, jax-esm#160). The only ice effect on the ocean is the
-  "swamp" mask on the heat and freshwater fluxes once the surface reaches the
-  freezing point.
+* **No sea ice by default.** ``veros-earth`` and ``veros-double-drake`` have
+  no sea-ice component; the only ice effect on the ocean is the "swamp" mask on
+  the heat and freshwater fluxes once the surface reaches the freezing point.
+  ``+configuration=veros-earth-winton`` composes the Winton ice on the ocean's
+  grid: the ocean then clamps its top cell at the freezing point and hands the
+  ice the deficit, and the ice hands the ocean its heat and freshwater (see
+  :doc:`design/winton_seaice`). The uniform 15 degC start means no ice forms
+  there for months, so it shows the coupling, not a sea-ice climate; a seasonal
+  cycle needs an ocean with a realistic initial state.
 
 The two components are coupled through :class:`jem.fluxes.VerosExchange`,
 named as ``coupling.exchanger``: it hands the ocean the surface wind stress
@@ -96,7 +101,8 @@ stress, the same for every physics package, so momentum is conserved across
 the interface -- regridded conservatively and rotated into the ocean grid's
 local frame for ``veros-earth``, whose grid is not true east/north;
 applies a "swamp" sea-ice mask to the heat and freshwater fluxes once the
-surface reaches the freezing point, and carries the rest of
+surface reaches the freezing point (unless a Winton ice is composed, which is
+then the insulation and passes the ocean its own fluxes), and carries the rest of
 :data:`jem.exchangers.VEROS_OCEAN_EXCHANGES` (the fluxes onto the ocean, its
 sea surface temperature back) -- so the ocean is mechanically as well as
 thermodynamically forced.

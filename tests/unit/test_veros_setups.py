@@ -621,7 +621,8 @@ def test_double_drake_output_merges_exactly_with_the_atmospheres():
         name: surface for name in (
             "psi", "sea_surface_temperature", "sea_surface_salinity",
             "sea_surface_u", "sea_surface_v", "surface_air_temperature",
-            "surface_taux", "surface_tauy", "heat_flux", "freshwater_flux")
+            "surface_taux", "surface_tauy", "heat_flux", "freshwater_flux",
+            "ice_frazil_melt_energy")
     })
     diagnostics["runoff_mass_rate"] = jnp.zeros((n_records,))
     diagnostics["ssh"] = surface

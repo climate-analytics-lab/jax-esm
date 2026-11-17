@@ -28,6 +28,7 @@ import tree_math
 import xarray as xr
 from veros import runtime_settings
 
+from jem import constants
 from jem.base.component import (
     Carry,
     CouplingTime,
@@ -245,22 +246,41 @@ class VerosDerived:
     weighted by (:func:`jem.exchangers.regrid_weighted`), so an atmosphere
     cell takes the SST of the water under it and nothing of the land
     columns' fill value.
+
+    ``ice_frazil_melt_energy`` is the slab ocean's freeze/melt potential, CESM's
+    ``frzmlt`` (J m-2 over one coupling step), of the top cell: positive is the
+    heat a clamp at the freezing point added, which a sea ice must turn into
+    ice; negative is heat above freezing, available to melt ice from below.
+    It is zero on land. It is published whether or not the ocean clamps; only a
+    clamping ocean has *removed* the positive part from its own temperature
+    (:class:`VerosComponent`, ``clamp_at_freezing``).
+
+    ``clamps_at_freezing`` is that static configuration flag (1.0 or 0.0, a
+    scalar), carried so that an exchanger, which sees only carries, can
+    refuse a sea ice that forms ice from ``ice_frazil_melt_energy`` over an
+    ocean that kept the deficit (or the converse) when the coupled model is
+    validated.
     """
 
     sea_surface_temperature: jnp.ndarray
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
     sea_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+    clamps_at_freezing: jnp.ndarray
 
     @classmethod
     def zeros(cls, shape, sea_surface_temperature=None, sea_surface_u=None,
-              sea_surface_v=None, sea_fraction=None):
+              sea_surface_v=None, sea_fraction=None, ice_frazil_melt_energy=None,
+              clamps_at_freezing=None):
         """Zero-filled derived fields on a ``shape`` horizontal grid."""
         return cls(
             sea_surface_temperature if sea_surface_temperature is not None else jnp.zeros(shape) + 273.15,
             sea_surface_u if sea_surface_u is not None else jnp.zeros(shape),
             sea_surface_v if sea_surface_v is not None else jnp.zeros(shape),
             sea_fraction if sea_fraction is not None else jnp.zeros(shape),
+            ice_frazil_melt_energy if ice_frazil_melt_energy is not None else jnp.zeros(shape),
+            clamps_at_freezing if clamps_at_freezing is not None else jnp.zeros(()),
         )
 
 
@@ -402,11 +422,33 @@ class VerosComponent:
           ``native_lon``/``native_lat``.
 
         Declaring the 1-D and the 2-D form together is refused.
+    clamp_at_freezing : bool, optional
+        Whether the top cell is held at the seawater freezing point
+        (:attr:`jem.constants.seawater_freezing_point_K`) once per coupling
+        step, with the heat that took published as
+        ``derived.ice_frazil_melt_energy`` for a sea ice to turn into ice --
+        what :class:`~jem.components.slab.SlabOceanModel` does under
+        ``params.clamp_at_freezing`` and what a Winton sea ice needs
+        (``docs/source/design/winton_seaice.md``). Static, like the slab
+        ocean's: it selects a code path at trace time. Default ``False``,
+        because a clamp with no sea ice taking the deficit creates the heat it
+        removes it with, every step it acts. With it ``False`` the deficit is
+        still *published* but nothing removes it, and
+        :func:`jem.fluxes.mask_fluxes_under_ice` is what keeps the surface from
+        cooling further.
+
+        The clamp is applied to the temperature at the time level ``tau`` that
+        the step has just made current, and to the wet surface cells only. See
+        :meth:`_clamp_surface_at_freezing` for why that level is the one the
+        next step reads, and :meth:`_freezing_potential` for the seawater
+        properties the deficit is measured with.
 
     Attributes
     ----------
     name : str
         ``"ocn"``.
+    clamp_at_freezing : bool
+        The constructor argument of that name.
     mask_T, mask_U : jax.Array
         Land-sea masks on the T and u grids, halo cells removed.
     mask_surface_Z : jax.Array
@@ -443,7 +485,7 @@ class VerosComponent:
 
     name = "ocn"
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, *, clamp_at_freezing: bool = False) -> None:
         """Wrap ``model``; see the class docstring for the parameters."""
         # The settings were applied when this module was imported; re-checking
         # here catches the case where Veros operators were bound to another
@@ -451,6 +493,7 @@ class VerosComponent:
         configure_veros_runtime()
 
         self.model = model
+        self.clamp_at_freezing = bool(clamp_at_freezing)
         settings = model.state.settings
         variables = model.state.variables
 
@@ -564,7 +607,9 @@ class VerosComponent:
         model.set_forcing = lambda state: None
 
     @classmethod
-    def from_setup(cls, setup: str, **setup_kwargs: Any) -> "VerosComponent":
+    def from_setup(
+        cls, setup: str, *, clamp_at_freezing: bool = False, **setup_kwargs: Any
+    ) -> "VerosComponent":
         """Build the component from an importable Veros setup.
 
         The constructor takes an already-built Veros model, which is a live
@@ -585,6 +630,10 @@ class VerosComponent:
             factories -- that is how a case is parameterised by its grid file
             and timesteps -- and which one a path names is only discoverable
             by calling it.
+        clamp_at_freezing : bool, optional
+            The wrapper's own argument of that name (see the class
+            docstring); it is not passed to the setup. ``+ocean.clamp_at_freezing=true``
+            on the command line, which a Winton sea ice requires.
         **setup_kwargs
             Passed to the class or factory.
 
@@ -630,7 +679,7 @@ class VerosComponent:
             # that the class can close over the case's grid and settings.
             model = model()
         model.setup()
-        return cls(model)
+        return cls(model, clamp_at_freezing=clamp_at_freezing)
 
     def bind(
         self,
@@ -712,7 +761,9 @@ class VerosComponent:
         if self._veros_time_zero is None:
             self._veros_time_zero = float(self.model.state.variables.time)
 
-    def _derived_fields(self, state: Any) -> "VerosDerived":
+    def _derived_fields(
+        self, state: Any, ice_frazil_melt_energy: jnp.ndarray | None = None
+    ) -> "VerosDerived":
         """Extract the fields ``VerosDerived`` publishes, from any state.
 
         This is the surface-extraction convention -- the interior slice,
@@ -731,6 +782,11 @@ class VerosComponent:
         state : veros.state.VerosState
             Either the setup's freshly initialized state, or the state
             :meth:`step` has just advanced.
+        ice_frazil_melt_energy : jax.Array, optional
+            The freeze/melt potential to publish. By default it is the
+            potential of ``state`` itself (:meth:`_freezing_potential`); a
+            clamping step passes the potential it measured *before* the clamp
+            removed the deficit, because the clamped ``state`` does not show it.
 
         Returns
         -------
@@ -764,9 +820,91 @@ class VerosComponent:
         sea_fraction = variables.maskT[interior, interior, -1].astype(
             sea_surface_temperature.dtype)
 
+        if ice_frazil_melt_energy is None:
+            ice_frazil_melt_energy = self._freezing_potential(state)
+
         return VerosDerived(  # type: ignore[call-arg]
             sea_surface_temperature, sea_surface_u, sea_surface_v, sea_fraction,
+            ice_frazil_melt_energy.astype(sea_surface_temperature.dtype),
+            jnp.asarray(float(self.clamp_at_freezing),
+                        dtype=sea_surface_temperature.dtype),
         )
+
+    def _freezing_potential(self, state: Any) -> jnp.ndarray:
+        """Return the top cell's freeze/melt potential, CESM's ``frzmlt``, J m-2.
+
+        ``(T_freezing - T_top) * rho_0 * c_p * dz_top`` on wet surface cells and
+        zero on land: positive is a deficit below freezing, negative is heat
+        above it. The heat capacity is ``rho_0 * SEAWATER_HEAT_CAPACITY *
+        dzt[-1]``: the same ``rho_0`` and heat capacity :meth:`step` divides
+        the surface heat flux by to make Veros' ``forc_temp_surface``, so the
+        energy a temperature change of the top cell stands for is measured
+        exactly as the energy a heat flux puts into it. That is what lets the
+        heat a clamp adds equal the heat a sea ice is told it received. (The
+        slab ocean and the Winton ice use ``jem.constants.ocean_density`` and
+        ``ocean_specific_heat_capacity``, 1025 and 3985; Veros' ``rho_0`` and
+        its heat capacity are other numbers, a ~0.2 % difference in what one
+        kelvin of the top cell is worth. It affects the temperature at which a
+        given energy leaves the ocean, never the conservation between ocean
+        and ice, which both count in joules.)
+
+        ``T_freezing`` is ``jem.constants.seawater_freezing_point_K`` read at
+        call time: the value the slab ocean clamps at, the swamp mask compares
+        against and the Winton ice's ``T_FREEZE`` (-1.8 degC) is defined to be,
+        so the coupled model has one freezing point. It is not the saline
+        freezing point Veros' equation of state would give (about -1.9 degC at
+        35 g/kg), which the slab ocean has no counterpart of, nor jax-gcm's
+        ``SEA_ICE_FREEZING_TEMPERATURE``, which only the atmosphere's own
+        stand-in for an absent ice uses.
+        """
+        interior = slice(GHOST_CELLS, -GHOST_CELLS)
+        variables = state.variables
+        temperature = variables.temp[interior, interior, -1, variables.tau] + 273.15
+        wet = variables.maskT[interior, interior, -1] > 0
+        heat_capacity = state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * self.dzt[-1]
+        return jnp.where(
+            wet,
+            (constants.seawater_freezing_point_K - temperature) * heat_capacity,
+            0.0,
+        )
+
+    def _clamp_surface_at_freezing(self, state: Any) -> Any:
+        """Raise a sub-freezing top cell to the freezing point, on the level Veros reads next.
+
+        Which level is the whole point. A Veros step reads ``temp`` only at
+        ``tau`` (advection and the density); the Adams-Bashforth
+        extrapolation reads the *tendencies* ``dtemp`` at ``tau`` and
+        ``taum1``, never ``temp`` at ``taum1``. It writes ``taup1`` and then
+        permutes ``(taum1, tau, taup1) <- (tau, taup1, taum1)``, so the level
+        the *next* step reads as ``tau`` is the one this step has just
+        computed -- the level :meth:`step` publishes its diagnostics from.
+        Clamping exactly that level means the clamped state is the one the
+        ocean integrates from and the one the sea ice is told about. Clamping
+        ``taum1`` instead would change a level nothing reads, and copying a
+        clamped value into it would add a write that does nothing:
+        ``tests/unit/test_veros_seaice.py`` perturbs ``taum1`` and shows the
+        next step is bit-identical.
+
+        Only wet surface cells are touched, and the update is pointwise, so it
+        needs no halo exchange: a halo cell is a copy of an interior cell and
+        is raised by the same arithmetic. The heat added is
+        ``(T_freezing - T) * heat capacity`` on the cells raised
+        (:meth:`_freezing_potential`'s positive part), which is the energy the
+        sea ice receives as ``ice_frazil_melt_energy``.
+        """
+        from veros.core.operators import at, update
+
+        variables = state.variables
+        tau = variables.tau
+        wet = variables.maskT[:, :, -1] > 0
+        freezing_celsius = constants.seawater_freezing_point_K - 273.15
+        surface = variables.temp[:, :, -1, tau]
+        with variables.unlock():
+            variables.temp = update(
+                variables.temp, at[:, :, -1, tau],
+                jnp.where(wet, jnp.maximum(surface, freezing_celsius), surface),
+            )
+        return state
 
     def initialize(self) -> Carry:
         """Build the initial carry without integrating the model.
@@ -781,6 +919,13 @@ class VerosComponent:
         fictitious freezing-point ocean instead of the setup's actual
         (e.g. ~288 K) surface temperature.
 
+        With ``clamp_at_freezing`` the initial surface is held at the freezing
+        point too, as the slab ocean's initial condition is: an initial
+        temperature below freezing is a heat deficit, and a sea ice told of it
+        in the first exchange would be given energy no clamp had removed. That
+        is done on a copy of the setup's state, so ``model.state`` itself is
+        not modified, and the first exchange sees no deficit.
+
         Returns
         -------
         dict
@@ -788,9 +933,28 @@ class VerosComponent:
             "forcing": VerosForcing}``.
 
         """
+        state = self.model.state
+        if not self.clamp_at_freezing:
+            return {
+                "state": state,
+                "derived": self._derived_fields(state),
+                "forcing": VerosForcing.zeros(self.horizontal_shape),
+            }
+        # A flatten-and-rebuild copy, which is what `fori_loop` makes of the
+        # state every step.
+        state = jax.tree_util.tree_map(lambda leaf: leaf, state)
+        n_raised = int(jnp.sum(self._freezing_potential(state) > 0))
+        if n_raised:
+            logger.info(
+                "%s: the initial surface is below the freezing point in %d wet"
+                " column(s); it is raised to freezing, as the slab ocean's"
+                " initial condition is (clamp_at_freezing).", self.name, n_raised,
+            )
+        state = self._clamp_surface_at_freezing(state)
         return {
-            "state": self.model.state,
-            "derived": self._derived_fields(self.model.state),
+            "state": state,
+            "derived": self._derived_fields(
+                state, ice_frazil_melt_energy=jnp.zeros(self.horizontal_shape)),
             "forcing": VerosForcing.zeros(self.horizontal_shape),
         }
 
@@ -928,7 +1092,16 @@ class VerosComponent:
         variables = state.variables
         tau = variables.tau
 
-        derived = self._derived_fields(state)
+        # The freeze/melt potential of the integrated state, measured before a
+        # clamp removes the deficit it is the size of. The clamp is static
+        # configuration, so only one branch is traced.
+        ice_frazil_melt_energy = self._freezing_potential(state)
+        if self.clamp_at_freezing:
+            state = self._clamp_surface_at_freezing(state)
+            variables = state.variables
+
+        derived = self._derived_fields(
+            state, ice_frazil_melt_energy=ice_frazil_melt_energy)
         sea_surface_temperature = derived.sea_surface_temperature
         sea_surface_u = derived.sea_surface_u
         sea_surface_v = derived.sea_surface_v
@@ -947,6 +1120,7 @@ class VerosComponent:
         diagnostics = {
             "sea_surface_temperature": sea_surface_temperature,
             "sea_surface_salinity": sea_surface_salinity,
+            "ice_frazil_melt_energy": derived.ice_frazil_melt_energy,
             "sea_surface_u": sea_surface_u,
             "sea_surface_v": sea_surface_v,
             "temp": variables.temp[interior, interior, :, tau],
@@ -1284,6 +1458,7 @@ class VerosComponent:
                 "sea_surface_u": (["time", x, y], diagnostics["sea_surface_u"]),
                 "sea_surface_v": (["time", x, y], diagnostics["sea_surface_v"]),
                 "sea_surface_salinity": (["time", x, y], diagnostics["sea_surface_salinity"]),
+                "ice_frazil_melt_energy": (["time", x, y], diagnostics["ice_frazil_melt_energy"]),
                 "psi": (["time", x, y], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
                     ["time", x, y], diagnostics["surface_air_temperature"]),
@@ -1372,6 +1547,18 @@ class VerosComponent:
                               **role_attrs("derived")},
             "sea_surface_salinity": {"long_name": "sea surface salinity", "units": "g/kg",
                                      **role_attrs("derived")},
+            "ice_frazil_melt_energy": {
+                "long_name": "freeze/melt potential of the top cell (frzmlt)",
+                "units": "J m-2",
+                "comment": (
+                    "(T_freezing - T_top) * rho_0 * c_p * dz_top at the end of"
+                    " the coupling step, before the clamp: positive is the"
+                    " heat a clamp at the freezing point added (so a sea ice"
+                    " forms that much ice), negative is heat above freezing"
+                    " available to melt ice. Published whether or not the"
+                    " ocean clamps (clamp_at_freezing)."
+                ),
+                **role_attrs("derived")},
             "psi": {"long_name": "barotropic streamfunction", "units": "m^3/s",
                     "comment": psi_comment, **role_attrs("derived")},
             forcing_variable("surface_air_temperature"): {

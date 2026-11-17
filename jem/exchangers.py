@@ -96,6 +96,8 @@ __all__ = [
     "STANDARD_EXCHANGES",
     "VEROS_COMPONENT_MODULE",
     "VEROS_OCEAN_EXCHANGES",
+    "VEROS_SLAB_SEAICE_EXCHANGES",
+    "VEROS_WINTON_SEAICE_EXCHANGES",
     "WINTON_SEAICE_EXCHANGES",
     "Exchange",
     "ExchangeSpec",
@@ -106,6 +108,7 @@ __all__ = [
     "read_field",
     "regrid_weighted",
     "replace_field",
+    "table_specs",
 ]
 
 #: The carry sections a spec may address. See the module docstring.
@@ -303,6 +306,46 @@ WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: The standard row a Winton sea ice replaces: the ocean takes the
 #: atmosphere's flux through the ice (``seaice.derived.ocean_heat_flux_up``).
 WINTON_REPLACES = ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux")
+
+#: The rows of :data:`VEROS_OCEAN_EXCHANGES` a Winton sea ice replaces over a
+#: Veros ocean: the ocean takes both its heat and its freshwater flux from the
+#: ice (:data:`VEROS_WINTON_SEAICE_EXCHANGES`), because the ice passes on
+#: everything the ocean receives -- the atmosphere's flux less what the ice
+#: kept, plus the water the ice's growth and melt exchange. Veros has a
+#: salinity, so unlike a slab ocean (where the freshwater flux is a
+#: diagnostic) the freshwater row is part of the coupling.
+VEROS_WINTON_REPLACES = (
+    ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux"),
+    ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux"),
+)
+
+#: The sea-ice rows of a Veros coupling with the SST-diagnosed
+#: :class:`~jem.components.slab.SlabSeaiceModel`: the ice takes the ocean's SST
+#: and hands the atmosphere its fraction. The ocean keeps its own fluxes, and
+#: :func:`jem.fluxes.mask_fluxes_under_ice` is its insulation.
+VEROS_SLAB_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    ("ocn.derived.sea_surface_temperature",
+     "seaice.forcing.sea_surface_temperature", "state"),
+    ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
+)
+
+#: The sea-ice rows of a Veros coupling with a Winton ice: the slab ice's two
+#: rows, :data:`WINTON_SEAICE_EXCHANGES` (the ocean's deficit read from where
+#: Veros publishes it, ``derived``, as the slab ocean does), and the ocean's
+#: heat and freshwater forcing taken from the ice. The ocean's heat row is
+#: Veros' ``forcing.heat_flux`` where a slab ocean has ``forcing.total_heat_flux``;
+#: both are upward positive, W m-2. The freshwater flux is upward positive too,
+#: kg m-2 s-1, the sign and unit :meth:`VerosComponent.step` turns into a
+#: salinity forcing.
+VEROS_WINTON_SEAICE_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    *VEROS_SLAB_SEAICE_EXCHANGES,
+    *(row for row in WINTON_SEAICE_EXCHANGES
+      if row[:2] != ("seaice.derived.ocean_heat_flux_up",
+                     "ocn.forcing.total_heat_flux")),
+    ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.heat_flux", "flux"),
+    ("seaice.derived.ocean_freshwater_flux_up",
+     "ocn.forcing.freshwater_flux", "flux"),
+)
 
 #: The weight of a regridded row whose destination is listed here, in place
 #: of the sea fraction :func:`default_exchanges` gives a row by default.
@@ -957,6 +1000,76 @@ class Exchange:
         _require_field(section, field, f"Exchange spec {spec}", path)
 
 
+def table_specs(
+    table: Iterable[tuple[str, str, str]],
+    present: Iterable[str],
+    regrid: Mapping[str, str],
+) -> list[ExchangeSpec]:
+    """Turn the rows of ``table`` between the ``present`` components into specs.
+
+    The one place a row becomes an :class:`ExchangeSpec`: which regridder it
+    names (from ``regrid``, :func:`default_exchanges`'s keys) and which
+    fraction weights it. :func:`default_exchanges` calls it on the standard
+    table, and :class:`jem.fluxes.VerosExchange` on the sea-ice rows it adds
+    to what it computes itself, so a hand-written exchanger and the table
+    cannot weight the same row differently.
+
+    Raises
+    ------
+    ValueError
+        If ``regrid`` has entries (so this is a mixed-grid coupling) but a
+        row that crosses between the atmosphere's grid and the ocean's finds
+        no regridder in it; see :func:`default_exchanges`.
+
+    """
+    present = set(present)
+    specs: list[ExchangeSpec] = []
+    # The key each grid-crossing row would need, for the rows that got none.
+    unmapped: dict[str, list[str]] = {}
+    for src, dst, kind in table:
+        src_component, _, _ = _parse_path(src, "source", src)
+        dst_component, _, _ = _parse_path(dst, "destination", dst)
+        if not {src_component, dst_component} <= present:
+            continue
+        direction = _grid_direction(src_component, dst_component)
+        name = None
+        if direction is not None:
+            name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
+            if name is None:
+                unmapped.setdefault(f"{direction}_{kind}", []).append(
+                    f"{src} -> {dst}")
+        weight = None
+        if name is not None and dst in ROW_WEIGHTS:
+            weight = ROW_WEIGHTS[dst]
+        elif name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
+            weight = ATMOSPHERE_SEA_FRACTION
+        elif name is not None and direction == "o2a":
+            weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
+        specs.append(ExchangeSpec(src, dst, name, weight))
+
+    # A run that supplies any regridder is a mixed-grid run, and a crossing row
+    # left without one would be a plain copy: index for index between two
+    # different geographies. `lax.scan` rejects that only when the shapes
+    # differ, and the packaged veros-earth pair (JCM_T31 and
+    # RotatedGaussianLatLon) are both 96 x 48. With no regridder at all the
+    # caller is saying every component shares a grid, which is valid.
+    if regrid and unmapped:
+        rows = "\n".join(
+            f"  {key}: {', '.join(rows)}" for key, rows in sorted(unmapped.items())
+        )
+        raise ValueError(
+            "regrid names regridders for "
+            f"{sorted(regrid)!r}, so this is a mixed-grid coupling, but "
+            f"{len(sum(unmapped.values(), []))} row(s) cross between the "
+            "atmosphere's grid and the ocean's with no regridder, which would "
+            "copy the field index for index between two different grids. Add "
+            f"the missing key(s) {sorted(unmapped)!r} (or the bare direction "
+            f"{sorted({key.split('_')[0] for key in unmapped})!r}), or pass "
+            f"no regrid at all if every component shares one grid:\n{rows}"
+        )
+    return specs
+
+
 def default_exchanges(
     components: Mapping[str, Component] | Iterable[str],
     regrid: Mapping[str, str] | None = None,
@@ -1000,9 +1113,11 @@ def default_exchanges(
     A :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
     registered as ``"seaice"`` changes the slab table: the ocean's heat-flux
     row is replaced by :data:`WINTON_SEAICE_EXCHANGES`, which force the ice
-    from the atmosphere and route the ocean's flux through it. The pairing is
-    refused over an ocean that does not clamp at freezing, over Veros
-    (jax-esm#160) and under a physics package with no sea flux tile.
+    from the atmosphere and route the ocean's flux through it; over a Veros
+    ocean the ocean's freshwater row is the ice's too
+    (:data:`VEROS_WINTON_SEAICE_EXCHANGES`). The pairing is refused over an
+    ocean that does not clamp at freezing (slab or Veros) and under a physics
+    package with no sea flux tile.
 
     Regridding
     ----------
@@ -1081,51 +1196,7 @@ def default_exchanges(
             "(\"a2o\", \"o2a\") optionally followed by \"_flux\" or \"_state\"."
         )
 
-    table = _exchange_table(components)
-    specs: list[ExchangeSpec] = []
-    # The key each grid-crossing row would need, for the rows that got none.
-    unmapped: dict[str, list[str]] = {}
-    for src, dst, kind in table:
-        src_component, _, _ = _parse_path(src, "source", src)
-        dst_component, _, _ = _parse_path(dst, "destination", dst)
-        if not {src_component, dst_component} <= present:
-            continue
-        direction = _grid_direction(src_component, dst_component)
-        name = None
-        if direction is not None:
-            name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
-            if name is None:
-                unmapped.setdefault(f"{direction}_{kind}", []).append(
-                    f"{src} -> {dst}")
-        weight = None
-        if name is not None and dst in ROW_WEIGHTS:
-            weight = ROW_WEIGHTS[dst]
-        elif name is not None and src.startswith(ATMOSPHERE_SEA_PREFIX):
-            weight = ATMOSPHERE_SEA_FRACTION
-        elif name is not None and direction == "o2a":
-            weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
-        specs.append(ExchangeSpec(src, dst, name, weight))
-
-    # A run that supplies any regridder is a mixed-grid run, and a crossing row
-    # left without one would be a plain copy: index for index between two
-    # different geographies. `lax.scan` rejects that only when the shapes
-    # differ, and the packaged veros-earth pair (JCM_T31 and
-    # RotatedGaussianLatLon) are both 96 x 48. With no regridder at all the
-    # caller is saying every component shares a grid, which is valid.
-    if regrid and unmapped:
-        rows = "\n".join(
-            f"  {key}: {', '.join(rows)}" for key, rows in sorted(unmapped.items())
-        )
-        raise ValueError(
-            "regrid names regridders for "
-            f"{sorted(regrid)!r}, so this is a mixed-grid coupling, but "
-            f"{len(sum(unmapped.values(), []))} row(s) cross between the "
-            "atmosphere's grid and the ocean's with no regridder, which would "
-            "copy the field index for index between two different grids. Add "
-            f"the missing key(s) {sorted(unmapped)!r} (or the bare direction "
-            f"{sorted({key.split('_')[0] for key in unmapped})!r}), or pass "
-            f"no regrid at all if every component shares one grid:\n{rows}"
-        )
+    specs = table_specs(_exchange_table(components), present, regrid)
 
     wired = {part for spec in specs
              for part in (spec.src_parts[0], spec.dst_parts[0])}
@@ -1207,18 +1278,17 @@ def _check_freezing_deficit_is_taken(
     """
     if not isinstance(components, Mapping) or "ocn" not in components:
         return
-    params = getattr(components["ocn"], "params", None)
-    if not getattr(params, "clamp_at_freezing", False):
+    if not _ocean_clamps_at_freezing(components["ocn"]):
         return
     if any(spec.src == FREEZING_DEFICIT for spec in specs):
         return
     raise ValueError(
-        "The ocean clamps its mixed layer at the freezing point "
-        "(params.clamp_at_freezing=True), but no exchange takes the deficit "
+        "The ocean clamps its top layer at the freezing point "
+        "(clamp_at_freezing=True), but no exchange takes the deficit "
         f"the clamp removes ({FREEZING_DEFICIT}), so the clamp would create "
         "heat. Couple a sea ice that forms ice from it, or construct the "
         "ocean with clamp_at_freezing=False, which keeps the deficit in the "
-        "mixed layer (the choice for SlabSeaiceModel)."
+        "ocean (the choice for SlabSeaiceModel)."
     )
 
 
@@ -1237,9 +1307,10 @@ def _check_winton_coupling(
     """Refuse a Winton sea ice the table cannot couple faithfully.
 
     The ice forms frazil from the deficit an ocean's clamp at freezing removes
-    and passes the ocean everything the ocean receives, so its ocean has to be
-    a clamping slab ocean: an ocean that kept the deficit would freeze it a
-    second time, and Veros neither clamps nor publishes it. Its forcing is the
+    and passes the ocean everything the ocean receives, so its ocean has to
+    clamp, slab or Veros alike (``params.clamp_at_freezing`` /
+    ``VerosComponent(clamp_at_freezing=True)``): an ocean that kept the
+    deficit would have it frozen a second time. Its forcing is the
     atmosphere's flux over the sea part of each cell, so the atmosphere has to
     publish its sea tile: ECHAM delivers its fluxes untiled and integrates its
     own sea ice.
@@ -1255,24 +1326,26 @@ def _check_winton_coupling(
             f"mapping, not a {type(components).__name__}."
         )
     ocean = components.get("ocn")
-    if ocean is not None:
+    if ocean is not None and not _ocean_clamps_at_freezing(ocean):
         if _is_veros_ocean(ocean):
-            raise ValueError(
-                "A Winton sea ice cannot be coupled to the Veros ocean yet: "
-                "Veros neither clamps its top cell at the freezing point nor "
-                "publishes the deficit the ice forms frazil from "
-                "(jax-esm#160). Couple it to a slab ocean "
-                "(ocean=slab*), or use seaice=slab."
+            fix = (
+                "Construct the ocean with VerosComponent(model, "
+                "clamp_at_freezing=True) (+ocean.clamp_at_freezing=true)."
             )
-        if not getattr(getattr(ocean, "params", None), "clamp_at_freezing", False):
-            raise ValueError(
-                "A Winton sea ice forms frazil ice from the deficit the ocean "
-                "removes by clamping its mixed layer at the freezing point, but "
-                "this ocean keeps the deficit (params.clamp_at_freezing=False), "
-                "so freezing would be counted twice. Construct the ocean with "
-                "SlabOceanParameters(clamp_at_freezing=True) "
-                "(+ocean.params.clamp_at_freezing=true)."
+            what = "clamping its top cell at the freezing point"
+            flag = "clamp_at_freezing=False"
+        else:
+            fix = (
+                "Construct the ocean with SlabOceanParameters("
+                "clamp_at_freezing=True) (+ocean.params.clamp_at_freezing=true)."
             )
+            what = "clamping its mixed layer at the freezing point"
+            flag = "params.clamp_at_freezing=False"
+        raise ValueError(
+            "A Winton sea ice forms frazil ice from the deficit the ocean "
+            f"removes by {what}, but this ocean keeps the deficit ({flag}), "
+            f"so freezing would be counted twice. {fix}"
+        )
     atmosphere = components.get("atm")
     if atmosphere is not None and not getattr(atmosphere, "publishes_sea_tiles", True):
         raise ValueError(
@@ -1290,6 +1363,18 @@ def _is_veros_ocean(ocean: Any) -> bool:
     return module is not None and isinstance(ocean, module.VerosComponent)
 
 
+def _ocean_clamps_at_freezing(ocean: Any) -> bool:
+    """Whether an ocean holds itself at freezing and publishes the deficit.
+
+    A slab ocean says so in its (differentiable-parameter) ``params``; the
+    Veros wrapper, which has no parameters pytree, in its static
+    ``clamp_at_freezing`` attribute.
+    """
+    if _is_veros_ocean(ocean):
+        return bool(getattr(ocean, "clamp_at_freezing", False))
+    return bool(getattr(getattr(ocean, "params", None), "clamp_at_freezing", False))
+
+
 def _exchange_table(
     components: Mapping[str, Component] | Iterable[str],
 ) -> tuple[tuple[str, str, str], ...]:
@@ -1299,22 +1384,18 @@ def _exchange_table(
     :class:`~jem.components.veros_component.VerosComponent`, and
     :data:`STANDARD_EXCHANGES` otherwise -- including when the caller passed
     names rather than components, since a name says nothing about a carry.
-    With a Winton sea ice, the slab table's ocean heat-flux row is replaced
-    by :data:`WINTON_SEAICE_EXCHANGES` (:func:`_check_winton_coupling`
-    refuses the Veros case).
+    With a Winton sea ice the ocean's heat-flux row is replaced by
+    :data:`WINTON_SEAICE_EXCHANGES`' (the slab table) or, over Veros, the
+    heat and freshwater rows by :data:`VEROS_WINTON_SEAICE_EXCHANGES`'
+    (:func:`_check_winton_coupling` refuses an ocean that does not clamp).
     """
-    if _is_winton(components):
-        return tuple(
-            row for row in STANDARD_EXCHANGES if row[:2] != WINTON_REPLACES
-        ) + WINTON_SEAICE_EXCHANGES
-    if not isinstance(components, Mapping):
-        return STANDARD_EXCHANGES
-    ocean = components.get("ocn")
-    # `sys.modules`, not an import: see VEROS_COMPONENT_MODULE.
-    module = sys.modules.get(VEROS_COMPONENT_MODULE)
-    if ocean is None or module is None:
-        return STANDARD_EXCHANGES
-    if not isinstance(ocean, module.VerosComponent):
+    winton = _is_winton(components)
+    ocean = components.get("ocn") if isinstance(components, Mapping) else None
+    if not _is_veros_ocean(ocean):
+        if winton:
+            return tuple(
+                row for row in STANDARD_EXCHANGES if row[:2] != WINTON_REPLACES
+            ) + WINTON_SEAICE_EXCHANGES
         return STANDARD_EXCHANGES
     logger.warning(
         "The ocean is a Veros GCM and no exchanger was named, so the default "
@@ -1326,6 +1407,14 @@ def _exchange_table(
         "+coupling.exchanger._target_=jem.fluxes.VerosExchange on the command "
         "line -- for a mechanically forced ocean."
     )
+    if winton:
+        # The ice's rows replace the ones that would hand the ocean the
+        # atmosphere's heat and freshwater fluxes; the others stay.
+        replaced = set(VEROS_WINTON_REPLACES)
+        kept = tuple(row for row in VEROS_OCEAN_EXCHANGES
+                     if row[:2] not in replaced)
+        return kept + tuple(
+            row for row in VEROS_WINTON_SEAICE_EXCHANGES if row not in kept)
     return VEROS_OCEAN_EXCHANGES
 
 

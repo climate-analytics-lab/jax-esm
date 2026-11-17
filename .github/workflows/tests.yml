@@ -204,7 +204,7 @@ jobs:
         pytest tests/examples -q
 
     - name: Run the slow unit tests
-      # Four invocations, not one, per #113: importing a Veros setup module
+      # Five invocations, not one, per #113: importing a Veros setup module
       # flips the process-global jax_enable_x64 flag on (Veros runs double
       # precision internally), which would silently contaminate whichever
       # other slow test shares that process afterward -- including the
@@ -215,10 +215,11 @@ jobs:
       # together in one more.
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
-        JAX_PLATFORMS=cpu pytest tests/unit -q -m slow -p no:cacheprovider --ignore=tests/unit/test_veros_component.py --ignore=tests/unit/test_veros_setups.py --ignore=tests/unit/test_veros_earth_masks_veros.py
+        JAX_PLATFORMS=cpu pytest tests/unit -q -m slow -p no:cacheprovider --ignore=tests/unit/test_veros_component.py --ignore=tests/unit/test_veros_setups.py --ignore=tests/unit/test_veros_earth_masks_veros.py --ignore=tests/unit/test_veros_seaice.py
         JAX_PLATFORMS=cpu pytest tests/unit/test_veros_component.py -q -m slow -p no:cacheprovider
         JAX_PLATFORMS=cpu pytest tests/unit/test_veros_setups.py -q -p no:cacheprovider
         JAX_PLATFORMS=cpu pytest tests/unit/test_veros_earth_masks_veros.py -q -p no:cacheprovider
+        JAX_PLATFORMS=cpu pytest tests/unit/test_veros_seaice.py -q -p no:cacheprovider
 
   docs:
     runs-on: ubuntu-latest

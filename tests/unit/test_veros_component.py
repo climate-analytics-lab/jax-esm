@@ -172,7 +172,7 @@ def _labelling_diagnostics(component, n_records):
             "sea_surface_temperature", "sea_surface_salinity",
             "sea_surface_u", "sea_surface_v",
             "surface_air_temperature", "surface_taux", "surface_tauy",
-            "heat_flux", "freshwater_flux",
+            "heat_flux", "freshwater_flux", "ice_frazil_melt_energy",
         )
     })
     # The land's runoff is one mass rate per record.
@@ -1420,3 +1420,42 @@ def test_a_spun_up_ocean_is_reused_under_another_start_date(
         july.generate_trajectory_function(1)(spun_up)
         jax.effects_barrier()
     assert "model clock is" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The freeze/melt potential and the clamp (jax-esm#160)
+#
+# The budget and clamp tests that need a sea ice and a coupled run are in
+# `test_veros_seaice.py`; these are the component's own contract.
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_publishes_the_freeze_melt_potential_of_the_initial_surface(
+    component, veros_model,
+):
+    """``ice_frazil_melt_energy`` is ``(T_f - T_top) rho_0 c_p dz_top`` on wet cells, 0 on land."""
+    from jem import constants
+    from jem.components.veros_component import SEAWATER_HEAT_CAPACITY
+
+    derived = component.initialize()["derived"]
+    wet = np.asarray(component.mask_T[:, :, -1]) > 0
+    surface = np.asarray(derived.sea_surface_temperature)
+    heat_capacity = (
+        veros_model.state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * float(component.dzt[-1]))
+    expected = (constants.seawater_freezing_point_K - surface) * heat_capacity
+    np.testing.assert_allclose(
+        np.asarray(derived.ice_frazil_melt_energy)[wet], expected[wet], rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(derived.ice_frazil_melt_energy)[~wet], 0.0)
+    # acc_basic starts far above freezing: all melt potential, no deficit.
+    assert np.all(np.asarray(derived.ice_frazil_melt_energy)[wet] < 0.0)
+    assert float(derived.clamps_at_freezing) == 0.0
+
+
+def test_to_xarray_labels_the_freeze_melt_energy_as_a_derived_field(component):
+    diagnostics = _labelling_diagnostics(component, 2)
+    dataset = component.to_xarray(
+        diagnostics, TimeAxis(start_date=START_DATE, steps=np.arange(2), dt=COUPLING_TIMESTEP))
+    variable = dataset["ice_frazil_melt_energy"]
+    assert variable.attrs["units"] == "J m-2"
+    assert variable.attrs["jem_role"] == "derived"
+    assert variable.dims == dataset["sea_surface_temperature"].dims
