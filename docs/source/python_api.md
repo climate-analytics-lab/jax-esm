@@ -82,7 +82,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
   for a land-sea mask; without one every cell is ocean.
 - **The exchanger** is the only place where components exchange anything.
-  {func}`~jem.default_exchangers` builds the standard wiring for
+  {func}`~jem.exchangers.default_exchangers` builds the standard wiring for
   whichever of the standard components (`atm`, `ocn`, `lnd`, `seaice`) are
   present. An exchange it cannot express — one that regrids, computes a flux,
   converts units or blends two fields — is a plain function
@@ -103,7 +103,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   step. The same model can be written as an hourly `Coupler` registered as a
   component of the daily one — a `Coupler` satisfies the component contract.
   See {doc}`design/nesting` for both forms.
-- **The run loop** {func}`~jem.run_chunked` integrates in chunks: per
+- **The run loop** {func}`~jem.driver.run_chunked` integrates in chunks: per
   chunk it writes one file per component, checkpoints if it was given a path,
   and runs a health check on the result, stopping the run if the atmosphere
   has gone unstable. Every run default lives on its signature. How far to

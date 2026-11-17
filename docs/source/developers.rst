@@ -15,7 +15,7 @@ shadow it:
    git -C jax-gcm checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97   # JCM_SUPPORTED_REV
    pip install -e ./jax-gcm
 
-   git clone https://[your_credential]@github.com/climate-analytics-lab/jax-esm.git
+   git clone https://github.com/climate-analytics-lab/jax-esm.git
    cd jax-esm
    pip install -e ".[dev]"
 
@@ -41,6 +41,24 @@ into ``Any``. A function in :mod:`jem.plot` that returns a matplotlib value
 directly therefore passes locally, where the real types resolve, and fails in
 CI under ``warn_return_any``. Convert such a value to the declared type rather
 than returning it straight through, so the annotation holds either way.
+
+The Winton sea ice is also compared at machine precision with the unmodified
+MITgcm ``thsice`` Fortran routines
+(``tests/unit/test_winton_vs_thsice_fortran.py``). That comparison needs a small
+Fortran executable that CI builds before the unit tests and that you build once
+locally:
+
+.. code-block:: bash
+
+   tests/reference/thsice/build.sh     # needs gfortran and network access
+
+The script fetches the four MITgcm source files it needs, at a pinned commit,
+into ``tests/reference/thsice/upstream/`` (git-ignored) and compiles them
+(``tests/reference/thsice/README.md`` describes the oracle). Without the
+executable the test *skips* on a development machine; CI sets
+``JEM_REQUIRE_THSICE_ORACLE=1``, under which a missing executable *fails* the
+test, so a broken build cannot pass as a skipped comparison. Set the variable
+locally to get the same behaviour.
 
 Two suites sit behind those gates. ``tests/unit``'s fast gate is
 ``-m "not slow"`` and needs no external data; its ``@pytest.mark.slow`` tests
@@ -69,3 +87,46 @@ examples are the largest body of code that uses it:
 The conventions the code is held to are in ``CLAUDE.md`` at the repository root,
 and the architecture the tests exercise is described in
 :doc:`design/architecture`.
+
+Building the documentation
+--------------------------
+
+.. code-block:: bash
+
+   pip install -e ".[docs,plot]"
+   docs/build_docs.sh -c        # clean build; the HTML is in docs/build/html
+
+``docs/build_docs.sh`` copies ``examples/`` into ``docs/source/examples/`` (the
+example notebook pages are built from that copy) and runs Sphinx through
+``docs/Makefile``. It needs ``pandoc`` on ``PATH``, which ``nbsphinx`` converts
+the notebooks with (``apt install pandoc``, ``brew install pandoc`` or the
+``pypandoc`` wheel); the generated API stubs, the copied examples and the build
+directory are all git-ignored. The build is strict: the Makefile passes
+``-W --keep-going``, so any warning fails it while every warning is still
+reported, and the ``docs`` CI job runs this same script. ``-i`` installs
+``docs/requirements.txt`` first and ``-o`` opens the result in a browser.
+
+The API reference (``docs/source/api.rst``) is generated: every module listed
+there is rendered with all of its public members, so a new public function or
+class needs no docs change, but a new *module* must be added to ``api.rst``.
+The cross-references in docstrings and pages are also checkable under
+Sphinx's nitpicky mode, which reports every reference that resolves to nothing:
+
+.. code-block:: bash
+
+   SPHINXOPTS="--keep-going -n" docs/build_docs.sh -c
+
+The example notebooks are checked in with their outputs cleared, so by default
+their pages show code only, which keeps an everyday build fast. To render the
+figures, execute them while building:
+
+.. code-block:: bash
+
+   docs/build_docs.sh -c -e     # same as JEM_DOCS_EXECUTE_NOTEBOOKS=1
+
+This runs all of them (a few minutes each on a CPU; the per-notebook timeout
+is 1800 s) and writes whatever the notebooks write under
+``docs/source/examples/``, never into ``examples/``. Read the Docs builds from
+``.readthedocs.yaml``, which installs jax-gcm from source at the revision in
+``JCM_SUPPORTED_REV`` before the project (``jcm>=3.1.0`` is not on PyPI) and
+does not execute the notebooks.

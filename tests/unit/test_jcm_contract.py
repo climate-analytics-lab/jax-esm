@@ -338,6 +338,27 @@ def test_the_dockerfile_installs_the_supported_revision():
     )
 
 
+def test_the_readthedocs_build_installs_the_supported_revision():
+    """Check the hosted docs are built against the revision the contract supports.
+
+    Read the Docs cannot `pip install` the project (the `jcm` floor is not on
+    PyPI), so `.readthedocs.yaml` installs jax-gcm from git at a sha of its
+    own. A docs build at another one succeeds on install and then renders the
+    API pages of an adapter that does not match the atmosphere it documents.
+    """
+    config = WORKFLOW.parents[2] / ".readthedocs.yaml"
+    shas = re.findall(
+        r"git\+https://github\.com/climate-analytics-lab/jax-gcm@([0-9a-f]+)",
+        config.read_text(),
+    )
+    assert shas, f"No `git+https://github.com/climate-analytics-lab/jax-gcm@<sha>` in {config}"
+    assert set(shas) == {JCM_SUPPORTED_REV}, (
+        f"{config.name} installs jax-gcm {sorted(set(shas))} but"
+        " jem/components/jcm/contract.py says JAX-ESM is supported against"
+        f" {JCM_SUPPORTED_REV}. Bump it with the pin."
+    )
+
+
 def test_the_jcm_floor_is_the_supported_version():
     """Check `pip` cannot resolve `jcm` to a release older than the contract's.
 

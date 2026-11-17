@@ -1,18 +1,42 @@
 # .readthedocs.yaml
 version: 2
 
-# Build documentation in the docs/ directory with Sphinx
-sphinx:
-  configuration: docs/source/conf.py
-
-# Build documentation with Python 3.11
 build:
   os: ubuntu-22.04
   tools:
     python: "3.11"
+  apt_packages:
+    # nbsphinx converts the example notebooks with pandoc; rsync is what
+    # docs/Makefile's `copy_examples` target copies examples/ into the Sphinx
+    # source tree with.
+    - pandoc
+    - rsync
+  jobs:
+    # Replaces Read the Docs' own `pip install` step, because the project
+    # cannot be installed by `pip install .` alone: JAX-ESM requires
+    # `jcm>=3.1.0`, which is not on PyPI (its newest release is older), so
+    # jax-gcm has to be installed from source first, at the revision JAX-ESM
+    # is supported against (JCM_SUPPORTED_REV in
+    # jem/components/jcm/contract.py; tests/unit/test_jcm_contract.py asserts
+    # that this sha is the same one). With jcm installed, the requirement is
+    # already satisfied when the project is installed. `[plot]` is what
+    # `jem.plot` imports, so that its API page renders.
+    #
+    # The jittable Veros fork that `jem.components.veros*` import is not on
+    # PyPI either; docs/source/conf.py mocks `veros` when it is not importable,
+    # which is the case here.
+    install:
+      - python -m pip install --upgrade pip
+      - python -m pip install "git+https://github.com/climate-analytics-lab/jax-gcm@9764c56b36cd71b55c644aeb93cb787eb8c4db97"
+      - python -m pip install ".[plot]"
+      - python -m pip install -r docs/requirements.txt
+    # docs/source/examples/ only exists once `examples/` has been copied in, and
+    # every example notebook page is built from it.
+    pre_build:
+      - make -C docs copy_examples
 
-python:
-  install:
-    - method: pip
-      path: .
-    - requirements: docs/requirements.txt
+sphinx:
+  configuration: docs/source/conf.py
+  # The same strictness as docs/Makefile's `-W --keep-going`, which the GitHub
+  # `docs` job runs.
+  fail_on_warning: true

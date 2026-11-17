@@ -95,5 +95,6 @@ def evaluate_periodic(
 
     return (1.0 - alpha) * reordered_data.data[idx] + alpha * reordered_data.data[idx_next]  # type: ignore
 
-# Define a vectorized version
-vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None))  # vmap over x, keep data and name constant
+#: :func:`evaluate_periodic` mapped over ``x``; ``data`` and the axis name are
+#: shared by every evaluation point.
+vmap_evaluate_periodic = jax.vmap(evaluate_periodic, in_axes=(0, None, None))

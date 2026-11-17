@@ -245,6 +245,12 @@ jobs:
         python -m ipykernel install --user --name python3 --display-name "Python 3"
 
     - name: Build Sphinx docs
+      # The same command a developer runs locally. docs/Makefile passes
+      # `-W --keep-going` to Sphinx, so a warning (a broken cross-reference
+      # or a docstring that does not parse) fails the job and every warning
+      # is still reported. The notebooks are rendered as checked in, without
+      # executing them; `docs/build_docs.sh -e` (JEM_DOCS_EXECUTE_NOTEBOOKS=1)
+      # runs them and is for a build whose pages should show the figures.
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         docs/build_docs.sh -c

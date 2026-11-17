@@ -2,3 +2,8 @@ sphinx
 shibuya
 nbsphinx
 myst-parser
+# nbsphinx highlights the example notebooks' cells with the `ipython3` Pygments
+# lexer, which ships with IPython (a dependency of ipykernel); without it every
+# notebook page warns. ipykernel is also the kernel nbsphinx executes them with
+# under JEM_DOCS_EXECUTE_NOTEBOOKS=1.
+ipykernel
