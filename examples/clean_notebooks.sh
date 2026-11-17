@@ -12,16 +12,16 @@
 # Options:
 #   -c    Check only: report notebooks that are not already clean and exit
 #         non-zero if any are found, without modifying files. Useful as a
-#         pre-commit/CI guard.
+#         pre-commit guard; the `lint` job in .github/workflows/tests.yml runs it.
 #   -h    Show this help message and exit.
 #
 # PATH ...  Notebook files or directories to clean. Defaults to this
-#           notebooks/ directory (recursively), skipping
+#           examples/ directory (recursively), skipping
 #           .ipynb_checkpoints and output/ subdirectories.
 #
 # Examples:
 #   ./clean_notebooks.sh                       # clean every notebook here
-#   ./clean_notebooks.sh -c                     # CI check, no changes made
+#   ./clean_notebooks.sh -c                     # the check CI runs (lint job), no changes made
 #   ./clean_notebooks.sh 01_basic/01_aquaplanet.ipynb
 
 set -euo pipefail

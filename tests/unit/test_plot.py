@@ -672,6 +672,26 @@ def test_animate_map_writes_a_gif(tmp_path):
     assert gif.stat().st_size > 0
 
 
+def test_animate_map_frame_title_is_a_readable_timestamp():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    time = np.array(["2001-01-01T12:00", "2001-01-02T12:00"], dtype="datetime64[ns]")
+    field = xr.DataArray(
+        np.arange(2 * 8 * 4).reshape(2, 8, 4).astype(float),
+        dims=("time", "lon", "lat"),
+        coords={"time": time, "lon": np.linspace(0, 315, 8),
+                "lat": np.linspace(-60, 60, 4)},
+        name="field",
+    )
+
+    animation = plot.animate_map(field, title="Humidity")
+    ax = animation._fig.axes[0]
+    assert ax.get_title() == "Humidity (2001-01-01 12:00)"
+    animation._func(1)
+    assert ax.get_title() == "Humidity (2001-01-02 12:00)"
+
+
 def test_animate_map_draws_one_colorbar_not_one_per_frame():
     """`ax.clear()` per frame must not leave a growing stack of colorbars."""
     matplotlib = pytest.importorskip("matplotlib")
@@ -1735,3 +1755,151 @@ def test_map_plot_honours_vmin_vmax_alongside_levels_on_both_layouts():
     sep_colors = _facecolor_set(sep_ax)
     assert curv_colors == sep_colors
     assert curv_colors != _facecolor_set(curv_ax_no_bounds)
+
+
+# ---------------------------------------------------------------------------
+# map_plot: the longitude seam and the longitude wrap
+# ---------------------------------------------------------------------------
+
+
+def _separable_field(lon):
+    lat = np.linspace(-60, 60, 4)
+    return xr.DataArray(
+        np.arange(lon.size * lat.size, dtype=float).reshape(lon.size, lat.size),
+        dims=("lon", "lat"),
+        coords={"lon": lon, "lat": lat},
+        name="field",
+    )
+
+
+@pytest.mark.parametrize(
+    "lon, expected_right_edge",
+    [
+        pytest.param(np.arange(0.0, 360.0, 45.0), 360.0, id="0-360-convention"),
+        pytest.param(np.arange(-180.0, 180.0, 45.0), 180.0, id="-180-180-convention"),
+    ],
+)
+def test_map_plot_closes_the_seam_of_a_global_regular_longitude_axis(
+    lon, expected_right_edge
+):
+    """``contourf`` fills only between the longitudes it is given, so a global
+    axis that stops one step short of a full lap would draw a blank strip at
+    the seam; the helper must reach the first longitude's next lap.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    ax = plot.map_plot(_separable_field(lon))
+
+    assert ax.dataLim.x1 == pytest.approx(expected_right_edge)
+
+
+@pytest.mark.parametrize(
+    "lon",
+    [
+        pytest.param(np.arange(0.0, 100.0, 15.0), id="regional"),
+        pytest.param(np.arange(0.0, 361.0, 45.0), id="already-repeats-first-point"),
+        pytest.param(np.array([0.0, 10.0, 30.0, 60.0, 100.0]), id="irregular"),
+    ],
+)
+def test_map_plot_leaves_a_longitude_axis_that_is_not_a_bare_global_one_alone(lon):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    ax = plot.map_plot(_separable_field(lon))
+
+    assert ax.dataLim.x1 == pytest.approx(lon[-1])
+
+
+def _wrapping_curvilinear_field(lon_origin, convention):
+    """Build a global 2-D grid whose longitude wraps along ``x`` and is skewed by ``y``.
+
+    ``lon_origin`` is where index 0 sits, so every row starts mid-map and
+    crosses the dateline (or the Greenwich meridian, in the 0..360
+    convention) part of the way along -- the layout of the displaced-pole
+    ocean grid.
+    """
+    x = np.arange(72)
+    y = np.arange(9)
+    lon = lon_origin + 5.0 * x[:, None] + 2.0 * y[None, :]
+    lon = (lon + 180.0) % 360.0 - 180.0 if convention == "-180-180" else lon % 360.0
+    lat = np.broadcast_to(-80.0 + 20.0 * y[None, :], lon.shape)
+    return xr.DataArray(
+        np.cos(np.radians(lat)),
+        dims=("x", "y"),
+        coords={"lon": (("x", "y"), lon), "lat": (("x", "y"), lat)},
+        name="field",
+    )
+
+
+@pytest.mark.parametrize("convention", ["-180-180", "0-360"])
+def test_map_plot_curvilinear_longitude_wrap_draws_no_warning_and_no_streak(convention):
+    """A curvilinear grid whose longitude wraps must neither warn nor draw a
+    cell across the map: every drawn cell is a few degrees wide, and together
+    the copies of the mesh cover the whole longitude window.
+    """
+    import warnings
+
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    field = _wrapping_curvilinear_field(100.0, convention)
+    with warnings.catch_warnings():
+        # Any warning at all fails the test: the one a wrapped axis raised is
+        # matplotlib's "not monotonically increasing or decreasing".
+        warnings.simplefilter("error")
+        ax = plot.map_plot(field)
+
+    window = (-180.0, 180.0) if convention == "-180-180" else (0.0, 360.0)
+    assert ax.get_xlim() == pytest.approx(window)
+    degrees = np.arange(window[0], window[1])
+    covered = np.zeros(degrees.size, dtype=bool)
+    for mesh in ax.collections:
+        longitudes = mesh.get_coordinates()[..., 0]
+        assert np.abs(np.diff(longitudes, axis=1)).max() < 20.0, "a cell spans the map"
+        covered |= (degrees >= longitudes.min()) & (degrees < longitudes.max())
+    assert covered.all()
+
+
+def test_map_plot_curvilinear_copies_share_one_colour_scale():
+    """The copy of the mesh that carries the part hanging over the dateline
+    must colour a value exactly as the first does, not autoscale on its own.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    ax = plot.map_plot(_wrapping_curvilinear_field(100.0, "-180-180"))
+
+    meshes = ax.collections
+    assert len(meshes) > 1
+    assert all(mesh.norm is meshes[0].norm for mesh in meshes)
+    assert all(mesh.cmap is meshes[0].cmap for mesh in meshes)
+
+
+def test_map_plot_curvilinear_does_not_add_a_cyclic_column():
+    """A 2-D grid's seam is handled by its own geometry; the field drawn is the
+    field given, cell for cell, in every copy of the mesh.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    field = _wrapping_curvilinear_field(100.0, "-180-180")
+    ax = plot.map_plot(field)
+
+    for mesh in ax.collections:
+        assert mesh.get_array().shape == field.T.shape
+
+
+def test_curvilinear_mesh_leaves_cells_folded_over_the_pole_undrawn():
+    """Where a row folds back over the pole the longitude has no consistent
+    unwrapping: a cell there spans most of a lap, is not a quadrilateral on a
+    lon/lat plane, and is flagged so it is left blank rather than streaked.
+    """
+    row = np.arange(0.0, 360.0, 60.0)
+    lat = np.array([[80.0], [88.0]]) * np.ones((1, 6))
+
+    _, _, folded = plot._curvilinear_mesh(np.stack([row, row[::-1]]), lat)
+    _, _, parallel = plot._curvilinear_mesh(np.stack([row, row + 3.0]), lat)
+
+    assert folded.any() and not folded.all()
+    assert not parallel.any()

@@ -73,6 +73,13 @@ jobs:
       # and lint-only-jem is how they drifted to 124 findings.
       run: ruff check --output-format=github .
 
+    - name: Check the example notebooks are committed cleared
+      # Notebooks are committed without outputs, execution counts or run
+      # metadata (`python examples/clean_notebooks.py` clears them), so a diff
+      # shows what an author wrote. Needs only nbformat, which the dev extra
+      # installs.
+      run: python examples/clean_notebooks.py --check
+
     - name: Type check with mypy
       run: JAX_PLATFORMS=cpu mypy jem/ --ignore-missing-imports
 

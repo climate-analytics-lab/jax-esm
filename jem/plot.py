@@ -312,6 +312,149 @@ def _is_separable_grid(lat: xr.DataArray, lon: xr.DataArray) -> bool:
     return lat.ndim == 1 and lon.ndim == 1
 
 
+def _is_global_regular_longitude(lon: np.ndarray) -> bool:
+    """Return whether a 1-D longitude axis covers the globe once, with no repeat.
+
+    True when the axis is strictly ascending, evenly spaced, and one more step
+    past its last point lands on its first point plus 360 degrees (``0 ...
+    356.25`` at 3.75 degree spacing, or ``-180 ... 176.25``). Such an axis
+    leaves a seam: ``contourf`` fills only between the points it is given, so
+    the strip between the last longitude and the first one's next-lap copy is
+    drawn blank unless the first column is appended again at ``+360``. A
+    regional axis, or a global one that already repeats its first point, has
+    no such strip and must be left alone -- the two cases are told apart by the
+    span, not by the axis' name or its range, so ``0..360`` and ``-180..180``
+    conventions are both handled.
+    """
+    if lon.ndim != 1 or lon.size < 3:
+        return False
+    step = np.diff(lon)
+    if not np.all(step > 0):
+        return False
+    mean_step = (lon[-1] - lon[0]) / (lon.size - 1)
+    # 1e-3 of a step: the coordinates are float32 radians converted to degrees
+    # (`jem.components.slab.grid.to_degrees`), so a regular axis is regular
+    # only to a few parts in 1e6, and a tolerance this loose still separates
+    # a global axis from any real regional one (whose gap is a whole step).
+    if not np.allclose(step, mean_step, rtol=1e-3, atol=0.0):
+        return False
+    return bool(abs(lon[-1] + mean_step - lon[0] - 360.0) < 1e-3 * mean_step)
+
+
+def _cell_edges(centres: np.ndarray) -> np.ndarray:
+    """Return the ``(ny + 1, nx + 1)`` cell corners of 2-D cell-centre coordinates.
+
+    Interior corners are the mean of the four surrounding centres; the outer
+    ring extrapolates by half a step -- the construction ``pcolormesh`` itself
+    uses for ``shading="nearest"``, spelled out here so the corners can be
+    handed to ``pcolormesh`` explicitly (``shading="flat"``), which needs no
+    guess about whether the centres are monotonic.
+    """
+    def pad(values: np.ndarray) -> np.ndarray:
+        half = 0.5 * np.diff(values, axis=1)
+        return np.hstack([
+            values[:, :1] - half[:, :1],
+            values[:, :-1] + half,
+            values[:, -1:] + half[:, -1:],
+        ])
+
+    return pad(pad(centres).T).T
+
+
+def _curvilinear_mesh(
+    lon: np.ndarray, lat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(lon_corners, lat_corners, undrawable)`` for a curvilinear mesh.
+
+    ``lon``/``lat`` are the 2-D cell centres in degrees, ordered
+    ``(lat-like, lon-like)`` (the order the mesh is drawn in). A displaced-pole
+    grid wraps its longitude through +-180 along the lon-like axis, so two
+    neighbouring centres can be 359 degrees apart while being one cell apart
+    on the sphere, and the quad built from them would be a streak across the
+    map. The longitude is therefore *unwrapped* -- made continuous along each
+    row -- and each row is shifted by a whole number of laps onto the one
+    before it, so the corners are computed from consistent neighbours.
+
+    Near the grid's pole singularity there is no consistent longitude to be
+    had: a cell there spans most of a lap. ``undrawable`` flags every cell
+    whose four corners are more than half a lap apart in longitude; such a cell
+    is not a quadrilateral on a lon/lat plane, so it is left blank rather than
+    drawn as a streak.
+    """
+    unwrapped = np.unwrap(lon, period=360.0, axis=1)
+    for row in range(1, unwrapped.shape[0]):
+        laps = np.round(np.median(unwrapped[row] - unwrapped[row - 1]) / 360.0)
+        unwrapped[row] -= 360.0 * laps
+    lon_corners = _cell_edges(unwrapped)
+    lat_corners = _cell_edges(lat)
+    stack = np.stack([
+        lon_corners[:-1, :-1], lon_corners[1:, :-1],
+        lon_corners[:-1, 1:], lon_corners[1:, 1:],
+    ])
+    undrawable = (stack.max(axis=0) - stack.min(axis=0)) > 180.0
+    return lon_corners, lat_corners, undrawable
+
+
+def _draw_curvilinear(
+    ax: Any,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    values: np.ndarray,
+    plot_kwargs: dict[str, Any],
+) -> Any:
+    """Draw a curvilinear field with ``pcolormesh``; return the last mesh drawn.
+
+    ``lon``/``lat``/``values`` are ordered ``(lat-like, lon-like)``. The mesh
+    is drawn from explicit cell corners (see :func:`_curvilinear_mesh`), which
+    removes ``pcolormesh``'s guess at the edges of a grid whose centres are
+    not monotonic -- and with it the "interpreted as cell centers" warning,
+    which on a displaced-pole grid reports a real property of the grid, not a
+    mistake of the caller.
+
+    Unwrapping the longitude makes each row continuous but leaves it spanning
+    a lap that starts wherever the grid's own index origin happens to be, not
+    at the edge of the map. Copies of the mesh shifted by whole laps are drawn
+    wherever they overlap the map's longitude window, and the axes are limited
+    to that window, so the part of a lap that hangs over the dateline reappears
+    on the other side instead of being cut off. Every copy shares the first
+    mesh's colour map and normalisation -- which the first one, holding the
+    whole field, autoscaled -- so a value has one colour wherever it is drawn.
+    """
+    lon_corners, lat_corners, undrawable = _curvilinear_mesh(lon, lat)
+    masked = np.where(undrawable, np.nan, values.astype(float))
+
+    # The window the map shows: -180..180 for a grid written in that
+    # convention (JEM's own, `jem.components.slab.grid.to_degrees`), 0..360 for
+    # one that is not.
+    window_start = -180.0 if np.nanmin(lon) < 0.0 else 0.0
+    window_end = window_start + 360.0
+    low, high = float(lon_corners.min()), float(lon_corners.max())
+    laps = [
+        lap for lap in range(-2, 3)
+        if low + 360.0 * lap < window_end and high + 360.0 * lap > window_start
+    ]
+    if not laps:
+        laps = [0]
+
+    first = ax.pcolormesh(
+        lon_corners + 360.0 * laps[0], lat_corners, masked,
+        shading="flat", **plot_kwargs,
+    )
+    mappable = first
+    shared = {
+        name: value for name, value in plot_kwargs.items()
+        if name not in ("cmap", "norm", "vmin", "vmax")
+    }
+    for lap in laps[1:]:
+        mappable = ax.pcolormesh(
+            lon_corners + 360.0 * lap, lat_corners, masked, shading="flat",
+            cmap=first.cmap, norm=first.norm, **shared,
+        )
+    if laps != [0] or low < window_start or high > window_end:
+        ax.set_xlim(window_start, window_end)
+    return mappable
+
+
 def _require_single_record(field: xr.DataArray) -> None:
     """Raise, naming the axis, if ``field`` still has a time or level axis."""
     leftover = [dim for dim in ("time", "level") if dim in field.dims]
@@ -437,7 +580,15 @@ def _map_plot(
         # Separable grid: field dims are (..., lon, lat); transpose to
         # (lat, lon), which is what contourf(x, y, Z) needs of Z.
         data = field.transpose(lat.dims[0], lon.dims[0])
-        mappable = ax.contourf(lon.values, lat.values, data.values, **plot_kwargs)
+        lon_values = lon.values
+        data_values = data.values
+        if _is_global_regular_longitude(lon_values):
+            # Close the seam between the last longitude and the first one's
+            # next lap, which `contourf` would otherwise leave blank. The
+            # appended column is a copy of the first, so no value is invented.
+            lon_values = np.append(lon_values, lon_values[0] + 360.0)
+            data_values = np.concatenate([data_values, data_values[:, :1]], axis=1)
+        mappable = ax.contourf(lon_values, lat.values, data_values, **plot_kwargs)
         # `contourf` takes `extend` natively and its `ContourSet` already
         # carries it as its own `.extend` attribute; a colorbar drawn from a
         # `ContourSet` mappable reads that directly, no matter which call
@@ -596,9 +747,9 @@ def _map_plot(
         # `colorbar=True` draw below, and `animate_map`'s separate one -- has
         # exactly one thing to check either way.
         colorbar_extend = extend or "neither"
-        mappable = ax.pcolormesh(
-            lon.transpose(*order).values, lat.transpose(*order).values,
-            data.values, **plot_kwargs,
+        mappable = _draw_curvilinear(
+            ax, lon.transpose(*order).values, lat.transpose(*order).values,
+            data.values, plot_kwargs,
         )
 
     if coastlines:
@@ -632,6 +783,20 @@ def map_plot(
     data (and, for the curvilinear case, its coordinates) are transposed so
     latitude varies down the plot and longitude across it, because every JEM
     field is stored ``(..., lon, lat)``.
+
+    A global map has no blank strip where the longitude axis wraps. On a
+    separable grid whose 1-D longitude is regular and covers the globe once
+    (``0 ... 356.25``), the first column is appended again one lap later (a
+    cyclic point) so ``contourf`` fills the seam; a regional axis, or one that
+    already repeats its first point, is drawn as given. On a curvilinear grid
+    the longitude is unwrapped along each row and the mesh is drawn from
+    explicit cell corners, with copies shifted by whole laps where the grid
+    hangs over the edge of the map (see :func:`_draw_curvilinear`), so a grid
+    that crosses the dateline draws no streak and no warning, and every copy
+    shares one colour scale. A cell that spans more than half a lap of
+    longitude -- one folded over the grid's pole, where no consistent
+    unwrapping exists -- is left blank. The map window is -180..180 for a
+    grid written in that convention and 0..360 otherwise.
 
     Parameters
     ----------
@@ -1205,7 +1370,14 @@ def animate_map(
         frame = field.isel({TIME_DIMENSION: step})
         frame_title = title
         if title is not None:
-            frame_title = f"{title} ({frame[TIME_DIMENSION].values})"
+            time_value = frame[TIME_DIMENSION].values
+            stamp = str(time_value)
+            if np.issubdtype(time_value.dtype, np.datetime64):
+                # `YYYY-MM-DD HH:MM`: a record is labelled with an interval's
+                # midpoint, so minutes are the finest resolution that means
+                # anything, and the raw nanosecond ISO string is unreadable.
+                stamp = str(np.datetime_as_string(time_value, unit="m")).replace("T", " ")
+            frame_title = f"{title} ({stamp})"
         # `_map_plot` (not the public `map_plot`) so this holds the actual
         # mappable it drew, rather than picking one back out of
         # `ax.collections` -- see `_map_plot`'s own docstring for why that

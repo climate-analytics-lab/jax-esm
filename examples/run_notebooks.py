@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import nbformat
+from jupyter_client.kernelspec import KernelSpecManager, NoSuchKernel
 from nbconvert.preprocessors import CellExecutionError, ExecutePreprocessor
 
 DEFAULT_ROOT = Path(__file__).resolve().parent
@@ -23,6 +24,27 @@ def find_notebooks(paths: list[Path]) -> list[Path]:
             if SKIP_DIR_NAMES.isdisjoint(nb_path.relative_to(path).parts):
                 notebooks.append(nb_path)
     return notebooks
+
+
+def require_kernel(kernel_name: str) -> None:
+    """Exit with a message saying how to fix it if no kernelspec has this name.
+
+    ``jupyter``/``ipykernel`` are not installed by any ``jem`` extra, and a
+    kernelspec is only registered by ``ipykernel`` inside the environment
+    that will run the notebooks, so a fresh environment fails here -- with
+    nbconvert's bare ``NoSuchKernel`` if nothing says otherwise.
+    """
+    try:
+        KernelSpecManager().get_kernel_spec(kernel_name)
+    except NoSuchKernel:
+        sys.exit(
+            f"error: no Jupyter kernel named {kernel_name!r}. Install ipykernel "
+            "into the environment the notebooks should run in "
+            "(`pip install ipykernel jupyter`); the `python3` kernel is then "
+            "that environment's own interpreter. To use a different kernel, "
+            "list the available ones with `jupyter kernelspec list` and pass "
+            "one with --kernel."
+        )
 
 
 def execute_notebook(nb_path: Path, timeout: int, kernel_name: str) -> None:
@@ -67,6 +89,7 @@ def main() -> int:
     if not notebooks:
         print("No notebooks found.", file=sys.stderr)
         return 0
+    require_kernel(args.kernel)
 
     failed: list[Path] = []
     for nb_path in notebooks:
