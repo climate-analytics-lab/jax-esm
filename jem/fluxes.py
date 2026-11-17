@@ -47,10 +47,14 @@ about 1.6 times the old ``Cd = 1e-3`` law's (RMS), with the same sign
 everywhere and a pattern correlation of 0.92. JAX-ESM therefore has one
 stress law for every package: the atmosphere's.
 
-Two properties of that stress are inherited rather than chosen here. It is a
-**grid-box mean** over land, sea and sea ice, like every other flux the
-contract guarantees, so a coastal ocean cell receives some of the land's
-drag (jax-esm#147). And it is the stress against a surface **at rest**:
+Two properties of that stress are inherited rather than chosen here. It is
+the stress over the **sea tile** of each atmosphere cell (open water and sea
+ice together; ``derived.sea_eastward_wind_stress`` and
+``sea_northward_wind_stress``), not the grid-box mean, so a coastal ocean cell
+takes none of the land's drag; it is regridded weighted by the sea fraction.
+Where a physics package publishes no sea tile the adapter falls back to the
+grid-box mean (:mod:`jem.components.jcm.exchange_fields`). And it is the
+stress against a surface **at rest**:
 jax-gcm reserves ``ForcingData.ocean_u``/``ocean_v`` for a relative-wind
 stress but does not yet apply them (jax-gcm#915), so JEM does not send the
 ocean's surface current back to the atmosphere.
@@ -262,7 +266,8 @@ class VerosExchange:
         table). Either role missing from ``regrid`` -- and ``regrid=None``
         entirely -- falls back to the identity, which is exactly the
         single-grid double-drake configuration (``regrid=same_grid``
-        composes to an empty mapping).
+        composes to ``None``, which :func:`jem.runners.build_regridders`
+        turns into an empty mapping).
     rotation_grid_file : str or None
         A SCRIP grid file to read :func:`read_rotation_angles` from, when the
         ocean grid's axes are not true east/north (a rotated-pole grid, such

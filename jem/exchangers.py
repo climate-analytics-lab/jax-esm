@@ -51,9 +51,12 @@ workflow couples with a lag of one coupling step. With the default workflow
   from step *n-1*, and the atmosphere sees the sea surface temperature the
   ocean reached at the end of step *n-1*.
 - On the **first** step there is no previous step, so each component receives
-  whatever its ``initialize()`` put in its forcing section -- zeros, for
-  every packaged component. A run therefore begins with one step of
-  uncoupled spin-up: the ocean's first step sees no heat flux at all.
+  whatever its ``initialize()`` put in its forcing section: zeros for the slab
+  ocean, land and sea ice, and physically valid constants for the fields the
+  Winton sea ice cannot take as zero (an air temperature and downward
+  longwave at the freezing point, a wind speed, a surface pressure -- a zero
+  pressure makes the air density infinite). A run therefore begins with one
+  step of uncoupled spin-up: the slab ocean's first step sees no heat flux.
 - The lag is a property of the *workflow*, not of the exchanger: an
   ``["atm", "exchange", "ocn"]`` workflow hands the ocean the atmosphere's
   fluxes from the same step, at the cost of giving the atmosphere a
@@ -71,6 +74,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sys
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -80,6 +84,29 @@ import jax.numpy as jnp
 from jem.base.component import Carry, Component, CoupledCarry, CouplingTime, Exchanger
 
 logger = logging.getLogger(__name__)
+
+# What is public: everything `jem/__init__.py` re-exports from here, the names
+# the documentation and the examples use, and the tables and constants other
+# modules and the tests import. Every other module-level name (the section,
+# component-name and weight constants, the `_`-prefixed helpers) is an
+# implementation detail of the table and is free to change.
+__all__ = [
+    "ATMOSPHERE_SEA_FRACTION",
+    "DEFAULT_EXCHANGER_NAME",
+    "STANDARD_EXCHANGES",
+    "VEROS_COMPONENT_MODULE",
+    "VEROS_OCEAN_EXCHANGES",
+    "WINTON_SEAICE_EXCHANGES",
+    "Exchange",
+    "ExchangeSpec",
+    "default_exchangers",
+    "default_exchanges",
+    "default_workflow",
+    "exchanged_fields",
+    "read_field",
+    "regrid_weighted",
+    "replace_field",
+]
 
 #: The carry sections a spec may address. See the module docstring.
 SECTIONS = ("state", "derived", "forcing")
@@ -199,7 +226,8 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
 #: (``coupling.exchanger``):
 #:
 #: - **wind stress.** The atmosphere publishes its delivered surface stress
-#:   (``derived.eastward_wind_stress``/``northward_wind_stress``) and Veros
+#:   (``derived.sea_eastward_wind_stress``/``sea_northward_wind_stress``,
+#:   its stress over the sea tile) and Veros
 #:   integrates ``forcing.surface_taux/tauy``, but the stress is a *vector*
 #:   in true east/north components, and on a rotated ocean grid it has to be
 #:   rotated into the grid's local frame -- which mixes the two components,
@@ -278,9 +306,9 @@ WINTON_REPLACES = ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_fl
 
 #: The weight of a regridded row whose destination is listed here, in place
 #: of the sea fraction :func:`default_exchanges` gives a row by default.
-ROW_WEIGHTS = {
+ROW_WEIGHTS: Mapping[str, str] = types.MappingProxyType({
     "atm.forcing.sea_ice_temperature": "seaice.derived.ice_area_fraction",
-}
+})
 
 #: Module holding the Winton sea ice, looked up in ``sys.modules`` for the
 #: reason :data:`VEROS_COMPONENT_MODULE` is: if it was never imported, nothing
@@ -417,6 +445,14 @@ def _as_spec(spec: ExchangeSpec | Mapping[str, Any]) -> ExchangeSpec:
         f"An exchange spec must be an ExchangeSpec or a mapping with `src`/"
         f"`dst`; got {type(spec).__name__}."
     )
+
+
+def _array_shape(value: Any) -> tuple[int, ...] | None:
+    """Return the shape of ``value`` if it is one array, else None (a composite)."""
+    if not jax.tree_util.all_leaves([value]):
+        return None
+    shape = getattr(value, "shape", None)
+    return None if shape is None else tuple(shape)
 
 
 def _field_names(section: Any) -> list[str]:
@@ -702,7 +738,7 @@ class Exchange:
             # is here) for one of those two to catch downstream.
             # Typed as Any because `tree_structure` returns an opaque
             # PyTreeDef that static analysis cannot compare, exactly as in
-            # `_require_same_structure` above.
+            # `_require_same_structure` below.
             current_structure: Any = jax.tree_util.tree_structure(current)
             value_structure: Any = jax.tree_util.tree_structure(value)
             if current_structure == value_structure:
@@ -742,10 +778,12 @@ class Exchange:
         :meth:`jem.components.jcm.component.JCMComponent.set_exchanged_forcing`,
         which is how that is arranged).
 
-        Structure only: **shapes and dtypes are deliberately not compared**,
-        because a row that names a regridder legitimately changes shape, and a
-        row between grids of different resolution is the normal case rather
-        than an error.
+        **Shapes** are checked against the row: a row that names a regridder
+        needs a source of the regridder's ``src_shape`` and a destination of
+        its ``dst_shape`` (a regridder that carries neither attribute -- a
+        plain callable -- is not checked), and a row with no regridder is a
+        copy, so its two ends must be the same shape. Dtypes are deliberately
+        not compared: :meth:`__call__` casts to the destination's.
 
         Parameters
         ----------
@@ -759,15 +797,16 @@ class Exchange:
             If a spec names a component, a carry section or a regridder that
             does not exist.
         ValueError
-            If a spec names a field its section does not have, or if its two
-            ends have different pytree structures.
+            If a spec names a field its section does not have, if its two
+            ends have different pytree structures, or if a field's shape does
+            not fit its row (see above).
         TypeError
             If a component's carry is not a mapping, so it has no sections to
             address.
 
         """
         for spec in self.specs:
-            self._regridder(spec)
+            regridder = self._regridder(spec)
             values = {}
             for end, path, (component, section, field) in (
                 ("src", spec.src, spec.src_parts),
@@ -777,6 +816,8 @@ class Exchange:
                 self._require_field(resolved, field, spec, path)
                 values[end] = getattr(resolved, field)
             self._require_same_structure(spec, values["src"], values["dst"])
+            self._require_matching_shapes(
+                spec, regridder, values["src"], values["dst"])
             if spec.weight is not None:
                 weight_shape = jnp.shape(self._weight(components, spec))
                 if weight_shape != jnp.shape(values["src"]):
@@ -786,6 +827,60 @@ class Exchange:
                         f"{weight_shape}; the weight is the fraction of each "
                         "source cell, so it has to be on the source grid."
                     )
+
+    @staticmethod
+    def _require_matching_shapes(
+        spec: ExchangeSpec,
+        regridder: Callable[[Any], Any] | None,
+        source: Any,
+        destination: Any,
+    ) -> None:
+        """Raise, naming the spec, if its fields' shapes do not fit the row.
+
+        A row with a regridder must be handed a field of the regridder's
+        ``src_shape`` and must write one of its ``dst_shape``: a transposed or
+        wrong-grid source is otherwise gathered from with indices that are
+        merely out of range or in the wrong order, and a mismatched destination
+        is only caught by ``lax.scan``, naming neither. A row with **no**
+        regridder is a copy, so its two ends must already be the same shape --
+        and a copy between two grids of the same shape (the packaged
+        ``veros-earth`` pair is 96 x 48 on both sides) is not a map between
+        them, which no shape check can see; that case is for
+        :func:`default_exchanges`, which knows from the component names which
+        rows cross grids.
+
+        Only a field that is a single array has a shape to compare; a composite
+        (a ``TimeSeries``) is skipped. A regridder with no ``src_shape`` /
+        ``dst_shape`` attributes (a plain callable) is not checked.
+        """
+        source_shape = _array_shape(source)
+        destination_shape = _array_shape(destination)
+        if regridder is None:
+            if (
+                source_shape is not None
+                and destination_shape is not None
+                and source_shape != destination_shape
+            ):
+                raise ValueError(
+                    f"Exchange spec {spec} copies {spec.src} of shape "
+                    f"{source_shape} into {spec.dst} of shape "
+                    f"{destination_shape} and names no regridder, so the two "
+                    "components are on different grids and the row needs one."
+                )
+            return
+        for path, shape, attribute in (
+            (spec.src, source_shape, "src_shape"),
+            (spec.dst, destination_shape, "dst_shape"),
+        ):
+            expected = getattr(regridder, attribute, None)
+            if expected is None or shape is None:
+                continue
+            if tuple(expected) != shape:
+                raise ValueError(
+                    f"Exchange spec {spec}: regridder {spec.regrid!r} has "
+                    f"{attribute} = {tuple(expected)}, but {path} has shape "
+                    f"{shape}."
+                )
 
     @staticmethod
     def _require_same_structure(spec: ExchangeSpec, source: Any, destination: Any) -> None:
@@ -885,7 +980,9 @@ def default_exchanges(
     ``"ocn"`` selects :data:`VEROS_OCEAN_EXCHANGES` instead, which is the same
     wiring spelled in Veros' field names and with the freshwater flux Veros
     also takes. That constant documents what it cannot express -- above all
-    the wind stress, which is a drag law rather than a copy. The choice is
+    the wind stress, a vector that has to be rotated into the ocean grid's
+    local frame (and is the atmosphere's own stress, not a drag law of JEM's).
+    The choice is
     made by type, so it needs real components: called with just a list of
     *names*, this cannot tell one ocean from another and gives the slab table.
 
@@ -923,6 +1020,13 @@ def default_exchanges(
     ``regrid={"a2o": "a2o", "o2a": "o2a"}``. Rows that stay on one grid
     (``ocn`` to ``seaice``) never get a regridder.
 
+    A ``regrid`` with any entry says the run is mixed-grid, so **every** row
+    that crosses the boundary must find a regridder in it, and one that does
+    not is a ``ValueError`` naming the missing keys: the alternative is a plain
+    copy between two different grids, which nothing downstream can detect when
+    they happen to have the same shape. An empty or ``None`` ``regrid`` is a
+    single-grid run and every row is a copy.
+
     A regridded row that reads one of the atmosphere's ``sea_*`` fields
     (:data:`ATMOSPHERE_SEA_PREFIX`) -- a flux over the sea part of each cell
     -- is weighted by that part, :data:`ATMOSPHERE_SEA_FRACTION`, so a coastal
@@ -945,6 +1049,13 @@ def default_exchanges(
     -------
     list[ExchangeSpec]
 
+    Raises
+    ------
+    ValueError
+        If ``regrid`` has an unknown key, or has entries but leaves a row that
+        crosses the atmosphere/ocean-grid boundary without a regridder; and
+        for the unsupported component pairings listed above.
+
     """
     present = set(components)
     regrid = dict(regrid or {})
@@ -961,6 +1072,8 @@ def default_exchanges(
 
     table = _exchange_table(components)
     specs: list[ExchangeSpec] = []
+    # The key each grid-crossing row would need, for the rows that got none.
+    unmapped: dict[str, list[str]] = {}
     for src, dst, kind in table:
         src_component, _, _ = _parse_path(src, "source", src)
         dst_component, _, _ = _parse_path(dst, "destination", dst)
@@ -970,6 +1083,9 @@ def default_exchanges(
         name = None
         if direction is not None:
             name = regrid.get(f"{direction}_{kind}", regrid.get(direction))
+            if name is None:
+                unmapped.setdefault(f"{direction}_{kind}", []).append(
+                    f"{src} -> {dst}")
         weight = None
         if name is not None and dst in ROW_WEIGHTS:
             weight = ROW_WEIGHTS[dst]
@@ -978,6 +1094,27 @@ def default_exchanges(
         elif name is not None and direction == "o2a":
             weight = OCEAN_GRID_SEA_FRACTION.format(component=src_component)
         specs.append(ExchangeSpec(src, dst, name, weight))
+
+    # A run that supplies any regridder is a mixed-grid run, and a crossing row
+    # left without one would be a plain copy: index for index between two
+    # different geographies. `lax.scan` rejects that only when the shapes
+    # differ, and the packaged veros-earth pair (JCM_T31 and
+    # RotatedGaussianLatLon) are both 96 x 48. With no regridder at all the
+    # caller is saying every component shares a grid, which is valid.
+    if regrid and unmapped:
+        rows = "\n".join(
+            f"  {key}: {', '.join(rows)}" for key, rows in sorted(unmapped.items())
+        )
+        raise ValueError(
+            "regrid names regridders for "
+            f"{sorted(regrid)!r}, so this is a mixed-grid coupling, but "
+            f"{len(sum(unmapped.values(), []))} row(s) cross between the "
+            "atmosphere's grid and the ocean's with no regridder, which would "
+            "copy the field index for index between two different grids. Add "
+            f"the missing key(s) {sorted(unmapped)!r} (or the bare direction "
+            f"{sorted({key.split('_')[0] for key in unmapped})!r}), or pass "
+            f"no regrid at all if every component shares one grid:\n{rows}"
+        )
 
     wired = {part for spec in specs
              for part in (spec.src_parts[0], spec.dst_parts[0])}
@@ -1098,7 +1235,14 @@ def _check_winton_coupling(
     """
     if not _is_winton(components):
         return
-    assert isinstance(components, Mapping)
+    if not isinstance(components, Mapping):
+        # Unreachable from `default_exchanges` (`_is_winton` is False for
+        # anything but a mapping); a real error so that a direct caller still
+        # gets one when assertions are stripped.
+        raise TypeError(
+            "A Winton sea ice is recognised only among components passed as a "
+            f"mapping, not a {type(components).__name__}."
+        )
     ocean = components.get("ocn")
     if ocean is not None:
         if _is_veros_ocean(ocean):
@@ -1161,8 +1305,15 @@ def _exchange_table(
         return STANDARD_EXCHANGES
     if not isinstance(ocean, module.VerosComponent):
         return STANDARD_EXCHANGES
-    logger.debug(
-        "The ocean is a Veros GCM, so the default coupling is the Veros table."
+    logger.warning(
+        "The ocean is a Veros GCM and no exchanger was named, so the default "
+        "coupling is VEROS_OCEAN_EXCHANGES, which only copies fields: the "
+        "ocean gets the heat and freshwater fluxes but NO wind stress (it has "
+        "to be rotated onto the ocean grid, which a copy cannot do) and no "
+        "sea-ice mask on its fluxes, i.e. it is thermodynamically forced only. "
+        "Name jem.fluxes.VerosExchange as the exchanger -- "
+        "+coupling.exchanger._target_=jem.fluxes.VerosExchange on the command "
+        "line -- for a mechanically forced ocean."
     )
     return VEROS_OCEAN_EXCHANGES
 
@@ -1423,8 +1574,8 @@ def replace_field(
     :class:`~jem.base.component.CoupledCarry` or the bare ``dict[str, Carry]``
     mapping an exchanger is handed, and the return is the same kind: a
     ``CoupledCarry`` is rebuilt with ``dataclasses.replace(carry,
-    components=...)`` so that a field added to it later (there is only
-    ``components`` and ``step`` today) is carried through unchanged, and a
+    components=...)`` so that a field added to it later (it has
+    ``components``, ``step`` and ``time`` today) is carried through unchanged, and a
     bare mapping is returned as a new mapping.
 
     Parameters

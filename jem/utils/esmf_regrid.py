@@ -12,7 +12,7 @@ convention (`jem/components/slab/grid.py`) with no transpose needed.
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -211,11 +211,15 @@ class ESMFRegridder:
         finally:
             ds.close()
         
-        # Convert to JAX arrays
+        # Convert to JAX arrays. The weights take the working precision of the
+        # process: float64 under `jax_enable_x64`, so a float64 field is not
+        # mapped through float32 weights (which would put ~1e-8 of error into
+        # every row sum), and float32 otherwise, which is all JAX holds.
+        weight_dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
         return ESMFWeights(
             row_indices=jnp.array(row_indices, dtype=jnp.int32),
             col_indices=jnp.array(col_indices, dtype=jnp.int32),
-            weights=jnp.array(weights, dtype=jnp.float32),
+            weights=jnp.array(weights, dtype=weight_dtype),
             src_shape=src_shape,
             dst_shape=dst_shape,
             src_mask=src_mask,
@@ -245,7 +249,10 @@ class ESMFRegridder:
 
         # Gather source values and multiply by weights
         src_values = src_flat[self.weights.col_indices]
-        weighted_values = src_values * self.weights.weights
+        # Cast back to the field's dtype: the weights may be float64 (see
+        # `_load_weights`) while a component's field is float32, and a
+        # scatter-add of a wider dtype into a narrower buffer is not defined.
+        weighted_values = (src_values * self.weights.weights).astype(src_data.dtype)
 
         # Scatter-add to destination
         dst_flat = dst_flat.at[self.weights.row_indices].add(weighted_values)
@@ -266,214 +273,23 @@ class ESMFRegridder:
         jnp.ndarray
             Interpolated data on destination grid
 
-        """
-        # Validate input shape
-        #if src_data.shape != self.src_shape:
-        #    raise ValueError(
-        #        f"Input shape {src_data.shape} does not match "
-        #        f"expected source shape {self.src_shape}"
-        #    )
-        
-        return cast(jnp.ndarray, self._interp_fn(src_data))
-    
-    def apply_batched(self, src_data: jnp.ndarray, 
-                      batch_dims: int = 1) -> jnp.ndarray:
-        """Apply interpolation to batched data.
-        
-        Parameters
-        ----------
-        src_data : jnp.ndarray
-            Data with leading batch dimensions followed by grid shape
-            e.g., (time, level, lat, lon) or (batch, lat, lon)
-        batch_dims : int
-            Number of leading batch dimensions
-            
-        Returns
-        -------
-        jnp.ndarray
-            Interpolated data with same batch dimensions
+        Raises
+        ------
+        ValueError
+            If ``src_data.shape`` is not ``src_shape``.
 
         """
-        # Validate shape
-        expected_shape = src_data.shape[:batch_dims] + self.src_shape
-        if src_data.shape != expected_shape:
+        # Shapes are static under `jit`, so this check costs nothing per call
+        # and cannot be skipped. It has to be explicit: a transposed
+        # (n_lat, n_lon) field has the right number of elements, and a
+        # too-small one is gathered from with an out-of-range index that JAX
+        # clamps, so neither would raise on its own -- both would return wrong
+        # numbers on the destination grid.
+        if tuple(src_data.shape) != tuple(self.src_shape):
             raise ValueError(
-                f"Input shape {src_data.shape} incompatible with "
-                f"batch_dims={batch_dims} and src_shape={self.src_shape}"
+                f"ESMFRegridder('{self.weight_file}') expects a source field of "
+                f"shape (n_lon, n_lat) = {tuple(self.src_shape)}, got "
+                f"{tuple(src_data.shape)}."
             )
-        
-        # Vectorize over batch dimensions
-        vectorized_interp = self._interp_fn
-        for _ in range(batch_dims):
-            vectorized_interp = jax.vmap(vectorized_interp)
-        
-        return cast(jnp.ndarray, vectorized_interp(src_data))
-    
-    def regrid_xarray(self, da: xr.DataArray, 
-                      target_coords: dict[str, np.ndarray] | None = None) -> xr.DataArray:
-        """Regrid an xarray DataArray and preserve metadata.
-        
-        Parameters
-        ----------
-        da : xr.DataArray
-            Input data array with dimensions matching src_shape
-        target_coords : dict, optional
-            Target coordinates for output DataArray
-            
-        Returns
-        -------
-        xr.DataArray
-            Regridded data with updated coordinates
 
-        """
-        # Extract batch dimensions (everything before the last N dims matching src_shape)
-        batch_dims = da.dims[:-len(self.src_shape)]
-        
-        # Get data as numpy/jax array
-        data = jnp.array(da.values)
-        
-        # Apply regridding
-        if len(batch_dims) > 0:
-            result = self.apply_batched(data, batch_dims=len(batch_dims))
-        else:
-            result = self(data)
-        
-        # Create output coordinates
-        out_coords = {}
-        
-        # Keep batch coordinates
-        for dim in batch_dims:
-            out_coords[dim] = da.coords[dim]
-        
-        # Add target grid coordinates
-        if target_coords is not None:
-            out_coords.update(target_coords)
-        elif self.weights.dst_grid_dims is not None:
-            # Use stored dimension names if available
-            for i, dim_name in enumerate(self.weights.dst_grid_dims):
-                out_coords[dim_name] = np.arange(self.dst_shape[i])
-        else:
-            # Create generic dimension names
-            for i, size in enumerate(self.dst_shape):
-                dim_name = f"dim_{i}"
-                out_coords[dim_name] = np.arange(size)
-        
-        # Determine output dimensions
-        if self.weights.dst_grid_dims is not None:
-            out_dims = batch_dims + self.weights.dst_grid_dims
-        else:
-            grid_dim_names = tuple(f"dim_{i}" for i in range(len(self.dst_shape)))
-            out_dims = batch_dims + grid_dim_names
-        
-        # Create output DataArray
-        result_da = xr.DataArray(
-            np.array(result),
-            dims=out_dims,
-            coords=out_coords,
-            attrs=da.attrs.copy()
-        )
-        
-        # Add regridding metadata
-        result_da.attrs['regrid_method'] = self.weights.method
-        result_da.attrs['regrid_source_shape'] = str(self.src_shape)
-        result_da.attrs['regrid_target_shape'] = str(self.dst_shape)
-        
-        return result_da
-    
-    def inverse(self) -> 'ESMFRegridder':
-        """Create approximate inverse regridder (dst -> src).
-        
-        Note: This creates a new weight structure by swapping row/col indices.
-        For true conservative remapping inverse, regenerate weights with ESMF.
-        """
-        inverse_weights = ESMFWeights(
-            row_indices=self.weights.col_indices,
-            col_indices=self.weights.row_indices,
-            weights=self.weights.weights,
-            src_shape=self.weights.dst_shape,
-            dst_shape=self.weights.src_shape,
-            src_mask=self.weights.dst_mask,
-            dst_mask=self.weights.src_mask,
-            method=f"inverse_{self.weights.method}",
-            src_grid_dims=self.weights.dst_grid_dims,
-            dst_grid_dims=self.weights.src_grid_dims
-        )
-        
-        # Create new regridder with swapped weights
-        inv_regridder = ESMFRegridder.__new__(ESMFRegridder)
-        inv_regridder.weight_file = f"inverse_of_{self.weight_file}"
-        inv_regridder.src_shape = self.dst_shape
-        inv_regridder.dst_shape = self.src_shape
-        inv_regridder.weights = inverse_weights
-        inv_regridder._interp_fn = jit(inv_regridder._interpolate_impl)
-        
-        return inv_regridder
-    
-    def diagnostics(self) -> dict[str, Any]:
-        """Return diagnostic information about the regridder."""
-        return {
-            'method': self.weights.method,
-            'src_shape': self.weights.src_shape,
-            'dst_shape': self.weights.dst_shape,
-            'src_size': self.weights.src_size,
-            'dst_size': self.weights.dst_size,
-            'n_weights': self.weights.n_weights,
-            'sparsity': self.weights.n_weights / (self.weights.src_size * self.weights.dst_size),
-            'avg_stencil_size': self.weights.n_weights / self.weights.dst_size,
-            'has_src_mask': self.weights.src_mask is not None,
-            'has_dst_mask': self.weights.dst_mask is not None,
-        }
-
-
-def verify_conservation(
-    regridder: ESMFRegridder,
-    src_data: jnp.ndarray,
-    src_areas: jnp.ndarray | None = None,
-    dst_areas: jnp.ndarray | None = None
-) -> dict[str, float]:
-    """Verify conservation properties of regridding.
-    
-    Parameters
-    ----------
-    regridder : ESMFRegridder
-        The regridder to test
-    src_data : jnp.ndarray
-        Test data on source grid
-    src_areas : jnp.ndarray, optional
-        Cell areas on source grid
-    dst_areas : jnp.ndarray, optional
-        Cell areas on destination grid
-        
-    Returns
-    -------
-    dict
-        Conservation diagnostics
-
-    """
-    dst_data = regridder(src_data)
-    
-    # Calculate integrals
-    if src_areas is not None:
-        src_integral = jnp.sum(src_data * src_areas)
-    else:
-        src_integral = jnp.sum(src_data)
-    
-    if dst_areas is not None:
-        dst_integral = jnp.sum(dst_data * dst_areas)
-    else:
-        dst_integral = jnp.sum(dst_data)
-    
-    # Calculate errors
-    abs_error = dst_integral - src_integral
-    if jnp.abs(src_integral) > 1e-10:
-        rel_error = abs_error / src_integral
-    else:
-        rel_error = abs_error
-    
-    return {
-        'src_integral': float(src_integral),
-        'dst_integral': float(dst_integral),
-        'absolute_error': float(abs_error),
-        'relative_error': float(rel_error),
-        'conserves': float(jnp.abs(rel_error)) < 1e-6
-    }
+        return cast(jnp.ndarray, self._interp_fn(src_data))

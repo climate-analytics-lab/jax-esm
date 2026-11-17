@@ -1275,9 +1275,11 @@ def test_a_regridded_ice_temperature_takes_the_fractions_operator():
     """
     from jem.exchangers import regrid_weighted
 
+    # Every direction the Winton rows cross in: its air temperature, humidity,
+    # wind and pressure are atmosphere states onto the ocean grid.
     specs = default_exchanges(_winton_components(), regrid={
-        "a2o_flux": "a2o_conserve", "o2a_flux": "o2a_conserve",
-        "o2a_state": "o2a_bilinear"})
+        "a2o_flux": "a2o_conserve", "a2o_state": "a2o_bilinear",
+        "o2a_flux": "o2a_conserve", "o2a_state": "o2a_bilinear"})
     regrid = {spec.dst: spec.regrid for spec in specs}
     assert regrid["atm.forcing.sea_ice_temperature"] == regrid["atm.forcing.sice_am"]
     assert regrid["atm.forcing.sice_am"] == "o2a_conserve"
