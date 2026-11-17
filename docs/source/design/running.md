@@ -171,13 +171,25 @@ nested coupler as a component that writes itself, hands it `directory /
 its own `carry.msgpack` there.
 
 **The carry file is the marker**, written last by renaming a flushed,
-fsynced temporary over its final name, and removed first when an existing
-checkpoint is overwritten, so a failure part-way through cannot leave a
-stale clock beside freshly written component data. A save interrupted
-part-way through therefore leaves a directory with no marker, which
-`load_coupled_carry` refuses and `latest_complete_checkpoint(root,
-pattern="step_*")` skips over (with a warning) in favour of the newest
-complete one.
+fsynced temporary over its final name: a directory without one is not a
+checkpoint, `load_coupled_carry` refuses it, and
+`latest_complete_checkpoint(root, pattern="step_*")` skips over it (with a
+warning) in favour of the newest complete one.
+
+**A save never destroys the checkpoint it replaces.** `run_chunked` rewrites
+one checkpoint directory after every chunk, so the directory being
+overwritten is the run's only restart point. The new checkpoint is therefore
+written whole into a sibling directory, `<directory>.saving`, and swapped in
+with two renames only once its carry file exists (the old one aside to
+`<directory>.replaced`, the new one into place, then the old one deleted). A
+save that fails -- a full disk, a killed job, an exception in a component's
+`save_carry` -- leaves a complete checkpoint behind whenever it happens, and
+the next save or load puts the newest one back at `<directory>`
+(`jem.checkpoint.recover_interrupted_save`, logged at WARNING), so the
+resubmitted command resumes from the last chunk that was checkpointed rather
+than from the start date. Because the directory is replaced wholesale it has
+to be the checkpoint's own: a save into a directory holding anything else
+(a `checkpoint_path` pointed at the output directory, say) is refused.
 
 `run_chunked` keeps a **single checkpoint directory**, rewritten after every
 chunk the health gate accepts, rather than a directory of dated restart
@@ -214,8 +226,9 @@ INFO, in one line before anything is compiled — "Starting from
 "Starting from initial_condition ...", or
 "Resumed from checkpoint ... at coupled step N" — because resuming a run is
 the *same command* as starting one, so nothing else says which happened. A
-directory an interrupted save left without its carry file is a WARNING (a
-run died and its last chunk is gone); a path with nothing at it is INFO
+checkpoint directory with no carry file in it is a WARNING (it is not what a
+save leaves, interrupted or not, so something else emptied it and the run
+starts over); a path with nothing at it is INFO
 (what every first run into a fresh output directory sees).
 
 **A spun-up state as the initial condition of a run with another start

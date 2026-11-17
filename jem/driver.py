@@ -150,8 +150,10 @@ coupled step. A ``checkpoint_path`` that holds no
 complete checkpoint says so on the line before, naming the failure and what
 the run does instead -- for a run with no ``initial_carry``, in as many words,
 that every component starts from its initial state rather than from a restart.
-The wreckage of an interrupted save is a WARNING, because a run died and its
-last chunk is gone; a path with nothing at it is INFO, because with
+A checkpoint directory with no carry file in it is a WARNING, because no save
+leaves one (:mod:`jem.checkpoint` swaps a whole new checkpoint in, so an
+interrupted save leaves the old one) and the run is about to start over; a
+path with nothing at it is INFO, because with
 checkpointing on by default that is what every first run sees, and a warning
 nobody can avoid is a warning nobody reads. Both name the path, so a mistyped
 one is visible in the line the run always prints. :meth:`jem.base.coupler.Coupler.load_carry` completes the picture
@@ -207,7 +209,11 @@ from typing import TYPE_CHECKING, Any
 import xarray as xr
 
 from jem.base.component import CoupledCarry, SupportsXarray
-from jem.checkpoint import CARRY_FILENAME, remaining_batches
+from jem.checkpoint import (
+    CARRY_FILENAME,
+    recover_interrupted_save,
+    remaining_batches,
+)
 from jem.output import (
     check_subsample,
     chunk_datasets,
@@ -999,11 +1005,27 @@ def _checkpoint_directory(
 
     An absolute path is used as given, for a run that checkpoints to scratch
     while writing its output elsewhere.
+
+    The directory has to be the checkpoint's own. Every save replaces it
+    wholesale (:func:`jem.checkpoint.save_coupled_carry`), so one that is, or
+    contains, the output directory would take the run's output with it; that
+    is refused here, before anything is integrated, rather than at the first
+    save.
     """
     if checkpoint_path is None:
         return None
     path = Path(checkpoint_path)
-    return path if path.is_absolute() else output_dir / path
+    directory = path if path.is_absolute() else output_dir / path
+    resolved, resolved_output = directory.resolve(), output_dir.resolve()
+    if resolved == resolved_output or resolved in resolved_output.parents:
+        raise ValueError(
+            f"checkpoint_path {str(checkpoint_path)!r} resolves to {resolved}, "
+            f"which is or contains the output directory {resolved_output}. A "
+            "checkpoint directory is replaced wholesale at every save, so it "
+            "must be a directory of its own -- a subdirectory of the output "
+            "directory (the default, 'checkpoint') or somewhere else entirely."
+        )
+    return directory
 
 
 def _output_names(coupler: "Coupler") -> list[str]:
@@ -1238,17 +1260,18 @@ def _starting_carry(
     what it integrated. That precedence is what lets one command be both the
     launch and the restart of an experiment begun from a spun-up state.
 
-    A checkpoint directory with no carry file is not a checkpoint but the
-    wreckage of an interrupted save (:mod:`jem.checkpoint` publishes that file
-    last), so it is stepped over rather than loaded -- loading it would mean
+    A checkpoint directory with no carry file is not a checkpoint
+    (:mod:`jem.checkpoint` publishes that file last, and it holds the clock),
+    so it is stepped over rather than loaded -- loading it would mean
     resuming from component states written at a step this run cannot know.
-    Either way -- an interrupted save, or a ``checkpoint_path`` with nothing
-    at it -- the message names the failure *and* what the run does instead,
+    Either way -- a directory with no carry file, or a ``checkpoint_path``
+    with nothing at it -- the message names the failure *and* what the run
+    does instead,
     which is why it is composed here and not in :func:`_load_checkpoint`: a
     caller who also passed an ``initial_carry`` -- a spun-up state, say -- is
     not starting the model from scratch, and saying so would be false. The
     *level* comes from :func:`_load_checkpoint`, which is what distinguishes
-    the two: the wreckage of an interrupted save is a WARNING, and a path with
+    the two: a directory with no carry file is a WARNING, and a path with
     nothing at it is INFO, because with checkpointing on by default that is
     what every first run sees.
     """
@@ -1343,6 +1366,7 @@ def _load_initial_condition(
         state (:meth:`~jem.base.coupler.Coupler.load_carry`).
 
     """
+    recover_interrupted_save(directory)
     if not (directory / CARRY_FILENAME).exists():
         raise ValueError(
             f"initial_condition {directory} holds no {CARRY_FILENAME}, so it is "
@@ -1372,20 +1396,27 @@ def _load_checkpoint(
     worked.
 
     The two ways of not resuming are not equally alarming, which is why the
-    level comes back too. A directory with no carry file is the wreckage of an
-    interrupted save (:mod:`jem.checkpoint` publishes that file last) -- a run
-    died, and its last chunk is gone -- so it is a **warning**. A path with
+    level comes back too. A directory with no carry file is not something a
+    save leaves behind, interrupted or not (:mod:`jem.checkpoint` writes the
+    new checkpoint beside the old one and swaps it in, and
+    :func:`~jem.checkpoint.recover_interrupted_save` has already put back
+    whatever an interrupted swap left), so the run is about to start over for
+    a reason nobody chose: it is a **warning**. A path with
     nothing at it at all is what every first run sees, and since
     checkpointing is on by default into a fresh output directory, that is the
     common case: it is reported at INFO, alongside the provenance line, which
     names the path so a mistyped one is still visible.
     """
+    # A save that died while swapping its new checkpoint in left a complete
+    # one beside the path rather than at it; put it back before looking.
+    recover_interrupted_save(checkpoint_path)
     if (checkpoint_path / CARRY_FILENAME).exists():
         return coupler.load_carry(checkpoint_path), None, logging.INFO
     if checkpoint_path.is_dir():
         return None, (
             f"{checkpoint_path} holds no {CARRY_FILENAME}, so it is not a "
-            "complete checkpoint: the save that wrote it was interrupted."
+            "complete checkpoint: no save into it ever finished, or its "
+            "carry file was removed."
         ), logging.WARNING
     return None, (
         f"There is no checkpoint at {checkpoint_path}; a run asked to resume "

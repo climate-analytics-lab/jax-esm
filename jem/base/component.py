@@ -347,7 +347,15 @@ class SupportsXarray(Protocol):
 
 @runtime_checkable
 class SupportsCheckpoint(Protocol):
-    """Optional: components whose carry is not a plain pytree of arrays (Veros)."""
+    """Optional: components whose carry is not a plain pytree of arrays (Veros).
+
+    ``save_carry`` writes everything into the ``directory`` it is handed and
+    ``load_carry`` reads it back from the one it is handed. The two are not
+    the same path: a coupled checkpoint is written into a staging directory
+    and renamed into place only once it is complete
+    (:func:`jem.checkpoint.save_coupled_carry`), so a component must not
+    record the path it saved to and expect to find its files there later.
+    """
 
     def save_carry(self, carry: Carry, directory: Path) -> None: ...
 

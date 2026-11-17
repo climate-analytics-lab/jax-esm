@@ -627,6 +627,58 @@ def test_resume_skips_incomplete_checkpoint(coupler, tmp_path, caplog):
     assert result.steps_completed == 2
 
 
+def test_a_failed_save_does_not_cost_the_run_its_restart_point(
+    tmp_path, caplog, monkeypatch
+):
+    """A run whose checkpoint save fails resumes from the last one that worked.
+
+    The checkpoint directory is rewritten after every chunk, so the save that
+    fails is always overwriting the run's only restart point. The resubmitted
+    command -- the same command -- has to continue from the last chunk that
+    was checkpointed: starting over at the start date would re-integrate, and
+    overwrite the output of, simulated time that has already been paid for.
+    """
+    output = tmp_path / "output"
+    run_chunked(two_slabs(), total_time="2 days", chunk="2 days", output_dir=output)
+
+    # The failure is inside the save, at the point the carry file is written:
+    # by then the save has done everything it does to the directory before
+    # the new checkpoint is whole.
+    def disk_full(carry, path):
+        del carry, path
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("jem.checkpoint.save", disk_full)
+    with pytest.raises(OSError, match="No space left"):
+        run_chunked(two_slabs(), total_time="6 days", chunk="2 days", output_dir=output)
+    monkeypatch.undo()
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            two_slabs(), total_time="6 days", chunk="2 days", output_dir=output
+        )
+
+    assert f"Resumed from checkpoint {output / 'checkpoint'} at coupled step 2." in caplog.text
+    assert result.steps_completed == 6
+
+
+def test_a_checkpoint_path_that_holds_the_output_is_refused(tmp_path):
+    """The checkpoint directory cannot be, or contain, the output directory.
+
+    Every save replaces the checkpoint directory wholesale, so the run's
+    output would go with it. That is refused before anything is integrated,
+    not at the first save.
+    """
+    output = tmp_path / "output"
+    for checkpoint_path in (".", tmp_path):
+        with pytest.raises(ValueError, match="directory of its own"):
+            run_chunked(
+                two_slabs(), total_time="2 days", chunk="2 days",
+                output_dir=output, checkpoint_path=checkpoint_path,
+            )
+    assert not list(output.glob("*.nc"))
+
+
 # ---------------------------------------------------------------------------
 # How often the checkpoint is written
 # ---------------------------------------------------------------------------

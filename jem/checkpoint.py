@@ -32,6 +32,8 @@ The directory layout is::
                               nested Coupler), written by the component itself
         carry.msgpack         every other component's carry, plus the clock,
                               plus the *name* of every delegated component
+    <directory>.saving/       only while a save is in progress
+    <directory>.replaced/     only while a save is swapping the new one in
 
 **The clock is part of the checkpoint because it is part of the state.**
 ``CoupledCarry.time`` -- a carried ``jax_datetime.Datetime`` -- is the
@@ -46,21 +48,39 @@ directory whose ``carry.msgpack`` does not hold the clock is refused with
 
 **The carry file is the completion marker.** It is written last, and
 published by renaming a fully-flushed, fsynced temporary file over its final
-name, so it exists only once the whole checkpoint is on disk: an interrupted
-save leaves a directory that :func:`load_coupled_carry` refuses and
-:func:`latest_complete_checkpoint` skips. A separate ``COMPLETE`` file would
-add a second thing to keep in step with no gain, because the clock -- which
-a resume cannot do without -- lives in the carry file anyway, so its presence
-is exactly the condition "this checkpoint can be resumed from". When an
-existing checkpoint is overwritten the carry file is removed *first*, so a
-failure part-way through cannot leave a stale clock next to freshly written
-component data.
+name, so it exists only once everything else in its directory is on disk: a
+directory without one is not a checkpoint, and :func:`load_coupled_carry`
+refuses it and :func:`latest_complete_checkpoint` skips it. A separate
+``COMPLETE`` file would add a second thing to keep in step with no gain,
+because the clock -- which a resume cannot do without -- lives in the carry
+file anyway, so its presence is exactly the condition "this checkpoint can be
+resumed from".
+
+**A save never destroys the checkpoint it replaces.** A run keeps one
+checkpoint directory and rewrites it after every chunk, so the directory being
+overwritten is the only restart point there is; a save that removed anything
+from it before the new one was whole would turn a full disk or a killed job
+into a run with nothing to resume from. :func:`save_coupled_carry` therefore
+writes the whole new checkpoint into a sibling directory,
+``<directory>.saving``, and only once its carry file exists swaps it in with
+two renames -- the old checkpoint aside to ``<directory>.replaced``, the new
+one into place -- before deleting the old one. Whenever the save dies, one
+complete checkpoint survives: the old one in place (it died while writing),
+or the new one in ``.saving`` and the old one in ``.replaced`` (it died
+between the two renames, the only moment ``<directory>`` itself is absent).
+:func:`recover_interrupted_save` puts the newest surviving one back at
+``<directory>``, and both :func:`save_coupled_carry` and
+:func:`load_coupled_carry` call it first, so a resume needs no manual repair.
+Because the swap replaces the directory wholesale, a checkpoint directory has
+to be the checkpoint's own: one holding anything a checkpoint does not write
+is refused rather than replaced.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -79,6 +99,16 @@ logger = logging.getLogger(__name__)
 #: and with them the coupled step counter. Written last, so its presence is
 #: what marks a checkpoint directory complete.
 CARRY_FILENAME = "carry.msgpack"
+
+#: Suffix of the sibling directory a checkpoint is written into before it is
+#: swapped into place. Not ``.tmp`` or ``.old``: those are names a person
+#: gives a copy they made by hand, and a save removes whatever is left at
+#: this name before it starts.
+_SAVING_SUFFIX = ".saving"
+
+#: Suffix of the sibling directory the checkpoint being overwritten is moved
+#: to for the instant between the two renames of the swap.
+_REPLACED_SUFFIX = ".replaced"
 
 #: Key the flattened leaves are stored under inside that file. Named rather
 #: than bare so that a future format can add fields beside it.
@@ -418,12 +448,18 @@ def save_coupled_carry(
     own loader failing on a missing directory, or, for a loader that does not
     look at its directory, not met at all.
 
+    An existing checkpoint at ``directory`` is replaced only once the new one
+    is complete: everything is written into ``<directory>.saving`` and swapped
+    in at the end, so a save that fails leaves the old checkpoint loadable
+    (see the module docstring, and :func:`recover_interrupted_save`).
+
     Parameters
     ----------
     coupled_carry : jem.base.component.CoupledCarry
         The carry a trajectory function returned.
     directory : path-like
-        Directory to save into (created if absent).
+        Directory to save into (created if absent). It is replaced wholesale,
+        so it must hold nothing but a checkpoint.
     component_savers : mapping, optional
         ``{component name: (carry, directory) -> None}`` for the components
         whose carry is not a plain pytree -- in practice the ``save_carry`` of
@@ -432,38 +468,177 @@ def save_coupled_carry(
 
     """
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     component_savers = component_savers or {}
+    saving, replaced = _sibling(directory, _SAVING_SUFFIX), _sibling(directory, _REPLACED_SUFFIX)
 
-    carry_file = directory / CARRY_FILENAME
-    # Removed before anything else is written: overwriting a checkpoint in
-    # place would otherwise leave the old clock beside new component data if
-    # the save died in between, and that mixture is indistinguishable from a
-    # good checkpoint.
-    carry_file.unlink(missing_ok=True)
+    # Before anything is written: the newest checkpoint an earlier, interrupted
+    # save left behind goes back to `directory`, so that if *this* save dies
+    # too the run still resumes from it rather than from an older one.
+    recover_interrupted_save(directory)
+    if directory.exists():
+        # Also before anything is written, so the refusal costs no chunk's
+        # worth of serialisation and leaves the directory exactly as it was.
+        _require_only_checkpoint_entries(directory, component_savers)
+    for leftover in (saving, replaced):
+        if leftover.exists():
+            shutil.rmtree(leftover)
 
-    stored_components: dict[str, Carry] = {}
-    for name, carry in coupled_carry.components.items():
-        saver = component_savers.get(name)
-        if saver is None:
-            stored_components[name] = carry
-        else:
-            component_directory = directory / name
-            component_directory.mkdir(parents=True, exist_ok=True)
-            saver(carry, component_directory)
-            # The component's data is in its own directory; what goes in the
-            # shared file is only its name, carried by a marker that holds no
-            # leaf.
-            stored_components[name] = _delegated_marker()
+    saving.mkdir(parents=True)
+    try:
+        stored_components: dict[str, Carry] = {}
+        for name, carry in coupled_carry.components.items():
+            saver = component_savers.get(name)
+            if saver is None:
+                stored_components[name] = carry
+            else:
+                component_directory = saving / name
+                component_directory.mkdir(parents=True, exist_ok=True)
+                saver(carry, component_directory)
+                # The component's data is in its own directory; what goes in
+                # the shared file is only its name, carried by a marker that
+                # holds no leaf.
+                stored_components[name] = _delegated_marker()
 
-    save(
-        {
-            "step": coupled_carry.step,
-            "time": coupled_carry.time,
-            "components": stored_components,
-        },
-        carry_file,
+        save(
+            {
+                "step": coupled_carry.step,
+                "time": coupled_carry.time,
+                "components": stored_components,
+            },
+            saving / CARRY_FILENAME,
+        )
+    except BaseException:
+        # A save that raises leaves nothing half-written beside the
+        # checkpoint; one that is killed outright cannot run this, and the
+        # next save removes what it left.
+        shutil.rmtree(saving, ignore_errors=True)
+        raise
+
+    # The swap. `saving` is a whole checkpoint from here on, so whichever of
+    # these three lines the process dies on, `recover_interrupted_save` finds
+    # a complete one: the old one still in place, or the new one in `saving`.
+    if directory.exists():
+        os.rename(directory, replaced)
+    os.rename(saving, directory)
+    _sync_directory(directory.parent)
+    if replaced.exists():
+        shutil.rmtree(replaced)
+
+
+def _sibling(directory: Path, suffix: str) -> Path:
+    """Return the directory beside ``directory`` named with ``suffix`` appended.
+
+    Resolved from the absolute path, because ``Path(".")`` and a path ending
+    in ``..`` have no name to append to.
+    """
+    absolute = Path(os.path.abspath(directory))
+    return absolute.with_name(absolute.name + suffix)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Flush ``directory``'s entries to disk, where the platform allows it.
+
+    A rename is durable only once the directory holding the name is synced.
+    Not every filesystem can open a directory for that (and Windows cannot at
+    all), and a checkpoint that is on disk but not yet fsynced is still a
+    checkpoint, so a refusal is not an error.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _require_only_checkpoint_entries(
+    directory: Path, component_savers: Mapping[str, Any]
+) -> None:
+    """Refuse to replace ``directory`` if it holds anything a checkpoint does not.
+
+    A save replaces the directory wholesale, so whatever else is in it would
+    be deleted with the old checkpoint. That is only right for a directory
+    that is the checkpoint's own; a ``checkpoint_path`` pointed at a run's
+    output directory, say, must not cost the run its output.
+    """
+    expected = {CARRY_FILENAME, CARRY_FILENAME + ".tmp", *component_savers}
+    foreign = sorted(
+        entry.name for entry in directory.iterdir() if entry.name not in expected
     )
+    if foreign:
+        raise ValueError(
+            f"{directory} holds {foreign!r}, which a checkpoint of this model "
+            "does not write. Saving a checkpoint replaces its directory "
+            "wholesale, so it has to be a directory of the checkpoint's own: "
+            "choose another one, or remove those entries."
+        )
+
+
+def recover_interrupted_save(directory: str | Path) -> bool:
+    """Put the newest complete checkpoint back at ``directory`` after a failed save.
+
+    :func:`save_coupled_carry` writes into ``<directory>.saving`` and swaps it
+    in with two renames (see the module docstring). A save that died between
+    them leaves ``directory`` absent with a complete new checkpoint in
+    ``.saving`` and the complete old one in ``.replaced``; this renames the
+    newer of the two into place. It does nothing when ``directory`` already
+    holds a carry file, which covers every other moment a save can die at:
+    the old checkpoint is still where it was.
+
+    Parameters
+    ----------
+    directory : path-like
+        The checkpoint directory a save was asked to write.
+
+    Returns
+    -------
+    bool
+        Whether a checkpoint was put back.
+
+    Raises
+    ------
+    ValueError
+        If a complete checkpoint is waiting beside ``directory`` but
+        ``directory`` itself exists, holds no carry file and is not empty.
+        Nothing a save does leaves that state, so what is in it is not this
+        module's to delete -- and starting over instead, with a restart point
+        one rename away, is exactly what this function exists to prevent.
+
+    """
+    directory = Path(directory)
+    if (directory / CARRY_FILENAME).exists():
+        return False
+    for suffix, what in (
+        (_SAVING_SUFFIX, "the checkpoint that save had finished writing"),
+        (_REPLACED_SUFFIX, "the checkpoint that save was replacing"),
+    ):
+        survivor = _sibling(directory, suffix)
+        if not (survivor / CARRY_FILENAME).exists():
+            continue
+        if directory.exists():
+            try:
+                directory.rmdir()  # only an empty directory can be replaced
+            except OSError as exc:
+                raise ValueError(
+                    f"{directory} holds no {CARRY_FILENAME} and is not empty, "
+                    f"while {survivor} holds a complete checkpoint an "
+                    "interrupted save left behind. Move or remove "
+                    f"{directory} so that it can be put back in place."
+                ) from exc
+        os.rename(survivor, directory)
+        _sync_directory(directory.parent)
+        logger.warning(
+            "A checkpoint save into %s was interrupted. Restored %s, from %s.",
+            directory,
+            what,
+            survivor,
+        )
+        return True
+    return False
 
 
 def load_coupled_carry(
@@ -521,15 +696,17 @@ def load_coupled_carry(
     """
     directory = Path(directory)
     component_loaders = component_loaders or {}
+    # A save that died while swapping the new checkpoint in left a complete
+    # one beside `directory`; it goes back first, so the load below reads it.
+    recover_interrupted_save(directory)
     carry_file = directory / CARRY_FILENAME
     if not carry_file.exists():
         raise ValueError(
             f"{carry_file} does not exist, so {directory} is not a complete "
-            "checkpoint: the save that wrote it was interrupted before the "
-            "carry file (which is written last, and holds the coupled step "
-            "counter) was published. Resume from an earlier checkpoint -- "
-            "`jem.checkpoint.latest_complete_checkpoint` picks the newest one "
-            "that is loadable."
+            "checkpoint: the carry file is written last, and holds the clock "
+            "and the coupled step counter a resume cannot do without. "
+            "`save_coupled_carry` never leaves a directory in this state, so "
+            "either this is not a directory it wrote or the file was removed."
         )
     overlap = sorted(set(component_loaders) & set(component_templates))
     if overlap:
@@ -584,25 +761,24 @@ def latest_complete_checkpoint(
 ) -> Path | None:
     """Return the newest checkpoint directory that is actually complete.
 
-    A driver that resumes by taking the last of ``sorted(root.glob(pattern))``
-    can pick a directory that no run can load. :func:`save_coupled_carry` writes
-    :data:`CARRY_FILENAME` *last*, precisely so that a save interrupted
-    part-way through leaves a directory without it rather than one that
-    silently mixes component carries from two different steps. The cost of
-    that ordering is that an interrupted save leaves behind a carry-less
-    directory which sorts newest -- so the newest name is not necessarily the
-    newest *checkpoint*, and resuming has to skip it.
+    For a caller that keeps a *history* of checkpoints, one directory per
+    save, rather than the single directory :func:`jem.driver.run_chunked`
+    rewrites. Taking the last of ``sorted(root.glob(pattern))`` can pick a
+    directory that no run can load: a save killed part-way through leaves its
+    ``<name>.saving`` staging directory behind, with no carry file in it, and
+    that name sorts newest -- so the newest name is not necessarily the newest
+    *checkpoint*, and resuming has to skip it.
 
-    Directories are ordered by sorted name. The drivers name a checkpoint
-    after the coupled step it was written at, zero-padded to a fixed width
-    (``step_00000000``, ``step_00000005``, ...), so sorting the names sorts
-    the checkpoints by simulated time. The step a resumed run continues from
-    is read from inside the checkpoint, not from its name -- the name is only
-    what makes "newest" well defined.
+    Directories are ordered by sorted name. A caller that names each
+    checkpoint after the coupled step it was written at, zero-padded to a
+    fixed width (``step_00000000``, ``step_00000005``, ...), gets them sorted
+    by simulated time. The step a resumed run continues from is read from
+    inside the checkpoint, not from its name -- the name is only what makes
+    "newest" well defined.
 
     Each skipped directory is logged at WARNING: a carry-less directory means
-    an earlier run died mid-save, which is worth knowing about even though the
-    resume itself recovers.
+    an earlier save did not finish, which is worth knowing about even though
+    the resume itself recovers.
 
     Parameters
     ----------
