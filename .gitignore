@@ -14,14 +14,10 @@ env/
 *.nc
 !jem/data/*.nc
 
-# Output written by the example drivers alongside themselves:
-# examples/<group>/<example>/output_T<truncation>/<run name>/ holds the netCDF
-# output, a checkpoint/ directory (a msgpack carry file and Veros HDF5 restarts)
-# and the explosion log. Each Veros run.sh deletes its own before running;
-# these rules keep whatever a manual or interrupted run leaves behind out of
-# the index.
-output_T*/
-explode.log
+# What `python -m jem.main` writes when it is run from the repo root: Hydra's
+# default run directory is outputs/<date>/<time>/, holding main.log, .hydra/,
+# the netCDF output and checkpoint/.
+outputs/
 
 # Figures the example notebooks write next to themselves, in
 # examples/<group>/output/<notebook name>/. `examples/clean_notebooks.py`

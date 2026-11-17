@@ -47,10 +47,11 @@ atmosphere.
 or configuration file only by being (a) `_target_`, (b) a required input
 marked `???`, or (c) a value that differs from the Python default *and* is
 what the named configuration is about. `test_config_has_no_python_defaults`
-instantiates every group option and every configuration and fails if a
-supplied value equals the target's own default, so a physics default cannot
-acquire a second home in the configuration and drift from the class that owns
-it. `jem.runners` never reads a physics parameter either: its one table is
+composes every group option and every configuration (it builds nothing),
+resolves each `_target_` to the class or function it names, and fails if a
+key the YAML supplies equals the default in that target's signature, so a
+physics default cannot acquire a second home in the configuration and drift
+from the class that owns it. `jem.runners` never reads a physics parameter either: its one table is
 `GROUP_TO_NAME` (which config group becomes which component name — `ocean`
 → `"ocn"`, and so on), and `test_runners_has_no_component_kwargs` fails if
 any component parameter's name appears in its source at all. What the runner
@@ -59,6 +60,40 @@ any component parameter's name appears in its source at all. What the runner
 `terrain.fmask`, or from a SCRIP `grid_file`), the regridders, and the
 coupling timestep — injected into `hydra.utils.instantiate` after the keys
 that describe them are removed.
+
+**The coupled run's defaults live once, on `run_chunked`'s signature.**
+`coupled_run/default.yaml` is the schema of the run -- every key present, so
+`coupled_run.chunk="10 days"` needs no `+` and `--cfg job` lists them all --
+but a key that takes `run_chunked`'s default does not repeat it: it says
+`chunk: ${run_default:chunk}`, and the `run_default` resolver (registered with
+the data resolvers in `jem/config/__init__.py`) reads the default off
+`inspect.signature(run_chunked)` when the config is resolved. So
+`--cfg job --resolve` shows the real values, an override replaces the
+interpolation as it would a literal, and changing a default on the signature
+changes the command line with it. Three keys are literals on purpose, and the
+file says why: `total_time` (`run_chunked` has no default run length; the
+command line's own choice is 30 days), `output_dir` (null means the Hydra run
+directory, where `run_chunked`'s own default is a relative `outputs`) and
+`log_level` (not an argument of `run_chunked`). `health_check`, `accumulate`
+and `initial_carry` are not keys: a YAML cannot name a live function or
+carry. `test_run_options_repeat_no_run_chunked_default` and
+`test_run_options_cover_every_configurable_run_chunked_keyword` hold both
+facts.
+
+**A missing required input names its full key.** A `???` input (`ocean.sst_clim_file`
+under `ocean=slab_relax`, the four `regrid.*` weight files under `regrid=esmf`,
+`ocean.setup` under `ocean=veros`) is reported by OmegaConf as the bare leaf
+(`Missing mandatory value: sst_clim_file`), which does not say which group it
+belongs to. `jem.runners.build_component` re-raises it as
+`MissingMandatoryValue` naming each full key and the override to add,
+spelled with the packaged-file resolver where the repository's own examples use
+one.
+
+**`--help` lists every group's options.** Hydra's `$APP_CONFIG_GROUPS` fills in
+JAX-ESM's own groups, but not the groups on the `pkg://jcm.config` search path,
+so jax-gcm's re-rooted ones (and its `+configuration@atmosphere` bundles) are
+listed by the `${jcm_groups:}` resolver, read from the installed package so
+the listing cannot go stale.
 
 **A grid goes only to a component that asks for one.** `_accepts_grid`
 resolves the node's `_target_` (a class or a classmethod — both spellings
@@ -74,7 +109,7 @@ from the atmosphere's geometry would describe a grid nothing runs on.
 **Packaged data resolvers.** `${jcm_data:bc/t30/clim/forcing.nc}` and
 `${jem_data:DisplacedPoleGrid.SCRIP.nc}` resolve to files inside the
 installed `jcm.data` and `jem.data` packages; importing `jem.config`
-registers them. They exist so the shipped configurations run **offline**:
+registers them (and `run_default` and `jcm_groups`, above). They exist so the shipped configurations run **offline**:
 jax-gcm's own configurations fetch boundary data from an `hf://` mirror,
 which needs the network and a warm cache, while everything named through
 these is already on disk beside the code. A path that does not exist is

@@ -317,6 +317,54 @@ def test_mixed_grid_configuration_builds():
     assert all(name in exchange.regridders for name in crossing)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "keys", "hint"),
+    [
+        (["ocean=slab_relax"], ["ocean.sst_clim_file"], "${jcm_data:bc/t30/clim/forcing.nc}"),
+        (
+            ["regrid=esmf"],
+            ["regrid.a2o_conserve", "regrid.a2o_bilinear",
+             "regrid.o2a_conserve", "regrid.o2a_bilinear"],
+            "${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}",
+        ),
+        (["ocean=veros"], ["ocean.setup"], "jem.components.veros.setups."),
+    ],
+    ids=["slab_relax", "esmf", "veros"],
+)
+def test_a_missing_required_input_names_its_full_key_and_the_override(
+    overrides, keys, hint
+):
+    """`???` surfaces as the full key and the override to add, not the bare leaf.
+
+    OmegaConf alone says `Missing mandatory value: sst_clim_file` -- no group,
+    no hint. The error names `ocean.sst_clim_file` and shows the line to add,
+    spelled with the packaged-file resolver where the repo's docs use one.
+    """
+    from omegaconf.errors import MissingMandatoryValue
+
+    # The component is built before anything that needs a grid or a file, so
+    # no atmosphere is needed for the `ocean` cases; the regridders are built
+    # on their own.
+    cfg = composed(overrides)
+    with pytest.raises(MissingMandatoryValue) as info:
+        if overrides[0].startswith("regrid"):
+            runners.build_regridders(cfg)
+        else:
+            runners.build_component(cfg.ocean, key="ocean")
+    message = str(info.value)
+    for key in keys:
+        assert f"  {key}=" in message, message
+    assert hint in message
+
+
+def test_a_missing_input_is_named_by_the_coupler_build_too():
+    """`build_coupler` passes each group's key, so the CLI error is the full key."""
+    from omegaconf.errors import MissingMandatoryValue
+
+    with pytest.raises(MissingMandatoryValue, match=r"ocean\.sst_clim_file"):
+        runners.build_coupler(composed(["ocean=slab_relax"]))
+
+
 def test_constants_override_reaches_the_build(restore_constants):
     """`+atmosphere.constants.<name>=` is applied before anything is built."""
     import jcm.constants

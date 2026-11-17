@@ -5,9 +5,9 @@
 #
 #   python -m jem.main +configuration=aquaplanet-slab
 #
-# Everything here is a config default already. It is restated as explicit
-# overrides on purpose: a named configuration has to keep meaning what it
-# meant when it was validated, even after a default moves.
+# Almost everything here is a config default already. It is restated as
+# explicit overrides on purpose: a named configuration has to keep meaning
+# what it meant when it was validated, even after a default moves.
 #
 # WHY each setting:
 #  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics on
@@ -24,6 +24,16 @@
 #    is diagnosed from the coupled ocean's SST, so the ice cover follows the
 #    ocean instead of staying at the forcing's ice-free default.
 #  - land=none: there is no land.
+#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
+#    group's default, because a named configuration must not move if
+#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
+#    comment calls it "the validated ECHAM L47/L95 production step"). What is
+#    known about it for THIS case: it is the step this configuration integrates
+#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
+#    no `time_step` takes the physics' stable step capped at 30 min, which is
+#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
+#    (the Veros configurations here do too). No comparison of the two steps on
+#    this coupled case is recorded, so neither is "the" validated one.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8
@@ -31,3 +41,7 @@ defaults:
   - override /ocean: slab
   - override /seaice: slab
   - override /land: none
+
+atmosphere:
+  run:
+    time_step: 12    # minutes; see the comment above

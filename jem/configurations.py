@@ -21,6 +21,7 @@ notebook.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -115,26 +116,42 @@ def _fresh_output_dir() -> str:
 
 
 def _summary(path: Path) -> str:
-    """First human comment line of a configuration yaml (its one-line summary).
+    """Return the first sentence of a configuration yaml's leading comment.
 
-    The yamls open with ``# @package _global_``, a blank ``#``, then the
-    summary; return that first real comment, or ``""`` if none is present.
+    The yamls open with ``# @package _global_`` and then a paragraph that says
+    what the configuration is, ending at a blank ``#`` line. The paragraph can
+    wrap over several lines, so its lines are joined and the first sentence
+    (up to the first ``.``, ``!`` or ``?`` followed by a space or the end) is
+    returned whole; ``""`` if the file has no leading comment.
     """
+    paragraph: list[str] = []
     for line in path.read_text().splitlines():
         s = line.strip()
         if not s.startswith("#"):
             break
         body = s[1:].strip()
-        if not body or body.startswith("@package"):
+        if body.startswith("@package"):
             continue
-        return body
-    return ""
+        if not body:
+            if paragraph:
+                break
+            continue
+        paragraph.append(body)
+    text = " ".join(paragraph)
+    match = re.search(r"[.!?](?=\s|$)", text)
+    return text if match is None else text[: match.end()]
 
 
 def available() -> dict[str, str]:
-    """Map each configuration name to its one-line summary (sorted by name)."""
+    """Map each configuration name to a one-sentence summary.
+
+    The order is alphabetical by name (the file stem, so
+    ``aquaplanet-slab`` comes before ``aquaplanet-slab-mixed-grid``), not a
+    recommended reading order. Each
+    summary is the first sentence of the yaml's leading comment.
+    """
     return {p.stem: _summary(p)
-            for p in sorted(CONFIGURATION_DIR.glob("*.yaml"))}
+            for p in sorted(CONFIGURATION_DIR.glob("*.yaml"), key=lambda p: p.stem)}
 
 
 def _compose(name: str, overrides: list[str]):
@@ -366,9 +383,7 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ``jem/config/configuration/*.yaml`` stem). ``**overrides`` is the optional
     escape hatch: Hydra overrides passed straight into compose -- a plain
     value override (``load("earth-slab", **{"coupled_run.total_time": "60
-    days"})`` -- the recipe's chunk stays its default 30 days, so this has to
-    be a multiple of that, not the CLI's own arbitrary "10 days"; the dict key
-    carries the dots a Python kwarg cannot) or a config-group selection
+    days"})`` -- the dict key carries the dots a Python kwarg cannot) or a config-group selection
     (``load("aquaplanet-slab", seaice="none")``, exactly the CLI's
     ``seaice=none``). The returned :class:`LoadedConfiguration` is Hydra-free:
     ``coupler`` is built and ``config`` is a plain resolved dict.

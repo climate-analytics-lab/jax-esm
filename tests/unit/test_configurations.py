@@ -46,6 +46,16 @@ class TestAvailable(unittest.TestCase):
         self.assertIn("Earth", av["earth-slab"])
         self.assertIn("Winton", av["earth-slab-winton"])
 
+    def test_summaries_are_whole_sentences_in_name_order(self):
+        av = configurations.available()
+        self.assertEqual(list(av), sorted(av))
+        for name, summary in av.items():
+            self.assertTrue(summary.endswith("."), (name, summary))
+        # A summary is the first sentence of a paragraph that wraps over
+        # several lines of the yaml, not its first line.
+        self.assertIn("SPEEDY T31L8 over the Veros ocean GCM on an idealized",
+                      av["veros-double-drake"])
+
 
 class TestLoad(unittest.TestCase):
     def test_unknown_name_raises(self):

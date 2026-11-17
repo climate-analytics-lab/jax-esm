@@ -20,8 +20,30 @@
 #    the interface); the SST the atmosphere reads uses the bilinear one.
 #  - terrain=aquaplanet and ocean=slab as in `aquaplanet-slab`: the grids are
 #    the experiment here, not the physics.
-#  - land=none: an aquaplanet has no land, and the displaced pole's land
-#    fraction only marks which ocean cells are inactive.
+#  - land=none: an aquaplanet has no land component.
+#  - the displaced pole's land fraction file (`land_fraction_file` below) is
+#    passed to the ocean and sea-ice grids, so this is NOT an all-ocean
+#    planet on the ocean grid: the packaged mask has a mean land fraction of
+#    0.35 and 707 all-land cells, which are inactive -- their SST never
+#    leaves its initial 288.15 K -- and 238 of the atmosphere's 4608 cells
+#    (5.2%) sit over such a frozen SST for the whole run (0 in
+#    `aquaplanet-slab`). What the configuration exercises is the coupler on
+#    two different grids with ESMF weights; the masked cells are part of that
+#    grid's definition, and `examples/01_basic/04_jcm_slabs_mixed_grid_aqua_
+#    planet.ipynb` builds the same masked grid by hand (`tests/unit/test_
+#    notebook_equivalence.py` pins the two to each other, mask included).
+#    A true two-grid aquaplanet needs the mask dropped from BOTH this file
+#    and that notebook.
+#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
+#    group's default, because a named configuration must not move if
+#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
+#    comment calls it "the validated ECHAM L47/L95 production step"). What is
+#    known about it for THIS case: it is the step this configuration integrates
+#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
+#    no `time_step` takes the physics' stable step capped at 30 min, which is
+#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
+#    (the Veros configurations here do too). No comparison of the two steps on
+#    this coupled case is recorded, so neither is "the" validated one.
 defaults:
   - override /physics@atmosphere.physics: speedy
   - override /grid@atmosphere.grid: speedy_t31_l8
@@ -30,6 +52,10 @@ defaults:
   - override /seaice: slab
   - override /land: none
   - override /regrid: esmf
+
+atmosphere:
+  run:
+    time_step: 12    # minutes; see the comment above
 
 # `grid_file` and `land_fraction_file` are NOT constructor arguments of the
 # slab models: they are read (and removed) by `jem.runners` when it builds the

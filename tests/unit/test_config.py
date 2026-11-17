@@ -252,6 +252,77 @@ def test_run_options_share_one_schema():
     assert len(set(map(frozenset, key_sets.values()))) == 1, key_sets
 
 
+#: `run_chunked` arguments that have no key in `coupled_run`: the coupler is
+#: the thing being run, and the other three are live Python objects no YAML
+#: can name (`default.yaml` says so).
+NOT_CONFIGURABLE_RUN_ARGUMENTS = frozenset(
+    {"coupler", "health_check", "accumulate", "initial_carry"}
+)
+
+
+def _run_chunked_defaults() -> dict:
+    """Return ``run_chunked``'s keyword arguments and their defaults."""
+    from jem.driver import run_chunked
+
+    return {
+        name: parameter.default
+        for name, parameter in inspect.signature(run_chunked).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+
+
+@pytest.mark.parametrize("option", _options("coupled_run"))
+def test_run_options_repeat_no_run_chunked_default(option):
+    """No ``coupled_run`` literal equals the ``run_chunked`` default it shadows.
+
+    The defaults live on ``run_chunked``'s signature; a YAML key that wants
+    one says ``${run_default:<keyword>}``. A literal equal to the default is a
+    second copy that drifts silently, so it is refused whether it is an
+    option file's own or one inherited from ``default.yaml``.
+    """
+    raw = OmegaConf.load(CONFIG_DIR / "coupled_run" / f"{option}.yaml")
+    defaults = _run_chunked_defaults()
+    for key in raw:
+        if key == "defaults" or OmegaConf.is_interpolation(raw, key):
+            continue
+        if key in defaults:
+            assert raw[key] != defaults[key] or type(raw[key]) is not type(defaults[key]), (
+                f"coupled_run/{option}.yaml: {key} = {raw[key]!r} repeats "
+                f"run_chunked's default; write `${{run_default:{key}}}` (or, if "
+                "the option means to inherit it, delete the key)."
+            )
+
+
+def test_run_options_cover_every_configurable_run_chunked_keyword():
+    """Every ``run_chunked`` keyword that a YAML can express is a schema key."""
+    from jem.driver import run_chunked
+
+    keywords = set(inspect.signature(run_chunked).parameters) - NOT_CONFIGURABLE_RUN_ARGUMENTS
+    schema = set(composed([]).coupled_run)
+    assert keywords <= schema, f"no coupled_run key for: {sorted(keywords - schema)}"
+    # `log_level` is the one key that is not a run_chunked argument.
+    assert schema - keywords == {"log_level"}
+
+
+def test_resolved_run_defaults_are_run_chunked_s():
+    """The resolver hands the command line exactly ``run_chunked``'s defaults."""
+    resolved = OmegaConf.to_container(composed([]).coupled_run, resolve=True)
+    defaults = _run_chunked_defaults()
+    for key, value in resolved.items():
+        # The two literals this file chooses for the command line.
+        if key in defaults and key not in ("total_time", "output_dir"):
+            assert value == defaults[key], key
+    # An override still replaces the interpolation, with no leading `+`.
+    cfg = composed(["coupled_run.chunk=10 days"])
+    assert cfg.coupled_run.chunk == "10 days"
+
+
+def test_run_default_resolver_refuses_an_unknown_keyword():
+    cfg = OmegaConf.create({"x": "${run_default:not_a_keyword}"})
+    with pytest.raises(Exception, match="not_a_keyword"):
+        cfg.x
+
+
 def test_end_time_composes_and_nulls_total_time():
     """``coupled_run.end_time`` is a schema key, so it overrides without a ``+``."""
     cfg = composed([
@@ -335,6 +406,25 @@ def test_named_configurations_set_non_default_values():
     assert earth.ocean.params.relaxation_time == 30 * 86400
     # The land is the atmosphere's own (SPEEDY's slab): no land component.
     assert earth.land is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["aquaplanet-slab", "aquaplanet-slab-mixed-grid", "earth-slab", "earth-slab-winton"],
+)
+def test_slab_configurations_state_the_atmosphere_timestep(name):
+    """A slab configuration names the atmosphere's step instead of inheriting it.
+
+    The step comes from jax-gcm's ``run/default.yaml`` otherwise, which would
+    move every configuration the day that default moves. A key that is present
+    in the composed config is not enough -- the group supplies one -- so the
+    configuration file itself is checked. ``earth-slab-winton`` is
+    ``earth-slab`` with the ice swapped and states nothing of its own.
+    """
+    if name != "earth-slab-winton":
+        raw = OmegaConf.load(CONFIG_DIR / "configuration" / f"{name}.yaml")
+        assert raw.atmosphere.run.time_step == 12
+    assert composed([f"+configuration={name}"]).atmosphere.run.time_step == 12
 
 
 # ---------------------------------------------------------------------------

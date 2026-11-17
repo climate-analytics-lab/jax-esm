@@ -5,29 +5,48 @@
 #
 #   python -m jem.main +configuration=earth-slab
 #
-# This is `examples/02_experimental/01_earth.ipynb` as a config.
+# `examples/02_experimental/01_earth.ipynb` loads this configuration and runs it.
 #
 # WHY each setting:
 #  - terrain/forcing come from jax-gcm's packaged T30 climatology rather than
 #    the `hf://` mirror jax-gcm's own configurations use, so this runs with no
 #    network. The T30 climatology is on the T31 grid's own 96x48 Gaussian
 #    grid; `interpolate` stays at the group's default.
+#  - forcing.align stays `auto`: `jcm.forcing.resolve_align` resolves `auto`
+#    only for a data-mirror or packaged product, from the manifest's record of
+#    what it is, and refuses a user file. This forcing file is the packaged
+#    one (through `${jcm_data:...}`), which the manifest records as a
+#    climatology, so `auto` resolves to `wrap_year` -- the twelve months replay
+#    every model year, which is what a climatology is. A configuration that
+#    points the forcing at a file of its own has to say `wrap_year` or
+#    `by_date` explicitly (see `veros-earth`).
+#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
+#    group's default, because a named configuration must not move if
+#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
+#    comment calls it "the validated ECHAM L47/L95 production step"). What is
+#    known about it for THIS case: it is the step this configuration integrates
+#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
+#    no `time_step` takes the physics' stable step capped at 30 min, which is
+#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
+#    (the Veros configurations here do too). No comparison of the two steps on
+#    this coupled case is recorded, so neither is "the" validated one.
 #  - ocean=slab_relax reading the same forcing file's `sst`: a free slab drifts
 #    away from the observed state within months, so an Earth-like run relaxes.
-#  - ocean relaxation_time = 30 days rather than the model's 60: this is the
-#    validated setting of the notebook this configuration comes from -- at T31
-#    the slower relaxation lets the tropical SST drift before the seasonal
-#    cycle turns it around.
-#  - no land component (land=none, the default): the land is the
+#  - ocean relaxation_time = 30 days rather than the model's Python default of
+#    60: a stronger pull towards the observed SST, so the slab follows the
+#    seasonal cycle more closely and drifts less in a free-running year. That
+#    is the reason for choosing it; what is KNOWN is only that this is the
+#    value the configuration and the earth notebook run -- no run comparing 30
+#    days with the 60-day default is stored in the repo, so it is a choice,
+#    not a calibrated optimum.
+#  - no land component (land=none): the land is the
 #    atmosphere's own. SPEEDY runs its slab land (`land_model.f90`, jax-gcm's
 #    `SpeedySurfaceFlux` default) on the same file's `stl` climatology, with
 #    the file's `snowc` and `soilw_am`, forced by the flux over the land part
 #    of each cell. The ocean takes the flux over the sea part, so the two
 #    surfaces of a coast cell each take their own share. The anomaly relaxes
 #    on jax-gcm's validated 40 days (SPEEDY's own; jax-gcm's
-#    docs/source/design/speedy_retune.md); the 1 day this configuration used
-#    with JAX-ESM's former land component was a stopgap for that component.
-#    The relaxation is `SpeedySurfaceFlux`'s `land_params.tdland`, under
+#    docs/source/design/speedy_retune.md). The relaxation is `SpeedySurfaceFlux`'s `land_params.tdland`, under
 #    `atmosphere.physics.terms.speedy_surface_flux` like any jax-gcm term.
 #  - seaice=slab on the same file's `icec`: the sea-ice cover the atmosphere
 #    sees comes from this component, not from the forcing file -- the
@@ -44,8 +63,11 @@ defaults:
   - override /forcing@atmosphere.forcing: from_file
   - override /ocean: slab_relax
   - override /seaice: slab
+  - override /land: none
 
 atmosphere:
+  run:
+    time_step: 12    # minutes; see the comment above
   terrain:
     file: ${jcm_data:bc/t30/clim/terrain.nc}
   forcing:

@@ -35,6 +35,7 @@ import jax_datetime as jdt
 import xarray as xr
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.errors import MissingMandatoryValue
 
 # Importing the config package registers the ${jcm_data:}/${jem_data:}
 # resolvers. A config composed elsewhere (`jem.main`, a test) has already done
@@ -288,7 +289,54 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
     )
 
 
-def build_component(node: Any, **injected: Any) -> Any:
+#: Spellings of the override that supplies a required input, by the input's
+#: key within its node: the packaged-file resolver where the repo's own docs
+#: use one (``docs/source/getting_started.rst``, the ``--help`` text), the
+#: shape of the value otherwise. Only a hint -- the error names the full key
+#: either way.
+_MISSING_INPUT_EXAMPLES = {
+    "sst_clim_file": "'${jcm_data:bc/t30/clim/forcing.nc}'",
+    "ice_clim_file": "'${jcm_data:bc/t30/clim/forcing.nc}'",
+    "a2o_conserve": "'${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}'",
+    "a2o_bilinear": "'${jem_data:weight_algo-bilinear_JCM_T31_to_DisplacedPoleGrid.nc}'",
+    "o2a_conserve": "'${jem_data:weight_algo-conserve_DisplacedPoleGrid_to_JCM_T31.nc}'",
+    "o2a_bilinear": "'${jem_data:weight_algo-bilinear_DisplacedPoleGrid_to_JCM_T31.nc}'",
+    "setup": "jem.components.veros.setups.double_drake.double_drake_setup",
+}
+
+
+def _missing_keys(node: Any, prefix: str) -> list[str]:
+    """Return the full dotted keys under ``node`` whose value is still ``???``."""
+    if not isinstance(node, DictConfig):
+        return []
+    missing: list[str] = []
+    for key in node:
+        full = f"{prefix}.{key!s}"
+        if OmegaConf.is_missing(node, key):
+            missing.append(full)
+        else:
+            missing.extend(_missing_keys(node[key], full))
+    return missing
+
+
+def _missing_input_message(node: Any, key: str | None) -> str:
+    """Say which required inputs of ``node`` are unset and how to supply them."""
+    prefix = key if key is not None else "<component>"
+    missing = _missing_keys(node, prefix)
+    lines = []
+    for full in missing:
+        example = _MISSING_INPUT_EXAMPLES.get(full.rsplit(".", 1)[-1], "<value>")
+        lines.append(f"  {full}={example}")
+    names = ", ".join(missing) if missing else "a required input"
+    return (
+        f"The config leaves {names} unset (it is `???` in the selected "
+        f"`{prefix.split('.')[0]}` option, which cannot invent it). Add an "
+        "override for each on the command line, in single quotes so that the "
+        "shell leaves a `${...}` resolver for Hydra:\n" + "\n".join(lines)
+    )
+
+
+def build_component(node: Any, *, key: str | None = None, **injected: Any) -> Any:
     """Instantiate one component (or None) from its config node.
 
     ``hydra.utils.instantiate`` on everything but the runner-only keys, with
@@ -300,6 +348,11 @@ def build_component(node: Any, **injected: Any) -> Any:
     ----------
     node : omegaconf.DictConfig or None
         The component's config node.
+    key : str, optional
+        The config key ``node`` sits at (``"ocean"``, ``"regrid"``). Used only
+        to name a missing required input by its full key: OmegaConf reports
+        just the leaf (``sst_clim_file``), which does not say which group it
+        belongs to.
     **injected
         Objects the config cannot name, passed to the constructor.
 
@@ -310,9 +363,9 @@ def build_component(node: Any, **injected: Any) -> Any:
 
     Raises
     ------
-    omegaconf.MissingMandatoryValue
+    omegaconf.errors.MissingMandatoryValue
         If the node leaves a required input (``???``) unset. The message names
-        the full config key, so the fix is the override to add.
+        the full config key (``ocean.sst_clim_file``) and the override to add.
 
     """
     if node is None:
@@ -321,7 +374,10 @@ def build_component(node: Any, **injected: Any) -> Any:
     # the config node, so that the runner-only keys can be dropped without
     # mutating the composed config a caller may still be reading (and
     # `python -m jem.main --cfg job` still prints what the run was given).
-    config = OmegaConf.to_container(node, resolve=True, throw_on_missing=True)
+    try:
+        config = OmegaConf.to_container(node, resolve=True, throw_on_missing=True)
+    except MissingMandatoryValue as error:
+        raise MissingMandatoryValue(_missing_input_message(node, key)) from error
     if not isinstance(config, dict):
         raise TypeError(
             f"A component config node must be a mapping with a `_target_`; got "
@@ -361,7 +417,7 @@ def build_regridders(cfg: DictConfig) -> dict[str, Callable[[Any], Any]]:
     dict[str, Callable]
 
     """
-    regridders = build_component(cfg.get("regrid"))
+    regridders = build_component(cfg.get("regrid"), key="regrid")
     if regridders is None:
         return {}
     named = dict(regridders)
@@ -789,7 +845,9 @@ def build_coupler(cfg: DictConfig) -> Coupler:
         if node is None:
             logger.debug("No %s component (%s=none).", name, group)
             continue
-        components[name] = build_component(node, **_injected_grid(node, atm))
+        components[name] = build_component(
+            node, key=group, **_injected_grid(node, atm)
+        )
 
     regridders = build_regridders(cfg)
     exchangers = build_exchangers(cfg, components, regridders)
@@ -872,7 +930,7 @@ def run(cfg: DictConfig) -> driver.RunResult:
     jem.driver.RunResult
 
     """
-    logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg))
+    logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
     settings = build_run_kwargs(cfg)
     logger.info("Writing output to %s", settings["output_dir"])
     return driver.run_chunked(build_coupler(cfg), **settings)

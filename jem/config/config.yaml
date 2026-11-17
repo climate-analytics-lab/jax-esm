@@ -59,8 +59,8 @@ defaults:
   # (this one) comes before `pkg://jcm.config`, so a `run` group here would
   # shadow jcm's `run/default.yaml` and `run/longrun.yaml` -- the atmosphere
   # would silently be handed the coupler's run keys instead of its own, and
-  # every jax-gcm configuration bundle that says `override /run: longrun` (16
-  # of the 19 shipped ones) would compose the wrong file. And for reading:
+  # every jax-gcm configuration bundle that says `override /run: longrun` (most
+  # of them) would compose the wrong file. And for reading:
   # `atmosphere.run` already exists and means something else, so the coupled
   # run keeps its own name at both ends -- `coupled_run=short_run` selects the
   # option, `coupled_run.total_time="90 days"` sets one key. The OPTIONS are
