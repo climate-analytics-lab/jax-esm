@@ -36,7 +36,13 @@ The conventions, which are JCM's:
 - **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid,
   and `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (and a
   CF `coordinates` attribute on each variable) for a curvilinear one — CF and
-  xarray forbid a 2-D variable named after one of its own dimensions.
+  xarray forbid a 2-D variable named after one of its own dimensions. The
+  Veros ocean follows the same rule: a setup whose grid lines are not
+  meridians and parallels (the rotated pole of `veros-earth`) declares each
+  cell's true position, and its output is written on `x`/`y` under 2-D
+  `lon`/`lat`, with Veros' own axes kept as `native_lon`/`native_lat` —
+  they are up to the pole's displacement (12 degrees there) away from where
+  a cell is, so they are never written as `lon`/`lat`.
 - **Coordinate values** are degrees computed as `radians * 180 / pi`, in
   float64, which is character for character what `jcm.utils.data_to_xarray`
   does. A last-bit difference would be enough for `xr.merge` to treat two

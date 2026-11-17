@@ -25,6 +25,7 @@ import numpy as np
 import xarray as xr
 from veros import VerosSetup, veros_routine
 from veros.core.operators import at, update
+from veros.core.utilities import enforce_boundaries
 from veros.distributed import global_max, global_min
 from veros.variables import Variable, allocate
 
@@ -46,9 +47,10 @@ class GridInfo:
     x_origin, y_origin : float
         What Veros' own grid-spacing reconstruction needs to reproduce the
         native axis exactly; see :meth:`get_grid_info`.
-    true_lat_xy : numpy.ndarray
-        Each cell's true (post-rotation) geographic latitude, ``(nx, ny)``,
-        for the Coriolis parameter.
+    true_lat_xy, true_lon_xy : numpy.ndarray
+        Each cell's true (post-rotation) geographic latitude and longitude in
+        degrees, ``(nx, ny)``: the latitude for the Coriolis parameter, and
+        both for labelling the output, whose own axes are the rotated ones.
     landsea_mask : numpy.ndarray
         ``(nx, ny)``, ``1`` = ocean / ``0`` = land (Veros' ``kbot``
         convention), from the matching land-sea mask file thresholded at
@@ -148,6 +150,7 @@ class GridInfo:
         # the Coriolis parameter only, not for grid geometry.
         true_lat = grid_ds["grid_center_lat"].to_numpy().reshape(ny, nx)
         true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
+        true_lon_xy = grid_ds["grid_center_lon"].to_numpy().reshape(ny, nx).transpose()
 
         # TODO: real bathymetry is still needed here -- this only gives a
         # binary land/sea mask, so every ocean column gets the same flat
@@ -165,6 +168,7 @@ class GridInfo:
         self.y_origin = y_origin
         self.x_origin = x_origin
         self.true_lat_xy = true_lat_xy
+        self.true_lon_xy = true_lon_xy
         self.landsea_mask = landsea_mask
 
 
@@ -226,6 +230,12 @@ def earth_setup(
          - the true (post-rotation) latitude a rotated grid's Coriolis
            parameter needs
         """
+
+        # Veros' own `xt`/`yt` are this grid's native, pre-rotation axes: up
+        # to ~12 degrees from where a cell really is. These two say where it
+        # is, and `VerosComponent` labels the output with them.
+        geographic_longitude = grid_info.true_lon_xy
+        geographic_latitude = grid_info.true_lat_xy
 
         @veros_routine
         def set_parameter(self, state):
@@ -311,9 +321,17 @@ def earth_setup(
             settings = state.settings
             # Coriolis depends on position relative to Earth's true spin axis,
             # not the grid's own (rotated) latitude -- see note in GridInfo above.
-            vs.coriolis_t = update(
-                vs.coriolis_t, at[2:-2, 2:-2],
-                2 * settings.omega * npx.sin(grid_info.true_lat_xy / 180.0 * settings.pi),
+            # The true latitude is known for the interior only, so the zonal
+            # halo is filled from the other side of the periodic seam: Veros
+            # never halo-exchanges `coriolis_t` itself, and its Coriolis
+            # tendency for `u` averages `coriolis_t` with its eastern
+            # neighbour, which for the last interior column is a ghost cell.
+            vs.coriolis_t = enforce_boundaries(
+                update(
+                    vs.coriolis_t, at[2:-2, 2:-2],
+                    2 * settings.omega * npx.sin(grid_info.true_lat_xy / 180.0 * settings.pi),
+                ),
+                settings.enable_cyclic_x,
             )
 
         @veros_routine

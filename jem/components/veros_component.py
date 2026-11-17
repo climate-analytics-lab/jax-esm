@@ -24,6 +24,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 import xarray as xr
 from veros import runtime_settings
@@ -55,11 +56,14 @@ GHOST_CELLS = 2
 SEAWATER_HEAT_CAPACITY = 3991.86795711963  # J kg-1 K-1
 REFERENCE_SALINITY = 35.0  # PSU
 
-# ``sqrt`` has an infinite derivative at 0, so AD through ``sqrt(x)`` blows
-# up to NaN as x -> 0 even though the primal value stays finite. The TKE
-# surface forcing floors the *squared* stress magnitude -- sqrt's argument --
-# at this value squared, which bounds sqrt and its derivative and caps the
-# resulting magnitude from below.
+# ``sqrt`` has an infinite derivative at 0, so AD through ``sqrt(x)`` gives
+# NaN at exactly zero stress (``inf * 0``) even though the TKE surface forcing
+# itself, ``|tau / rho_0| ** 1.5``, is smooth there. The forcing therefore
+# floors the stress magnitude at this value before taking the root. It is a
+# stress in N m-2 and is divided by ``rho_0`` where it is applied, like the
+# stress it is compared with: three orders of magnitude below a typical wind
+# stress (0.1 N m-2), so it guards the derivative without setting the forcing
+# anywhere the wind blows.
 MIN_STRESS_MAGNITUDE = 1e-3  # N m-2
 
 #: Name of the HDF5 restart file :meth:`VerosComponent.save_carry` writes
@@ -238,6 +242,37 @@ class VerosDerived:
         )
 
 
+def _geographic_coordinates(
+    model: Any, horizontal_shape: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Return a setup's declared true ``(longitude, latitude)``, or ``(None, None)``.
+
+    Read from the setup's ``geographic_longitude``/``geographic_latitude``
+    attributes (see :class:`VerosComponent`). Declaring one without the other,
+    or on a different shape from the grid, is a mistake in the setup and is
+    refused here rather than written into every output file.
+    """
+    longitude = getattr(model, "geographic_longitude", None)
+    latitude = getattr(model, "geographic_latitude", None)
+    if longitude is None and latitude is None:
+        return None, None
+    if longitude is None or latitude is None:
+        raise ValueError(
+            f"{type(model).__name__} declares only one of geographic_longitude"
+            " and geographic_latitude; a rotated grid needs both."
+        )
+    longitude = np.asarray(longitude, dtype=np.float64)
+    latitude = np.asarray(latitude, dtype=np.float64)
+    for label, values in (("geographic_longitude", longitude),
+                          ("geographic_latitude", latitude)):
+        if values.shape != tuple(horizontal_shape):
+            raise ValueError(
+                f"{type(model).__name__}.{label} has shape {values.shape}, but"
+                f" the interior T grid is {tuple(horizontal_shape)}."
+            )
+    return longitude, latitude
+
+
 class VerosComponent:
     """The Veros ocean GCM, driven one coupling timestep at a time.
 
@@ -252,7 +287,13 @@ class VerosComponent:
     model : veros.VerosSetup
         A Veros setup on which ``setup()`` has already been called, so
         ``model.state`` holds the allocated grid and initial conditions
-        this wrapper reads its geometry from.
+        this wrapper reads its geometry from. A setup whose grid lines are
+        not geographic meridians and parallels -- a rotated or displaced
+        pole -- says where its cells really are with two attributes,
+        ``geographic_longitude`` and ``geographic_latitude``: arrays in
+        degrees on the interior T grid, shape ``(nx, ny)``. Veros' own
+        ``xt``/``yt`` are then the grid's native axes and are published as
+        such (see :meth:`to_xarray`).
 
     Attributes
     ----------
@@ -330,6 +371,12 @@ class VerosComponent:
         # coordinates those spacings accumulate into are metres too.
         self.longitude_units = "degrees_east" if settings.coord_degree else "m"
         self.latitude_units = "degrees_north" if settings.coord_degree else "m"
+        # Where each T cell really is, for a setup that says its grid lines
+        # are not meridians and parallels; None for an ordinary lat-lon grid,
+        # whose `longitude`/`latitude` axes above already say it.
+        geographic = _geographic_coordinates(model, self.horizontal_shape)
+        self.geographic_longitude: np.ndarray | None = geographic[0]
+        self.geographic_latitude: np.ndarray | None = geographic[1]
 
         # Which external mode the setup solves is fixed for the whole run, so
         # it is read once here as a Python bool and the `psi` branch in
@@ -671,6 +718,7 @@ class VerosComponent:
         # to numpy operators.
         from veros.core.operators import at, update
         from veros.core.operators import numpy as npx
+        from veros.core.utilities import enforce_boundaries
 
         interior = slice(GHOST_CELLS, -GHOST_CELLS)
         state = carry["state"]
@@ -679,16 +727,30 @@ class VerosComponent:
         settings = state.settings
 
         with variables.unlock():
-            variables.surface_taux = update(
-                variables.surface_taux, at[interior, interior],
-                forcing.surface_taux,
+            # The coupler supplies the interior only. The TKE forcing below
+            # averages each stress with its western (or southern) neighbour,
+            # which for the first interior column of a zonally periodic grid
+            # is a ghost cell, so the halo is filled from the other side of
+            # the seam before anything reads it.
+            variables.surface_taux = enforce_boundaries(
+                update(
+                    variables.surface_taux, at[interior, interior],
+                    forcing.surface_taux,
+                ),
+                settings.enable_cyclic_x,
             )
-            variables.surface_tauy = update(
-                variables.surface_tauy, at[interior, interior],
-                forcing.surface_tauy,
+            variables.surface_tauy = enforce_boundaries(
+                update(
+                    variables.surface_tauy, at[interior, interior],
+                    forcing.surface_tauy,
+                ),
+                settings.enable_cyclic_x,
             )
             if settings.enable_tke:
-                # Follows Veros' own `setups/global_1deg`.
+                # Follows Veros' own `setups/global_1deg`: the forcing is the
+                # kinematic stress magnitude, |tau| / rho_0 in m2 s-2, to the
+                # power 3/2. The floor is a stress too, so it is divided by
+                # rho_0 with the rest (see MIN_STRESS_MAGNITUDE).
                 surface_stress_squared = (
                     (0.5 * (variables.surface_taux[1:-1, 1:-1]
                             + variables.surface_taux[:-2, 1:-1])
@@ -698,8 +760,10 @@ class VerosComponent:
                        / settings.rho_0) ** 2
                 )
                 surface_stress_magnitude = npx.sqrt(
-                    npx.maximum(surface_stress_squared,
-                                MIN_STRESS_MAGNITUDE ** 2)
+                    npx.maximum(
+                        surface_stress_squared,
+                        (MIN_STRESS_MAGNITUDE / settings.rho_0) ** 2,
+                    )
                 )
                 variables.forc_tke_surface = update(
                     variables.forc_tke_surface, at[1:-1, 1:-1],
@@ -1052,12 +1116,19 @@ class VerosComponent:
             ``u`` and for the depth integral behind ``psi``, and
             ``mask_surface_Z`` for the zeta points ``psi`` itself sits on,
             where its values over land are an artefact of the integration.
-            The ``time`` coordinate is the absolute ``datetime64[ns]`` axis
+            The ``time`` coordinate is the absolute ``datetime64[ms]`` axis
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
-            ``xr.merge`` joins the records instead of unioning two axes -- or,
-            as before this coordinate was written at all, leaving the ocean's
-            ``time`` as a bare 0..n-1 index that means nothing.
+            ``xr.merge`` joins the records instead of unioning two axes.
+            The horizontal dimensions are ``("lon", "lat")``, Veros' own
+            T-grid axes, for a grid whose axes are meridians and parallels.
+            A setup that declares its cells' true positions (a rotated pole;
+            see the class docstring) is written on index dimensions
+            ``("x", "y")`` instead, with 2-D ``lon``/``lat`` auxiliary
+            coordinates holding those positions, a CF ``coordinates``
+            attribute on every horizontal variable, and Veros' axes kept as
+            ``native_lon``/``native_lat``; its vectors (``u``, ``v``, the
+            wind stress) are along the grid's own directions and say so.
             ``ssh`` is present only for a run that solves the linear free
             surface, because that is the only regime in which Veros carries
             a sea surface height; ``step`` emits it on the same static
@@ -1072,47 +1143,48 @@ class VerosComponent:
                 " passed here are not the ones this run produced."
             )
 
+        # The horizontal dimensions follow the output convention every
+        # component shares: `lon`/`lat` for a grid whose axes are meridians
+        # and parallels, and index dimensions `x`/`y` under 2-D `lon`/`lat`
+        # for one whose axes are not (`_horizontal_coordinates`).
+        x, y = self._horizontal_dims()
         dataset = xr.Dataset(
             data_vars={
-                "temp": (["time", "lon", "lat", "depth"], diagnostics["temp"]),
-                "salt": (["time", "lon", "lat", "depth"], diagnostics["salt"]),
-                "u": (["time", "lon", "lat", "depth"], diagnostics["u"]),
-                "v": (["time", "lon", "lat", "depth"], diagnostics["v"]),
-                "sea_surface_temperature": (["time", "lon", "lat"], diagnostics["sea_surface_temperature"]),
-                "sea_surface_u": (["time", "lon", "lat"], diagnostics["sea_surface_u"]),
-                "sea_surface_v": (["time", "lon", "lat"], diagnostics["sea_surface_v"]),
-                "sea_surface_salinity": (["time", "lon", "lat"], diagnostics["sea_surface_salinity"]),
-                "psi": (["time", "lon", "lat"], diagnostics["psi"]),
+                "temp": (["time", x, y, "depth"], diagnostics["temp"]),
+                "salt": (["time", x, y, "depth"], diagnostics["salt"]),
+                "u": (["time", x, y, "depth"], diagnostics["u"]),
+                "v": (["time", x, y, "depth"], diagnostics["v"]),
+                "sea_surface_temperature": (["time", x, y], diagnostics["sea_surface_temperature"]),
+                "sea_surface_u": (["time", x, y], diagnostics["sea_surface_u"]),
+                "sea_surface_v": (["time", x, y], diagnostics["sea_surface_v"]),
+                "sea_surface_salinity": (["time", x, y], diagnostics["sea_surface_salinity"]),
+                "psi": (["time", x, y], diagnostics["psi"]),
                 forcing_variable("surface_air_temperature"): (
-                    ["time", "lon", "lat"], diagnostics["surface_air_temperature"]),
+                    ["time", x, y], diagnostics["surface_air_temperature"]),
                 forcing_variable("surface_taux"): (
-                    ["time", "lon", "lat"], diagnostics["surface_taux"]),
+                    ["time", x, y], diagnostics["surface_taux"]),
                 forcing_variable("surface_tauy"): (
-                    ["time", "lon", "lat"], diagnostics["surface_tauy"]),
+                    ["time", x, y], diagnostics["surface_tauy"]),
                 forcing_variable("heat_flux"): (
-                    ["time", "lon", "lat"], diagnostics["heat_flux"]),
+                    ["time", x, y], diagnostics["heat_flux"]),
                 forcing_variable("freshwater_flux"): (
-                    ["time", "lon", "lat"], diagnostics["freshwater_flux"]),
+                    ["time", x, y], diagnostics["freshwater_flux"]),
                 forcing_variable("runoff_mass_rate"): (
                     ["time"], diagnostics["runoff_mass_rate"]),
-                "mask_T": (["lon", "lat", "depth"], self.mask_T),
-                "mask_surface_T": (["lon", "lat"], self.mask_T[:, :, -1]),
-                "mask_U": (["lon", "lat", "depth"], self.mask_U),
-                "mask_surface_U": (["lon", "lat"], self.mask_U[:, :, -1]),
-                "mask_surface_Z": (["lon", "lat"], self.mask_surface_Z),
+                "mask_T": ([x, y, "depth"], self.mask_T),
+                "mask_surface_T": ([x, y], self.mask_T[:, :, -1]),
+                "mask_U": ([x, y, "depth"], self.mask_U),
+                "mask_surface_U": ([x, y], self.mask_U[:, :, -1]),
+                "mask_surface_Z": ([x, y], self.mask_surface_Z),
                 "dzt": (["depth"], self.dzt),
             },
             coords={
                 # ``attrs`` is a fresh dict per access, so xarray -- which
                 # keeps the dict it is handed -- gets one of its own.
                 "time": (["time"], time.datetimes(), time.attrs),
-                "lon": (["lon"], self.longitude),
-                "lat": (["lat"], self.latitude),
+                **self._horizontal_coordinates(),
             },
         )
-
-        dataset.lon.attrs = {"long_name": "T-grid longitude", "units": self.longitude_units}
-        dataset.lat.attrs = {"long_name": "T-grid latitude", "units": self.latitude_units}
 
         # Nothing in the numbers says whether `psi` is Veros' own prognostic
         # streamfunction or the diagnosis that stands in for it, so the
@@ -1214,7 +1286,7 @@ class VerosComponent:
         # needs no staggering note: it is a T-grid field, the grid this
         # dataset's `lon`/`lat` already label.
         if not self.enable_streamfunction:
-            dataset["ssh"] = (["time", "lon", "lat"], diagnostics["ssh"])
+            dataset["ssh"] = (["time", x, y], diagnostics["ssh"])
             var_attrs["ssh"] = {
                 "long_name": "sea surface height", "units": "m",
                 "comment": (
@@ -1235,7 +1307,7 @@ class VerosComponent:
 
         # The GM streamfunction exists only where `step` emitted one.
         if self.enable_gm_streamfunction:
-            dataset["B1_gm"] = (["time", "lon", "lat", "depth"], diagnostics["B1_gm"])
+            dataset["B1_gm"] = (["time", x, y, "depth"], diagnostics["B1_gm"])
             var_attrs["B1_gm"] = {
                 "long_name": "zonal component of the GM (eddy-induced) streamfunction",
                 "units": "m^2/s",
@@ -1259,7 +1331,74 @@ class VerosComponent:
         for name, attrs in var_attrs.items():
             dataset[name].attrs = attrs
 
+        if self.geographic_longitude is not None:
+            # On a rotated grid the vectors are along the grid's own axes,
+            # not east and north, and nothing in a name like "zonal" says so.
+            for name in ("u", "v", "sea_surface_u", "sea_surface_v",
+                         forcing_variable("surface_taux"),
+                         forcing_variable("surface_tauy")):
+                dataset[name].attrs["comment"] = (
+                    "a component along this grid's own x/y direction"
+                    " (`native_lon`/`native_lat`), which is rotated from"
+                    " geographic east/north; `lon`/`lat` give each cell's"
+                    " true position"
+                )
+            # CF: a variable on index dimensions names its auxiliary
+            # coordinates, or a reader has no way to geolocate it.
+            for variable in dataset.data_vars.values():
+                if x in variable.dims and y in variable.dims:
+                    variable.attrs["coordinates"] = "lat lon"
+
         return dataset
+
+    def _horizontal_dims(self) -> tuple[str, str]:
+        """Return the names of the two horizontal output dimensions.
+
+        ``("lon", "lat")`` for a grid whose axes are meridians and parallels,
+        so that its dataset shares dimensions with the atmosphere's;
+        ``("x", "y")`` for a rotated one, because CF and xarray forbid a 2-D
+        variable named after one of its own dimensions and the true
+        ``lon``/``lat`` of such a grid are 2-D.
+        """
+        if self.geographic_longitude is None:
+            return "lon", "lat"
+        return "x", "y"
+
+    def _horizontal_coordinates(self) -> dict[str, tuple]:
+        """Return the horizontal coordinate variables of the output dataset.
+
+        An ordinary lat-lon grid has two 1-D coordinates, Veros' own T-grid
+        axes. A rotated grid has 2-D ``lon``/``lat`` -- where each cell really
+        is, as the setup declared it -- over the index dimensions, and keeps
+        Veros' axes as ``native_lon``/``native_lat``: they are what the
+        grid's metric terms and the directions of ``u``/``v`` refer to, but
+        labelling them ``lon``/``lat`` would put every cell up to the pole's
+        displacement away from where it is.
+        """
+        if self.geographic_longitude is None:
+            return {
+                "lon": (["lon"], self.longitude,
+                        {"long_name": "T-grid longitude", "units": self.longitude_units}),
+                "lat": (["lat"], self.latitude,
+                        {"long_name": "T-grid latitude", "units": self.latitude_units}),
+            }
+        x, y = self._horizontal_dims()
+        return {
+            # No `axis` attribute: CF reserves it for true coordinate
+            # variables, and these are 2-D fields over index dimensions.
+            "lon": ([x, y], self.geographic_longitude,
+                    {"standard_name": "longitude", "units": "degrees_east",
+                     "long_name": "T-grid longitude"}),
+            "lat": ([x, y], self.geographic_latitude,
+                    {"standard_name": "latitude", "units": "degrees_north",
+                     "long_name": "T-grid latitude"}),
+            "native_lon": ([x], self.longitude,
+                           {"long_name": "T-grid longitude on the grid's own (rotated) axis",
+                            "units": self.longitude_units}),
+            "native_lat": ([y], self.latitude,
+                           {"long_name": "T-grid latitude on the grid's own (rotated) axis",
+                            "units": self.latitude_units}),
+        }
 
     def save_carry(self, carry: Carry, directory: Path) -> None:
         """Write the carry to ``directory`` (:class:`~jem.base.component.SupportsCheckpoint`).

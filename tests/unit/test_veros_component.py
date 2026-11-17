@@ -33,6 +33,7 @@ from jem.base.component import (  # noqa: E402
 )
 from jem.components.veros_component import (  # noqa: E402
     GHOST_CELLS,
+    MIN_STRESS_MAGNITUDE,
     VerosComponent,
     VerosDerived,
     VerosForcing,
@@ -356,6 +357,86 @@ def test_to_xarray_publishes_the_external_mode_outputs(
         np.testing.assert_array_equal(dataset.ssh.values, np.asarray(ssh))
 
 
+def _rotated(veros_model, monkeypatch, grid_shape):
+    """Return a component whose setup declares its cells' true positions.
+
+    The positions are the grid's own, displaced, which is all the labelling
+    needs: a setup that declares them is one whose axes are not meridians
+    and parallels.
+    """
+    nx, ny = grid_shape
+    native_lon = np.asarray(veros_model.state.variables.xt)[GHOST_CELLS:-GHOST_CELLS]
+    native_lat = np.asarray(veros_model.state.variables.yt)[GHOST_CELLS:-GHOST_CELLS]
+    true_lon = np.broadcast_to(native_lon[:, None] + 7.0, (nx, ny))
+    true_lat = np.broadcast_to(native_lat[None, :] - 3.0, (nx, ny))
+    monkeypatch.setattr(veros_model, "geographic_longitude", true_lon, raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude", true_lat, raising=False)
+    return _bound(veros_model), true_lon, true_lat, native_lon, native_lat
+
+
+def test_a_rotated_grid_is_labelled_with_its_cells_true_positions(
+    veros_model, monkeypatch, grid_shape
+):
+    """A rotated grid's output is on index dimensions under 2-D ``lon``/``lat``.
+
+    Veros' own axes are the grid's native, pre-rotation ones. Writing them as
+    ``lon``/``lat`` would label every cell up to the pole's displacement away
+    from where it is, so a setup that declares its true positions gets the
+    convention every component uses for a curvilinear grid: ``x``/``y``
+    dimensions, 2-D ``lon``/``lat`` auxiliary coordinates and a CF
+    ``coordinates`` attribute, with the native axes kept under their own
+    name.
+    """
+    component, true_lon, true_lat, native_lon, native_lat = _rotated(
+        veros_model, monkeypatch, grid_shape
+    )
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+
+    assert dataset.sea_surface_temperature.dims == ("time", "x", "y")
+    assert dataset.temp.dims == ("time", "x", "y", "depth")
+    assert dataset.mask_surface_T.dims == ("x", "y")
+    assert dataset.lon.dims == dataset.lat.dims == ("x", "y")
+    np.testing.assert_array_equal(dataset.lon, true_lon)
+    np.testing.assert_array_equal(dataset.lat, true_lat)
+    assert dataset.lon.attrs["units"] == "degrees_east"
+    assert dataset.lat.attrs["units"] == "degrees_north"
+    np.testing.assert_array_equal(dataset.native_lon, native_lon)
+    np.testing.assert_array_equal(dataset.native_lat, native_lat)
+
+    # Every horizontal variable names its coordinates; the two that have no
+    # horizontal dimensions do not.
+    for name, variable in dataset.data_vars.items():
+        horizontal = "x" in variable.dims and "y" in variable.dims
+        assert ("coordinates" in variable.attrs) == horizontal, name
+        if horizontal:
+            assert variable.attrs["coordinates"] == "lat lon"
+    # The vectors are along the grid's own axes, and say so.
+    for name in ("u", "v", "sea_surface_u", "sea_surface_v",
+                 "forcing_surface_taux", "forcing_surface_tauy"):
+        assert "rotated" in dataset[name].attrs["comment"], name
+
+
+def test_a_setup_that_declares_half_a_position_is_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """True longitudes without latitudes, or on the wrong grid, are a setup bug."""
+    nx, ny = grid_shape
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude", np.zeros((nx, ny)), raising=False
+    )
+    with pytest.raises(ValueError, match="needs both"):
+        VerosComponent(veros_model)
+
+    monkeypatch.setattr(
+        veros_model, "geographic_latitude", np.zeros((nx + 1, ny)), raising=False
+    )
+    with pytest.raises(ValueError, match="geographic_latitude has shape"):
+        VerosComponent(veros_model)
+
+
 def test_to_xarray_labels_the_gm_streamfunction(component):
     """``B1_gm`` is a 3-D derived field, labelled and documented like ``v``."""
     assert component.enable_gm_streamfunction  # acc_basic runs GM skew diffusion
@@ -655,6 +736,66 @@ def test_clock_drift_of_a_day_is_reported(component, caplog):
     assert "86400" in caplog.text
     assert "172800" in caplog.text
     assert caplog.records and caplog.records[0].levelno == logging.ERROR
+
+
+def _tke_surface_forcing(component, surface_taux):
+    """Return the TKE surface forcing one step sets under ``surface_taux``.
+
+    Only the forcing is under test, so the caller has stubbed the Veros step
+    out: what comes back is what the ocean is about to be driven with.
+    """
+    carry = component.initialize()
+    carry = dict(carry, forcing=carry["forcing"].replace(surface_taux=surface_taux))
+    new_carry, _ = component.step(carry, _coupling_time(0))
+    interior = slice(GHOST_CELLS, -GHOST_CELLS)
+    return new_carry["state"].variables.forc_tke_surface[interior, interior]
+
+
+@pytest.mark.parametrize("stress", [0.02, 0.1, 0.5])
+def test_the_tke_surface_forcing_follows_the_wind_stress(
+    component, monkeypatch, stress
+):
+    """The mixed layer is stirred by the wind: ``(|tau| / rho_0) ** 1.5``.
+
+    Checked at three stresses spanning a calm day to a storm, because the
+    failure this guards against is a floor on the stress that sits above all
+    of them -- which makes the forcing one constant whatever the wind does.
+    It is checked on every interior column, because the forcing averages each
+    stress with its western neighbour and on a periodic grid the first
+    column's neighbour is across the seam.
+    """
+    monkeypatch.setattr(component.model, "step", lambda state: None)
+    rho_0 = float(component.model.state.settings.rho_0)
+
+    forcing = _tke_surface_forcing(
+        component, jnp.full(component.horizontal_shape, stress)
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(forcing), (stress / rho_0) ** 1.5, rtol=1e-6
+    )
+
+
+def test_the_tke_surface_forcing_is_differentiable_in_a_calm(component, monkeypatch):
+    """At zero stress the forcing is negligible and its gradient is finite.
+
+    ``sqrt`` has an infinite derivative at zero, so without the floor on the
+    stress the gradient of a coupled run with respect to anything upstream of
+    a windless cell would be NaN.
+    """
+    monkeypatch.setattr(component.model, "step", lambda state: None)
+    rho_0 = float(component.model.state.settings.rho_0)
+
+    def total_forcing(stress):
+        return _tke_surface_forcing(
+            component, jnp.full(component.horizontal_shape, stress)
+        ).sum()
+
+    value, gradient = jax.value_and_grad(total_forcing)(0.0)
+
+    cells = int(np.prod(component.horizontal_shape))
+    assert float(value) <= cells * (MIN_STRESS_MAGNITUDE / rho_0) ** 1.5 * (1 + 1e-6)
+    assert np.isfinite(float(gradient))
 
 
 def test_make_jem_compatible_is_deprecated(veros_model):

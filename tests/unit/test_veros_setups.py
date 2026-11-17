@@ -203,6 +203,82 @@ def test_earth_setup_coriolis_uses_the_true_latitude():
 
 
 @pytest.mark.slow
+def test_earth_setup_declares_its_cells_true_positions():
+    """The rotated setup publishes where its cells are, for the output to use.
+
+    Veros' own axes are the pre-rotation ones, so `VerosComponent` can only
+    label the output correctly if the setup says where each cell really is.
+    """
+    from jem.components.veros.setups.earth import earth_setup
+
+    setup_cls = earth_setup(
+        scrip_grid_file=ROTATED_SCRIP_FILE,
+        landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+    )
+
+    grid = xr.open_dataset(ROTATED_SCRIP_FILE)
+    nlon, nlat = (int(n) for n in grid["grid_dims"].to_numpy())
+    for declared, name in (
+        (setup_cls.geographic_latitude, "grid_center_lat"),
+        (setup_cls.geographic_longitude, "grid_center_lon"),
+    ):
+        expected = grid[name].to_numpy().reshape(nlat, nlon).transpose()
+        np.testing.assert_array_equal(declared, expected)
+    # And they are not the native axis: the pole is displaced.
+    native_lat = grid["native_lat"].to_numpy()
+    assert np.abs(setup_cls.geographic_latitude - native_lat[None, :]).max() > 5.0
+
+
+@pytest.mark.slow
+def test_earth_setup_coriolis_is_periodic_across_the_seam():
+    """The Coriolis parameter's zonal halo holds the other side of the seam.
+
+    Veros' Coriolis tendency for `u` averages `coriolis_t` with its eastern
+    neighbour, which for the last interior column is a ghost cell. Veros
+    never fills that halo itself, so a setup that writes the interior only
+    leaves it at zero and halves the Coriolis force on one meridian of zonal
+    velocities. With a uniform northward flow the tendency there must be the
+    full ``f v``, as it is everywhere else.
+    """
+    from veros.core import momentum
+    from veros.core.operators import at, update
+
+    from jem.components.veros.setups.earth import earth_setup
+
+    setup_cls = earth_setup(
+        scrip_grid_file=ROTATED_SCRIP_FILE,
+        landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+    )
+    model = setup_cls()
+    model.setup()
+    state = model.state
+    vs = state.variables
+
+    coriolis = np.asarray(vs.coriolis_t)
+    np.testing.assert_array_equal(coriolis[-2:, 2:-2], coriolis[2:4, 2:-2])
+    np.testing.assert_array_equal(coriolis[:2, 2:-2], coriolis[-4:-2, 2:-2])
+    assert np.abs(coriolis[-2:, 2:-2]).max() > 0.0
+
+    with vs.unlock():
+        vs.v = update(vs.v, at[...], 1.0 * vs.maskV[..., np.newaxis])
+        vs.u = update(vs.u, at[...], 0.0)
+    tendency = np.asarray(momentum.tend_coriolisf(state).du_cor)
+    mask_v = np.asarray(vs.maskV)[..., -1]
+    # Rows where the four V points around the seam's U point are all wet, so
+    # the tendency is the plain average of f over the two T columns.
+    seam = -3
+    rows = [
+        j for j in range(3, coriolis.shape[1] - 3)
+        if mask_v[seam, j] and mask_v[seam + 1, j]
+        and mask_v[seam, j - 1] and mask_v[seam + 1, j - 1]
+        and np.asarray(vs.maskU)[seam, j, -1]
+    ]
+    assert rows, "the grid has no open-ocean row at the seam to test"
+    expected = 0.5 * (coriolis[seam, rows] + coriolis[seam + 1, rows])
+    np.testing.assert_allclose(tendency[seam, rows, -1], expected, rtol=1e-3)
+
+
+@pytest.mark.slow
 def test_echam_veros_earth_configuration_steps():
     """`+configuration=veros-earth physics@atmosphere.physics=echam` builds,
     initializes and steps twice, and every atmosphere and ocean field stays
