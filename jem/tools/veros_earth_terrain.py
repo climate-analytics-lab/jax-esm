@@ -35,12 +35,9 @@ grid. The file's ``lat`` labels therefore have to be the model's own
 latitudes -- anything else is a (small) smoothing in the rows whose label is
 off -- so the output is labelled with the true Gaussian latitudes
 (:func:`gaussian_latitudes`), in degrees computed as ``radians * 180 / pi``
-like every other coordinate in JEM. The packaged ``terrain_JCM_T31.nc`` labels
-its first and last rows ``-/+87.66`` where JCM's are ``-/+87.159``; its other
-rows are within 0.006 degrees of JCM's. The *values* of that file are on
-JCM's grid by index (its coastline agrees with the Veros land fraction
-rotated onto the same grid to within a few per cent), so this module takes the
-reference file's fields by index and replaces only its labels.
+like every other coordinate in JEM. The reference file's fields are taken by
+index -- they are on JCM's grid, whatever its own labels say -- and only the
+labels are written here.
 """
 
 from __future__ import annotations

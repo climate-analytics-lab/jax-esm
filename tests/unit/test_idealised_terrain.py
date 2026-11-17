@@ -82,22 +82,48 @@ def _jcm_t31_axes():
 def test_axes_are_jcms_own_grid_not_the_reference_files_labels(tmp_path):
     """The written ``lon``/``lat`` are the grid's, exactly, whatever the reference says.
 
-    The packaged ``terrain_JCM_T31.nc`` labels its first row -87.66, where
-    JCM's T31 grid has -87.159, and JCM interpolates a terrain file onto its
-    grid by coordinate, so the output must not inherit those labels.
+    JCM interpolates a terrain file onto its grid by coordinate, so a
+    reference file whose rows are mislabelled -- here its polar rows, by half
+    a degree -- must not pass its labels on to the output.
     """
     lon, lat = _jcm_t31_axes()
-    reference = xr.open_dataset(REFERENCE_FILE)
-    assert abs(float(reference["lat"][0]) - lat[0]) > 0.4  # the premise of the test
+    mislabelled = xr.open_dataset(REFERENCE_FILE).load()
+    wrong_lat = mislabelled["lat"].to_numpy().copy()
+    wrong_lat[0] -= 0.5
+    wrong_lat[-1] += 0.5
+    reference_file = tmp_path / "mislabelled_reference.nc"
+    mislabelled.assign_coords(lat=("lat", wrong_lat)).to_netcdf(reference_file)
     for planet_type in ("double_drake", "aquaplanet"):
         ds = xr.open_dataset(
-            idealised_terrain(REFERENCE_FILE, planet_type, tmp_path / f"{planet_type}.nc")
+            idealised_terrain(reference_file, planet_type, tmp_path / f"{planet_type}.nc")
         )
         np.testing.assert_array_equal(ds["lon"].to_numpy(), lon)
         np.testing.assert_array_equal(ds["lat"].to_numpy(), lat)
     packaged = xr.open_dataset(PACKAGED_DOUBLE_DRAKE_FILE)
     np.testing.assert_array_equal(packaged["lon"].to_numpy(), lon)
     np.testing.assert_array_equal(packaged["lat"].to_numpy(), lat)
+
+
+def test_the_packaged_earth_terrain_is_labelled_with_the_grids_own_axes():
+    """``terrain_JCM_T31.nc`` loads through jax-gcm as the values it holds.
+
+    jax-gcm interpolates a terrain file onto its grid by coordinate. With the
+    file's rows labelled by the grid's own latitudes that interpolation is the
+    identity; a polar row labelled half a degree off is instead blended with
+    its neighbour, which moved that row's orography by up to 297 m.
+    """
+    from dinosaur.spherical_harmonic import Grid
+    from jcm.terrain import get_terrain
+
+    lon, lat = _jcm_t31_axes()
+    packaged = xr.open_dataset(REFERENCE_FILE)
+    np.testing.assert_array_equal(packaged["lon"].to_numpy(), lon)
+    np.testing.assert_array_equal(packaged["lat"].to_numpy(), lat)
+
+    orography, _ = get_terrain(terrain_file=REFERENCE_FILE, grid=Grid.T31())
+    np.testing.assert_allclose(
+        np.asarray(orography), packaged["orog"].to_numpy(), atol=1e-2
+    )
 
 
 def test_grid_axes_match_the_packaged_scrip_grid():

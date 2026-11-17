@@ -133,8 +133,7 @@ def test_the_latitude_labels_are_jcms_own_gaussian_latitudes():
 
     `jcm.data.bc.interpolate` interpolates the file onto the model's latitudes
     even when the file is on that grid, so a label that is off by half a
-    degree (as the original file's first and last rows are) mixes a row with
-    its neighbour.
+    degree mixes a row with its neighbour.
     """
     from dinosaur.spherical_harmonic import Grid
 
@@ -142,8 +141,6 @@ def test_the_latitude_labels_are_jcms_own_gaussian_latitudes():
     packaged = xr.open_dataset(PACKAGED)["lat"].to_numpy()
     np.testing.assert_allclose(packaged, jcm_latitudes, rtol=0, atol=1e-10)
     np.testing.assert_allclose(packaged, gaussian_latitudes(48), rtol=0, atol=0)
-    original = xr.open_dataset(ORIGINAL)["lat"].to_numpy()
-    assert abs(original[0] - jcm_latitudes[0]) > 0.4
 
 
 def test_jcm_reads_the_packaged_file_without_resampling_it():
