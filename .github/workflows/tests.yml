@@ -204,19 +204,21 @@ jobs:
         pytest tests/examples -q
 
     - name: Run the slow unit tests
-      # Three invocations, not one, per #113: importing a Veros setup module
+      # Four invocations, not one, per #113: importing a Veros setup module
       # flips the process-global jax_enable_x64 flag on (Veros runs double
       # precision internally), which would silently contaminate whichever
       # other slow test shares that process afterward -- including the
       # netCDF-writing ones (test_driver.py, test_coupled.py,
-      # test_readme_quickstart.py, test_jcm_component.py). So the two Veros
-      # files run in their own process, isolated from each other too, and
-      # everything else runs together in a third.
+      # test_readme_quickstart.py, test_jcm_component.py). So each file that
+      # builds a Veros model at import or module scope runs in its own
+      # process, isolated from the others too, and everything else runs
+      # together in one more.
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
-        JAX_PLATFORMS=cpu pytest tests/unit -q -m slow -p no:cacheprovider --ignore=tests/unit/test_veros_component.py --ignore=tests/unit/test_veros_setups.py
+        JAX_PLATFORMS=cpu pytest tests/unit -q -m slow -p no:cacheprovider --ignore=tests/unit/test_veros_component.py --ignore=tests/unit/test_veros_setups.py --ignore=tests/unit/test_veros_earth_masks_veros.py
         JAX_PLATFORMS=cpu pytest tests/unit/test_veros_component.py -q -m slow -p no:cacheprovider
         JAX_PLATFORMS=cpu pytest tests/unit/test_veros_setups.py -q -p no:cacheprovider
+        JAX_PLATFORMS=cpu pytest tests/unit/test_veros_earth_masks_veros.py -q -p no:cacheprovider
 
   docs:
     runs-on: ubuntu-latest

@@ -161,23 +161,96 @@ takes the SST of the sea under it rather than a land cell's fill value, and
 it. A YAML `coupling.exchangers` table is taken as written: give its rows a
 `weight` to get the same.
 
-**Veros' mask is its own.** Veros decides its wet and dry columns from its
-own land–sea mask (land where the fraction is at least 0.5,
-`jem.components.veros.setups.earth`), and a wet column is wholly water,
-while the atmosphere's sea part is `1 - fmask` of its terrain. Where the two
-disagree, the weighted map hands a wet column the flux per unit of the
-atmosphere's sea area over all of the column, and the sea flux over a dry
-column reaches no water. For `veros-earth` (the packaged
-`terrain_JCM_T31.nc` against the rotated Gaussian ocean grid) that is
-0.375 sr of wet columns taking the sea flux over what the atmosphere counts
-as land (723 of 3018 wet columns have a mapped sea fraction below 0.99), and
-0.359 sr of the atmosphere's sea whose flux reaches no wet column (681 dry
-columns), against 8.98 sr of ocean: about 4 % each way, mostly cancelling in
-the global sum. Removing it means making the two masks agree -- deriving the
-atmosphere's land fraction from the ocean's wet mask, as CESM derives its
-surface fractions -- which is a change to the configuration's boundary data,
-not to the exchange. `veros-double-drake` uses one mask on one grid and is
-exact.
+**The two masks are one coastline, by construction.** Veros decides its wet
+and dry columns from its own land-sea mask (land where the ERA5 land fraction
+is at least 0.5, `jem.components.veros.setups.earth`), and a wet column is
+wholly water, while the atmosphere's sea part is `1 - fmask` of its terrain.
+Two independent files disagree: on the packaged `terrain_JCM_T31.nc` against
+the rotated Gaussian ocean grid, 0.375 sr of wet columns lay under what the
+atmosphere counted as land and took a sea flux it never exchanged (723 of 3018
+wet columns had a mapped sea fraction below 0.99), and 0.359 sr of the
+atmosphere's sea lay over dry columns (681 of them), against 8.98 sr of ocean:
+about 4 % each way. Worse, 110 of the 3404 sea-containing atmosphere cells
+(sea fraction 10-57 %, 15 of them tropical) had no wet column under the SST
+map at all, so `regrid_weighted` took the unweighted map of the ocean's SST,
+which over land holds Veros' fill value, and gave them 273.15 K for the whole
+run.
+
+`veros-earth` therefore makes the ocean's mask authoritative, the way CESM
+derives its surface fractions (`lfrac = 1 - ofrac`):
+`jem.tools.veros_earth_terrain.veros_earth_terrain` reads the wet mask the way
+the ocean does (same file, same threshold), maps it onto the T31 grid with the
+packaged *conservative* ocean-to-atmosphere weights (the ones `regrid=esmf`
+names `o2a_conserve`), and writes `lsm = 1 - ofrac` with the original file's
+orography. Each atmosphere cell's sea area is then exactly the wet Veros area
+under it (tested to round-off), and the file is packaged as
+`terrain_veros_earth_T31.nc`. Three consequences follow, and `VerosExchange`
+acts on them:
+
+- A cell with sea in it always overlaps a wet column, so the conservative map
+  covers it. The SST map is still bilinear (so it leaves no staircase), and a
+  bilinear stencil can miss a sliver of wet ocean (10 cells of 3324 on this
+  grid pair, none tropical): where the bilinear map reaches no wet column the
+  conservative, wet-weighted map takes over, so no sea cell is ever handed the
+  fill value (110 before, none after; `regrid_weighted` states what a cell
+  with no weight takes).
+- `VerosExchange.check_masks` raises if a cell has sea but no wet ocean
+  mapped under it, on the first coupled step (a host callback under a
+  `lax.cond` on `step == 0`, since the masks live in the carries and are
+  tracers inside the step), naming the count and the remedy: run the
+  atmosphere on a terrain file derived from the ocean's mask. A single-grid
+  exchange, with identity maps, has one shared mask and is exact:
+  `veros-double-drake` is unaffected.
+- jax-gcm reads a terrain file **by coordinate** (it interpolates the file
+  onto the model's Gaussian latitudes even when the file is on that grid), so
+  the new file's `lat` labels are JCM's own latitudes. The original
+  `terrain_JCM_T31.nc` labels its first and last rows -/+87.66 where JCM's are
+  -/+87.159 (a 0.5 degree error, so jax-gcm mixes 12 % of the neighbouring row
+  into each polar row: the orography of the southernmost row changes by up to
+  297 m, the northernmost by 56 m) and its other rows are off by up to 0.005
+  degrees; its values are on the T31 grid by index. Read through jax-gcm, the
+  new file's orography is unchanged to float32 round-off.
+
+What the agreement does not remove:
+
+- **jax-gcm rounds the land fraction.** `jcm.terrain.get_terrain` sets an
+  `lsm` within 0.1 of 0 or 1 to exactly 0 or 1. The atmosphere's sea area is
+  therefore the wet area to 0.1 per cell, not to round-off: 0.014 sr of
+  atmosphere sea is dropped (cells with under 10 % sea) and 0.015 sr added
+  (cells with over 90 %), against 8.98 sr of ocean, and they nearly cancel
+  (the sea areas differ by 1.6e-4 of the ocean's).
+- **The flux map conserves to about half a percent, not exactly.** The
+  fluxes are normalised by the sea fraction mapped onto each ocean column
+  (`R(s F) / R(s)`), which keeps a coastal column from being diluted by the
+  land beside it but cannot match the heat the atmosphere gave up column by
+  column: the flux handed to the dry columns beside the coast (5 % of the
+  total on day 1 of a `veros-earth` run) is nearly, not exactly, what the
+  normalisation adds back. The sea-tile heat the atmosphere gives up and the
+  heat the ocean receives differed over a 30-day run by -1.13 W m-2 of ocean
+  on average before (always the same sign, up to 1.8) and -0.16 W m-2 after
+  (alternating, at most 0.38; 0.27 in mean absolute value), against a mean
+  flux of 60-90 W m-2. An exactly conservative alternative exists now that the
+  masks agree: hand a wet column `wet * R(s F / ofrac)`, where `ofrac` is the
+  conservative map of the wet mask, which closes the heat budget to 2e-16 on a
+  day's real fluxes but dilutes columns beside the cells JCM rounds to land;
+  it is not what the exchange does.
+- **The atmosphere's land data describe the old coastline.** `veros-earth`
+  takes its albedo, snow, soil water and land temperature from jax-gcm's
+  `bc/t30/clim/forcing.nc`, defined for the original coast. 417 cells gain land
+  fraction (0.205 sr of new land, against 3.6 sr of land, so 5.7 %; a mean of
+  0.20 of a cell; 8 cells by more than 0.5), and 410 lose it (0.222 sr). The
+  new land takes the file's mixed coastal values, an albedo of 0.13 where its
+  nearest land neighbours have 0.21 and a soil water availability of 0.52
+  where they have 0.73: about 0.001 of global-mean albedo, or 0.5 W m-2 of
+  absorbed shortwave if all of it were wrong, for the whole new coast. Sea
+  ice, which the atmosphere reads from the same file, is 0.38 in the cells
+  that turn to sea poleward of 55 degrees where the nearest sea has 0.48. The
+  orography of a cell that turns from mostly land to mostly sea is kept (the
+  worst is 1341 m, Andes coast at 31.5 S, land fraction 0.58 to 0.21), so a
+  small area of sea sits under a raised surface. A matching forcing file, with
+  land fields extended into the new land from their nearest land neighbours
+  and sea ice into the new sea, would remove the first and the third; it is
+  not part of this change.
 
 **The freezing point is an energy-budget decision.** The slab sea ice
 diagnoses its fraction from the SST and has no energy budget, so it takes no

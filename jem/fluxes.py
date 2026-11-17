@@ -68,6 +68,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import xarray as xr
 
 from jem import constants
@@ -263,7 +264,13 @@ class VerosExchange:
         sea surface temperature coming back (mapped **bilinearly**, so it is
         not left with a conservative map's staircase -- see
         :mod:`jem.regrid` for the same reasoning applied to the declarative
-        table). Either role missing from ``regrid`` -- and ``regrid=None``
+        table), weighted by Veros' wet mask. ``"o2a_flux"`` (the
+        conservative ocean-to-atmosphere map) backs it up: a bilinear map
+        reads only the four nearest columns, so an atmosphere cell with a
+        sliver of wet ocean can have none of them wet, and the SST is then
+        taken from the conservative map, which covers every cell that
+        overlaps a wet column (see :meth:`check_masks`). Either of
+        ``"a2o_flux"``/``"o2a_state"`` missing from ``regrid`` -- and ``regrid=None``
         entirely -- falls back to the identity, which is exactly the
         single-grid double-drake configuration (``regrid=same_grid``
         composes to ``None``, which :func:`jem.runners.build_regridders`
@@ -282,6 +289,17 @@ class VerosExchange:
 
     Notes
     -----
+    **The two masks must agree.** The fluxes are weighted by the atmosphere's
+    sea part and the SST by Veros' wet mask, so each side takes only water
+    from the other; but a flux the atmosphere computed over sea that has no
+    wet column under it reaches no ocean, and an atmosphere cell the ocean
+    cannot reach would be given a land fill value as its SST. The two
+    coastlines therefore have to be one: the atmosphere's land fraction is
+    derived from the ocean's wet mask (``jem.tools.veros_earth_terrain``,
+    as ``+configuration=veros-earth`` does), and :meth:`check_masks` raises
+    on the first coupled step if a cell of the atmosphere has sea but no wet
+    ocean mapped under it.
+
     Every numeric tunable is a Python default on this constructor, never a
     YAML value -- a configuration names only ``_target_`` and, where needed,
     ``rotation_grid_file``; the CLI reaches the rest with, for example,
@@ -312,6 +330,11 @@ class VerosExchange:
         regrid = regrid or {}
         self._a2o_flux: Callable[[Any], Any] = regrid.get("a2o_flux", _identity)
         self._o2a_state: Callable[[Any], Any] = regrid.get("o2a_state", _identity)
+        # Conservative map used wherever the bilinear one reaches no wet
+        # column; absent, the bilinear map is also the one coverage is
+        # judged by.
+        self._o2a_cover: Callable[[Any], Any] = regrid.get(
+            "o2a_flux", self._o2a_state)
         self.rotation_grid_file = rotation_grid_file
         self._rotation_angles: tuple[jax.Array, jax.Array] | None = (
             None if rotation_grid_file is None
@@ -331,8 +354,9 @@ class VerosExchange:
             Every component's carry, as the coupler hands it over. Only
             ``"atm"`` and ``"ocn"`` are read or written.
         time : jem.base.component.CouplingTime
-            The coupler's clock. Unused -- this coupling does not depend on
-            the date -- but part of the :data:`jem.base.component.Exchanger`
+            The coupler's clock. Only ``time.step`` is read (to check the
+            masks once, on step 0); the coupling does not depend on the
+            date. Part of the :data:`jem.base.component.Exchanger`
             signature every exchanger takes.
 
         Returns
@@ -346,7 +370,8 @@ class VerosExchange:
             :meth:`jem.exchangers.Exchange.__call__` states).
 
         """
-        del time  # this coupling does not depend on the date
+        # The coupling does not depend on the date; only the step count is
+        # read, to run the mask check once, on a run's first step.
 
         atm = components["atm"]
         ocn = components["ocn"]
@@ -433,9 +458,16 @@ class VerosExchange:
         # Sea surface temperature: regrid back onto the atmosphere's grid.
         # Weighted by Veros' wet mask, so an atmosphere cell on the coast
         # takes the SST of the water under it, not the land columns' fill.
+        # An atmosphere cell that no wet column reaches takes the unweighted
+        # map of the SST field, which over land is Veros' fill value
+        # (273.15 K) (`jem.exchangers.regrid_weighted`); `_o2a_sea` makes
+        # that impossible for a cell with sea in it, and `check_masks` raises
+        # if the terrain's coastline is not the ocean's.
+        wet = ocn["derived"].sea_fraction
         sea_surface_temperature_on_atm = self._o2a_sea(
-            ocean_sea_surface_temperature, ocn["derived"].sea_fraction
+            ocean_sea_surface_temperature, wet
         )
+        self._guard_masks(time.step, sea_fraction, wet)
 
         ocn = dict(ocn, forcing=ocn["forcing"].replace(
             surface_taux=surface_taux.astype(ocean_forcing_dtypes["surface_taux"]),
@@ -509,12 +541,92 @@ class VerosExchange:
         """Map a field over Veros' wet columns onto the atmosphere's grid.
 
         Weighted by Veros' wet mask (``derived.sea_fraction``); on one grid
-        the field passes through unchanged.
+        the field passes through unchanged. Where the state map (bilinear)
+        reaches no wet column the conservative map stands in, weighted the
+        same way: it covers every atmosphere cell that overlaps wet ocean, so
+        a cell with sea in it never takes the unweighted field over land.
         """
         if self._o2a_state is _identity:
             return field
         mapped: jax.Array = regrid_weighted(self._o2a_state, field, wet)
-        return mapped
+        if self._o2a_cover is self._o2a_state:
+            return mapped
+        covered_by_state = self._o2a_state(wet) > 0.0
+        backup: jax.Array = regrid_weighted(self._o2a_cover, field, wet)
+        return jnp.where(covered_by_state, mapped, backup)
+
+    def _guard_masks(
+        self, step: jax.Array, sea_fraction: jax.Array, wet: jax.Array
+    ) -> None:
+        """Run :meth:`check_masks` on a run's first coupling step.
+
+        The masks live in the carries, so inside a traced step they are not
+        values the exchanger can read at construction; a host callback
+        receives them concretely instead. It sits under a ``lax.cond`` on
+        ``step == 0`` so that it costs one device-to-host copy per run, not
+        one per step, and it only reads: nothing flows back into the step,
+        so it changes neither the carry nor a gradient. A failing check
+        surfaces as the error ``jax`` raises for a failed callback, whose
+        message is :meth:`check_masks`'s. On one grid the maps are identity
+        and the masks are one array: nothing to check.
+        """
+        if self._o2a_state is _identity:
+            return
+        reached = self._o2a_cover(wet)
+        jax.lax.cond(
+            jnp.asarray(step) == 0,
+            lambda: jax.debug.callback(self.check_masks, sea_fraction, reached),
+            lambda: None,
+        )
+
+    @staticmethod
+    def check_masks(sea_fraction: Any, reached: Any) -> None:
+        """Raise if an atmosphere cell has sea that no wet ocean column reaches.
+
+        Parameters
+        ----------
+        sea_fraction : array-like
+            The atmosphere's sea fraction per cell (``1 - fmask`` of its
+            terrain), on the atmosphere's grid.
+        reached : array-like
+            Veros' wet mask mapped onto the atmosphere's grid: positive
+            where some wet column overlaps (or, for a bilinear map, is
+            sampled by) the cell.
+
+        Raises
+        ------
+        ValueError
+            If any cell has ``sea_fraction > 0`` and ``reached <= 0``. Such a
+            cell is a disagreement between the atmosphere's coastline and the
+            ocean's: its sea flux reaches no water and it would take a land
+            fill value as its SST. The message gives the count and the
+            remedy.
+
+        Notes
+        -----
+        Only this direction is checked because it is the one a mismatch can
+        leave unserved: a wet ocean column always overlaps some atmosphere
+        cell with sea in it once the atmosphere's sea is the wet area under
+        it, and a column whose overlapping cells carry little sea still takes
+        their normalised flux (:func:`jem.exchangers.regrid_weighted`).
+
+        """
+        sea = np.asarray(sea_fraction)
+        unreached = (sea > 0.0) & (np.asarray(reached) <= 0.0)
+        count = int(unreached.sum())
+        if count:
+            raise ValueError(
+                f"{count} atmosphere cell(s) have sea (sea fraction "
+                f"{float(sea[unreached].min()):.2f} to "
+                f"{float(sea[unreached].max()):.2f}) but no wet ocean column "
+                "mapped under them, so their sea flux reaches no ocean and "
+                "their sea surface temperature has no water to come from: "
+                "the atmosphere's land-sea mask and the ocean's wet mask "
+                "disagree. Run the atmosphere on a terrain file derived from "
+                "the ocean's mask "
+                "(jem.tools.veros_earth_terrain.veros_earth_terrain; "
+                "+configuration=veros-earth does)."
+            )
 
     def __repr__(self) -> str:
         """Name the regridders this exchange holds and whether it rotates."""

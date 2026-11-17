@@ -556,9 +556,20 @@ def regrid_weighted(
         R(weight * value) / R(weight)
 
     weighs each source cell by the area of its sea part instead. On one grid
-    it is ``value`` wherever ``weight > 0``. A destination cell that overlaps
-    no sea at all on the source grid (``R(weight) == 0``) takes ``R(value)``,
-    the only estimate there is.
+    it is ``value`` wherever ``weight > 0``.
+
+    A destination cell with no weight under it (``R(weight) == 0``) takes
+    ``R(value)``: the *unweighted* map of the field, which includes whatever
+    the field holds where the weight is zero. For the Veros ocean's SST that
+    is the fill value over land (273.15 K), a number that is no temperature
+    of any water, so a caller whose destination cells can lack weight must
+    either make that impossible or not use the value there.
+    :class:`jem.fluxes.VerosExchange` makes it impossible for an atmosphere
+    cell with sea in it (its terrain's land fraction is derived from the
+    ocean's wet mask, a conservative map covers every cell the wet mask
+    overlaps, and it raises if a cell is left without), so the fallback
+    reaches only cells that have no sea and whose SST the atmosphere never
+    reads.
 
     Parameters
     ----------

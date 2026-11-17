@@ -33,11 +33,23 @@
 #    temperature) is a Python default on that factory, not repeated here.
 #  - regrid=esmf with the four packaged weight files for that grid pair --
 #    conservative for fluxes, bilinear for states.
-#  - atmosphere.terrain.file is the packaged, ERA5-derived
-#    `terrain_JCM_T31.nc`. It stays on JCM's own **unrotated** grid: JCM
-#    computes its Coriolis parameter from its own latitudes (no override
-#    hook), so the atmosphere's terrain must be geographically consistent
-#    with *that* latitude, not the ocean's rotated one.
+#  - atmosphere.terrain.file is the packaged `terrain_veros_earth_T31.nc`:
+#    the ERA5-derived orography of `terrain_JCM_T31.nc` with a land fraction
+#    derived from the OCEAN's wet mask (lsm = 1 - the wet mask conservatively
+#    mapped onto the T31 grid, `jem.tools.veros_earth_terrain`). Two
+#    independent coastlines disagree on about 4 % of the ocean area each way:
+#    ocean columns would take sea fluxes over what the atmosphere counts as
+#    land, atmosphere sea would send its flux to dry columns, and 110
+#    coastal atmosphere cells would have no wet column near them and be
+#    handed Veros' land fill value as their SST (jax-esm#162). With one
+#    coastline, each atmosphere cell's sea area is exactly the wet area
+#    under it, and `VerosExchange` raises if that ever fails to hold. It
+#    stays on JCM's own **unrotated** grid: JCM computes its Coriolis
+#    parameter from its own latitudes (no override hook), so the
+#    atmosphere's terrain must be geographically consistent with *that*
+#    latitude, not the ocean's rotated one. (The forcing file below still
+#    describes the original coastline's land surface; the size of that is
+#    given in docs/source/design/exchange.md.)
 #  - atmosphere.forcing is jax-gcm's packaged T30 climatology, the same file
 #    `+configuration=earth-slab` uses, because this is an Earth
 #    configuration and the atmosphere needs Earth's land surface: bare-land
@@ -102,7 +114,7 @@ defaults:
 
 atmosphere:
   terrain:
-    file: ${jem_data:terrain_JCM_T31.nc}
+    file: ${jem_data:terrain_veros_earth_T31.nc}
   forcing:
     file: ${jcm_data:bc/t30/clim/forcing.nc}
   run:

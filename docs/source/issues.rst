@@ -31,16 +31,19 @@ Veros ocean
     (Levitus bathymetry and initial state) is the setup to use when the
     ocean's realism matters.
 
-**Coastal cells where the two masks disagree.**
-    Veros decides its wet columns from its own land-sea mask, the atmosphere
-    from the land fraction of its terrain. Where they disagree, a wet column
-    takes the atmosphere's flux per unit of the atmosphere's sea area over all
-    of the column, and the sea flux over a dry column reaches no water
-    (jax-esm#162; :doc:`design/exchange` gives the measured size for
-    ``veros-earth``, about 4 % of the ocean area each way, mostly cancelling
-    in the global sum). Consequence: coastal fluxes in ``veros-earth`` are
-    wrong by a few percent of the ocean area even though the globe is nearly
-    conserved. ``veros-double-drake`` uses one mask on one grid and is exact.
+**``veros-earth``'s land data describe the original coastline.**
+    The atmosphere's land fraction is derived from the ocean's wet mask
+    (``terrain_veros_earth_T31.nc``; :doc:`design/exchange`), so the two
+    components agree on where the sea is, but the albedo, snow, soil water and
+    land temperature it reads from jax-gcm's ``bc/t30/clim/forcing.nc`` are
+    for the old coast. About 0.2 sr of the atmosphere's cells gain land
+    fraction where that file holds mixed or ocean-like values, and the
+    orography of cells that turn to sea is kept. Consequence: a small, coastal
+    error in the land surface (about 0.5 W m-2 of absorbed shortwave in the
+    global mean if all of it were wrong, 1.6 % of the sphere's area); the
+    mismatch between the heat the atmosphere gives up and the ocean receives
+    is about 0.3 W m-2 of ocean, not zero. ``veros-double-drake`` uses one mask
+    on one grid and is exact.
 
 **A Veros run is double precision for the whole process.**
     Importing Veros sets ``jax_enable_x64`` process-wide, so the atmosphere

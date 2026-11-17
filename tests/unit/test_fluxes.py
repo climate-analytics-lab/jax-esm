@@ -305,8 +305,9 @@ def test_veros_exchange_uses_the_regridders_it_was_given():
         assert any(call is field for call in a2o_calls)
     assert any(call is derived.sea_fraction for call in a2o_calls)
     # The sea surface temperature crosses o2a weighted by Veros' wet mask:
-    # R(wet), R(wet * SST) and the fallback R(SST).
-    assert len(o2a_calls) == 3
+    # R(wet), R(wet * SST) and the fallback R(SST); the first-step mask check
+    # maps the wet mask once more, R(wet).
+    assert len(o2a_calls) == 4
     assert any(call is components["ocn"]["derived"].sea_surface_temperature
                for call in o2a_calls)
 
