@@ -8,8 +8,9 @@ Install JEM
 
 .. code-block:: bash
 
-    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install it from source FIRST,
-    # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
+    # JAX-ESM needs a newer JAX-GCM (jcm) than the 3.0.0 on PyPI: install it
+    # from source FIRST, at the revision JAX-ESM is tested against
+    # (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
     git checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97
@@ -90,9 +91,10 @@ package spelled out.
    * - Compose a whole jax-gcm bundle as the atmosphere
      - ``+configuration@atmosphere=speedy-t31``
    * - Change one atmosphere group
-     - ``physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8``
+     - ``diffusion@atmosphere.diffusion=strong``
    * - Set one atmosphere key
-     - ``atmosphere.run.time_step=7``
+     - ``atmosphere.run.time_step=15`` (minutes; it has to divide the
+       coupling timestep)
    * - Start the atmosphere from ERA5 (or ``jw``, ``from_state``, ...)
      - ``init@atmosphere.init=era5 atmosphere.run.start_time=2022-12-24``
    * - Choose a surface component
@@ -116,10 +118,15 @@ package spelled out.
 Several things worth knowing:
 
 - **Spell the** ``@atmosphere``. ``+configuration=speedy-t31`` without it
-  composes that jax-gcm bundle at the *root*, where its ``physics``,
-  ``terrain`` and ``run`` keys are nobody's and nothing reads them. The
+  asks for that jax-gcm bundle at the *root*, where there is no ``physics``
+  group for it to override, and Hydra refuses it (``Could not override
+  'physics'. Did you mean to override physics@atmosphere.physics?``). The
   atmosphere's groups always carry their package:
   ``<group>@atmosphere.<group>=<option>``.
+- **The atmosphere has to have a surface.** A physics package is coupled
+  through the surface fluxes it publishes: SPEEDY, the default, and ECHAM do,
+  while ``physics@atmosphere.physics=held_suarez`` resolves none and is
+  refused when the model is built.
 - **The coupled run's own settings are** ``coupled_run``, **not** ``run``.
   ``atmosphere.run`` is the atmosphere's own run config, and a ``run`` group
   here would shadow jax-gcm's -- Hydra resolves a group option from the first

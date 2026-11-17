@@ -24,9 +24,11 @@ drift apart.
 Why a ``dev`` revision rather than a release
 --------------------------------------------
 ``JCM_SUPPORTED_REV`` is ``9764c56b36cd71b55c644aeb93cb787eb8c4db97``. A sha is
-the most precise thing there is to name; ``pyproject.toml``'s
-``jcm>=3.0.0rc1`` floor is the loosest true statement of the same fact,
-since jax-gcm's version string is bumped only at release. The policy,
+the most precise thing there is to name; ``pyproject.toml``'s ``jcm`` floor,
+:data:`JCM_SUPPORTED_VERSION`, is the loosest true statement of the same
+fact, since jax-gcm's version string is bumped only at release. It is still
+load-bearing: it is what stops ``pip`` resolving to an older jcm release on
+PyPI that this package cannot import against. The policy,
 stated once here: pin to a ``dev`` commit that
 has actually been validated as a whole against this repository's own gates
 -- not to the merge commit of one motivating pull request, and not to
@@ -72,8 +74,12 @@ How to bump the pin
 1. Change ``JCM_SUPPORTED_REV`` (and ``JCM_SUPPORTED_VERSION``, if jax-gcm's
    version string moved) here, and update the "why" paragraph above to say what
    the new revision brings.
-2. Change ``JCM_REV`` in ``.github/workflows/tests.yml`` to the same sha --
-   ``test_workflow_pins_the_supported_revision`` fails if the two disagree.
+2. Change ``JCM_REV`` in ``.github/workflows/tests.yml`` and in the
+   ``Dockerfile`` to the same sha, the sha in the install instructions
+   (``README.md``, ``docs/source/getting_started.rst``,
+   ``docs/source/developers.rst``), and the ``jcm`` floor in
+   ``pyproject.toml`` if the version moved -- ``test_jcm_contract.py`` fails
+   on each one that disagrees.
 3. Run ``pytest tests/unit/test_jcm_contract.py``; any integration point the
    new revision renamed or removed fails there, with the name, before it can
    fail inside a run. Fix the adapter and update the entry in the same change.

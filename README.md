@@ -6,7 +6,7 @@ A fully differentiable Earth-system coupler in JAX.
 [![Docs](https://img.shields.io/badge/docs-source-blue)](docs/source/index.rst)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
-![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
+![Status: Beta](https://img.shields.io/badge/status-beta-yellow)
 
 JAX-ESM (`jem`) does not implement a climate model of its own: it couples
 independently-developed components — the JCM spectral atmosphere from
@@ -36,8 +36,9 @@ model to write ([example](examples/01_basic/03_aquaplanet_response_to_SST_pertur
 ## Installation
 
 JAX-ESM is developed and tested against **one** jax-gcm revision, recorded in
-[`jem/components/jcm/contract.py`](jem/components/jcm/contract.py). jax-gcm
-`>=3.0` is not yet on PyPI, so install it from source first:
+[`jem/components/jcm/contract.py`](jem/components/jcm/contract.py). That
+revision is ahead of the newest jax-gcm release on PyPI (`jcm` 3.0.0, which
+JAX-ESM cannot run against), so install jax-gcm from source first:
 
 ```bash
 git clone https://github.com/climate-analytics-lab/jax-gcm

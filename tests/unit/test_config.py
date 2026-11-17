@@ -587,3 +587,10 @@ def test_installed_wheel_has_config(tmp_path):
     names = set(zipfile.ZipFile(wheels[0]).namelist())
     assert "jem/config/config.yaml" in names
     assert "jem/config/configuration/earth-slab.yaml" in names
+    # The MITgcm notice travels with the Winton port it covers: beside the
+    # code, where the module's docstring points, and with the licence files.
+    notice = "jem/components/slab/winton_seaice_model/NOTICE"
+    assert notice in names
+    assert any(
+        name.endswith(f".dist-info/licenses/{notice}") for name in names
+    ), sorted(name for name in names if ".dist-info/" in name)

@@ -25,8 +25,8 @@ The atmosphere is configured by jax-gcm's own groups, re-rooted under
 ``atmosphere`` (so the group's package is spelled out), and everything else by
 JAX-ESM's own::
 
-    python -m jem.main physics@atmosphere.physics=held_suarez \
-        grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15 \
+    python -m jem.main diffusion@atmosphere.diffusion=strong \
+        atmosphere.run.time_step=15 \
         ocean=slab_relax \
         ocean.sst_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'
 

@@ -87,9 +87,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: climate-analytics-lab/jax-gcm
-        # `jcm>=3.0.0rc1` is not on PyPI, so this checkout is the only thing
-        # that satisfies it; pinned, see the JCM_REV comment at the top of
-        # this workflow.
+        # The supported revision is ahead of the newest jcm on PyPI, so this
+        # checkout is the only thing that satisfies jax-esm's `jcm` floor;
+        # pinned, see the JCM_REV comment at the top of this workflow.
         ref: ${{ env.JCM_REV }}
         path: jax-gcm
 
@@ -107,7 +107,7 @@ jobs:
 
     - name: Install dependencies
       # jax-gcm goes in FIRST: installing it editable registers `jcm 3.1.0`
-      # with pip, so the `jcm>=3.0.0rc1` requirement of jax-esm resolves against
+      # with pip, so the `jcm>=3.1.0` requirement of jax-esm resolves against
       # the checkout instead of failing to find it on PyPI.
       run: |
         python -m pip install --upgrade pip
@@ -288,7 +288,7 @@ jobs:
         python-version: "3.11"
 
     - name: Install dependencies
-      # Same ordering as the test job: jax-gcm first so that `jcm>=3.0.0rc1`
+      # Same ordering as the test job: jax-gcm first so that `jcm>=3.1.0`
       # resolves against the checkout instead of failing to find it on PyPI.
       run: |
         python -m pip install --upgrade pip

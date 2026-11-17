@@ -15,6 +15,7 @@ branch to the runner.
 import dataclasses
 import inspect
 import logging
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -186,6 +187,65 @@ def test_build_coupler_default():
     assert coupler.components["ocn"].grid.shape == (
         len(horizontal.nodal_axes[0]), len(horizontal.nodal_axes[1])
     )
+
+
+# The atmosphere overrides `python -m jem.main --help`, `jem/config/config.yaml`,
+# `jem/main.py` and docs/source/getting_started.rst show a reader. Kept here so
+# that the commands the documentation teaches are *built*, not just composed:
+# an override can compose cleanly and still name a model that cannot be
+# coupled, which is only found by building it.
+DOCUMENTED_ATMOSPHERE_OVERRIDES = [
+    ["diffusion@atmosphere.diffusion=strong", "atmosphere.run.time_step=15"],
+    ["atmosphere.run.time_step=15"],
+]
+
+
+@pytest.mark.parametrize(
+    "overrides", DOCUMENTED_ATMOSPHERE_OVERRIDES, ids=lambda o: " ".join(o)
+)
+def test_the_documented_atmosphere_overrides_build(overrides):
+    """Every atmosphere override the documentation shows builds a coupled model."""
+    coupler = runners.build_coupler(composed(overrides))
+
+    assert coupler.components["atm"].model.dt_si.m == 15 * 60
+    root = Path(runners.__file__).parent
+    spelling = " ".join(overrides)
+    documented = "".join(
+        " ".join(path.read_text().replace("\\\n", " ").split())
+        for path in (
+            root / "config" / "config.yaml",
+            root / "config" / "hydra" / "help" / "custom_help.yaml",
+            root / "main.py",
+            root.parent / "docs" / "source" / "getting_started.rst",
+        )
+    )
+    for override in overrides:
+        assert override in documented, (
+            f"{override!r} is tested as a documented example ({spelling}) but"
+            " no longer appears in the help text or the docs; keep"
+            " DOCUMENTED_ATMOSPHERE_OVERRIDES in step with them."
+        )
+
+
+def test_an_atmosphere_without_a_surface_is_refused():
+    """A physics package that publishes no surface fluxes cannot be coupled.
+
+    Held-Suarez forcing resolves no surface at all, so there is nothing for
+    an ocean to be driven with; the build says so rather than coupling a
+    model whose exchange is all zeros.
+    """
+    cfg = composed([
+        "physics@atmosphere.physics=held_suarez",
+        "grid@atmosphere.grid=held_suarez_t31_l8",
+    ])
+    with pytest.raises(ValueError, match="surface_exchange"):
+        runners.build_coupler(cfg)
+
+
+def test_an_atmosphere_timestep_that_does_not_divide_the_coupling_step_is_refused():
+    """Seven-minute steps do not fit a whole number of times into a day."""
+    with pytest.raises(ValueError, match="not a whole multiple"):
+        runners.build_coupler(composed(["atmosphere.run.time_step=7"]))
 
 
 def test_cli_and_python_construction_agree():

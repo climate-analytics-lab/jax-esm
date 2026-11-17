@@ -7,8 +7,11 @@ breaks nothing until a user follows the documentation.
 """
 
 import importlib
+import re
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -138,3 +141,36 @@ def test_importing_jem_does_not_import_configurations():
         " sorted(m for m in sys.modules if m.startswith('jem'))"
     )
     subprocess.run([sys.executable, "-c", source], check=True)
+
+
+def test_the_declared_status_follows_the_version():
+    """The classifier, the README badge and the docs agree with ``__version__``.
+
+    The version is the one place the project's maturity is decided -- an
+    ``a``/``b``/``rc`` segment, or none -- and three other places repeat it in
+    words. A release that bumps the version and leaves one of them behind
+    publishes a 1.0 that calls itself alpha, which is what this guards.
+    """
+    stage = re.fullmatch(r"\d+(?:\.\d+)*(?:(a|b|rc)\d+)?", jem.__version__)
+    assert stage is not None, f"unrecognised version {jem.__version__!r}"
+    word, classifier = {
+        "a": ("alpha", "3 - Alpha"),
+        "b": ("beta", "4 - Beta"),
+        "rc": ("beta", "4 - Beta"),
+        None: ("stable", "5 - Production/Stable"),
+    }[stage.group(1)]
+
+    root = Path(jem.__file__).resolve().parents[1]
+    classifiers = tomllib.loads((root / "pyproject.toml").read_text())["project"][
+        "classifiers"
+    ]
+    statuses = [c for c in classifiers if c.startswith("Development Status ::")]
+    assert statuses == [f"Development Status :: {classifier}"]
+
+    badge = re.search(r"!\[Status: (\w+)\]", (root / "README.md").read_text())
+    assert badge is not None and badge.group(1).lower() == word
+
+    front_page = (root / "docs" / "source" / "index.rst").read_text()
+    others = {"alpha", "beta", "stable"} - {word}
+    assert f"JEM is {word} software" in front_page
+    assert not any(f"JEM is {other} software" in front_page for other in others)

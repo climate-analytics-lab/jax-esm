@@ -20,9 +20,11 @@ puts `pkg://jcm.config` on Hydra's search path and composes jcm's groups at
 `jcm.runners.build_model` expects and jcm's group and option names are
 unchanged. The price is that the group's package has to be spelled out in an
 override — `physics@atmosphere.physics=echam`,
-`+configuration@atmosphere=speedy-t31` — and that spelling it wrong is quiet:
-`+configuration=speedy-t31` composes that bundle at the *root*, where its
-`physics`, `terrain` and `run` keys are nobody's and nothing reads them.
+`+configuration@atmosphere=speedy-t31`. Leaving it out is at least loud:
+`+configuration=speedy-t31` asks for that bundle at the *root*, where there
+is no `physics` group for it to override, and Hydra refuses it with "Could
+not override 'physics'. Did you mean to override
+physics@atmosphere.physics?".
 JAX-ESM's own groups (`ocean`, `land`, `seaice`, `coupling`, `regrid`,
 `coupled_run`) sit at the top level, and `configuration` composes a named
 coupled model out of all of them.

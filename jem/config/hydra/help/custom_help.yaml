@@ -48,18 +48,24 @@ template: |
     Group and option names are JAX-GCM's; the package is spelled out in the
     override, and single keys are addressed under ``atmosphere.``:
 
-      python -m jem.main physics@atmosphere.physics=held_suarez \
-          grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15
+      python -m jem.main diffusion@atmosphere.diffusion=strong \
+          atmosphere.run.time_step=15
+
+    The physics package has to publish surface fluxes to be coupled (SPEEDY,
+    the default, and ECHAM do; ``held_suarez`` resolves none and is refused
+    when the model is built), and the atmosphere's timestep, in minutes, has
+    to divide the coupling timestep.
 
     A whole JAX-GCM configuration bundle composes under the atmosphere with
     the group's package, and command-line overrides still apply on top:
 
       python -m jem.main +configuration@atmosphere=speedy-t31 \
-          atmosphere.run.time_step=7
+          atmosphere.run.time_step=15
 
     Spell the ``@atmosphere`` part: ``+configuration=speedy-t31`` without it
-    would compose that bundle at the *root*, where its `physics`, `terrain`
-    and `run` keys are not the atmosphere's and nothing would read them.
+    asks for that bundle at the *root*, where there is no `physics` group
+    for it to override, and Hydra refuses it ("Could not override 'physics'.
+    Did you mean to override physics@atmosphere.physics?").
 
   Files shipped with the packages can be named without a machine-specific
   path -- in single quotes, so that the shell leaves the ``$\${...}`` for

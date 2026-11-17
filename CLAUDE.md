@@ -126,7 +126,7 @@ ocean GCM — into one JIT-compilable, end-to-end differentiable simulation loop
 - **Package name:** `jem`
 - **Python:** >= 3.11 (strict requirement; `X | Y` annotations)
 - **License:** MIT
-- **Status:** Alpha
+- **Status:** Beta (a pre-release of 1.0)
 
 The design in three sentences:
 

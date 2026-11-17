@@ -194,6 +194,47 @@ def test_workflow_pins_the_supported_revision():
     )
 
 
+def test_the_dockerfile_installs_the_supported_revision():
+    """Check the image is built against the revision the contract supports.
+
+    The Dockerfile clones jax-gcm at a sha of its own, and an image built at
+    another one installs cleanly -- the version floor is satisfied -- and then
+    fails on `import jem.components`, which is the image's entry point.
+    """
+    dockerfile = WORKFLOW.parents[2] / "Dockerfile"
+    match = re.search(r"^ARG JCM_REV=(\S+)\s*$", dockerfile.read_text(), re.MULTILINE)
+    assert match is not None, f"No `ARG JCM_REV=` in {dockerfile}"
+    assert match.group(1) == JCM_SUPPORTED_REV, (
+        f"{dockerfile.name} builds against jax-gcm {match.group(1)} but"
+        " jem/components/jcm/contract.py says JAX-ESM is supported against"
+        f" {JCM_SUPPORTED_REV}. Bump it with the pin."
+    )
+
+
+def test_the_jcm_floor_is_the_supported_version():
+    """Check `pip` cannot resolve `jcm` to a release older than the contract's.
+
+    The requirement's floor is what `pip install jax-esm` resolves against.
+    One lower than the version jax-gcm reports at the supported revision
+    admits older releases from PyPI, and those install without complaint and
+    then fail on import: jcm 3.0.0 lacks names the adapter imports at module
+    scope.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads((WORKFLOW.parents[2] / "pyproject.toml").read_text())
+    requirements = [
+        requirement
+        for requirement in pyproject["project"]["dependencies"]
+        if re.match(r"jcm\b", requirement)
+    ]
+    assert requirements == [f"jcm>={JCM_SUPPORTED_VERSION}"], (
+        f"pyproject.toml requires {requirements}, but the supported jax-gcm"
+        f" revision reports {JCM_SUPPORTED_VERSION}: the floor must be that"
+        " version, so that no older jcm release satisfies it."
+    )
+
+
 @pytest.mark.parametrize(
     "doc",
     ["README.md", "docs/source/getting_started.rst", "docs/source/developers.rst"],

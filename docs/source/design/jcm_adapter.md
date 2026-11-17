@@ -26,15 +26,18 @@ so the pin and the workflow cannot drift apart. A non-blocking
 `canary-jcm-dev` job separately tracks jax-gcm's `dev` branch, so drift stays
 visible without blocking a pull request.
 
-The pin is a `dev` commit rather than a release (jax-gcm has no tagged 3.x
-yet), chosen and bumped by the policy in `contract.py`'s own module
-docstring: pin to a `dev` commit validated as a whole against this
-repository's gates, never to the merge commit of one motivating pull request
-or to whatever `dev` happens to be at bump time. The current pin is needed
-for the package-independent surface-exchange contract's near-surface wind
-vector (`wind_u`/`wind_v`, jax-gcm#911/#914), which is what lets JAX-ESM read
-the wind the same way for every physics package (see *The JCM adapter*
-below).
+The pin is a `dev` commit rather than a release -- the newest release,
+3.0.0, predates what the adapter needs, which is why `pyproject.toml`'s `jcm`
+floor is the 3.1.0 the pinned revision reports -- chosen and bumped by the
+policy in `contract.py`'s own module docstring: pin to a `dev` commit
+validated as a whole against this repository's gates, never to whatever `dev`
+happens to be at bump time. The current pin is needed for SPEEDY's land and
+sea flux tiles and a coupled sea ice's forcing on `SurfaceExchange`
+(jax-gcm#1213, with SPEEDY's own slab land, jax-gcm#1199, and
+`ForcingData.sea_ice_temperature`, jax-gcm#1205), on top of the
+package-independent near-surface wind vector (`wind_u`/`wind_v`,
+jax-gcm#911/#914) that lets JAX-ESM read the wind the same way for every
+physics package (see *The JCM adapter* below).
 
 **One consequence a coupled configuration has to set explicitly.**
 `jcm.forcing.resolve_align`'s `auto` resolves a boundary condition's

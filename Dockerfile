@@ -50,12 +50,14 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install jax-gcm at JCM_SUPPORTED_REV (jem/components/jcm/contract.py) first,
-# since `jcm>=3.0.0rc1` is not published on PyPI. Keeping this before `COPY .`
-# caches jax-gcm's dependencies across local edits; when `launch.py
-# --jcm-source` stages a local checkout at `_deps/jax-gcm`, the step after
-# `COPY . /app` replaces `/opt/jax-gcm` with it.
-ARG JCM_REV=f378069090b127badbb158b06e2767f3be8f436c
+# Install jax-gcm at JCM_SUPPORTED_REV (jem/components/jcm/contract.py) first:
+# that revision is ahead of the newest jcm on PyPI, which JEM cannot import
+# against, so the source checkout is what satisfies JEM's `jcm` requirement.
+# `tests/unit/test_jcm_contract.py` keeps this sha equal to the contract's.
+# Keeping this before `COPY .` caches jax-gcm's dependencies across local
+# edits; a jax-gcm checkout placed at `_deps/jax-gcm` in the build context
+# replaces `/opt/jax-gcm` in the step after `COPY . /app`.
+ARG JCM_REV=9764c56b36cd71b55c644aeb93cb787eb8c4db97
 RUN git clone https://github.com/climate-analytics-lab/jax-gcm.git /opt/jax-gcm \
     && (git -C /opt/jax-gcm checkout "origin/${JCM_REV}" 2>/dev/null \
         || git -C /opt/jax-gcm checkout "${JCM_REV}") \

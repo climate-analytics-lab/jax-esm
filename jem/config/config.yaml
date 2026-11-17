@@ -6,8 +6,11 @@
 # anything that works in `python -m jcm.main` works here with the group's
 # package spelled out:
 #
-#   python -m jem.main physics@atmosphere.physics=held_suarez \
-#       grid@atmosphere.grid=held_suarez_t31_l8 atmosphere.run.time_step=15
+#   python -m jem.main diffusion@atmosphere.diffusion=strong \
+#       atmosphere.run.time_step=15
+#
+# (the physics package has to publish surface fluxes to be coupled: one with
+# no surface, like `held_suarez`, is refused when the model is built)
 #
 # and a whole jax-gcm configuration bundle composes under the atmosphere with
 #
