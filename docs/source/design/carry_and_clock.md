@@ -238,10 +238,11 @@ from the clock (`time.time - start_date` for a wrapped model's drift check,
   `time` by hand, because `year_fraction` is derived from `time`.
 
 `coupling_timestep` itself is a `jdt.Timedelta`, which holds whole seconds —
-the shortest step expressible today is one second, which is no limit for a
-geoscience configuration but does force a non-geoscience component onto a
-coarser step than it might otherwise want (jax-esm#110 tracks lifting it to
-accept a float number of seconds).
+the shortest step is one second, which is no limit for a geoscience
+configuration but does make a non-geoscience component rescale its units to
+fit (the spring example does). Accepting a float number of seconds was
+considered and not taken up (jax-esm#110): the one clock every component
+shares is a `jax_datetime` one.
 
 ## Reusing a state under another start date
 
