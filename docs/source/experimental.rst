@@ -79,20 +79,57 @@ mind:
   ``jem.tools.ocean_bathymetry.ocean_bathymetry`` from another source.
   ``veros-double-drake`` has the same flat 5200 m bottom in every ocean
   column.
-* **A uniform initial state.** Salinity is 35 and the sea surface temperature
-  is 288.03 K in every ocean column, poles included. Temperature falls
-  linearly with depth to zero at 4510 m, the top of the deepest layer, so the
-  deepest layer starts at -1.15 degC. The meridional structure comes from the
-  atmosphere's fluxes during the run.
+* **An observed mean state in** ``veros-earth``, **a uniform one in**
+  ``veros-double-drake``. ``veros-earth`` starts from the World Ocean Atlas
+  2018 annual-mean temperature and salinity (NOAA National Centers for
+  Environmental Information; Boyer et al., 2018, https://www.ncei.noaa.gov/archive/accession/NCEI-WOA18;
+  Locarnini et al., 2019, NOAA Atlas NESDIS 81, https://doi.org/10.25923/e5rn-9711
+  and Zweng et al., 2019, NOAA Atlas NESDIS 82, https://doi.org/10.25923/9pgv-1224;
+  the data are "openly available to the public" with a request to
+  acknowledge them, and the packaged file carries that citation and the
+  disclaimer), in
+  ``jem/data/ocean_initial_state_RotatedGaussianLatLon.nc``. WOA holds
+  in-situ temperature and practical salinity; Veros' ``temp`` and ``salt``
+  are Conservative Temperature and Absolute Salinity, so the tool converts
+  every WOA point (UNESCO 1983 potential temperature, TEOS-10 Conservative
+  Temperature, Reference-Composition Salinity; the salinity anomaly
+  ``delta SA`` is taken as zero) before averaging onto the grid's cells, and
+  each model layer takes the mean of the profile over its thickness. The
+  annual mean is used because the monthly fields stop at 1500 m and a run can
+  start in any month. The surface therefore starts at about 29 degC in the
+  warm pool and at the freezing point near the poles, with the observed
+  salinity contrasts, and the deep ocean cold. Wet cells with no WOA value
+  (WOA's sea floor is shallower, or a lake) are filled from their neighbours
+  or the layer above, and the counts are in the file's attributes. About
+  1.4 % of vertically adjacent pairs (467 of 32304) are statically unstable
+  in the setup's linear equation of state, nearly all south of 60 S with
+  densities differing by a few hundredths of a kg m-3 (the linear equation
+  overstates the thermal expansion of near-freezing water; one Baltic cell
+  differs by 2 kg m-3); in a coupled run the count is 638, 329 and 390 after
+  1, 30 and 90 days, and no pair is more than 0.03 kg m-3 inverted. The
+  currents start at rest, so the first days are a geostrophic adjustment of
+  the observed density field (the sea-surface-height range reaches about
+  -2.2 m within days and stays there). Over a 90-day
+  January run the band-mean sea surface temperature moves by 0.4 to 2.9
+  degrees (the annual mean is not January's state), and the polar surface
+  reaches and passes the freezing point with no sea ice to stop it: that is
+  the state a sea-ice component would start from. The file holds values for
+  exactly the wet cells of the packaged bathymetry, so it is valid only with it: the setup refuses a
+  file made for another bathymetry, and
+  ``jem.tools.ocean_initial_state`` says how to regenerate one.
+  ``ocean.initial_state_file=null`` restores the uniform start (salinity 35
+  and 288.03 K at the surface in every ocean column, falling linearly with depth to zero at
+  4510 m, so the deepest layer starts at -1.15 degC). ``veros-double-drake``
+  always starts uniformly.
 * **No sea ice by default.** ``veros-earth`` and ``veros-double-drake`` have
   no sea-ice component; the only ice effect on the ocean is the "swamp" mask on
-  the heat and freshwater fluxes once the surface reaches the freezing point.
+  the heat and freshwater fluxes once the surface reaches the freezing point,
+  which stops the surface cooling but not the water under it, so the polar
+  surface of ``veros-earth`` drifts below the freezing point.
   ``+configuration=veros-earth-winton`` composes the Winton ice on the ocean's
   grid: the ocean then clamps its top cell at the freezing point and hands the
   ice the deficit, and the ice hands the ocean its heat and freshwater (see
-  :doc:`design/winton_seaice`). The uniform 15 degC start means no ice forms
-  there for months, so it shows the coupling, not a sea-ice climate; a seasonal
-  cycle needs an ocean with a realistic initial state.
+  :doc:`design/winton_seaice`).
 
 The two components are coupled through :class:`jem.fluxes.VerosExchange`,
 named as ``coupling.exchanger``: it hands the ocean the surface wind stress

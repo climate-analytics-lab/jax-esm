@@ -7,11 +7,13 @@ here through :class:`GridInfo`, which reconstructs Veros' own grid-spacing
 arrays from it exactly (see its docstring for why that reconstruction needs
 care) and carries the true (post-rotation) latitude Coriolis needs.
 
-The ocean is idealised: the initial state is horizontally uniform (see
-``cold_start_temperature_celsius``) and there is no sea ice. Its wet columns
-are the land-sea mask's, and their depth is either a bathymetry file's
+The ocean is idealised: there is no sea ice. Its wet columns are the
+land-sea mask's, and their depth is either a bathymetry file's
 (``bathymetry_file``, made by :mod:`jem.tools.ocean_bathymetry`) or, with none
-given, the same flat bottom everywhere.
+given, the same flat bottom everywhere. It starts either from an observed
+climatology (``initial_state_file``, made by
+:mod:`jem.tools.ocean_initial_state`) or, with none given, from a horizontally
+uniform state (``cold_start_temperature_celsius``).
 """
 
 # Importing this before `veros.core.operators` is what points Veros at the
@@ -36,6 +38,7 @@ from veros.core.utilities import enforce_boundaries
 from jem.components.veros.setups._grid import axis_spacing_and_origin
 from jem.components.veros.setups._layers import LAYER_THICKNESSES
 from jem.tools.ocean_bathymetry import read_depth, read_wet_mask
+from jem.tools.ocean_initial_state import layer_centres, read_initial_state
 
 #: The fewest wet layers a column may have. A one-layer column has no vertical
 #: structure for the mixing schemes to act on (Veros' own ``global_4deg``
@@ -181,6 +184,53 @@ class GridInfo:
         self.landsea_mask = landsea_mask
 
 
+def _read_matching_initial_state(
+    initial_state_file: str,
+    grid_info: GridInfo,
+    kbot: np.ndarray,
+    layer_thicknesses: Sequence[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read an initial-state file and check it is for this grid, these layers and these wet cells.
+
+    The file's NaN cells must be exactly the cells that ``kbot`` leaves dry
+    (dry columns and the layers below a column's floor): a file made for
+    another bathymetry would leave wet cells at zero temperature and
+    salinity, or put values under the sea floor, and neither is a state this
+    model can start from.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Temperature and salinity, ``(nx, ny, nz)``, surface layer first, with
+        zero (not NaN) on dry cells.
+
+    """
+    nz = len(layer_thicknesses)
+    temperature, salinity, depth, centres = read_initial_state(
+        initial_state_file, nz, grid_info.ny, grid_info.nx
+    )
+    regenerate = (
+        f"regenerate it for this setup with jem.tools.ocean_initial_state.ocean_initial_state, passing the"
+        f" same bathymetry file as `bathymetry_file` ({initial_state_file!r} cannot be used with"
+        " a different bathymetry, land-sea mask or layers)"
+    )
+    if not np.allclose(depth, layer_centres(layer_thicknesses)):
+        raise ValueError(f"{initial_state_file}: its layer centres {depth} are not this setup's; {regenerate}")
+    if not (
+        np.allclose(centres[0], grid_info.true_lat_xy.T) and np.allclose(centres[1], grid_info.true_lon_xy.T)
+    ):
+        raise ValueError(f"{initial_state_file}: its cell centres are not this setup's grid; {regenerate}")
+    n_wet = nz - kbot + 1  # (nx, ny) layers per column, from the surface
+    expected_wet = (kbot[..., None] > 0) & (np.arange(nz) < n_wet[..., None])
+    has_value = np.isfinite(temperature) & np.isfinite(salinity)
+    if not np.array_equal(has_value, expected_wet):
+        raise ValueError(
+            f"{initial_state_file}: {int((has_value & ~expected_wet).sum())} cells have values where this"
+            f" setup is dry and {int((expected_wet & ~has_value).sum())} wet cells have none; {regenerate}"
+        )
+    return np.where(expected_wet, temperature, 0.0), np.where(expected_wet, salinity, 0.0)
+
+
 def earth_setup(
     *,
     scrip_grid_file: str,
@@ -191,6 +241,7 @@ def earth_setup(
     dt_tracer: float = 3600.0,
     cold_start_temperature_celsius: float = 15.0,
     bathymetry_file: str | None = None,
+    initial_state_file: str | None = None,
 ) -> type[VerosSetup]:
     """Return the Veros setup for a rotated-pole global ocean read from a SCRIP grid.
 
@@ -213,14 +264,15 @@ def earth_setup(
         Momentum and tracer timesteps, seconds. Default ``3600.0``, the value
         this configuration has been run with; it is not otherwise tuned.
     cold_start_temperature_celsius : float
-        Initial ocean temperature just below the surface, in degrees Celsius
-        (``vs.temp``'s units). The initial state is horizontally uniform --
-        every wet column has the same profile, poles included -- and falls
-        linearly with depth, ``T0 * (1 - z / zw[0])``, reaching zero at
-        ``|zw[0]|``, the depth of the top face of the deepest layer (4510 m
-        for the default layers). The deepest layer lies below that depth, so
-        it starts slightly below zero (-1.15 degC for the default layers),
-        not at zero. Default ``15.0``.
+        The uniform start, used only when ``initial_state_file`` is ``None``:
+        the initial ocean temperature just below the surface, in degrees
+        Celsius (``vs.temp``'s units). Every wet column has the same profile,
+        poles included, and it falls linearly with depth, ``T0 * (1 - z /
+        zw[0])``, reaching zero at ``|zw[0]|``, the depth of the top face of
+        the deepest layer (4510 m for the default layers). The deepest layer
+        lies below that depth, so it starts slightly below zero (-1.15 degC
+        for the default layers), not at zero. Salinity is 35 everywhere.
+        Default ``15.0``.
     bathymetry_file : str, optional
         A depth file on this grid, as written by
         :func:`jem.tools.ocean_bathymetry.ocean_bathymetry`. Each wet
@@ -230,6 +282,18 @@ def earth_setup(
         column has the flat bottom of all the layers (5200 m for the default
         layers). Everything else in the setup (the initial profile, the
         masks) follows from ``kbot`` and holds for either.
+    initial_state_file : str, optional
+        A temperature and salinity file on this grid, as written by
+        :func:`jem.tools.ocean_initial_state.ocean_initial_state`:
+        Conservative Temperature (degrees C, ``vs.temp``'s variable) and
+        Absolute Salinity (g/kg, ``vs.salt``'s) for every wet cell, surface
+        layer first, which become ``temp`` and ``salt`` on every time level
+        Veros reads at its first step. The file is valid only with the
+        bathymetry (and so the wet cells) it was made for; one that does not
+        match this setup's grid, layers or wet cells is refused here, before
+        Veros is built, with a message saying how to regenerate it. Default
+        ``None``: the uniform start of ``cold_start_temperature_celsius``,
+        exactly.
 
     Returns
     -------
@@ -252,6 +316,12 @@ def earth_setup(
     else:
         depth = read_depth(bathymetry_file, grid_info.ny, grid_info.nx)
         kbot = kbot_from_depth(depth, grid_info.landsea_mask > 0, layer_thicknesses)
+
+    initial_temperature = initial_salinity = None
+    if initial_state_file is not None:
+        initial_temperature, initial_salinity = _read_matching_initial_state(
+            initial_state_file, grid_info, kbot, layer_thicknesses
+        )
 
     class EarthSetup(VerosSetup):
         """A rotated-pole global ocean on a Gaussian lat-lon grid.
@@ -375,15 +445,30 @@ def earth_setup(
             vs = state.variables
             settings = state.settings
 
-            # Horizontally uniform, linear in depth; see the
-            # `cold_start_temperature_celsius` docstring for where it
-            # reaches zero. Veros' `zt`/`zw` are negative below the surface.
-            vs.temp = update(
-                vs.temp, at[...],
-                ((1 - vs.zt[None, None, :] / vs.zw[0])
-                 * cold_start_temperature_celsius * vs.maskT)[..., None],
-            )
-            vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
+            if initial_temperature is None:
+                # Horizontally uniform, linear in depth; see the
+                # `cold_start_temperature_celsius` docstring for where it
+                # reaches zero. Veros' `zt`/`zw` are negative below the surface.
+                vs.temp = update(
+                    vs.temp, at[...],
+                    ((1 - vs.zt[None, None, :] / vs.zw[0])
+                     * cold_start_temperature_celsius * vs.maskT)[..., None],
+                )
+                vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
+            else:
+                # The file is surface-first and Veros' layers are bottom-first.
+                # Veros reads all three time levels at its first step
+                # (`taum1`, `tau`, `taup1`), so each gets the same field; the
+                # halo is left zero and is filled from the interior (the
+                # periodic seam) by `calc_initial_conditions`.
+                mask = vs.maskT[2:-2, 2:-2, :]
+                for level in range(3):
+                    vs.temp = update(
+                        vs.temp, at[2:-2, 2:-2, :, level], npx.asarray(initial_temperature[..., ::-1]) * mask
+                    )
+                    vs.salt = update(
+                        vs.salt, at[2:-2, 2:-2, :, level], npx.asarray(initial_salinity[..., ::-1]) * mask
+                    )
 
             # No surface forcing is initialised here: a coupled run's wind
             # stress, heat and freshwater fluxes -- and the TKE surface forcing

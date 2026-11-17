@@ -5,20 +5,28 @@
 #
 #   python -m jem.main +configuration=veros-earth coupled_run=short_run
 #
-# WHAT THE OCEAN IS (it is an idealised ocean on Earth's land-sea mask):
+# WHAT THE OCEAN IS (an ocean on Earth's land-sea mask, bathymetry and
+# observed mean state, without sea ice or realistic forcing history):
 #  - Geometry: the land-sea mask decides which columns are ocean (the
 #    packaged ERA5 land fraction on the ocean grid, thresholded at 0.5 into a
 #    binary mask); the packaged ETOPO 2022 bathymetry decides how deep each
 #    of them is, at this grid's resolution (about 3.75 degrees): a column
 #    holds as many of the 15 default layers as fit above its depth, between
 #    2 layers (120 m) and all 15 (5200 m).
-#  - Initial state: horizontally uniform -- SST 288.03 K in every ocean
-#    column, poles included, salinity 35 -- with temperature falling
-#    linearly with depth to zero at 4510 m (so the deepest layer of a
-#    full-depth column starts at -1.15 degC; every column has the same profile
-#    over the layers it holds). A short run therefore shows the atmosphere's fluxes
-#    spinning up an ocean that has no meridional structure, not an
-#    equilibrated one.
+#  - Initial state: the World Ocean Atlas 2018 annual-mean temperature and
+#    salinity (NOAA NCEI), converted to the Conservative Temperature and
+#    Absolute Salinity Veros' `temp` and `salt` are, averaged onto this
+#    grid's cells and layers. SST therefore starts at about 29 degC in the
+#    warm pool and at the freezing point (-1.4 degC on average south of 65S)
+#    near the poles, and the deep ocean starts cold and salty, so a short run
+#    shows the atmosphere's fluxes acting on an ocean with its observed
+#    meridional and vertical structure, not spinning one up from nothing. It
+#    is a climatological mean, not January's or any particular year's
+#    state, and the currents start at rest, so the first days are a
+#    geostrophic adjustment of the observed density field. With no sea ice
+#    to stop it, the polar surface then cools to and past the freezing point
+#    (about 60 % of the surface poleward of 70 degrees is at or below the
+#    swamp mask's -1.8 degC after 30 days).
 #  - No sea ice: seaice=none. `+configuration=veros-earth-winton` is this
 #    configuration with the Winton sea ice on the ocean's grid and an ocean
 #    that clamps at freezing. Here the only ice effect on the ocean is the swamp mask
@@ -137,6 +145,20 @@ ocean:
   # alternative, every ocean column 5200 m deep, is selected from the command
   # line with `ocean.bathymetry_file=null`.
   bathymetry_file: ${jem_data:bathymetry_RotatedGaussianLatLon.nc}
+  # The ocean's initial temperature and salinity: NOAA NCEI's World Ocean
+  # Atlas 2018 annual means (public data, requested citation and terms in the
+  # file's attributes), made by `jem.tools.ocean_initial_state`. It is annual
+  # because WOA's monthly fields stop at 1500 m and a run can start in any
+  # month. Without it every ocean column would start as the same 15 degC
+  # profile with salinity 35 from the equator to the poles, so no water could
+  # reach freezing in a short run and the polar oceans would heat the
+  # atmosphere. The file holds values for exactly the wet cells of the
+  # bathymetry above, so it is valid only with that bathymetry: changing
+  # `ocean.bathymetry_file` needs a regenerated file (the setup refuses a
+  # mismatch and says how). The uniform start of
+  # `cold_start_temperature_celsius` is selected with
+  # `ocean.initial_state_file=null`.
+  initial_state_file: ${jem_data:ocean_initial_state_RotatedGaussianLatLon.nc}
 
 regrid:
   a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_RotatedGaussianLatLon.nc}

@@ -110,6 +110,24 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from jem.tools._rotated_grid import (
+    fill_from_wet_neighbours,
+    nearest_target,
+    read_scrip_cell_centres,
+    read_wet_mask,
+    unit_vectors,
+    weighted_target_means,
+)
+
+__all__ = [
+    "MAXIMUM_DEPTH",
+    "MINIMUM_DEPTH",
+    "etopo_to_coarse_bathymetry",
+    "ocean_bathymetry",
+    "read_depth",
+    "read_wet_mask",
+]
+
 logger = logging.getLogger(__name__)
 
 #: Depth of the two shallowest default layers (50 m + 70 m): the least a wet
@@ -149,21 +167,6 @@ ETOPO_2022_ATTRS = {
 #: Source attributes (prefix) that :func:`ocean_bathymetry` copies from its
 #: source file into its output, so provenance survives the second step.
 _PROVENANCE_PREFIX = "source_"
-
-
-def read_wet_mask(
-    landsea_mask_file: str | Path, landsea_mask_threshold: float, ny: int, nx: int
-) -> np.ndarray:
-    """Return the ocean grid's wet mask, ``(ny, nx)``, ``True`` where wet.
-
-    The one definition of which columns are ocean, shared by the setup and
-    this tool: the land fraction ``lsm`` (1 = land) in the file's row-major
-    ``(ny, nx)`` cell order, thresholded at ``landsea_mask_threshold`` -- a
-    cell is land at or above it.
-    """
-    with xr.open_dataset(landsea_mask_file) as mask_ds:
-        land_fraction = mask_ds["lsm"].to_numpy().reshape(ny, nx)
-    return ~(land_fraction >= landsea_mask_threshold)
 
 
 def etopo_to_coarse_bathymetry(
@@ -284,62 +287,6 @@ def etopo_to_coarse_bathymetry(
     return output_file
 
 
-def _unit_vectors(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
-    lat, lon = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
-    return np.stack(
-        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1
-    )
-
-
-def _nearest_target(targets: np.ndarray, sources: np.ndarray, chunk: int = 2048) -> np.ndarray:
-    """Index of the target unit vector nearest each source one (largest dot product).
-
-    Brute force in chunks (a chunk of 2048 sources against 4608 targets is
-    75 MB): a million sources is some ten billion multiplies, once, and needs
-    no dependency beyond numpy.
-    """
-    nearest = np.empty(len(sources), dtype=np.int64)
-    for start in range(0, len(sources), chunk):
-        nearest[start:start + chunk] = np.argmax(sources[start:start + chunk] @ targets.T, axis=1)
-    return nearest
-
-
-def _fill_from_wet_neighbours(depth: np.ndarray, wet: np.ndarray) -> int:
-    """Fill NaN wet cells of ``depth`` (``(ny, nx)``) in place; return how many.
-
-    A wet region with no source cell anywhere in it (an inland sea or lake
-    the source's ocean mask does not reach) cannot be filled from anything and
-    is left NaN; the caller decides what those get.
-    """
-    missing = wet & np.isnan(depth)
-    n_requested = int(missing.sum())
-    while missing.any():
-        known = wet & ~np.isnan(depth)
-        total = np.zeros_like(depth)
-        count = np.zeros(depth.shape)
-        values = np.where(known, depth, 0.0)
-        for dj in (-1, 0, 1):
-            for di in (-1, 0, 1):
-                if dj == 0 and di == 0:
-                    continue
-                shifted_values = np.roll(values, (dj, di), axis=(0, 1))
-                shifted_known = np.roll(known, (dj, di), axis=(0, 1)).astype(float)
-                # np.roll wraps the poles' rows too; undo that so row 0 and
-                # row ny-1 are not neighbours of one another.
-                if dj == 1:
-                    shifted_known[0, :] = 0.0
-                elif dj == -1:
-                    shifted_known[-1, :] = 0.0
-                total += shifted_values * shifted_known
-                count += shifted_known
-        reachable = missing & (count > 0)
-        if not reachable.any():
-            break
-        depth[reachable] = total[reachable] / count[reachable]
-        missing = wet & np.isnan(depth)
-    return n_requested - int(missing.sum())
-
-
 def ocean_bathymetry(
     source_file: str | Path,
     scrip_grid_file: str | Path,
@@ -390,10 +337,7 @@ def ocean_bathymetry(
         ``output_file``.
 
     """
-    with xr.open_dataset(scrip_grid_file) as grid_ds:
-        nx, ny = (int(n) for n in grid_ds["grid_dims"].to_numpy())
-        target_lat = grid_ds["grid_center_lat"].to_numpy().reshape(ny, nx)
-        target_lon = grid_ds["grid_center_lon"].to_numpy().reshape(ny, nx)
+    nx, ny, target_lat, target_lon = read_scrip_cell_centres(scrip_grid_file)
     wet = read_wet_mask(landsea_mask_file, landsea_mask_threshold, ny, nx)
 
     with xr.open_dataset(source_file) as source_ds:
@@ -412,21 +356,16 @@ def ocean_bathymetry(
 
     source_lat2, source_lon2 = np.meshgrid(source_lat, source_lon, indexing="ij")
     is_ocean = (source_depth > 0) & (source_fraction > 0)
-    nearest = _nearest_target(
-        _unit_vectors(target_lat, target_lon).reshape(-1, 3),
-        _unit_vectors(source_lat2, source_lon2)[is_ocean],
+    nearest = nearest_target(
+        unit_vectors(target_lat, target_lon).reshape(-1, 3),
+        unit_vectors(source_lat2, source_lon2)[is_ocean],
     )
 
     weight = np.cos(np.deg2rad(source_lat2[is_ocean])) * source_fraction[is_ocean]
-    weighted_depth = np.bincount(nearest, weights=weight * source_depth[is_ocean], minlength=nx * ny)
-    total_weight = np.bincount(nearest, weights=weight, minlength=nx * ny)
-    flat_depth = np.full(nx * ny, np.nan)
-    has_source = total_weight > 0
-    flat_depth[has_source] = weighted_depth[has_source] / total_weight[has_source]
-    depth = flat_depth.reshape(ny, nx)
+    depth = weighted_target_means(nearest, weight, source_depth[is_ocean], nx * ny).reshape(ny, nx)
     depth[~wet] = np.nan
 
-    n_filled = _fill_from_wet_neighbours(depth, wet)
+    n_filled = fill_from_wet_neighbours(depth, wet)
     # An isolated wet region has no ocean depth to borrow from: Veros' own
     # coarse setups would make such water land, which this setup must not, so
     # it is given the minimum depth (shallow, the safe side for an inland

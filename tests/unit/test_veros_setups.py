@@ -551,6 +551,113 @@ def test_earth_initial_state_is_the_flat_profile_on_every_wet_layer_and_zero_bel
         assert np.all(field[~mask_t] == 0.0)
 
 
+PACKAGED_BATHYMETRY = str(DATA / "bathymetry_RotatedGaussianLatLon.nc")
+PACKAGED_INITIAL_STATE = str(DATA / "ocean_initial_state_RotatedGaussianLatLon.nc")
+
+
+def _earth_model_with_initial_state(initial_state_file, bathymetry_file=PACKAGED_BATHYMETRY):
+    from jem.components.veros.setups.earth import earth_setup
+
+    model = earth_setup(
+        scrip_grid_file=ROTATED_SCRIP_FILE,
+        landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+        bathymetry_file=bathymetry_file,
+        initial_state_file=initial_state_file,
+    )()
+    model.setup()
+    return model
+
+
+@pytest.mark.slow
+def test_earth_without_an_initial_state_file_is_exactly_the_uniform_start(_bathymetry_file):
+    """The uniform start, on every cell and time level the setup writes: ``T0 (1 - zt/zw0)`` and 35."""
+    vs = _earth_model_with_bathymetry(_bathymetry_file).state.variables
+    mask_t = np.asarray(vs.maskT)
+    expected_temp = (1 - np.asarray(vs.zt)[None, None, :] / np.asarray(vs.zw)[0]) * 15.0 * mask_t
+    temp, salt = np.asarray(vs.temp), np.asarray(vs.salt)
+    for level in range(temp.shape[-1]):
+        np.testing.assert_array_equal(temp[..., level], expected_temp)
+        np.testing.assert_array_equal(salt[..., level], 35.0 * mask_t)
+
+
+@pytest.mark.slow
+def test_earth_with_an_initial_state_file_starts_every_time_level_from_it():
+    """Temperature and salinity are the file's on every wet cell and time level, zero on dry ones.
+
+    The file is surface-first and Veros' layers are bottom-first, so the
+    check reverses the layer axis; it also checks a cell on the periodic seam
+    and that the surface is no longer one temperature everywhere.
+    """
+    vs = _earth_model_with_initial_state(PACKAGED_INITIAL_STATE).state.variables
+    with xr.open_dataset(PACKAGED_INITIAL_STATE) as ds:
+        file_temp = ds["temperature"].to_numpy().astype(float)  # (nz, ny, nx)
+        file_salt = ds["salinity"].to_numpy().astype(float)
+    wet_file = np.isfinite(file_temp)
+    mask_t = np.asarray(vs.maskT)[2:-2, 2:-2] > 0  # (nx, ny, nz) bottom-first
+    np.testing.assert_array_equal(mask_t[..., ::-1].transpose(2, 1, 0), wet_file)
+    expected_temp = np.where(wet_file, file_temp, 0.0).transpose(2, 1, 0)[..., ::-1]
+    expected_salt = np.where(wet_file, file_salt, 0.0).transpose(2, 1, 0)[..., ::-1]
+    for level in range(np.asarray(vs.temp).shape[-1]):
+        np.testing.assert_array_equal(np.asarray(vs.temp)[2:-2, 2:-2, :, level], expected_temp)
+        np.testing.assert_array_equal(np.asarray(vs.salt)[2:-2, 2:-2, :, level], expected_salt)
+    surface = np.asarray(vs.temp)[2:-2, 2:-2, -1, 0][mask_t[..., -1]]
+    assert surface.max() - surface.min() > 25.0  # warm pool to freezing: not the 15 degC of the uniform start
+
+
+@pytest.mark.slow
+def test_earth_refuses_an_initial_state_file_made_for_another_bathymetry():
+    """The packaged file's wet cells are those of the packaged bathymetry: the flat bottom is a different ocean."""
+    from jem.components.veros.setups.earth import earth_setup
+
+    with pytest.raises(ValueError, match="regenerate") as flat:
+        earth_setup(
+            scrip_grid_file=ROTATED_SCRIP_FILE,
+            landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+            bathymetry_file=None,
+            initial_state_file=PACKAGED_INITIAL_STATE,
+        )
+    assert "wet cells have none" in str(flat.value) or "cells have values where" in str(flat.value)
+
+    with pytest.raises(ValueError, match="regenerate"):
+        earth_setup(
+            scrip_grid_file=ROTATED_SCRIP_FILE,
+            landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+            bathymetry_file=PACKAGED_BATHYMETRY,
+            layer_thicknesses=(50.0, 70.0, 100.0),
+            initial_state_file=PACKAGED_INITIAL_STATE,
+        )
+
+
+@pytest.mark.slow
+def test_the_initial_state_tools_wet_cells_and_equation_of_state_are_the_setups(_bathymetry_file):
+    """``wet_layer_mask`` is ``maskT`` for the same bathymetry, and the tool's EOS constants are Veros' own."""
+    from veros.core.density import linear_eq
+
+    from jem.tools import ocean_initial_state as tool
+    from jem.tools.ocean_bathymetry import read_depth, read_wet_mask
+
+    vs = _earth_model_with_bathymetry(PACKAGED_BATHYMETRY).state.variables
+    from jem.components.veros.setups._layers import LAYER_THICKNESSES
+
+    depth = read_depth(PACKAGED_BATHYMETRY, 48, 96).T  # (ny, nx)
+    wet = read_wet_mask(ROTATED_LANDSEA_MASK_FILE, 0.5, 48, 96)
+    mask = tool.wet_layer_mask(depth, wet, LAYER_THICKNESSES)  # (ny, nx, nz) surface-first
+    mask_t = np.asarray(vs.maskT)[2:-2, 2:-2] > 0  # (nx, ny, nz) bottom-first
+    np.testing.assert_array_equal(mask_t[..., ::-1].transpose(1, 0, 2), mask)
+
+    assert tool.LINEAR_EOS_RHO0 == linear_eq.rho0
+    assert tool.LINEAR_EOS_THETA0 == pytest.approx(linear_eq.theta0, abs=1e-12)
+    assert tool.LINEAR_EOS_S0 == linear_eq.S0
+    assert tool.LINEAR_EOS_BETA_T == linear_eq.betaT
+    assert tool.LINEAR_EOS_BETA_S == linear_eq.betaS
+
+
+def test_veros_earth_configuration_starts_from_the_packaged_state_and_the_uniform_start_is_one_override():
+    packaged = str(DATA / "ocean_initial_state_RotatedGaussianLatLon.nc")
+    assert _composed_veros_earth().ocean.initial_state_file == packaged
+    assert _composed_veros_earth(["ocean.initial_state_file=null"]).ocean.initial_state_file is None
+
+
 def _atmosphere_dataset(n_records=2):
     """Return a dataset with the T31 atmosphere's own coordinates, from jcm's writer."""
     from jcm.physics.speedy.speedy_coords import get_speedy_coords

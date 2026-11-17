@@ -42,13 +42,14 @@ Veros ocean
     Its setup reads a binary land-sea mask and a packaged ETOPO 2022 bathymetry
     averaged onto the grid's cells (see :doc:`experimental`), so the bottom is
     real but at the grid's resolution of about 3.75 degrees, with a 120 m
-    minimum depth. It starts from a horizontally uniform temperature and
-    salinity profile rather than an observed state
-    (``jem.components.veros.setups.earth``), and has no sea ice. Consequence:
-    the ocean starts from a state no ocean is in, so a short run is mostly
-    adjustment, not a climate. ``jem.components.veros.setups.global_latlon``
-    (Levitus bathymetry and initial state) is the setup to use when the
-    ocean's realism matters.
+    minimum depth. It starts from the World Ocean Atlas 2018 annual-mean
+    temperature and salinity (see :doc:`experimental`) with the currents at
+    rest, and has no sea ice. Consequence: the starting state is a
+    climatological mean that this model has not been spun up to, so a short run
+    is the atmosphere's fluxes and the model's own adjustment acting on it, not
+    an equilibrated climate. ``jem.components.veros.setups.global_latlon``
+    (one-degree Levitus bathymetry and initial state) is the setup to use when
+    the ocean's realism matters.
 
 **``veros-earth``'s land data describe the original coastline.**
     The atmosphere's land fraction is derived from the ocean's wet mask

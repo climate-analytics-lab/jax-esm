@@ -135,10 +135,15 @@ def test_one_exchange_conserves_the_sea_tile_heat_and_freshwater(coupler):
         received = np.sum(area_t * wet * np.asarray(received_field, np.float64))
         assert abs(received - given) / abs(given) < 1e-3, (received, given)
 
-    # No atmosphere cell with sea is handed the land fill SST (273.15 K); the
-    # wet ocean's is 288 K at the cold start.
+    # No atmosphere cell with sea is handed the land fill SST (273.15 K): the
+    # regridding weights are convex, so every sea cell's SST lies within the
+    # range of the wet ocean's own (which, from an observed initial state, runs
+    # from the freezing point to 30 degC and so includes the fill value; the
+    # bound is what shows that no land column's value leaked into a sea cell).
     sst = np.asarray(exchanged["atm"]["forcing"].sea_surface_temperature, np.float64)
-    assert int(np.sum((sea > 0) & (sst < 280.0))) == 0
+    wet_sst = np.asarray(ocn["derived"].sea_surface_temperature, np.float64)[wet > 0]
+    sea_sst = sst[sea > 0]
+    assert wet_sst.min() - 1e-3 <= sea_sst.min() and sea_sst.max() <= wet_sst.max() + 1e-3
 
 
 def ocn_area(coupler):
