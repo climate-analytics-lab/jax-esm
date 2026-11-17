@@ -115,9 +115,20 @@ jobs:
         pip install -e ".[dev]"
         pip install -r veros-jittable/requirements.txt
 
+    - name: Build the thsice Fortran oracle
+      # The Winton sea ice is compared at machine precision with the
+      # unmodified MITgcm thsice routines (tests/reference/thsice), which this
+      # builds; JEM_REQUIRE_THSICE_ORACLE below makes that comparison fail,
+      # rather than skip, if the build left no executable.
+      run: |
+        command -v gfortran || (sudo apt-get update && sudo apt-get install -y gfortran)
+        tests/reference/thsice/build.sh
+
     - name: Run unit tests with pytest
       # veros-jittable is a source checkout, not a pip install, so it still
       # needs PYTHONPATH; jax-gcm no longer does.
+      env:
+        JEM_REQUIRE_THSICE_ORACLE: "1"
       run: |
         export PYTHONPATH=$(pwd)/veros-jittable:$PYTHONPATH
         pytest tests/unit -q -m "not slow" --cov=jem --cov-report=xml --cov-report=term

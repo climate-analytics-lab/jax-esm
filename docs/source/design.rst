@@ -17,4 +17,5 @@ implementation-specific details belong in the PR that introduced them.
    design/configuration
    design/jcm_adapter
    design/bucket_land
+   design/winton_seaice
    design/differentiating_long_runs

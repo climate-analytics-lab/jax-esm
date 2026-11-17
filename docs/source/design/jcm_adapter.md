@@ -65,7 +65,11 @@ configured, and nothing in JCM has to know JEM exists. Its carry is:
                           sea_total_heat_flux, sea_total_freshwater_flux,
                           sea_evaporation, sea_eastward_wind_stress,
                           sea_northward_wind_stress, sea_fraction,
-                          land_evaporation),
+                          land_evaporation,
+                          downward_shortwave_flux, downward_longwave_flux,
+                          wind_speed, normalized_surface_pressure,
+                          sea_air_temperature, sea_air_specific_humidity,
+                          rainfall, snowfall),
 }
 ```
 
@@ -145,6 +149,28 @@ cell will then also receive the land part's flux (jax-esm#147).
 soil supplies ({doc}`bucket_land`); with no land tile it is the grid mean, and
 `JCMComponent.publishes_land_evaporation` is `False`, which
 `default_exchanges` refuses to force a land with.
+
+The rest are what a sea ice that solves its own surface energy balance reads
+({doc}`winton_seaice`), taken unchanged from the contract: the downward
+shortwave and the incident downward longwave, the wind speed, the surface
+pressure over jax-gcm's `p0`, the air the sea's fluxes were computed against
+(the `sea` tile of the air fields, else the package's one reference air) and
+the precipitation by phase. SPEEDY condenses liquid only, so `rainfall` and
+`snowfall` split its precipitation by MITgcm AIM's rule: snow where the
+lowest level brought dry-adiabatically to the surface is below 273.15 K
+(`exchange_fields.split_precipitation`); a package that splits its own is
+taken at its word. `JCMComponent.publishes_sea_tiles` says whether the
+package publishes its sea tile, which `default_exchanges` requires of a
+Winton ice.
+
+The atmosphere takes the ice's skin temperature in
+`ForcingData.sea_ice_temperature`, the field a forcing file can also fill
+(jax-gcm#1205). jax-gcm leaves it `None` when no file does, as the packaged
+T30 climatology does not. An exchanged field must be an array from the first
+step, so `initialize` then seeds it with SPEEDY's own stand-in
+(`SEA_ICE_FREEZING_TEMPERATURE`, the SST capped at the saline freezing
+point), and the first step is the uncoupled one; a file's value, if there is
+one, is collapsed to the start date like any other exchanged field.
 
 `wind_u` and `wind_v` sit at whichever reference the *publishing* package's
 own surface closure defines — the contract's static `wind_reference` field

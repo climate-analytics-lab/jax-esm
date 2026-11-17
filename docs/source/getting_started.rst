@@ -101,6 +101,9 @@ package spelled out.
      - ``seaice=none``
    * - Evolve the soil water (the bucket land)
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
+   * - Use the thermodynamic Winton sea ice
+     - ``+configuration=earth-slab-winton``, or ``seaice=winton
+       +ocean.params.clamp_at_freezing=true`` in another composition
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component

@@ -181,7 +181,11 @@ keeps its own deficit when it cools below freezing
 being clamped at freezing with nothing to account for the heat the clamp
 would add. `clamp_at_freezing=True` is for a sea ice that turns the ocean's
 `derived.ice_frazil_melt_energy` into ice, and `default_exchanges` refuses it
-when no exchange takes that field.
+when no exchange takes that field. `WintonSeaiceModel` is that ice: a
+thermodynamic snow-and-two-layer ice with an energy budget, which
+`default_exchanges` forces from the atmosphere and routes the ocean's heat
+flux through, and which it refuses over an ocean that does not clamp
+({doc}`design/winton_seaice`).
 
 ## Parameters: process and initial condition
 

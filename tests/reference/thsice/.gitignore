@@ -1,0 +1,5 @@
+upstream/
+*.o
+*.f
+thsice_oracle
+__pycache__/

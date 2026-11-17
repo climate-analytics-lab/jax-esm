@@ -92,7 +92,11 @@ shaped differently can still be coupled, with a hand-written exchanger.
 | `lnd.derived.soil_water_availability` | `atm.forcing.soilw_am` |
 
 A row survives only if **both** its components are present, so an
-atmosphere/ocean pair gets two. The land rows are the bucket's soil water
+atmosphere/ocean pair gets two. A Winton sea ice ({doc}`winton_seaice`)
+replaces the first row with `WINTON_SEAICE_EXCHANGES`: it takes the
+atmosphere's state and its flux over the sea part, passes the ocean what it
+does not keep (`seaice.derived.ocean_heat_flux_up`), and hands the atmosphere
+its fraction and skin temperature. The land rows are the bucket's soil water
 ({doc}`bucket_land`): the land tile's evaporation, never the cell mean, so
 `default_exchanges` refuses them under an atmosphere with no land tile. The wiring is by *name* — `("atm", "ocn",
 "lnd", "seaice")` — and a component registered under a name that just
