@@ -370,9 +370,15 @@ together if `xr.merge` aligns them rather than producing an outer join. The
 conventions are JCM's, and every component follows them:
 
 - **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid, and
-  `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (plus a CF
-  `coordinates` attribute on each variable) for a curvilinear one — CF and
-  xarray forbid a 2-D variable named after one of its own dimensions.
+  `("time", "x", "y")` with 2-D auxiliary **`longitude`/`latitude`**
+  coordinates (plus a CF `coordinates` attribute on each variable) for a
+  curvilinear one — CF and xarray forbid a 2-D variable named after one of its
+  own dimensions, and the 2-D coordinates are *not* called `lon`/`lat` because
+  `xr.merge` of an atmosphere with a curvilinear component keeps the
+  atmosphere's 1-D `lon`/`lat` and silently drops the 2-D ones of the same
+  name. `jem.components.coordinates` defines both layouts for every component.
+  The `x`/`y` of two components on curvilinear grids of different shapes cannot
+  be merged (see `docs/source/design/output.md`).
 - **Coordinate values** are degrees computed as `radians * 180 / pi` in float64
   (`jem.components.slab.grid.to_degrees`), which is character for character what
   `jcm.utils.data_to_xarray` does. Any other route risks a last-bit difference,

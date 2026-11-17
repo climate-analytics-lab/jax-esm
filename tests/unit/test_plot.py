@@ -162,7 +162,7 @@ def test_area_mean_keeps_a_level_axis_and_reduces_only_lat_lon():
 
 
 def test_area_mean_reduces_curvilinear_lat_lon_dims_and_keeps_the_rest():
-    # Curvilinear grid: lat/lon are 2-D auxiliary coordinates over ("x", "y")
+    # Curvilinear grid: latitude/longitude are 2-D auxiliary coordinates over ("x", "y")
     # rather than 1-D coordinates over their own dimension -- the same
     # layout `map_plot` handles separately from the separable grid.
     time = np.array(["2001-01-01", "2001-01-02"], dtype="datetime64[ns]")
@@ -174,8 +174,8 @@ def test_area_mean_reduces_curvilinear_lat_lon_dims_and_keeps_the_rest():
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lat": (("x", "y"), lat2d),
-            "lon": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
         },
     )
 
@@ -235,7 +235,7 @@ def test_map_plot_accepts_a_curvilinear_grid():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
 
@@ -300,7 +300,7 @@ def test_map_plot_curvilinear_grid_realises_levels_as_boundary_norm():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     levels = [0, 10, 20, 30]
@@ -331,7 +331,7 @@ def test_map_plot_raises_on_levels_and_norm_together_on_a_curvilinear_grid():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
 
@@ -392,7 +392,7 @@ def test_map_plot_curvilinear_grid_expands_an_integer_levels_count():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     expected = list(
@@ -445,7 +445,7 @@ def test_map_plot_curvilinear_grid_consumes_extend_into_boundary_norm():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     levels = [0, 10, 20, 30]
@@ -477,7 +477,7 @@ def test_map_plot_curvilinear_grid_extend_defaults_to_neither():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
 
@@ -544,7 +544,7 @@ def test_map_plot_curvilinear_grid_consumes_extend_without_levels():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
 
@@ -589,8 +589,8 @@ def test_animate_map_curvilinear_extend_without_levels_reaches_the_one_colorbar(
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lat": (("x", "y"), lat2d),
-            "lon": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
         },
         name="field",
     )
@@ -1070,8 +1070,8 @@ def test_animate_map_curvilinear_shares_a_caller_supplied_norm_with_no_levels():
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lat": (("x", "y"), lat2d),
-            "lon": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
         },
         name="field",
     )
@@ -1144,8 +1144,8 @@ def test_animate_map_curvilinear_field_shares_bands_across_frames():
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lat": (("x", "y"), lat2d),
-            "lon": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
         },
         name="field",
     )
@@ -1217,8 +1217,8 @@ def test_animate_map_curvilinear_shares_boundaries_for_an_integer_levels_count()
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lat": (("x", "y"), lat2d),
-            "lon": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
         },
         name="field",
     )
@@ -1451,8 +1451,8 @@ def test_animate_map_string_norm_with_vmin_applies_the_caller_bound():
         data, dims=("time", "x", "y"),
         coords={
             "time": time,
-            "lon": (("x", "y"), lon2d),
-            "lat": (("x", "y"), lat2d),
+            "longitude": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
         },
         name="field",
     )
@@ -1491,7 +1491,7 @@ def test_map_plot_curvilinear_levels_with_explicit_norm_none_does_not_raise():
     field = xr.DataArray(
         np.arange(6 * 4).reshape(6, 4).astype(float),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     levels = [0, 10, 20, 30]
@@ -1570,7 +1570,7 @@ def test_map_plot_curvilinear_grid_small_listed_cmap_with_levels_and_extend():
     curvilinear_field = xr.DataArray(
         curvilinear_data,
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     separable_data = np.broadcast_to(values[:, None], (6, 4)).astype(float)
@@ -1643,7 +1643,7 @@ def _curvilinear_and_separable_fields(values):
     curvilinear_field = xr.DataArray(
         data.copy(),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon2d), "lat": (("x", "y"), lat2d)},
+        coords={"longitude": (("x", "y"), lon2d), "latitude": (("x", "y"), lat2d)},
         name="field",
     )
     separable_field = xr.DataArray(
@@ -1827,7 +1827,7 @@ def _wrapping_curvilinear_field(lon_origin, convention):
     return xr.DataArray(
         np.cos(np.radians(lat)),
         dims=("x", "y"),
-        coords={"lon": (("x", "y"), lon), "lat": (("x", "y"), lat)},
+        coords={"longitude": (("x", "y"), lon), "latitude": (("x", "y"), lat)},
         name="field",
     )
 
@@ -1903,3 +1903,52 @@ def test_curvilinear_mesh_leaves_cells_folded_over_the_pole_undrawn():
 
     assert folded.any() and not folded.all()
     assert not parallel.any()
+
+
+def _merged_atmosphere_and_curvilinear_ocean():
+    """Merge a separable atmosphere dataset with a curvilinear ocean one, as a run's files are."""
+    lon = np.linspace(0, 315, 8)
+    lat = np.linspace(-60, 60, 4)
+    time = np.array(["2001-01-01"], dtype="datetime64[ns]")
+    atmosphere = xr.Dataset(
+        {"humidity": (("time", "lon", "lat"), np.ones((1, 8, 4)))},
+        coords={"time": time, "lon": lon, "lat": lat},
+    )
+    lon2d, lat2d = np.meshgrid(np.linspace(0, 300, 6), np.linspace(-60, 60, 5), indexing="ij")
+    ocean = xr.Dataset(
+        {"sst": (("time", "x", "y"), np.full((1, 6, 5), 3.0))},
+        coords={
+            "time": time,
+            "longitude": (("x", "y"), lon2d),
+            "latitude": (("x", "y"), lat2d),
+        },
+    )
+    return xr.merge([atmosphere, ocean], join="exact")
+
+
+def test_area_mean_and_map_plot_find_each_grids_coordinates_in_a_merged_dataset():
+    """Each field of a merged dataset is read with its own grid's coordinates.
+
+    The atmosphere's has the 1-D ``lon``/``lat``, the curvilinear ocean's the
+    2-D ``longitude``/``latitude``; neither is called after the other's.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    merged = _merged_atmosphere_and_curvilinear_ocean()
+
+    ocean_mean = plot.area_mean(merged["sst"])
+    atmosphere_mean = plot.area_mean(merged["humidity"])
+    np.testing.assert_allclose(ocean_mean.values, 3.0)
+    np.testing.assert_allclose(atmosphere_mean.values, 1.0)
+    assert ocean_mean.dims == atmosphere_mean.dims == ("time",)
+
+    assert len(plot.map_plot(merged["sst"].isel(time=0)).collections) > 0
+    assert len(plot.map_plot(merged["humidity"].isel(time=0)).collections) > 0
+
+
+def test_map_plot_names_both_coordinate_conventions_when_a_field_has_neither():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    field = xr.DataArray(np.zeros((3, 2)), dims=("x", "y"), name="field")
+    with pytest.raises(ValueError, match="latitude"):
+        plot.map_plot(field)

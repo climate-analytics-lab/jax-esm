@@ -30,11 +30,73 @@ from collections.abc import Sequence
 import jax.numpy as npx
 import numpy as np
 import xarray as xr
+from dinosaur import spherical_harmonic
 from veros import VerosSetup, veros_routine
 from veros.core.operators import at, update
 
+from jem.components.slab.grid import to_degrees
 from jem.components.veros.setups._grid import axis_spacing_and_origin, read_scrip_axes
 from jem.components.veros.setups._layers import LAYER_THICKNESSES
+
+
+#: How far, in degrees, the atmosphere's Gaussian axes may be from the SCRIP
+#: file's centres. The file stores them rounded to its own precision (~1e-13
+#: degrees); a larger departure means the file is a different grid from the one
+#: the atmosphere runs on.
+_SCRIP_AXIS_TOLERANCE_DEGREES = 1e-9
+
+
+def _atmosphere_output_axes(
+    scrip_longitude: np.ndarray, scrip_latitude: np.ndarray, scrip_file: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the longitude and latitude axes the atmosphere labels its output with.
+
+    The atmosphere (jax-gcm on a dinosaur Gaussian grid) writes ``lon`` as
+    ``longitude_nodes * 180 / pi`` and ``lat`` as ``arcsin(sin_lat) * 180 /
+    pi``, in float64 (``jem.components.slab.grid.to_degrees`` is that
+    conversion). Those values differ from the SCRIP file's degrees, which are
+    rounded on the way to disk, by ~1e-13 degrees -- enough for
+    ``xr.merge(join="exact")`` to refuse two datasets that describe one grid --
+    so the axes are rebuilt here from the grid's definition, the way the
+    atmosphere builds them, and the file only confirms they describe the same
+    cells.
+
+    A dinosaur Gaussian grid with ``ny`` latitudes has ``nx = 2 * ny``
+    longitudes; any other shape is not a grid the atmosphere can run on.
+
+    Raises
+    ------
+    ValueError
+        If the file's shape is not a Gaussian grid's, or its centres are not
+        those of the Gaussian grid of that shape.
+
+    """
+    nx, ny = scrip_longitude.size, scrip_latitude.size
+    if ny % 2 or nx != 2 * ny:
+        raise ValueError(
+            f"{scrip_file!r} is a {nx} x {ny} (lon x lat) grid, which is not a"
+            " Gaussian grid of the atmosphere (longitudes = 2 x latitudes);"
+            " double_drake_setup shares the atmosphere's axes bit for bit, so"
+            " it needs the grid the atmosphere runs on."
+        )
+    # The nodal axes depend only on the node counts, not on the truncation.
+    grid = spherical_harmonic.Grid.construct(
+        max_wavenumber=ny // 2 - 1, gaussian_nodes=ny // 2)
+    longitude_radian, sine_latitude = grid.nodal_axes
+    longitude = to_degrees(longitude_radian)
+    latitude = to_degrees(np.arcsin(sine_latitude))
+    departure = max(
+        float(np.max(np.abs(longitude - scrip_longitude))),
+        float(np.max(np.abs(latitude - scrip_latitude))),
+    )
+    if departure > _SCRIP_AXIS_TOLERANCE_DEGREES:
+        raise ValueError(
+            f"{scrip_file!r}'s cell centres are {departure:g} degrees from the"
+            f" atmosphere's {nx} x {ny} Gaussian grid, more than the"
+            f" {_SCRIP_AXIS_TOLERANCE_DEGREES:g} allowed: it is not the grid the"
+            " atmosphere runs on."
+        )
+    return longitude, latitude
 
 
 def double_drake_setup(
@@ -126,6 +188,11 @@ def double_drake_setup(
     dxt_axis, x_origin = axis_spacing_and_origin(longitude, cyclic=True)
     dyt, y_origin = axis_spacing_and_origin(latitude, cyclic=False)
     dxt = float(dxt_axis[0])  # the longitude axis is uniform
+    # What the output is labelled with: the atmosphere's own axes, bit for bit
+    # (see `_atmosphere_output_axes`). Veros' `xt`/`yt` are the same cells to
+    # round-off, which `VerosComponent` checks before it relabels them.
+    output_longitude, output_latitude = _atmosphere_output_axes(
+        longitude, latitude, atmosphere_grid_file)
 
     class DoubleDrakeSetup(VerosSetup):
         """A spherical-coordinate ocean with a partially closed domain.
@@ -135,6 +202,12 @@ def double_drake_setup(
         atmosphere's own (see the module docstring), and its initial state is
         horizontally uniform (see ``cold_start_temperature_celsius``).
         """
+
+        # The output's `lon`/`lat` are the atmosphere's exact axes, so that
+        # `xr.merge([atm, ocn], join="exact")` succeeds where Veros' own
+        # cumulative-sum `xt`/`yt` would not.
+        geographic_longitude_axis = output_longitude
+        geographic_latitude_axis = output_latitude
 
         @veros_routine
         def set_parameter(self, state):

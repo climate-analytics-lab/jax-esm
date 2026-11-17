@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+import xarray as xr
 
 # Importing the adapter is what points Veros at its JAX backend, and it has
 # to happen before anything imports veros.core -- including the setup module
@@ -377,15 +378,16 @@ def _rotated(veros_model, monkeypatch, grid_shape):
 def test_a_rotated_grid_is_labelled_with_its_cells_true_positions(
     veros_model, monkeypatch, grid_shape
 ):
-    """A rotated grid's output is on index dimensions under 2-D ``lon``/``lat``.
+    """A rotated grid's output is on index dimensions under 2-D ``longitude``/``latitude``.
 
     Veros' own axes are the grid's native, pre-rotation ones. Writing them as
     ``lon``/``lat`` would label every cell up to the pole's displacement away
     from where it is, so a setup that declares its true positions gets the
     convention every component uses for a curvilinear grid: ``x``/``y``
-    dimensions, 2-D ``lon``/``lat`` auxiliary coordinates and a CF
-    ``coordinates`` attribute, with the native axes kept under their own
-    name.
+    dimensions, 2-D ``longitude``/``latitude`` auxiliary coordinates (not
+    ``lon``/``lat``, which are the atmosphere's 1-D axes and would be lost in
+    a merge) and a CF ``coordinates`` attribute, with the native axes kept
+    under their own name.
     """
     component, true_lon, true_lat, native_lon, native_lat = _rotated(
         veros_model, monkeypatch, grid_shape
@@ -398,11 +400,14 @@ def test_a_rotated_grid_is_labelled_with_its_cells_true_positions(
     assert dataset.sea_surface_temperature.dims == ("time", "x", "y")
     assert dataset.temp.dims == ("time", "x", "y", "depth")
     assert dataset.mask_surface_T.dims == ("x", "y")
-    assert dataset.lon.dims == dataset.lat.dims == ("x", "y")
-    np.testing.assert_array_equal(dataset.lon, true_lon)
-    np.testing.assert_array_equal(dataset.lat, true_lat)
-    assert dataset.lon.attrs["units"] == "degrees_east"
-    assert dataset.lat.attrs["units"] == "degrees_north"
+    assert dataset.longitude.dims == dataset.latitude.dims == ("x", "y")
+    assert "lon" not in dataset.variables and "lat" not in dataset.variables
+    np.testing.assert_array_equal(dataset.longitude, true_lon)
+    np.testing.assert_array_equal(dataset.latitude, true_lat)
+    assert dataset.longitude.attrs["units"] == "degrees_east"
+    assert dataset.latitude.attrs["units"] == "degrees_north"
+    assert dataset.longitude.attrs["standard_name"] == "longitude"
+    assert "axis" not in dataset.longitude.attrs
     np.testing.assert_array_equal(dataset.native_lon, native_lon)
     np.testing.assert_array_equal(dataset.native_lat, native_lat)
 
@@ -412,7 +417,7 @@ def test_a_rotated_grid_is_labelled_with_its_cells_true_positions(
         horizontal = "x" in variable.dims and "y" in variable.dims
         assert ("coordinates" in variable.attrs) == horizontal, name
         if horizontal:
-            assert variable.attrs["coordinates"] == "lat lon"
+            assert variable.attrs["coordinates"] == "longitude latitude"
     # The vectors are along the grid's own axes, and say so.
     for name in ("u", "v", "sea_surface_u", "sea_surface_v",
                  "forcing_surface_taux", "forcing_surface_tauy"):
@@ -435,6 +440,146 @@ def test_a_setup_that_declares_half_a_position_is_refused(
     )
     with pytest.raises(ValueError, match="geographic_latitude has shape"):
         VerosComponent(veros_model)
+
+
+def _atmosphere_like_dataset(longitude, latitude, n_records=2):
+    """Return a dataset on exactly the given ``lon``/``lat`` axes, as the atmosphere's is."""
+    return xr.Dataset(
+        {"surface_pressure": (("time", "lon", "lat"),
+                              np.zeros((n_records, longitude.size, latitude.size)))},
+        coords={
+            "time": TimeAxis(
+                START_DATE, np.arange(n_records), COUPLING_TIMESTEP).datetimes(),
+            "lon": ("lon", longitude), "lat": ("lat", latitude),
+        },
+    )
+
+
+def _declare_axes(veros_model, monkeypatch, grid_shape, *, offset=0.0):
+    """Declare 1-D output axes that are Veros' own to within ``offset`` degrees."""
+    native_lon = np.asarray(veros_model.state.variables.xt)[GHOST_CELLS:-GHOST_CELLS]
+    native_lat = np.asarray(veros_model.state.variables.yt)[GHOST_CELLS:-GHOST_CELLS]
+    declared_lon = native_lon + offset
+    declared_lat = native_lat + offset
+    monkeypatch.setattr(veros_model, "geographic_longitude_axis", declared_lon, raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude_axis", declared_lat, raising=False)
+    return declared_lon, declared_lat
+
+
+def _require_degrees(component):
+    if component.longitude_units != "degrees_east":
+        pytest.skip("this grid's coordinates are metres: it has no longitude to declare")
+
+
+def test_declared_axes_label_a_separable_grid_exactly(veros_model, monkeypatch, grid_shape):
+    """A setup's 1-D axes label ``lon``/``lat`` bit for bit and merge exactly.
+
+    Veros reconstructs ``xt``/``yt`` by cumulative sums, so they differ in the
+    last bits from another component's axis of the same grid and
+    ``xr.merge(join="exact")`` refuses the pair. A setup that declares the
+    other component's axis gets that axis written, not Veros' near copy.
+    """
+    _require_degrees(_bound(veros_model))
+    # 5e-14 degrees: the size of the round-off the declaration exists to remove.
+    declared_lon, declared_lat = _declare_axes(
+        veros_model, monkeypatch, grid_shape, offset=5e-14)
+    component = _bound(veros_model)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+
+    assert dataset.sea_surface_temperature.dims == ("time", "lon", "lat")
+    np.testing.assert_array_equal(dataset.lon.values, declared_lon)
+    np.testing.assert_array_equal(dataset.lat.values, declared_lat)
+    assert dataset.lon.attrs["standard_name"] == "longitude"
+    assert dataset.lat.attrs["axis"] == "Y"
+    assert "coordinates" not in dataset.sea_surface_temperature.attrs
+
+    atmosphere = _atmosphere_like_dataset(declared_lon, declared_lat)
+    merged = xr.merge([atmosphere, dataset], join="exact")
+    np.testing.assert_array_equal(merged.lon.values, declared_lon)
+    assert merged.sea_surface_temperature.dims == ("time", "lon", "lat")
+
+
+def test_undeclared_axes_do_not_merge_exactly_with_a_round_off_neighbour(
+    veros_model, grid_shape
+):
+    """The case the declaration exists for: Veros' own axes are not bit-equal."""
+    _require_degrees(_bound(veros_model))
+    component = _bound(veros_model)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+    neighbour = _atmosphere_like_dataset(
+        np.asarray(dataset.lon.values) + 5e-14, np.asarray(dataset.lat.values))
+    with pytest.raises(ValueError, match="exact"):
+        xr.merge([neighbour, dataset], join="exact")
+
+
+def test_declared_axes_that_would_move_a_cell_are_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """A label must not move a cell: an axis off Veros' own by more than 1e-6 degrees is refused."""
+    _require_degrees(_bound(veros_model))
+    _declare_axes(veros_model, monkeypatch, grid_shape, offset=1e-4)
+    with pytest.raises(ValueError, match="must not move"):
+        VerosComponent(veros_model)
+
+
+def test_declared_axes_of_the_wrong_length_are_refused(veros_model, monkeypatch, grid_shape):
+    _require_degrees(_bound(veros_model))
+    declared_lon, declared_lat = _declare_axes(veros_model, monkeypatch, grid_shape)
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude_axis", declared_lon[:-1], raising=False)
+    with pytest.raises(ValueError, match="geographic_longitude_axis has shape"):
+        VerosComponent(veros_model)
+
+
+def test_a_setup_that_declares_half_the_axes_is_refused(veros_model, monkeypatch, grid_shape):
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude_axis", np.zeros(grid_shape[0]), raising=False)
+    with pytest.raises(ValueError, match="needs both"):
+        VerosComponent(veros_model)
+
+
+def test_declaring_axes_and_positions_together_is_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """The 1-D and the 2-D declaration are two answers to one question."""
+    _require_degrees(_bound(veros_model))
+    _declare_axes(veros_model, monkeypatch, grid_shape)
+    nx, ny = grid_shape
+    monkeypatch.setattr(veros_model, "geographic_longitude", np.zeros((nx, ny)), raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude", np.zeros((nx, ny)), raising=False)
+    with pytest.raises(ValueError, match="declare one"):
+        VerosComponent(veros_model)
+
+
+def test_a_rotated_grid_keeps_its_positions_through_a_merge_with_the_atmosphere(
+    veros_model, monkeypatch, grid_shape
+):
+    """The 2-D positions survive ``xr.merge`` with the atmosphere's 1-D ``lon``/``lat``.
+
+    Named ``lon``/``lat`` they would be dropped for the atmosphere's axes,
+    leaving the ocean's variables with no position at all.
+    """
+    component, true_lon, true_lat, _, _ = _rotated(veros_model, monkeypatch, grid_shape)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+    atmosphere = _atmosphere_like_dataset(np.arange(0.0, 360.0, 3.75), np.linspace(-87, 87, 48))
+
+    merged = xr.merge([atmosphere, dataset], join="exact")
+
+    sst = merged.sea_surface_temperature
+    assert "longitude" in sst.coords and "latitude" in sst.coords
+    np.testing.assert_array_equal(sst.longitude, true_lon)
+    np.testing.assert_array_equal(sst.latitude, true_lat)
+    # The atmosphere's own axes are untouched.
+    assert merged.surface_pressure.dims == ("time", "lon", "lat")
 
 
 def test_to_xarray_labels_the_gm_streamfunction(component):

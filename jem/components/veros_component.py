@@ -40,6 +40,13 @@ from jem.checkpoint import CARRY_FILENAME
 from jem.checkpoint import load as load_pytree
 from jem.checkpoint import save as save_pytree
 from jem.components.clock import clock_tolerance_seconds
+from jem.components.coordinates import (
+    CURVILINEAR_DIMS,
+    SEPARABLE_DIMS,
+    curvilinear_coordinates,
+    geolocate,
+    separable_coordinates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,10 +248,22 @@ class VerosDerived:
         )
 
 
+#: How far, in degrees, a setup's declared 1-D output axes (see
+#: :class:`VerosComponent`) may differ from Veros' own ``xt``/``yt``. A
+#: declaration is a *label*: it must never move a cell. Veros rebuilds its
+#: centres by cumulative sums, which differ from any other construction of the
+#: same axis by ~1e-13 degrees (round-off, and the reason a label is needed at
+#: all, since ``xr.merge(join="exact")`` compares bits); 1e-6 degrees is ~0.1 m,
+#: seven orders of magnitude above that and far below anything that changes a
+#: metric term, while a declared axis that is a different grid -- shifted by half
+#: a cell, or another resolution's -- is off by orders of magnitude more.
+_DECLARED_AXIS_TOLERANCE_DEGREES = 1e-6
+
+
 def _geographic_coordinates(
     model: Any, horizontal_shape: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
-    """Return a setup's declared true ``(longitude, latitude)``, or ``(None, None)``.
+    """Return a setup's declared true 2-D ``(longitude, latitude)``, or ``(None, None)``.
 
     Read from the setup's ``geographic_longitude``/``geographic_latitude``
     attributes (see :class:`VerosComponent`). Declaring one without the other,
@@ -272,6 +291,64 @@ def _geographic_coordinates(
     return longitude, latitude
 
 
+def _geographic_axes(
+    model: Any,
+    native_longitude: np.ndarray,
+    native_latitude: np.ndarray,
+    coordinates_in_degrees: bool,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Return a setup's declared 1-D output axes, or ``(None, None)``.
+
+    Read from the setup's ``geographic_longitude_axis`` /
+    ``geographic_latitude_axis`` attributes (see :class:`VerosComponent`).
+    The declared axes only *rename the values* the output is labelled with, so
+    they are refused unless they are Veros' own ``xt``/``yt`` to within
+    :data:`_DECLARED_AXIS_TOLERANCE_DEGREES`: an axis that moved a cell would
+    mislabel every field in the file. Declaring one axis without the other, an
+    axis of the wrong length, or axes for a grid whose coordinates are metres
+    is refused as a mistake in the setup.
+    """
+    name = type(model).__name__
+    longitude = getattr(model, "geographic_longitude_axis", None)
+    latitude = getattr(model, "geographic_latitude_axis", None)
+    if longitude is None and latitude is None:
+        return None, None
+    if longitude is None or latitude is None:
+        raise ValueError(
+            f"{name} declares only one of geographic_longitude_axis and"
+            " geographic_latitude_axis; an output grid needs both."
+        )
+    if not coordinates_in_degrees:
+        raise ValueError(
+            f"{name} declares geographic output axes, but its grid is"
+            " Cartesian (settings.coord_degree is False): its coordinates are"
+            " metres and have no longitude or latitude to label them with."
+        )
+    axes = []
+    for label, declared, native in (
+        ("geographic_longitude_axis", longitude, native_longitude),
+        ("geographic_latitude_axis", latitude, native_latitude),
+    ):
+        values = np.asarray(declared, dtype=np.float64)
+        if values.shape != native.shape:
+            raise ValueError(
+                f"{name}.{label} has shape {values.shape}, but Veros' axis is"
+                f" {native.shape}."
+            )
+        departure = float(np.max(np.abs(values - native)))
+        if not departure <= _DECLARED_AXIS_TOLERANCE_DEGREES:
+            raise ValueError(
+                f"{name}.{label} differs from Veros' own axis by {departure:g}"
+                f" degrees, more than the {_DECLARED_AXIS_TOLERANCE_DEGREES:g}"
+                " allowed: a declared axis only relabels the cells' round-off,"
+                " it must not move them. A grid whose cells are elsewhere than"
+                " Veros' axes say is a 2-D geographic_longitude/"
+                "geographic_latitude declaration instead."
+            )
+        axes.append(values)
+    return axes[0], axes[1]
+
+
 class VerosComponent:
     """The Veros ocean GCM, driven one coupling timestep at a time.
 
@@ -286,13 +363,29 @@ class VerosComponent:
     model : veros.VerosSetup
         A Veros setup on which ``setup()`` has already been called, so
         ``model.state`` holds the allocated grid and initial conditions
-        this wrapper reads its geometry from. A setup whose grid lines are
-        not geographic meridians and parallels -- a rotated or displaced
-        pole -- says where its cells really are with two attributes,
-        ``geographic_longitude`` and ``geographic_latitude``: arrays in
-        degrees on the interior T grid, shape ``(nx, ny)``. Veros' own
-        ``xt``/``yt`` are then the grid's native axes and are published as
-        such (see :meth:`to_xarray`).
+        this wrapper reads its geometry from. What the output's horizontal
+        coordinates are labelled with is the setup's to declare, as one of:
+
+        * nothing: the dataset is written on ``("lon", "lat")`` with Veros'
+          own T-grid axes ``xt``/``yt``;
+        * ``geographic_longitude_axis`` and ``geographic_latitude_axis``:
+          1-D arrays in degrees, shapes ``(nx,)`` and ``(ny,)``. The dataset
+          is still on ``("lon", "lat")`` but labelled with these values, which
+          must be Veros' own axes to within 1e-6 degrees (a label must not
+          move a cell; anything further is refused). Veros rebuilds ``xt``/
+          ``yt`` by cumulative sums, so they differ in the last bits from
+          another component's axis even when both describe one grid; declaring
+          that component's own axis, bit for bit, is what lets
+          ``xr.merge(join="exact")`` of the two datasets succeed;
+        * ``geographic_longitude`` and ``geographic_latitude``: 2-D arrays in
+          degrees on the interior T grid, shape ``(nx, ny)``, for a grid whose
+          lines are not meridians and parallels (a rotated or displaced pole).
+          The dataset is written on index dimensions ``("x", "y")`` with 2-D
+          ``longitude``/``latitude`` coordinates (see
+          :mod:`jem.components.coordinates`) and Veros' own axes are kept as
+          ``native_lon``/``native_lat``.
+
+        Declaring the 1-D and the 2-D form together is refused.
 
     Attributes
     ----------
@@ -376,6 +469,23 @@ class VerosComponent:
         geographic = _geographic_coordinates(model, self.horizontal_shape)
         self.geographic_longitude: np.ndarray | None = geographic[0]
         self.geographic_latitude: np.ndarray | None = geographic[1]
+        # The 1-D alternative: the exact axes the output is labelled with when
+        # the grid *is* meridians and parallels but another component's copy
+        # of the axis differs from Veros' in the last bits.
+        axes = _geographic_axes(
+            model, np.asarray(self.longitude), np.asarray(self.latitude),
+            bool(settings.coord_degree),
+        )
+        self.geographic_longitude_axis: np.ndarray | None = axes[0]
+        self.geographic_latitude_axis: np.ndarray | None = axes[1]
+        if geographic[0] is not None and axes[0] is not None:
+            raise ValueError(
+                f"{type(model).__name__} declares both 2-D geographic"
+                " positions (geographic_longitude/geographic_latitude) and"
+                " 1-D output axes (geographic_longitude_axis/"
+                "geographic_latitude_axis); they are two answers to what the"
+                " output is labelled with, so declare one."
+            )
 
         # Which external mode the setup solves is fixed for the whole run, so
         # it is read once here as a Python bool and the `psi` branch in
@@ -1119,13 +1229,14 @@ class VerosComponent:
             :meth:`~jem.base.component.TimeAxis.datetimes` builds from ``time``,
             the same one every other component labels its output with, so
             ``xr.merge`` joins the records instead of unioning two axes.
-            The horizontal dimensions are ``("lon", "lat")``, Veros' own
-            T-grid axes, for a grid whose axes are meridians and parallels.
-            A setup that declares its cells' true positions (a rotated pole;
-            see the class docstring) is written on index dimensions
-            ``("x", "y")`` instead, with 2-D ``lon``/``lat`` auxiliary
-            coordinates holding those positions, a CF ``coordinates``
-            attribute on every horizontal variable, and Veros' axes kept as
+            The horizontal dimensions are ``("lon", "lat")`` for a grid whose
+            axes are meridians and parallels, labelled with Veros' own T-grid
+            axes or with the 1-D axes the setup declared (see the class
+            docstring). A setup that declares its cells' true 2-D positions
+            (a rotated pole) is written on index dimensions ``("x", "y")``
+            instead, with 2-D ``longitude``/``latitude`` auxiliary coordinates
+            holding those positions, a CF ``coordinates`` attribute on every
+            horizontal variable, and Veros' axes kept as
             ``native_lon``/``native_lat``; its vectors (``u``, ``v``, the
             wind stress) are along the grid's own directions and say so.
             ``ssh`` is present only for a run that solves the linear free
@@ -1143,9 +1254,9 @@ class VerosComponent:
             )
 
         # The horizontal dimensions follow the output convention every
-        # component shares: `lon`/`lat` for a grid whose axes are meridians
-        # and parallels, and index dimensions `x`/`y` under 2-D `lon`/`lat`
-        # for one whose axes are not (`_horizontal_coordinates`).
+        # component shares (`jem.components.coordinates`): `lon`/`lat` for a
+        # grid whose axes are meridians and parallels, and index dimensions
+        # `x`/`y` under 2-D `longitude`/`latitude` for one whose axes are not.
         x, y = self._horizontal_dims()
         dataset = xr.Dataset(
             data_vars={
@@ -1217,7 +1328,7 @@ class VerosComponent:
             " Like `u` and `v` it lives on Veros' staggered grid -- here the"
             " zeta (corner) points, whose surface land-sea mask is published"
             " as `mask_surface_Z` -- but is labelled with the T-grid"
-            " `lon`/`lat` coordinates this dataset uses throughout."
+            " horizontal coordinates this dataset uses throughout."
         )
 
         # `jem_role` records which section of the carry each variable came
@@ -1283,7 +1394,7 @@ class VerosComponent:
         # The sea surface height exists only where `step` emitted one, so it
         # is added rather than sitting in the literals above. Unlike `psi` it
         # needs no staggering note: it is a T-grid field, the grid this
-        # dataset's `lon`/`lat` already label.
+        # dataset's horizontal coordinates already label.
         if not self.enable_streamfunction:
             dataset["ssh"] = (["time", x, y], diagnostics["ssh"])
             var_attrs["ssh"] = {
@@ -1314,7 +1425,7 @@ class VerosComponent:
                     "Veros' `B1_gm` (isoneutral_diag_streamfunction), on the"
                     " V grid in the horizontal and at the top face of each"
                     " `depth` cell in the vertical, labelled with the T-grid"
-                    " `lon`/`lat` and cell-centre `depth` like `v`. Its"
+                    " horizontal coordinates and cell-centre `depth` like `v`. Its"
                     " zonal integral, sum(B1_gm * dxt * cos(lat_u)), is the"
                     " eddy-induced meridional overturning streamfunction on"
                     " geopotentials in Veros' convention (Veros'"
@@ -1339,14 +1450,10 @@ class VerosComponent:
                 dataset[name].attrs["comment"] = (
                     "a component along this grid's own x/y direction"
                     " (`native_lon`/`native_lat`), which is rotated from"
-                    " geographic east/north; `lon`/`lat` give each cell's"
+                    " geographic east/north; `longitude`/`latitude` give each cell's"
                     " true position"
                 )
-            # CF: a variable on index dimensions names its auxiliary
-            # coordinates, or a reader has no way to geolocate it.
-            for variable in dataset.data_vars.values():
-                if x in variable.dims and y in variable.dims:
-                    variable.attrs["coordinates"] = "lat lon"
+            geolocate(dataset)
 
         return dataset
 
@@ -1356,25 +1463,30 @@ class VerosComponent:
         ``("lon", "lat")`` for a grid whose axes are meridians and parallels,
         so that its dataset shares dimensions with the atmosphere's;
         ``("x", "y")`` for a rotated one, because CF and xarray forbid a 2-D
-        variable named after one of its own dimensions and the true
-        ``lon``/``lat`` of such a grid are 2-D.
+        variable named after one of its own dimensions and the true positions
+        of such a grid are 2-D.
         """
         if self.geographic_longitude is None:
-            return "lon", "lat"
-        return "x", "y"
+            return SEPARABLE_DIMS
+        return CURVILINEAR_DIMS
 
     def _horizontal_coordinates(self) -> dict[str, tuple]:
         """Return the horizontal coordinate variables of the output dataset.
 
-        An ordinary lat-lon grid has two 1-D coordinates, Veros' own T-grid
-        axes. A rotated grid has 2-D ``lon``/``lat`` -- where each cell really
-        is, as the setup declared it -- over the index dimensions, and keeps
-        Veros' axes as ``native_lon``/``native_lat``: they are what the
-        grid's metric terms and the directions of ``u``/``v`` refer to, but
-        labelling them ``lon``/``lat`` would put every cell up to the pole's
-        displacement away from where it is.
+        Three cases, by what the setup declared (see the class docstring). With
+        nothing declared, Veros' own T-grid axes. With 1-D axes, those, with the
+        attributes the atmosphere's own axes carry. A rotated grid has 2-D
+        ``longitude``/``latitude`` -- where each cell really is -- over the
+        index dimensions, and keeps Veros' axes as ``native_lon``/
+        ``native_lat``: they are what the grid's metric terms and the
+        directions of ``u``/``v`` refer to, but labelling them as positions
+        would put every cell up to the pole's displacement away from where it is.
         """
-        if self.geographic_longitude is None:
+        if (self.geographic_longitude_axis is not None
+                and self.geographic_latitude_axis is not None):
+            return separable_coordinates(
+                self.geographic_longitude_axis, self.geographic_latitude_axis)
+        if self.geographic_longitude is None or self.geographic_latitude is None:
             return {
                 "lon": (["lon"], self.longitude,
                         {"long_name": "T-grid longitude", "units": self.longitude_units}),
@@ -1383,14 +1495,8 @@ class VerosComponent:
             }
         x, y = self._horizontal_dims()
         return {
-            # No `axis` attribute: CF reserves it for true coordinate
-            # variables, and these are 2-D fields over index dimensions.
-            "lon": ([x, y], self.geographic_longitude,
-                    {"standard_name": "longitude", "units": "degrees_east",
-                     "long_name": "T-grid longitude"}),
-            "lat": ([x, y], self.geographic_latitude,
-                    {"standard_name": "latitude", "units": "degrees_north",
-                     "long_name": "T-grid latitude"}),
+            **curvilinear_coordinates(
+                self.geographic_longitude, self.geographic_latitude),
             "native_lon": ([x], self.longitude,
                            {"long_name": "T-grid longitude on the grid's own (rotated) axis",
                             "units": self.longitude_units}),

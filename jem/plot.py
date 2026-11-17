@@ -3,7 +3,7 @@
 Every example that produces a map or a time series was doing the same three
 things by hand: gluing a run's chunk files back into one dataset, weighting a
 horizontal mean by ``cos(latitude)``, and orienting a JEM field
-(``(..., lon, lat)``, see ``docs/source/design/output.md``) for
+(``(..., lon, lat)`` or ``(..., x, y)``, see ``docs/source/design/output.md``) for
 ``contourf``/``pcolormesh``. This module is those three things, written once.
 
 It is behind the optional ``plot`` extra (``pip install "jax-esm[plot]"``,
@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import numpy as np
 import xarray as xr
 
+from jem.components.coordinates import CURVILINEAR_LATITUDE, CURVILINEAR_LONGITUDE
 from jem.output import TIME_DIMENSION, output_file_step
 
 if TYPE_CHECKING:
@@ -172,16 +173,34 @@ def open_output(output_dir: Path | str, component: str = "atm") -> xr.Dataset:
         return xr.concat(datasets, dim=TIME_DIMENSION)
 
 
-def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.DataArray:
+def _horizontal_coordinate_names(field: xr.DataArray) -> tuple[str, str]:
+    """Return the names of ``field``'s latitude and longitude coordinates.
+
+    A curvilinear component's 2-D positions are named ``latitude``/``longitude``
+    and a separable grid's 1-D axes ``lat``/``lon`` (see
+    ``docs/source/design/output.md``); the names differ so that a merged dataset
+    can hold both. A field that carries the 2-D pair is on a curvilinear grid
+    and they are what it is drawn and averaged with; every other field has the
+    1-D ``lat``/``lon`` (and, lacking them, is refused by the caller with a
+    message naming what it does have).
+    """
+    if CURVILINEAR_LATITUDE in field.coords and CURVILINEAR_LONGITUDE in field.coords:
+        return CURVILINEAR_LATITUDE, CURVILINEAR_LONGITUDE
+    return "lat", "lon"
+
+
+def area_mean(
+    field: xr.DataArray, *, lat: str | None = None, lon: str | None = None
+) -> xr.DataArray:
     """Return the cos(latitude)-weighted mean of a field over its horizontal axes.
 
     Only the dimensions the horizontal coordinates actually span are
     reduced -- the same distinction :func:`_is_separable_grid` names for
     :func:`map_plot`/:func:`animate_map`: on a separable lon/lat grid
     ``lat``/``lon`` are 1-D coordinates over their own dimension each
-    (``("lat",)``, ``("lon",)``); on a curvilinear grid they are 2-D
-    auxiliary coordinates sharing the field's own index dimensions (e.g.
-    ``("x", "y")``). This does not call that helper, though: it never needs
+    (``("lat",)``, ``("lon",)``); on a curvilinear grid the 2-D auxiliary
+    coordinates are named ``latitude``/``longitude`` and share the field's
+    own index dimensions (e.g. ``("x", "y")``). This does not call that helper, though: it never needs
     to know *which* layout it has, only the union of the dims whichever of
     the two coordinates are present span -- one line that already covers
     both layouts uniformly, where naming the layout first would only add a
@@ -209,10 +228,12 @@ def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.
         The field to average. May still have a ``"time"`` dimension, a
         ``"level"`` dimension, or any other non-horizontal axis, all of
         which are left alone.
-    lat : str, default "lat"
-        Name of the latitude coordinate, in degrees.
-    lon : str, default "lon"
-        Name of the longitude coordinate, in degrees.
+    lat : str, optional
+        Name of the latitude coordinate, in degrees. By default the field's
+        2-D ``latitude`` if it has one, else ``lat``.
+    lon : str, optional
+        Name of the longitude coordinate, in degrees. By default the field's
+        2-D ``longitude`` if it has one, else ``lon``.
 
     Returns
     -------
@@ -228,6 +249,9 @@ def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.
         ``lat`` -- the cos(latitude) weight cannot be built without it.
 
     """
+    default_lat, default_lon = _horizontal_coordinate_names(field)
+    lat = default_lat if lat is None else lat
+    lon = default_lon if lon is None else lon
     horizontal_coords = [name for name in (lat, lon) if name in field.coords]
     # `dict.fromkeys` dedupes while keeping first-seen order (`lat`'s dims,
     # then any of `lon`'s not already in it) -- a plain `set` would do too,
@@ -529,13 +553,15 @@ def _map_plot(
     import matplotlib.pyplot as plt
 
     _require_single_record(field)
-    if "lat" not in field.coords or "lon" not in field.coords:
+    lat_name, lon_name = _horizontal_coordinate_names(field)
+    if lat_name not in field.coords or lon_name not in field.coords:
         raise ValueError(
-            f"map_plot needs `lat`/`lon` coordinates; this field has "
+            f"map_plot needs `lat`/`lon` (separable grid) or `latitude`/"
+            f"`longitude` (curvilinear grid) coordinates; this field has "
             f"{sorted(str(name) for name in field.coords)!r}."
         )
-    lat = field["lat"]
-    lon = field["lon"]
+    lat = field[lat_name]
+    lon = field[lon_name]
     separable = _is_separable_grid(lat, lon)
 
     plot_kwargs = dict(kwargs)
@@ -596,7 +622,7 @@ def _map_plot(
         # explicitly -- unlike the curvilinear path below.
         colorbar_extend = None
     else:
-        # Curvilinear grid: lat/lon are 2-D over the field's own index
+        # Curvilinear grid: latitude/longitude are 2-D over the field's own index
         # dimensions, in the same (lon-like, lat-like) order as the data
         # (see the module docstring); reverse both so lat-like leads.
         order = tuple(reversed(lat.dims))
@@ -778,7 +804,8 @@ def map_plot(
     Handles both grids the examples produce: a separable lon/lat grid (JEM's
     default, ``SlabGrid.from_coords``) with 1-D ``lat``/``lon`` coordinates,
     drawn with ``contourf``; and a curvilinear grid (``SlabGrid.from_scrip``,
-    a displaced-pole ocean) with 2-D auxiliary ``lat``/``lon`` coordinates
+    a displaced-pole ocean) with 2-D auxiliary ``latitude``/``longitude``
+    coordinates
     over its own index dimensions, drawn with ``pcolormesh``. Either way the
     data (and, for the curvilinear case, its coordinates) are transposed so
     latitude varies down the plot and longitude across it, because every JEM
@@ -941,7 +968,8 @@ def map_plot(
         ``coastlines=True``.
     ValueError
         If ``field`` still has a ``"time"`` or ``"level"`` dimension, has no
-        ``lat``/``lon`` coordinates to plot against, or ``field`` is on a
+        ``lat``/``lon`` (or, curvilinear, ``latitude``/``longitude``)
+        coordinates to plot against, or ``field`` is on a
         curvilinear grid and both ``levels`` and a non-``None`` ``norm`` are
         given (on a separable grid the combination is accepted, and
         ``norm=None`` never conflicts on either grid -- see above).

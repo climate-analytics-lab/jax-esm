@@ -96,8 +96,9 @@ sea surface temperature back) -- so the ocean is mechanically as well as
 thermodynamically forced.
 
 ``veros-earth``'s ocean output is written on index dimensions ``x``/``y``
-with 2-D ``lon``/``lat`` coordinates giving each cell's true position, like
-any curvilinear grid (see :doc:`design/output`): the grid's own axes are the
+with 2-D ``longitude``/``latitude`` coordinates giving each cell's true
+position, like any curvilinear grid (see :doc:`design/output`, which also says
+why they are not called ``lon``/``lat``): the grid's own axes are the
 rotated ones, kept in the file as ``native_lon``/``native_lat``, and ``u``,
 ``v`` and the wind stress are components along those axes rather than east
 and north.

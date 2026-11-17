@@ -44,6 +44,11 @@ from jem.base.component import (
     forcing_variable as forcing_variable,
     role_attrs as role_attrs,
 )
+from jem.components.coordinates import (
+    curvilinear_coordinates,
+    geolocated_variable_attrs,
+    separable_coordinates,
+)
 from jem.components.slab.grid import SlabGrid, to_degrees
 
 logger = logging.getLogger(__name__)
@@ -73,20 +78,6 @@ _MONTHS_PER_YEAR = 12
 # the ~0.4 degree spacing of the finest grid JEM supports, so a file written
 # on a genuinely different grid is rejected rather than silently regridded.
 _COORDINATE_TOLERANCE_DEGREES = 1e-3
-
-#: CF attributes for the horizontal coordinates, copied from
-#: ``jcm.cf_metadata._COORD_ATTRS`` so a slab dataset and a JCM dataset
-#: describe their shared axes identically.
-_LONGITUDE_ATTRS = {
-    "standard_name": "longitude",
-    "units": "degrees_east",
-    "long_name": "longitude",
-}
-_LATITUDE_ATTRS = {
-    "standard_name": "latitude",
-    "units": "degrees_north",
-    "long_name": "latitude",
-}
 
 
 def _resolve_dim_name(
@@ -470,9 +461,12 @@ class SlabModelBase(ABC):
         :meth:`jem.base.component.TimeAxis.datetimes`, and a separable grid
         writes 1-D ``lon``/``lat`` in degrees with the same values JCM writes
         for the same coordinate system. A curvilinear grid cannot: it writes
-        2-D auxiliary ``lat``/``lon`` coordinates over index-space dimensions,
-        and each data variable gets the CF ``coordinates`` attribute that
-        points at them.
+        2-D auxiliary ``longitude``/``latitude`` coordinates over index-space
+        dimensions ``x``/``y``, and each data variable on them gets the CF
+        ``coordinates`` attribute that points at them. They are not called
+        ``lon``/``lat`` because the atmosphere's 1-D axes already are, and a
+        merge would keep those and drop the 2-D positions
+        (:mod:`jem.components.coordinates`).
 
         Parameters
         ----------
@@ -493,34 +487,18 @@ class SlabModelBase(ABC):
         # dict it is handed -- gets one of its own.
         coords: dict[str, Any] = {"time": ("time", time.datetimes(), time.attrs)}
 
-        grid_dims = self.grid.dims
         if self.grid.is_separable:
-            coords["lon"] = (
-                "lon",
+            coords.update(separable_coordinates(
                 to_degrees(self.grid.longitude_axis_radian),
-                {**_LONGITUDE_ATTRS, "axis": "X"},
-            )
-            coords["lat"] = (
-                "lat",
                 to_degrees(self.grid.latitude_axis_radian),
-                {**_LATITUDE_ATTRS, "axis": "Y"},
-            )
+            ))
         else:
-            # CF forbids ``axis`` on an auxiliary coordinate: it marks a true
-            # coordinate variable, and these are 2-D fields over index-space
-            # dimensions.
-            coords["lon"] = (
-                grid_dims,
+            coords.update(curvilinear_coordinates(
                 to_degrees(self.grid.longitude_radian),
-                dict(_LONGITUDE_ATTRS),
-            )
-            coords["lat"] = (
-                grid_dims,
                 to_degrees(self.grid.latitude_radian),
-                dict(_LATITUDE_ATTRS),
-            )
+            ))
             data_vars = {
-                name: (dims, values, {**attrs, "coordinates": "lat lon"})
+                name: (dims, values, geolocated_variable_attrs(dims, attrs))
                 for name, (dims, values, attrs) in data_vars.items()
             }
 

@@ -513,3 +513,92 @@ def test_earth_initial_state_is_the_flat_profile_on_every_wet_layer_and_zero_bel
         field = np.asarray(getattr(deep, name))[2:-2, 2:-2, :, 0]
         np.testing.assert_array_equal(field[mask_t], flat_field[mask_t])
         assert np.all(field[~mask_t] == 0.0)
+
+
+def _atmosphere_dataset(n_records=2):
+    """Return a dataset with the T31 atmosphere's own coordinates, from jcm's writer."""
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.utils import data_to_xarray
+
+    coords = get_speedy_coords(layers=8, spectral_truncation=31)
+    return data_to_xarray(
+        {"surface_pressure": np.zeros(
+            (n_records,) + coords.horizontal.nodal_shape, dtype=np.float32)},
+        coords=coords,
+        times=1.0 * np.arange(n_records),
+        serialize_coords_to_attrs=False,
+    )
+
+
+def test_double_drake_declares_the_atmospheres_axes_bit_for_bit():
+    """The declared output axes are what the atmosphere's own dataset holds.
+
+    Not close: equal. ``xr.merge(join="exact")`` compares bits, and the SCRIP
+    file the setup is built from is ~1e-13 degrees away from them.
+    """
+    from jem.components.veros.setups._grid import read_scrip_axes
+    from jem.components.veros.setups.double_drake import _atmosphere_output_axes
+
+    scrip_longitude, scrip_latitude = read_scrip_axes(ATMOSPHERE_SCRIP_FILE)
+    longitude, latitude = _atmosphere_output_axes(
+        scrip_longitude, scrip_latitude, ATMOSPHERE_SCRIP_FILE)
+
+    atmosphere = _atmosphere_dataset()
+    np.testing.assert_array_equal(longitude, atmosphere["lon"].values)
+    np.testing.assert_array_equal(latitude, atmosphere["lat"].values)
+    # The reason the declaration exists: the file's own centres are not those.
+    assert not np.array_equal(scrip_longitude, atmosphere["lon"].values)
+
+
+def test_double_drake_refuses_a_grid_that_is_not_the_atmospheres():
+    from jem.components.veros.setups._grid import read_scrip_axes
+    from jem.components.veros.setups.double_drake import _atmosphere_output_axes
+
+    longitude, latitude = read_scrip_axes(ATMOSPHERE_SCRIP_FILE)
+    with pytest.raises(ValueError, match="not a Gaussian grid"):
+        _atmosphere_output_axes(longitude[:-1], latitude, "shape.nc")
+    with pytest.raises(ValueError, match="not the grid the atmosphere runs on"):
+        _atmosphere_output_axes(longitude + 0.5, latitude, "shifted.nc")
+
+
+@pytest.mark.slow
+def test_double_drake_output_merges_exactly_with_the_atmospheres():
+    """A double-drake ocean's dataset shares ``lon``/``lat`` with the atmosphere's exactly.
+
+    Without the setup's declared axes the ocean is labelled with Veros'
+    reconstructed ``xt``/``yt``, ~1e-13 degrees from the atmosphere's, and
+    ``xr.merge([atm, ocn], join="exact")`` raises.
+    """
+    import jax_datetime as jdt
+
+    from jem.base.component import TimeAxis
+
+    model = _double_drake_model()
+    component = veros_component.VerosComponent(model)
+    nx, ny = component.horizontal_shape
+    nz = int(component.dzt.shape[0])
+    n_records = 2
+    surface = jnp.zeros((n_records, nx, ny))
+    diagnostics = {name: jnp.zeros((n_records, nx, ny, nz))
+                   for name in ("temp", "salt", "u", "v")}
+    diagnostics.update({
+        name: surface for name in (
+            "psi", "sea_surface_temperature", "sea_surface_salinity",
+            "sea_surface_u", "sea_surface_v", "surface_air_temperature",
+            "surface_taux", "surface_tauy", "heat_flux", "freshwater_flux")
+    })
+    diagnostics["runoff_mass_rate"] = jnp.zeros((n_records,))
+    diagnostics["ssh"] = surface
+    diagnostics["B1_gm"] = jnp.zeros((n_records, nx, ny, nz))
+    time = TimeAxis(
+        jdt.to_datetime("2001-01-01"), np.arange(n_records), jdt.to_timedelta(1, "day"))
+    dataset = component.to_xarray(diagnostics, time)
+
+    atmosphere = _atmosphere_dataset(n_records)
+    atmosphere["time"] = dataset["time"]
+    merged = xr.merge([atmosphere, dataset], join="exact", compat="no_conflicts")
+
+    np.testing.assert_array_equal(merged["lon"].values, atmosphere["lon"].values)
+    np.testing.assert_array_equal(merged["lat"].values, atmosphere["lat"].values)
+    assert merged["sea_surface_temperature"].dims == ("time", "lon", "lat")
+    assert merged["surface_pressure"].dims == ("time", "lon", "lat")
