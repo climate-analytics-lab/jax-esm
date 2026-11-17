@@ -35,10 +35,13 @@ directory into ``outputs/<date>/<time>/``.
        SST-diagnosed slab sea ice; no land. The first thing to run.
      - ``python -m jem.main +configuration=aquaplanet-slab``
    * - ``aquaplanet-slab-mixed-grid``
-     - The same, with the ocean and sea ice on a displaced-pole curvilinear
-       grid and ESMF regridding weights mapping fields to and from the
-       atmosphere's T31 Gaussian grid. Proves the coupler does not need one
-       shared grid.
+     - The same, with the ocean and sea ice (every cell ocean) on a
+       displaced-pole curvilinear grid and ESMF regridding weights mapping
+       fields to and from the atmosphere's T31 Gaussian grid. Proves the
+       coupler does not need one shared grid. The grid's displaced pole is
+       open (a gap over Greenland covering 0.04% of the sphere), so 11 of the
+       atmosphere's 4608 cells are only partly covered by the maps; the
+       configuration's comments give the numbers.
      - ``python -m jem.main +configuration=aquaplanet-slab-mixed-grid``
    * - ``earth-slab``
      - SPEEDY T31L8 on jax-gcm's packaged T30 terrain and climatology, over a

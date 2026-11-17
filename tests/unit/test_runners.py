@@ -307,9 +307,15 @@ def test_mixed_grid_configuration_builds():
     assert ocean_grid.shape != atmosphere_shape
     # Both surface components are on the one ocean grid.
     assert coupler.components["seaice"].grid.shape == ocean_grid.shape
-    # The land fraction came from the packaged mask file, not from the SCRIP
-    # file's own all-ocean integer mask.
-    assert float(ocean_grid.fractional_mask.max()) > 0.0
+    # An aquaplanet: no land fraction file is given, so the grid's own all-active
+    # SCRIP mask is used and every ocean and sea-ice cell is ocean. A packaged
+    # land mask would leave cells that never leave their initial temperature.
+    assert float(ocean_grid.fractional_mask.max()) == 0.0
+    assert bool(np.all(np.asarray(ocean_grid.ocean_mask)))
+    assert float(coupler.components["seaice"].grid.fractional_mask.max()) == 0.0
+    # The ocean grid is the displaced-pole one: curvilinear, not the
+    # atmosphere's separable Gaussian grid.
+    assert not ocean_grid.is_separable
 
     exchange = coupler.exchangers["exchange"]
     crossing = {spec.regrid for spec in exchange.specs if spec.regrid is not None}

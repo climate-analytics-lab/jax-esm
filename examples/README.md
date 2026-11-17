@@ -29,7 +29,7 @@ drift the door exists to prevent.
 | Aquaplanet (`01_basic/01_aquaplanet.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice); equivalent to `python -m jem.main +configuration=aquaplanet-slab` |
 | Custom initial SST (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: `configurations.load("aquaplanet-slab")`, then one field of the initial carry is replaced before the run |
 | Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
-| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction on a displaced-pole ocean grid with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
+| Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction of an all-ocean aquaplanet with the ocean and sea ice on a displaced-pole grid, with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
 | Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab` with the thermodynamic Winton ice and a freezing-clamped ocean) |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
