@@ -60,9 +60,19 @@ it is.
 The ocean is idealised in both, and a short run should be read with that in
 mind:
 
-* **No bathymetry.** The land-sea mask is the only geometry read (for
-  ``veros-earth`` the packaged ERA5 land fraction, thresholded at 0.5), so
-  every ocean column has the same flat 5200 m bottom.
+* **A flat bottom, unless a bathymetry file is given.** The land-sea mask
+  decides which columns are ocean (for ``veros-earth`` the packaged ERA5 land
+  fraction, thresholded at 0.5), and as shipped every ocean column has the
+  same flat 5200 m bottom. ``jem.components.veros.setups.earth.earth_setup``
+  takes ``bathymetry_file=``: a depth file made on the same grid by
+  ``jem.tools.ocean_bathymetry.ocean_bathymetry`` from a regular lat-lon
+  bathymetry (Veros' ``global_1deg`` asset is one), which sets how many of
+  the 15 layers each ocean column holds (at least two) without changing which
+  columns are ocean. No such file is packaged with JEM, because the terms
+  under which that asset's bathymetry may be redistributed are not stated, so
+  ``+configuration=veros-earth`` keeps the flat bottom; point the setup at a
+  file you generated with
+  ``+ocean.bathymetry_file=/path/to/depth.nc``.
 * **A uniform initial state.** Salinity is 35 and the sea surface temperature
   is 288.03 K in every ocean column, poles included. Temperature falls
   linearly with depth to zero at 4510 m, the top of the deepest layer, so the

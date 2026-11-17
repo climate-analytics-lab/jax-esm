@@ -409,3 +409,107 @@ def test_the_initial_profile_is_uniform_and_crosses_zero_above_the_deepest_layer
     assert abs(float(vs.zw[0])) == pytest.approx(4510.0)
     assert profile[0, 0] == pytest.approx(-1.147, abs=1e-3)
     assert profile[0, -1] == pytest.approx(14.884, abs=1e-3)
+
+
+@pytest.fixture(scope="module")
+def _bathymetry_file(tmp_path_factory):
+    """Write a depth file on the rotated grid from a synthetic source spanning every layer count.
+
+    The source is a 1-degree field laid out like Veros' ``global_1deg`` asset,
+    with a depth that varies smoothly from about 60 m to over 5200 m, so the
+    setup is exercised across the minimum, the full depth and everything
+    between without needing that asset (or its licence) in the test.
+    """
+    from jem.tools.ocean_bathymetry import ocean_bathymetry
+
+    directory = tmp_path_factory.mktemp("bathymetry")
+    lon = np.arange(90.5, 450.0, 1.0, dtype=np.float32)
+    lat = np.arange(-79.5, 80.0, 1.0, dtype=np.float32)
+    lat2, lon2 = np.meshgrid(lat, lon % 360, indexing="ij")
+    depth = 60.0 + 5400.0 * np.abs(np.sin(np.deg2rad(2.0 * lat2)) * np.cos(np.deg2rad(lon2)))
+    source = directory / "source.nc"
+    xr.Dataset(
+        {"bathymetry": (("yt", "xt"), (-depth).astype(np.float32))}, coords={"xt": lon, "yt": lat}
+    ).to_netcdf(source)
+    return str(
+        ocean_bathymetry(source, ROTATED_SCRIP_FILE, ROTATED_LANDSEA_MASK_FILE, directory / "depth.nc")
+    )
+
+
+def _earth_model_with_bathymetry(bathymetry_file):
+    from jem.components.veros.setups.earth import earth_setup
+
+    model = earth_setup(
+        scrip_grid_file=ROTATED_SCRIP_FILE,
+        landsea_mask_file=ROTATED_LANDSEA_MASK_FILE,
+        bathymetry_file=bathymetry_file,
+    )()
+    model.setup()
+    return model
+
+
+@pytest.mark.slow
+def test_earth_flat_bottom_is_the_land_sea_mask_itself():
+    """With no bathymetry file every wet column holds every layer: ``kbot`` is the mask, exactly."""
+    vs = _earth_model().state.variables
+    lsm = xr.open_dataset(ROTATED_LANDSEA_MASK_FILE)["lsm"].to_numpy().reshape(48, 96)
+    expected = (~(lsm >= 0.5)).astype(int).T
+    kbot = np.asarray(vs.kbot)[2:-2, 2:-2]
+    np.testing.assert_array_equal(kbot, expected)
+    mask_t = np.asarray(vs.maskT)[2:-2, 2:-2]
+    np.testing.assert_array_equal(mask_t, np.broadcast_to(expected[..., None] > 0, mask_t.shape))
+
+
+@pytest.mark.slow
+def test_earth_bathymetry_leaves_the_wet_columns_exactly_the_land_sea_masks(_bathymetry_file):
+    """Bathymetry sets how deep a wet column is, never whether it is wet."""
+    flat = np.asarray(_earth_model().state.variables.kbot)[2:-2, 2:-2]
+    deep = _earth_model_with_bathymetry(_bathymetry_file).state.variables
+    kbot = np.asarray(deep.kbot)[2:-2, 2:-2]
+    np.testing.assert_array_equal(kbot > 0, flat > 0)
+    np.testing.assert_array_equal(np.asarray(deep.maskT)[2:-2, 2:-2, -1] > 0, flat > 0)
+    # And the bottom really is variable: the test would otherwise pass on a flat one.
+    assert len(np.unique(kbot[kbot > 0])) > 5
+
+
+@pytest.mark.slow
+def test_earth_kbot_matches_the_depths_and_the_wet_layers_the_depth_implies(_bathymetry_file):
+    """``kbot`` counts the layers whose centre is above the floor (at least two), as global_latlon does."""
+    from jem.components.veros.setups._layers import LAYER_THICKNESSES
+    from jem.tools.ocean_bathymetry import read_depth
+
+    vs = _earth_model_with_bathymetry(_bathymetry_file).state.variables
+    kbot = np.asarray(vs.kbot)[2:-2, 2:-2]
+    depth = read_depth(_bathymetry_file, 48, 96)
+    wet = kbot > 0
+    thickness = np.asarray(LAYER_THICKNESSES)
+    bottom_face = np.cumsum(thickness)
+    centre = bottom_face - thickness / 2
+
+    n_wet = len(thickness) - kbot + 1
+    for i, j in zip(*np.nonzero(wet)):
+        expected = max(int((centre < depth[i, j]).sum()), 2)
+        assert n_wet[i, j] == expected, (i, j, depth[i, j])
+    # Within one layer of what the depth implies: no more than one layer
+    # whose bottom face lies below the floor, none missing above it (the
+    # two-layer minimum aside).
+    fully_above = (bottom_face[None, :] <= depth[wet][:, None]).sum(1)
+    assert np.all(n_wet[wet] >= fully_above)
+    assert np.all(n_wet[wet] <= np.maximum(fully_above + 1, 2))
+    # The model's own masks agree with kbot: layers from the surface down.
+    mask_t = np.asarray(vs.maskT)[2:-2, 2:-2]
+    np.testing.assert_array_equal(mask_t.sum(-1), n_wet * wet)
+    assert mask_t[..., -1][wet].all()
+
+
+@pytest.mark.slow
+def test_earth_initial_state_is_the_flat_profile_on_every_wet_layer_and_zero_below(_bathymetry_file):
+    """A variable bottom does not change the profile; it only removes the layers under the floor."""
+    flat = _earth_model().state.variables
+    deep = _earth_model_with_bathymetry(_bathymetry_file).state.variables
+    mask_t = np.asarray(deep.maskT)[2:-2, 2:-2] > 0
+    for name in ("temp", "salt"):
+        flat_field = np.asarray(getattr(flat, name))[2:-2, 2:-2, :, 0]
+        field = np.asarray(getattr(deep, name))[2:-2, 2:-2, :, 0]
+        np.testing.assert_array_equal(field[mask_t], flat_field[mask_t])
+        assert np.all(field[~mask_t] == 0.0)

@@ -7,10 +7,11 @@ here through :class:`GridInfo`, which reconstructs Veros' own grid-spacing
 arrays from it exactly (see its docstring for why that reconstruction needs
 care) and carries the true (post-rotation) latitude Coriolis needs.
 
-The ocean is idealised: every wet column has the same flat bottom (there is
-no bathymetry, only a binary land-sea mask), the initial state is
-horizontally uniform (see ``cold_start_temperature_celsius``), and there is
-no sea ice.
+The ocean is idealised: the initial state is horizontally uniform (see
+``cold_start_temperature_celsius``) and there is no sea ice. Its wet columns
+are the land-sea mask's, and their depth is either a bathymetry file's
+(``bathymetry_file``, made by :mod:`jem.tools.ocean_bathymetry`) or, with none
+given, the same flat bottom everywhere.
 """
 
 # Importing this before `veros.core.operators` is what points Veros at the
@@ -25,6 +26,7 @@ from jem.components import veros_component  # noqa: F401
 
 from collections.abc import Sequence
 
+import numpy as np
 import jax.numpy as npx
 import xarray as xr
 from veros import VerosSetup, veros_routine
@@ -33,6 +35,49 @@ from veros.core.utilities import enforce_boundaries
 
 from jem.components.veros.setups._grid import axis_spacing_and_origin
 from jem.components.veros.setups._layers import LAYER_THICKNESSES
+from jem.tools.ocean_bathymetry import read_depth, read_wet_mask
+
+#: The fewest wet layers a column may have. A one-layer column has no vertical
+#: structure for the mixing schemes to act on (Veros' own ``global_4deg``
+#: setup makes such a column land); this setup does not change which columns
+#: are wet, so it gives them two layers instead.
+MINIMUM_WET_LAYERS = 2
+
+
+def kbot_from_depth(
+    depth: np.ndarray, wet: np.ndarray, layer_thicknesses: Sequence[float]
+) -> np.ndarray:
+    """Veros' ``kbot`` for each column: how many layers from the bottom are wet.
+
+    ``kbot`` counts from the bottom (``1`` = every layer is wet, ``nz`` = only
+    the surface layer, ``0`` = land). A layer is wet if its centre lies above
+    the sea floor, as in :mod:`.global_latlon`, and a wet column has at least
+    :data:`MINIMUM_WET_LAYERS` of them.
+
+    Parameters
+    ----------
+    depth : numpy.ndarray
+        Sea-floor depth in metres, positive down, ``(nx, ny)``. Only wet
+        columns are read.
+    wet : numpy.ndarray
+        ``(nx, ny)``, true where the column is ocean.
+    layer_thicknesses : Sequence[float]
+        Layer thicknesses in metres, surface first.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer ``kbot``, ``(nx, ny)``.
+
+    """
+    thickness = np.asarray(layer_thicknesses, dtype=float)
+    nz = thickness.size
+    centres = np.cumsum(thickness) - thickness / 2
+    if np.isnan(depth[wet]).any():
+        raise ValueError("the bathymetry has no depth for some wet columns")
+    n_wet = np.maximum((centres[None, None, :] < np.nan_to_num(depth)[..., None]).sum(-1),
+                       min(MINIMUM_WET_LAYERS, nz))
+    return np.where(wet, nz - n_wet + 1, 0).astype(int)
 
 
 class GridInfo:
@@ -115,16 +160,15 @@ class GridInfo:
         true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
         true_lon_xy = grid_ds["grid_center_lon"].to_numpy().reshape(ny, nx).transpose()
 
-        # The ocean has no bathymetry: the land-sea mask is the only geometry
-        # read, so every ocean column has the same flat bottom (the sum of the
-        # layer thicknesses, 5200 m for the default layers). The mask is the
-        # ERA5-derived fractional land fraction on the same SCRIP grid
-        # (convention: 1 = land), thresholded at `landsea_mask_threshold`
-        # into a binary mask.
-        mask_ds = xr.open_dataset(self.landsea_mask_file)
-        lsm = mask_ds["lsm"].to_numpy().reshape(ny, nx)
-        is_land = lsm >= self.landsea_mask_threshold
-        landsea_mask = (1 - is_land.astype(int)).transpose()  # -> ocean=1/land=0, (xt, yt); Veros kbot wants 0 = land
+        # The land-sea mask alone decides which columns are wet, never the
+        # bathymetry: it is the ERA5-derived fractional land fraction on the
+        # same SCRIP grid (convention: 1 = land), thresholded at
+        # `landsea_mask_threshold` into a binary mask. The atmosphere's
+        # terrain is derived from this same wet set, so a bathymetry that
+        # changed it would leave the two components disagreeing about where
+        # the coast is.
+        wet = read_wet_mask(self.landsea_mask_file, self.landsea_mask_threshold, ny, nx)
+        landsea_mask = wet.astype(int).transpose()  # ocean=1/land=0, (xt, yt); Veros kbot wants 0 = land
 
         self.nx = nx
         self.ny = ny
@@ -146,6 +190,7 @@ def earth_setup(
     dt_mom: float = 3600.0,
     dt_tracer: float = 3600.0,
     cold_start_temperature_celsius: float = 15.0,
+    bathymetry_file: str | None = None,
 ) -> type[VerosSetup]:
     """Return the Veros setup for a rotated-pole global ocean read from a SCRIP grid.
 
@@ -176,6 +221,15 @@ def earth_setup(
         for the default layers). The deepest layer lies below that depth, so
         it starts slightly below zero (-1.15 degC for the default layers),
         not at zero. Default ``15.0``.
+    bathymetry_file : str, optional
+        A depth file on this grid, as written by
+        :func:`jem.tools.ocean_bathymetry.ocean_bathymetry`. Each wet
+        column's number of layers is those whose centre lies above its depth
+        (at least two; see :func:`kbot_from_depth`); the wet columns
+        themselves are still the land-sea mask's. Default ``None``: every wet
+        column has the flat bottom of all the layers (5200 m for the default
+        layers). Everything else in the setup (the initial profile, the
+        masks) follows from ``kbot`` and holds for either.
 
     Returns
     -------
@@ -190,6 +244,14 @@ def earth_setup(
 
     ddz = npx.array(layer_thicknesses)
     nz = len(ddz)
+
+    # Host-side numpy, once: `kbot` is a static input to the setup, not a
+    # traced value.
+    if bathymetry_file is None:
+        kbot = grid_info.landsea_mask
+    else:
+        depth = read_depth(bathymetry_file, grid_info.ny, grid_info.nx)
+        kbot = kbot_from_depth(depth, grid_info.landsea_mask > 0, layer_thicknesses)
 
     class EarthSetup(VerosSetup):
         """A rotated-pole global ocean on a Gaussian lat-lon grid.
@@ -306,7 +368,7 @@ def earth_setup(
             vs = state.variables
             x, y = npx.meshgrid(vs.xt, vs.yt, indexing="ij")
             vs.kbot = npx.zeros_like(x)
-            vs.kbot = update(vs.kbot, at[2:-2, 2:-2], grid_info.landsea_mask)
+            vs.kbot = update(vs.kbot, at[2:-2, 2:-2], kbot)
 
         @veros_routine
         def set_initial_conditions(self, state):
