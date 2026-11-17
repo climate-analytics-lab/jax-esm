@@ -585,31 +585,56 @@ def test_veros_configurations_declare_the_atmosphere_field_their_exchanger_write
 
 
 @pytest.mark.slow
+def test_veros_earth_has_an_observed_land_climatology_and_double_drake_does_not(_veros_x64):
+    """``veros-earth`` runs on Earth's land boundary conditions; the idealised planet does not.
+
+    ``ForcingData.zeros`` -- what an atmosphere with no forcing file gets --
+    has a bare-land albedo of 0, so an Earth configuration left on it has
+    black continents. ``veros-earth`` therefore composes jax-gcm's packaged
+    climatology, and its sea surface temperature is still the ocean's:
+    ``sea_surface_temperature`` is one of the time-varying fields the
+    coupling overwrites. ``veros-double-drake``'s continents are idealised,
+    so Earth's climatology would sit on the wrong geography, and it stays on
+    the default forcing (see its YAML).
+    """
+    import jem.runners as runners
+
+    earth = runners.build_coupler(composed(["+configuration=veros-earth"]))
+    atm = earth.components["atm"]
+    forcing = earth.initialize().components["atm"]["forcing"]
+    assert float(forcing.alb0.max()) > 0.4
+    assert {"snowc_am", "soilw_am", "stl_am"} <= set(atm.time_varying_forcing)
+    assert atm.exchanged_forcing == ("sea_surface_temperature",)
+
+    drake = runners.build_coupler(composed(["+configuration=veros-double-drake"]))
+    forcing = drake.initialize().components["atm"]["forcing"]
+    assert float(forcing.alb0.max()) == 0.0
+    assert drake.components["atm"].time_varying_forcing == ()
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("configuration", ["veros-double-drake", "veros-earth"])
 def test_veros_configurations_couple_a_responding_land_surface(configuration, _veros_x64):
-    """The WHY comment's documented override -- a file-forced atmosphere --
-    actually traces, rather than tripping the carry-structure refusal.
+    """A file-forced atmosphere traces, rather than tripping the carry-structure refusal.
 
-    Both configurations' WHY comments tell the user they can add
-    ``forcing@atmosphere.forcing=from_file`` for a responding land surface
-    instead of the flat `ForcingData.zeros()` boundary conditions `land=none`
-    otherwise leaves in place. That builds every boundary condition,
+    ``forcing@atmosphere.forcing=from_file`` builds every boundary condition,
     including ``sea_surface_temperature``, as a `jcm.forcing.TimeSeries` --
     which is exactly what `coupling.exchanged_forcing` above exists to
     reconcile: without it, `VerosExchange` overwriting
     ``sea_surface_temperature`` with a plain array on the first coupled step
     changes the atmosphere's carry structure and `lax.scan` refuses the whole
-    trajectory.
+    trajectory. ``veros-earth`` composes this forcing itself; for
+    ``veros-double-drake`` it is an override, and both are given the same
+    file here so the test exercises the same boundary conditions.
 
     Traced with `jax.make_jaxpr` rather than `jax.eval_shape`: a real
     `VerosComponent`'s pytree unflatten calls `.astype`/`asarray` on its
     variables, which `jax.eval_shape`'s abstract `ShapeDtypeStruct` avals
-    cannot satisfy (`TypeError: ... not 'ShapeDtypeStruct'`) even for the
-    unmodified default configuration -- a pre-existing `eval_shape`/Veros
-    incompatibility this test's fix does not touch, so it is worked around
-    here rather than papered over. `make_jaxpr` traces the same step through
-    real (concrete-shaped) tracers without running any physics, which is
-    exactly as cheap a check that the carry's structure survives the step.
+    cannot satisfy (`TypeError: ... not 'ShapeDtypeStruct'`) even for an
+    ordinary configuration, so it is worked around here. `make_jaxpr` traces
+    the same step through real (concrete-shaped) tracers without running any
+    physics, which is as cheap a check as any that the carry's structure
+    survives the step.
     """
     import jem.runners as runners
 

@@ -1,11 +1,16 @@
 """The earth Veros case: a rotated-pole global ocean read from a SCRIP grid.
 
-Unlike :mod:`.double_drake`'s uniform lat-lon grid, this case's ocean grid is
-the packaged ``RotatedGaussianLatLon`` SCRIP grid -- a Gaussian lat-lon grid
-whose pole has been rigidly rotated onto land, read here through
-:class:`GridInfo`, which reconstructs Veros' own grid-spacing arrays from it
-exactly (see its docstring for why that reconstruction needs care) and
-carries the true (post-rotation) latitude Coriolis needs.
+Unlike :mod:`.double_drake`, whose ocean sits on the atmosphere's own grid,
+this case's ocean grid is the packaged ``RotatedGaussianLatLon`` SCRIP grid --
+a Gaussian lat-lon grid whose pole has been rigidly rotated onto land, read
+here through :class:`GridInfo`, which reconstructs Veros' own grid-spacing
+arrays from it exactly (see its docstring for why that reconstruction needs
+care) and carries the true (post-rotation) latitude Coriolis needs.
+
+The ocean is idealised: every wet column has the same flat bottom (there is
+no bathymetry, only a binary land-sea mask), the initial state is
+horizontally uniform (see ``cold_start_temperature_celsius``), and there is
+no sea ice.
 """
 
 # Importing this before `veros.core.operators` is what points Veros at the
@@ -21,14 +26,12 @@ from jem.components import veros_component  # noqa: F401
 from collections.abc import Sequence
 
 import jax.numpy as npx
-import numpy as np
 import xarray as xr
 from veros import VerosSetup, veros_routine
 from veros.core.operators import at, update
 from veros.core.utilities import enforce_boundaries
-from veros.distributed import global_max, global_min
-from veros.variables import Variable, allocate
 
+from jem.components.veros.setups._grid import axis_spacing_and_origin
 from jem.components.veros.setups._layers import LAYER_THICKNESSES
 
 
@@ -95,56 +98,16 @@ class GridInfo:
         native_lat = grid_ds["native_lat"].to_numpy()  # (ny,) centres, non-uniform (Gaussian)
         native_lon = grid_ds["native_lon"].to_numpy()  # (nx,) centres, uniform
 
-        # Veros reconstructs cell-centre vs.yt/vs.xt from vs.dyt/vs.dxt via a
-        # leapfrog-style recursion (veros.core.numerics.u_centered_grid) that is
-        # only exact when spacing[j] equals the *central* difference of the
-        # target centres, (centre[j+1]-centre[j-1])/2 -- not the cell width
-        # implied by native_lat_bounds/native_lon_bounds. For the (uniform)
-        # longitude axis those coincide, but for the (non-uniform, Gaussian)
-        # latitude axis the pole-clamped outermost bounds break that relation,
-        # which -- left uncorrected -- introduces up to ~1.5 degrees of error at
-        # the two polar-cap rows (verified numerically), enough to meaningfully
-        # bias cos/tan there. Build spacing from centre differences instead, and
-        # solve for x_origin/y_origin by exactly replicating Veros's own
-        # reconstruction (host-side, degrees) so vs.yt/vs.xt come out identical
-        # to native_lat/native_lon.
-        def _spacing_from_centers(centers):
-            d = np.empty_like(centers)
-            d[1:-1] = (centers[2:] - centers[:-2]) / 2.0
-            d[0] = centers[1] - centers[0]
-            d[-1] = centers[-1] - centers[-2]
-            return d
-
-        def _calibrate_origin(spacing, first_center, cyclic):
-            """Solve for the origin Veros needs so that its own u_centered_grid
-            reconstruction from `spacing` places the first interior centre
-            exactly at `first_center`. Mirrors
-            veros.core.numerics.calc_grid_spacings_kernel's ghost-cell fill and
-            u_centered_grid exactly.
-            """
-            n = spacing.size
-            padded = np.zeros(n + 4)
-            padded[2:-2] = spacing
-            if cyclic:
-                padded[-2:] = padded[2:4]
-                padded[:2] = padded[-4:-2]
-            else:
-                padded[-2:] = padded[-3]
-                padded[:2] = padded[2]
-            yu = np.zeros(n + 4)
-            yu[1:] = np.cumsum(padded[1:])
-            yt = np.zeros(n + 4)
-            yt[0] = yu[0] - padded[0] * 0.5
-            yt[1:] = 2 * yu[:-1]
-            alt = np.ones(n + 4)
-            alt[::2] = -1
-            yt = alt * np.cumsum(alt * yt)
-            return first_center - yt[2] + yu[2]
-
-        dyt = _spacing_from_centers(native_lat)                              # (ny,)
-        dxt = float(native_lon[1] - native_lon[0])                           # scalar, uniform
-        y_origin: float = float(_calibrate_origin(dyt, native_lat[0], cyclic=False))
-        x_origin: float = float(_calibrate_origin(np.full(nx, dxt), native_lon[0], cyclic=True))
+        # Veros reconstructs vs.yt/vs.xt from dyt/dxt and the origins, exactly
+        # only when the spacing is the central difference of the target
+        # centres -- not the cell width the SCRIP bounds imply, which is wrong
+        # by up to ~1.5 degrees at the Gaussian axis' two polar rows. See
+        # `jem.components.veros.setups._grid`, which builds the spacing and
+        # origin that make `vs.xt`/`vs.yt` come out identical to the native
+        # centres.
+        dyt, y_origin = axis_spacing_and_origin(native_lat, cyclic=False)  # (ny,)
+        dxt_axis, x_origin = axis_spacing_and_origin(native_lon, cyclic=True)
+        dxt = float(dxt_axis[0])  # uniform axis, so one scalar
 
         # True (post-rotation) geographic latitude of each (j, i) cell -- used for
         # the Coriolis parameter only, not for grid geometry.
@@ -152,10 +115,12 @@ class GridInfo:
         true_lat_xy = true_lat.transpose()  # (j, i) -> (xt, yt)
         true_lon_xy = grid_ds["grid_center_lon"].to_numpy().reshape(ny, nx).transpose()
 
-        # TODO: real bathymetry is still needed here -- this only gives a
-        # binary land/sea mask, so every ocean column gets the same flat
-        # bottom depth (kbot) rather than actual varying ocean depth.
-        # ERA5-derived fractional land-sea mask on the same SCRIP grid; convention: 1 = land.
+        # The ocean has no bathymetry: the land-sea mask is the only geometry
+        # read, so every ocean column has the same flat bottom (the sum of the
+        # layer thicknesses, 5200 m for the default layers). The mask is the
+        # ERA5-derived fractional land fraction on the same SCRIP grid
+        # (convention: 1 = land), thresholded at `landsea_mask_threshold`
+        # into a binary mask.
         mask_ds = xr.open_dataset(self.landsea_mask_file)
         lsm = mask_ds["lsm"].to_numpy().reshape(ny, nx)
         is_land = lsm >= self.landsea_mask_threshold
@@ -201,11 +166,16 @@ def earth_setup(
         ``layer_thicknesses=LAYER_THICKNESSES[:n]``.
     dt_mom, dt_tracer : float
         Momentum and tracer timesteps, seconds. Default ``3600.0``, the value
-        validated by this case's original standalone driver.
+        this configuration has been run with; it is not otherwise tuned.
     cold_start_temperature_celsius : float
-        Initial ocean temperature at the surface, decaying linearly to zero
-        at the sea floor (``vs.temp``'s units are already degrees Celsius).
-        Default ``15.0``.
+        Initial ocean temperature just below the surface, in degrees Celsius
+        (``vs.temp``'s units). The initial state is horizontally uniform --
+        every wet column has the same profile, poles included -- and falls
+        linearly with depth, ``T0 * (1 - z / zw[0])``, reaching zero at
+        ``|zw[0]|``, the depth of the top face of the deepest layer (4510 m
+        for the default layers). The deepest layer lies below that depth, so
+        it starts slightly below zero (-1.15 degC for the default layers),
+        not at zero. Default ``15.0``.
 
     Returns
     -------
@@ -244,7 +214,10 @@ def earth_setup(
             settings.description = "Rotated-pole global ocean"
 
             settings.enable_streamfunction = False  # then it solves linear free surface
-            settings.enable_nan_checks = True
+            # Off, as in the other setups: the coupled run has its own health gate
+            # (`jem.driver.run_chunked`), and Veros' scanner adds reductions at
+            # every instrumented point of the step and prints to stdout.
+            settings.enable_nan_checks = False
 
             settings.nx, settings.ny, settings.nz = grid_info.nx, grid_info.ny, nz
             settings.dt_mom = dt_mom
@@ -299,12 +272,6 @@ def earth_setup(
 
             settings.eq_of_state_type = 1
 
-            var_meta = state.var_meta
-            var_meta.update(
-                t_star=Variable("t_star", ("yt",), "deg C", "Reference surface temperature"),
-                t_rest=Variable("t_rest", ("xt", "yt"), "1/s", "Surface temperature restoring time scale"),
-            )
-
         @veros_routine
         def set_grid(self, state):
             vs = state.variables
@@ -346,6 +313,9 @@ def earth_setup(
             vs = state.variables
             settings = state.settings
 
+            # Horizontally uniform, linear in depth; see the
+            # `cold_start_temperature_celsius` docstring for where it
+            # reaches zero. Veros' `zt`/`zw` are negative below the surface.
             vs.temp = update(
                 vs.temp, at[...],
                 ((1 - vs.zt[None, None, :] / vs.zw[0])
@@ -353,33 +323,11 @@ def earth_setup(
             )
             vs.salt = update(vs.salt, at[...], 35.0 * vs.maskT[..., None])
 
-            # wind stress forcing
-            yt_min = global_min(vs.yt.min())
-            yu_min = global_min(vs.yu.min())
-            yt_max = global_max(vs.yt.max())
-            yu_max = global_max(vs.yu.max())
-
-            taux = allocate(state.dimensions, ("yt",))
-            taux = npx.where(vs.yt < -20, 0.1 * npx.sin(settings.pi * (vs.yu - yu_min) / (-20.0 - yt_min)), taux)
-            taux = npx.where(vs.yt > 10, 0.1 * (1 - npx.cos(2 * settings.pi * (vs.yu - 10.0) / (yu_max - 10.0))), taux)
-            vs.surface_taux = taux * vs.maskU[:, :, -1]
-
-            # surface heatflux forcing
-            vs.t_star = allocate(state.dimensions, ("yt",), fill=15)
-            vs.t_star = npx.where(vs.yt < -20, 15 * (vs.yt - yt_min) / (-20 - yt_min), vs.t_star)
-            vs.t_star = npx.where(vs.yt > 20, 15 * (1 - (vs.yt - 20) / (yt_max - 20)), vs.t_star)
-            vs.t_rest = vs.dzt[npx.newaxis, -1] / (30.0 * 86400.0) * vs.maskT[:, :, -1]
-
-            if settings.enable_tke:
-                vs.forc_tke_surface = update(
-                    vs.forc_tke_surface,
-                    at[2:-2, 2:-2],
-                    npx.sqrt(
-                        (0.5 * (vs.surface_taux[2:-2, 2:-2] + vs.surface_taux[1:-3, 2:-2]) / settings.rho_0) ** 2
-                        + (0.5 * (vs.surface_tauy[2:-2, 2:-2] + vs.surface_tauy[2:-2, 1:-3]) / settings.rho_0) ** 2
-                    )
-                    ** (1.5),
-                )
+            # No surface forcing is initialised here: a coupled run's wind
+            # stress, heat and freshwater fluxes -- and the TKE surface forcing
+            # derived from the stress -- are written by `VerosComponent` before
+            # every step, and `set_forcing` below is a no-op, so nothing in
+            # this setup reads a wind stress or a restoring temperature.
 
             if settings.enable_idemix:
                 vs.forc_iw_bottom = 1e-6 * vs.maskW[:, :, -1]

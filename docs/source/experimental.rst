@@ -23,21 +23,49 @@ GCM, each runnable as one command with no generated inputs and no
 ``PYTHONPATH``:
 
 ``python -m jem.main +configuration=veros-double-drake``
-    An idealised two-continent ("double-drake") ocean on a uniform lat-lon
-    grid, sharing the atmosphere's longitudes and its shape. Its latitude
-    axis is uniform where the atmosphere's is Gaussian (up to ~0.9 degrees
-    apart near the poles), and the exchange between them is un-regridded --
-    see jax-esm#121.
+    An idealised two-continent ("double-drake") planet. The ocean's cell
+    centres are the atmosphere's own -- the uniform longitude axis and the
+    Gaussian latitude axis of the T31 grid, read from its SCRIP file
+    (``ocean.atmosphere_grid_file``) -- because the two are exchanged
+    index-to-index with no regridding. The continents are the packaged
+    ``terrain_double_drake_T31.nc`` land-sea mask, which must have the
+    atmosphere grid's shape. The atmosphere's land boundary conditions are
+    jax-gcm's defaults: bare-land albedo 0, no snow cover, no soil water and a
+    flat 288.15 K skin-temperature climatology, so SPEEDY's slab land absorbs
+    all the sunlight it receives. Earth's climatology is not used, because it
+    describes Earth's continents, not these.
 ``python -m jem.main +configuration=veros-earth``
-    A realistic, rotated-pole global ocean read from a SCRIP grid, exchanged
-    with the atmosphere through ESMF regridding weights.
+    A rotated-pole global ocean read from a SCRIP grid, exchanged with the
+    atmosphere through ESMF regridding weights. The atmosphere runs on
+    jax-gcm's packaged T30 observed climatology (the file ``earth-slab``
+    uses): bare-land albedo, snow cover, soil water and land skin
+    temperature. Its sea surface temperature comes from the ocean, not from
+    that file, which also holds the observed sea-ice cover the atmosphere
+    sees.
 
 Both compose ``ocean=veros`` with a case setup importable from
 :mod:`jem.components.veros.setups`
 (:mod:`~jem.components.veros.setups.double_drake` /
 :mod:`~jem.components.veros.setups.earth`), and neither has a land or
-sea-ice component -- see each configuration's own comment for what that
-means for the atmosphere's land boundary conditions.
+sea-ice component: the land is SPEEDY's own slab land inside the
+atmosphere. Each configuration's own comment says why every setting is what
+it is.
+
+The ocean is idealised in both, and a short run should be read with that in
+mind:
+
+* **No bathymetry.** The land-sea mask is the only geometry read (for
+  ``veros-earth`` the packaged ERA5 land fraction, thresholded at 0.5), so
+  every ocean column has the same flat 5200 m bottom.
+* **A uniform initial state.** Salinity is 35 and the sea surface temperature
+  is 288.03 K in every ocean column, poles included. Temperature falls
+  linearly with depth to zero at 4510 m, the top of the deepest layer, so the
+  deepest layer starts at -1.15 degC. The meridional structure comes from the
+  atmosphere's fluxes during the run.
+* **No sea ice.** There is no sea-ice component (the Winton ice cannot be
+  composed with Veros, jax-esm#160). The only ice effect on the ocean is the
+  "swamp" mask on the heat and freshwater fluxes once the surface reaches the
+  freezing point.
 
 The two components are coupled through :class:`jem.fluxes.VerosExchange`,
 named as ``coupling.exchanger``: it hands the ocean the surface wind stress

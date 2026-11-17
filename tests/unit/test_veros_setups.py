@@ -40,6 +40,7 @@ from jem.components import veros_component  # noqa: E402, F401
 
 DATA = resources.files("jem.data")
 DOUBLE_DRAKE_MASK_FILE = str(DATA / "terrain_double_drake_T31.nc")
+ATMOSPHERE_SCRIP_FILE = str(DATA / "JCM_T31.SCRIP.nc")
 ROTATED_SCRIP_FILE = str(DATA / "RotatedGaussianLatLon.SCRIP.nc")
 ROTATED_LANDSEA_MASK_FILE = str(DATA / "landsea_mask_fraction_RotatedGaussianLatLon.nc")
 
@@ -79,12 +80,15 @@ def _restore_jax_x64_after_this_module():
 
 
 @pytest.mark.slow
-def test_double_drake_setup_takes_its_shape_from_the_mask():
-    """`nx`/`ny` come from the mask file's own shape, not an argument."""
+def test_double_drake_setup_takes_its_shape_from_the_atmosphere_grid():
+    """`nx`/`ny` come from the atmosphere grid file, not an argument."""
     from jem.components.veros.setups._layers import LAYER_THICKNESSES
     from jem.components.veros.setups.double_drake import double_drake_setup
 
-    setup_cls = double_drake_setup(land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE)
+    setup_cls = double_drake_setup(
+        atmosphere_grid_file=ATMOSPHERE_SCRIP_FILE,
+        land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE,
+    )
     model = setup_cls()
     model.setup()
     settings = model.state.settings
@@ -108,7 +112,9 @@ def test_double_drake_setup_rejects_a_fractional_mask(tmp_path):
     mask_file = tmp_path / "fractional_mask.nc"
     fractional.to_netcdf(mask_file)
     with pytest.raises(ValueError, match="binary 0/1"):
-        double_drake_setup(land_sea_mask_file=str(mask_file))
+        double_drake_setup(
+            atmosphere_grid_file=ATMOSPHERE_SCRIP_FILE, land_sea_mask_file=str(mask_file)
+        )
 
 
 @pytest.mark.slow
@@ -118,6 +124,7 @@ def test_layer_thicknesses_can_be_shortened():
     from jem.components.veros.setups.double_drake import double_drake_setup
 
     setup_cls = double_drake_setup(
+        atmosphere_grid_file=ATMOSPHERE_SCRIP_FILE,
         land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE,
         layer_thicknesses=LAYER_THICKNESSES[:3],
     )
@@ -298,3 +305,107 @@ def test_echam_veros_earth_configuration_steps():
             if jnp.issubdtype(leaf.dtype, jnp.inexact):
                 assert bool(jnp.all(jnp.isfinite(leaf))), (
                     f"{name}{jax.tree_util.keystr(path)} is not finite")
+
+
+def _jcm_t31_axes_in_degrees():
+    """Return the T31 atmosphere's own longitude and latitude axes, as JCM computes them.
+
+    The same ``radians * 180 / pi`` route `jcm.predictions` labels its output
+    with, so this is what the atmosphere's dataset holds.
+    """
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+    lon, sin_lat = get_speedy_coords().horizontal.nodal_axes
+    return np.asarray(lon) * 180.0 / np.pi, np.arcsin(np.asarray(sin_lat)) * 180.0 / np.pi
+
+
+def _double_drake_model():
+    from jem.components.veros.setups.double_drake import double_drake_setup
+
+    model = double_drake_setup(
+        atmosphere_grid_file=ATMOSPHERE_SCRIP_FILE,
+        land_sea_mask_file=DOUBLE_DRAKE_MASK_FILE,
+    )()
+    model.setup()
+    return model
+
+
+def _earth_model():
+    from jem.components.veros.setups.earth import earth_setup
+
+    model = earth_setup(
+        scrip_grid_file=ROTATED_SCRIP_FILE, landsea_mask_file=ROTATED_LANDSEA_MASK_FILE
+    )()
+    model.setup()
+    return model
+
+
+@pytest.mark.slow
+def test_double_drake_ocean_cells_are_the_atmospheres_cells():
+    """`vs.xt`/`vs.yt` are the atmosphere's longitude and latitude axes.
+
+    The exchange is index-to-index, so an ocean cell has to be where the
+    atmosphere cell with the same indices is: a uniform 180/ny latitude grid
+    put the rows 2.8-4.7 degrees away (and the first one beyond the pole),
+    which applied every flux at the wrong latitude and gave the ocean the
+    wrong metric terms. Compared against JCM's own coordinates, not the
+    SCRIP file the setup reads, so the file's fidelity is tested too.
+    """
+    vs = _double_drake_model().state.variables
+    atmosphere_lon, atmosphere_lat = _jcm_t31_axes_in_degrees()
+    np.testing.assert_allclose(np.asarray(vs.xt)[2:-2], atmosphere_lon, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(vs.yt)[2:-2], atmosphere_lat, atol=1e-9)
+    # The metric terms follow: cos(lat) at the right rows, no row past a pole.
+    assert np.abs(np.asarray(vs.yt)[2:-2]).max() < 90.0
+    np.testing.assert_allclose(
+        np.asarray(vs.cost)[2:-2], np.cos(np.deg2rad(atmosphere_lat)), atol=1e-9
+    )
+
+
+@pytest.mark.slow
+def test_double_drake_land_mask_is_the_terrain_files_land_mask():
+    """The ocean's wet cells are the cells the terrain file says are not land."""
+    model = _double_drake_model()
+    lsm = xr.open_dataset(DOUBLE_DRAKE_MASK_FILE)["lsm"].to_numpy()
+    wet = np.asarray(model.state.variables.maskT)[2:-2, 2:-2, -1] > 0
+    np.testing.assert_array_equal(wet, lsm == 0)
+    assert wet.any() and not wet.all()
+
+
+@pytest.mark.slow
+def test_double_drake_refuses_a_mask_on_another_grid(tmp_path):
+    """A terrain file whose shape is not the atmosphere grid's is refused by name."""
+    from jem.components.veros.setups.double_drake import double_drake_setup
+
+    coarse = xr.open_dataset(DOUBLE_DRAKE_MASK_FILE).isel(lon=slice(0, 48))
+    mask_file = tmp_path / "half_the_longitudes.nc"
+    coarse.to_netcdf(mask_file)
+    with pytest.raises(ValueError, match="same grid"):
+        double_drake_setup(
+            atmosphere_grid_file=ATMOSPHERE_SCRIP_FILE, land_sea_mask_file=str(mask_file)
+        )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("build", [_double_drake_model, _earth_model])
+def test_the_coupled_setups_leave_veros_nan_scanner_off(build):
+    """Veros' own NaN scanner prints to stdout and instruments every step; the run's health gate is the check."""
+    assert not build().state.settings.enable_nan_checks
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("build", [_double_drake_model, _earth_model])
+def test_the_initial_profile_is_uniform_and_crosses_zero_above_the_deepest_layer(build):
+    """The documented initial temperature: uniform in the horizontal, zero at |zw[0]|.
+
+    ``T0 * (1 - z / zw[0])`` reaches zero at the top face of the deepest
+    layer, not at the sea floor, so the deepest layer starts below zero. The
+    setups' docstrings say so; this pins the numbers they quote.
+    """
+    vs = build().state.variables
+    wet = np.asarray(vs.maskT)[2:-2, 2:-2, -1] > 0
+    profile = np.asarray(vs.temp)[2:-2, 2:-2, :, 0][wet]
+    np.testing.assert_allclose(profile, np.broadcast_to(profile[0], profile.shape), atol=1e-12)
+    assert abs(float(vs.zw[0])) == pytest.approx(4510.0)
+    assert profile[0, 0] == pytest.approx(-1.147, abs=1e-3)
+    assert profile[0, -1] == pytest.approx(14.884, abs=1e-3)
