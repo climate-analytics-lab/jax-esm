@@ -1,8 +1,23 @@
 # Differentiating long, high-resolution coupled runs
 
 `jax.grad` of a coupled trajectory is the project's reason for being, and for
-a T31 atmosphere over a slab ocean it is one line:
-`jax.grad(objective)(coupler.generate_trajectory_function(n, remat=True))`.
+a T31 atmosphere over a slab ocean it is a few lines: build the trajectory
+function once, write an objective of the final carry that closes over it, and
+differentiate with respect to a parameter (`python_api.md`'s *Parameters*
+section has a runnable one):
+
+```python
+import jax
+
+trajectory = coupler.generate_trajectory_function(n, remat=True)
+
+def objective(parameter):
+    final, _ = trajectory(coupler.initialize({"ocn": ocn.params.replace(mixed_layer_depth_max=parameter)}))
+    return final.components["ocn"]["state"].sea_surface_temperature.mean()
+
+gradient = jax.grad(objective)(60.0)
+```
+
 This page records what changes when the atmosphere is T255 and the ocean is a
 one-degree Veros, and the gradient is wanted over a forecast of a week or
 two. The worked case throughout is a T255 SPEEDY atmosphere started from
@@ -81,20 +96,35 @@ to five orders of magnitude above their neighbours at isolated cells (the
 Yucatan channel, off Japan, near Mindanao); a finite-difference check in an
 ocean-only run reproduced them only for perturbations of `1e-4` K, and a 0.01 K
 perturbation responded five times less. Freezing the Prandtl number in the
-reverse pass removed them, which located the switch. The fix, in the Veros
-fork (`veros.core.tke.prandtl_number`,
-[veros-jittable#2](https://github.com/meteorologytoday/veros-jittable/pull/2)), keeps the reference value and takes the
-derivative from the same formula with the shear floor raised smoothly to
-`settings.tke_prandtl_surrogate_shear_floor` (default `1e-7 s^-2`, a weak
-current shear of a few cm/s per 100 m) and the clip rounded over
-`tke_prandtl_surrogate_width` (0.5). With it the adjoint reproduces the
-response to a 0.01 K perturbation at the former spike cells and is unchanged
-at every ordinary cell; `1e-8` was too narrow to matter and `1e-6` smoothed
-the real convective response away. The fork's earlier
-`sqrt(max(x, eps))` regularisation of the closures' square roots turned out not
-to be the source of the spikes: a surrogate there changed nothing.
+reverse pass removed them, which located the switch.
 
-The forward model is unchanged by the surrogate up to floating-point
+**What is and is not available.** The remedy is a change to
+`veros.core.tke.prandtl_number` in the Veros fork: keep the reference value
+and take the derivative from the same formula with the shear floor raised
+smoothly to `settings.tke_prandtl_surrogate_shear_floor` (proposed default
+`1e-7 s^-2`, a weak current shear of a few cm/s per 100 m) and the clip rounded
+over `tke_prandtl_surrogate_width` (0.5). It lives in an open, **unmerged**
+pull request,
+[veros-jittable#2](https://github.com/meteorologytoday/veros-jittable/pull/2).
+It is in neither the fork's default branch nor the branch JAX-ESM's tests run
+against (`dev/naive-fix-AD-needs-physical-justification`), so a Veros installed
+by the instructions in {doc}`../getting_started` **does not have it, and its
+adjoint has the spikes described above** at quiescent, convecting cells. Check
+your checkout with `grep -rn tke_prandtl_surrogate veros/`: no output means the
+surrogate is absent. To get it, install the Veros fork from that pull request's
+branch (for example `git fetch origin pull/2/head:prandtl-surrogate && git
+checkout prandtl-surrogate` in the clone, then `pip install -e .` again).
+JAX-ESM itself neither sets nor requires the setting, so nothing in this
+repository changes with it; only the Veros adjoint does.
+
+With the surrogate the adjoint reproduces the response to a 0.01 K
+perturbation at the former spike cells and is unchanged at every ordinary
+cell; `1e-8` was too narrow to matter and `1e-6` smoothed the real convective
+response away. A surrogate on the closures' `sqrt(max(x, eps))`
+regularisation, the other candidate, changed nothing: that is not where the
+spikes come from.
+
+The forward model is unchanged by the surrogate, when present, up to floating-point
 reassociation (the compiled program fuses differently): in an ocean-only run
 the objective agrees to `1e-12`. In a coupled run a week long, that last-bit
 difference grows like any other perturbation, which is the next point.

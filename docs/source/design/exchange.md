@@ -19,11 +19,15 @@ def atm_ocn_exchange(components, time):
     del time
     atm, ocn = components["atm"], components["ocn"]
     ocn = dict(ocn, forcing=ocn["forcing"].replace(
-        total_heat_flux=atm["derived"].total_heat_flux))
+        total_heat_flux=atm["derived"].sea_total_heat_flux))
     atm = dict(atm, forcing=atm["forcing"].replace(
         sea_surface_temperature=ocn["state"].sea_surface_temperature))
     return dict(components, atm=atm, ocn=ocn)
 ```
+
+The ocean takes `sea_total_heat_flux`, the flux over the sea part of the
+cell, rather than `total_heat_flux`, the grid-cell mean (see *Each surface
+takes the flux over its own part of the cell* below).
 
 Two rules, both enforced by what `lax.scan` will accept:
 
@@ -118,15 +122,21 @@ default `land_model="slab"`, jax-gcm's `step_slab_land` after
 `land_model.f90`), forced by its own land tile, so no row carries the land's
 temperature; a land component (`land=bucket`) evolves only the soil water
 SPEEDY prescribes.
-SPEEDY's grid mean is exactly `(1 - land_fraction) * sea + land_fraction *
+**SPEEDY.** Its grid mean is `(1 - land_fraction) * sea + land_fraction *
 land`, so on one grid the ocean's share and the land's are disjoint and
-together are the cell's flux: no part of it is applied twice (#147). What the
-land does with its share is SPEEDY's: it holds its anomaly at zero on cells
-with less than `flandmin` of land, and its relaxation to the climatology is
-itself a source and a sink. A physics package that publishes no flux tiles (ECHAM's
-delivered fluxes) leaves the `sea_*` fields equal to the grid mean; the
-adapter warns about it at `initialize`, because an ocean on a coastal cell
-then also receives the land part's flux.
+together are the cell's flux: the ocean takes the sea part only and the land
+part stays with SPEEDY's slab land. What the land does with its share is
+SPEEDY's: it holds its anomaly at zero on cells with less than `flandmin` of
+land, and its relaxation to the climatology is itself a source and a sink.
+
+**ECHAM.** It publishes no flux tiles (its delivered fluxes are untiled), so
+`sea_tile` finds none and the `sea_*` fields are equal to the grid-cell mean.
+An ocean on a coastal cell therefore also receives the land part's flux, and
+the double count on coastal cells is not removed for ECHAM. The adapter says
+so with a warning at `initialize`
+(`JCMComponent.publishes_sea_tiles` is `False`), and the couplings that need a
+tile refuse ECHAM outright: the bucket land (`publishes_land_evaporation`) and
+the Winton sea ice (`publishes_sea_tiles`) raise in `default_exchanges`.
 
 **On another grid the sea fluxes are weighted by the sea part.** A plain
 conservative map averages every atmosphere cell an ocean cell overlaps by
@@ -216,10 +226,10 @@ to stability, applied to a wind whose reference height differs between
 physics packages (SPEEDY's lowest model level, ECHAM's 10 m), so the ocean's
 forcing would change with the atmosphere package for a reason unrelated to
 the ocean. It would also be applied to the interval-mean wind, and the drag
-of a mean wind is smaller than the mean drag. On the `veros-double-drake`
-configuration after 30 days, the published stress over open ocean is about
-1.6 times the old `Cd = 1e-3` law's (RMS), with the same sign everywhere and
-a pattern correlation of 0.92.
+of a mean wind is smaller than the mean drag. Measured on the
+`veros-double-drake` configuration after 30 days, the published stress over
+open ocean is about 1.6 times that of a constant-drag law with `Cd = 1e-3`
+(RMS), with the same sign everywhere and a pattern correlation of 0.92.
 
 Three properties are worth stating, because a hand-written exchanger has
 them only by accident:
@@ -290,4 +300,4 @@ exchange is lagged by one coupling step. With `["exchange", "atm", "ocn"]`:
   fluxes from the same step, at the cost of giving the atmosphere a
   two-step-old SST. Neither order gives every component same-step
   information; that needs an iterated (implicit) exchange or a partitioned
-  workflow, which is a follow-up.
+  workflow, and no packaged workflow does either.

@@ -1,6 +1,6 @@
 # Output conventions
 
-`Coupler.to_xarray(diagnostics, *, first_step=0)` returns one
+`Coupler.to_xarray(diagnostics, time=None, *, first_step=0)` returns one
 `xarray.Dataset` per component that implements `SupportsXarray`; components
 that do not are skipped, so an output-less component does not stop a run
 producing output. A component that returns a *mapping* of datasets (a nested
@@ -9,7 +9,9 @@ names, and a name that collides with one already written is a `ValueError`.
 `first_step` is the coupled step the first record covers — the `step` of the
 carry the trajectory started from — and defaults to 0. **Pass it when
 writing a chunked run**, or the second chunk is labelled with the first
-chunk's dates.
+chunk's dates. The positional `time` is the *component* form of the call: a
+`TimeAxis` an outer coupler hands a nested `Coupler` (see {doc}`nesting`); a
+run leaves it `None` and the coupler builds the axis from `first_step`.
 
 Each component is handed a `TimeAxis` (start date, the record's step indices
 and the record interval) so every dataset from one run shares one time

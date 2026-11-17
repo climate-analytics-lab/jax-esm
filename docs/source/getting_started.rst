@@ -74,8 +74,9 @@ package spelled out.
 
 .. code-block:: bash
 
-    # every group, option and override spelling -- JAX-ESM's own help, not
-    # the atmosphere's
+    # JAX-ESM's own help (not the atmosphere's): the config groups, how the
+    # atmosphere's groups are re-rooted, and worked override examples. The
+    # options of a group are the files in jem/config/<group>/
     python -m jem.main --help
 
     # compose the fully-resolved config and print it; run nothing
@@ -236,8 +237,9 @@ and the log's first line says which one the run started from. See
 Where next
 -----------
 
-- :doc:`examples` -- every example, and the command or notebook that runs it,
-  is listed in ``examples/README.md``.
+- :doc:`examples` -- the six named configurations, each with the one command
+  that runs it and what it couples, and the example notebooks.
+- :doc:`issues` -- what 1.0 does not do yet, and the consequence of each.
 - :doc:`adding_a_component` -- wrapping an external model to join a coupled
   run.
 - :doc:`experimental` -- features still under development.

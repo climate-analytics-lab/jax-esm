@@ -261,6 +261,26 @@ def test_bind_rejects_non_multiple_timestep(model):
         )
 
 
+def test_an_hourly_coupling_interval_steps(model):
+    """A sub-daily coupling interval reaches jax-gcm as a whole number of seconds.
+
+    jax-gcm takes the interval as a number of days and refuses one that is
+    not a whole number of seconds. An hour is 1/24 of a day, which is not
+    exact in float32, so the interval has to be worked out from the
+    timedelta's integer seconds; an hourly-coupled atmosphere is what a
+    nested or repeated workflow element steps.
+    """
+    component = JCMComponent(model)
+    component.bind(coupling_timestep=jdt.to_timedelta(1, "hour"), start_date=START_DATE)
+    assert component._coupling_days * 86400 == 3600.0
+
+    carry, _ = component.step(
+        component.initialize(),
+        CouplingTime(step=jnp.int32(0), time=START_DATE, dt=3600.0),
+    )
+    assert int(carry["step"]) > 0
+
+
 def test_initialize_does_not_integrate(model, monkeypatch):
     """``initialize()`` must build pytrees, not run the model.
 

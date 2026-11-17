@@ -83,9 +83,8 @@ config-group overrides — never as a standalone driver script:
    a `run.sh`).** A new runnable configuration is a named
    `jem/config/configuration/*.yaml` with a comment saying WHY each setting is
    what it is, or a notebook calling the Python API (`Coupler`, the component
-   classes, `run_chunked`). The bespoke drivers still under
-   `examples/02_experimental/` are legacy and are being folded into the Hydra
-   tree, not extended.
+   classes, `run_chunked`). `examples/02_experimental/` holds a notebook and a
+   README and no driver script; keep it that way.
  - **Python is the primary interface; config is a thin wrapper.** Every
    physical parameter and its default value lives once, as a Python default on
    the component class. YAML may carry only wiring (`_target_`, required
@@ -133,7 +132,8 @@ The design in three sentences:
 - A **component** is any object satisfying the `Component` protocol in
   `jem/base/component.py`: a `name`, an `initialize() -> carry` and a
   `step(carry, time) -> (new_carry, diagnostics)`, plus the optional
-  capabilities `SupportsXarray`, `SupportsBind` and `SupportsCheckpoint`.
+  capabilities `SupportsXarray`, `SupportsBind`, `SupportsCheckpoint` and
+  `SupportsClockReset`.
   There is still no base class to inherit from — it is a runtime-checkable
   `typing.Protocol` — so an external model is adapted by a thin wrapper class
   rather than being rewritten or monkey-patched.
@@ -156,30 +156,37 @@ to add a component.
 jem/                             # Main package
 ├── __init__.py                  # exports the coupling core (Coupler, the protocols,
 │                                #   the exchangers, the output helpers, run_chunked)
-├── accumulate.py                # in-scan diagnostic reductions (monthly_mean)
+├── accumulate.py                # in-scan diagnostic reductions (monthly_mean, windowed_mean)
+├── adjoint.py                   # checkpointed_value_and_grad: gradients of long runs
 ├── checkpoint.py                # saving/loading a carry; the coupled directory layout
+├── configurations.py            # load(name) -> LoadedConfiguration: a named configuration
+│                                #   as built Python objects, no Hydra visible
 ├── constants.py                 # SurfaceConstants: what jcm.constants does not define
 ├── driver.py                    # run_chunked: THE chunked run loop, and its defaults
 ├── exchangers.py                # ExchangeSpec/Exchange + the standard coupling table
-├── main.py                      # `python -m jem.main`: the Hydra entry point
+├── fluxes.py                    # VerosExchange: the exchange a table cannot carry (wind stress)
+├── main.py                      # `python -m jem.main` (and the `jem` script): the Hydra entry point
 ├── output.py                    # postprocess / write_chunk: a chunk's files
+├── plot.py                      # the notebooks' shared plotting helpers (optional `plot` extra)
 ├── regrid.py                    # ESMFRegridders: the named maps a mixed-grid run uses
 ├── runners.py                   # composed config -> built objects -> run_chunked
 ├── config/                      # the Hydra config groups (wiring only, no defaults)
 │   ├── config.yaml              #   jcm's groups under `atmosphere`, plus jem's own
 │   └── <group>/*.yaml           #   ocean, land, seaice, coupling, regrid,
-│                                #   coupled_run, configuration
+│                                #   coupled_run, configuration (the named ones)
 ├── base/
 │   ├── component.py             # the contract: Component + optional capabilities,
 │   │                            #   CoupledCarry, CouplingTime, TimeAxis, Exchanger
 │   └── coupler.py               # Coupler — the coupled model, its clock and its step
 ├── components/
+│   ├── clock.py                 # how far a wrapped model's own clock may drift from the coupler's
 │   ├── jcm/                     # the JCM atmosphere (jax-gcm)
 │   │   ├── component.py         #   JCMComponent: wrapper class, threads the physics carry
 │   │   ├── contract.py          #   the pinned jax-gcm revision and every name JEM calls
-│   │   └── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
-│   ├── jcm_component.py         # deprecated make_jem_compatible shim
+│   │   ├── exchange_fields.py   #   SurfaceExchange: JCM's diagnostics -> JEM's conventions
+│   │   └── forcing_window.py    #   restrict_forcing_to_window: keep only the records a run reads
 │   ├── veros_component.py       # VerosComponent, the Veros ocean GCM (optional dep)
+│   ├── veros/setups/            # importable Veros cases: double_drake, earth, global_latlon
 │   └── slab/
 │       ├── base.py              # SlabModelBase: grid, climatologies, xarray output
 │       ├── grid.py              # SlabGrid.from_coords / .from_scrip
@@ -190,10 +197,11 @@ jem/                             # Main package
 │       └── slab_atmosphere_model/  # SlabAtmosphereModel (idealized, for tests)
 │           # each model directory holds a params.py: its flax.struct parameters
 ├── data/                        # packaged grids, masks and regridding weights
-└── utils/                       # cycles, esmf_regrid, idealized_distribution, ...
+├── tools/                       # idealised_terrain: terrain files of an idealised geography
+└── utils/                       # cycles, esmf_regrid, idealized_distribution, latlon_weights
 docs/                            # Sphinx documentation (RST + MyST, shibuya theme)
 ├── source/design/               # design documents (this is where they go)
-examples/                        # example notebooks and experimental setups
+examples/                        # example notebooks (01_basic, 02_experimental, 03_non_geoscience)
 tests/                           # tests/unit/ and tests/examples/
 ```
 

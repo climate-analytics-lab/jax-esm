@@ -1,6 +1,7 @@
 # Examples
 
-Every example here is either one `python -m jem.main` command, or a notebook
+Every example here (the table below lists all of them, the six named
+configurations among them) is either one `python -m jem.main` command, or a notebook
 built entirely in Python -- there is no Hydra in any notebook (issue #131).
 Python is JAX-ESM's primary interface; see `docs/source/python_api.md` for
 the complete direct construction the notebooks below are built from, and for
@@ -11,8 +12,8 @@ composes) as built Python objects, with no Hydra visible to the caller:
 ```python
 from jem import configurations
 
-exp = configurations.load("aquaplanet-slab")   # a jem.base.coupler.Coupler
-exp.coupler, exp.config, exp.run_kwargs        # built, plain-dict, run_chunked() kwargs
+exp = configurations.load("aquaplanet-slab")   # a jem.configurations.LoadedConfiguration
+exp.coupler, exp.config, exp.run_kwargs        # built Coupler, plain-dict config, run_chunked() kwargs
 ```
 
 A notebook that *teaches* how a coupled model is put together builds its
@@ -30,6 +31,7 @@ drift the door exists to prevent.
 | Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
 | Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction on a displaced-pole ocean grid with ESMF regridding; equivalent to `python -m jem.main +configuration=aquaplanet-slab-mixed-grid` |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
+| Earth-like with Winton sea ice | `python -m jem.main +configuration=earth-slab-winton` (`earth-slab` with the thermodynamic Winton ice and a freezing-clamped ocean) |
 | Long aquaplanet at T106 | `python -m jem.main +configuration=aquaplanet-slab coupled_run=long_run atmosphere.grid.spectral_truncation=106 atmosphere.run.time_step=10` |
 | Double drake with a Veros ocean | `python -m jem.main +configuration=veros-double-drake` |
 | Earth with a Veros ocean | `python -m jem.main +configuration=veros-earth` |
@@ -45,13 +47,15 @@ would instead pick SPEEDY T31L8's own stable step (30 minutes), a materially
 different model. `tests/unit/test_notebook_equivalence.py` checks the claim
 structurally, `dt` included.
 
-jax-gcm ships no T106 grid option, so the resolution above is raised with the
-grid's own keys, `atmosphere.grid.spectral_truncation=106`, paired with a
-10-minute atmosphere timestep (`atmosphere.run.time_step=10`). A long run
-needs two things the short examples do not: `coupled_run.total_time=...` must
-be a whole multiple of `coupled_run.chunk` (30 days under `long_run`), and the
-run checkpoints into its Hydra output directory by default, so it can be
-resumed by pointing a second launch at the first's `coupled_run.output_dir`.
+jax-gcm ships T106 grid options only for ECHAM physics
+(`echam_t106_l47_hybrid`, `echam_t106_l95_hybrid`); it has no SPEEDY T106
+option, so the SPEEDY resolution above is raised with the grid's own key,
+`atmosphere.grid.spectral_truncation=106`, paired with a 10-minute atmosphere
+timestep (`atmosphere.run.time_step=10`). A long run checkpoints into its Hydra
+output directory by default, so it can be resumed by pointing a second launch
+at the first's `coupled_run.output_dir`. The run length need not be a multiple
+of `coupled_run.chunk` (30 days under `long_run`): a last short chunk finishes
+it.
 
 Every command above writes `outputs/<date>/<time>/<component>-<first coupled
 step>.nc` plus a `checkpoint/` directory into that same run directory, unless
@@ -61,15 +65,22 @@ told otherwise with `coupled_run.output_dir=...`.
 for checking that a configuration composes, builds, steps and writes output
 on a given machine before committing to a real integration.
 
-`python -m jem.main --help` lists every configuration group and its options.
+`python -m jem.main --help` explains the configuration groups, how the
+atmosphere's groups are re-rooted under `atmosphere`, and worked overrides; the
+options of a group are the files in `jem/config/<group>/`, and
+`python -m jem.main +configuration=<name> --cfg job` prints a configuration
+fully composed. `jem <overrides>` is the same command as `python -m jem.main
+<overrides>`.
 
 ## Running the notebooks
 
 `./examples/run_notebooks.sh [PATH ...]` executes the notebooks in place (all
-of them if no path is given). Plotting needs the `plot` extra:
+of them if no path is given). Plotting needs the `plot` extra, and running a
+notebook needs a Jupyter runtime (`ipykernel`, and `nbconvert` for the script),
+which no extra provides:
 
 ```bash
-pip install -e ".[plot]"
+pip install -e ".[plot]" jupyter
 ```
 
 ## Committing a notebook

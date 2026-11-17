@@ -60,6 +60,7 @@ import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import jcm.constants as jcm_constants
+import numpy as np
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -609,16 +610,22 @@ class JCMComponent:
                 f" {self.model.start_time!r}. Rebuild the model with"
                 " start_time=<coupler start date>."
             )
-        model_timestep = jdt.to_timedelta(
-            int(self.model.dt_si.to_timedelta().total_seconds()), "second")
-        n_steps = float(coupling_timestep / model_timestep)
-        if n_steps != int(n_steps) or n_steps < 1:
+        model_seconds = int(self.model.dt_si.to_timedelta().total_seconds())
+        model_timestep = jdt.to_timedelta(model_seconds, "second")
+        # Whole seconds, as Python integers: a `jdt.Timedelta` is integer
+        # backed, but dividing two of them gives a float32, in which most
+        # sub-daily fractions of a day (one hour is 1/24) are inexact enough
+        # for jax-gcm to refuse the interval as not a whole number of seconds.
+        coupling_seconds = int(np.asarray(coupling_timestep.days)) * 86400 + int(
+            np.asarray(coupling_timestep.seconds)
+        )
+        if coupling_seconds < model_seconds or coupling_seconds % model_seconds:
             raise ValueError(
                 f"Coupling timestep {coupling_timestep!r} is not a whole"
                 f" multiple of {self.name!r}'s model timestep"
                 f" {model_timestep!r}."
             )
-        coupling_days = float(coupling_timestep / jdt.to_timedelta(1, "day"))
+        coupling_days = coupling_seconds / 86400
         if self._coupling_days is not None and coupling_days != self._coupling_days:
             # One instance belongs to one coupled model: `step` advances the
             # atmosphere by `_coupling_days`, so a second coupler with another
