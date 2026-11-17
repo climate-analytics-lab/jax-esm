@@ -40,7 +40,9 @@ minus what the ice absorbed from the atmosphere, plus what the ice passes down
 ice and ocean together therefore receive the flux the atmosphere lost: the budget
 ``ice_energy_tendency - ocean_heat_flux_up + ocean_frazil_heating + total_heat_flux``
 closes to round-off (about 1e-11 W m-2 in float64, for any ``n_flux_iterations``
-and ``n_substeps``; the test is ``test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged``).
+and ``n_substeps``, and through a complete melt-out; the tests are
+``test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged`` and
+``test_energy_and_water_budgets_close_when_a_column_melts_out_completely``).
 The flux the ice is charged is the one its implicit solve conducted into the ice,
 the linearised flux thsice reports as ``flxAtm`` (see :func:`winton_temperature_step`),
 not the true bulk flux re-evaluated at the new surface temperature: the two differ
@@ -387,6 +389,17 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     upper_thicker = h1 > h2
     q1n = jnp.where(upper_thicker, q1_a, q1_b)
     q2n = jnp.where(upper_thicker, q2_a, q2)
+    # Keeping q2 fixed can leave layer 1 warmer than its melting point (q1 below the enthalpy at T_MELT), which the
+    # ice state, a temperature, cannot hold: clipping T1 there would drop the excess enthalpy from the ice without
+    # the ocean receiving it. The excess warmth melts ice instead, at constant column enthalpy, down to the thickness
+    # whose layers hold it at (q1 at T_MELT, q2). That thickness equals the unmelted one exactly where q1_alt reaches
+    # the bound, so the branch is continuous, and the melt water (at 0 degC) is the mass the water budget sees.
+    # thsice has no such branch: it stops with a "Tice(1) > Tmlt" error in THSICE_SOLVE4TEMP instead.
+    q1_warm_limit = q_from_T1(T_MELT)
+    too_warm = upper_thicker & (q2tmp <= L_ICE) & (q1_alt < q1_warm_limit)
+    column_enthalpy = h1 * q1 + h2 * q2     # rho_i-free enthalpy of the column, conserved by the reshape
+    h_tot = jnp.where(too_warm, 2.0 * column_enthalpy / (q1_warm_limit + q2), h_tot)
+    q1n = jnp.where(too_warm, q1_warm_limit, q1n)
     q1n = jnp.where(vanished, q_from_T1(T_FREEZE), q1n)
     q2n = jnp.where(vanished, q_from_T2(T_FREEZE), q2n)
     return h_tot, hs, q1n, q2n, surplus, vanished

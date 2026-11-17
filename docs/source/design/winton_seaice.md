@@ -97,7 +97,7 @@ asserts it below 1e-6. In float32, the dtype of a JEM run, the same
 experiment gives at most 4e-3 W m⁻² (2e-3, 4e-3 and 3e-3), float32 round-off
 of the enthalpy of columns a few metres thick.
 
-Two choices make that hold for a non-converged solve:
+Three choices make that hold, the first two for a non-converged solve:
 
 - The ice-atmosphere flux is the one the implicit solve conducted: the flux and
   its slope at the surface temperature the last iteration started from, carried
@@ -110,6 +110,40 @@ Two choices make that hold for a non-converged solve:
 - A negative surface residual (the melting clamp overshot, so the surface
   conducts more than the atmosphere gave) is a deficit the ocean covers, as
   thsice's `esurp`, rather than being clipped to zero.
+
+- The enthalpy the ice state holds is always one a temperature can represent.
+  The state is a temperature per layer, so an enthalpy beyond the melting point
+  of layer 1 cannot be stored: clipping its temperature would drop the excess
+  from the ice without the ocean receiving it. It arises when a basal melt takes
+  layer 2 first and the layers are then re-equalised keeping `q2` fixed (thsice's
+  rule, which keeps `T2 <= 0`): the thicker, warm layer 1 would be left warmer
+  than its melting point. The excess warmth melts ice instead, at constant
+  column enthalpy, down to the thickness whose layers hold the column's
+  enthalpy at (`q1` at `T_MELT`, `q2`); that equals the unmelted thickness
+  exactly where the rule stops overshooting, so the branch is continuous, and
+  the melt water reaches the ocean through the water budget. thsice has no such
+  branch: it stops with a "Tice(1) > Tmlt" error in `THSICE_SOLVE4TEMP` on the
+  next call. A complete melt-out is where it matters most, because it takes
+  several substeps of strong melting to get there, but it is not specific to a
+  column that vanishes: the leak is in the partial-melt substeps before it.
+
+The same holds through a complete melt-out, from above (strong surface heating)
+and from below (a large ocean melt potential), bare or snow-covered, at partial
+and full cover: when the column vanishes its last ice and snow enthalpy is
+charged to the ocean in `e_ocn` as thsice's `esurp`/`flx2oc`, the oracle
+comparison includes such cases (`complete melt from above/below`) and agrees
+with thsice to round-off, and `test_energy_and_water_budgets_close_when_a_column_melts_out_completely`
+asserts both the energy residual (below 1e-6 W m⁻²) and the water residual
+(`ocean_freshwater_flux_up − (E − P) − d(ice and snow mass)/dt`, below 1e-12
+kg m⁻² s⁻¹, with the whole initial mass returned to the ocean) for
+`(n_flux_iterations, n_substeps)` of (1, 1), (1, 4) and (3, 4).
+A coupled 30-day run (`+configuration=earth-slab-winton`, float32 output)
+gives, over every ocean cell and record, a largest residual of 3.5e-3 W m⁻², which
+is float32 round-off of the output, and 5e-4 W m⁻² over the 78 cell-steps in
+which the ice vanished. Clipping layer 1's temperature at its melting point
+instead of melting the excess leaks up to 4.6 W m⁻² in that run (0.8 W m⁻² in the
+vanishing steps), by an amount that does not depend on the size of the ocean's
+melt potential.
 
 `n_flux_iterations` therefore changes the surface temperature and the fluxes
 (the solve is closer to the nonlinear one with more iterations), not whether the
