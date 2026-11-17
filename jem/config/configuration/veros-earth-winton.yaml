@@ -13,9 +13,15 @@
 # swamp mask is not applied), and hands the atmosphere its fraction and skin
 # temperature.
 #
-# WHAT IT IS NOT: a seasonal-cycle configuration. The Veros ocean here starts
-# from a horizontally uniform 15 degC (see veros-earth), so no ice forms in it
-# for months and a run shows the machinery working, not a sea-ice climate.
+# WHAT A RUN SHOWS. The ocean starts from the observed annual-mean state (see
+# veros-earth) with no ice on it, and the ice grows from there: in a 90-day
+# run started on 1 January the ice covers 4% of the northern ocean after 30
+# days and 6.5% after 60 and 90, averaging 0.9 m thick poleward of 65N (1.9 m
+# at most), and the first southern ice appears in March. The sea surface
+# holds at the -1.8 degC freezing point under it (without the ice it drifts
+# to -3.5 degC), and the ice's energy budget closes to round-off. It is a
+# cover growing from nothing over an annual-mean ocean, not an equilibrated
+# seasonal cycle: that needs years of integration, which have not been run.
 #
 # WHY each setting (everything else is veros-earth's):
 #  - seaice=winton: see above. The refusal in `jem.exchangers`/`VerosExchange`
@@ -34,10 +40,10 @@
 #    the ocean's own, by reference, so the two cannot drift.
 #  - the ice is started ice-free (its `initial_ice_thickness` default of 0):
 #    `ice_clim_file` would read the atmosphere's forcing file, which is on the
-#    atmosphere's grid, not this one, and an observed cover over a uniform
-#    15 degC ocean is not a state to start from. Start it from a prescribed
-#    thickness with `+seaice.params.initial_ice_thickness=<metres>` (every
-#    ocean cell is then covered, which is a melting experiment).
+#    atmosphere's grid, not this one. The ocean starts at the freezing point
+#    where the observed ocean is, so the ice forms there within days.
+#    `+seaice.params.initial_ice_thickness=<metres>` covers EVERY ocean cell
+#    at that thickness, which is a melting experiment, not an initial cover.
 #  - coupling.exchanged_forcing adds `sice_am` and `sea_ice_temperature` to
 #    veros-earth's `sea_surface_temperature`: the fields the ice's rows write
 #    into the atmosphere. `VerosExchange` is a function, so they cannot be read

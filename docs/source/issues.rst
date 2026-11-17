@@ -30,9 +30,10 @@ Veros ocean
       (``VerosExchange.check_ice_mask``); ``veros-earth-winton`` uses the binary
       mask of ``jem.tools.veros_earth_ice_mask``, which duplicates the
       thresholding the ocean setup does;
-    - ``veros-earth``'s ocean starts uniform at 15 degC, so no ice forms in it for
-      months and the **seasonal cycle of the ice has not been validated**: that
-      needs an ocean with a realistic initial state;
+    - the ice starts from nothing over the observed annual-mean ocean and has
+      been run for 90 days (it grows to 6.5% of the northern ocean, with a
+      closed energy budget); the **equilibrated seasonal cycle of the ice has
+      not been validated**, which needs years of integration;
     - ``veros-double-drake`` and ``veros-earth`` themselves still set
       ``seaice=none`` (no ice, the swamp mask), and a Winton ice composed without
       the ocean's clamp, or an SST-diagnosed ice over a clamping ocean, is refused

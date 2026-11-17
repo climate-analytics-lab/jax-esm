@@ -259,11 +259,15 @@ Limits, which are the clamp's and the ice's rather than the exchange's:
   from the packaged land fraction.
 
 `+configuration=veros-earth-winton` is the Earth-like Veros configuration with
-the ice. The Veros ocean there starts from a horizontally uniform 15 degC state,
-so no ice forms in it for months, and the ice starts ice-free: it demonstrates
-the coupling (the budgets close, the ice and ocean exchange what they should)
-but a seasonal cycle of the ice needs an ocean with a realistic initial state,
-which the configuration does not have.
+the ice. The Veros ocean there starts from the observed annual-mean state with
+no ice on it, and the ice grows where the surface is at the freezing point: in
+a 90-day run started on 1 January it covers 4% of the northern ocean after 30
+days and 6.5% after 60 and 90, averaging 0.9 m thick poleward of 65N (1.9 m at
+most), with the first southern ice in March. The sea surface holds at the
+freezing point under it, where without the ice it drifts to -3.5 degC, and the
+ice's energy budget closes to 5e-12 W m-2 in every cell and record. That is a
+cover growing from nothing over an annual-mean ocean; an equilibrated seasonal
+cycle needs years of integration, which have not been run.
 
 Without an atmosphere (a forced or standalone ice) the fields the atmosphere
 would supply are the caller's to write. `+configuration=earth-slab-winton` is

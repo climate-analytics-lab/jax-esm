@@ -64,21 +64,24 @@ directory into ``outputs/<date>/<time>/``.
      - ``python -m jem.main +configuration=earth-slab-winton``
    * - ``veros-double-drake``
      - SPEEDY T31L8 (30-minute step) over the Veros ocean GCM on an idealised
-       two-continent planet, on a uniform lat-lon grid that shares the
-       atmosphere's longitudes. No land or sea-ice component. Needs Veros.
+       two-continent planet, the ocean built on the atmosphere's own cell
+       centres, with a uniform idealised land. Flat-bottomed ocean, uniform
+       initial state, no land or sea-ice component. Needs Veros.
      - ``python -m jem.main +configuration=veros-double-drake``
    * - ``veros-earth``
      - SPEEDY T31L8 (30-minute step) over the Veros ocean GCM on a rotated
-       Gaussian global grid read from a SCRIP file, exchanged through ESMF
-       weights. No land or sea-ice component. Needs Veros.
+       Gaussian global grid, exchanged through ESMF weights: ETOPO 2022
+       bathymetry, a World Ocean Atlas initial state, the observed land
+       climatology, and an atmosphere coastline derived from the ocean's.
+       No sea-ice component (see ``veros-earth-winton``). Needs Veros.
      - ``python -m jem.main +configuration=veros-earth``
    * - ``veros-earth-winton``
      - ``veros-earth`` with the Winton thermodynamic sea ice on the ocean's
        own grid: the Veros ocean clamps its top cell at the freezing point and
        hands the ice its freezing deficit, and the ice hands the ocean the
-       heat and freshwater it receives. Starts ice-free over the uniform
-       15 degC ocean, so it shows the coupling, not a sea-ice climate. Needs
-       Veros.
+       heat and freshwater it receives. Starts ice-free over the observed
+       ocean state; in a 90-day run from 1 January the ice grows to 6.5% of
+       the northern ocean, about 0.9 m thick poleward of 65N. Needs Veros.
      - ``python -m jem.main +configuration=veros-earth-winton``
 
 The Veros configurations are experimental and have known limitations; see
