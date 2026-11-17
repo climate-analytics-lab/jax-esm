@@ -5,18 +5,25 @@
 #
 #   python -m jem.main +configuration=aquaplanet-slab
 #
-# Almost everything here is a config default already. It is restated as
-# explicit overrides on purpose: a named configuration has to keep meaning
-# what it meant when it was validated, even after a default moves.
-#
 # WHY each setting:
-#  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics on
-#    its native low resolution -- cheap enough to run on a laptop CPU, which
-#    is what makes this the first thing a new user runs.
-#  - terrain=aquaplanet: zero orography and an all-ocean mask, so the slab
-#    ocean covers the planet and no land component is needed.
-#  - forcing stays at `default` (an aquaplanet `ForcingData`): the SST the
-#    atmosphere sees comes from the coupled ocean, not from a boundary file.
+#  - the atmosphere is jax-gcm's `speedy-t31` configuration bundle, composed
+#    whole under `atmosphere` and listed FIRST (Hydra refuses the other order,
+#    since the overrides below act on the groups the bundle selects). That
+#    brings SPEEDY on its native T31L8 grid (cheap enough for a laptop CPU,
+#    which is what makes this the first thing a new user runs), its parameters
+#    calibrated for coupled use, and the 30-minute step they were calibrated
+#    at (`atmosphere.run.time_step`). None of those values is restated here:
+#    they live once, in jax-gcm. The calibration was made with prescribed SSTs
+#    against observations (docs/source/design/configuration.md), so a coupled
+#    run is not guaranteed drift-free.
+#  - terrain=aquaplanet and forcing=default, overriding the bundle's
+#    `hf://` T63 orography and forcing files: zero orography and an all-ocean
+#    mask, so the slab ocean covers the planet and no land component is
+#    needed, and the SST the atmosphere sees comes from the coupled ocean, not
+#    from a boundary file. Neither group reads a file, so the two `file` keys
+#    the bundle leaves behind are set to null below (a composed config should
+#    not name a download nothing performs); `terrain.interpolate` and
+#    `forcing.align` are read only together with a file and so are inert.
 #  - ocean=slab with no forcing term: the mixed layer responds to the coupled
 #    surface heat flux alone. Nothing pins it, which is the point -- the
 #    coupled system finds its own equilibrium.
@@ -24,24 +31,16 @@
 #    is diagnosed from the coupled ocean's SST, so the ice cover follows the
 #    ocean instead of staying at the forcing's ice-free default.
 #  - land=none: there is no land.
-#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
-#    group's default, because a named configuration must not move if
-#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
-#    comment calls it "the validated ECHAM L47/L95 production step"). What is
-#    known about it for THIS case: it is the step this configuration integrates
-#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
-#    no `time_step` takes the physics' stable step capped at 30 min, which is
-#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
-#    (the Veros configurations here do too). No comparison of the two steps on
-#    this coupled case is recorded, so neither is "the" validated one.
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: aquaplanet
+  - override /forcing@atmosphere.forcing: default
   - override /ocean: slab
   - override /seaice: slab
   - override /land: none
 
 atmosphere:
-  run:
-    time_step: 12    # minutes; see the comment above
+  terrain:
+    file: null
+  forcing:
+    file: null

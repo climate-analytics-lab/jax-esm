@@ -36,31 +36,32 @@
 #    never called). Fluxes and areal fractions use the conservative maps
 #    (budgets have to be preserved across the interface); the SST the
 #    atmosphere reads uses the bilinear one.
-#  - terrain=aquaplanet and ocean=slab as in `aquaplanet-slab`: the grids are
-#    the experiment here, not the physics.
+#  - the atmosphere is jax-gcm's `speedy-t31` configuration bundle, composed
+#    whole under `atmosphere` and listed FIRST (Hydra refuses the other order,
+#    since the overrides below act on the groups the bundle selects): SPEEDY on
+#    T31L8 with its parameters calibrated for coupled use and the 30-minute
+#    step they were calibrated at. None of it is restated here; it lives once,
+#    in jax-gcm (docs/source/design/configuration.md). The calibration was made
+#    with prescribed SSTs, so a coupled run is not guaranteed drift-free.
+#  - terrain=aquaplanet and forcing=default as in `aquaplanet-slab`, overriding
+#    the bundle's T63 files (nulled below, as there): the grids are the
+#    experiment here, not the physics.
+#  - ocean=slab and seaice=slab as in `aquaplanet-slab`.
 #  - land=none: an aquaplanet has no land component.
-#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
-#    group's default, because a named configuration must not move if
-#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
-#    comment calls it "the validated ECHAM L47/L95 production step"). What is
-#    known about it for THIS case: it is the step this configuration integrates
-#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
-#    no `time_step` takes the physics' stable step capped at 30 min, which is
-#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
-#    (the Veros configurations here do too). No comparison of the two steps on
-#    this coupled case is recorded, so neither is "the" validated one.
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: aquaplanet
+  - override /forcing@atmosphere.forcing: default
   - override /ocean: slab
   - override /seaice: slab
   - override /land: none
   - override /regrid: esmf
 
 atmosphere:
-  run:
-    time_step: 12    # minutes; see the comment above
+  terrain:
+    file: null
+  forcing:
+    file: null
 
 # `grid_file` is NOT a constructor argument of the slab models: it is read (and
 # removed) by `jem.runners` when it builds the `SlabGrid` the component is then

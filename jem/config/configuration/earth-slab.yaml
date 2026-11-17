@@ -8,28 +8,27 @@
 # `examples/02_experimental/01_earth.ipynb` loads this configuration and runs it.
 #
 # WHY each setting:
+#  - the atmosphere is jax-gcm's `speedy-t31` configuration bundle, composed
+#    whole under `atmosphere` and listed FIRST (Hydra refuses the other order,
+#    since the overrides below act on the groups the bundle selects): SPEEDY on
+#    T31L8 with its parameters calibrated for coupled use -- the top-of-
+#    atmosphere budget and the surface fluxes an ocean is handed -- and the
+#    30-minute step they were calibrated at. None of it is restated here; it
+#    lives once, in jax-gcm (docs/source/design/configuration.md). The
+#    calibration was made with prescribed SSTs, so a coupled run is not
+#    guaranteed drift-free.
 #  - terrain/forcing come from jax-gcm's packaged T30 climatology rather than
-#    the `hf://` mirror jax-gcm's own configurations use, so this runs with no
-#    network. The T30 climatology is on the T31 grid's own 96x48 Gaussian
-#    grid; `interpolate` stays at the group's default.
-#  - forcing.align stays `auto`: `jcm.forcing.resolve_align` resolves `auto`
-#    only for a data-mirror or packaged product, from the manifest's record of
-#    what it is, and refuses a user file. This forcing file is the packaged
-#    one (through `${jcm_data:...}`), which the manifest records as a
-#    climatology, so `auto` resolves to `wrap_year` -- the twelve months replay
-#    every model year, which is what a climatology is. A configuration that
-#    points the forcing at a file of its own has to say `wrap_year` or
-#    `by_date` explicitly (see `veros-earth`).
-#  - atmosphere.run.time_step = 12 min: stated rather than left to the `run`
-#    group's default, because a named configuration must not move if
-#    jax-gcm's default does (it is jax-gcm's `run/default.yaml`, whose own
-#    comment calls it "the validated ECHAM L47/L95 production step"). What is
-#    known about it for THIS case: it is the step this configuration integrates
-#    at, and it is not the physics' own: a `jcm.model.Model(...)` built with
-#    no `time_step` takes the physics' stable step capped at 30 min, which is
-#    30 for SPEEDY T31L8 and what jax-gcm's `speedy-t31` configuration states
-#    (the Veros configurations here do too). No comparison of the two steps on
-#    this coupled case is recorded, so neither is "the" validated one.
+#    the bundle's `hf://` T63 files, so this runs with no network. The T30
+#    climatology is on the T31 grid's own 96x48 Gaussian grid, so the bundle's
+#    `terrain.interpolate: true` has nothing to interpolate (it is the group's
+#    own default).
+#  - forcing.align is the bundle's `wrap_year`, which is also what `auto`
+#    would resolve to here: `jcm.forcing.resolve_align` resolves `auto` only
+#    for a data-mirror or packaged product, from the manifest's record of what
+#    it is, and refuses a user file. This forcing file is the packaged one
+#    (through `${jcm_data:...}`), a climatology, so the twelve months replay
+#    every model year. A configuration that points the forcing at a file of
+#    its own has to say `wrap_year` or `by_date` explicitly (see `veros-earth`).
 #  - ocean=slab_relax reading the same forcing file's `sst`: a free slab drifts
 #    away from the observed state within months, so an Earth-like run relaxes.
 #  - ocean relaxation_time = 30 days rather than the model's Python default of
@@ -57,8 +56,7 @@
 #    for its first coupling step. Starting the slab from the observed
 #    concentration is what stops that being ice-free poles.
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: from_file
   - override /forcing@atmosphere.forcing: from_file
   - override /ocean: slab_relax
@@ -66,8 +64,6 @@ defaults:
   - override /land: none
 
 atmosphere:
-  run:
-    time_step: 12    # minutes; see the comment above
   terrain:
     file: ${jcm_data:bc/t30/clim/terrain.nc}
   forcing:
