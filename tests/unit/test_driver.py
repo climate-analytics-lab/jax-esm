@@ -11,23 +11,36 @@ atmosphere is the slow test at the bottom, which is what proves the toy is
 not the only thing this works on.
 """
 
+import dataclasses
+import gc
 import logging
 import pathlib
 import shutil
+import weakref
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+import tree_math
 import xarray as xr
+from flax import struct
 
 from jem.accumulate import monthly_mean
+from jem.base.component import CoupledCarry
 from jem.base.coupler import Coupler
 from jem.checkpoint import CARRY_FILENAME
 from jem.components.slab import SlabOceanModel, SlabSeaiceModel
-from jem.driver import RunResult, default_health_check, run_chunked
-from jem.exchangers import default_exchangers
+from jem.driver import (
+    RunResult,
+    _adopt_configuration,
+    _load_initial_condition,
+    _starting_carry,
+    default_health_check,
+    run_chunked,
+)
+from jem.exchangers import Exchange, ExchangeSpec, default_exchangers
 from tests.unit.slab_test_utils import make_grid
 
 START_DATE = jdt.to_datetime("2001-01-01")
@@ -863,7 +876,7 @@ def test_a_resume_under_another_chunk_realigns_and_keeps_the_interval(
     checkpoint = tmp_path / "checkpoint"
     run_chunked(
         two_slabs(), total_time="3 days", chunk="3 days",
-        output_dir=tmp_path / "first", checkpoint_path=checkpoint,
+        output_dir=tmp_path / "first", checkpoint_path=checkpoint, health_check=None,
     )
     seen = []
     with caplog.at_level(logging.WARNING):
@@ -1114,7 +1127,7 @@ def test_a_first_run_names_the_empty_checkpoint_path_it_looked_at(
     visible in the one line the run always prints.
     """
     with caplog.at_level(logging.INFO, logger="jem.driver"):
-        run_chunked(coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path)
+        run_chunked(coupler, total_time="2 days", chunk="2 days", output_dir=tmp_path, health_check=None)
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert f"There is no checkpoint at {tmp_path / 'checkpoint'}" in caplog.text
@@ -2973,3 +2986,439 @@ def test_run_smoke_cli(tmp_path):
     log = (run_directories[0] / "main.log").read_text()
     assert "Chunk 0:" in log
     assert "Finished: 2 coupled steps, completed=True, 3 file(s) written." in log
+
+
+# ---------------------------------------------------------------------------
+# What a run starts from: configuration versus state
+# ---------------------------------------------------------------------------
+
+
+def slabs_with(ocean_parameters=None, start_date: jdt.Datetime = START_DATE) -> Coupler:
+    """Return :func:`two_slabs`' model with the ocean built from given parameters."""
+    grid = make_grid()
+    components = {
+        "ocn": SlabOceanModel(grid, ocean_parameters), "seaice": SlabSeaiceModel(grid),
+    }
+    return Coupler(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=start_date,
+    )
+
+
+def spin_up(tmp_path, days: str = "2 days") -> pathlib.Path:
+    """Run the default two-slab model and return its checkpoint directory."""
+    run_chunked(
+        two_slabs(), total_time=days, chunk="1 day", output_dir=tmp_path / "spinup"
+    )
+    return tmp_path / "spinup" / "checkpoint"
+
+
+def driver_records(caplog, level):
+    return [
+        record for record in caplog.records
+        if record.name == "jem.driver" and record.levelno == level
+    ]
+
+
+def test_an_initial_condition_runs_with_the_configured_parameters(tmp_path, caplog):
+    """A branch experiment's changed parameter is the one the run integrates with.
+
+    The spin-up ran with the defaults; the experiment is built with a thinner
+    mixed layer and starts from the spin-up. The parameters the experiment's
+    carry holds -- and the mixed layer its ocean reports each step, which is
+    recomputed from them -- are the configured ones, and the parameter that was
+    not changed is named nowhere as different.
+    """
+    from jem.components.slab.slab_ocean_model.params import SlabOceanParameters
+
+    spun_up = spin_up(tmp_path)
+    experiment = slabs_with(SlabOceanParameters(mixed_layer_depth_max=10.0))
+    defaults = SlabOceanParameters()
+    assert defaults.mixed_layer_depth_max == 60.0
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            experiment, total_time="2 days", chunk="1 day",
+            initial_condition=spun_up, output_dir=tmp_path / "experiment",
+        )
+
+    params = result.final_carry.components["ocn"]["params"]
+    assert float(params.mixed_layer_depth_max) == 10.0
+    assert float(params.relaxation_time) == defaults.relaxation_time
+    derived = result.final_carry.components["ocn"]["derived"]
+    # The prescribed depth is max + (min - max) cos(lat)**3, so at the first
+    # cell's latitude (60 degrees) it is 10 + 30/8 with the configured maximum
+    # and 60 - 20/8 with the spin-up's.
+    np.testing.assert_allclose(
+        np.asarray(derived.mixed_layer_depth)[0, 0], 10.0 + 30.0 / 8, rtol=1e-5
+    )
+    taken = [
+        record.getMessage() for record in driver_records(caplog, logging.INFO)
+        if "come from this run's configuration" in record.getMessage()
+    ]
+    assert len(taken) == 1
+    assert "ocn" in taken[0] and "seaice" in taken[0]
+    assert "ocn.params.mixed_layer_depth_max: checkpoint 60, configured 10" in taken[0]
+    assert "relaxation_time" not in taken[0]
+    assert not [
+        record for record in driver_records(caplog, logging.WARNING)
+        if "Resuming" in record.getMessage()
+    ]
+
+
+def test_an_initial_condition_with_unchanged_parameters_says_none_differ(
+    tmp_path, caplog
+):
+    spun_up = spin_up(tmp_path)
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            two_slabs(), total_time="1 day", chunk="1 day",
+            initial_condition=spun_up, output_dir=tmp_path / "experiment",
+        )
+    assert "None of them differs from the checkpoint's." in caplog.text
+
+
+def test_the_params_after_an_initial_condition_are_the_configured_differentiable_leaves(
+    tmp_path,
+):
+    """`jax.grad` through a run started from a checkpoint sees the configured leaves."""
+    from jem.components.slab.slab_ocean_model.params import SlabOceanParameters
+
+    spun_up = spin_up(tmp_path)
+    experiment = slabs_with(SlabOceanParameters(mixed_layer_depth_max=10.0))
+    carry, _ = _load_initial_condition(experiment, spun_up)
+    assert float(carry.components["ocn"]["params"].mixed_layer_depth_max) == 10.0
+
+    trajectory = experiment.generate_trajectory_function(2)
+
+    def total_mixed_layer_depth(depth_max):
+        ocean = dict(carry.components["ocn"])
+        ocean["params"] = ocean["params"].replace(mixed_layer_depth_max=depth_max)
+        start = dataclasses.replace(carry, components={**carry.components, "ocn": ocean})
+        final, _ = trajectory(start)
+        return jnp.sum(final.components["ocn"]["derived"].mixed_layer_depth)
+
+    # d(depth)/d(max) = 1 - cos(lat)**3: 7/8, 0, 7/8 over the latitudes, 4 longitudes.
+    gradient = jax.grad(total_mixed_layer_depth)(jnp.float32(10.0))
+    np.testing.assert_allclose(float(gradient), 4 * (2 - 2 / 8), rtol=1e-5)
+
+
+def test_a_resume_continues_with_the_checkpoints_parameters_and_warns_once(
+    tmp_path, caplog
+):
+    from jem.components.slab.slab_ocean_model.params import SlabOceanParameters
+
+    run_chunked(two_slabs(), total_time="2 days", chunk="1 day", output_dir=tmp_path)
+    changed = slabs_with(SlabOceanParameters(relaxation_time=7 * 86400.0))
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        result = run_chunked(
+            changed, total_time="4 days", chunk="1 day", output_dir=tmp_path
+        )
+
+    params = result.final_carry.components["ocn"]["params"]
+    assert float(params.relaxation_time) == SlabOceanParameters().relaxation_time
+    warnings = [
+        record for record in driver_records(caplog, logging.WARNING)
+        if "Resuming from" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "ocn.params.relaxation_time: checkpoint 5.184e+06, configured 604800" in message
+    assert "mixed_layer_depth_max" not in message
+    assert "CHECKPOINT's values" in message
+    assert "initial_condition" in message
+
+    # The resume is the uninterrupted run, whatever the configuration said.
+    uninterrupted = run_chunked(
+        two_slabs(), total_time="4 days", chunk="1 day", output_dir=tmp_path / "whole",
+    )
+    assert_carries_agree(result.final_carry, uninterrupted.final_carry, atol=1e-12)
+
+
+def test_a_resume_with_the_same_configuration_does_not_warn(tmp_path, caplog):
+    run_chunked(two_slabs(), total_time="2 days", chunk="1 day", output_dir=tmp_path)
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(two_slabs(), total_time="4 days", chunk="1 day", output_dir=tmp_path)
+    assert not [
+        record for record in driver_records(caplog, logging.WARNING)
+        if "Resuming from" in record.getMessage()
+    ]
+    assert "Resumed from checkpoint" in caplog.text
+
+
+# -- prescribed forcing, through components that are not the slab models --------
+
+
+@tree_math.struct
+class ProbeForcing:
+    fed: jnp.ndarray
+    prescribed: jnp.ndarray
+
+
+@tree_math.struct
+class ProbeState:
+    x: jnp.ndarray
+
+
+@struct.dataclass
+class ProbeParameters:
+    gain: float | jnp.ndarray = 1.0
+    mode: str = struct.field(pytree_node=False, default="plain")
+
+
+class Probe:
+    """A component with parameters, state, one exchanged and one prescribed forcing."""
+
+    def __init__(self, name, gain=1.0, climatology=0.0):
+        """Name the probe and set its parameter and its prescribed forcing."""
+        self.name = name
+        self.gain = gain
+        self.climatology = climatology
+
+    def initialize(self):
+        return {
+            "params": ProbeParameters(gain=self.gain),
+            "state": ProbeState(x=jnp.ones(2)),
+            "forcing": ProbeForcing(
+                fed=jnp.zeros(2), prescribed=self.climatology * jnp.ones(2)
+            ),
+            "derived": {},
+        }
+
+    def step(self, carry, time):
+        del time
+        forcing, params = carry["forcing"], carry["params"]
+        state = carry["state"].replace(
+            x=carry["state"].x + params.gain * (forcing.fed + forcing.prescribed)
+        )
+        return dict(carry, state=state), {"state": state}
+
+
+def probe_coupler(feeder_gain=1.0, gain=1.0, climatology=0.0, exchanger=None):
+    components = {
+        "feeder": Probe("feeder", feeder_gain), "probe": Probe("probe", gain, climatology),
+    }
+    exchangers = {
+        "feed": exchanger
+        or Exchange([ExchangeSpec("feeder.state.x", "probe.forcing.fed")])
+    }
+    return Coupler(
+        components, exchangers, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+
+
+def test_an_initial_condition_takes_prescribed_forcing_but_not_exchanged_forcing(
+    tmp_path, caplog
+):
+    spun_up = tmp_path / "spun-up"
+    spinup_model = probe_coupler(gain=1.0, climatology=1.0)
+    spun_carry, _ = spinup_model.generate_trajectory_function(3)(spinup_model.initialize())
+    spinup_model.save_carry(spun_carry, spun_up)
+    experiment = probe_coupler(gain=2.0, climatology=5.0)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        carry, _ = _load_initial_condition(experiment, spun_up)
+
+    probe = carry.components["probe"]
+    assert float(probe["params"].gain) == 2.0
+    np.testing.assert_array_equal(probe["forcing"].prescribed, [5.0, 5.0])
+    # What the exchanger wrote last, and the state, are the spin-up's.
+    saved = spun_carry.components["probe"]
+    assert float(saved["forcing"].fed[0]) != 0.0
+    np.testing.assert_array_equal(probe["forcing"].fed, saved["forcing"].fed)
+    np.testing.assert_array_equal(probe["state"].x, saved["state"].x)
+    text = caplog.text
+    assert "probe.params.gain: checkpoint 1, configured 2" in text
+    assert "probe.forcing.prescribed" in text
+    assert "probe.forcing.fed" not in text
+
+
+def test_a_resume_reports_drifted_forcing_and_keeps_the_checkpoint(tmp_path, caplog):
+    checkpoint = tmp_path / "checkpoint"
+    model = probe_coupler(climatology=1.0)
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+    model.save_carry(carry, checkpoint)
+    drifted = probe_coupler(gain=3.0, climatology=9.0)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        resumed, _, was_resumed = _starting_carry(drifted, None, None, checkpoint)
+
+    assert was_resumed
+    np.testing.assert_array_equal(
+        resumed.components["probe"]["forcing"].prescribed, [1.0, 1.0]
+    )
+    assert float(resumed.components["probe"]["params"].gain) == 1.0
+    (warning,) = driver_records(caplog, logging.WARNING)
+    message = warning.getMessage()
+    assert "probe.params.gain" in message
+    assert "probe.forcing.prescribed" in message
+    assert "probe.forcing.fed" not in message
+
+
+def test_a_hand_written_exchanger_leaves_forcing_restored_and_says_so(tmp_path, caplog):
+    """Fields a function writes cannot be told from prescribed ones, so none is reset."""
+
+    def hand_written(components, time):
+        del time
+        probe = components["probe"]
+        fed = components["feeder"]["state"].x
+        return dict(
+            components, probe=dict(probe, forcing=probe["forcing"].replace(fed=fed))
+        )
+
+    spun_up = tmp_path / "spun-up"
+    model = probe_coupler(climatology=1.0, exchanger=hand_written)
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+    model.save_carry(carry, spun_up)
+    experiment = probe_coupler(gain=2.0, climatology=5.0, exchanger=hand_written)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        loaded, _ = _load_initial_condition(experiment, spun_up)
+
+    probe = loaded.components["probe"]
+    assert float(probe["params"].gain) == 2.0
+    np.testing.assert_array_equal(probe["forcing"].prescribed, [1.0, 1.0])
+    assert "probe: forcing restored whole" in caplog.text
+    assert "not jem.exchangers.Exchange" in caplog.text
+
+
+def test_a_nested_coupler_takes_its_components_configuration(tmp_path, caplog):
+    def nested(gain, climatology):
+        inner = Coupler(
+            {"feeder": Probe("feeder"), "probe": Probe("probe", gain, climatology)},
+            {"feed": Exchange([ExchangeSpec("feeder.state.x", "probe.forcing.fed")])},
+            coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, name="inner",
+        )
+        return Coupler(
+            {"inner": inner}, {}, coupling_timestep=COUPLING_TIMESTEP,
+            start_date=START_DATE,
+        )
+
+    spun_up = tmp_path / "spun-up"
+    model = nested(1.0, 1.0)
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+    model.save_carry(carry, spun_up)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        loaded, _ = _load_initial_condition(nested(4.0, 6.0), spun_up)
+
+    probe = loaded.components["inner"].components["probe"]
+    assert float(probe["params"].gain) == 4.0
+    np.testing.assert_array_equal(probe["forcing"].prescribed, [6.0, 6.0])
+    assert "inner/probe.params.gain: checkpoint 1, configured 4" in caplog.text
+
+
+def test_a_component_that_checkpoints_itself_is_restored_whole():
+    """Its carry layout is its own, and building it to compare would be costly."""
+
+    class SelfCheckpointing:
+        name = "big"
+        built = 0
+
+        def initialize(self):
+            type(self).built += 1
+            return {"params": ProbeParameters()}
+
+        def step(self, carry, time):
+            return carry, {}
+
+        def save_carry(self, carry, directory):
+            raise NotImplementedError
+
+        def load_carry(self, directory):
+            raise NotImplementedError
+
+    model = Coupler(
+        {"big": SelfCheckpointing()}, {}, coupling_timestep=COUPLING_TIMESTEP,
+        start_date=START_DATE,
+    )
+    restored = CoupledCarry(
+        components={"big": {"params": ProbeParameters(gain=9.0)}},
+        time=START_DATE, step=jnp.int32(0),
+    )
+
+    adopted, report = _adopt_configuration(model, restored)
+
+    assert SelfCheckpointing.built == 0
+    assert adopted.components["big"]["params"].gain == 9.0
+    assert report.leaves == []
+    assert report.skipped and "big: checkpoints itself" in report.skipped[0]
+
+
+# ---------------------------------------------------------------------------
+# The loop does not keep a chunk's diagnostics alive across the next chunk
+# ---------------------------------------------------------------------------
+
+
+class Diagnostics(dict):
+    """A diagnostics mapping that can be weakly referenced."""
+
+
+class WatchesItsDiagnostics(Coupler):
+    """Records, when each trajectory starts, whether the previous chunk's stack lives."""
+
+    def generate_trajectory_function(self, iterations, accumulate=None):
+        trajectory = super().generate_trajectory_function(
+            iterations, accumulate=accumulate
+        )
+        self.previous_alive = []
+        self.previous = None
+
+        def watched(carry, *args):
+            gc.collect()
+            self.previous_alive.append(
+                None if self.previous is None else self.previous() is not None
+            )
+            carry, diagnostics = trajectory(carry, *args)
+            wrapped = Diagnostics(diagnostics)
+            self.previous = weakref.ref(wrapped)
+            return carry, wrapped
+
+        return watched
+
+
+def test_the_previous_chunks_diagnostics_are_released_before_the_next_trajectory(
+    tmp_path,
+):
+    grid = make_grid()
+    components = {"ocn": SlabOceanModel(grid), "seaice": SlabSeaiceModel(grid)}
+    model = WatchesItsDiagnostics(
+        components, default_exchangers(components),
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+    )
+
+    run_chunked(model, total_time="3 days", chunk="1 day", output_dir=tmp_path)
+
+    assert model.previous_alive == [None, False, False]
+
+
+# ---------------------------------------------------------------------------
+# A default health gate with nothing to check is said to be off
+# ---------------------------------------------------------------------------
+
+
+def test_a_default_gate_with_nothing_to_check_warns_once_per_run(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(two_slabs(), total_time="3 days", chunk="1 day", output_dir=tmp_path)
+
+    warnings = driver_records(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "NO health gate" in message
+    assert "health_check" in message
+    assert "'atm'" in message
+
+
+def test_an_explicit_gate_or_none_does_not_warn_about_the_default(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        run_chunked(
+            two_slabs(), total_time="1 day", chunk="1 day", output_dir=tmp_path / "a",
+            health_check=None,
+        )
+        run_chunked(
+            two_slabs(), total_time="1 day", chunk="1 day", output_dir=tmp_path / "b",
+            health_check=lambda datasets, index, days: (True, {}),
+        )
+    assert not driver_records(caplog, logging.WARNING)

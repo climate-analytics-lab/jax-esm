@@ -225,6 +225,13 @@ different start date -- name that run's checkpoint directory:
         coupled_run.initial_condition=/scratch/spinup/checkpoint
 
 The state is kept and the clock restarts at the atmosphere's ``start_time``.
+The parameters and prescribed forcing (``q_flux`` climatologies, the
+atmosphere's boundary conditions) are **this run's configuration, not the
+spin-up's**, so a branch experiment that changes a parameter runs with it; the
+log names every leaf whose value differs from the checkpoint's. A *resume*, in
+contrast, continues with the checkpoint's parameters (it is the same run) and
+logs one warning if the configuration has since changed -- to run with the
+changed value, start a new run from that checkpoint with ``initial_condition``.
 The experiment writes its own checkpoint, and repeating the same command
 resumes *that* rather than starting again from the spun-up state: a complete
 checkpoint at ``checkpoint_path`` takes precedence over ``initial_condition``,

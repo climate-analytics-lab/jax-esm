@@ -685,7 +685,11 @@ def load_coupled_carry(
     **Loading is all-or-nothing.** ``component_templates`` supplies the pytree
     *structure* the saved leaves are poured into and nothing else: every leaf
     of the result comes from the checkpoint, and the values in the templates
-    are discarded. A component the checkpoint does not hold is therefore a
+    are discarded. That includes each component's parameters and prescribed
+    forcing, which are leaves too; deciding whether those should instead be the
+    configured model's is the driver's call, because it depends on whether the
+    checkpoint is a resume or an initial condition
+    (:func:`jem.driver.run_chunked`). A component the checkpoint does not hold is therefore a
     :class:`ValueError` -- never a component quietly left at the initial state
     the template happened to carry, which would resume a run with one
     component at the saved step and another back at the start date. Which
@@ -743,8 +747,10 @@ def load_coupled_carry(
     # question the log has to answer without the operator reading this module.
     logger.info(
         "Loaded checkpoint %s at coupled step %d: %s restored from %s, %s "
-        "restored by their own load_carry. Every leaf comes from the "
-        "checkpoint -- the templates supply structure only.",
+        "restored by their own load_carry. Every leaf of what was read comes "
+        "from the checkpoint -- the templates supply structure only; the "
+        "driver says separately whether parameters and prescribed forcing "
+        "are then taken from the configured model.",
         directory,
         int(stored["step"]),
         _named(component_templates),

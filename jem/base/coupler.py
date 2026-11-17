@@ -1671,7 +1671,10 @@ class Coupler:
         **Loading is all-or-nothing.** The template built from
         ``initialize()`` supplies the pytree *structure* and nothing else:
         every leaf of the returned carry comes from the checkpoint, and the
-        freshly-initialized values are discarded. A component the checkpoint
+        freshly-initialized values are discarded -- each component's ``params``
+        and prescribed ``forcing`` included. (:func:`jem.driver.run_chunked`
+        takes those from the configured model when the checkpoint is an
+        ``initial_condition``, and reports a difference when it is a resume.) A component the checkpoint
         does not hold is a ``ValueError``, never a component silently left at
         its initial state -- which would continue one part of the model from
         the saved step and restart another at the start date, a run that is

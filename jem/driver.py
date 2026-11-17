@@ -15,6 +15,13 @@ replaced by folding the chunk into an accumulator that crosses the chunk
 boundaries -- see :func:`run_chunked`'s Notes for what an accumulated run
 gives up in exchange (files, the health gate, and a checkpointed reduction).
 
+**What a run starts from.** A resume (the run's own checkpoint) restores every
+leaf, so it is bit-identical to the uninterrupted run, and logs one WARNING if
+the configured parameters or prescribed forcing differ from the checkpoint's.
+An ``initial_condition`` is a spun-up *state* that starts a new run, so
+the parameters and prescribed forcing come from the configured model and the
+rest from the checkpoint (``_adopt_configuration``).
+
 **Every default a run has lives here**, on :func:`run_chunked`'s signature.
 ``jem/config/coupled_run/*.yaml`` names the same keys and :mod:`jem.runners`
 passes them through, so a default can only be changed in one place.
@@ -206,6 +213,8 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import jax
+import numpy as np
 import xarray as xr
 
 from jem.base.component import CoupledCarry, SupportsXarray
@@ -246,6 +255,11 @@ ATMOSPHERE_NAME = "atm"
 #: the run when ``bail_on_unhealthy``; ``report`` is kept in
 #: :attr:`RunResult.reports` whatever it says.
 HealthCheck = Callable[[dict[str, xr.Dataset], int, float], tuple[bool, dict]]
+
+#: The ``report["skipped"]`` value :func:`default_health_check` returns when
+#: the chunk has no component named :data:`ATMOSPHERE_NAME`. :func:`run_chunked`
+#: recognises a gate that ran and judged nothing by it.
+_NOTHING_TO_CHECK = "no atmosphere"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -319,12 +333,17 @@ def default_health_check(
     within a coupling step is averaged with the rest of the step and can be
     missed. Coupling more often is what makes the gate look more closely.
 
-    A coupled model with no atmosphere -- a slab-only test, a spring, an
-    ocean-only configuration -- has nothing this can look at, so it is
-    reported as skipped and the run continues. That is a deliberate "no
-    opinion", not a pass: a gate for the surface components would have to
-    know each one's physical ranges, which is the components' business and is
-    tracked separately.
+    A coupled model with no component named :data:`ATMOSPHERE_NAME` -- a
+    slab-only test, a spring, an ocean-only configuration, or an atmosphere
+    registered under another name -- has nothing this can look at, so it is
+    reported as skipped (``report["skipped"]``) and the run continues. That is
+    a deliberate "no opinion", not a pass: a gate for the surface components
+    would have to know each one's physical ranges, which is the components'
+    business and is tracked separately. :func:`run_chunked` says once per run,
+    at WARNING, that the gate found nothing to check, so a model whose
+    atmosphere has another name is told its run is ungated rather than reading
+    a gate that was never on as one that passed; ``health_check=`` is how it
+    supplies a gate that knows its name.
 
     Parameters
     ----------
@@ -345,7 +364,7 @@ def default_health_check(
         return True, {
             "chunk": chunk_index,
             "elapsed_days": elapsed_days,
-            "skipped": "no atmosphere",
+            "skipped": _NOTHING_TO_CHECK,
         }
     # Imported here rather than at module scope so that `import jem` does not
     # pull in jax-gcm (and with it dinosaur and the whole atmosphere) for the
@@ -417,8 +436,14 @@ def run_chunked(
         ``coupled_run.initial_condition=<directory>`` sets from the command
         line. Like ``initial_carry`` it is used only when no complete
         checkpoint is found at ``checkpoint_path``, so the run's own
-        checkpoint, once written, is what a repeated command resumes. A
-        relative path is resolved against the working directory (it names
+        checkpoint, once written, is what a repeated command resumes. **The
+        checkpoint supplies the state, not the configuration:** every
+        component's ``params`` and its prescribed ``forcing`` (the fields no
+        exchanger writes) are the configured model's, and the log names the
+        leaves whose value differs from the checkpoint's. A resume from the
+        run's own checkpoint, in contrast, restores them from the checkpoint
+        and warns when they differ from the configured ones. See
+        :func:`_adopt_configuration`. A relative path is resolved against the working directory (it names
         something that already exists, unlike ``checkpoint_path``, which names
         where this run writes). Mutually exclusive with ``initial_carry``.
     output_dir : path-like
@@ -748,6 +773,7 @@ def run_chunked(
     # state. Exactly one carry is held -- each accepted chunk replaces it -- so
     # the interval costs one carry of device memory, not a history of them.
     pending_carry: CoupledCarry | None = None
+    warned_ungated = False
     for batch_index, steps in enumerate(batches):
         first_step = int(carry.step)
         # A counter for the health check and the log line only: the grid chunk
@@ -815,6 +841,24 @@ def run_chunked(
         if health_check is not None and datasets is not None:
             ok, report = health_check(datasets, chunk_index, elapsed_days)
             reports.append(report)
+            if report.get("skipped") == _NOTHING_TO_CHECK and not warned_ungated:
+                # Once per run: the same sentence after every chunk would be
+                # read by nobody, and the first is the one that can still be
+                # acted on. WARNING because "passed" is not what happened --
+                # nothing was looked at, which for an atmosphere registered
+                # under another name means a blow-up would run to the end.
+                warned_ungated = True
+                logger.warning(
+                    "The default health check found no component named %r in "
+                    "the chunk's output (%s), so there is nothing for it to "
+                    "check: this run has NO health gate, and a model that "
+                    "blows up will keep integrating. If the atmosphere is "
+                    "registered under another name, pass a health_check that "
+                    "looks it up by that name (run_chunked(..., "
+                    "health_check=...)); health_check=None says the run goes "
+                    "ungated on purpose.",
+                    ATMOSPHERE_NAME, ", ".join(sorted(datasets)) or "no components",
+                )
             if ok:
                 logger.debug(
                     "Chunk %d passed the health check: %s", chunk_index, report
@@ -879,13 +923,17 @@ def run_chunked(
                 carry, int(carry.step), False, reports, paths, accumulator
             )
 
-        # Both copies of the chunk are dropped before the next one is built.
-        # Each is a chunk of host-side arrays -- a month of an atmosphere is
-        # gigabytes -- and holding one while `chunk_datasets` labels the next
-        # would double the run's peak memory for nothing. (An accumulated run
-        # never built either.)
+        # Every copy of the chunk is dropped before the next trajectory runs:
+        # the stacked per-step `diagnostics` (device arrays, one record per
+        # coupled step), the labelled `datasets` and their `reduced` copy
+        # (host arrays). A month of an atmosphere is gigabytes in each, and
+        # holding any of them while the next chunk is integrated and labelled
+        # would keep two chunks alive at once for nothing. (An accumulated
+        # run never built any of them.) They are dropped together because the
+        # datasets can be views of the device buffers `diagnostics` holds, so
+        # releasing only one of the names would free nothing.
         if datasets is not None:
-            del datasets, reduced
+            del datasets, reduced, diagnostics
 
     return RunResult(carry, int(carry.step), True, reports, paths, accumulator)
 
@@ -1280,6 +1328,13 @@ def _starting_carry(
         (None, None, logging.INFO) if path is None else _load_checkpoint(coupler, path)
     )
     if restored is not None:
+        # The restored carry is used as it is -- a resume is the same run
+        # carried on -- but a configuration that has changed since the
+        # checkpoint was written is said, once, rather than left to be
+        # discovered in the numbers. See `_adopt_configuration`.
+        _warn_configuration_drift(
+            _adopt_configuration(coupler, restored)[1], str(path)
+        )
         # A caller who passed a starting state as well gets told which one
         # won, because the argument they wrote is not the state that is being
         # integrated.
@@ -1348,7 +1403,9 @@ def _load_initial_condition(
     The checkpoint is read with the clock check off and its clock reset onto
     this coupler's start date (:meth:`~jem.base.coupler.Coupler.restart_clock`),
     so the physical state is the checkpoint's and the time axis is the run's
-    own. Unlike a ``checkpoint_path`` with nothing at it, a missing or
+    own. Its parameters and prescribed forcing are the *configured* model's, not
+    the checkpoint's (:func:`_adopt_configuration`), and the log names the
+    leaves whose values differ. Unlike a ``checkpoint_path`` with nothing at it, a missing or
     incomplete ``initial_condition`` is an error: the caller asked for this
     state by name, and starting the model from ``coupler.initialize()``
     instead would give an experiment that never saw the spin-up without
@@ -1374,7 +1431,13 @@ def _load_initial_condition(
             "Coupler.save_carry or by a run's checkpoint_path."
         )
     loaded = coupler.load_carry(directory, check_clock=False)
-    carry = coupler.restart_clock(loaded)
+    # The checkpoint is a spun-up STATE, and this is a new run: its parameters
+    # and prescribed forcing are the ones this run was configured with, not the
+    # spin-up's (`_adopt_configuration`), or a branch experiment with a changed
+    # parameter would silently integrate the old one.
+    configured, report = _adopt_configuration(coupler, loaded)
+    _report_configuration_taken(report, directory)
+    carry = coupler.restart_clock(configured)
     return carry, (
         f"Starting from initial_condition {directory} at coupled step "
         f"{int(carry.step)} (its clock restarted from step {int(loaded.step)} "
@@ -1393,7 +1456,9 @@ def _load_checkpoint(
     or asserted a consequence that the caller's ``initial_carry`` makes false,
     would be worse than none. :meth:`jem.base.coupler.Coupler.load_carry` logs
     which component came from where, so nothing is said here about a load that
-    worked.
+    worked. The carry is returned exactly as the checkpoint holds it, parameters
+    included, because a resume continues the same run; :func:`_starting_carry`
+    reports any that differ from the configured ones.
 
     The two ways of not resuming are not equally alarming, which is why the
     level comes back too. A directory with no carry file is not something a
@@ -1422,3 +1487,340 @@ def _load_checkpoint(
         f"There is no checkpoint at {checkpoint_path}; a run asked to resume "
         "from it cannot. One will be written there after every chunk."
     ), logging.INFO
+
+
+# -- what a restored carry takes from the configured model ---------------------
+#
+# `Coupler.load_carry` restores EVERY leaf from a checkpoint and uses
+# `component.initialize()` only as the template. That is the right default for
+# state, and wrong for configuration: a component's parameters
+# (`carry["params"]`) and its prescribed forcing are leaves of the carry too,
+# so a checkpoint would silently overrule the values the run was built with.
+# What the run does about that depends on what the checkpoint is for, which only
+# the driver knows:
+#
+# - `initial_condition` is a spun-up STATE that starts a NEW run, so the
+#   configuration is the new run's: parameters and prescribed forcing come from
+#   the configured components and only the rest comes from the checkpoint.
+# - the run's own checkpoint is a RESUME. Everything stays restored, which is
+#   what keeps a resume bit-identical to the uninterrupted run, and a
+#   configuration that has drifted since the checkpoint was written is reported
+#   rather than applied.
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConfigurationLeaf:
+    """One leaf of a component's configuration, as restored and as configured."""
+
+    component: str
+    section: str
+    leaf: str
+    restored: np.ndarray
+    configured: np.ndarray
+
+    @property
+    def differs(self) -> bool:
+        """Whether the configured value is not the restored one."""
+        return not _same_values(self.restored, self.configured)
+
+    def __str__(self) -> str:
+        """Return ``component.section.leaf`` with both values."""
+        # A key path renders as ".name" or "[index]"; a forcing field's leaf
+        # starts with its bare name.
+        separator = "" if self.leaf[:1] in (".", "[") else "."
+        return (
+            f"{self.component}.{self.section}{separator}{self.leaf}: checkpoint "
+            f"{_summary(self.restored)}, configured {_summary(self.configured)}"
+        )
+
+
+@dataclasses.dataclass
+class _ConfigurationReport:
+    """What :func:`_adopt_configuration` looked at.
+
+    Attributes
+    ----------
+    leaves : list of _ConfigurationLeaf
+        Every parameter and every prescribed-forcing leaf compared.
+    params_components : list of str
+        The components whose ``params`` were compared.
+    forcing_components : list of str
+        The components whose prescribed forcing was compared.
+    skipped : list of str
+        ``"<component>: <reason>"`` for each part of the carry this could not
+        classify, which is therefore left exactly as the checkpoint holds it.
+
+    """
+
+    leaves: list[_ConfigurationLeaf] = dataclasses.field(default_factory=list)
+    params_components: list[str] = dataclasses.field(default_factory=list)
+    forcing_components: list[str] = dataclasses.field(default_factory=list)
+    skipped: list[str] = dataclasses.field(default_factory=list)
+
+    @property
+    def differing(self) -> list[_ConfigurationLeaf]:
+        """The leaves whose configured value is not the restored one."""
+        return [leaf for leaf in self.leaves if leaf.differs]
+
+
+def _same_values(restored: np.ndarray, configured: np.ndarray) -> bool:
+    """Return whether two leaves hold the same values (NaN equals NaN)."""
+    # The configured leaf is cast to the restored leaf's dtype first: a
+    # checkpoint stores float32 where the configuration holds the Python float
+    # 0.1, and those are the same parameter, not a difference.
+    configured = np.asarray(configured, dtype=restored.dtype)
+    inexact = bool(np.issubdtype(restored.dtype, np.inexact))
+    return bool(np.array_equal(restored, configured, equal_nan=inexact))
+
+
+def _summary(value: np.ndarray) -> str:
+    """Return a scalar as itself and an array as its shape and extremes."""
+    if value.size == 1:
+        return f"{value.reshape(()).item():.6g}"
+    if np.issubdtype(value.dtype, np.number):
+        return (
+            f"array{value.shape} min={np.nanmin(value):.6g} "
+            f"mean={np.nanmean(value):.6g} max={np.nanmax(value):.6g}"
+        )
+    return f"array{value.shape} dtype={value.dtype}"
+
+
+def _named_leaves(tree: Any) -> list[tuple[str, np.ndarray]]:
+    """Return ``(path, host array)`` for every leaf of ``tree``."""
+    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
+    return [(jax.tree_util.keystr(path), np.asarray(leaf)) for path, leaf in flat]
+
+
+def _destination_components(coupler: "Coupler") -> set[str]:
+    """Return the names of the components a coupling table writes into."""
+    from jem.exchangers import Exchange
+
+    return {
+        spec.dst_parts[0]
+        for exchanger in coupler.exchangers.values()
+        if isinstance(exchanger, Exchange)
+        for spec in exchanger.specs
+    }
+
+
+def _adopt_configuration(
+    coupler: "Coupler", restored: CoupledCarry
+) -> tuple[CoupledCarry, _ConfigurationReport]:
+    """Return ``restored`` with its configuration leaves taken from ``coupler``.
+
+    **What is configuration.** ``carry["params"]`` is, whole. In
+    ``carry["forcing"]``, a field that no exchanger of the coupling table
+    writes is a prescribed input (the slab ocean's ``q_flux`` climatology, the
+    atmosphere's boundary conditions) and so is configuration in the same
+    sense; a field an exchanger writes is lagged state -- the flux the
+    component was last given -- and stays as restored. ``carry["state"]`` and
+    ``carry["derived"]`` are never touched. The rule reads only the carry's
+    sections, never a component's type, so it holds for any component whose
+    carry follows the ``{"state", "forcing", "derived", "params"}`` layout; a
+    carry with neither ``params`` nor ``forcing`` is not classified. A
+    component that updates its own ``forcing`` inside ``step`` would have its
+    evolving field mistaken for a prescribed one, so such a field belongs
+    under ``state``.
+
+    **What is left alone, and why it is said.** The classification of a
+    ``forcing`` field rests on the coupling table, which only
+    :class:`~jem.exchangers.Exchange` exchangers expose: a hand-written
+    exchanger is an arbitrary function, so a field it writes would look
+    prescribed and be wrongly reset. A coupler with one therefore has its
+    ``forcing`` sections left as restored (its ``params`` are still taken),
+    and so does a nested coupler that an outer table writes into, since the
+    outer table names the inner coupler and not its components. A component
+    that checkpoints itself (:class:`~jem.base.component.SupportsCheckpoint`:
+    Veros) holds a carry whose layout only it knows and is not built here at
+    all -- ``initialize()`` of an ocean GCM is not a cheap template -- so it
+    is restored whole. Each is listed in the report's ``skipped``.
+
+    A nested :class:`~jem.base.coupler.Coupler` is walked with its own
+    components and its own coupling table.
+
+    Parameters
+    ----------
+    coupler : jem.base.coupler.Coupler
+        The configured model whose components' ``initialize()`` is the
+        configuration.
+    restored : jem.base.component.CoupledCarry
+        A carry read by ``coupler.load_carry``, whose structure is therefore
+        the configured components'.
+
+    Returns
+    -------
+    tuple
+        The carry with configuration leaves replaced, and what was compared.
+        The replaced leaves are the configured components' own, so the carry's
+        structure, shapes and dtypes are exactly what a cold start gives.
+
+    """
+    return _adopt(coupler, restored, "", forcing_inspectable=True)
+
+
+def _adopt(
+    coupler: "Coupler", restored: CoupledCarry, label: str, *, forcing_inspectable: bool
+) -> tuple[CoupledCarry, _ConfigurationReport]:
+    """Walk ``coupler``'s components; see :func:`_adopt_configuration`."""
+    # Imported here rather than at module scope, like `default_health_check`'s
+    # jcm import: `jem.base.coupler` is only a type-checking import above.
+    from jem.base.component import SupportsCheckpoint
+    from jem.base.coupler import Coupler
+    from jem.exchangers import Exchange, exchanged_fields
+
+    report = _ConfigurationReport()
+    uninspectable = sorted(
+        name for name, exchanger in coupler.exchangers.items()
+        if not isinstance(exchanger, Exchange)
+    )
+    inspectable = forcing_inspectable and not uninspectable
+    written_into = _destination_components(coupler)
+    components: dict[str, Any] = {}
+    for name, component in coupler.components.items():
+        where = f"{label}{name}"
+        carry = restored.components[name]
+        if isinstance(component, Coupler):
+            components[name], inner = _adopt(
+                component, carry, f"{where}/",
+                forcing_inspectable=inspectable and name not in written_into,
+            )
+            report.leaves += inner.leaves
+            report.params_components += inner.params_components
+            report.forcing_components += inner.forcing_components
+            report.skipped += inner.skipped
+            continue
+        if isinstance(component, SupportsCheckpoint):
+            report.skipped.append(
+                f"{where}: checkpoints itself, so its carry layout is not the "
+                "driver's to read and it is restored whole"
+            )
+            components[name] = carry
+            continue
+        if not isinstance(carry, dict) or not ({"params", "forcing"} & set(carry)):
+            components[name] = carry
+            continue
+        configured = component.initialize()
+        new = dict(carry)
+        if "params" in carry:
+            report.params_components.append(where)
+            report.leaves += [
+                _ConfigurationLeaf(where, "params", leaf, old, value)
+                for (leaf, old), (_, value) in zip(
+                    _named_leaves(carry["params"]), _named_leaves(configured["params"])
+                )
+            ]
+            new["params"] = configured["params"]
+        if "forcing" in carry:
+            if inspectable:
+                new["forcing"] = _adopt_forcing(
+                    where, carry["forcing"], configured["forcing"],
+                    set(exchanged_fields(coupler.exchangers, name)), report,
+                )
+            else:
+                report.skipped.append(
+                    f"{where}: forcing restored whole, because "
+                    + (
+                        f"the exchangers {uninspectable!r} are not "
+                        "jem.exchangers.Exchange, so the fields they write cannot "
+                        "be told from prescribed ones"
+                        if uninspectable
+                        else "an outer coupling table writes into this coupler "
+                        "and names it rather than its components"
+                    )
+                )
+        components[name] = new
+    return dataclasses.replace(restored, components=components), report
+
+
+def _adopt_forcing(
+    where: str, restored: Any, configured: Any, exchanged: set[str],
+    report: _ConfigurationReport,
+) -> Any:
+    """Return ``restored`` with every field no exchanger writes taken from ``configured``."""
+    if dataclasses.is_dataclass(restored):
+        names = [field.name for field in dataclasses.fields(restored)]
+
+        def get(tree: Any, key: str) -> Any:
+            return getattr(tree, key)
+    elif isinstance(restored, dict):
+        names = list(restored)
+
+        def get(tree: Any, key: str) -> Any:
+            return tree[key]
+    else:
+        report.skipped.append(
+            f"{where}: forcing is a {type(restored).__name__}, which has no "
+            "named fields to tell exchanged from prescribed, so it is restored whole"
+        )
+        return restored
+    prescribed = [name for name in names if name not in exchanged]
+    if not prescribed:
+        return restored
+    report.forcing_components.append(where)
+    for name in prescribed:
+        report.leaves += [
+            _ConfigurationLeaf(where, "forcing", f"{name}{leaf}", old, value)
+            for (leaf, old), (_, value) in zip(
+                _named_leaves(get(restored, name)), _named_leaves(get(configured, name))
+            )
+        ]
+    taken = {name: get(configured, name) for name in prescribed}
+    if isinstance(restored, dict):
+        return {**restored, **taken}
+    return dataclasses.replace(restored, **taken)
+
+
+def _differing_lines(report: _ConfigurationReport) -> str:
+    """Return one indented line per differing leaf."""
+    return "\n".join(f"  {leaf}" for leaf in report.differing)
+
+
+def _report_configuration_taken(
+    report: _ConfigurationReport, directory: Path | str
+) -> None:
+    """Log, at INFO, what an ``initial_condition`` run took from its configuration."""
+    if not (report.params_components or report.forcing_components):
+        logger.info(
+            "initial_condition %s: no component carries parameters or prescribed "
+            "forcing, so the whole carry comes from it.", directory,
+        )
+    else:
+        forcing = (
+            f", and the prescribed forcing (fields no exchanger writes) of "
+            f"{', '.join(report.forcing_components)}"
+            if report.forcing_components
+            else ""
+        )
+        outcome = (
+            "Leaves whose configured value differs from the checkpoint's:\n"
+            + _differing_lines(report)
+            if report.differing
+            else "None of them differs from the checkpoint's."
+        )
+        logger.info(
+            "initial_condition %s: the parameters of %s%s come from this run's "
+            "configuration, not from the checkpoint; the rest of the carry comes "
+            "from the checkpoint. %s",
+            directory, ", ".join(report.params_components) or "no component",
+            forcing, outcome,
+        )
+    for note in report.skipped:
+        logger.info("initial_condition %s: %s.", directory, note)
+
+
+def _warn_configuration_drift(report: _ConfigurationReport, directory: Path | str) -> None:
+    """Warn once if a resumed checkpoint holds configuration unlike the run's."""
+    for note in report.skipped:
+        logger.debug("Resume from %s: %s.", directory, note)
+    if not report.differing:
+        return
+    logger.warning(
+        "Resuming from %s: the checkpoint's parameters and prescribed forcing "
+        "differ from this run's configuration at:\n%s\nThe run continues with "
+        "the CHECKPOINT's values, because a resume is the same run carried on "
+        "(and stays bit-identical to the uninterrupted one); the configured "
+        "values are not used. To run with the configured values, start a new "
+        "run from this state by passing it as initial_condition "
+        "(coupled_run.initial_condition=%s) with a different output directory.",
+        directory, _differing_lines(report), directory,
+    )
