@@ -200,12 +200,14 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import xarray as xr
 
+from jem import provenance as _provenance
 from jem.base.component import CoupledCarry, SupportsXarray
 from jem.checkpoint import CARRY_FILENAME, remaining_batches
 from jem.output import (
@@ -631,6 +633,17 @@ def run_chunked(
     output_dir = Path(output_dir)
     checkpoint_dir = _checkpoint_directory(checkpoint_path, output_dir)
 
+    if initial_condition is not None:
+        # Hash the warm-start checkpoint BEFORE choosing between fresh start
+        # and resume, so a resumed process after preemption records the same
+        # donor digest and produces the same run_hash as its pre-preemption
+        # chunks (matching jax-gcm#1112).
+        _provenance.record_input(
+            str(initial_condition),
+            Path(initial_condition).resolve(),
+            force_hash=True,
+        )
+
     carry, provenance, resumed = _starting_carry(
         coupler, initial_carry, initial_condition, checkpoint_dir
     )
@@ -760,6 +773,7 @@ def run_chunked(
 
         datasets: dict[str, xr.Dataset] | None = None
         if accumulate is None:
+            chunk_t0 = time.perf_counter()
             carry, diagnostics = trajectories[steps](carry)
             # The chunk is labelled once, unreduced, and then reduced only for
             # the copy that is written: `output_averages` and `subsample` are
@@ -769,6 +783,7 @@ def run_chunked(
             # would pass a state that went bad at the end of the chunk. See
             # :mod:`jem.output`.
             datasets = chunk_datasets(coupler, diagnostics, first_step=first_step)
+            chunk_wall = time.perf_counter() - chunk_t0
             # `first_step` and `steps` place the chunk on the run's clock, so
             # the `subsample` stride counts coupled steps of the RUN: the
             # retained cadence is then the same however the run was chunked
@@ -778,10 +793,24 @@ def run_chunked(
                 datasets, output_averages=output_averages, subsample=subsample,
                 first_step=first_step, steps=steps,
             )
+            # Stamp provenance attributes on shallow copies (never mutating
+            # `datasets`, which is handed unreduced to the health gate) and
+            # write a `<file>.provenance.json` sidecar beside every written
+            # `.nc` file, matching jax-gcm's provenance convention.
+            chunk_params = _provenance.read_params_from_datasets(datasets)
+            prov_attrs = _provenance.attrs(
+                chunk_params, chunk_wall_seconds=chunk_wall
+            )
+            stamped = {
+                name: ds.assign_attrs(prov_attrs)
+                for name, ds in reduced.items()
+            }
             # `write_chunk` skips a component whose reduced chunk holds no
             # record, so what it returns -- not `len(reduced)` -- is what was
             # written.
-            chunk_paths = write_chunk(reduced, output_dir, first_step)
+            chunk_paths = write_chunk(stamped, output_dir, first_step)
+            for path in chunk_paths:
+                _provenance.write_sidecar(path, chunk_params)
             paths.extend(chunk_paths)
             written = f"{len(chunk_paths)} file(s) written"
         else:

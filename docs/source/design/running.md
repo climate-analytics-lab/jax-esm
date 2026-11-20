@@ -275,6 +275,20 @@ chunk *index* would collide across two runs chunked differently.
 `write_chunk` warns when it overwrites an existing file (normally a rerun
 into the same directory, or a resume that repeats a chunk).
 
+**Provenance.** Matching jax-gcm's convention, `run_chunked` stamps
+flat `jem_prov_*` global attributes (plus `jcm_prov_chunk_wall_seconds`
+for downstream throughput readers) onto every chunk dataset it writes and
+writes a `<component>-<first step:08d>.nc.provenance.json` sidecar beside
+each `.nc` file. The sidecar carries the full composed Hydra config (when
+run through `jem.runners.run`), git SHAs and dirty-tree fingerprints for
+`jem`, `jcm`, `veros` and any other imported editable libraries, the JAX
+precision and device environment, resolved input files (with forced
+content SHA-256 digests for warm-start initial conditions — both
+`atmosphere.init.file` and `coupled_run.initial_condition`), run-shaping
+facts merged from `jcm.provenance`, the atmosphere's effective parameter
+record, and a single `run_hash`. Set `JEM_HASH_INPUTS=1` (or
+`JCM_HASH_INPUTS=1`) to content-hash every recorded input file.
+
 `subsample=n` keeps every *n*-th coupling step of the **run**, counting from
 its start rather than from the chunk in hand, so an uninterrupted run, the
 same run in different-length chunks, and a run resumed from a checkpoint

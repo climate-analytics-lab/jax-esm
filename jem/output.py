@@ -634,6 +634,9 @@ def write_chunk(
             # duplicate of a record it writes under another name.
             removed = path.exists()
             path.unlink(missing_ok=True)
+            # Remove any provenance sidecar that belonged to the removed chunk
+            # file so a rechunked resume never leaves an orphaned sidecar behind.
+            path.with_suffix(path.suffix + ".provenance.json").unlink(missing_ok=True)
             logger.info(
                 "Coupled step %d: %r holds no records, so %s was not "
                 "written%s. The usual cause is a subsample stride that keeps "

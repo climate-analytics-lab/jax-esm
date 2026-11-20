@@ -41,7 +41,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 # it, but a caller that hands this module a config built by hand has not, and
 # the resolvers must exist before a value that uses one is read.
 import jem.config  # noqa: F401
-from jem import driver
+from jem import driver, provenance
 from jem.base.coupler import Coupler
 from jem.components.jcm import JCMComponent
 from jem.components.slab import SlabGrid
@@ -224,6 +224,7 @@ def build_initial_state(atmosphere: DictConfig, model: Any) -> tuple[Any, Any]:
         from jcm.initial_states import era5_state
 
         date = init.get("date") or str(model.start_time.to_datetime64())
+        provenance.record_fact("initial_condition", f"era5:{date}")
         logger.info("Atmosphere initial condition: ERA5 at %s.", date)
         return era5_state(model.coords, str(date)), None
     if kind == "from_state":
@@ -231,9 +232,13 @@ def build_initial_state(atmosphere: DictConfig, model: Any) -> tuple[Any, Any]:
         from jcm.data.remote import fetch
         from jcm.initial_states import checkpoint_state
 
-        path = str(init["file"])
-        if path.startswith("hf://"):
-            path = fetch(path.removeprefix("hf://"))
+        raw_path = str(init["file"])
+        path = (
+            fetch(raw_path.removeprefix("hf://"))
+            if raw_path.startswith("hf://")
+            else raw_path
+        )
+        provenance.record_input(raw_path, path, force_hash=True)
         state, physics_carry, donor_days = checkpoint_state(
             model, path,
             unstamped_scale=parse_unstamped_scale(init.get("unstamped_scale")),
@@ -282,6 +287,9 @@ def build_grid(node: Any, atm: JCMComponent) -> SlabGrid:
             atm.model.coords.horizontal, atm.model.terrain.fmask
         )
     mask_file = _runner_only_value(node, "land_fraction_file")
+    provenance.record_input(str(grid_file))
+    if mask_file is not None:
+        provenance.record_input(str(mask_file))
     return SlabGrid.from_scrip(
         str(grid_file),
         fractional_mask=None if mask_file is None else _land_fraction(mask_file),
@@ -872,10 +880,22 @@ def run(cfg: DictConfig) -> driver.RunResult:
     jem.driver.RunResult
 
     """
+    from jcm import provenance as jcm_provenance
+
+    # Reset both provenance registries before model construction so every
+    # boundary file and fact resolved by jcm or jem lands in them, and the
+    # composed config is captured once at run start.
+    jcm_provenance.start_run(cfg)
+    provenance.start_run(cfg)
+
     logger.info("Composed config:\n%s", OmegaConf.to_yaml(cfg))
     settings = build_run_kwargs(cfg)
     logger.info("Writing output to %s", settings["output_dir"])
-    return driver.run_chunked(build_coupler(cfg), **settings)
+    coupler = build_coupler(cfg)
+    # After model construction: config-selected libraries are imported and
+    # atmosphere facts such as ozone_source are decided.
+    logger.info("provenance: %s", provenance.summary())
+    return driver.run_chunked(coupler, **settings)
 
 
 # -- the objects a config cannot name ---------------------------------------
