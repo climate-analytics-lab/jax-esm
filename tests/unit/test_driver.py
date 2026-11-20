@@ -580,7 +580,10 @@ def test_checkpointing_can_be_turned_off(coupler, tmp_path):
     )
     assert not (tmp_path / "checkpoint").exists()
     assert sorted(p.name for p in tmp_path.iterdir()) == [
-        "ocn-00000000.nc", "seaice-00000000.nc"
+        "ocn-00000000.nc",
+        "ocn-00000000.nc.provenance.json",
+        "seaice-00000000.nc",
+        "seaice-00000000.nc.provenance.json",
     ]
 
 
@@ -1555,9 +1558,22 @@ def test_a_resume_under_the_same_chunk_rewrites_and_is_allowed(
         for name in ("ocn", "seaice")
         for step in range(6)
     ]
+    wall_attrs = (
+        "jem_prov_written",
+        "jem_prov_chunk_wall_seconds",
+        "jcm_prov_chunk_wall_seconds",
+    )
     for name, original in before.items():
         with xr.open_dataset(output / name) as rewritten:
-            xr.testing.assert_identical(rewritten, original)
+            # Per-write wall-clock timestamps and timings naturally differ on a
+            # later rewrite; every data value, coordinate, variable attribute
+            # and deterministic provenance attribute (including run_hash) must
+            # still match identically.
+            lhs = rewritten.copy(deep=False)
+            rhs = original.copy(deep=False)
+            lhs.attrs = {k: v for k, v in rewritten.attrs.items() if k not in wall_attrs}
+            rhs.attrs = {k: v for k, v in original.attrs.items() if k not in wall_attrs}
+            xr.testing.assert_identical(lhs, rhs)
 
     # And the directory as a whole -- the killed run's files, the rewritten
     # ones and the chunk that finished the run -- reads back as the same six

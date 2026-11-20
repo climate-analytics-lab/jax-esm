@@ -194,6 +194,24 @@ JCM_INTEGRATION_POINTS: tuple[IntegrationPoint, ...] = (
         " forcing, coords=None, dycore=None) -> None.",
     ),
     IntegrationPoint(
+        "jcm.provenance", "start_run", "public",
+        "Reset jax-gcm's provenance registries before jem.runners builds the"
+        " atmosphere, so boundary inputs and facts resolved by jcm.runners"
+        " land in the current run's provenance record.",
+    ),
+    IntegrationPoint(
+        "jcm.provenance", "probe_code", "public",
+        "Probe imported jax-gcm and its sibling editable libraries (dinosaur,"
+        " rrtmgp, mam4_jax, jax_cosp, pyses) for git SHA, branch and dirty"
+        " state when collecting coupled-run provenance.",
+    ),
+    IntegrationPoint(
+        "jcm.provenance", "collect", "public",
+        "Collect jax-gcm's recorded inputs, facts (including"
+        " data_mirror_revision and ozone_source) and environment so"
+        " jem.provenance merges them into <output>.provenance.json.",
+    ),
+    IntegrationPoint(
         "jcm.diagnostics", "check_health", "public",
         "Per-chunk health gate on the atmosphere's output dataset, so a run"
         " that has gone unstable stops instead of burning the queue."
