@@ -159,6 +159,29 @@ nitpick_ignore_regex = [
     ('py:class', r'optional|callables?|iterables?|mappings?|sequences?|pairs?|path-like|pytree|Boolean|default .+'),
 ]
 
+# On Python 3.11 jaxlib's extension type reports its `__qualname__` as
+# `jaxlib._jax.Array` (on 3.12 it is `Array`), so autodoc writes every
+# `jax.Array` / `jnp.ndarray` annotation as `jax.jaxlib._jax.Array`, a name no
+# inventory holds. Read the Docs and the CI docs job both build on 3.11 with
+# warnings as errors. Resolving that one name as `jax.Array` gives the same
+# link on every Python, where ignoring it would leave 3.11's pages unlinked.
+_JAX_ARRAY_ON_PYTHON_311 = 'jax.jaxlib._jax.Array'
+
+
+def _resolve_jax_array(app, env, node, contnode):
+    """Resolve Python 3.11's spelling of ``jax.Array`` through intersphinx."""
+    if (node.get('refdomain') == 'py'
+            and node.get('reftarget') == _JAX_ARRAY_ON_PYTHON_311):
+        from sphinx.ext.intersphinx import missing_reference
+
+        node['reftarget'] = 'jax.Array'
+        return missing_reference(app, env, node, contnode)
+    return None
+
+
+def setup(app):
+    app.connect('missing-reference', _resolve_jax_array)
+
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
