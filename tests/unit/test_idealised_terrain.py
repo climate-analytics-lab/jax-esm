@@ -20,6 +20,23 @@ REFERENCE_FILE = str(DATA / "terrain_JCM_T31.nc")
 PACKAGED_DOUBLE_DRAKE_FILE = str(DATA / "terrain_double_drake_T31.nc")
 PACKAGED_FORCING_FILE = str(DATA / "forcing_idealised_T31.nc")
 
+#: How closely a packaged file's axis labels must match axes computed in this
+#: process, in degrees. The Gaussian latitudes are float64 results whose last
+#: bit is not the same on every machine: with identical numpy and jax
+#: versions, a grid built on a CI runner differed from the file written on a
+#: development host by one unit in the last place (7e-15 degrees) in 2 of the
+#: 48 rows. So a packaged label can be held to the grid's only within
+#: round-off, while axes written and read back in one process are still
+#: compared exactly. 1e-12 degrees is a hundred times that round-off and
+#: twelve orders below the 3.7 degree row spacing that a mislabelled row
+#: would be off by.
+PACKAGED_LABEL_TOLERANCE = 1e-12
+
+
+def _assert_labels_match(packaged, computed):
+    """Assert a packaged axis equals a computed one to within cross-machine round-off."""
+    np.testing.assert_allclose(packaged, computed, rtol=0, atol=PACKAGED_LABEL_TOLERANCE)
+
 
 def test_double_drake_matches_the_packaged_file(tmp_path):
     """Regenerating from the reference file reproduces the packaged one exactly.
@@ -85,7 +102,9 @@ def test_axes_are_jcms_own_grid_not_the_reference_files_labels(tmp_path):
 
     JCM interpolates a terrain file onto its grid by coordinate, so a
     reference file whose rows are mislabelled -- here its polar rows, by half
-    a degree -- must not pass its labels on to the output.
+    a degree -- must not pass its labels on to the output. A file written here
+    carries this process's axes bit for bit; the packaged file was written on
+    another machine and is held to them within round-off.
     """
     lon, lat = _jcm_t31_axes()
     mislabelled = xr.open_dataset(REFERENCE_FILE).load()
@@ -101,8 +120,8 @@ def test_axes_are_jcms_own_grid_not_the_reference_files_labels(tmp_path):
         np.testing.assert_array_equal(ds["lon"].to_numpy(), lon)
         np.testing.assert_array_equal(ds["lat"].to_numpy(), lat)
     packaged = xr.open_dataset(PACKAGED_DOUBLE_DRAKE_FILE)
-    np.testing.assert_array_equal(packaged["lon"].to_numpy(), lon)
-    np.testing.assert_array_equal(packaged["lat"].to_numpy(), lat)
+    _assert_labels_match(packaged["lon"].to_numpy(), lon)
+    _assert_labels_match(packaged["lat"].to_numpy(), lat)
 
 
 def test_the_packaged_earth_terrain_is_labelled_with_the_grids_own_axes():
@@ -118,8 +137,8 @@ def test_the_packaged_earth_terrain_is_labelled_with_the_grids_own_axes():
 
     lon, lat = _jcm_t31_axes()
     packaged = xr.open_dataset(REFERENCE_FILE)
-    np.testing.assert_array_equal(packaged["lon"].to_numpy(), lon)
-    np.testing.assert_array_equal(packaged["lat"].to_numpy(), lat)
+    _assert_labels_match(packaged["lon"].to_numpy(), lon)
+    _assert_labels_match(packaged["lat"].to_numpy(), lat)
 
     orography, _ = get_terrain(terrain_file=REFERENCE_FILE, grid=Grid.T31())
     np.testing.assert_allclose(
@@ -184,7 +203,7 @@ def test_forcing_matches_the_packaged_file(tmp_path):
         assert fresh[name].dtype == packaged[name].dtype
         assert fresh[name].dims == packaged[name].dims
     np.testing.assert_array_equal(fresh["time"].to_numpy(), packaged["time"].to_numpy())
-    np.testing.assert_array_equal(fresh["lat"].to_numpy(), packaged["lat"].to_numpy())
+    _assert_labels_match(packaged["lat"].to_numpy(), fresh["lat"].to_numpy())
 
 
 def test_packaged_forcing_is_small():
