@@ -104,17 +104,35 @@ def test_absolute_salinity_is_reference_salinity():
 
 
 def test_the_linear_equation_of_state_constants_are_the_veros_ones():
-    pytest.importorskip("veros")
-    # Importing Veros flips jax_enable_x64 for the process, which is why this
-    # check is skipped unless the module is already importable; the Veros-side
-    # test in test_veros_setups.py pins the same numbers.
-    from veros.core.density import linear_eq
+    """The restated constants equal Veros' own, read in a separate process.
 
-    assert ois.LINEAR_EOS_RHO0 == linear_eq.rho0
-    assert ois.LINEAR_EOS_THETA0 == pytest.approx(linear_eq.theta0, abs=1e-12)
-    assert ois.LINEAR_EOS_S0 == linear_eq.S0
-    assert ois.LINEAR_EOS_BETA_T == linear_eq.betaT
-    assert ois.LINEAR_EOS_BETA_S == linear_eq.betaS
+    Veros switches the process-global ``jax_enable_x64`` on the first time
+    its operators are imported with the JAX backend selected, which an
+    earlier test of the same session may have done. Importing
+    ``veros.core.density`` here would then leave every later test in double
+    precision, so the values are read in a subprocess, which cannot.
+    """
+    import importlib.util
+    import json
+    import subprocess
+    import sys
+
+    if importlib.util.find_spec("veros") is None:
+        pytest.skip("veros is not installed")
+    code = (
+        "import json; from veros.core.density import linear_eq as eq; "
+        "print(json.dumps([eq.rho0, eq.theta0, eq.S0, eq.betaT, eq.betaS]))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], check=True, capture_output=True, text=True
+    )
+    rho0, theta0, s0, beta_t, beta_s = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert ois.LINEAR_EOS_RHO0 == rho0
+    assert ois.LINEAR_EOS_THETA0 == pytest.approx(theta0, abs=1e-12)
+    assert ois.LINEAR_EOS_S0 == s0
+    assert ois.LINEAR_EOS_BETA_T == beta_t
+    assert ois.LINEAR_EOS_BETA_S == beta_s
 
 
 # ---------------------------------------------------------------------------
