@@ -206,7 +206,9 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
     Returns
     -------
     jnp.ndarray
-        The field with shape ``(n_lon, n_lat, 12)``.
+        The field with shape ``(n_lon, n_lat, 12)``, in the working precision
+        of the process (float64 under ``jax_enable_x64``, otherwise float32)
+        whatever precision the file stores it in.
 
     Raises
     ------
@@ -271,8 +273,14 @@ def load_monthly_climatology(path, var: str, grid: SlabGrid) -> jnp.ndarray:
         var,
     )
 
+    # `dtype=float` is the working precision of the process, not the file's:
+    # a component seeds its state from this array, and its step computes in the
+    # working precision, so a float32 file read at its own dtype under
+    # `jax_enable_x64` gives a float32 initial state that the first step
+    # returns as float64, which `lax.scan` rejects.
     return jnp.asarray(
-        field.transpose(longitude_name, latitude_name, time_name).values
+        field.transpose(longitude_name, latitude_name, time_name).values,
+        dtype=float,
     )
 
 

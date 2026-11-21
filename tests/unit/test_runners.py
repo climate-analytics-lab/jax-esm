@@ -1311,6 +1311,33 @@ def test_a_slab_run_is_the_precision_it_asks_for_from_the_start(
     assert _float_dtypes(carry.components["ocn"]) == {dtype}
 
 
+@pytest.mark.parametrize("overrides", [
+    ["+configuration=earth-slab"],
+    ["+configuration=earth-slab-winton"],
+    ["+configuration=earth-slab", "land=bucket",
+     "+land.soil_water_clim_file=${jcm_data:bc/t30/clim/forcing.nc}"],
+], ids=["earth-slab", "earth-slab-winton", "earth-slab-bucket-land"])
+def test_a_float64_run_from_file_climatologies_keeps_its_carry(overrides, restore_x64):
+    """A configuration started from float32 files scans in float64.
+
+    The packaged climatologies are stored in float32. Each slab component
+    seeds its state from one, so the state must take the run's precision, not
+    the file's: a float32 initial SST under ``jax_enable_x64`` comes back from
+    the first step as float64, and ``lax.scan`` refuses the carry. Tracing two
+    coupled steps is what shows the carry that leaves a step is the one that
+    entered it.
+    """
+    coupler = runners.build_coupler(composed([*overrides, "jax_enable_x64=true"]))
+    carry = coupler.initialize()
+    for name in set(coupler.components) - {"atm"}:
+        assert _float_dtypes(carry.components[name]) == {"float64"}, name
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(2), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    assert [leaf.dtype for leaf in jax.tree_util.tree_leaves(final)] == [
+        jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(carry)
+    ]
+
+
 @pytest.mark.slow
 def test_a_float64_slab_run_scans_two_coupled_steps(restore_x64):
     """The carry that leaves a float64 step has the structure and dtypes it entered with."""
