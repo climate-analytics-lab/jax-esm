@@ -579,7 +579,10 @@ def test_save_carry_hands_each_component_its_own_directory(tmp_path):
     root = tmp_path / "checkpoint"
     outer.save_carry(carry, root)
 
-    assert land.saved_directories == [root / "atm_lnd" / "lnd"]
+    # The land is handed a directory named after it, once; that directory is
+    # inside the staging area the checkpoint is assembled in, and what the
+    # land wrote there is at `<root>/atm_lnd/lnd` once the save returns.
+    assert [directory.name for directory in land.saved_directories] == ["lnd"]
     assert (root / "atm_lnd" / "lnd" / CheckpointingCounter.FILENAME).exists()
     # A component with no capability of its own is not given a directory: its
     # carry is a plain pytree and goes into the carry file of the coupler it

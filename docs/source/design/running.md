@@ -89,7 +89,11 @@ state. The output written so far is kept and `RunResult.completed` is
 False. A coupled model with **no** atmosphere gets `{"skipped": "no
 atmosphere"}` — an abstention, not a pass: a gate for the surface
 components would have to know each one's physical ranges, which is the
-components' business. `health_check=None` removes the gate entirely, and
+components' business. The run says so once, at WARNING, so a model that
+registers its atmosphere under another name is told it has no gate rather than
+reading a gate that never looked as one that passed; it supplies one with
+`health_check=` (a function that looks the atmosphere up by its name).
+`health_check=None` removes the gate entirely, silently and on purpose, and
 `bail_on_unhealthy=False` logs and carries on, which is what a run studying
 the instability itself wants.
 
@@ -141,17 +145,56 @@ load cleanly and resume a different composition). A **static**
 (`pytree_node=False`) parameter that changed value is refused the same way:
 JAX keeps it inside the `PyTreeDef`, so resuming with `forcing_method`
 edited from `"none"` to `"qflux"` would otherwise silently run a different
-model. A *differentiable* parameter is a leaf, so it is restored from the
-checkpoint instead and a value edited between runs is overridden, not
-refused.
+model. A *differentiable* parameter is a leaf, so `Coupler.load_carry` restores it
+from the checkpoint like any other leaf; what the *driver* does about a value
+that differs from the configured one is the next section.
 
 **Loading is all-or-nothing**: the template built from `initialize()`
-supplies only the pytree *structure*, every leaf of the restored carry comes
+supplies only the pytree *structure*, every leaf of the restored carry
+`Coupler.load_carry` returns comes
 from the checkpoint, and a component the checkpoint does not hold is a
 `ValueError` rather than being quietly left at its initial state — which
 would continue one part of the model from the saved step while another
 restarted at the start date, a run that is neither a resume nor a cold
 start.
+
+**A resume and an `initial_condition` take different things from the
+checkpoint.** A carry's `params` (the differentiable physical parameters) and
+the prescribed part of its `forcing` are leaves like the state is, so
+restoring "everything" would silently discard the values the run was
+configured with. `run_chunked` therefore decides by what the checkpoint is for:
+
+| | the run's own checkpoint (a **resume**) | `initial_condition` (a **new run** from a spun-up state) |
+|---|---|---|
+| state, derived, lagged (exchanger-written) forcing, the clock's step and time | checkpoint | checkpoint (clock reset onto this coupler's start date) |
+| `params` of every component | checkpoint; a WARNING names each leaf that differs from the configured one | **configured** model's; INFO names each leaf that differs from the checkpoint's |
+| prescribed `forcing` (fields no exchanger writes) | checkpoint; same WARNING | **configured** model's; same INFO |
+
+A resume has to be the same run carried on (bit-identical to the
+uninterrupted one), which is why it keeps the checkpoint's values and only
+reports drift, once, with how to get the other behaviour: start a new run from
+the checkpoint with `initial_condition`. A branch experiment (spin up, then
+change a parameter and run from the spin-up) is an `initial_condition` run
+and integrates with the parameter it was configured with.
+
+"Prescribed forcing" is read from the coupling table: a field of
+`carry["forcing"]` that no `jem.exchangers.Exchange` writes
+(`jem.exchangers.exchanged_fields`) is configuration, such as the slab
+ocean's `q_flux` climatology or the atmosphere's boundary conditions, and a
+field an exchanger writes is the flux the component was last given, which is
+state. Where that cannot be read, the forcing is restored whole and the log
+says why: a hand-written exchanger (an arbitrary function) hides which fields
+it writes, so every `forcing` of that coupler (its `params` are still taken),
+or a nested coupler that an outer table writes into; a component that
+checkpoints itself (Veros) is restored whole, since its carry layout is its
+own. A component that updates its own `forcing` inside `step` must keep that
+field under `state`, or it would be mistaken for a prescribed one. A nested
+`Coupler` is walked with its own components and table. Static
+(`pytree_node=False`) parameters are refused on mismatch by the `PyTreeDef`
+check either way. A parameter read only by `initialize` (an initial-condition
+parameter such as the slab ocean's `initial_sst`) is a leaf like the others,
+so a resume that changes it is reported even though the state it shaped is
+already in the checkpoint.
 
 **The coupler is what a driver checkpoints through**, in one call each way:
 
@@ -171,13 +214,25 @@ nested coupler as a component that writes itself, hands it `directory /
 its own `carry.msgpack` there.
 
 **The carry file is the marker**, written last by renaming a flushed,
-fsynced temporary over its final name, and removed first when an existing
-checkpoint is overwritten, so a failure part-way through cannot leave a
-stale clock beside freshly written component data. A save interrupted
-part-way through therefore leaves a directory with no marker, which
-`load_coupled_carry` refuses and `latest_complete_checkpoint(root,
-pattern="step_*")` skips over (with a warning) in favour of the newest
-complete one.
+fsynced temporary over its final name: a directory without one is not a
+checkpoint, `load_coupled_carry` refuses it, and
+`latest_complete_checkpoint(root, pattern="step_*")` skips over it (with a
+warning) in favour of the newest complete one.
+
+**A save never destroys the checkpoint it replaces.** `run_chunked` rewrites
+one checkpoint directory after every chunk, so the directory being
+overwritten is the run's only restart point. The new checkpoint is therefore
+written whole into a sibling directory, `<directory>.saving`, and swapped in
+with two renames only once its carry file exists (the old one aside to
+`<directory>.replaced`, the new one into place, then the old one deleted). A
+save that fails -- a full disk, a killed job, an exception in a component's
+`save_carry` -- leaves a complete checkpoint behind whenever it happens, and
+the next save or load puts the newest one back at `<directory>`
+(`jem.checkpoint.recover_interrupted_save`, logged at WARNING), so the
+resubmitted command resumes from the last chunk that was checkpointed rather
+than from the start date. Because the directory is replaced wholesale it has
+to be the checkpoint's own: a save into a directory holding anything else
+(a `checkpoint_path` pointed at the output directory, say) is refused.
 
 `run_chunked` keeps a **single checkpoint directory**, rewritten after every
 chunk the health gate accepts, rather than a directory of dated restart
@@ -214,8 +269,9 @@ INFO, in one line before anything is compiled — "Starting from
 "Starting from initial_condition ...", or
 "Resumed from checkpoint ... at coupled step N" — because resuming a run is
 the *same command* as starting one, so nothing else says which happened. A
-directory an interrupted save left without its carry file is a WARNING (a
-run died and its last chunk is gone); a path with nothing at it is INFO
+checkpoint directory with no carry file in it is a WARNING (it is not what a
+save leaves, interrupted or not, so something else emptied it and the run
+starts over); a path with nothing at it is INFO
 (what every first run into a fresh output directory sees).
 
 **A spun-up state as the initial condition of a run with another start
@@ -244,7 +300,9 @@ per interface:
   for by name, and quietly starting from `coupler.initialize()` would give an
   experiment that never saw the spin-up.
 
-`initial_condition` and `initial_carry` are mutually exclusive.
+`initial_condition` and `initial_carry` are mutually exclusive. Only
+`initial_condition` swaps in the configured parameters and prescribed forcing
+(see *Checkpoints and resume*); an `initial_carry` is used exactly as given.
 
 **Precedence with `checkpoint_path`.** A complete checkpoint at
 `checkpoint_path` wins over `initial_condition` (and over `initial_carry`), and

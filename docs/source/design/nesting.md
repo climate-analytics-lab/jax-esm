@@ -91,7 +91,8 @@ model cannot perturb the rest of it.
 A `Coupler` satisfies `Component`: it has a `name` (the keyword-only
 `name="coupled"` argument; the *registered* key in an outer coupler is what
 the outer workflow uses), an `initialize()` returning its `CoupledCarry`, and
-a `step(carry, time)`. It also implements `SupportsBind` and `SupportsXarray`.
+a `step(carry, time)`. It also implements all four optional capabilities:
+`SupportsBind`, `SupportsXarray`, `SupportsCheckpoint` and `SupportsClockReset`.
 So a coupled model can be a component of a slower coupled model with no
 wrapper class:
 
@@ -143,8 +144,13 @@ model = Coupler(
   ```python
   def srf_ocn_exchange(components, time):
       del time
-      land = nested_carry(components, "atm_lnd", "lnd")
-      ocn = dict(components["ocn"], forcing=land["derived"].total_heat_flux)
+      atm = nested_carry(components, "atm_lnd", "atm")
+      ocn = components["ocn"]
+      # The ocean's forcing is a struct: replace one field of it, never the
+      # whole section (the coupler refuses a changed pytree structure). The
+      # ocean takes the flux over its own part of the cell.
+      ocn = dict(ocn, forcing=ocn["forcing"].replace(
+          total_heat_flux=atm["derived"].sea_total_heat_flux))
       return dict(components, ocn=ocn)
   ```
 

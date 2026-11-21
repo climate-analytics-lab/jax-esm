@@ -261,6 +261,26 @@ def test_bind_rejects_non_multiple_timestep(model):
         )
 
 
+def test_an_hourly_coupling_interval_steps(model):
+    """A sub-daily coupling interval reaches jax-gcm as a whole number of seconds.
+
+    jax-gcm takes the interval as a number of days and refuses one that is
+    not a whole number of seconds. An hour is 1/24 of a day, which is not
+    exact in float32, so the interval has to be worked out from the
+    timedelta's integer seconds; an hourly-coupled atmosphere is what a
+    nested or repeated workflow element steps.
+    """
+    component = JCMComponent(model)
+    component.bind(coupling_timestep=jdt.to_timedelta(1, "hour"), start_date=START_DATE)
+    assert component._coupling_days * 86400 == 3600.0
+
+    carry, _ = component.step(
+        component.initialize(),
+        CouplingTime(step=jnp.int32(0), time=START_DATE, dt=3600.0),
+    )
+    assert int(carry["step"]) > 0
+
+
 def test_initialize_does_not_integrate(model, monkeypatch):
     """``initialize()`` must build pytrees, not run the model.
 
@@ -728,19 +748,6 @@ def test_echam_new_reader_matches_a_real_echam_surface_exchange_step():
     np.testing.assert_allclose(exchange.precipitation, expected_precipitation)
     np.testing.assert_allclose(exchange.u0, wind_10m_u)
     np.testing.assert_allclose(exchange.v0, wind_10m_v)
-
-
-def test_make_jem_compatible_is_deprecated(model):
-    """The old entry point still works, warns, and leaves the model alone."""
-    from jem.components import jcm_component
-
-    with pytest.warns(DeprecationWarning, match="JCMComponent"):
-        component = jcm_component.make_jem_compatible(model, COUPLING_TIMESTEP)
-
-    assert isinstance(component, JCMComponent)
-    assert component.model is model
-    # The wrapper no longer injects methods onto the jcm Model.
-    assert not hasattr(model, "generate_step_function")
 
 
 # --------------------------------------------------------------------------

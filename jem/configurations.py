@@ -21,6 +21,7 @@ notebook.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -115,26 +116,42 @@ def _fresh_output_dir() -> str:
 
 
 def _summary(path: Path) -> str:
-    """First human comment line of a configuration yaml (its one-line summary).
+    """Return the first sentence of a configuration yaml's leading comment.
 
-    The yamls open with ``# @package _global_``, a blank ``#``, then the
-    summary; return that first real comment, or ``""`` if none is present.
+    The yamls open with ``# @package _global_`` and then a paragraph that says
+    what the configuration is, ending at a blank ``#`` line. The paragraph can
+    wrap over several lines, so its lines are joined and the first sentence
+    (up to the first ``.``, ``!`` or ``?`` followed by a space or the end) is
+    returned whole; ``""`` if the file has no leading comment.
     """
+    paragraph: list[str] = []
     for line in path.read_text().splitlines():
         s = line.strip()
         if not s.startswith("#"):
             break
         body = s[1:].strip()
-        if not body or body.startswith("@package"):
+        if body.startswith("@package"):
             continue
-        return body
-    return ""
+        if not body:
+            if paragraph:
+                break
+            continue
+        paragraph.append(body)
+    text = " ".join(paragraph)
+    match = re.search(r"[.!?](?=\s|$)", text)
+    return text if match is None else text[: match.end()]
 
 
 def available() -> dict[str, str]:
-    """Map each configuration name to its one-line summary (sorted by name)."""
+    """Map each configuration name to a one-sentence summary.
+
+    The order is alphabetical by name (the file stem, so
+    ``aquaplanet-slab`` comes before ``aquaplanet-slab-mixed-grid``), not a
+    recommended reading order. Each
+    summary is the first sentence of the yaml's leading comment.
+    """
     return {p.stem: _summary(p)
-            for p in sorted(CONFIGURATION_DIR.glob("*.yaml"))}
+            for p in sorted(CONFIGURATION_DIR.glob("*.yaml"), key=lambda p: p.stem)}
 
 
 def _compose(name: str, overrides: list[str]):
@@ -163,7 +180,7 @@ def _compose(name: str, overrides: list[str]):
     ``version_base`` given here (``"1.3"``) and ``jem.main``'s (``None``,
     which ``hydra.main`` resolves to the installed version -- also 1.3.6
     here) are IDENTICAL on this installed Hydra, so nothing about how an
-    override composes differs between the two calls today; where a base
+    override composes differs between the two calls; where a base
     below 1.2 would matter is deprecated *defaults-list* spellings
     (``optional: true``, ``_name_``, a bare ``hydra/`` default with no
     ``override`` keyword) that no jem or jax-gcm config uses.
@@ -366,9 +383,7 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ``jem/config/configuration/*.yaml`` stem). ``**overrides`` is the optional
     escape hatch: Hydra overrides passed straight into compose -- a plain
     value override (``load("earth-slab", **{"coupled_run.total_time": "60
-    days"})`` -- the recipe's chunk stays its default 30 days, so this has to
-    be a multiple of that, not the CLI's own arbitrary "10 days"; the dict key
-    carries the dots a Python kwarg cannot) or a config-group selection
+    days"})`` -- the dict key carries the dots a Python kwarg cannot) or a config-group selection
     (``load("aquaplanet-slab", seaice="none")``, exactly the CLI's
     ``seaice=none``). The returned :class:`LoadedConfiguration` is Hydra-free:
     ``coupler`` is built and ``config`` is a plain resolved dict.
@@ -441,6 +456,23 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     ``jcm.constants.physical_constants`` itself, understanding that this
     changes the physics of any model already built with the old value).
 
+    The process's JAX precision follows the configuration, and persists
+    -------------------------------------------------------------------
+    ``jax_enable_x64`` is process-global too, and :func:`jem.runners.build_coupler`
+    sets it from the configuration's ``jax_enable_x64`` key *before* it builds
+    any component: ``load("veros-earth")`` (whose ``ocean=veros`` selects
+    ``true``) switches the whole process to float64, and so does
+    ``load("earth-slab", jax_enable_x64=True)``. A configuration that leaves it
+    ``null`` -- the four slab ones -- builds in whatever precision the process
+    already has. Unlike a constants override, a ``load()`` that fails (including
+    the refusal when a component changes the precision mid-build) puts the flag
+    back to what it was, because no model was returned that could depend on the
+    change. A successful ``load()`` does not restore it: the returned coupler
+    is only valid in that precision, so a process should load either
+    float32 or float64 configurations, not both, and a test that loads a
+    float64 one must restore the flag itself (``jax.config.read`` before,
+    ``jax.config.update`` after).
+
     Other pre-build side effects of :func:`jem.runners.run`
     ---------------------------------------------------------
     Unlike jax-gcm's own door (:func:`jcm.configurations.load`), which has to
@@ -493,8 +525,9 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     cfg = _compose(name, overrides_list)
 
     # Everything that can fail on the config is resolved before the coupler
-    # is built, because building it applies `atmosphere.constants`
-    # process-globally: a `load()` that raises must leave them untouched.
+    # is built, because building it applies `atmosphere.constants` and
+    # `jax_enable_x64` process-globally: a `load()` that raises must leave
+    # them untouched.
     # `config` is the plain resolved dict for introspection; a still-unfilled
     # ``???`` key stays a string rather than raising on this read-only copy.
     config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
@@ -509,14 +542,18 @@ def load(name: str, **overrides: Any) -> LoadedConfiguration:
     if cfg.coupled_run.get("output_dir") is None:
         run_kwargs["output_dir"] = _fresh_output_dir()
     # A component can still fail while being built (a missing data file),
-    # after the atmosphere has applied the constants; put them back.
+    # after the atmosphere has applied the constants and the precision was set
+    # (or a component changed the precision mid-build); put both back.
+    import jax
     import jcm.constants as jcm_constants
 
     saved_constants = jcm_constants.physical_constants
+    saved_x64 = jax.config.read("jax_enable_x64")
     try:
         coupler = runners.build_coupler(cfg)
     except BaseException:
         jcm_constants.set_constants(saved_constants)
+        jax.config.update("jax_enable_x64", saved_x64)
         raise
     return LoadedConfiguration(name=name, coupler=coupler,
                                run_kwargs=run_kwargs, config=config)

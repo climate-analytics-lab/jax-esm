@@ -6,18 +6,22 @@ A fully differentiable Earth-system coupler in JAX.
 [![Docs](https://img.shields.io/badge/docs-source-blue)](docs/source/index.rst)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
-![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
+![Status: Beta](https://img.shields.io/badge/status-beta-yellow)
 
 JAX-ESM (`jem`) does not implement a climate model of its own: it couples
 independently-developed components — the JCM spectral atmosphere from
 [jax-gcm](https://github.com/climate-analytics-lab/jax-gcm) (SPEEDY or
-ICON/ECHAM physics), JEM's own slab ocean and sea-ice models, and the
-[Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM — into
-one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory. Every
-component's physical parameters travel in the scan carry as pytrees, so
+ICON/ECHAM physics), JEM's own slab ocean, bucket land and sea-ice models, and
+the [Veros](https://github.com/meteorologytoday/veros-jittable) ocean GCM —
+into one JIT-compiled, end-to-end differentiable `jax.lax.scan` trajectory.
+Every component's physical parameters travel in the scan carry as pytrees, so
 `jax.grad` reaches them through a whole coupled run: calibration against
 observations, hybrid physics-ML and sensitivity studies, with no adjoint
-model to write ([example](examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb)).
+model to write. [`docs/source/python_api.md`](docs/source/python_api.md)
+shows `jax.grad` of a coupled run with respect to a component parameter, and
+[this notebook](examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb)
+differentiates a coupled run with respect to its initial sea surface
+temperature (a tangent-linear sensitivity with `jax.jvp`).
 
 - **Any model plugs in.** A component is any object with a `name`,
   `initialize()` and `step(carry, time)` — a protocol, not a base class.
@@ -27,17 +31,18 @@ model to write ([example](examples/01_basic/03_aquaplanet_response_to_SST_pertur
   every component's output merges onto one time axis.
 - **One run loop.** `run_chunked` handles chunking, output, checkpoint/resume
   and a health gate, with in-scan monthly means for long runs.
-- **One command.** `python -m jem.main` composes a coupled model from Hydra
-  config groups, with named configurations from an aquaplanet slab ocean to
-  a Veros Earth.
+- **One command.** `python -m jem.main` (also installed as `jem`) composes a
+  coupled model from Hydra config groups, with named configurations from an
+  aquaplanet slab ocean to a Veros Earth.
 
 ![Surface specific humidity from a coupled JCM/slab-ocean run](gallery/JCM_SOM_demo.gif)
 
 ## Installation
 
 JAX-ESM is developed and tested against **one** jax-gcm revision, recorded in
-[`jem/components/jcm/contract.py`](jem/components/jcm/contract.py). jax-gcm
-`>=3.0` is not yet on PyPI, so install it from source first:
+[`jem/components/jcm/contract.py`](jem/components/jcm/contract.py). That
+revision is ahead of the newest jax-gcm release on PyPI (`jcm` 3.0.0, which
+JAX-ESM cannot run against), so install jax-gcm from source first:
 
 ```bash
 git clone https://github.com/climate-analytics-lab/jax-gcm
@@ -46,9 +51,13 @@ cd jax-gcm && git checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97 && pip insta
 git clone https://github.com/climate-analytics-lab/jax-esm
 cd jax-esm && pip install -e "." && cd ..
 
-# Optional: the jittable Veros fork, only needed for the Veros configurations
+# Optional: the jittable Veros fork, only needed for the Veros configurations.
+# Check out the revision CI tests (the fork's `main` is a different commit).
+# Veros is used from the checkout, as in CI: install its pinned requirements
+# and put the checkout on PYTHONPATH.
 git clone https://github.com/meteorologytoday/veros-jittable.git
-cd veros-jittable && pip install -e "."
+cd veros-jittable && git checkout 180366b73b0fc1938b3db8fbdb5426bc546905c6 && pip install -r requirements.txt
+export PYTHONPATH="$PWD:$PYTHONPATH"
 ```
 
 See [`docs/source/getting_started.rst`](docs/source/getting_started.rst) for
@@ -105,16 +114,73 @@ result = run_chunked(
 print(result.steps_completed, "coupled steps;", len(result.paths), "files")
 ```
 
-The same run, composed from Hydra config groups instead of built by hand:
+The closest shipped configuration, composed from Hydra config groups instead
+of built by hand:
 
 ```bash
 python -m jem.main +configuration=aquaplanet-slab coupled_run=short_run
 ```
 
+It is not the identical run. `aquaplanet-slab` adds an SST-diagnosed slab sea
+ice, runs SPEEDY with jax-gcm's coupled-calibrated parameters (the `Model(...)`
+above runs SPEEDY's reference values; see the note under the named
+configurations below), and `short_run` integrates 2 days where the script above
+integrates 10. Both step the atmosphere at 30 minutes. To reproduce the
+configuration from Python, load it with `jem.configurations`
+([`docs/source/python_api.md`](docs/source/python_api.md)).
+
 See [`docs/source/getting_started.rst`](docs/source/getting_started.rst) for
-every override, and [`docs/source/python_api.md`](docs/source/python_api.md)
+the overrides, and [`docs/source/python_api.md`](docs/source/python_api.md)
 for the complete construction (the declarative exchange table, parameters,
 long runs and checkpoints).
+
+## What is in the box
+
+Components (`jem.components`; each a plain object satisfying the `Component`
+protocol):
+
+- `JCMComponent` — the JCM atmosphere (SPEEDY or ECHAM physics).
+- `SlabOceanModel` — a mixed-layer ocean, free, relaxed to an SST
+  climatology, or driven by a Q-flux.
+- `SlabSeaiceModel` — sea ice diagnosed from the ocean's SST;
+  `WintonSeaiceModel` — Winton's thermodynamic snow-and-ice model, with an
+  energy budget and optional ice transport.
+- `BucketLandModel` — a two-layer soil-water bucket under the atmosphere's own
+  land.
+- `VerosComponent` — the Veros ocean GCM (optional dependency).
+- `SlabAtmosphereModel` — an idealized atmosphere, for tests and examples with
+  no climate in them.
+
+Named configurations (`python -m jem.main +configuration=<name>`, or
+`jem.configurations.load("<name>")` from Python): `aquaplanet-slab`,
+`aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
+`earth-slab-echam`, `earth-slab-winton`, `veros-double-drake` and
+`veros-earth`.
+[Examples](docs/source/examples.rst)
+tabulates what each couples and its command.
+
+Every named configuration takes its atmosphere whole from a jax-gcm
+configuration bundle. The six SPEEDY ones (all but the two `-echam`) run
+jax-gcm's parameters for SPEEDY calibrated for coupled use, at the 30-minute
+atmosphere step they were calibrated at, from its `speedy-t31` bundle
+(jax-gcm's `docs/source/design/speedy_retune.md`); the two ECHAM ones run its
+`t63-echam-1m` bundle, and `configuration@atmosphere=<bundle>` swaps in
+another. The
+calibration was a fit of 29 values at T31 against observations (CERES, GPCP,
+ERA5 and others) with *prescribed* SSTs, so that the top-of-atmosphere budget
+and the surface fluxes handed to an ocean are credible; a coupled run is
+therefore not guaranteed drift-free. A bare `python -m jem.main` composition
+and a Python-built `jcm.model.Model()` run SPEEDY's reference values instead.
+The calibrated atmosphere alone is `+configuration@atmosphere=speedy-t31`, and
+from Python `jem.configurations.load("<name>")`.
+
+Also:
+
+- `jem.adjoint` — gradients of long, high-resolution runs with host-memory
+  checkpoints ([design note](docs/source/design/differentiating_long_runs.md)).
+- `jem.plot` — the helpers the notebooks share: opening a run's output, area
+  means, maps and animations (maps need the `plot` extra).
+- `jem.accumulate` — in-scan reductions such as `monthly_mean`.
 
 ## Documentation
 
@@ -122,7 +188,8 @@ long runs and checkpoints).
 - [Python API](docs/source/python_api.md) — the complete direct-Python construction
 - [Design notes](docs/source/design.rst) — the coupling core, carry and clock, exchangers, chunked runs and checkpoints, configuration
 - [Adding a component](docs/source/adding_a_component.rst) — wrapping an external model to join a coupled run
-- [Examples](docs/source/examples.rst) — every example notebook and configuration, and the command that runs it
+- [Examples](docs/source/examples.rst) — every named configuration with its command, and the example notebooks
+- [Known limitations](docs/source/issues.rst) — what 1.0 does not do, and the consequence of each
 
 ## Contributing
 

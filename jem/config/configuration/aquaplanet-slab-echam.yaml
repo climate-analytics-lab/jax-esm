@@ -1,0 +1,66 @@
+# @package _global_
+#
+# Aquaplanet with ECHAM physics: jax-gcm's `t63-echam-1m` atmosphere (ECHAM
+# 1-moment microphysics and RRTMGP radiation at T63 with 47 hybrid levels)
+# over a free slab ocean with SST-diagnosed sea ice, on a planet with no land.
+#
+#   python -m jem.main +configuration=aquaplanet-slab-echam
+#
+# WHAT THE ATMOSPHERE IS: jax-gcm's own configuration. The first line of the
+# defaults list composes `jcm/config/configuration/t63-echam-1m.yaml` under
+# `atmosphere`, so the grid, the physics terms and their parameters, the dry
+# Jablonowski-Williamson start, the 12-minute step and ECHAM's upper sponge
+# are the ones jax-gcm validates and documents there (its comments say why
+# each is what it is). The two overrides after it replace the bundle's Earth
+# surface with an aquaplanet and change nothing else, which
+# `tests/unit/test_echam_configuration.py` asserts key for key.
+#
+# ANOTHER ATMOSPHERE is one override, because the bundle is a group choice:
+#
+#   python -m jem.main +configuration=aquaplanet-slab-echam \
+#       configuration@atmosphere=t63-echam-2m
+#
+# selects any other jax-gcm configuration bundle (`python -m jem.main --help`
+# lists them under `+configuration@atmosphere`); the ocean and the sea ice are
+# built on whatever grid it has.
+#
+# WHAT IT NEEDS: T63 L47 ECHAM is not a laptop run. A five-day run of this
+# configuration took about half an hour of wall time per simulated day on 16
+# CPU threads (no GPU was tried) and wrote about 290 MB of atmosphere output
+# per day; it stayed finite, the atmosphere moistening from its dry start.
+# The inputs the bundle resolves from jax-gcm's data mirror (the SLIM land
+# surface dataset among them) are fetched once into the local Hugging Face
+# cache, so the first run needs the network. CI integrates the ECHAM plumbing
+# on jax-gcm's smallest ECHAM grid instead (see
+# `tests/unit/test_echam_configuration.py` for the two overrides that select
+# it) and checks this configuration by composition.
+#
+# WHY each of JEM's settings:
+#  - terrain=aquaplanet and forcing=default: zero orography, no land, and an
+#    aquaplanet `ForcingData` in place of the bundle's native orography and
+#    present-day boundary file. The SST the atmosphere sees comes from the
+#    coupled ocean, not from a file. Neither group reads a file, so the
+#    `forcing.file` the bundle leaves behind is set to null below (a composed
+#    config should not name a download nothing performs); the bundle's
+#    `forcing.align` is read only together with a file and so is inert.
+#  - ocean=slab with no forcing term: the mixed layer responds to the coupled
+#    surface heat flux alone, as in `aquaplanet-slab`. Nothing pins it, so
+#    the coupled system finds its own equilibrium.
+#  - seaice=slab: ECHAM reads the ice fraction of the sea from the same
+#    `sice_am` forcing field as SPEEDY, and the exchange writes the slab's
+#    diagnosed `ice_fraction` into it, so the ice cover follows the ocean.
+#  - land=none: there is no land. The bucket land and the Winton sea ice are
+#    not options with ECHAM in any case: both need the per-surface flux tiles
+#    SPEEDY publishes and ECHAM does not, and the standard exchange refuses
+#    the pairing.
+defaults:
+  - /configuration@atmosphere: t63-echam-1m
+  - override /terrain@atmosphere.terrain: aquaplanet
+  - override /forcing@atmosphere.forcing: default
+  - override /ocean: slab
+  - override /seaice: slab
+  - override /land: none
+
+atmosphere:
+  forcing:
+    file: null

@@ -149,7 +149,7 @@ against their own protocols at the one place that uses them — never with
 | Protocol | Member | Who implements it |
 |---|---|---|
 | `SupportsXarray` | `to_xarray(diagnostics, time) -> xr.Dataset \| Mapping[str, xr.Dataset]` | slab models, `JCMComponent`, `VerosComponent`, `Coupler` |
-| `SupportsBind` | `bind(*, coupling_timestep, start_date)` | `JCMComponent`, `VerosComponent`, the slab models |
+| `SupportsBind` | `bind(*, coupling_timestep, start_date)` | `JCMComponent`, `VerosComponent`, the slab models, `Coupler` |
 | `SupportsCheckpoint` | `save_carry(carry, directory)` / `load_carry(directory)` | `VerosComponent`, `Coupler` |
 | `SupportsClockReset` | `restart_clock(carry) -> carry` | `JCMComponent`, `VerosComponent`, `Coupler` |
 
@@ -238,10 +238,11 @@ from the clock (`time.time - start_date` for a wrapped model's drift check,
   `time` by hand, because `year_fraction` is derived from `time`.
 
 `coupling_timestep` itself is a `jdt.Timedelta`, which holds whole seconds —
-the shortest step expressible today is one second, which is no limit for a
-geoscience configuration but does force a non-geoscience component onto a
-coarser step than it might otherwise want (jax-esm#110 tracks lifting it to
-accept a float number of seconds).
+the shortest step is one second, which is no limit for a geoscience
+configuration but does make a non-geoscience component rescale its units to
+fit (the spring example does). Accepting a float number of seconds was
+considered and not taken up (jax-esm#110): the one clock every component
+shares is a `jax_datetime` one.
 
 ## Reusing a state under another start date
 
@@ -321,14 +322,19 @@ returns the carry with `step` (and `time`) advanced. It snapshots the
 components and exchangers as they stand when it is called, so registering a
 component afterwards cannot silently change an already-compiled step.
 
-`Coupler.generate_trajectory_function(iterations, *, remat=False, jit=True)`
-drives that step with `jax.lax.scan` over `iterations` steps and no `xs`
+`Coupler.generate_trajectory_function(iterations, *, remat=False, jit=True,
+accumulate=None)` drives that step with `jax.lax.scan` over `iterations` steps and no `xs`
 (the steps are identical; the only per-step input, the clock, comes from the
-carry). It returns `carry -> (final_carry, diagnostics)`, where every
+carry). Without `accumulate` it returns `carry -> (final_carry, diagnostics)`, where every
 diagnostics leaf gains a leading axis of length `iterations`. `remat=True`
 wraps the step in `jax.checkpoint`, trading recomputation for memory when
 differentiating through a long trajectory; `jit=False` leaves the scan
-unjitted.
+unjitted. `accumulate=(init, update)` is an **in-scan reduction**: `update`
+folds each step's diagnostics into a fixed-size accumulator inside the scan
+body, the function becomes `(carry, accumulator=None) -> (final_carry,
+accumulator)` and nothing is stacked per step, so memory no longer grows with
+`iterations` (`jem.accumulate.monthly_mean` and `windowed_mean` build such a
+pair; {doc}`running` has the binning rules).
 
 Because the clock lives in the carry, calling the trajectory function again
 on the returned carry continues the run:

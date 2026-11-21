@@ -8,8 +8,9 @@ Install JEM
 
 .. code-block:: bash
 
-    # JAX-GCM (jcm) >= 3.0 is not on PyPI yet: install it from source FIRST,
-    # at the revision JAX-ESM is tested against (JCM_SUPPORTED_REV)
+    # JAX-ESM needs a newer JAX-GCM (jcm) than the 3.0.0 on PyPI: install it
+    # from source FIRST, at the revision JAX-ESM is tested against
+    # (JCM_SUPPORTED_REV)
     git clone https://github.com/climate-analytics-lab/jax-gcm
     cd jax-gcm
     git checkout 9764c56b36cd71b55c644aeb93cb787eb8c4db97
@@ -23,10 +24,15 @@ Install JEM
     cd ..
 
     # Optional: the jittable Veros fork, only needed for the Veros
-    # configurations (+configuration=veros-double-drake / veros-earth)
+    # configurations (+configuration=veros-double-drake / veros-earth).
+    # Check out the revision CI tests (the fork's `main` is a different
+    # commit). Veros is used from the checkout, as in CI: install its pinned
+    # requirements and put the checkout on PYTHONPATH.
     git clone https://github.com/meteorologytoday/veros-jittable.git
     cd veros-jittable
-    pip install -e "."
+    git checkout 180366b73b0fc1938b3db8fbdb5426bc546905c6
+    pip install -r requirements.txt
+    export PYTHONPATH="$PWD:$PYTHONPATH"
     cd ..
 
 Plotting the examples needs the plotting extras, which are JEM's own, so
@@ -73,8 +79,9 @@ package spelled out.
 
 .. code-block:: bash
 
-    # every group, option and override spelling -- JAX-ESM's own help, not
-    # the atmosphere's
+    # JAX-ESM's own help (not the atmosphere's): the config groups, how the
+    # atmosphere's groups are re-rooted, and worked override examples. The
+    # options of a group are the files in jem/config/<group>/
     python -m jem.main --help
 
     # compose the fully-resolved config and print it; run nothing
@@ -89,10 +96,23 @@ package spelled out.
      - ``+configuration=earth-slab``
    * - Compose a whole jax-gcm bundle as the atmosphere
      - ``+configuration@atmosphere=speedy-t31``
+   * - Swap the atmosphere of a named SPEEDY slab configuration for another
+       jax-gcm bundle
+     - ``+configuration=earth-slab configuration@atmosphere=<bundle>``; see
+       below for what else has to change
    * - Change one atmosphere group
-     - ``physics@atmosphere.physics=held_suarez grid@atmosphere.grid=held_suarez_t31_l8``
+     - ``diffusion@atmosphere.diffusion=strong``
+   * - Use ECHAM physics
+     - ``+configuration=aquaplanet-slab-echam`` or
+       ``+configuration=earth-slab-echam``: jax-gcm's ``t63-echam-1m``
+       atmosphere, composed whole, over the slab ocean. Any other jax-gcm
+       configuration bundle is one more override,
+       ``configuration@atmosphere=t63-echam-2m``. ECHAM is more than a
+       ``physics`` override -- it needs its own grid, initial state, step and
+       sponge -- which is why the bundle is taken as a unit.
    * - Set one atmosphere key
-     - ``atmosphere.run.time_step=7``
+     - ``atmosphere.run.time_step=15`` (minutes; it has to divide the
+       coupling timestep)
    * - Start the atmosphere from ERA5 (or ``jw``, ``from_state``, ...)
      - ``init@atmosphere.init=era5 atmosphere.run.start_time=2022-12-24``
    * - Choose a surface component
@@ -102,12 +122,20 @@ package spelled out.
    * - Evolve the soil water (the bucket land)
      - ``land=bucket +land.soil_water_clim_file='${jcm_data:bc/t30/clim/forcing.nc}'``
    * - Use the thermodynamic Winton sea ice
-     - ``+configuration=earth-slab-winton``, or ``seaice=winton
-       +ocean.params.clamp_at_freezing=true`` in another composition
+     - ``+configuration=earth-slab-winton`` (or ``veros-earth``), or
+       ``seaice=winton +ocean.params.clamp_at_freezing=true`` in another slab
+       composition; a Veros ocean's clamp is ``+ocean.clamp_at_freezing=true``
+       and its ice has to be on the ocean's grid, which ``veros-earth``
+       does
    * - Set a component parameter
      - ``+ocean.params.relaxation_time=1e6``
    * - Override a physical constant, for every component
      - ``+atmosphere.constants.grav=9.7``
+   * - Run the whole model (atmosphere and slab components) in float64
+     - ``jax_enable_x64=true``. ``ocean=veros`` selects it itself, since
+       Veros cannot run in float32; ``jax_enable_x64=false`` with it is
+       refused. Left unset (the default) the model is float32. It is
+       process-wide and applied before any component is built.
    * - Choose the run settings
      - ``coupled_run=short_run``, or ``coupled_run.total_time="90 days"``
    * - Run to a calendar end date instead of a duration
@@ -116,10 +144,42 @@ package spelled out.
 Several things worth knowing:
 
 - **Spell the** ``@atmosphere``. ``+configuration=speedy-t31`` without it
-  composes that jax-gcm bundle at the *root*, where its ``physics``,
-  ``terrain`` and ``run`` keys are nobody's and nothing reads them. The
+  asks for that jax-gcm bundle at the *root*, where there is no ``physics``
+  group for it to override, and Hydra refuses it (``Could not override
+  'physics'. Did you mean to override physics@atmosphere.physics?``). The
   atmosphere's groups always carry their package:
   ``<group>@atmosphere.<group>=<option>``.
+- **The named SPEEDY configurations run jax-gcm's coupled-calibrated
+  SPEEDY.** ``aquaplanet-slab``, ``aquaplanet-slab-mixed-grid``, ``earth-slab``
+  and ``earth-slab-winton`` take their atmosphere whole from jax-gcm's
+  ``speedy-t31`` configuration bundle: SPEEDY at T31L8 with 29 parameters
+  calibrated for coupled use, at the 30-minute atmosphere step the calibration
+  was made at (jax-gcm's ``docs/source/design/speedy_retune.md``). That
+  calibration was a fit at T31 against observations (CERES, GPCP, ERA5 and
+  others) with *prescribed* SSTs, so that the top-of-atmosphere budget and the
+  surface fluxes handed to an ocean are credible; a coupled run, whose SST
+  responds, is therefore not guaranteed drift-free. The bare
+  ``python -m jem.main`` composition (``physics@atmosphere.physics=speedy`` at
+  jax-gcm's default run step) and a Python-built ``jcm.model.Model()`` run
+  SPEEDY's *reference* values instead. The calibrated atmosphere alone is
+  ``+configuration@atmosphere=speedy-t31``, and from Python
+  ``jem.configurations.load("<name>")``. The values live once, in jax-gcm; a
+  JEM configuration file does not restate them.
+- **Swapping the atmosphere of a named configuration** for another jax-gcm
+  bundle is ``configuration@atmosphere=<bundle>`` (the configuration lists the
+  bundle first in its defaults, which is what makes it overridable by name).
+  The bundle's physics, grid and step arrive with it, and the configuration's
+  own overrides (terrain, forcing, ocean, sea ice, land) still apply on top.
+  What does not follow automatically: files tied to the old grid (the Earth
+  configurations' T30 terrain and climatology are on the T31 grid, and the
+  mixed-grid configuration's regridding weights are for T31), the surface
+  components' constraints on the physics (the Winton ice and the bucket land
+  need SPEEDY's flux tiles), and the parameter fit, which belongs to SPEEDY at
+  T31.
+- **The atmosphere has to have a surface.** A physics package is coupled
+  through the surface fluxes it publishes: SPEEDY, the default, and ECHAM do,
+  while ``physics@atmosphere.physics=held_suarez`` resolves none and is
+  refused when the model is built.
 - **The coupled run's own settings are** ``coupled_run``, **not** ``run``.
   ``atmosphere.run`` is the atmosphere's own run config, and a ``run`` group
   here would shadow jax-gcm's -- Hydra resolves a group option from the first
@@ -217,6 +277,13 @@ different start date -- name that run's checkpoint directory:
         coupled_run.initial_condition=/scratch/spinup/checkpoint
 
 The state is kept and the clock restarts at the atmosphere's ``start_time``.
+The parameters and prescribed forcing (``q_flux`` climatologies, the
+atmosphere's boundary conditions) are **this run's configuration, not the
+spin-up's**, so a branch experiment that changes a parameter runs with it; the
+log names every leaf whose value differs from the checkpoint's. A *resume*, in
+contrast, continues with the checkpoint's parameters (it is the same run) and
+logs one warning if the configuration has since changed -- to run with the
+changed value, start a new run from that checkpoint with ``initial_condition``.
 The experiment writes its own checkpoint, and repeating the same command
 resumes *that* rather than starting again from the spun-up state: a complete
 checkpoint at ``checkpoint_path`` takes precedence over ``initial_condition``,
@@ -229,8 +296,9 @@ and the log's first line says which one the run started from. See
 Where next
 -----------
 
-- :doc:`examples` -- every example, and the command or notebook that runs it,
-  is listed in ``examples/README.md``.
+- :doc:`examples` -- the eight named configurations, each with the one command
+  that runs it and what it couples, and the example notebooks.
+- :doc:`issues` -- what 1.0 does not do yet, and the consequence of each.
 - :doc:`adding_a_component` -- wrapping an external model to join a coupled
   run.
 - :doc:`experimental` -- features still under development.

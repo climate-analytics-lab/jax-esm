@@ -24,7 +24,7 @@ from jem.utils.esmf_regrid import ESMFRegridder
 
 
 class ESMFRegridders(Mapping[str, ESMFRegridder]):
-    """An immutable, named collection of :class:`ESMFRegridder` objects.
+    """An immutable, named collection of :class:`~jem.utils.esmf_regrid.ESMFRegridder` objects.
 
     Parameters
     ----------
@@ -42,8 +42,9 @@ class ESMFRegridders(Mapping[str, ESMFRegridder]):
     ValueError
         If no weights are given. An empty collection is never what a caller
         wants: it means a mixed-grid run would silently exchange nothing,
-        and ``regrid=same_grid`` (which composes to ``None``) is how a
-        single-grid run says it needs no maps.
+        and ``regrid=same_grid`` is how a single-grid run says it needs no
+        maps: it composes to ``None``, which
+        :func:`jem.runners.build_regridders` turns into an empty mapping.
     FileNotFoundError
         If a weight file does not exist.
 
@@ -60,9 +61,10 @@ class ESMFRegridders(Mapping[str, ESMFRegridder]):
 
     Notes
     -----
-    Every weight file is read, and its regridder's interpolation function
-    JIT-compiled on first use, when the collection is built -- once per run
-    rather than once per coupling step.
+    Every weight file is read when the collection is built -- once per run
+    rather than once per coupling step. A regridder's interpolation function
+    is JIT-compiled the first time it is called (a coupled run's first trace),
+    not at construction.
 
     """
 

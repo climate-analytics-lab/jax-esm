@@ -1,10 +1,8 @@
 API Reference
 =============
 
-.. automodule:: jem
-   :members:
-   :imported-members:
+.. autosummary::
+   :toctree: generated
+   :template: autosummary/exports.rst
 
-.. automodule:: jem.utils
-   :members:
-   :imported-members:
+   jem

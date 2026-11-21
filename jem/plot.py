@@ -3,7 +3,7 @@
 Every example that produces a map or a time series was doing the same three
 things by hand: gluing a run's chunk files back into one dataset, weighting a
 horizontal mean by ``cos(latitude)``, and orienting a JEM field
-(``(..., lon, lat)``, see ``docs/source/design/output.md``) for
+(``(..., lon, lat)`` or ``(..., x, y)``, see ``docs/source/design/output.md``) for
 ``contourf``/``pcolormesh``. This module is those three things, written once.
 
 It is behind the optional ``plot`` extra (``pip install "jax-esm[plot]"``,
@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import numpy as np
 import xarray as xr
 
+from jem.components.coordinates import CURVILINEAR_LATITUDE, CURVILINEAR_LONGITUDE
 from jem.output import TIME_DIMENSION, output_file_step
 
 if TYPE_CHECKING:
@@ -172,16 +173,34 @@ def open_output(output_dir: Path | str, component: str = "atm") -> xr.Dataset:
         return xr.concat(datasets, dim=TIME_DIMENSION)
 
 
-def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.DataArray:
+def _horizontal_coordinate_names(field: xr.DataArray) -> tuple[str, str]:
+    """Return the names of ``field``'s latitude and longitude coordinates.
+
+    A curvilinear component's 2-D positions are named ``latitude``/``longitude``
+    and a separable grid's 1-D axes ``lat``/``lon`` (see
+    ``docs/source/design/output.md``); the names differ so that a merged dataset
+    can hold both. A field that carries the 2-D pair is on a curvilinear grid
+    and they are what it is drawn and averaged with; every other field has the
+    1-D ``lat``/``lon`` (and, lacking them, is refused by the caller with a
+    message naming what it does have).
+    """
+    if CURVILINEAR_LATITUDE in field.coords and CURVILINEAR_LONGITUDE in field.coords:
+        return CURVILINEAR_LATITUDE, CURVILINEAR_LONGITUDE
+    return "lat", "lon"
+
+
+def area_mean(
+    field: xr.DataArray, *, lat: str | None = None, lon: str | None = None
+) -> xr.DataArray:
     """Return the cos(latitude)-weighted mean of a field over its horizontal axes.
 
     Only the dimensions the horizontal coordinates actually span are
     reduced -- the same distinction :func:`_is_separable_grid` names for
     :func:`map_plot`/:func:`animate_map`: on a separable lon/lat grid
     ``lat``/``lon`` are 1-D coordinates over their own dimension each
-    (``("lat",)``, ``("lon",)``); on a curvilinear grid they are 2-D
-    auxiliary coordinates sharing the field's own index dimensions (e.g.
-    ``("x", "y")``). This does not call that helper, though: it never needs
+    (``("lat",)``, ``("lon",)``); on a curvilinear grid the 2-D auxiliary
+    coordinates are named ``latitude``/``longitude`` and share the field's
+    own index dimensions (e.g. ``("x", "y")``). This does not call that helper, though: it never needs
     to know *which* layout it has, only the union of the dims whichever of
     the two coordinates are present span -- one line that already covers
     both layouts uniformly, where naming the layout first would only add a
@@ -209,10 +228,12 @@ def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.
         The field to average. May still have a ``"time"`` dimension, a
         ``"level"`` dimension, or any other non-horizontal axis, all of
         which are left alone.
-    lat : str, default "lat"
-        Name of the latitude coordinate, in degrees.
-    lon : str, default "lon"
-        Name of the longitude coordinate, in degrees.
+    lat : str, optional
+        Name of the latitude coordinate, in degrees. By default the field's
+        2-D ``latitude`` if it has one, else ``lat``.
+    lon : str, optional
+        Name of the longitude coordinate, in degrees. By default the field's
+        2-D ``longitude`` if it has one, else ``lon``.
 
     Returns
     -------
@@ -228,6 +249,9 @@ def area_mean(field: xr.DataArray, *, lat: str = "lat", lon: str = "lon") -> xr.
         ``lat`` -- the cos(latitude) weight cannot be built without it.
 
     """
+    default_lat, default_lon = _horizontal_coordinate_names(field)
+    lat = default_lat if lat is None else lat
+    lon = default_lon if lon is None else lon
     horizontal_coords = [name for name in (lat, lon) if name in field.coords]
     # `dict.fromkeys` dedupes while keeping first-seen order (`lat`'s dims,
     # then any of `lon`'s not already in it) -- a plain `set` would do too,
@@ -312,6 +336,149 @@ def _is_separable_grid(lat: xr.DataArray, lon: xr.DataArray) -> bool:
     return lat.ndim == 1 and lon.ndim == 1
 
 
+def _is_global_regular_longitude(lon: np.ndarray) -> bool:
+    """Return whether a 1-D longitude axis covers the globe once, with no repeat.
+
+    True when the axis is strictly ascending, evenly spaced, and one more step
+    past its last point lands on its first point plus 360 degrees (``0 ...
+    356.25`` at 3.75 degree spacing, or ``-180 ... 176.25``). Such an axis
+    leaves a seam: ``contourf`` fills only between the points it is given, so
+    the strip between the last longitude and the first one's next-lap copy is
+    drawn blank unless the first column is appended again at ``+360``. A
+    regional axis, or a global one that already repeats its first point, has
+    no such strip and must be left alone -- the two cases are told apart by the
+    span, not by the axis' name or its range, so ``0..360`` and ``-180..180``
+    conventions are both handled.
+    """
+    if lon.ndim != 1 or lon.size < 3:
+        return False
+    step = np.diff(lon)
+    if not np.all(step > 0):
+        return False
+    mean_step = (lon[-1] - lon[0]) / (lon.size - 1)
+    # 1e-3 of a step: the coordinates are float32 radians converted to degrees
+    # (`jem.components.slab.grid.to_degrees`), so a regular axis is regular
+    # only to a few parts in 1e6, and a tolerance this loose still separates
+    # a global axis from any real regional one (whose gap is a whole step).
+    if not np.allclose(step, mean_step, rtol=1e-3, atol=0.0):
+        return False
+    return bool(abs(lon[-1] + mean_step - lon[0] - 360.0) < 1e-3 * mean_step)
+
+
+def _cell_edges(centres: np.ndarray) -> np.ndarray:
+    """Return the ``(ny + 1, nx + 1)`` cell corners of 2-D cell-centre coordinates.
+
+    Interior corners are the mean of the four surrounding centres; the outer
+    ring extrapolates by half a step -- the construction ``pcolormesh`` itself
+    uses for ``shading="nearest"``, spelled out here so the corners can be
+    handed to ``pcolormesh`` explicitly (``shading="flat"``), which needs no
+    guess about whether the centres are monotonic.
+    """
+    def pad(values: np.ndarray) -> np.ndarray:
+        half = 0.5 * np.diff(values, axis=1)
+        return np.hstack([
+            values[:, :1] - half[:, :1],
+            values[:, :-1] + half,
+            values[:, -1:] + half[:, -1:],
+        ])
+
+    return pad(pad(centres).T).T
+
+
+def _curvilinear_mesh(
+    lon: np.ndarray, lat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(lon_corners, lat_corners, undrawable)`` for a curvilinear mesh.
+
+    ``lon``/``lat`` are the 2-D cell centres in degrees, ordered
+    ``(lat-like, lon-like)`` (the order the mesh is drawn in). A displaced-pole
+    grid wraps its longitude through +-180 along the lon-like axis, so two
+    neighbouring centres can be 359 degrees apart while being one cell apart
+    on the sphere, and the quad built from them would be a streak across the
+    map. The longitude is therefore *unwrapped* -- made continuous along each
+    row -- and each row is shifted by a whole number of laps onto the one
+    before it, so the corners are computed from consistent neighbours.
+
+    Near the grid's pole singularity there is no consistent longitude to be
+    had: a cell there spans most of a lap. ``undrawable`` flags every cell
+    whose four corners are more than half a lap apart in longitude; such a cell
+    is not a quadrilateral on a lon/lat plane, so it is left blank rather than
+    drawn as a streak.
+    """
+    unwrapped = np.unwrap(lon, period=360.0, axis=1)
+    for row in range(1, unwrapped.shape[0]):
+        laps = np.round(np.median(unwrapped[row] - unwrapped[row - 1]) / 360.0)
+        unwrapped[row] -= 360.0 * laps
+    lon_corners = _cell_edges(unwrapped)
+    lat_corners = _cell_edges(lat)
+    stack = np.stack([
+        lon_corners[:-1, :-1], lon_corners[1:, :-1],
+        lon_corners[:-1, 1:], lon_corners[1:, 1:],
+    ])
+    undrawable = (stack.max(axis=0) - stack.min(axis=0)) > 180.0
+    return lon_corners, lat_corners, undrawable
+
+
+def _draw_curvilinear(
+    ax: Any,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    values: np.ndarray,
+    plot_kwargs: dict[str, Any],
+) -> Any:
+    """Draw a curvilinear field with ``pcolormesh``; return the last mesh drawn.
+
+    ``lon``/``lat``/``values`` are ordered ``(lat-like, lon-like)``. The mesh
+    is drawn from explicit cell corners (see :func:`_curvilinear_mesh`), which
+    removes ``pcolormesh``'s guess at the edges of a grid whose centres are
+    not monotonic -- and with it the "interpreted as cell centers" warning,
+    which on a displaced-pole grid reports a real property of the grid, not a
+    mistake of the caller.
+
+    Unwrapping the longitude makes each row continuous but leaves it spanning
+    a lap that starts wherever the grid's own index origin happens to be, not
+    at the edge of the map. Copies of the mesh shifted by whole laps are drawn
+    wherever they overlap the map's longitude window, and the axes are limited
+    to that window, so the part of a lap that hangs over the dateline reappears
+    on the other side instead of being cut off. Every copy shares the first
+    mesh's colour map and normalisation -- which the first one, holding the
+    whole field, autoscaled -- so a value has one colour wherever it is drawn.
+    """
+    lon_corners, lat_corners, undrawable = _curvilinear_mesh(lon, lat)
+    masked = np.where(undrawable, np.nan, values.astype(float))
+
+    # The window the map shows: -180..180 for a grid written in that
+    # convention (JEM's own, `jem.components.slab.grid.to_degrees`), 0..360 for
+    # one that is not.
+    window_start = -180.0 if np.nanmin(lon) < 0.0 else 0.0
+    window_end = window_start + 360.0
+    low, high = float(lon_corners.min()), float(lon_corners.max())
+    laps = [
+        lap for lap in range(-2, 3)
+        if low + 360.0 * lap < window_end and high + 360.0 * lap > window_start
+    ]
+    if not laps:
+        laps = [0]
+
+    first = ax.pcolormesh(
+        lon_corners + 360.0 * laps[0], lat_corners, masked,
+        shading="flat", **plot_kwargs,
+    )
+    mappable = first
+    shared = {
+        name: value for name, value in plot_kwargs.items()
+        if name not in ("cmap", "norm", "vmin", "vmax")
+    }
+    for lap in laps[1:]:
+        mappable = ax.pcolormesh(
+            lon_corners + 360.0 * lap, lat_corners, masked, shading="flat",
+            cmap=first.cmap, norm=first.norm, **shared,
+        )
+    if laps != [0] or low < window_start or high > window_end:
+        ax.set_xlim(window_start, window_end)
+    return mappable
+
+
 def _require_single_record(field: xr.DataArray) -> None:
     """Raise, naming the axis, if ``field`` still has a time or level axis."""
     leftover = [dim for dim in ("time", "level") if dim in field.dims]
@@ -357,9 +524,9 @@ def _map_plot(
     caller gave, or matplotlib's default) has no ``.extend`` attribute at all
     to fall back on (verified in this environment:
     ``hasattr(matplotlib.colors.Normalize(0, 10), "extend")`` is ``False``).
-    With ``levels`` the ``norm`` *is* a ``BoundaryNorm`` and, since this fix,
-    it does carry the caller's real ``extend`` (see the comment where it is
-    built, in :func:`_map_plot` itself, for why giving it that is now safe --
+    With ``levels`` the ``norm`` *is* a ``BoundaryNorm`` and it carries the
+    caller's real ``extend`` (see the comment where it is built, in
+    :func:`_map_plot` itself, for why giving it that is safe --
     a `matplotlib.colorbar.Colorbar` built with no explicit ``extend`` even
     reads it from there automatically, verified:
     ``fig.colorbar(mesh)`` on a mesh normalized this way resolves
@@ -386,13 +553,15 @@ def _map_plot(
     import matplotlib.pyplot as plt
 
     _require_single_record(field)
-    if "lat" not in field.coords or "lon" not in field.coords:
+    lat_name, lon_name = _horizontal_coordinate_names(field)
+    if lat_name not in field.coords or lon_name not in field.coords:
         raise ValueError(
-            f"map_plot needs `lat`/`lon` coordinates; this field has "
+            f"map_plot needs `lat`/`lon` (separable grid) or `latitude`/"
+            f"`longitude` (curvilinear grid) coordinates; this field has "
             f"{sorted(str(name) for name in field.coords)!r}."
         )
-    lat = field["lat"]
-    lon = field["lon"]
+    lat = field[lat_name]
+    lon = field[lon_name]
     separable = _is_separable_grid(lat, lon)
 
     plot_kwargs = dict(kwargs)
@@ -437,7 +606,15 @@ def _map_plot(
         # Separable grid: field dims are (..., lon, lat); transpose to
         # (lat, lon), which is what contourf(x, y, Z) needs of Z.
         data = field.transpose(lat.dims[0], lon.dims[0])
-        mappable = ax.contourf(lon.values, lat.values, data.values, **plot_kwargs)
+        lon_values = lon.values
+        data_values = data.values
+        if _is_global_regular_longitude(lon_values):
+            # Close the seam between the last longitude and the first one's
+            # next lap, which `contourf` would otherwise leave blank. The
+            # appended column is a copy of the first, so no value is invented.
+            lon_values = np.append(lon_values, lon_values[0] + 360.0)
+            data_values = np.concatenate([data_values, data_values[:, :1]], axis=1)
+        mappable = ax.contourf(lon_values, lat.values, data_values, **plot_kwargs)
         # `contourf` takes `extend` natively and its `ContourSet` already
         # carries it as its own `.extend` attribute; a colorbar drawn from a
         # `ContourSet` mappable reads that directly, no matter which call
@@ -445,7 +622,7 @@ def _map_plot(
         # explicitly -- unlike the curvilinear path below.
         colorbar_extend = None
     else:
-        # Curvilinear grid: lat/lon are 2-D over the field's own index
+        # Curvilinear grid: latitude/longitude are 2-D over the field's own index
         # dimensions, in the same (lon-like, lat-like) order as the data
         # (see the module docstring); reverse both so lat-like leads.
         order = tuple(reversed(lat.dims))
@@ -483,25 +660,22 @@ def _map_plot(
                     level_vmax = float(np.nanmax(data.values))
                 levels = _expand_level_count(levels, level_vmin, level_vmax)
             cmap = plt.get_cmap(plot_kwargs.get("cmap"))
-            # ee6ecb5 (this PR) built `BoundaryNorm(levels, cmap.N)` directly
-            # over the *resolved* colormap's own colour count. Codex round-19
-            # (finding A) showed that renders different colours from
-            # `contourf` on identical data whenever `cmap.N` does not equal
-            # the number of bands -- true for every continuous colormap
-            # (`cmap.N == 256`) with anything but a one-band-per-colour
-            # `levels`. Read empirically from matplotlib's own source rather
-            # than trusted from the finding's one-line description (see
+            # `BoundaryNorm(levels, cmap.N)` built directly over the
+            # *resolved* colormap's own colour count would render different
+            # colours from `contourf` on identical data whenever `cmap.N`
+            # does not equal the number of bands -- true for every continuous
+            # colormap (`cmap.N == 256`) with anything but a
+            # one-band-per-colour `levels`. So the norm is built to match what
+            # `contourf` does, read from matplotlib's own source (see
             # `matplotlib.contour.ContourSet._process_colors`/
-            # `_process_levels`, and the probe in this fix's PR description):
-            # `contourf` colours filled band *i* as
+            # `_process_levels`): `contourf` colours filled band *i* as
             # ``cmap(norm(0.5 * (levels[i] + levels[i + 1])))`` -- the
             # colormap sampled at each band's own numeric midpoint through a
             # `Normalize` whose `vmin`/`vmax` default to `min(levels)`/
             # `max(levels)` but defer to an explicit `vmin`/`vmax` kwarg
             # (`Normalize.autoscale_None` only fills in bounds that are still
-            # `None`) -- which is also finding B: those kwargs were being
-            # dropped here, silently, rather than folded into that
-            # normalization. An `extend`ed end's "band" has no second real
+            # `None`) -- so `vmin`/`vmax` kwargs are folded into that
+            # normalization rather than dropped. An `extend`ed end's "band" has no second real
             # level to average with; `contourf` instead inserts a sentinel
             # boundary (``+-1e250``, `_process_levels`) so that band's
             # midpoint is a huge (but finite) number whose normalized value
@@ -527,9 +701,8 @@ def _map_plot(
             # accepts these four literal strings; mypy needs telling that
             # explicitly since `extend` itself is forwarded through
             # `**kwargs` as `Any`. An invalid string is unaffected by this
-            # cast -- it still surfaces as matplotlib's own `ValueError` once
-            # a colorbar is drawn from `colorbar_extend` below, the same
-            # point and error as before this fix (verified: unrecognised
+            # cast -- it surfaces as matplotlib's own `ValueError` once
+            # a colorbar is drawn from `colorbar_extend` below (verified: unrecognised
             # `extend` values are simply ignored by the plain ``in (...)``
             # checks a few lines down, on both this and the `contourf` path,
             # so nothing here would catch one earlier).
@@ -551,8 +724,8 @@ def _map_plot(
             )
             # `pcolormesh` raises if hidden `vmin`/`vmax` and an explicit
             # `norm` are given together, so they cannot simply be forwarded
-            # alongside the `BoundaryNorm` built below (finding B's original
-            # bug: they were popped and never used at all) -- folded into
+            # alongside the `BoundaryNorm` built below (popping them and never
+            # using them would silently drop the caller's limits) -- folded into
             # the `Normalize` that resamples `cmap` instead, exactly the
             # role they play in `contourf`'s own normalization.
             vmin = plot_kwargs.pop("vmin", None)
@@ -569,10 +742,9 @@ def _map_plot(
             # `.boundaries`) and `ncolors` equal to that same band count,
             # `BoundaryNorm.__call__`'s own "fewer bins than colours"
             # stretch (`Ncmap > self._n_regions`, matplotlib.colors) never
-            # triggers -- unlike the earlier, since-reverted attempt this
-            # function's history records (passing `extend` to a
+            # triggers -- which it would if `extend` were passed to a
             # `BoundaryNorm` sized off the *original*, possibly tiny,
-            # `cmap.N`): here `ncolors` is built to equal the exact region
+            # `cmap.N`: here `ncolors` is built to equal the exact region
             # count `extend` implies, at any `cmap.N`, so region *i* maps to
             # colour *i* one-to-one regardless of how many colours the
             # caller's own colormap happens to have.
@@ -596,9 +768,9 @@ def _map_plot(
         # `colorbar=True` draw below, and `animate_map`'s separate one -- has
         # exactly one thing to check either way.
         colorbar_extend = extend or "neither"
-        mappable = ax.pcolormesh(
-            lon.transpose(*order).values, lat.transpose(*order).values,
-            data.values, **plot_kwargs,
+        mappable = _draw_curvilinear(
+            ax, lon.transpose(*order).values, lat.transpose(*order).values,
+            data.values, plot_kwargs,
         )
 
     if coastlines:
@@ -627,11 +799,26 @@ def map_plot(
     Handles both grids the examples produce: a separable lon/lat grid (JEM's
     default, ``SlabGrid.from_coords``) with 1-D ``lat``/``lon`` coordinates,
     drawn with ``contourf``; and a curvilinear grid (``SlabGrid.from_scrip``,
-    a displaced-pole ocean) with 2-D auxiliary ``lat``/``lon`` coordinates
+    a displaced-pole ocean) with 2-D auxiliary ``latitude``/``longitude``
+    coordinates
     over its own index dimensions, drawn with ``pcolormesh``. Either way the
     data (and, for the curvilinear case, its coordinates) are transposed so
     latitude varies down the plot and longitude across it, because every JEM
     field is stored ``(..., lon, lat)``.
+
+    A global map has no blank strip where the longitude axis wraps. On a
+    separable grid whose 1-D longitude is regular and covers the globe once
+    (``0 ... 356.25``), the first column is appended again one lap later (a
+    cyclic point) so ``contourf`` fills the seam; a regional axis, or one that
+    already repeats its first point, is drawn as given. On a curvilinear grid
+    the longitude is unwrapped along each row and the mesh is drawn from
+    explicit cell corners, with copies shifted by whole laps where the grid
+    hangs over the edge of the map (see :func:`_draw_curvilinear`), so a grid
+    that crosses the dateline draws no streak and no warning, and every copy
+    shares one colour scale. A cell that spans more than half a lap of
+    longitude -- one folded over the grid's pole, where no consistent
+    unwrapping exists -- is left blank. The map window is -180..180 for a
+    grid written in that convention and 0..360 otherwise.
 
     Parameters
     ----------
@@ -688,8 +875,8 @@ def map_plot(
         exactly the number of bands (ordinary bins plus any ``extend`` adds),
         so pairing it with a ``BoundaryNorm`` over exactly that many colours
         never hits ``BoundaryNorm``'s "fewer bins than colours" interpolation
-        (the bug an earlier version of this fix had -- see :func:`_map_plot`
-        for why a small discrete ``cmap`` made that visible). An integer
+        (which a small discrete ``cmap`` would make visible -- see
+        :func:`_map_plot`). An integer
         ``levels`` (a band *count* rather than explicit boundary values) is
         expanded into boundaries first, over the field's own
         ``[nanmin, nanmax]``, by :func:`_expand_level_count` -- the same
@@ -740,7 +927,7 @@ def map_plot(
         ``pcolormesh`` (regardless of whether ``levels`` is present, since
         leaving it behind raises the same ``AttributeError`` either way).
         With ``levels``, it *is* passed on to the ``BoundaryNorm`` built from
-        them -- unlike an earlier version of this fix, this is now safe
+        them -- this is safe
         because that norm's colour count is always built to match exactly
         (see above), so ``BoundaryNorm``'s own requirement (enough colours
         for the ordinary bins plus one per extended end) is met regardless of
@@ -761,7 +948,7 @@ def map_plot(
         such a value to the nearest edge band's colour via the same
         ``get_under()``/``get_over()`` fallback used for a genuine
         ``extend``. This is a pre-existing property of the two draw
-        functions, not something this fix changes or could remove without
+        functions, not something this function changes or could remove without
         leaving curvilinear cells unpainted; it affects which cells get any
         colour at all, never which colour a cell painted by both gets.
 
@@ -776,7 +963,8 @@ def map_plot(
         ``coastlines=True``.
     ValueError
         If ``field`` still has a ``"time"`` or ``"level"`` dimension, has no
-        ``lat``/``lon`` coordinates to plot against, or ``field`` is on a
+        ``lat``/``lon`` (or, curvilinear, ``latitude``/``longitude``)
+        coordinates to plot against, or ``field`` is on a
         curvilinear grid and both ``levels`` and a non-``None`` ``norm`` are
         given (on a separable grid the combination is accepted, and
         ``norm=None`` never conflicts on either grid -- see above).
@@ -831,7 +1019,7 @@ def animate_map(
     for another spanning ten times the range) while the one colorbar keeps
     showing the first frame's. So whenever ``vmin``/``vmax`` are computed
     here, shared band boundaries are computed alongside them, from the same
-    (now whole-field) bounds, and passed on as ``levels`` -- matplotlib's own
+    (whole-field) bounds, and passed on as ``levels`` -- matplotlib's own
     ``contourf`` locator (`matplotlib.ticker.MaxNLocator`, with the ``nbins``
     and ``min_n_ticks`` `ContourSet` itself hard-codes for its default
     levels) rather than a hand-rolled ``linspace``, so the default *look*
@@ -853,7 +1041,7 @@ def animate_map(
     once, from the bounds actually in force, using the caller's own count in
     place of the ``7`` the default case hard-codes -- the same
     :func:`_expand_level_count` the curvilinear path in :func:`map_plot`
-    itself now uses -- and passed to every frame as explicit boundaries.
+    itself uses -- and passed to every frame as explicit boundaries.
     Passing ``levels`` as an explicit sequence of boundaries opts out of all
     of this entirely, since it already pins the whole scale on its own;
     passing ``vmin`` or ``vmax`` fixes that one bound and leaves the other --
@@ -871,8 +1059,8 @@ def animate_map(
     increasing (as ``contourf`` itself requires of ``levels``) -- and this is
     in fact the same fallback ``contourf`` reaches internally
     (`ContourSet._autolev`) when it autoscales a genuinely constant field
-    with no explicit levels, so a constant field's appearance is unchanged
-    from before this shared scale existed.
+    with no explicit levels, so a constant field looks the same with or
+    without a shared scale.
 
     An explicit ``norm=None`` means the default normalization, exactly as if
     ``norm`` had been left out entirely -- one of matplotlib's own supported
@@ -905,7 +1093,7 @@ def animate_map(
     vmin=1)`` -- is applied to the resolved norm object (before its other,
     still-open bound is autoscaled from the whole field) and removed from
     what is forwarded on, rather than being left in ``kwargs`` alongside the
-    now-resolved norm *instance*: matplotlib itself refuses a norm instance
+    already-resolved norm *instance*: matplotlib itself refuses a norm instance
     combined with ``vmin``/``vmax`` (``pcolormesh``'s curvilinear path
     raises ``ValueError`` for it; ``contourf``'s separable path does not
     raise, but only because it silently overwrites the shared instance's
@@ -914,14 +1102,13 @@ def animate_map(
     when given a *string* scale name. A ``vmin``/``vmax`` given alongside a
     norm *instance* the caller built themselves is left exactly as
     matplotlib treats it -- rejected on the curvilinear path -- since that
-    combination was never valid and is not this function's regression to
-    paper over.
+    combination is not valid and this function does not paper over it.
 
     Deriving shared *band boundaries* for an arbitrary norm is still
     deliberately not attempted here, open bounds or not: ``contourf`` takes
     its band boundaries from each frame's own data even with a ``norm``
     given, so on the separable path the bands can still differ between
-    frames; the colours do not, since every frame now shares the same norm
+    frames; the colours do not, since every frame shares the same norm
     object. The boundaries would have to come from the norm's own scale, and
     guessing at it goes wrong in ways that are worse than the gap: a linear
     locator applied to a ``LogNorm(1, 1000)`` yields ``[0, 150, ..., 1050]``
@@ -1003,8 +1190,8 @@ def animate_map(
     # `map_plot`'s own `levels`+`norm` curvilinear conflict guard (which
     # otherwise misfires on a `norm=None` that describes no actual norm).
     # Left as `"norm" in kwargs`, an explicit `None` reached
-    # `norm.autoscale_None(...)` below and raised `AttributeError` -- that
-    # was this branch's own bug, not a case matplotlib itself ever rejected.
+    # `norm.autoscale_None(...)` below and raised `AttributeError`, although
+    # matplotlib itself accepts an explicit `norm=None`.
     if kwargs.get("norm") is None:
         kwargs = {name: value for name, value in kwargs.items() if name != "norm"}
 
@@ -1065,7 +1252,7 @@ def animate_map(
             kwargs = {"vmin": vmin, "vmax": vmax, **kwargs, "levels": levels}
         # else: every value is NaN -- there is no range to compute, so this
         # leaves `map_plot` to autoscale each (equally NaN) frame on its own,
-        # which is exactly today's behaviour for that degenerate case.
+        # which is the right behaviour for that degenerate case.
 
     if "norm" in kwargs:
         # `kwargs` is forwarded straight through to `_map_plot` for every
@@ -1099,7 +1286,7 @@ def animate_map(
             # norm of this kind and let `vmin`/`vmax` set its bounds" --
             # verified in this environment, `contourf(..., norm="log",
             # vmin=1)` builds a `LogNorm` and applies `vmin` to it. But
-            # `norm` above is no longer a string past this point; it is the
+            # `norm` above is not a string past this point; it is the
             # `Normalize` *instance* just resolved from it, and matplotlib
             # refuses `vmin`/`vmax` alongside a norm instance -- verified
             # empirically here too: `pcolormesh(..., norm=LogNorm(),
@@ -1205,7 +1392,14 @@ def animate_map(
         frame = field.isel({TIME_DIMENSION: step})
         frame_title = title
         if title is not None:
-            frame_title = f"{title} ({frame[TIME_DIMENSION].values})"
+            time_value = frame[TIME_DIMENSION].values
+            stamp = str(time_value)
+            if np.issubdtype(time_value.dtype, np.datetime64):
+                # `YYYY-MM-DD HH:MM`: a record is labelled with an interval's
+                # midpoint, so minutes are the finest resolution that means
+                # anything, and the raw nanosecond ISO string is unreadable.
+                stamp = str(np.datetime_as_string(time_value, unit="m")).replace("T", " ")
+            frame_title = f"{title} ({stamp})"
         # `_map_plot` (not the public `map_plot`) so this holds the actual
         # mappable it drew, rather than picking one back out of
         # `ax.collections` -- see `_map_plot`'s own docstring for why that
@@ -1221,8 +1415,7 @@ def animate_map(
             # always be trusted to carry `.extend` itself, unlike a
             # separable `ContourSet`, whose own `extend` a colorbar already
             # reads with no help from here (`colorbar_extend` is `None`
-            # there, so this falls through to the plain call below,
-            # unchanged from before this fix).
+            # there, so this falls through to the plain call below).
             if colorbar_extend is not None:
                 fig.colorbar(mappable, ax=ax, extend=colorbar_extend)
             else:

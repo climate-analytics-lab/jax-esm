@@ -1,7 +1,7 @@
 """Veros case setups: factories returning a ``veros.VerosSetup`` subclass.
 
 Each module here is one ocean geometry -- :mod:`.double_drake` an idealised
-two-continent basin on a uniform lat-lon grid, :mod:`.earth` a realistic
+two-continent basin on the atmosphere's own grid, :mod:`.earth` a
 rotated-pole global ocean read from a SCRIP grid, :mod:`.global_latlon` a
 one-degree global ocean with Levitus bathymetry started from observations --
 and is named from a

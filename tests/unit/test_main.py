@@ -135,6 +135,38 @@ def test_help_prints_the_resolver_syntax_rather_than_this_machine_s_paths(tmp_pa
     assert str(repository) not in finished.stdout
 
 
+def test_help_lists_the_options_of_every_config_group(tmp_path):
+    """`--help` promises every config-group choice, so it has to name them.
+
+    Hydra's `$APP_CONFIG_GROUPS` covers JAX-ESM's own groups; jax-gcm's
+    re-rooted ones come from the `${jcm_groups:}` resolver. A subprocess, as
+    for the resolver-syntax test: it is the rendered text that matters.
+    """
+    repository = pathlib.Path(__file__).resolve().parents[2]
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(repository), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    finished = subprocess.run(
+        [sys.executable, "-m", "jem.main", "--help"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=600,
+    )
+    assert finished.returncode == 0, finished.stderr[-2000:]
+    for option in (
+        "winton", "bucket", "slab_relax", "slab_qflux", "veros", "short_run",
+        "long_run", "aquaplanet-slab", "aquaplanet-slab-echam",
+        "aquaplanet-slab-mixed-grid",
+        "earth-slab", "earth-slab-echam", "earth-slab-winton", "veros-earth",
+        "veros-double-drake",
+    ):
+        assert option in finished.stdout, option
+    # jax-gcm's groups appear under the spelling an override needs.
+    assert "physics@atmosphere.physics:" in finished.stdout
+    assert "speedy" in finished.stdout
+    assert "+configuration@atmosphere:" in finished.stdout
+
+
 def test_main_sets_the_package_log_level_from_the_config(cfg, monkeypatch):
     """`coupled_run.log_level` configures the `jem` logger, not the root one.
 

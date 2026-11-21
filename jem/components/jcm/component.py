@@ -24,19 +24,19 @@ the model slices by date on every internal timestep. An exchanger writes a
 single ``(ix, il)`` array into those same fields, so a carry that held a
 time series on the way in holds a bare array on the way out: a change of
 pytree structure that ``lax.scan`` cannot carry, and that the coupler
-refuses. :meth:`set_exchanged_forcing` names the fields the coupled model
-supplies, and :meth:`initialize` collapses exactly those to the
+refuses. :meth:`~jem.components.jcm.component.JCMComponent.set_exchanged_forcing` names the fields the coupled model
+supplies, and :meth:`~jem.components.jcm.component.JCMComponent.initialize` collapses exactly those to the
 climatology at the run's start date. The carry's ``"forcing"`` section
 therefore has, from ``initialize()`` onward, the structure an exchange
 preserves; every field no component supplies keeps its time series and
 goes on being sliced by jax-gcm, one step at a time.
 
-**Nothing integrates at initialization.** :meth:`initialize` builds the
+**Nothing integrates at initialization.** :meth:`~jem.components.jcm.component.JCMComponent.initialize` builds the
 initial pytrees with :meth:`jcm.model.Model.bootstrap_state` and a
-structural template of the diagnostics dict. The previous adapter ran a
-whole coupling interval just to discover the shape of the diagnostics it
-would later store, which both cost a full model step per run and started
-the atmosphere one interval ahead of the coupler's clock.
+structural template of the diagnostics dict. Running a whole coupling
+interval just to discover the shape of the diagnostics to store would cost a
+full model step per run and start the atmosphere one interval ahead of the
+coupler's clock.
 
 Every JCM *attribute* this wrapper touches is public at the pinned revision
 (``jem.components.jcm.contract``): the whole surface exchange, wind included,
@@ -60,6 +60,7 @@ import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
 import jcm.constants as jcm_constants
+import numpy as np
 import tree_math
 import xarray as xr
 from jcm.date import DateData
@@ -403,15 +404,15 @@ class JCMComponent:
         model's grid. It lives in the carry, not on ``self``, because
         exchangers overwrite parts of it (the SST an ocean component
         computes) every coupling step.
-    initial_state : jcm.physics_interface.PhysicsState or dycore state, optional
+    initial_state : jcm.physics_interface.PhysicsState, optional
         The atmosphere's initial condition, as
         :meth:`jcm.model.Model.bootstrap_state` takes it: a gridpoint
         ``PhysicsState`` (an ERA5 analysis from
         ``jcm.initial_states.era5_state``, a ``jw_state``...) or a
         dycore-native state (a warm start from
         ``jcm.initial_states.checkpoint_state``). Default ``None``: jax-gcm's
-        own default, an isothermal atmosphere at rest. :func:`jem.runners.
-        build_atmosphere` sets it from the ``atmosphere.init`` config group.
+        own default, an isothermal atmosphere at rest. ``jem.runners.build_atmosphere`` sets it
+        from the ``atmosphere.init`` config group.
     initial_physics_state : optional
         The cross-step physics carry to start from, for a warm start that
         restores a donor run's carry along with its state (what
@@ -527,7 +528,7 @@ class JCMComponent:
         A coupled atmosphere does not prescribe the surface it stands on --
         the surface components do -- so the fields named here stop being
         boundary conditions the atmosphere reads from a file and become
-        per-step values it is handed. :meth:`initialize` collapses them to
+        per-step values it is handed. :meth:`~jem.components.jcm.component.JCMComponent.initialize` collapses them to
         the climatology at the run's start date, which is what gives the
         carry's ``"forcing"`` section the same pytree structure before and
         after an exchange. Fields that are *not* named keep whatever jax-gcm
@@ -609,16 +610,22 @@ class JCMComponent:
                 f" {self.model.start_time!r}. Rebuild the model with"
                 " start_time=<coupler start date>."
             )
-        model_timestep = jdt.to_timedelta(
-            int(self.model.dt_si.to_timedelta().total_seconds()), "second")
-        n_steps = float(coupling_timestep / model_timestep)
-        if n_steps != int(n_steps) or n_steps < 1:
+        model_seconds = int(self.model.dt_si.to_timedelta().total_seconds())
+        model_timestep = jdt.to_timedelta(model_seconds, "second")
+        # Whole seconds, as Python integers: a `jdt.Timedelta` is integer
+        # backed, but dividing two of them gives a float32, in which most
+        # sub-daily fractions of a day (one hour is 1/24) are inexact enough
+        # for jax-gcm to refuse the interval as not a whole number of seconds.
+        coupling_seconds = int(np.asarray(coupling_timestep.days)) * 86400 + int(
+            np.asarray(coupling_timestep.seconds)
+        )
+        if coupling_seconds < model_seconds or coupling_seconds % model_seconds:
             raise ValueError(
                 f"Coupling timestep {coupling_timestep!r} is not a whole"
                 f" multiple of {self.name!r}'s model timestep"
                 f" {model_timestep!r}."
             )
-        coupling_days = float(coupling_timestep / jdt.to_timedelta(1, "day"))
+        coupling_days = coupling_seconds / 86400
         if self._coupling_days is not None and coupling_days != self._coupling_days:
             # One instance belongs to one coupled model: `step` advances the
             # atmosphere by `_coupling_days`, so a second coupler with another
@@ -636,7 +643,7 @@ class JCMComponent:
         """Build the initial carry without integrating the model.
 
         The ``"forcing"`` entry is the boundary conditions this component was
-        built with, with the fields :meth:`set_exchanged_forcing` names
+        built with, with the fields :meth:`~jem.components.jcm.component.JCMComponent.set_exchanged_forcing` names
         collapsed to their value at the model's start date. That collapse is
         what fixes the carry's pytree structure: an exchanger writes a plain
         ``(ix, il)`` array into each of those fields every coupling step, and

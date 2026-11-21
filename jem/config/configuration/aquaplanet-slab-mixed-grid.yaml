@@ -11,37 +11,67 @@
 # shared grid.
 #
 # WHY each setting:
-#  - the ocean and sea ice run on the packaged `DisplacedPoleGrid` SCRIP grid:
-#    its pole sits over land, which is how an ocean model avoids the polar
-#    singularity -- and being curvilinear it is exactly what a shared-grid
-#    assumption would break on.
-#  - regrid=esmf with the four packaged weight files. Fluxes and areal
-#    fractions use the conservative maps (budgets have to be preserved across
-#    the interface); the SST the atmosphere reads uses the bilinear one.
-#  - terrain=aquaplanet and ocean=slab as in `aquaplanet-slab`: the grids are
-#    the experiment here, not the physics.
-#  - land=none: an aquaplanet has no land, and the displaced pole's land
-#    fraction only marks which ocean cells are inactive.
+#  - the ocean and sea ice run on the packaged `DisplacedPoleGrid` SCRIP grid,
+#    with every cell active: this is an aquaplanet, so the grid carries no
+#    land mask and the SCRIP file's own `grid_imask` (all 1, which in the
+#    SCRIP convention means "active") is what is used. Being curvilinear it
+#    is exactly what a shared-grid assumption would break on.
+#  - the grid is not a complete tiling of the sphere. Its displaced pole is
+#    open: the cells cover 12.5611 sr of 4*pi = 12.5664 sr, and the gap lies
+#    over Greenland (about 34-49 W, 68-77 N; on Earth the pole is put over
+#    land for exactly this reason, here it has no land to hide it). What
+#    remains imperfect is confined to 11 of the atmosphere's 4608 cells
+#    around it: the packaged conservative atmosphere->ocean weights account
+#    for only 0.9996 of the sphere, so 0.042% of the atmosphere's surface flux
+#    (0.0053 sr of area) reaches no ocean cell, and the ocean->atmosphere
+#    conservative map covers those 11 cells by 0.0004 to 0.98 instead of 1
+#    (the ice fraction it carries is scaled down by that). The bilinear
+#    ocean->atmosphere SST map does cover every atmosphere cell with weights
+#    summing to 1, but for 9 of those 11 cells (the ones the gap falls
+#    inside) it is the unweighted mean of the grid's whole top row of 120
+#    cells, not a local value. Everywhere else both maps are exact.
+#  - regrid=esmf with the four packaged weight files, of which the standard
+#    coupling uses three (`a2o_conserve`, `o2a_conserve`, `o2a_bilinear`; no
+#    row carries an atmosphere-to-ocean state, so `a2o_bilinear` is loaded and
+#    never called). Fluxes and areal fractions use the conservative maps
+#    (budgets have to be preserved across the interface); the SST the
+#    atmosphere reads uses the bilinear one.
+#  - the atmosphere is jax-gcm's `speedy-t31` configuration bundle, composed
+#    whole under `atmosphere` and listed FIRST (Hydra refuses the other order,
+#    since the overrides below act on the groups the bundle selects): SPEEDY on
+#    T31L8 with its parameters calibrated for coupled use and the 30-minute
+#    step they were calibrated at. None of it is restated here; it lives once,
+#    in jax-gcm (docs/source/design/configuration.md). The calibration was made
+#    with prescribed SSTs, so a coupled run is not guaranteed drift-free.
+#  - terrain=aquaplanet and forcing=default as in `aquaplanet-slab`, overriding
+#    the bundle's T63 files (nulled below, as there): the grids are the
+#    experiment here, not the physics.
+#  - ocean=slab and seaice=slab as in `aquaplanet-slab`.
+#  - land=none: an aquaplanet has no land component.
 defaults:
-  - override /physics@atmosphere.physics: speedy
-  - override /grid@atmosphere.grid: speedy_t31_l8
+  - /configuration@atmosphere: speedy-t31
   - override /terrain@atmosphere.terrain: aquaplanet
+  - override /forcing@atmosphere.forcing: default
   - override /ocean: slab
   - override /seaice: slab
   - override /land: none
   - override /regrid: esmf
 
-# `grid_file` and `land_fraction_file` are NOT constructor arguments of the
-# slab models: they are read (and removed) by `jem.runners` when it builds the
-# `SlabGrid` the component is then handed, exactly as the notebook does with
-# `SlabGrid.from_scrip(...)`. Without them a slab model is built on the
-# atmosphere's grid.
+atmosphere:
+  terrain:
+    file: null
+  forcing:
+    file: null
+
+# `grid_file` is NOT a constructor argument of the slab models: it is read (and
+# removed) by `jem.runners` when it builds the `SlabGrid` the component is then
+# handed, exactly as the notebook does with `SlabGrid.from_scrip(...)`. Without
+# it a slab model is built on the atmosphere's grid. No `land_fraction_file`:
+# the grid's own all-active mask is the aquaplanet.
 ocean:
   grid_file: ${jem_data:DisplacedPoleGrid.SCRIP.nc}
-  land_fraction_file: ${jem_data:landsea_mask_fraction_DisplacedPoleGrid.nc}
 seaice:
   grid_file: ${jem_data:DisplacedPoleGrid.SCRIP.nc}
-  land_fraction_file: ${jem_data:landsea_mask_fraction_DisplacedPoleGrid.nc}
 
 regrid:
   a2o_conserve: ${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}

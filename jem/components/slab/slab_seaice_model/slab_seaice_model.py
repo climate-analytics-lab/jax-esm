@@ -92,7 +92,7 @@ class SlabSeaiceModel(SlabModelBase):
     -----------------
     With an ice-concentration climatology (``ice_clim_file``) the run starts
     from the observed cover: the climatology is sampled at the month the run
-    starts in (:attr:`SlabModelBase.start_year_fraction`, which the coupler
+    starts in (:attr:`~jem.components.slab.base.SlabModelBase.start_year_fraction`, which the coupler
     sets through ``bind``). Without one the run starts ice-free.
 
     The choice matters for exactly one coupling step. Under the standard

@@ -26,6 +26,7 @@ than here: they need the Veros fork and a real ``VerosState``.
 """
 
 import logging
+import os
 
 import flax.serialization
 import jax
@@ -41,6 +42,7 @@ from jem.checkpoint import (
     latest_complete_checkpoint,
     load,
     load_coupled_carry,
+    recover_interrupted_save,
     remaining_batches,
     save,
     save_coupled_carry,
@@ -368,7 +370,10 @@ def test_a_component_saver_is_delegated_to(tmp_path):
         toy_coupled_carry(step=3), checkpoint_dir, component_savers={"ocn": save_ocn}
     )
 
-    assert saved["directory"] == checkpoint_dir / "ocn"
+    # The saver is handed a directory named after its component -- inside the
+    # staging directory the checkpoint is written into, not the final one --
+    # and what it wrote there is at `<checkpoint>/ocn` once the save returns.
+    assert saved["directory"].name == "ocn"
     assert (checkpoint_dir / "ocn" / "marker").exists()
 
     loaded = load_coupled_carry(
@@ -495,46 +500,158 @@ def test_a_component_cannot_be_both_delegated_and_templated(tmp_path):
         )
 
 
-def test_a_failed_overwrite_leaves_no_carry_file(tmp_path):
-    """Overwriting removes the carry file first, so a partial write is refused.
+def failing_saver(carry, directory):
+    """Stand in for a component whose restart write runs out of disk."""
+    del carry
+    (directory / "partial").write_text("half a restart file")
+    raise OSError("disk full")
 
-    Without that ordering the old clock would survive beside freshly written
-    component data, and the mixture is indistinguishable from a good
-    checkpoint.
+
+def test_a_failed_overwrite_leaves_the_old_checkpoint_loadable(tmp_path):
+    """A save that fails costs nothing: the checkpoint it was replacing survives.
+
+    A run rewrites one checkpoint directory after every chunk, so the
+    directory being overwritten is the only restart point there is. The new
+    checkpoint is assembled beside it and swapped in only when complete, so a
+    failure part-way through -- here in a component's own saver, after it has
+    written some of its data -- leaves the old one exactly as it was, with
+    nothing half-written next to it.
     """
-    save_coupled_carry(toy_coupled_carry(step=3), tmp_path)
-    assert (tmp_path / CARRY_FILENAME).exists()
-
-    def failing_saver(carry, directory):
-        del carry, directory
-        raise OSError("disk full")
+    checkpoint = tmp_path / "checkpoint"
+    save_coupled_carry(toy_coupled_carry(step=3), checkpoint)
 
     with pytest.raises(OSError, match="disk full"):
         save_coupled_carry(
-            toy_coupled_carry(step=4), tmp_path, component_savers={"lnd": failing_saver}
+            toy_coupled_carry(step=4), checkpoint, component_savers={"lnd": failing_saver}
         )
-    assert not (tmp_path / CARRY_FILENAME).exists()
-    with pytest.raises(ValueError, match=CARRY_FILENAME):
-        load_coupled_carry(tmp_path, toy_component_templates())
+
+    assert int(load_coupled_carry(checkpoint, toy_component_templates()).step) == 3
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["checkpoint"]
+    assert sorted(path.name for path in checkpoint.iterdir()) == [CARRY_FILENAME]
+
+
+def test_a_save_killed_while_writing_is_cleared_by_the_next_one(tmp_path):
+    """What a killed save left in the staging directory never reaches a checkpoint.
+
+    A process killed outright runs no cleanup, so its half-written staging
+    directory is still there for the next save to find. It holds no carry
+    file, so it is not a checkpoint; the next save discards it rather than
+    building on it.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    save_coupled_carry(toy_coupled_carry(step=3), checkpoint)
+    staging = tmp_path / "checkpoint.saving"
+    (staging / "ocn").mkdir(parents=True)
+    (staging / "ocn" / "partial").write_text("half a restart file")
+
+    assert not recover_interrupted_save(checkpoint)
+    assert int(load_coupled_carry(checkpoint, toy_component_templates()).step) == 3
+
+    save_coupled_carry(toy_coupled_carry(step=4), checkpoint)
+
+    assert int(load_coupled_carry(checkpoint, toy_component_templates()).step) == 4
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["checkpoint"]
+    assert not (checkpoint / "ocn").exists()
+
+
+def test_a_save_killed_between_the_two_renames_is_completed_on_load(
+    tmp_path, monkeypatch, caplog
+):
+    """The one moment the directory itself is absent is recovered from.
+
+    The swap is two renames -- the old checkpoint aside, the new one into
+    place -- and a process that dies between them leaves nothing at the
+    checkpoint path. Both checkpoints are complete beside it, and the next
+    load puts the newer one back, with a warning, rather than reporting that
+    there is nothing to resume from.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    save_coupled_carry(toy_coupled_carry(step=3), checkpoint)
+
+    real_rename = os.rename
+    renames = []
+
+    def die_on_the_second_rename(source, destination):
+        renames.append((source, destination))
+        if len(renames) == 2:
+            raise KeyboardInterrupt("killed between the renames")
+        real_rename(source, destination)
+
+    monkeypatch.setattr("jem.checkpoint.os.rename", die_on_the_second_rename)
+    with pytest.raises(KeyboardInterrupt):
+        save_coupled_carry(toy_coupled_carry(step=4), checkpoint)
+    monkeypatch.undo()
+    assert not checkpoint.exists()
+
+    with caplog.at_level(logging.WARNING, logger="jem.checkpoint"):
+        loaded = load_coupled_carry(checkpoint, toy_component_templates())
+
+    assert int(loaded.step) == 4
+    assert "interrupted" in caplog.text
+    # The older one is redundant now; the next save clears it away.
+    save_coupled_carry(toy_coupled_carry(step=5), checkpoint)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["checkpoint"]
+
+
+def test_the_replaced_checkpoint_is_restored_when_it_is_all_that_survives(tmp_path):
+    """With no finished new checkpoint, recovery rolls back to the old one."""
+    checkpoint = tmp_path / "checkpoint"
+    save_coupled_carry(toy_coupled_carry(step=3), checkpoint)
+    os.rename(checkpoint, tmp_path / "checkpoint.replaced")
+
+    assert recover_interrupted_save(checkpoint)
+
+    assert int(load_coupled_carry(checkpoint, toy_component_templates()).step) == 3
+    assert not (tmp_path / "checkpoint.replaced").exists()
+
+
+def test_recovery_does_not_delete_what_it_did_not_write(tmp_path):
+    """A non-empty, carry-less directory in the way is an error, not a casualty.
+
+    No save leaves that state, so whatever is in the directory is somebody
+    else's. Deleting it to make room would be wrong, and so would starting
+    the run over with a complete checkpoint sitting beside it.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    save_coupled_carry(toy_coupled_carry(step=3), checkpoint)
+    os.rename(checkpoint, tmp_path / "checkpoint.replaced")
+    checkpoint.mkdir()
+    (checkpoint / "notes.txt").write_text("not a checkpoint")
+
+    with pytest.raises(ValueError, match="checkpoint.replaced"):
+        recover_interrupted_save(checkpoint)
+    assert (checkpoint / "notes.txt").exists()
+    assert (tmp_path / "checkpoint.replaced" / CARRY_FILENAME).exists()
+
+
+def test_a_directory_holding_anything_else_is_not_replaced(tmp_path):
+    """Saving into a directory that is not the checkpoint's own is refused.
+
+    A save replaces its directory wholesale, so a checkpoint pointed at a
+    directory with a run's output in it would delete that output. It is
+    refused before anything is written, and the directory is left as it was.
+    """
+    (tmp_path / "atm-00000000.nc").write_text("a chunk of output")
+
+    with pytest.raises(ValueError, match="atm-00000000.nc"):
+        save_coupled_carry(toy_coupled_carry(step=1), tmp_path)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["atm-00000000.nc"]
+    assert not tmp_path.with_name(tmp_path.name + ".saving").exists()
 
 
 def test_an_interrupted_save_is_skipped_by_latest_complete_checkpoint(tmp_path, caplog):
     """A carry-less directory sorts newest but cannot be loaded, so it is skipped.
 
-    This is exactly the state a run killed mid-save leaves behind: the
-    directory and the delegated components' data exist, but the carry file --
-    written last -- does not.
+    This is the state a run killed mid-save leaves behind when each checkpoint
+    gets a directory of its own: the staging directory the new checkpoint was
+    being assembled in, holding a delegated component's data but no carry
+    file -- that is written last.
     """
     save_coupled_carry(toy_coupled_carry(step=5), tmp_path / "step_00000005")
     save_coupled_carry(toy_coupled_carry(step=10), tmp_path / "step_00000010")
     # Killed after the component directory, before the carry file.
-    interrupted = tmp_path / "step_00000015"
-    save_coupled_carry(
-        toy_coupled_carry(step=15),
-        interrupted,
-        component_savers={"ocn": lambda carry, directory: None},
-    )
-    (interrupted / CARRY_FILENAME).unlink()
+    (tmp_path / "step_00000015.saving" / "ocn").mkdir(parents=True)
 
     with caplog.at_level(logging.WARNING, logger="jem.checkpoint"):
         latest = latest_complete_checkpoint(tmp_path)

@@ -7,8 +7,10 @@
 # of each cell and routes the ocean's heat flux through it
 # (docs/source/design/winton_seaice.md). It refuses an ocean that does not clamp
 # at the freezing point, so compose it with
-# `+ocean.params.clamp_at_freezing=true`, or use
-# `+configuration=earth-slab-winton`, which does.
+# `+ocean.params.clamp_at_freezing=true` over the slab ocean, or use
+# `+configuration=earth-slab-winton`, which does. Over a Veros ocean the
+# switch is `+ocean.clamp_at_freezing=true` and the ice has to be built on the
+# ocean's own grid and wet mask: `+configuration=veros-earth` does both.
 _target_: jem.components.WintonSeaiceModel
 params:
   _target_: jem.components.slab.WintonSeaiceParameters

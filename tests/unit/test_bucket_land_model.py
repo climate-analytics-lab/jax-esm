@@ -13,7 +13,6 @@ from jem.components.slab.bucket_land_model import (
     BucketLandParameters,
     soil_water_availability,
 )
-from jem.components.slab.bucket_land_model.bucket_land_model import WATER_DENSITY
 from tests.unit.slab_test_utils import (
     TIMESTEP,
     coupling_time,
@@ -53,8 +52,32 @@ def _forced(carry, precipitation, evaporation):
 
 def _storage(carry, params):
     """Water the soil holds, kg m-2 of land."""
-    return WATER_DENSITY * jnp.sum(
+    return jcm_constants.rhow * jnp.sum(
         carry["state"].soil_water_content * params.soil_bucket_depth, axis=-1)
+
+
+def test_the_water_density_is_the_atmospheres_and_honours_an_override(model):
+    """Mass fluxes become depths through ``jcm.constants.rhow``, read when the step is traced."""
+    def rain_effect():
+        """Water the rain adds to the surface layer in one step, over the same step without rain."""
+        def after(precipitation):
+            carry = _forced(model.initialize(), precipitation=precipitation, evaporation=0.0)
+            stepped, _ = model.step(carry, coupling_time(0))
+            return np.asarray(stepped["state"].soil_water_content)[..., 0]
+        return after(1e-7) - after(0.0)
+
+    default = rain_effect()
+    original = jcm_constants.physical_constants
+    try:
+        jcm_constants.set_constants(rhow=2.0 * original.rhow)
+        doubled = rain_effect()
+    finally:
+        jcm_constants.set_constants(original)
+    land = LAND_FRACTION > 0.0
+    assert np.all(default[land] > 0.0)
+    # The same mass of rain is half the depth of water; the soil's drainage depends on its
+    # level, which the rain changes slightly, so the ratio is half to a percent.
+    np.testing.assert_allclose(doubled[land], 0.5 * default[land], rtol=2e-2)
 
 
 def test_only_cells_with_land_hold_water(model, grid):

@@ -67,22 +67,25 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   touching it — no methods are attached to the model. The coupler calls its
   `bind()` when it is registered, which is where the model's start date and
   timestep are checked against the coupler's.
-- **The atmosphere's own timestep.** `Model(...)` above passes no
-  `time_step`, so it picks the active physics' *stable* step — 30 minutes for
-  SPEEDY at T31L8 — rather than any particular jax-gcm configuration's own
-  choice. `python -m jem.main`'s atmosphere instead reads `atmosphere.run.time_step`
-  from its composed config (12 minutes by jax-gcm's own `run/default.yaml`
-  default), so a script that means to match a specific `+configuration=<name>`
-  bit for bit — not just build *an* aquaplanet — should pass that recipe's own
-  `time_step` explicitly, in minutes, rather than rely on this page's
-  no-configuration default; see `jem.configurations` below for loading the
-  recipe itself instead of reproducing it by hand.
+- **The atmosphere's own timestep and parameters.** `Model(...)` above passes
+  no `time_step`, so it picks the active physics' *stable* step — 30 minutes
+  for SPEEDY at T31L8 — and `speedy_physics()` runs SPEEDY's *reference*
+  parameter values. The named SPEEDY configurations (`aquaplanet-slab`,
+  `aquaplanet-slab-mixed-grid`, `earth-slab`, `earth-slab-winton`) run the same
+  30-minute step but jax-gcm's parameters calibrated for coupled use, taken
+  whole from its `speedy-t31` configuration bundle; so does
+  `python -m jem.main +configuration@atmosphere=speedy-t31`. A bare
+  `python -m jem.main` composition runs the reference values, at jax-gcm's
+  default run step (12 minutes). A script that means to reproduce a
+  `+configuration=<name>` — not just build *an* aquaplanet — should therefore
+  load the recipe itself (`jem.configurations.load`, below) rather than
+  rebuild it by hand.
 - **The grid** comes from the atmosphere's own `coords.horizontal`, so the
   ocean cannot end up on a grid that merely resembles the atmosphere's. Pass
   `fractional_mask=` (e.g. `jcm.terrain.TerrainData.from_file(...).fmask`)
   for a land-sea mask; without one every cell is ocean.
 - **The exchanger** is the only place where components exchange anything.
-  {func}`~jem.default_exchangers` builds the standard wiring for
+  {func}`~jem.exchangers.default_exchangers` builds the standard wiring for
   whichever of the standard components (`atm`, `ocn`, `lnd`, `seaice`) are
   present. An exchange it cannot express — one that regrids, computes a flux,
   converts units or blends two fields — is a plain function
@@ -103,7 +106,7 @@ print(result.steps_completed, "coupled steps;", len(result.paths), "files")
   step. The same model can be written as an hourly `Coupler` registered as a
   component of the daily one — a `Coupler` satisfies the component contract.
   See {doc}`design/nesting` for both forms.
-- **The run loop** {func}`~jem.run_chunked` integrates in chunks: per
+- **The run loop** {func}`~jem.driver.run_chunked` integrates in chunks: per
   chunk it writes one file per component, checkpoints if it was given a path,
   and runs a health check on the result, stopping the run if the atmosphere
   has gone unstable. Every run default lives on its signature. How far to
@@ -214,6 +217,197 @@ Each `*Parameters` docstring says which of its fields are initial conditions.
 See {doc}`design/carry_and_clock`'s *Parameters* section for the pattern in
 full, including why the distinction is not one the framework enforces.
 
+**Differentiating a whole coupled run with respect to a parameter.** The
+carry is built from the parameter, so `jax.grad` of a function of the final
+carry reaches it through every coupled step. Differentiate with respect to the
+parameter (a float), not the carry: the carry holds integer leaves (the step
+counter) that `jax.grad` refuses. The coupler and its trajectory function are
+built once, outside the differentiated function (`components` and `coupler`
+as built above):
+
+```python
+import jax
+
+ocn = components["ocn"]                       # the SlabOceanModel built above
+trajectory = coupler.generate_trajectory_function(2, remat=True)
+
+def mean_final_sst(mixed_layer_depth_max):
+    params = ocn.params.replace(mixed_layer_depth_max=mixed_layer_depth_max)
+    final, _ = trajectory(coupler.initialize({"ocn": params}))
+    return final.components["ocn"]["state"].sea_surface_temperature.mean()
+
+sensitivity = jax.grad(mean_final_sst)(60.0)  # K per metre of mixed-layer depth
+```
+
+`jax.jvp` of a function of the initial sea surface temperature gives the
+tangent-linear response to an initial-condition perturbation instead; the
+notebook `examples/01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`
+does that for the whole coupled aquaplanet.
+
+## Ocean, land and sea-ice variants
+
+The slab components beyond the first block's ocean are built the same way,
+each from the model's `SlabGrid` and an optional parameters object. A realistic
+land-sea mask is what makes a land or a sea ice worth coupling, so this block
+reads jax-gcm's packaged T30 terrain and climatology (the files
+`+configuration=earth-slab` names); `run_two_steps` is the usual
+`default_exchangers` coupling, run for two steps.
+
+```python
+import jax_datetime as jdt
+import jcm
+from jcm.physics.speedy.speedy_coords import get_speedy_coords
+from jcm.terrain import TerrainData
+
+from jem import Coupler, default_exchangers, exchanged_fields
+from jem.components import (
+    BucketLandModel, JCMComponent, SlabOceanModel, WintonSeaiceModel,
+)
+from jem.components.slab import SlabGrid, SlabOceanParameters, WintonSeaiceParameters
+from jem.config import package_data_path
+
+start_date = jdt.to_datetime("2000-01-01")
+coords = get_speedy_coords()
+climatology = package_data_path("jcm.data", "bc/t30/clim/forcing.nc")
+
+terrain = TerrainData.from_file(package_data_path("jcm.data", "bc/t30/clim/terrain.nc"), coords)
+atm_model = jcm.model.Model(coords=coords, terrain=terrain, start_time=start_date)
+grid = SlabGrid.from_coords(atm_model.coords.horizontal, fractional_mask=terrain.fmask)
+
+
+def run_two_steps(components):
+    exchangers = default_exchangers(components)
+    # The fields an exchanger writes into the atmosphere's forcing have to be
+    # declared to the atmosphere, so that its carry keeps one structure.
+    components["atm"].set_exchanged_forcing(exchanged_fields(exchangers, "atm"))
+    coupler = Coupler(components, exchangers,
+                      coupling_timestep=jdt.to_timedelta(1, "day"), start_date=start_date)
+    return coupler.generate_trajectory_function(2)(coupler.initialize())
+
+
+# The bucket land evolves the soil water SPEEDY's own land reads. It starts half
+# full unless `soil_water_clim_file` names a monthly `soilw_am`.
+land = BucketLandModel(grid, soil_water_clim_file=climatology)
+carry, _ = run_two_steps({"atm": JCMComponent(atm_model), "ocn": SlabOceanModel(grid), "lnd": land})
+
+# The Winton sea ice has an energy budget, so the ocean beside it has to clamp at
+# freezing and hand it the deficit. `ice_clim_file` is the initial cover only;
+# `transport=True` also advects and diffuses the ice.
+ocean = SlabOceanModel(grid, SlabOceanParameters(clamp_at_freezing=True))
+ice = WintonSeaiceModel(
+    grid, WintonSeaiceParameters(initial_ice_thickness=1.5), ice_clim_file=climatology,
+)
+carry, _ = run_two_steps({"atm": JCMComponent(atm_model), "ocn": ocean, "seaice": ice})
+```
+
+What a user has to know about each, beyond the constructor:
+
+- **`BucketLandModel(grid, params=None, *, name="lnd", soil_water_clim_file=None)`**
+  needs a grid with cell areas, takes the atmosphere's precipitation and its
+  *land-tile* evaporation, and hands back `soilw_am`. SPEEDY keeps integrating
+  the land's temperature itself. It is refused under an atmosphere with no land
+  tile (ECHAM). CLI: `land=bucket +land.soil_water_clim_file=...`;
+  {doc}`design/bucket_land` has the budget.
+- **`WintonSeaiceModel(grid, params=None, *, name="seaice", transport=False,
+  frozen_precipitation_latent_heat_release_mode=True, ice_clim_file=None)`**.
+  `default_exchangers` forces it from the atmosphere's sea tile and routes the
+  ocean's heat flux through it, and refuses three pairings: an ocean that does
+  not clamp at freezing (`SlabOceanParameters(clamp_at_freezing=True)`, else
+  the freezing would be counted twice), a Veros ocean, and an atmosphere that
+  publishes no sea tile (ECHAM). Leave
+  `frozen_precipitation_latent_heat_release_mode` at `True` for SPEEDY, whose
+  snowfall arrives without its latent heat released; pass `False` for an
+  atmosphere that already released it. CLI: `seaice=winton
+  +ocean.params.clamp_at_freezing=true`, or `+configuration=earth-slab-winton`;
+  {doc}`design/winton_seaice` has the coupling.
+- **`SlabOceanModel(grid, params=None, *, name="ocn", sst_clim_file=None,
+  q_flux_file=None)`** forces its mixed layer in one of three ways,
+  `SlabOceanParameters.forcing_method`: `"none"` (the default, the coupled flux
+  alone), `"relaxation"` toward the `sst` of `sst_clim_file` (required;
+  CLI `ocean=slab_relax ocean.sst_clim_file=...`), or `"qflux"`, a prescribed
+  heat flux from the `qflux` of `q_flux_file` (CLI `ocean=slab_qflux
+  ocean.q_flux_file=...`, where the file is required but may be given as
+  `null`, which applies a zero Q-flux, the starting point when the Q-flux is
+  itself being trained).
+
+```python
+ocean = SlabOceanModel(grid, SlabOceanParameters(forcing_method="qflux"), q_flux_file=None)
+```
+
+## A Veros ocean
+
+`VerosComponent` wraps an already-built Veros model, a live Python object no
+configuration can name; `VerosComponent.from_setup` is the door that takes an
+importable setup instead. It needs the optional jittable Veros fork
+({doc}`getting_started`), and a Veros ocean makes the whole process double
+precision: `jem.configurations.load("veros-earth")` and `ocean=veros` set
+`jax_enable_x64` before the atmosphere is built and leave it set, and a model
+assembled by hand, as below, has to call
+`jax.config.update("jax_enable_x64", True)` before constructing its
+atmosphere. So this block is not executed here; its signatures are those of
+`jem.components.VerosComponent.from_setup`, `jem.fluxes.VerosExchange` and
+`double_drake_setup`:
+
+```python
+from jem.components import VerosComponent
+from jem.fluxes import VerosExchange
+
+ocean = VerosComponent.from_setup(
+    "jem.components.veros.setups.double_drake.double_drake_setup",
+    # The ocean is built on the atmosphere's own cell centres, read from the
+    # SCRIP file of the atmosphere's grid.
+    atmosphere_grid_file=package_data_path("jem.data", "JCM_T31.SCRIP.nc"),
+    land_sea_mask_file=package_data_path("jem.data", "terrain_double_drake_T31.nc"),
+)
+# `default_exchangers` supplies the table in Veros' field names, but not the wind
+# stress, which crosses through `VerosExchange` (rotated into the ocean's frame
+# when the grid is rotated, `rotation_grid_file=`; regridded when `regrid=` is given).
+coupler = Coupler(
+    {"atm": atm, "ocn": ocean}, {"exchange": VerosExchange()},
+    coupling_timestep=coupling_timestep, start_date=start_date,
+)
+atm.set_exchanged_forcing(["sea_surface_temperature"])
+```
+
+`atm_model` has to be built on the terrain file the ocean shares
+(`atmosphere.terrain.file` in the configuration) and with a 30-minute
+`time_step`, as `+configuration=veros-double-drake` does; the configuration
+is the validated way to get all of that right, and its comments say why each
+setting is what it is.
+
+A sea ice is coupled to the Veros ocean through the same `VerosExchange`
+(registered as `"seaice"`, on the ocean's grid, with its sea part exactly
+Veros' wet mask). A Winton ice needs the ocean to clamp its top cell at the
+freezing point, which is a constructor argument, off by default:
+
+```python
+ocean = VerosComponent(veros_model, clamp_at_freezing=True)   # or from_setup(..., clamp_at_freezing=True)
+atm.set_exchanged_forcing(["sea_surface_temperature", "sice_am", "sea_ice_temperature"])
+```
+
+`VerosExchange.validate(coupler.initialize().components)` refuses the pairings
+that would be wrong (a Winton ice over a non-clamping ocean, a clamping ocean
+with no ice or an SST-diagnosed one). `+configuration=veros-earth` is the
+validated composition; its limits are in {doc}`issues`.
+
+## Surface constants
+
+`jem.constants` holds the surface-slab properties `jcm.constants` does not
+define (seawater's density, heat capacity and freezing point, and the idealized
+slab atmosphere's bulk coefficients); everything the atmosphere shares comes from
+`jcm.constants`, so the two cannot disagree. Override either before building
+any component, since a component reads the constants while building its
+carry and while tracing its step:
+
+```python
+import jem.constants
+
+jem.constants.set_constants(ocean_density=1030.0)   # one field of the live set
+```
+
+From the command line `+atmosphere.constants.grav=9.7` overrides a
+`jcm.constants` value for every component.
+
 ## The atmosphere's initial condition
 
 `JCMComponent` starts the atmosphere from jax-gcm's default, an isothermal
@@ -294,7 +488,11 @@ date. See {doc}`design/carry_and_clock` for what each component resets.
 The construction above builds a coupled model by hand -- the thing to do
 when writing a new experiment. To instead run one of the *validated*
 configurations in `jem/config/configuration/*.yaml` -- `aquaplanet-slab`,
-`earth-slab`, the mixed-grid and Veros recipes -- without composing Hydra,
+`aquaplanet-slab-echam`, `aquaplanet-slab-mixed-grid`, `earth-slab`,
+`earth-slab-echam`, `earth-slab-winton`, `veros-double-drake` and
+`veros-earth`, the same eight
+`configurations.available()` returns, each with its command in
+{doc}`examples` -- without composing Hydra,
 `jem.configurations` is the recipe door onto them (issue #131):
 
 ```python
@@ -313,9 +511,9 @@ the SAME `jem.runners` builders `python -m jem.main` uses
 (`jem.runners.build_coupler`, `jem.runners.build_run_kwargs`), and hands back
 a Hydra-free `LoadedConfiguration` -- `omegaconf`/`hydra` never appear in a
 caller's own code. `**overrides` is the escape hatch onto both a dotted
-value (`load("earth-slab", **{"coupled_run.total_time": "60 days"})` --
-`earth-slab`'s `chunk` stays its recipe default of 30 days, so this has to be
-a multiple of that) and a config-group selection (`load("aquaplanet-slab",
+value (`load("earth-slab", **{"coupled_run.total_time": "60 days"})`; the run
+length need not be a multiple of `chunk`, a last short chunk finishes it) and a
+config-group selection (`load("aquaplanet-slab",
 seaice="none")`, the Python spelling of the CLI's `seaice=none`). A string
 override is carried literally except for a `${...}` interpolation, which
 resolves just as it does on the CLI, so
@@ -329,6 +527,26 @@ docstring lists the small, specific things `run_chunked(exp.coupler,
 **exp.run_kwargs)` does NOT reproduce of the CLI (a fresh `output_dir` of the
 door's own rather than the CLI's Hydra-managed one, no logger-level change)
 and the process-global persistence of a `+atmosphere.constants.*` override.
+The docstring is rendered in the API reference ({doc}`api_superset`); in short,
+the door builds the same coupler and the same run settings as the command
+line, and differs only in where the run writes by default and in leaving the
+logger alone.
+
+The six SPEEDY configurations (all but the two `-echam`) run jax-gcm's
+coupled-calibrated SPEEDY,
+so `load("aquaplanet-slab")` is not the same atmosphere as a hand-built
+`jcm.model.Model(...)`, which runs the reference values. The calibrated set is
+jax-gcm's `speedy-t31` bundle at a 30-minute step (jax-gcm's
+`docs/source/design/speedy_retune.md`): 29 values fitted at T31 against
+observations (CERES, GPCP, ERA5 and others) with *prescribed* SSTs, so that the
+top-of-atmosphere budget and the surface fluxes handed to an ocean are
+credible. A coupled run, whose SST responds, is not guaranteed drift-free. The
+bundle alone is `+configuration@atmosphere=speedy-t31` on the command line.
+Another jax-gcm bundle can replace it with
+`load("aquaplanet-slab", **{"configuration@atmosphere": "<bundle>"})`
+(`configuration@atmosphere=<bundle>` on the command line); the bundle's
+physics, grid and step come with it, but the files tied to the old grid and the
+surface components' constraints on the physics do not follow.
 
 A notebook that *runs* a validated configuration to demonstrate something
 else -- perturbing an initial condition, differentiating through a

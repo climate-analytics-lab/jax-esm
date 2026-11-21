@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import jax_datetime as jdt
 import numpy as np
 import pytest
+import xarray as xr
 
 # Importing the adapter is what points Veros at its JAX backend, and it has
 # to happen before anything imports veros.core -- including the setup module
@@ -33,6 +34,7 @@ from jem.base.component import (  # noqa: E402
 )
 from jem.components.veros_component import (  # noqa: E402
     GHOST_CELLS,
+    MIN_STRESS_MAGNITUDE,
     VerosComponent,
     VerosDerived,
     VerosForcing,
@@ -170,7 +172,7 @@ def _labelling_diagnostics(component, n_records):
             "sea_surface_temperature", "sea_surface_salinity",
             "sea_surface_u", "sea_surface_v",
             "surface_air_temperature", "surface_taux", "surface_tauy",
-            "heat_flux", "freshwater_flux",
+            "heat_flux", "freshwater_flux", "ice_frazil_melt_energy",
         )
     })
     # The land's runoff is one mass rate per record.
@@ -354,6 +356,230 @@ def test_to_xarray_publishes_the_external_mode_outputs(
         assert dataset.ssh.attrs["jem_role"] == "derived"
         assert "psi / grav" in dataset.ssh.attrs["comment"]
         np.testing.assert_array_equal(dataset.ssh.values, np.asarray(ssh))
+
+
+def _rotated(veros_model, monkeypatch, grid_shape):
+    """Return a component whose setup declares its cells' true positions.
+
+    The positions are the grid's own, displaced, which is all the labelling
+    needs: a setup that declares them is one whose axes are not meridians
+    and parallels.
+    """
+    nx, ny = grid_shape
+    native_lon = np.asarray(veros_model.state.variables.xt)[GHOST_CELLS:-GHOST_CELLS]
+    native_lat = np.asarray(veros_model.state.variables.yt)[GHOST_CELLS:-GHOST_CELLS]
+    true_lon = np.broadcast_to(native_lon[:, None] + 7.0, (nx, ny))
+    true_lat = np.broadcast_to(native_lat[None, :] - 3.0, (nx, ny))
+    monkeypatch.setattr(veros_model, "geographic_longitude", true_lon, raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude", true_lat, raising=False)
+    return _bound(veros_model), true_lon, true_lat, native_lon, native_lat
+
+
+def test_a_rotated_grid_is_labelled_with_its_cells_true_positions(
+    veros_model, monkeypatch, grid_shape
+):
+    """A rotated grid's output is on index dimensions under 2-D ``longitude``/``latitude``.
+
+    Veros' own axes are the grid's native, pre-rotation ones. Writing them as
+    ``lon``/``lat`` would label every cell up to the pole's displacement away
+    from where it is, so a setup that declares its true positions gets the
+    convention every component uses for a curvilinear grid: ``x``/``y``
+    dimensions, 2-D ``longitude``/``latitude`` auxiliary coordinates (not
+    ``lon``/``lat``, which are the atmosphere's 1-D axes and would be lost in
+    a merge) and a CF ``coordinates`` attribute, with the native axes kept
+    under their own name.
+    """
+    component, true_lon, true_lat, native_lon, native_lat = _rotated(
+        veros_model, monkeypatch, grid_shape
+    )
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+
+    assert dataset.sea_surface_temperature.dims == ("time", "x", "y")
+    assert dataset.temp.dims == ("time", "x", "y", "depth")
+    assert dataset.mask_surface_T.dims == ("x", "y")
+    assert dataset.longitude.dims == dataset.latitude.dims == ("x", "y")
+    assert "lon" not in dataset.variables and "lat" not in dataset.variables
+    np.testing.assert_array_equal(dataset.longitude, true_lon)
+    np.testing.assert_array_equal(dataset.latitude, true_lat)
+    assert dataset.longitude.attrs["units"] == "degrees_east"
+    assert dataset.latitude.attrs["units"] == "degrees_north"
+    assert dataset.longitude.attrs["standard_name"] == "longitude"
+    assert "axis" not in dataset.longitude.attrs
+    np.testing.assert_array_equal(dataset.native_lon, native_lon)
+    np.testing.assert_array_equal(dataset.native_lat, native_lat)
+
+    # Every horizontal variable names its coordinates; the two that have no
+    # horizontal dimensions do not.
+    for name, variable in dataset.data_vars.items():
+        horizontal = "x" in variable.dims and "y" in variable.dims
+        assert ("coordinates" in variable.attrs) == horizontal, name
+        if horizontal:
+            assert variable.attrs["coordinates"] == "longitude latitude"
+    # The vectors are along the grid's own axes, and say so.
+    for name in ("u", "v", "sea_surface_u", "sea_surface_v",
+                 "forcing_surface_taux", "forcing_surface_tauy"):
+        assert "rotated" in dataset[name].attrs["comment"], name
+
+
+def test_a_setup_that_declares_half_a_position_is_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """True longitudes without latitudes, or on the wrong grid, are a setup bug."""
+    nx, ny = grid_shape
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude", np.zeros((nx, ny)), raising=False
+    )
+    with pytest.raises(ValueError, match="needs both"):
+        VerosComponent(veros_model)
+
+    monkeypatch.setattr(
+        veros_model, "geographic_latitude", np.zeros((nx + 1, ny)), raising=False
+    )
+    with pytest.raises(ValueError, match="geographic_latitude has shape"):
+        VerosComponent(veros_model)
+
+
+def _atmosphere_like_dataset(longitude, latitude, n_records=2):
+    """Return a dataset on exactly the given ``lon``/``lat`` axes, as the atmosphere's is."""
+    return xr.Dataset(
+        {"surface_pressure": (("time", "lon", "lat"),
+                              np.zeros((n_records, longitude.size, latitude.size)))},
+        coords={
+            "time": TimeAxis(
+                START_DATE, np.arange(n_records), COUPLING_TIMESTEP).datetimes(),
+            "lon": ("lon", longitude), "lat": ("lat", latitude),
+        },
+    )
+
+
+def _declare_axes(veros_model, monkeypatch, grid_shape, *, offset=0.0):
+    """Declare 1-D output axes that are Veros' own to within ``offset`` degrees."""
+    native_lon = np.asarray(veros_model.state.variables.xt)[GHOST_CELLS:-GHOST_CELLS]
+    native_lat = np.asarray(veros_model.state.variables.yt)[GHOST_CELLS:-GHOST_CELLS]
+    declared_lon = native_lon + offset
+    declared_lat = native_lat + offset
+    monkeypatch.setattr(veros_model, "geographic_longitude_axis", declared_lon, raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude_axis", declared_lat, raising=False)
+    return declared_lon, declared_lat
+
+
+def _require_degrees(component):
+    if component.longitude_units != "degrees_east":
+        pytest.skip("this grid's coordinates are metres: it has no longitude to declare")
+
+
+def test_declared_axes_label_a_separable_grid_exactly(veros_model, monkeypatch, grid_shape):
+    """A setup's 1-D axes label ``lon``/``lat`` bit for bit and merge exactly.
+
+    Veros reconstructs ``xt``/``yt`` by cumulative sums, so they differ in the
+    last bits from another component's axis of the same grid and
+    ``xr.merge(join="exact")`` refuses the pair. A setup that declares the
+    other component's axis gets that axis written, not Veros' near copy.
+    """
+    _require_degrees(_bound(veros_model))
+    # 5e-14 degrees: the size of the round-off the declaration exists to remove.
+    declared_lon, declared_lat = _declare_axes(
+        veros_model, monkeypatch, grid_shape, offset=5e-14)
+    component = _bound(veros_model)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+
+    assert dataset.sea_surface_temperature.dims == ("time", "lon", "lat")
+    np.testing.assert_array_equal(dataset.lon.values, declared_lon)
+    np.testing.assert_array_equal(dataset.lat.values, declared_lat)
+    assert dataset.lon.attrs["standard_name"] == "longitude"
+    assert dataset.lat.attrs["axis"] == "Y"
+    assert "coordinates" not in dataset.sea_surface_temperature.attrs
+
+    atmosphere = _atmosphere_like_dataset(declared_lon, declared_lat)
+    merged = xr.merge([atmosphere, dataset], join="exact")
+    np.testing.assert_array_equal(merged.lon.values, declared_lon)
+    assert merged.sea_surface_temperature.dims == ("time", "lon", "lat")
+
+
+def test_undeclared_axes_do_not_merge_exactly_with_a_round_off_neighbour(
+    veros_model, grid_shape
+):
+    """The case the declaration exists for: Veros' own axes are not bit-equal."""
+    _require_degrees(_bound(veros_model))
+    component = _bound(veros_model)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+    neighbour = _atmosphere_like_dataset(
+        np.asarray(dataset.lon.values) + 5e-14, np.asarray(dataset.lat.values))
+    with pytest.raises(ValueError, match="exact"):
+        xr.merge([neighbour, dataset], join="exact")
+
+
+def test_declared_axes_that_would_move_a_cell_are_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """A label must not move a cell: an axis off Veros' own by more than 1e-6 degrees is refused."""
+    _require_degrees(_bound(veros_model))
+    _declare_axes(veros_model, monkeypatch, grid_shape, offset=1e-4)
+    with pytest.raises(ValueError, match="must not move"):
+        VerosComponent(veros_model)
+
+
+def test_declared_axes_of_the_wrong_length_are_refused(veros_model, monkeypatch, grid_shape):
+    _require_degrees(_bound(veros_model))
+    declared_lon, declared_lat = _declare_axes(veros_model, monkeypatch, grid_shape)
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude_axis", declared_lon[:-1], raising=False)
+    with pytest.raises(ValueError, match="geographic_longitude_axis has shape"):
+        VerosComponent(veros_model)
+
+
+def test_a_setup_that_declares_half_the_axes_is_refused(veros_model, monkeypatch, grid_shape):
+    monkeypatch.setattr(
+        veros_model, "geographic_longitude_axis", np.zeros(grid_shape[0]), raising=False)
+    with pytest.raises(ValueError, match="needs both"):
+        VerosComponent(veros_model)
+
+
+def test_declaring_axes_and_positions_together_is_refused(
+    veros_model, monkeypatch, grid_shape
+):
+    """The 1-D and the 2-D declaration are two answers to one question."""
+    _require_degrees(_bound(veros_model))
+    _declare_axes(veros_model, monkeypatch, grid_shape)
+    nx, ny = grid_shape
+    monkeypatch.setattr(veros_model, "geographic_longitude", np.zeros((nx, ny)), raising=False)
+    monkeypatch.setattr(veros_model, "geographic_latitude", np.zeros((nx, ny)), raising=False)
+    with pytest.raises(ValueError, match="declare one"):
+        VerosComponent(veros_model)
+
+
+def test_a_rotated_grid_keeps_its_positions_through_a_merge_with_the_atmosphere(
+    veros_model, monkeypatch, grid_shape
+):
+    """The 2-D positions survive ``xr.merge`` with the atmosphere's 1-D ``lon``/``lat``.
+
+    Named ``lon``/``lat`` they would be dropped for the atmosphere's axes,
+    leaving the ocean's variables with no position at all.
+    """
+    component, true_lon, true_lat, _, _ = _rotated(veros_model, monkeypatch, grid_shape)
+    dataset = component.to_xarray(
+        _labelling_diagnostics(component, 2),
+        TimeAxis(START_DATE, np.arange(2), COUPLING_TIMESTEP),
+    )
+    atmosphere = _atmosphere_like_dataset(np.arange(0.0, 360.0, 3.75), np.linspace(-87, 87, 48))
+
+    merged = xr.merge([atmosphere, dataset], join="exact")
+
+    sst = merged.sea_surface_temperature
+    assert "longitude" in sst.coords and "latitude" in sst.coords
+    np.testing.assert_array_equal(sst.longitude, true_lon)
+    np.testing.assert_array_equal(sst.latitude, true_lat)
+    # The atmosphere's own axes are untouched.
+    assert merged.surface_pressure.dims == ("time", "lon", "lat")
 
 
 def test_to_xarray_labels_the_gm_streamfunction(component):
@@ -657,16 +883,84 @@ def test_clock_drift_of_a_day_is_reported(component, caplog):
     assert caplog.records and caplog.records[0].levelno == logging.ERROR
 
 
-def test_make_jem_compatible_is_deprecated(veros_model):
-    """The old entry point still works and warns."""
-    from jem.components import veros_component
+#: The Veros variables `VerosComponent.step` writes the coupler's forcing into
+#: before it integrates.
+_FORCING_VARIABLES = (
+    "surface_taux", "surface_tauy", "forc_tke_surface",
+    "forc_temp_surface", "forc_salt_surface",
+)
 
-    with pytest.warns(DeprecationWarning, match="VerosComponent"):
-        wrapper = veros_component.make_jem_compatible(
-            veros_model, COUPLING_TIMESTEP)
 
-    assert isinstance(wrapper, VerosComponent)
-    assert wrapper.model is veros_model
+def _tke_surface_forcing(component, surface_taux):
+    """Return the TKE surface forcing one step sets under ``surface_taux``.
+
+    Only the forcing is under test, so the caller has stubbed the Veros step
+    out: what comes back is what the ocean is about to be driven with.
+
+    `step` writes the forcing into the model's own state object, which this
+    module's tests share. Called under `jax.grad`, what it writes are tracers
+    of a transformation that has ended by the time the next test steps the
+    model, so the variables are put back as they were found.
+    """
+    variables = component.model.state.variables
+    before = {name: getattr(variables, name) for name in _FORCING_VARIABLES}
+    try:
+        carry = component.initialize()
+        carry = dict(carry, forcing=carry["forcing"].replace(surface_taux=surface_taux))
+        new_carry, _ = component.step(carry, _coupling_time(0))
+        interior = slice(GHOST_CELLS, -GHOST_CELLS)
+        return new_carry["state"].variables.forc_tke_surface[interior, interior]
+    finally:
+        with variables.unlock():
+            for name, value in before.items():
+                setattr(variables, name, value)
+
+
+@pytest.mark.parametrize("stress", [0.02, 0.1, 0.5])
+def test_the_tke_surface_forcing_follows_the_wind_stress(
+    component, monkeypatch, stress
+):
+    """The mixed layer is stirred by the wind: ``(|tau| / rho_0) ** 1.5``.
+
+    Checked at three stresses spanning a calm day to a storm, because the
+    failure this guards against is a floor on the stress that sits above all
+    of them -- which makes the forcing one constant whatever the wind does.
+    It is checked on every interior column, because the forcing averages each
+    stress with its western neighbour and on a periodic grid the first
+    column's neighbour is across the seam.
+    """
+    monkeypatch.setattr(component.model, "step", lambda state: None)
+    rho_0 = float(component.model.state.settings.rho_0)
+
+    forcing = _tke_surface_forcing(
+        component, jnp.full(component.horizontal_shape, stress)
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(forcing), (stress / rho_0) ** 1.5, rtol=1e-6
+    )
+
+
+def test_the_tke_surface_forcing_is_differentiable_in_a_calm(component, monkeypatch):
+    """At zero stress the forcing is negligible and its gradient is finite.
+
+    ``sqrt`` has an infinite derivative at zero, so without the floor on the
+    stress the gradient of a coupled run with respect to anything upstream of
+    a windless cell would be NaN.
+    """
+    monkeypatch.setattr(component.model, "step", lambda state: None)
+    rho_0 = float(component.model.state.settings.rho_0)
+
+    def total_forcing(stress):
+        return _tke_surface_forcing(
+            component, jnp.full(component.horizontal_shape, stress)
+        ).sum()
+
+    value, gradient = jax.value_and_grad(total_forcing)(0.0)
+
+    cells = int(np.prod(component.horizontal_shape))
+    assert float(value) <= cells * (MIN_STRESS_MAGNITUDE / rho_0) ** 1.5 * (1 + 1e-6)
+    assert np.isfinite(float(gradient))
 
 
 @pytest.mark.slow
@@ -914,6 +1208,7 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     from jem.components.veros_component import VEROS_RESTART_FILENAME
 
     carry = component.initialize()
+    carry, _ = component.step(carry, _coupling_time(0))
     carry = dict(
         carry,
         derived=carry["derived"].replace(
@@ -921,6 +1216,8 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
         ),
         forcing=carry["forcing"].replace(heat_flux=jnp.full(grid_shape, -12.5)),
     )
+    iteration = int(carry["state"].variables.itt)
+    assert iteration > 0
 
     directory = tmp_path / "ocn"
     component.save_carry(carry, directory)
@@ -935,6 +1232,10 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
     # Veros' reader mutates the model's state in place, so the restored carry
     # shares that object rather than holding a copy of it.
     assert loaded["state"] is component.model.state
+    # Veros' restart does not hold the iteration counter; without it the next
+    # step would read `itt == 0` and re-initialise the pressure history.
+    assert int(loaded["state"].variables.itt) == iteration
+    assert float(loaded["state"].variables.time) == float(carry["state"].variables.time)
     np.testing.assert_array_equal(
         np.asarray(loaded["derived"].sea_surface_temperature),
         np.asarray(carry["derived"].sea_surface_temperature),
@@ -943,6 +1244,79 @@ def test_save_carry_and_load_carry_round_trip(component, grid_shape, tmp_path):
         np.asarray(loaded["forcing"].heat_flux),
         np.asarray(carry["forcing"].heat_flux),
     )
+
+
+def _fresh_component(workdir, **setting_overrides) -> VerosComponent:
+    """Build a new ``acc_basic`` model of its own and bind a component to it.
+
+    The module-scoped fixtures share one model whose state a restart read
+    mutates in place; a resume has to start from a model nothing has touched,
+    which is what a new process has.
+    """
+    workdir.mkdir(parents=True)
+    generator = _acc_basic_model(workdir, **setting_overrides)
+    model = next(generator)
+    generator.close()  # restores the working directory
+    return _bound(model)
+
+
+def _wind_and_cooling(carry, grid_shape):
+    """Return ``carry`` with a steady wind stress and surface cooling applied."""
+    return dict(
+        carry,
+        forcing=carry["forcing"].replace(
+            surface_taux=jnp.full(grid_shape, 0.1),
+            heat_flux=jnp.full(grid_shape, 20.0),
+        ),
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("enable_streamfunction", [True, False])
+def test_a_run_resumed_from_disk_is_the_uninterrupted_run(
+    enable_streamfunction, grid_shape, tmp_path
+):
+    """Resuming from disk after k steps for N-k more equals N steps in a row.
+
+    Every Veros variable is compared, not just the tracers: a restart that
+    drops something the next step reads shows up first in a field no output
+    reports. The free-surface case is the one that carries the hazard, because
+    only there do the older time levels of ``psi`` enter the next step;
+    ``solve_pressure`` overwrites all of them when it reads ``itt == 0``.
+    """
+    overrides = {"enable_streamfunction": enable_streamfunction}
+    total, split = 3, 1
+
+    uninterrupted = _fresh_component(tmp_path / "a", **overrides)
+    carry = _wind_and_cooling(uninterrupted.initialize(), grid_shape)
+    for step in range(total):
+        carry, _ = uninterrupted.step(carry, _coupling_time(step))
+    expected = {k: np.asarray(v) for k, v in carry["state"].variables.items()}
+
+    first_leg = _fresh_component(tmp_path / "b", **overrides)
+    carry = _wind_and_cooling(first_leg.initialize(), grid_shape)
+    for step in range(split):
+        carry, _ = first_leg.step(carry, _coupling_time(step))
+    # Saved into a directory that is then renamed away, as a coupled
+    # checkpoint's staging directory is: nothing may depend on the path.
+    staging = tmp_path / "staging"
+    first_leg.save_carry(carry, staging)
+    staging.rename(tmp_path / "checkpoint")
+
+    resumed = _fresh_component(tmp_path / "c", **overrides)
+    carry = resumed.load_carry(tmp_path / "checkpoint")
+    assert int(carry["state"].variables.itt) == split * resumed._steps_per_coupling_step
+    for step in range(split, total):
+        carry, _ = resumed.step(carry, _coupling_time(step))
+    actual = {k: np.asarray(v) for k, v in carry["state"].variables.items()}
+
+    assert actual.keys() == expected.keys()
+    differing = {
+        name: float(np.max(np.abs(actual[name] - expected[name])))
+        for name in expected
+        if not np.array_equal(actual[name], expected[name], equal_nan=True)
+    }
+    assert not differing, f"resumed run differs from the uninterrupted one: {differing}"
 
 
 def test_a_runtime_setting_is_restored_even_when_the_block_raises():
@@ -1046,3 +1420,42 @@ def test_a_spun_up_ocean_is_reused_under_another_start_date(
         july.generate_trajectory_function(1)(spun_up)
         jax.effects_barrier()
     assert "model clock is" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The freeze/melt potential and the clamp (jax-esm#160)
+#
+# The budget and clamp tests that need a sea ice and a coupled run are in
+# `test_veros_seaice.py`; these are the component's own contract.
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_publishes_the_freeze_melt_potential_of_the_initial_surface(
+    component, veros_model,
+):
+    """``ice_frazil_melt_energy`` is ``(T_f - T_top) rho_0 c_p dz_top`` on wet cells, 0 on land."""
+    from jem import constants
+    from jem.components.veros_component import SEAWATER_HEAT_CAPACITY
+
+    derived = component.initialize()["derived"]
+    wet = np.asarray(component.mask_T[:, :, -1]) > 0
+    surface = np.asarray(derived.sea_surface_temperature)
+    heat_capacity = (
+        veros_model.state.settings.rho_0 * SEAWATER_HEAT_CAPACITY * float(component.dzt[-1]))
+    expected = (constants.seawater_freezing_point_K - surface) * heat_capacity
+    np.testing.assert_allclose(
+        np.asarray(derived.ice_frazil_melt_energy)[wet], expected[wet], rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(derived.ice_frazil_melt_energy)[~wet], 0.0)
+    # acc_basic starts far above freezing: all melt potential, no deficit.
+    assert np.all(np.asarray(derived.ice_frazil_melt_energy)[wet] < 0.0)
+    assert float(derived.clamps_at_freezing) == 0.0
+
+
+def test_to_xarray_labels_the_freeze_melt_energy_as_a_derived_field(component):
+    diagnostics = _labelling_diagnostics(component, 2)
+    dataset = component.to_xarray(
+        diagnostics, TimeAxis(start_date=START_DATE, steps=np.arange(2), dt=COUPLING_TIMESTEP))
+    variable = dataset["ice_frazil_melt_energy"]
+    assert variable.attrs["units"] == "J m-2"
+    assert variable.attrs["jem_role"] == "derived"
+    assert variable.dims == dataset["sea_surface_temperature"].dims

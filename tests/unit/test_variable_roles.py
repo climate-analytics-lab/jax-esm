@@ -200,5 +200,5 @@ def test_a_curvilinear_grid_keeps_the_role_beside_the_coordinates_attribute():
     dataset = dataset_for(model)
 
     for variable in dataset.data_vars.values():
-        assert variable.attrs["coordinates"] == "lat lon"
+        assert variable.attrs["coordinates"] == "longitude latitude"
         assert variable.attrs[ROLE_ATTRIBUTE] in ROLES

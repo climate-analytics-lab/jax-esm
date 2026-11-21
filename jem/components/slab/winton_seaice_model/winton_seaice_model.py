@@ -37,9 +37,19 @@ one area.
 the atmosphere's downward flux over the sea part (``-forcing.total_heat_flux``)
 minus what the ice absorbed from the atmosphere, plus what the ice passes down
 (transmitted shortwave, melt surplus), minus the basal heat the ice draws. The
-ice and ocean together therefore receive exactly the flux the atmosphere lost, and
-where the atmosphere's flux over the ice part differs from the ice's own (the
-blended temperature, SPEEDY's albedo), the difference goes to the ocean. It does
+ice and ocean together therefore receive the flux the atmosphere lost: the budget
+``ice_energy_tendency - ocean_heat_flux_up + ocean_frazil_heating + total_heat_flux``
+closes to round-off (about 1e-11 W m-2 in float64, for any ``n_flux_iterations``
+and ``n_substeps``, and through a complete melt-out; the tests are
+``test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged`` and
+``test_energy_and_water_budgets_close_when_a_column_melts_out_completely``).
+The flux the ice is charged is the one its implicit solve conducted into the ice,
+the linearised flux thsice reports as ``flxAtm`` (see :func:`winton_temperature_step`),
+not the true bulk flux re-evaluated at the new surface temperature: the two differ
+by the linearisation error, and only the first is what the ice absorbed. The ice
+never sends its own flux to the atmosphere, which evaluates its sea flux itself at
+the blended temperature and with its own albedo; the difference between that flux
+and the ice's goes to the ocean. It does
 not include the latent heat of the frazil ice formed from the ocean's freezing
 potential: the ocean clamps its own temperature at freezing
 (``SlabOceanParameters.clamp_at_freezing``), and the heat that clamp adds is that
@@ -231,8 +241,21 @@ def winton_temperature_step(h, hs, T1, T2, Ts, flux_fn, sw_abs, dt, i0=0.3, ksol
     flux_fn(Ts) -> (F_nonsw, dF/dTs), positive downward. sw_abs is the absorbed
     shortwave at the surface (after albedo). With ``n_iter=1`` and a linear flux this is
     exactly thsice with external fluxes; larger ``n_iter`` re-linearises (Newton).
-    Returns (T1, T2, Ts, M_s, F_cb, sw_ocn): surface melt energy flux M_s (>= 0),
-    conductive flux toward the base F_cb = 4K(T2 - Tf)/h, shortwave passed to the ocean.
+    Returns (T1, T2, Ts, M_s, F_cb, sw_ocn, F_atm): the surface energy left over
+    M_s (the atmosphere's flux plus absorbed shortwave minus what the ice
+    conducts; positive melts, and it is negative only when the linearisation
+    overshot the melting clamp), conductive flux toward the base
+    F_cb = 4K(T2 - Tf)/h, shortwave passed to the ocean, and F_atm, the
+    non-solar flux the atmosphere gives the ice (positive downward).
+
+    F_atm is the flux the solve conducted, as thsice reports it
+    (``flxAtm += flxTexSW + dFlxdT*dTsrf``): the flux and its slope at the surface
+    temperature the last iteration started from, carried to the new surface
+    temperature along that slope. The ice's energy budget is charged this flux,
+    so it is exactly what the ice absorbed whatever ``n_iter`` is, where the flux
+    re-evaluated at the new temperature would differ from it by the
+    linearisation error. A melting surface sits at 0 degC and takes the flux
+    evaluated there.
     """
     snow = hs > 0.0
     sw_pen = jnp.where(snow, 0.0, sw_abs * i0)      # thsice: no penetration through snow
@@ -250,6 +273,7 @@ def winton_temperature_step(h, hs, T1, T2, Ts, flux_fn, sw_abs, dt, i0=0.3, ksol
     Ts_it = Ts
     for _ in range(n_iter):
         F, dF = flux_fn(Ts_it)
+        F_start, dF_start, Ts_start = F, dF, Ts_it
         Fnet = F + sw_sfc
         a1 = a10 - k12 * dF / (k12 - dF)
         b1 = b10 - k12 * (Fnet - dF * Ts_it) / (k12 - dF)
@@ -264,17 +288,22 @@ def winton_temperature_step(h, hs, T1, T2, Ts, flux_fn, sw_abs, dt, i0=0.3, ksol
     T1n = jnp.where(melting, T1_melt, T1_free)
     Tsn = jnp.where(melting, T_SURF_MELT, Ts_free)
     T2n = (2.0 * dt * k32 * (T1n + 2.0 * T_FREEZE) + rhc * T2) / (6.0 * dt * k32 + rhc)
-    F_final, _ = flux_fn(Tsn)
-    M_s = jnp.where(melting, F_final + sw_sfc - k12 * (Tsn - T1n), 0.0)
+    F_melting, _ = flux_fn(Tsn)
+    F_linear = F_start + dF_start * (Tsn - Ts_start)
+    F_atm = jnp.where(melting, F_melting, F_linear)
+    M_s = jnp.where(melting, F_atm + sw_sfc - k12 * (Tsn - T1n), 0.0)
     F_cb = 4.0 * K_ICE * (T2n - T_FREEZE) / h
-    return T1n, T2n, Tsn, M_s, F_cb, sw_ocn
+    return T1n, T2n, Tsn, M_s, F_cb, sw_ocn, F_atm
 
 
 # ---------------------------------------------------------------- mass step (thsice_calc_thickn)
 def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     """Thickness changes for the ice-covered column, in thsice order.
 
-    q1, q2: layer enthalpies (thsice convention). M_s: surface melt energy flux (>= 0).
+    q1, q2: layer enthalpies (thsice convention). M_s: surface energy left over
+    (positive melts the top; a negative value, which the temperature step
+    returns when the melting clamp was overshot, is a deficit the ocean covers,
+    as thsice's ``esurp``).
     F_b: ocean-to-ice basal flux (>= 0 warms/melts the base). F_cb: conductive flux toward
     the base. snowfall: kg/m2/s. Returns (h, hs, q1, q2, energy_to_ocean [J/m2], vanished),
     where energy_to_ocean is the melt surplus (positive) or, if the column vanished, minus
@@ -288,6 +317,7 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     """
     h1 = h2 = 0.5 * h
     etop = jnp.maximum(M_s, 0.0) * dt
+    esurp = jnp.minimum(M_s, 0.0) * dt
     ebot = (F_cb + F_b) * dt          # > 0 melts the base, < 0 freezes
     # --- top melt: snow, layer 1, layer 2
     rq = RHO_SNOW * Q_SNOW
@@ -323,7 +353,7 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     d = jnp.minimum(ebot / rq, hs)
     hs = hs - d
     ebot = ebot - d * rq
-    surplus = etop + ebot
+    surplus = etop + ebot + esurp
     # --- vanishing column: ocean supplies what is left
     h_tot = h1 + h2
     vanished = h_tot < h_min
@@ -359,6 +389,17 @@ def winton_mass_step(h, hs, q1, q2, M_s, F_b, F_cb, snowfall, dt, h_min=0.01):
     upper_thicker = h1 > h2
     q1n = jnp.where(upper_thicker, q1_a, q1_b)
     q2n = jnp.where(upper_thicker, q2_a, q2)
+    # Keeping q2 fixed can leave layer 1 warmer than its melting point (q1 below the enthalpy at T_MELT), which the
+    # ice state, a temperature, cannot hold: clipping T1 there would drop the excess enthalpy from the ice without
+    # the ocean receiving it. The excess warmth melts ice instead, at constant column enthalpy, down to the thickness
+    # whose layers hold it at (q1 at T_MELT, q2). That thickness equals the unmelted one exactly where q1_alt reaches
+    # the bound, so the branch is continuous, and the melt water (at 0 degC) is the mass the water budget sees.
+    # thsice has no such branch: it stops with a "Tice(1) > Tmlt" error in THSICE_SOLVE4TEMP instead.
+    q1_warm_limit = q_from_T1(T_MELT)
+    too_warm = upper_thicker & (q2tmp <= L_ICE) & (q1_alt < q1_warm_limit)
+    column_enthalpy = h1 * q1 + h2 * q2     # rho_i-free enthalpy of the column, conserved by the reshape
+    h_tot = jnp.where(too_warm, 2.0 * column_enthalpy / (q1_warm_limit + q2), h_tot)
+    q1n = jnp.where(too_warm, q1_warm_limit, q1n)
     q1n = jnp.where(vanished, q_from_T1(T_FREEZE), q1n)
     q2n = jnp.where(vanished, q_from_T2(T_FREEZE), q2n)
     return h_tot, hs, q1n, q2n, surplus, vanished
@@ -388,8 +429,8 @@ class WintonForcing:
     supplier's: the ice does not partition precipitation by phase itself.
     ``evaporation`` and ``total_heat_flux`` are the atmosphere's, over the sea
     part of the cell, in JAX-ESM's convention (both positive upward), and
-    ``rlds`` is the incident downward longwave flux. Whether the ice charges the
-    ocean the latent heat of fusion of the snow that lands on it (thsice's
+    ``rlds`` is the incident downward longwave flux. Whether the ice credits the
+    ocean with the latent heat of fusion of the snow that lands on it (thsice's
     convention, for a supplier that condensed it as liquid) is set by the
     model's ``frozen_precipitation_latent_heat_release_mode``.
     """
@@ -496,7 +537,8 @@ class WintonSeaiceModel(SlabModelBase):
     solve, surface and basal melt or growth, snowfall, flooding and layer
     re-equalisation, then the lead closure for the fraction) and, if the model
     was built with transport, one conservative advection-diffusion step of the
-    ice. Water and enthalpy diagnostics are exact for the thermodynamic state,
+    ice. Water and enthalpy diagnostics describe the thermodynamic state, and the
+    energy budget between ice and ocean closes to round-off (module docstring),
     so a coupler can close the ice-ocean-atmosphere budget.
 
     The numerics, provenance and sign conventions are in the module docstring;
@@ -544,10 +586,13 @@ class WintonSeaiceModel(SlabModelBase):
             pass an :class:`IceTransportGrid` for any other grid. The
             diffusivity and substep count are in ``params``.
         frozen_precipitation_latent_heat_release_mode : bool
-            ``True`` (the default) charges the ocean the latent heat of fusion
-            of the snow that lands on the ice, because the atmosphere supplying
+            ``True`` (the default) credits the ocean with ``+f*S*L`` (ice
+            fraction, snowfall rate and latent heat of fusion: heat to the
+            ocean) for the snow that lands on the ice, because the atmosphere supplying
             ``frozen_precipitation`` condensed it as liquid and never released
-            that heat (SPEEDY, and thsice's convention). Pass ``False`` for an
+            that heat (SPEEDY, and thsice's convention); the ice stores the
+            snow at an enthalpy lower by that amount, so the ocean must supply
+            it to keep the budget closed. Pass ``False`` for an
             atmosphere that already released it, which would otherwise be
             counted twice.
         ice_clim_file : str, optional
@@ -713,10 +758,9 @@ class WintonSeaiceModel(SlabModelBase):
 
             albedo = jnp.where(hs > 1e-3, jnp.where(Ts > -0.1, snow_melt_albedo, snow_albedo), ice_albedo)
             sw_abs = fc.rsds * (1.0 - albedo)
-            T1n, T2n, Tsn, M_s, F_cb, sw_ocn = winton_temperature_step(
+            T1n, T2n, Tsn, M_s, F_cb, sw_ocn, F_nonsw = winton_temperature_step(
                 h_safe, hs, T1, T2, Ts, flux_fn, sw_abs, dt, params.i0_fraction, params.ksolar,
                 params.n_flux_iterations)
-            F_nonsw, _ = flux_fn(Tsn)
             F_ice_atm = F_nonsw + sw_abs
             sst_c = fc.sea_surface_temperature - KELVIN
             F_b_raw = jnp.maximum(RHO_SW * C_W * B_MELT * USTAR_SLAB * (sst_c - T_FREEZE), 0.0)
@@ -774,7 +818,7 @@ class WintonSeaiceModel(SlabModelBase):
                              - e_dispose / dt, 0.0)
             new_s = WintonState(hn * ocean, hsn * ocean, fn * ocean, T1n, T2n, Tsn)
             intercepted = jnp.where(icy & ~vanished, f * fc.frozen_precipitation * dt, 0.0)   # snow mass that landed on ice, kg/m2
-            diag = (jnp.where(icy, M_s, 0.0), jnp.where(icy, -(F_b + F_cb), 0.0), jnp.where(icy, F_ice_atm, 0.0), -down,
+            diag = (jnp.where(icy, jnp.maximum(M_s, 0.0), 0.0), jnp.where(icy, -(F_b + F_cb), 0.0), jnp.where(icy, F_ice_atm, 0.0), -down,
                     intercepted, jnp.where(icy, albedo, ice_albedo))
             return new_s, diag
 

@@ -163,6 +163,8 @@ class _VerosLikeDerived:
     sea_surface_u: jnp.ndarray
     sea_surface_v: jnp.ndarray
     sea_fraction: jnp.ndarray
+    ice_frazil_melt_energy: jnp.ndarray
+    clamps_at_freezing: jnp.ndarray
 
 
 @tree_math.struct
@@ -189,15 +191,18 @@ class StubVerosOcean:
 
     name = "ocn"
 
-    def __init__(self, shape):
+    def __init__(self, shape, clamp_at_freezing=False):
         """Remember the horizontal shape the carry is built on."""
         self.shape = shape
+        self.clamp_at_freezing = clamp_at_freezing
 
     def initialize(self):
         zeros = jnp.zeros(self.shape)
         return {
             "state": _VerosLikeState(zeros + 285.0),
-            "derived": _VerosLikeDerived(zeros + 285.0, zeros, zeros, zeros + 1.0),
+            "derived": _VerosLikeDerived(
+                zeros + 285.0, zeros, zeros, zeros + 1.0, zeros,
+                jnp.asarray(float(self.clamp_at_freezing))),
             "forcing": _VerosLikeForcing(zeros, zeros, zeros, zeros, zeros,
                                          jnp.zeros(())),
         }
@@ -218,6 +223,8 @@ class StubVerosOcean:
             "derived": _VerosLikeDerived(
                 temperature, carry["derived"].sea_surface_u,
                 carry["derived"].sea_surface_v, carry["derived"].sea_fraction,
+                carry["derived"].ice_frazil_melt_energy,
+                carry["derived"].clamps_at_freezing,
             ),
             "forcing": forcing,
         }
@@ -892,7 +899,8 @@ def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components, caplo
     )
     with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
         specs = default_exchanges(
-            components, regrid={"a2o": "a2o", "o2a_flux": "o2a_conserve"})
+            components, regrid={"a2o": "a2o", "o2a_flux": "o2a_conserve",
+                   "o2a_state": "o2a_bilinear"})
     by_route = {(spec.src, spec.dst): spec.regrid for spec in specs}
     assert by_route[(
         "ocn.derived.sea_surface_temperature",
@@ -901,7 +909,12 @@ def test_sea_ice_with_a_veros_ocean_is_driven_by_its_sst(veros_components, caplo
     assert by_route[
         ("seaice.derived.ice_fraction", "atm.forcing.sice_am")
     ] == "o2a_conserve"
-    assert caplog.text == ""
+    # The one warning is the Veros table's own, see
+    # `test_the_veros_table_without_a_veros_exchanger_warns`.
+    assert [
+        record.getMessage() for record in caplog.records
+        if "VerosExchange" not in record.getMessage()
+    ] == []
 
 
 def test_the_veros_table_is_the_documented_one():
@@ -914,7 +927,8 @@ def test_the_veros_table_is_the_documented_one():
 
 def test_a_bare_direction_key_covers_both_kinds():
     """``regrid={"o2a": ...}`` regrids every field coming off the ocean grid."""
-    specs = default_exchanges(("atm", "ocn", "seaice"), regrid={"o2a": "o2a"})
+    specs = default_exchanges(
+        ("atm", "ocn", "seaice"), regrid={"a2o": "a2o", "o2a": "o2a"})
     by_route = {(spec.src, spec.dst): spec.regrid for spec in specs}
     assert by_route[
         ("ocn.state.sea_surface_temperature", "atm.forcing.sea_surface_temperature")
@@ -928,16 +942,17 @@ def test_a_bare_direction_key_covers_both_kinds():
     )] is None
     assert by_route[
         ("atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux")
-    ] is None
+    ] == "a2o"
 
 
 def test_default_exchangers_names_its_regridders_after_their_keys():
     """``default_exchangers`` takes the callables and derives the spec names."""
     identity = lambda field: field  # noqa: E731 - a stand-in regridder
-    exchangers = default_exchangers(("atm", "ocn"), regrid={"a2o_flux": identity})
+    exchangers = default_exchangers(
+        ("atm", "ocn"), regrid={"a2o_flux": identity, "o2a_state": identity})
     exchange = exchangers["exchange"]
-    assert exchange.regridders == {"a2o_flux": identity}
-    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", None]
+    assert exchange.regridders == {"a2o_flux": identity, "o2a_state": identity}
+    assert [spec.regrid for spec in exchange.specs] == ["a2o_flux", "o2a_state"]
 
 
 def test_unknown_regrid_key_is_rejected():
@@ -1441,3 +1456,206 @@ def test_exchange_still_rejects_a_shape_mismatch():
 
     with pytest.raises(TypeError, match="shapes do not match"):
         coupler.generate_trajectory_function(2)(coupler.initialize())
+
+
+# ---------------------------------------------------------------------------
+# Shapes are checked against the row, and a mixed-grid table is complete
+# ---------------------------------------------------------------------------
+
+
+class _ShapedRegridder:
+    """A regridder that declares its grids, as the ESMF ones do."""
+
+    def __init__(self, src_shape, dst_shape):
+        self.src_shape = src_shape
+        self.dst_shape = dst_shape
+
+    def __call__(self, field):
+        return jnp.zeros(self.dst_shape, field.dtype)
+
+
+def _heat_flux_row(regrid=None):
+    return ExchangeSpec(
+        "atm.derived.sea_total_heat_flux", "ocn.forcing.total_heat_flux", regrid)
+
+
+def _initial_carries(components):
+    return {name: component.initialize() for name, component in components.items()}
+
+
+def test_validate_refuses_a_source_that_is_not_the_regridders_source_grid(components):
+    """A (4, 3) field fed to a regridder built for (3, 4) is named at validate."""
+    exchange = Exchange(
+        [_heat_flux_row("r")], {"r": _ShapedRegridder((3, 4), (4, 3))})
+    with pytest.raises(
+        ValueError,
+        match=r"atm.derived.sea_total_heat_flux.*src_shape = \(3, 4\).*shape \(4, 3\)",
+    ):
+        exchange.validate(_initial_carries(components))
+
+
+def test_validate_refuses_a_destination_that_is_not_the_regridders_destination(
+    components,
+):
+    """The destination field's shape is checked against ``dst_shape``."""
+    exchange = Exchange(
+        [_heat_flux_row("r")], {"r": _ShapedRegridder((4, 3), (5, 5))})
+    with pytest.raises(ValueError, match=r"ocn.forcing.total_heat_flux has shape"):
+        exchange.validate(_initial_carries(components))
+
+
+def test_validate_accepts_matching_shapes_and_shapeless_regridders(components):
+    """The shape half is skipped for a plain callable, not a crash."""
+    carries = _initial_carries(components)
+    Exchange([_heat_flux_row("r")],
+             {"r": _ShapedRegridder((4, 3), (4, 3))}).validate(carries)
+    Exchange([_heat_flux_row("r")], {"r": lambda field: field}).validate(carries)
+
+
+def test_validate_refuses_a_copy_between_different_shapes():
+    """A row with no regridder between two grids of different shape is named."""
+    components = {
+        "atm": StubAtmosphere((6, 5)),
+        "ocn": SlabOceanModel(make_grid()),
+    }
+    exchange = Exchange([_heat_flux_row()])
+    with pytest.raises(
+        ValueError,
+        match=r"atm.derived.sea_total_heat_flux of shape \(6, 5\).*"
+        r"ocn.forcing.total_heat_flux of shape \(4, 3\).*no regridder",
+    ):
+        exchange.validate(_initial_carries(components))
+
+
+def test_a_mixed_grid_table_with_a_missing_direction_is_refused():
+    """Supplying one regridder makes every grid-crossing row need one."""
+    with pytest.raises(ValueError, match=r"o2a_flux.*o2a_state") as error:
+        default_exchanges(
+            ("atm", "ocn", "seaice"), regrid={"a2o_flux": "a2o_flux"})
+    assert "ocn.state.sea_surface_temperature -> atm.forcing" in str(error.value)
+
+
+def test_a_mixed_grid_table_missing_a_kind_names_that_key():
+    """Only the key that is absent is named."""
+    with pytest.raises(ValueError, match=r"\['o2a_state'\]"):
+        default_exchanges(("atm", "ocn", "seaice"), regrid={
+            "a2o_flux": "a", "o2a_flux": "b"})
+
+
+@pytest.mark.parametrize("regrid", [None, {}])
+def test_no_regridder_at_all_is_a_single_grid_run(regrid):
+    """An empty or missing ``regrid`` stays valid: every row is a copy."""
+    specs = default_exchanges(("atm", "ocn", "seaice"), regrid=regrid)
+    assert all(spec.regrid is None for spec in specs)
+
+
+def test_the_veros_table_without_a_veros_exchanger_warns(veros_components, caplog):
+    """The copy-only Veros table says what the ocean is not getting."""
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        default_exchanges(veros_components)
+    assert "NO wind stress" in caplog.text
+    assert "+coupling.exchanger._target_=jem.fluxes.VerosExchange" in caplog.text
+
+
+def test_a_slab_ocean_does_not_get_the_veros_warning(components, caplog):
+    """Only the Veros table warns."""
+    with caplog.at_level(logging.WARNING, logger="jem.exchangers"):
+        default_exchanges(components)
+    assert "VerosExchange" not in caplog.text
+
+
+def test_the_public_names_are_listed_and_exist():
+    """`__all__` covers what `jem` re-exports and every name it lists exists."""
+    import jem
+
+    assert all(hasattr(exchangers, name) for name in exchangers.__all__)
+    reexported = {
+        name for name in jem.__all__
+        if getattr(getattr(jem, name), "__module__", None) == exchangers.__name__
+    }
+    assert reexported
+    assert reexported <= set(exchangers.__all__)
+
+
+def test_row_weights_are_read_only():
+    """The weights table cannot be changed by a caller."""
+    with pytest.raises(TypeError):
+        exchangers.ROW_WEIGHTS["atm.forcing.x"] = "y"  # type: ignore[index]
+
+
+def test_a_non_mapping_gets_an_error_not_an_assert(monkeypatch):
+    """The Winton check raises a real error for a non-mapping."""
+    monkeypatch.setattr(exchangers, "_is_winton", lambda components: True)
+    with pytest.raises(TypeError, match="mapping"):
+        exchangers.check_winton_coupling(["atm"])
+
+
+# ---------------------------------------------------------------------------
+# A Winton sea ice over a Veros ocean (jax-esm#160)
+# ---------------------------------------------------------------------------
+
+
+class _TiledAtmosphere(StubAtmosphere):
+    """The stub atmosphere, which says its physics publishes sea tiles."""
+
+    publishes_sea_tiles = True
+    publishes_land_evaporation = True
+
+
+def _veros_winton_components(clamp):
+    from jem.components.slab import WintonSeaiceModel
+
+    grid = make_grid()
+    return {
+        "atm": _TiledAtmosphere(grid.shape),
+        "ocn": StubVerosOcean(grid.shape, clamp_at_freezing=clamp),
+        "seaice": WintonSeaiceModel(grid),
+    }
+
+
+def test_a_winton_ice_over_a_clamping_veros_ocean_takes_over_its_heat_and_freshwater(
+    veros_module,
+):
+    """The ice's fluxes replace the atmosphere's two rows; the deficit is read from ``derived``."""
+    del veros_module
+    specs = default_exchanges(_veros_winton_components(clamp=True))
+    rows = {(spec.src, spec.dst) for spec in specs}
+    assert ("atm.derived.sea_total_heat_flux", "ocn.forcing.heat_flux") not in rows
+    assert ("atm.derived.sea_total_freshwater_flux", "ocn.forcing.freshwater_flux") not in rows
+    assert ("seaice.derived.ocean_heat_flux_up", "ocn.forcing.heat_flux") in rows
+    assert ("seaice.derived.ocean_freshwater_flux_up", "ocn.forcing.freshwater_flux") in rows
+    assert ("ocn.derived.ice_frazil_melt_energy",
+            "seaice.forcing.ice_frazil_melt_energy") in rows
+    assert ("ocn.derived.sea_surface_temperature",
+            "seaice.forcing.sea_surface_temperature") in rows
+    assert ("ocn.derived.sea_surface_temperature",
+            "atm.forcing.sea_surface_temperature") in rows
+    assert ("seaice.derived.ice_fraction", "atm.forcing.sice_am") in rows
+    assert ("seaice.derived.ice_surface_temperature_K",
+            "atm.forcing.sea_ice_temperature") in rows
+    # The slab ocean's names are not Veros'.
+    assert not any(spec.dst == "ocn.forcing.total_heat_flux" for spec in specs)
+    # Nothing is written twice. (That every row names a field the carries have
+    # is checked against real ones: `tests/unit/test_fluxes.py` and
+    # `tests/unit/test_veros_seaice.py`; this stub atmosphere has no Winton fields.)
+    assert len({spec.dst for spec in specs}) == len(specs)
+
+
+def test_a_winton_ice_over_a_veros_ocean_that_does_not_clamp_is_refused(veros_module):
+    del veros_module
+    with pytest.raises(ValueError, match=r"VerosComponent\(model, clamp_at_freezing=True\)"):
+        default_exchanges(_veros_winton_components(clamp=False))
+
+
+def test_a_clamping_veros_ocean_with_no_ice_to_take_the_deficit_is_refused(veros_module):
+    """Without a Winton ice the clamp would create the heat it removes the deficit with."""
+    del veros_module
+    shape = (4, 3)
+    components = {"atm": StubAtmosphere(shape), "ocn": StubVerosOcean(shape, clamp_at_freezing=True)}
+    with pytest.raises(ValueError, match="no exchange takes the deficit"):
+        default_exchanges(components)
+    components["seaice"] = SlabSeaiceModel(make_grid(), name="seaice")
+    with pytest.raises(ValueError, match="no exchange takes the deficit"):
+        default_exchanges(components)
+    components["ocn"] = StubVerosOcean(shape, clamp_at_freezing=False)
+    default_exchanges(components)

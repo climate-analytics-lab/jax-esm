@@ -1,7 +1,7 @@
 """Structural equivalence between the directly-built notebooks and the CLI.
 
 ``01_aquaplanet.ipynb`` and ``04_jcm_slabs_mixed_grid_aqua_planet.ipynb`` both
-claim, in their own markdown, to build "the same model"
+say, in their own markdown, that they build the same coupled structure
 ``+configuration=aquaplanet-slab`` / ``...-mixed-grid`` composes. This module
 executes each notebook's OWN construction cell (not a copy of it, so it
 cannot silently drift from what the notebook actually runs) and compares the
@@ -9,15 +9,16 @@ resulting :class:`~jem.base.coupler.Coupler` against
 :func:`jem.runners.build_coupler` on the equivalent composed config:
 component names and types, workflow, coupling timestep, start date, the
 coupled carry's pytree structure, and -- the specific field this test exists
-to guard -- the atmosphere's own physics timestep (``model.dt_si``). Building
-a plain ``jcm.model.Model`` with no
-explicit ``time_step`` silently adopts the physics' *stable* step (30 minutes
-for SPEEDY T31L8) rather than the 12 minutes
-``+configuration=aquaplanet-slab`` actually runs at
-(``atmosphere.run.time_step``, from jax-gcm's ``run/default.yaml``, which the
-recipe never overrides) -- exactly the kind of divergence the other
-structural checks (component types, carry shape) cannot see, since a wrong
-timestep changes nothing about a carry's *shape*.
+to guard -- the atmosphere's own physics timestep (``model.dt_si``). A
+plain ``jcm.model.Model`` with no explicit ``time_step`` takes the physics'
+stable step (30 minutes for SPEEDY T31L8), and the configurations run the
+``speedy-t31`` bundle's own 30 minutes; a wrong timestep changes nothing
+about a carry's *shape*, so the other structural checks cannot see it.
+
+What is deliberately NOT compared is the SPEEDY parameters: the notebooks run
+the Python defaults (SPEEDY's reference values) and the configurations run
+jax-gcm's coupled-calibrated set, which is why the notebooks claim the same
+structure and not the same climate.
 
 Slow: each test builds two full JCM atmospheres (the notebook's own and the
 CLI's reference).

@@ -28,7 +28,7 @@ class IceTransportGrid:
 
     Transport is a flux-form finite-volume step, so it needs the size of every
     cell and the length of its faces. Those are properties of the grid, not
-    tunables, so they live on the model beside the :class:`SlabGrid` rather than
+    tunables, so they live on the model beside the :class:`~jem.components.slab.grid.SlabGrid` rather than
     in the differentiable parameters; the diffusivity and the substep count,
     which are tunables, are in
     :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceParameters`.
@@ -66,7 +66,7 @@ class IceTransportGrid:
 
         Parameters
         ----------
-        grid : SlabGrid
+        grid : jem.components.slab.grid.SlabGrid
             A separable lon/lat grid.
         cyclic_x : bool
             Whether longitude wraps around.

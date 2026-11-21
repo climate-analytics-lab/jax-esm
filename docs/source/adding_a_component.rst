@@ -76,8 +76,9 @@ simply skipped there, never broken:
      - ``bind(*, coupling_timestep, start_date)``
      - Called once, when the component is registered. The place to check the
        coupler's clock against the model's own and **refuse**, with
-       ``ValueError``, a configuration that cannot work (a coupling timestep
-       that does not divide the model's own).
+       ``ValueError``, a configuration that cannot work (a model timestep
+       that does not divide the coupling timestep, so the component could not
+       take a whole number of its own steps per coupled step).
    * - :class:`~jem.base.component.SupportsClockReset`
      - ``restart_clock(carry)``
      - Implement it if the **carry holds a clock of its own** (a wrapped
@@ -122,6 +123,8 @@ objects. So the carry structure the adapter adopts is
     {
         "state":   jcm_native_modal_state,
         "physics": jcm_cross_step_physics_carry,  # threaded back in every step
+        "time":    jcm_own_clock,                 # carries a clock of its own,
+        "step":    jcm_own_step_counter,          # hence SupportsClockReset
         "forcing": jcm_native_forcing_data,       # holds sea_surface_temperature
         "derived": JCMDerived(
             physics,                # JCM's own per-step diagnostics, opaque
@@ -137,7 +140,12 @@ objects. So the carry structure the adapter adopts is
             sea_eastward_wind_stress, sea_northward_wind_stress,
             sea_fraction,           # the sea part of the cell they are over
             land_evaporation,       # the land tile's evaporation, for a land
-        ),
+            downward_shortwave_flux, downward_longwave_flux,  # surface radiation,
+            wind_speed, normalized_surface_pressure,          # air over the sea part
+            sea_air_temperature, sea_air_specific_humidity,   # and precipitation by
+            rainfall, snowfall,                               # phase: what a sea ice
+        ),                                                    # with its own energy
+                                                              # budget reads
     }
 
 For the slab ocean model, the carry is
@@ -152,8 +160,11 @@ For the slab ocean model, the carry is
         "derived": OceanDerived(...),
     }
 
-Neither carries a simulation time: the coupler owns the one clock and hands it
-to :code:`step`.
+The slab ocean carries no simulation time: the coupler owns the one clock and
+hands it to :code:`step`. The JCM component's ``"time"`` and ``"step"`` are the
+wrapped model's own bookkeeping, which it needs to hand back to
+``run_from_state_with_carry``; the coupler's clock stays the authority, and the
+component reports it if the two drift apart (see :doc:`design/jcm_adapter`).
 
 The carried parameters are differentiable, but only the ones :code:`step`
 actually reads from the carry can be varied *there*: replacing
@@ -196,9 +207,7 @@ Four things to note:
 
 - :code:`initialize` does not integrate: it builds the initial pytrees from
   :code:`Model.bootstrap_state()` plus a structural template of the
-  diagnostics dict. An earlier adapter ran a whole throwaway coupling step
-  just to learn that structure, which cost a step per run *and* started the
-  atmosphere one interval ahead of the coupler's clock.
+  diagnostics dict, so the atmosphere starts exactly on the coupler's clock.
 - The **physics carry is threaded**: JCM keeps cross-step physics state
   (sub-cycled radiation, prior-step TKE, term-to-term tendencies) in a carry
   that :code:`run_from_state_with_carry` takes in and hands back. It lives
@@ -213,8 +222,8 @@ Four things to note:
   package-independent :code:`SurfaceExchange` contract (jax-gcm#754) with
   :code:`net_heat_flux` positive *down* and the water fluxes already in
   :code:`kg m-2 s-1`, and JEM's convention is heat flux positive *up*, so the
-  sign is flipped exactly once, at the component boundary -- no unit
-  conversion is needed any more. The surface wind stress crosses unchanged:
+  sign is flipped exactly once, at the component boundary, with no unit
+  conversion. The surface wind stress crosses unchanged:
   JCM's "positive down" stress is the stress *on* the surface, which is
   already JEM's convention. That single translation is what keeps every
   exchanger downstream sign- and unit-consistent, for either physics package:
@@ -239,10 +248,15 @@ into the carries it was handed, and must not change their pytree structure:
             sea_surface_temperature=ocn["state"].sea_surface_temperature,
         ))
         ocn = dict(ocn, forcing=ocn["forcing"].replace(
-            total_heat_flux=atm["derived"].total_heat_flux,
+            total_heat_flux=atm["derived"].sea_total_heat_flux,
         ))
 
         return dict(components, atm=atm, ocn=ocn)
+
+The ocean takes ``sea_total_heat_flux``, the flux over the sea part of each
+cell, and not ``total_heat_flux``, the grid-cell mean over land and sea: on a
+coastal cell the mean charges the ocean with the land's flux
+(:doc:`design/exchange` explains the choice).
 
 The clock is passed in so a time-dependent coupling (a ramped forcing, a
 lagged exchange) needs no state of its own.

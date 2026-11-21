@@ -1,6 +1,6 @@
 # Output conventions
 
-`Coupler.to_xarray(diagnostics, *, first_step=0)` returns one
+`Coupler.to_xarray(diagnostics, time=None, *, first_step=0)` returns one
 `xarray.Dataset` per component that implements `SupportsXarray`; components
 that do not are skipped, so an output-less component does not stop a run
 producing output. A component that returns a *mapping* of datasets (a nested
@@ -9,7 +9,9 @@ names, and a name that collides with one already written is a `ValueError`.
 `first_step` is the coupled step the first record covers — the `step` of the
 carry the trajectory started from — and defaults to 0. **Pass it when
 writing a chunked run**, or the second chunk is labelled with the first
-chunk's dates.
+chunk's dates. The positional `time` is the *component* form of the call: a
+`TimeAxis` an outer coupler hands a nested `Coupler` (see {doc}`nesting`); a
+run leaves it `None` and the coupler builds the axis from `first_step`.
 
 Each component is handed a `TimeAxis` (start date, the record's step indices
 and the record interval) so every dataset from one run shares one time
@@ -33,14 +35,74 @@ design.
 
 The conventions, which are JCM's:
 
-- **Dimensions** are `("time", "lon", "lat")` for a separable lon/lat grid,
-  and `("time", "x", "y")` with 2-D auxiliary `lat`/`lon` coordinates (and a
-  CF `coordinates` attribute on each variable) for a curvilinear one — CF and
-  xarray forbid a 2-D variable named after one of its own dimensions.
+- **Dimensions and horizontal coordinates.** A separable lon/lat grid
+  (every grid whose axes are meridians and parallels, the atmosphere's among
+  them) is written on `("time", "lon", "lat")` with 1-D `lon`/`lat`
+  coordinates. A curvilinear grid (the displaced-pole ocean, the rotated pole
+  of `veros-earth`) is written on `("time", "x", "y")` — index dimensions, no
+  coordinate values — with 2-D auxiliary coordinates named **`longitude`** and
+  **`latitude`** (`standard_name` `longitude`/`latitude`, degrees, no `axis`
+  attribute), and every variable spanning `x` and `y` carries the CF
+  `coordinates = "longitude latitude"` attribute that points at them.
+  `jem.components.coordinates` defines both layouts once, for the slab models
+  and the Veros component alike.
+
+  The 2-D coordinates are not called `lon`/`lat` for two reasons. CF and
+  xarray forbid a 2-D variable named after one of its own dimensions, which
+  is why the dimensions are `x`/`y`; and, more to the point, a dataset holds
+  one variable per name, so in
+  `xr.merge([atm, ocn], join="exact")` the ocean's 2-D `lon`/`lat` would meet
+  the atmosphere's 1-D `lon`/`lat` dimension coordinates and **lose**. The
+  merge does not fail: it keeps the atmosphere's axes and silently drops the
+  ocean's positions, leaving `sea_surface_temperature` with no horizontal
+  coordinate at all. No `compat` option helps (`equals`, `no_conflicts` and
+  `override` all drop them), because the clash is between a dimension
+  coordinate and a non-index coordinate of one name, not between values. CF
+  does not care what an auxiliary coordinate is called — `standard_name`,
+  `units` and the `coordinates` attribute identify it — so a name that cannot
+  collide costs nothing, and the merge of an atmosphere, a curvilinear ocean
+  and sea ice keeps `longitude`/`latitude` on every ocean and ice variable.
+  `jem.plot.map_plot` and `area_mean` read `longitude`/`latitude` when a
+  field has them and `lon`/`lat` otherwise.
+
+  Two components on the *same* curvilinear grid (the slab ocean and the slab
+  sea ice on the displaced-pole grid) share `x`/`y` and equal 2-D
+  coordinates and merge exactly. **The limit:** `x`/`y` carry a size, not
+  positions, so two components on curvilinear grids of *different shapes*
+  cannot be merged — xarray raises an `AlignmentError` ("conflicting dimension
+  sizes") rather than producing a union, and `join="outer"` would pad one
+  grid against the other with no meaning. Nothing ships such a configuration;
+  one that needs it has to give the second component its own dimension names
+  or write its dataset separately.
+
+  The Veros ocean declares what its output is labelled with, as one of:
+  nothing (Veros' own T-grid axes `xt`/`yt` on `lon`/`lat`); the 1-D
+  `geographic_longitude_axis`/`geographic_latitude_axis` (still `lon`/`lat`,
+  but with exactly those values; they must be Veros' own axes to within 1e-6
+  degrees, about 0.1 m, because a label must not move a cell); or the 2-D
+  `geographic_longitude`/`geographic_latitude` of a grid whose lines are not
+  meridians and parallels (written as above, with Veros' own axes kept as
+  `native_lon`/`native_lat`: they are up to the pole's displacement — 12
+  degrees on `veros-earth` — from where a cell is, so they are never written
+  as positions). The 1-D form exists because Veros rebuilds `xt`/`yt` by
+  cumulative sums, which cannot be made bit-identical to the atmosphere's
+  `radians * 180 / pi`; `veros-double-drake` declares the atmosphere's own
+  axes (rebuilt from its Gaussian grid, and checked against its SCRIP file),
+  so its `atm` and `ocn` files merge with `join="exact"` and share `lon`/`lat`
+  exactly.
 - **Coordinate values** are degrees computed as `radians * 180 / pi`, in
   float64, which is character for character what `jcm.utils.data_to_xarray`
   does. A last-bit difference would be enough for `xr.merge` to treat two
   96-point longitude axes as different axes and produce a 119-point union.
+- **The atmosphere's `level` coordinate** is the nominal sigma value
+  (`a / p0 + b`) at each layer's mid-level, **ordered surface-first**: index 0
+  is the lowest layer, `level[0] = 0.95` and `level[-1] = 0.025` for the
+  8-layer SPEEDY grid. Its attributes say so: `units = "1"`,
+  `positive = "down"`, `axis = "Z"`, and a `long_name` ("nominal sigma ... at
+  layer mid-level, surface-first (index 0 is the surface)"). Pick the lowest
+  model level with `sel(level=1.0, method="nearest")`, not `isel(level=-1)`,
+  which is the top. Only the atmosphere has a `level`; the slab components
+  and Veros (`depth`) have none.
 - **The time label is the MIDPOINT of the interval a record covers**, as an
   absolute `datetime64[ms]`: record *k* holds the average over `[start_date
   + k dt, start_date + (k+1) dt)` and is stamped at that interval's

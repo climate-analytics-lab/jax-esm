@@ -56,6 +56,7 @@ from jem.components.slab.winton_seaice_model.winton_seaice_model import (
     T_MELT,
     column_enthalpy_to_melt,
     ice_surface_flux,
+    qsat_ice,
     q_from_T1,
     q_from_T2,
     winton_mass_step,
@@ -164,13 +165,13 @@ def pinned_flux(T_target, gain=1e4):
 
 def column_step(h, hs, T1, T2, Ts, flux, sw, F_b, snowfall, dt, n_iter=1):
     """One thermodynamic step of a single column: temperature solve, then mass step."""
-    T1, T2, Ts, M_s, F_cb, sw_ocn = winton_temperature_step(
+    T1, T2, Ts, M_s, F_cb, sw_ocn, F_atm = winton_temperature_step(
         h, hs, T1, T2, Ts, flux, sw, dt, n_iter=n_iter
     )
     h, hs, q1, q2, e_ocn, vanished = winton_mass_step(
         h, hs, q_from_T1(T1), q_from_T2(T2), M_s, F_b, F_cb, snowfall, dt
     )
-    return h, hs, T1_from_q(q1), T2_from_q(q2), Ts, sw_ocn, e_ocn, vanished
+    return h, hs, T1_from_q(q1), T2_from_q(q2), Ts, sw_ocn, e_ocn, vanished, F_atm
 
 
 def test_temperature_step_matches_thsice_transcription(x64):
@@ -206,10 +207,9 @@ def integrate_column(n_steps, dt, h, hs, T1, T2, Ts, flux_of_step, sw_of_step, F
     def body(carry, k):
         h, hs, T1, T2, Ts = carry
         flux, sw, F_b = flux_of_step(k), sw_of_step(k), F_b_of_step(k)
-        h, hs, T1, T2, Ts, sw_ocn, e_ocn, vanished = column_step(
+        h, hs, T1, T2, Ts, sw_ocn, e_ocn, vanished, F_atm = column_step(
             h, hs, T1, T2, Ts, flux, sw, F_b, zero, dt, n_iter=n_iter
         )
-        F_atm, _ = flux(Ts)
         return (h, hs, T1, T2, Ts), (sw_ocn, e_ocn, vanished, F_atm)
 
     return jax.lax.scan(body, (h, hs, T1, T2, Ts), jnp.arange(n_steps))
@@ -294,7 +294,7 @@ def test_complete_melt_returns_excess(x64):
     # An eager loop that stops at melt-out: a vanished column has no thickness
     # left to integrate, so it cannot be scanned past that point.
     for _ in range(40):
-        h, hs, T1, T2, Ts, _, e_ocn, vanished = column_step(
+        h, hs, T1, T2, Ts, _, e_ocn, vanished, _ = column_step(
             h, hs, T1, T2, Ts, pinned_flux(10.0, gain=100.0), jnp.array(300.0),
             jnp.array(50.0), jnp.array(0.0), dt,
         )
@@ -304,6 +304,25 @@ def test_complete_melt_returns_excess(x64):
     assert np.isfinite(total_e_ocn)
     assert float(h) == 0.0
     assert total_e_ocn > 0.0
+
+
+def test_reshape_after_a_basal_melt_never_leaves_the_upper_layer_above_its_melting_point(x64):
+    """Basal melt takes layer 2 first, so the upper layer is the thicker; equalising the layers while keeping q2
+    would then put layer 1 warmer than its melting point. The excess warmth melts ice at constant column enthalpy.
+    """
+    dt, h, q1, q2 = 21600.0, 0.14, q_from_T1(-0.088), q_from_T2(-1.26)
+    melt_layer_2 = 0.05                                       # m of layer 2 the basal flux melts
+    F_b = RHO_ICE * q2 * melt_layer_2 / dt
+    hn, hsn, q1n, q2n, e_ocn, vanished = winton_mass_step(
+        jnp.array(h), jnp.array(0.0), q1, q2, jnp.array(0.0), jnp.array(F_b), jnp.array(0.0), jnp.array(0.0), dt)
+    assert not bool(vanished)
+    q1_limit = q_from_T1(T_MELT)
+    assert float(q1n) >= float(q1_limit) - 1e-6, "layer 1 must hold an enthalpy a temperature at or below T_MELT can represent"
+    assert float(hn) < h, "the excess warmth melts some ice"
+    before = 0.5 * h * q1 + (0.5 * h - melt_layer_2) * q2     # enthalpy-thickness of the column once the base has melted
+    after = 0.5 * hn * (q1n + q2n)
+    np.testing.assert_allclose(float(after), float(before), rtol=1e-12)
+    np.testing.assert_allclose(float(e_ocn), 0.0, atol=1e-6)
 
 
 def test_enthalpy_inversion_roundtrip(x64):
@@ -860,6 +879,187 @@ def test_energy_budget_closes_in_every_regime(x64):
     assert float(jnp.max(stepped["state"].ice_fraction * stepped["state"].ice_thickness)) > 0.0
 
 
+def _nonlinear_forcing(grid, step, seed=3):
+    """Return a varying forcing, in space and time, whose surface flux is strongly nonlinear in Ts.
+
+    The air warms from deep winter to above freezing over the steps, with random
+    wind, humidity, shortwave and sea-surface temperature per cell, so the
+    implicit solve is far from linear and far from converged after one
+    iteration, and cells cross the melting clamp in both directions.
+    """
+    rng = np.random.default_rng(seed)
+    shape = grid.shape
+    air = 238.0 + 7.0 * step + rng.uniform(-6.0, 6.0, shape)
+    humidity = 0.7 * np.asarray(qsat_ice(air, jcm_constants.p0 * 1.0)[0]) * rng.uniform(0.5, 1.0, shape)
+    return make_forcing(
+        grid,
+        rsds=rng.uniform(0.0, 380.0, shape) * min(1.0, 0.2 * step),
+        rlds=rng.uniform(150.0, 330.0, shape),
+        air_temperature=air,
+        air_specific_humidity=humidity,
+        wind_speed=rng.uniform(1.0, 14.0, shape),
+        normalized_surface_pressure=rng.uniform(0.97, 1.02, shape),
+        frozen_precipitation=rng.uniform(0.0, 3e-5, shape),
+        sea_surface_temperature=KELVIN + rng.uniform(-1.8, 2.0, shape),
+        ice_frazil_melt_energy=rng.choice([-2e6, -2e5, 0.0, 2e5, 2e6], shape),
+        total_heat_flux=rng.uniform(-150.0, 150.0, shape),
+    )
+
+
+@pytest.mark.parametrize("n_flux_iterations, n_substeps", [(1, 1), (1, 4), (3, 4)])
+def test_energy_budget_closes_to_roundoff_when_the_surface_solve_has_not_converged(
+    x64, n_flux_iterations, n_substeps
+):
+    """The ice is charged the flux its solve conducted, whatever the iteration count.
+
+    The linearised flux the implicit solve conducts into the ice and the true
+    flux re-evaluated at the new surface temperature differ by the
+    linearisation error, which is tens of W m-2 after one iteration of one
+    substep. If the ocean is charged the latter the ice+ocean budget leaks by
+    exactly that difference, so the residual below measures it: it is far above
+    1e-6 W m-2 then, and round-off (about 1e-9) when both use the same flux.
+    """
+    grid = global_grid(coasts=True)
+    model = WintonSeaiceModel(grid, WintonSeaiceParameters(
+        n_substeps=n_substeps, n_flux_iterations=n_flux_iterations))
+    ocean = np.asarray(grid.ocean_mask)
+    state = random_ice_state(grid, seed=1)[0]
+    step_fn = jax.jit(model.step)
+    carry = with_state_and_forcing(model, state)
+    worst = 0.0
+    melted = grown = 0
+    for step in range(8):
+        forcing = _nonlinear_forcing(grid, step)
+        carry = {**carry, "forcing": forcing}
+        new_carry, _ = step_fn(carry, coupling_time(step))
+        derived = new_carry["derived"]
+        residual = np.asarray(
+            derived.ice_energy_tendency - derived.ocean_heat_flux_up
+            + derived.ocean_frazil_heating + forcing.total_heat_flux
+        )[ocean]
+        assert np.all(np.isfinite(residual))
+        worst = max(worst, float(np.abs(residual).max()))
+        melted += int(np.sum(np.asarray(derived.surface_melt_flux)[ocean] > 0.0))
+        grown += int(np.sum(np.asarray(derived.basal_growth_flux)[ocean] > 0.0))
+        carry = new_carry
+    assert melted > 0 and grown > 0, "the forcing must exercise both melting and growth"
+    assert worst < 1e-6, f"energy residual {worst:.3e} W/m2 (n_flux_iterations={n_flux_iterations}, n_substeps={n_substeps})"
+
+
+def _melt_out_cases(grid):
+    """Return ``{name: (state, forcing overrides)}`` for columns that melt out completely in one coupling step.
+
+    "From above" is a strong surface heating with no ocean melt potential; "from below" is a large ocean melt
+    potential under a nearly isothermal ice at its melting point, the second of them the state and forcing of a
+    cell of a coupled run (a 0.33 m cover of 0.38 of the cell under a 287 K ocean) that lost 8 W m-2 of budget.
+    """
+    ocean = grid.ocean_mask
+    zeros = jnp.zeros(grid.shape)
+
+    def state(h, hs, f, T1, T2, Ts):
+        return WintonState(jnp.where(ocean, h, 0.0), jnp.where(ocean, hs, 0.0), jnp.where(ocean, f, 0.0),
+                           zeros + T1, zeros + T2, zeros + Ts)
+
+    from_above = dict(rsds=800.0, rlds=400.0, air_temperature=295.0, wind_speed=6.0)
+    from_below = dict(rsds=378.0, rlds=203.0, air_temperature=277.5, air_specific_humidity=1.1e-3, wind_speed=5.0,
+                      normalized_surface_pressure=1.09, total_heat_flux=-1.9, evaporation=2.5e-5,
+                      sea_surface_temperature=287.26, ice_frazil_melt_energy=-3.25e9)
+    coupled = (0.33, 0.0, 0.38, -0.1535, -1.2924, 0.0)      # (h, hs, f, T1, T2, Ts) of the reproduced cell
+    return {
+        "from above, bare ice": (state(0.04, 0.0, 0.6, -0.5, -1.0, -0.5), from_above),
+        "from above, snow-covered": (state(0.04, 0.01, 0.6, -0.5, -1.0, -0.5), from_above),
+        "from above, full cover": (state(0.04, 0.0, 1.0, -0.5, -1.0, -0.5), from_above),
+        "from below, the coupled cell": (state(*coupled), from_below),
+        "from below, the coupled cell with snow": (state(0.33, 0.04, 0.38, -0.1535, -1.2924, 0.0), from_below),
+        "from below, full cover": (state(0.33, 0.0, 1.0, -0.1535, -1.2924, 0.0), from_below),
+        "from below, thin warm ice": (state(0.05, 0.0, 0.7, -0.1, -0.5, -0.1), from_below),
+    }
+
+
+@pytest.mark.parametrize("n_flux_iterations, n_substeps", [(1, 1), (1, 4), (3, 4)])
+def test_energy_and_water_budgets_close_when_a_column_melts_out_completely(x64, n_flux_iterations, n_substeps):
+    """The identity holds through a complete melt-out, from above and from below, bare and snow-covered.
+
+    Over several substeps a column that melts from below loses its thickness unevenly between the layers; the
+    reshape that re-equalises them must not leave the upper layer warmer than its melting point, or the state
+    (a temperature) cannot hold the enthalpy and the clip drops it from the budget. The water budget is
+    ``ocean_freshwater_flux_up = E - P + d(ice and snow mass)/dt``, which a melt-out returns whole to the ocean.
+    """
+    grid = make_grid(fractional_mask=np.array([[1, 0, 0]] * 4, dtype=float))
+    model = WintonSeaiceModel(grid, WintonSeaiceParameters(
+        n_substeps=n_substeps, n_flux_iterations=n_flux_iterations))
+    ocean = np.asarray(grid.ocean_mask)
+    step_fn = jax.jit(model.step)
+
+    def mass(st):
+        return np.asarray(st.ice_fraction * (RHO_ICE * st.ice_thickness + RHO_SNOW * st.snow_thickness))
+
+    for name, (state, overrides) in _melt_out_cases(grid).items():
+        forcing = make_forcing(grid, **overrides)
+        stepped, _ = step_fn(with_state_and_forcing(model, state, forcing), coupling_time(0))
+        derived, new = stepped["derived"], stepped["state"]
+        assert float(jnp.max(new.ice_fraction * new.ice_thickness)) == 0.0, f"{name}: the column should melt out"
+        energy = np.asarray(
+            derived.ice_energy_tendency - derived.ocean_heat_flux_up
+            + derived.ocean_frazil_heating + forcing.total_heat_flux
+        )[ocean]
+        assert np.abs(energy).max() < 1e-6, (
+            f"{name}: energy residual {np.abs(energy).max():.3e} W/m2 (n_flux_iterations={n_flux_iterations}, n_substeps={n_substeps})")
+        water = np.asarray(
+            derived.ocean_freshwater_flux_up
+            - (forcing.evaporation - forcing.liquid_precipitation - forcing.frozen_precipitation)
+            - (mass(new) - mass(state)) / DAY
+        )[ocean]
+        assert np.abs(water).max() < 1e-12, f"{name}: water residual {np.abs(water).max():.3e} kg m-2 s-1"
+        # the melt water is returned to the ocean whole
+        returned = np.asarray(derived.ocean_freshwater_flux_up - (forcing.evaporation - forcing.liquid_precipitation
+                                                                  - forcing.frozen_precipitation))[ocean]
+        np.testing.assert_allclose(returned, -mass(state)[ocean] / DAY, rtol=1e-10)
+
+
+def test_the_budget_closes_over_consecutive_substeps_of_a_column_melting_from_below(x64):
+    """Three quarter-day steps of the reproduced cell, each with one substep: the melt is partial in the first two."""
+    grid = make_grid(fractional_mask=np.array([[1, 0, 0]] * 4, dtype=float))
+    model = WintonSeaiceModel(grid, WintonSeaiceParameters(n_substeps=1))
+    state = _melt_out_cases(grid)["from below, the coupled cell"][0]
+    carry = with_state_and_forcing(model, state, make_forcing(grid, **_melt_out_cases(grid)["from below, the coupled cell"][1]))
+    quarter_day = dataclasses.replace(coupling_time(0), dt=DAY / 4)
+    for step in range(3):
+        carry, _ = model.step(carry, quarter_day)
+        derived = carry["derived"]
+        residual = np.asarray(
+            derived.ice_energy_tendency - derived.ocean_heat_flux_up
+            + derived.ocean_frazil_heating + carry["forcing"].total_heat_flux
+        )[np.asarray(grid.ocean_mask)]
+        assert np.abs(residual).max() < 1e-6, f"step {step}: {np.abs(residual).max():.3e} W/m2"
+
+
+@pytest.mark.parametrize("dtype_x64", [False, True])
+def test_a_gradient_through_a_step_in_which_a_column_melts_out_is_finite(dtype_x64):
+    """``jax.grad`` of a step that melts the column out from below, with respect to the state and the forcing.
+
+    The melt-out branch is where a ``where`` can hide a NaN, in float32 above all, so it is checked in both.
+    """
+    with jax.enable_x64(dtype_x64):
+        grid = make_grid(fractional_mask=np.array([[1, 0, 0]] * 4, dtype=float))
+        model = WintonSeaiceModel(grid)
+        state, overrides = _melt_out_cases(grid)["from below, the coupled cell"]
+        carry = with_state_and_forcing(model, state, make_forcing(grid, **overrides))
+
+        def loss(thickness, rsds, sst):
+            st = carry["state"].replace(ice_thickness=jnp.where(carry["state"].ice_fraction > 0, thickness, 0.0))
+            fc = carry["forcing"].replace(rsds=carry["forcing"].rsds * 0 + rsds,
+                                          sea_surface_temperature=carry["forcing"].sea_surface_temperature * 0 + sst)
+            new, _ = model.step(dict(carry, state=st, forcing=fc), coupling_time(0))
+            d = new["derived"]
+            return jnp.sum(d.ocean_heat_flux_up) + jnp.sum(d.ocean_freshwater_flux_up) + jnp.sum(new["state"].ice_thickness)
+
+        args = (jnp.asarray(0.33), jnp.asarray(378.0), jnp.asarray(287.26))
+        assert float(jnp.max(model.step(carry, coupling_time(0))[0]["state"].ice_fraction)) == 0.0, "the column should melt out"
+        grads = jax.grad(loss, argnums=(0, 1, 2))(*args)
+        assert all(bool(jnp.isfinite(g)) for g in grads), grads
+
+
 def test_ice_growth_removes_water_from_the_ocean_and_melt_returns_it(grid):
     model = WintonSeaiceModel(grid)
     cold = with_state_and_forcing(model, ice_state(grid, 1.0), make_forcing(grid))
@@ -1275,9 +1475,11 @@ def test_a_regridded_ice_temperature_takes_the_fractions_operator():
     """
     from jem.exchangers import regrid_weighted
 
+    # Every direction the Winton rows cross in: its air temperature, humidity,
+    # wind and pressure are atmosphere states onto the ocean grid.
     specs = default_exchanges(_winton_components(), regrid={
-        "a2o_flux": "a2o_conserve", "o2a_flux": "o2a_conserve",
-        "o2a_state": "o2a_bilinear"})
+        "a2o_flux": "a2o_conserve", "a2o_state": "a2o_bilinear",
+        "o2a_flux": "o2a_conserve", "o2a_state": "o2a_bilinear"})
     regrid = {spec.dst: spec.regrid for spec in specs}
     assert regrid["atm.forcing.sea_ice_temperature"] == regrid["atm.forcing.sice_am"]
     assert regrid["atm.forcing.sice_am"] == "o2a_conserve"
@@ -1316,22 +1518,55 @@ def test_a_winton_ice_under_an_atmosphere_with_no_sea_tile_is_refused():
         default_exchanges(_winton_components(atmosphere=_Untiled()))
 
 
-def test_a_winton_ice_over_the_veros_ocean_is_refused(monkeypatch):
-    """Veros neither clamps nor publishes the deficit the ice freezes."""
+def test_the_veros_exchange_refuses_what_the_table_refuses():
+    """A hand-written exchange applies the table's rule to the same components.
+
+    `VerosExchange` is a function, so `default_exchanges` never sees its
+    components; the runner hands them to `check_components` instead, and a
+    Winton ice under an atmosphere with no sea flux tile is refused there as
+    it is by the table, while the tiled pairing is accepted.
+    """
+    from jem.fluxes import VerosExchange
+
+    class _Untiled(_TiledAtmosphere):
+        publishes_sea_tiles = False
+
+    exchange = VerosExchange()
+    exchange.check_components(_winton_components())
+    with pytest.raises(ValueError, match="no sea"):
+        exchange.check_components(_winton_components(atmosphere=_Untiled()))
+    with pytest.raises(ValueError, match="clamp_at_freezing"):
+        exchange.check_components(_winton_components(clamp_at_freezing=False))
+
+    class _NoLandTile(_TiledAtmosphere):
+        publishes_land_evaporation = False
+
+    with_land = dict(_winton_components(atmosphere=_NoLandTile()), lnd=object())
+    with pytest.raises(ValueError, match="no land flux tile"):
+        exchange.check_components(with_land)
+    exchange.check_components(dict(_winton_components(), lnd=object()))
+
+
+def test_a_winton_ice_over_a_veros_ocean_that_does_not_clamp_is_refused(monkeypatch):
+    """Veros keeps its deficit unless it is built to clamp; the ice would freeze it twice.
+
+    The refusal names the Veros fix, not the slab ocean's
+    (``tests/unit/test_exchangers.py`` has the clamping case, which is accepted).
+    """
     import sys
     import types
 
     from jem import exchangers
 
     class _StubVeros:
-        pass
+        clamp_at_freezing = False
 
     module = types.ModuleType(exchangers.VEROS_COMPONENT_MODULE)
     module.VerosComponent = _StubVeros
     monkeypatch.setitem(sys.modules, exchangers.VEROS_COMPONENT_MODULE, module)
     components = _winton_components()
     components["ocn"] = _StubVeros()
-    with pytest.raises(ValueError, match="Veros"):
+    with pytest.raises(ValueError, match=r"\+ocean\.clamp_at_freezing=true"):
         default_exchanges(components)
 
 

@@ -15,6 +15,7 @@ branch to the runner.
 import dataclasses
 import inspect
 import logging
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -188,6 +189,65 @@ def test_build_coupler_default():
     )
 
 
+# The atmosphere overrides `python -m jem.main --help`, `jem/config/config.yaml`,
+# `jem/main.py` and docs/source/getting_started.rst show a reader. Kept here so
+# that the commands the documentation teaches are *built*, not just composed:
+# an override can compose cleanly and still name a model that cannot be
+# coupled, which is only found by building it.
+DOCUMENTED_ATMOSPHERE_OVERRIDES = [
+    ["diffusion@atmosphere.diffusion=strong", "atmosphere.run.time_step=15"],
+    ["atmosphere.run.time_step=15"],
+]
+
+
+@pytest.mark.parametrize(
+    "overrides", DOCUMENTED_ATMOSPHERE_OVERRIDES, ids=lambda o: " ".join(o)
+)
+def test_the_documented_atmosphere_overrides_build(overrides):
+    """Every atmosphere override the documentation shows builds a coupled model."""
+    coupler = runners.build_coupler(composed(overrides))
+
+    assert coupler.components["atm"].model.dt_si.m == 15 * 60
+    root = Path(runners.__file__).parent
+    spelling = " ".join(overrides)
+    documented = "".join(
+        " ".join(path.read_text().replace("\\\n", " ").split())
+        for path in (
+            root / "config" / "config.yaml",
+            root / "config" / "hydra" / "help" / "custom_help.yaml",
+            root / "main.py",
+            root.parent / "docs" / "source" / "getting_started.rst",
+        )
+    )
+    for override in overrides:
+        assert override in documented, (
+            f"{override!r} is tested as a documented example ({spelling}) but"
+            " no longer appears in the help text or the docs; keep"
+            " DOCUMENTED_ATMOSPHERE_OVERRIDES in step with them."
+        )
+
+
+def test_an_atmosphere_without_a_surface_is_refused():
+    """A physics package that publishes no surface fluxes cannot be coupled.
+
+    Held-Suarez forcing resolves no surface at all, so there is nothing for
+    an ocean to be driven with; the build says so rather than coupling a
+    model whose exchange is all zeros.
+    """
+    cfg = composed([
+        "physics@atmosphere.physics=held_suarez",
+        "grid@atmosphere.grid=held_suarez_t31_l8",
+    ])
+    with pytest.raises(ValueError, match="surface_exchange"):
+        runners.build_coupler(cfg)
+
+
+def test_an_atmosphere_timestep_that_does_not_divide_the_coupling_step_is_refused():
+    """Seven-minute steps do not fit a whole number of times into a day."""
+    with pytest.raises(ValueError, match="not a whole multiple"):
+        runners.build_coupler(composed(["atmosphere.run.time_step=7"]))
+
+
 def test_cli_and_python_construction_agree():
     """The README's Python construction and the equivalent config build one model.
 
@@ -247,14 +307,105 @@ def test_mixed_grid_configuration_builds():
     assert ocean_grid.shape != atmosphere_shape
     # Both surface components are on the one ocean grid.
     assert coupler.components["seaice"].grid.shape == ocean_grid.shape
-    # The land fraction came from the packaged mask file, not from the SCRIP
-    # file's own all-ocean integer mask.
-    assert float(ocean_grid.fractional_mask.max()) > 0.0
+    # An aquaplanet: no land fraction file is given, so the grid's own all-active
+    # SCRIP mask is used and every ocean and sea-ice cell is ocean. A packaged
+    # land mask would leave cells that never leave their initial temperature.
+    assert float(ocean_grid.fractional_mask.max()) == 0.0
+    assert bool(np.all(np.asarray(ocean_grid.ocean_mask)))
+    assert float(coupler.components["seaice"].grid.fractional_mask.max()) == 0.0
+    # The ocean grid is the displaced-pole one: curvilinear, not the
+    # atmosphere's separable Gaussian grid.
+    assert not ocean_grid.is_separable
 
     exchange = coupler.exchangers["exchange"]
     crossing = {spec.regrid for spec in exchange.specs if spec.regrid is not None}
     assert crossing == {"a2o_flux", "o2a_flux", "o2a_state"}
     assert all(name in exchange.regridders for name in crossing)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "keys", "hint"),
+    [
+        (["ocean=slab_relax"], ["ocean.sst_clim_file"], "${jcm_data:bc/t30/clim/forcing.nc}"),
+        (
+            ["regrid=esmf"],
+            ["regrid.a2o_conserve", "regrid.a2o_bilinear",
+             "regrid.o2a_conserve", "regrid.o2a_bilinear"],
+            "${jem_data:weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc}",
+        ),
+        (["ocean=veros"], ["ocean.setup"], "jem.components.veros.setups."),
+    ],
+    ids=["slab_relax", "esmf", "veros"],
+)
+def test_a_missing_required_input_names_its_full_key_and_the_override(
+    overrides, keys, hint
+):
+    """`???` surfaces as the full key and the override to add, not the bare leaf.
+
+    OmegaConf alone says `Missing mandatory value: sst_clim_file` -- no group,
+    no hint. The error names `ocean.sst_clim_file` and shows the line to add,
+    spelled with the packaged-file resolver where the repo's docs use one.
+    """
+    from omegaconf.errors import MissingMandatoryValue
+
+    # The component is built before anything that needs a grid or a file, so
+    # no atmosphere is needed for the `ocean` cases; the regridders are built
+    # on their own.
+    cfg = composed(overrides)
+    with pytest.raises(MissingMandatoryValue) as info:
+        if overrides[0].startswith("regrid"):
+            runners.build_regridders(cfg)
+        else:
+            runners.build_component(cfg.ocean, key="ocean")
+    message = str(info.value)
+    for key in keys:
+        assert f"  {key}=" in message, message
+    assert hint in message
+
+
+def test_a_component_is_handed_the_local_copy_of_a_mirror_file(monkeypatch):
+    """An ``hf://`` value reaches the constructor as the fetched file's path.
+
+    jax-gcm's configuration bundles name their forcing on its data mirror, and
+    a surface component that reads the same file is handed that name by
+    interpolation (``sst_clim_file: ${atmosphere.forcing.file}``). xarray
+    cannot open the scheme, so the runner fetches through jax-gcm's own
+    ``fetch`` -- at any depth of the node, and leaving every other value alone.
+    """
+    import jcm.data.remote
+
+    fetched = []
+
+    def fake_fetch(relative_path):
+        fetched.append(relative_path)
+        return f"/cache/{relative_path}"
+
+    monkeypatch.setattr(jcm.data.remote, "fetch", fake_fetch)
+    node = OmegaConf.create(
+        {
+            "_target_": "builtins.dict",
+            "sst_clim_file": "hf://bundles/t63/forcing_pd.nc",
+            "local_file": "/somewhere/forcing.nc",
+            "nested": {"files": ["hf://bundles/t63/terrain.nc", "plain.nc"]},
+        }
+    )
+    built = runners.build_component(node, key="ocean")
+    assert built == {
+        "sst_clim_file": "/cache/bundles/t63/forcing_pd.nc",
+        "local_file": "/somewhere/forcing.nc",
+        "nested": {"files": ["/cache/bundles/t63/terrain.nc", "plain.nc"]},
+    }
+    assert fetched == ["bundles/t63/forcing_pd.nc", "bundles/t63/terrain.nc"]
+    # The composed config a caller may still be reading keeps what it was given.
+    assert node.sst_clim_file == "hf://bundles/t63/forcing_pd.nc"
+
+
+def test_a_missing_input_is_named_by_the_coupler_build_too():
+    """`build_coupler` passes each group's key, so the CLI error is the full key."""
+    from omegaconf.errors import MissingMandatoryValue
+
+    with pytest.raises(MissingMandatoryValue, match=r"ocean\.sst_clim_file"):
+        runners.build_coupler(composed(["ocean=slab_relax"]))
 
 
 def test_constants_override_reaches_the_build(restore_constants):
@@ -597,11 +748,10 @@ def test_forcing_align_auto_raises_for_an_undeclared_user_file():
     `jem/components/jcm/contract.py`'s note on jax-gcm#884). This test is the
     other half: a *user's* file -- anything the manifest does not
     recognise -- must raise jax-gcm's own named error rather than silently
-    guessing, so a user who copies `+configuration=veros-double-drake
-    forcing@atmosphere.forcing=from_file` (as its own comment documents) and
-    points `atmosphere.forcing.file` at their own archive is told to declare
-    `atmosphere.forcing.align` explicitly, not handed a silently mis-phased
-    forcing.
+    guessing, so a user who points `atmosphere.forcing.file` of
+    `+configuration=veros-double-drake` (which names its own file's `align`
+    explicitly) at their own archive and leaves `atmosphere.forcing.align=auto`
+    is told to declare it, not handed a silently mis-phased forcing.
 
     The file used here does not need to exist or even be a real netCDF: the
     manifest lookup (`jcm.data.input_resolution.manifest_alignment_for_paths`)
@@ -610,7 +760,7 @@ def test_forcing_align_auto_raises_for_an_undeclared_user_file():
     """
     cfg = composed([
         "+configuration=veros-double-drake",
-        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.align=auto",
         "atmosphere.forcing.file=${jem_data:terrain_double_drake_T31.nc}",
     ])
     with pytest.raises(ValueError, match="forcing.align=auto cannot resolve"):
@@ -628,7 +778,7 @@ def test_forcing_align_auto_resolves_jcms_own_packaged_climatology():
     """
     cfg = composed([
         "+configuration=veros-double-drake",
-        "forcing@atmosphere.forcing=from_file",
+        "atmosphere.forcing.align=auto",
         "atmosphere.forcing.file=${jcm_data:bc/t30/clim/forcing.nc}",
     ])
     atm = runners.build_atmosphere(cfg)
@@ -1050,3 +1200,201 @@ def test_initial_condition_is_a_schema_key_that_defaults_to_none():
     assert composed([]).coupled_run.initial_condition is None
     kwargs = runners.build_run_kwargs(composed(["coupled_run.initial_condition=/x/y"]))
     assert kwargs["initial_condition"] == "/x/y"
+
+
+# ---------------------------------------------------------------------------
+# The precision of a run is part of its configuration (`jax_enable_x64`)
+# ---------------------------------------------------------------------------
+
+#: `jax_enable_x64` as this process had it when the module was collected. The
+#: last test of the module checks the process is left the way it was found.
+_X64_WHEN_COLLECTED = jax.config.read("jax_enable_x64")
+
+
+@pytest.fixture
+def restore_x64():
+    """Put `jax_enable_x64` back after a test that builds a coupler.
+
+    The flag is process-global and `runners.build_coupler` changes it by
+    design, so a test that builds one with a precision of its own would
+    otherwise decide the precision of every test that runs after it.
+    """
+    before = jax.config.read("jax_enable_x64")
+    yield
+    jax.config.update("jax_enable_x64", before)
+
+
+def _float_dtypes(tree, *, ignore_jcm_fixed_forcing: bool = False) -> set[str]:
+    """Return the dtype names of every floating-point leaf of ``tree``.
+
+    ``ignore_jcm_fixed_forcing`` skips the atmosphere's forcing leaves that
+    are scalars or empty. jax-gcm builds the solar-geometry scalars and the
+    empty analytic-ozone array as float32 whatever ``jax_enable_x64`` is
+    (``jcm.forcing`` passes ``dtype=jnp.float32`` explicitly), so they are
+    not something this layer can set.
+
+    """
+    found = set()
+    leaves = jax.tree_util.tree_leaves_with_path(tree)
+    for path, leaf in leaves:
+        array = jnp.asarray(leaf)
+        if not jnp.issubdtype(array.dtype, jnp.floating):
+            continue
+        if (ignore_jcm_fixed_forcing and "forcing" in jax.tree_util.keystr(path)
+                and (array.ndim == 0 or array.size == 0)):
+            continue
+        found.add(str(array.dtype))
+    return found
+
+
+def test_precision_key_is_null_by_default_and_a_schema_key():
+    """Unset means "leave JAX alone", and the key overrides without a `+`."""
+    assert composed([]).jax_enable_x64 is None
+    assert composed(["jax_enable_x64=true"]).jax_enable_x64 is True
+    assert composed(["jax_enable_x64=false"]).jax_enable_x64 is False
+
+
+@pytest.mark.parametrize("overrides", [
+    ["ocean=veros"],
+    ["+configuration=veros-earth"],
+    ["+configuration=veros-double-drake"],
+])
+def test_choosing_the_veros_ocean_selects_double_precision(overrides):
+    """`ocean=veros` carries the setting, with or without a named configuration."""
+    assert composed(overrides).jax_enable_x64 is True
+
+
+@pytest.mark.parametrize("configuration", [
+    "aquaplanet-slab", "aquaplanet-slab-mixed-grid", "earth-slab",
+    "earth-slab-winton",
+])
+def test_slab_configurations_leave_the_precision_alone(configuration):
+    assert composed([f"+configuration={configuration}"]).jax_enable_x64 is None
+
+
+def test_a_command_line_setting_beats_the_ocean_options_selection():
+    """An explicit `false` is still `false` in the composed config (the build refuses it)."""
+    assert composed(["ocean=veros", "jax_enable_x64=false"]).jax_enable_x64 is False
+
+
+def test_apply_precision_sets_the_flag_and_reports_what_it_must_stay(restore_x64):
+    jax.config.update("jax_enable_x64", False)
+    assert runners.apply_precision(composed(["jax_enable_x64=true"])) is True
+    assert jax.config.read("jax_enable_x64") is True
+    assert runners.apply_precision(composed(["jax_enable_x64=false"])) is False
+    assert jax.config.read("jax_enable_x64") is False
+    # null leaves it as the process has it, whichever way that is.
+    jax.config.update("jax_enable_x64", True)
+    assert runners.apply_precision(composed([])) is True
+    assert jax.config.read("jax_enable_x64") is True
+
+
+def test_apply_precision_refuses_a_non_boolean(restore_x64):
+    cfg = composed([])
+    cfg.jax_enable_x64 = "yes please"
+    with pytest.raises(TypeError, match="jax_enable_x64 must be true, false or null"):
+        runners.apply_precision(cfg)
+
+
+@pytest.mark.parametrize("x64, dtype", [(True, "float64"), (False, "float32")])
+def test_a_slab_run_is_the_precision_it_asks_for_from_the_start(
+    x64, dtype, restore_x64
+):
+    """Atmosphere and slab ocean carries hold one float dtype, the requested one.
+
+    The setting is applied before the atmosphere is built, so nothing is
+    allocated in the other precision.
+    """
+    coupler = runners.build_coupler(composed([f"jax_enable_x64={str(x64).lower()}"]))
+    carry = coupler.initialize()
+    assert _float_dtypes(carry.components["atm"], ignore_jcm_fixed_forcing=True) == {dtype}
+    assert _float_dtypes(carry.components["ocn"]) == {dtype}
+
+
+@pytest.mark.parametrize("overrides", [
+    ["+configuration=earth-slab"],
+    ["+configuration=earth-slab-winton"],
+    ["+configuration=earth-slab", "land=bucket",
+     "+land.soil_water_clim_file=${jcm_data:bc/t30/clim/forcing.nc}"],
+], ids=["earth-slab", "earth-slab-winton", "earth-slab-bucket-land"])
+def test_a_float64_run_from_file_climatologies_keeps_its_carry(overrides, restore_x64):
+    """A configuration started from float32 files scans in float64.
+
+    The packaged climatologies are stored in float32. Each slab component
+    seeds its state from one, so the state must take the run's precision, not
+    the file's: a float32 initial SST under ``jax_enable_x64`` comes back from
+    the first step as float64, and ``lax.scan`` refuses the carry. Tracing two
+    coupled steps is what shows the carry that leaves a step is the one that
+    entered it.
+    """
+    coupler = runners.build_coupler(composed([*overrides, "jax_enable_x64=true"]))
+    carry = coupler.initialize()
+    for name in set(coupler.components) - {"atm"}:
+        assert _float_dtypes(carry.components[name]) == {"float64"}, name
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(2), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    assert [leaf.dtype for leaf in jax.tree_util.tree_leaves(final)] == [
+        jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(carry)
+    ]
+
+
+@pytest.mark.slow
+def test_a_float64_slab_run_scans_two_coupled_steps(restore_x64):
+    """The carry that leaves a float64 step has the structure and dtypes it entered with."""
+    coupler = runners.build_coupler(composed(["jax_enable_x64=true"]))
+    carry = coupler.initialize()
+    final, _ = coupler.generate_trajectory_function(2)(carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    assert [jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(final)] == [
+        jnp.asarray(leaf).dtype for leaf in jax.tree_util.tree_leaves(carry)
+    ]
+    assert _float_dtypes(final.components["atm"], ignore_jcm_fixed_forcing=True) == {"float64"}
+    sst = final.components["ocn"]["state"].sea_surface_temperature
+    assert bool(jnp.all(jnp.isfinite(sst)))
+
+
+@pytest.fixture
+def component_that_flips_x64(monkeypatch):
+    """Make building the ocean turn x64 on, as the first Veros import does."""
+    real = runners.build_component
+
+    def flipping(node, **kwargs):
+        built = real(node, **kwargs)
+        jax.config.update("jax_enable_x64", True)
+        return built
+
+    monkeypatch.setattr(runners, "build_component", flipping)
+
+
+@pytest.mark.parametrize("overrides", [["jax_enable_x64=false"], []])
+def test_a_component_that_changes_the_precision_mid_build_is_refused(
+    overrides, component_that_flips_x64, restore_x64
+):
+    """The mix is detected right after the build and the message names the key.
+
+    Both ways in: a configuration that asked for float32, and one that asked
+    for nothing and so expected the process's float32 to hold. The
+    atmosphere was built before the flip in both.
+    """
+    jax.config.update("jax_enable_x64", False)
+    with pytest.raises(RuntimeError, match=r"jax_enable_x64=true"):
+        runners.build_coupler(composed(overrides))
+
+
+def test_a_component_that_agrees_with_the_requested_precision_is_accepted(
+    component_that_flips_x64, restore_x64
+):
+    """Requesting `true` makes the same flip a no-op, so the build goes through."""
+    coupler = runners.build_coupler(composed(["jax_enable_x64=true"]))
+    assert "ocn" in coupler.components
+
+
+def test_zz_the_process_is_left_with_the_precision_it_was_collected_with():
+    """No test in this module leaks a changed `jax_enable_x64` into the next one.
+
+    `build_coupler` changes the flag by design and the tests above restore it;
+    composing a Veros configuration changes nothing (only building one does).
+    Kept last in the file so that it sees what the others left behind.
+    """
+    composed(["ocean=veros"])
+    assert jax.config.read("jax_enable_x64") == _X64_WHEN_COLLECTED

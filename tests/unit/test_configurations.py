@@ -36,15 +36,26 @@ class TestAvailable(unittest.TestCase):
             set(av),
             {p.stem for p in configurations.CONFIGURATION_DIR.glob("*.yaml")},
         )
-        # Six configurations are shipped today; a new one only has to land
-        # as a yaml file, this assertion included to catch the moment one
-        # goes missing from the recipe store rather than staying silent.
-        self.assertEqual(len(av), 6)
+        # Eight configurations are shipped; a new one only has to land as a
+        # yaml file, and this count is what catches one going missing from
+        # the recipe store rather than staying silent.
+        self.assertEqual(len(av), 8)
         self.assertTrue(all(isinstance(v, str) and v for v in av.values()))
         # The one-line summary is the yaml's first human comment.
         self.assertIn("SPEEDY", av["aquaplanet-slab"])
         self.assertIn("Earth", av["earth-slab"])
         self.assertIn("Winton", av["earth-slab-winton"])
+        self.assertIn("Winton", av["veros-earth"])
+
+    def test_summaries_are_whole_sentences_in_name_order(self):
+        av = configurations.available()
+        self.assertEqual(list(av), sorted(av))
+        for name, summary in av.items():
+            self.assertTrue(summary.endswith("."), (name, summary))
+        # A summary is the first sentence of a paragraph that wraps over
+        # several lines of the yaml, not its first line.
+        self.assertIn("SPEEDY T31L8 over the Veros ocean GCM on an idealized",
+                      av["veros-double-drake"])
 
 
 class TestLoad(unittest.TestCase):
@@ -309,6 +320,40 @@ class TestLoad(unittest.TestCase):
                     self.assertEqual(c.physical_constants, saved)
                 finally:
                     c.set_constants(saved)
+
+
+    def test_a_successful_load_leaves_the_precision_the_configuration_asked_for(self):
+        """``jax_enable_x64`` is process-global and ``load()`` sets it, by design.
+
+        The returned coupler is only valid in that precision, so it stays; this
+        test restores it afterwards because it must not decide the precision
+        of the tests that follow.
+        """
+        before = jax.config.read("jax_enable_x64")
+        self.addCleanup(jax.config.update, "jax_enable_x64", before)
+        jax.config.update("jax_enable_x64", False)
+        exp = configurations.load("aquaplanet-slab", jax_enable_x64=True)
+        self.assertTrue(jax.config.read("jax_enable_x64"))
+        self.assertIs(exp.config["jax_enable_x64"], True)
+
+    def test_a_load_that_fails_puts_the_precision_back(self):
+        """No coupler came back, so nothing depends on the precision it asked for."""
+        before = jax.config.read("jax_enable_x64")
+        self.addCleanup(jax.config.update, "jax_enable_x64", before)
+        jax.config.update("jax_enable_x64", False)
+        with self.assertRaises(Exception):
+            configurations.load(
+                "aquaplanet-slab", jax_enable_x64=True,
+                **{"ocean": "slab_relax",
+                   "ocean.sst_clim_file": "/nonexistent/sst.nc"})
+        self.assertFalse(jax.config.read("jax_enable_x64"))
+
+    def test_the_slab_configurations_leave_the_precision_unset(self):
+        for name in ("aquaplanet-slab", "aquaplanet-slab-mixed-grid",
+                     "earth-slab", "earth-slab-winton"):
+            with self.subTest(name=name):
+                cfg = configurations._compose(name, [])
+                self.assertIsNone(cfg.jax_enable_x64)
 
 
 class TestOverrideStr(unittest.TestCase):

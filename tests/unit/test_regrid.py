@@ -75,3 +75,65 @@ def test_empty_collection_is_refused():
     """An empty collection would silently exchange nothing."""
     with pytest.raises(ValueError, match="same_grid"):
         ESMFRegridders()
+
+
+# ---------------------------------------------------------------------------
+# ESMFRegridder: input shape, jit, precision
+# ---------------------------------------------------------------------------
+
+
+def test_a_transposed_source_is_refused(regridders):
+    """(n_lat, n_lon) has the right size but the wrong layout: it must raise."""
+    regridder = regridders["a2o_conserve"]
+    with pytest.raises(ValueError, match=r"a2o_conserve|weight_algo-conserve_JCM_T31") as error:
+        regridder(np.ones((48, 96)))
+    assert "(96, 48)" in str(error.value)
+    assert "(48, 96)" in str(error.value)
+
+
+def test_a_too_small_source_is_refused(regridders):
+    """A (10, 10) field would be gathered from with clamped indices."""
+    with pytest.raises(ValueError, match=r"\(10, 10\)"):
+        regridders["a2o_conserve"](np.ones((10, 10)))
+
+
+def test_a_correct_call_works_under_jit(regridders):
+    """The shape check is static, so it does not stop the call being traced."""
+    import jax
+
+    regridder = regridders["a2o_conserve"]
+    field = np.random.default_rng(0).uniform(size=T31_SHAPE).astype(np.float32)
+    jitted = jax.jit(regridder)(field)
+    np.testing.assert_allclose(jitted, regridder(field), rtol=1e-6)
+    with pytest.raises(ValueError):
+        jax.jit(regridder)(np.ones((48, 96), np.float32))
+
+
+_PRECISION_SCRIPT = """
+import jax
+jax.config.update("jax_enable_x64", {x64})
+import numpy as np
+from importlib import resources
+from jem.utils.esmf_regrid import ESMFRegridder
+file = resources.files("jem.data") / "weight_algo-conserve_JCM_T31_to_DisplacedPoleGrid.nc"
+r = ESMFRegridder(str(file))
+print(r.weights.weights.dtype)
+out = np.asarray(r(np.ones(r.src_shape)))
+covered = out > 0.5
+print(float(np.abs(out[covered] - 1.0).max()))
+"""
+
+
+@pytest.mark.parametrize("x64", [False, True])
+def test_weights_follow_the_processs_float_precision(x64):
+    """float64 weights under x64 (R(1) is 1 to 1e-12), float32 otherwise."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", _PRECISION_SCRIPT.format(x64=x64)],
+        capture_output=True, text=True, check=True,
+    )
+    dtype, error = result.stdout.split()
+    assert dtype == ("float64" if x64 else "float32")
+    assert float(error) < (1e-10 if x64 else 1e-5)
