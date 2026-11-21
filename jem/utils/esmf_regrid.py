@@ -215,7 +215,11 @@ class ESMFRegridder:
         # process: float64 under `jax_enable_x64`, so a float64 field is not
         # mapped through float32 weights (which would put ~1e-8 of error into
         # every row sum), and float32 otherwise, which is all JAX holds.
-        weight_dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+        # `config.read`, not attribute access: the attribute is not declared
+        # on jax's `Config` in every supported jax release, and mypy is a gate.
+        weight_dtype = (
+            jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
+        )
         return ESMFWeights(
             row_indices=jnp.array(row_indices, dtype=jnp.int32),
             col_indices=jnp.array(col_indices, dtype=jnp.int32),
