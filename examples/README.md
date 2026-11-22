@@ -18,16 +18,19 @@ exp.coupler, exp.config, exp.run_kwargs        # built Coupler, plain-dict confi
 
 A notebook that *teaches* how a coupled model is put together builds its
 components directly (`01_aquaplanet.ipynb`,
-`04_jcm_slabs_mixed_grid_aqua_planet.ipynb`); a notebook that *runs* a
-validated configuration to demonstrate something else -- perturbing an
-initial condition, differentiating through a trajectory -- loads it through
-the door instead of copying its settings into Python, which is exactly the
-drift the door exists to prevent.
+`02_aquaplanet_customized_initial_condition.ipynb`,
+`04_jcm_slabs_mixed_grid_aqua_planet.ipynb`). Of those, 01 and 04 take their
+wiring from `default_exchangers`, the standard exchange table, and 02 writes
+the same exchange out as a plain function, so what passes between the
+components is on the page. A notebook that *runs* a validated configuration to
+demonstrate something else -- differentiating through a trajectory, an
+Earth-like climate -- loads it through the door instead of copying its
+settings into Python, which is exactly the drift the door exists to prevent.
 
 | Example | How to run it |
 | --- | --- |
 | Aquaplanet (`01_basic/01_aquaplanet.ipynb`) | notebook: direct construction (atmosphere, slab ocean, slab sea ice) with SPEEDY's reference parameters; the same coupled structure as `python -m jem.main +configuration=aquaplanet-slab`, which runs jax-gcm's calibrated SPEEDY |
-| Custom initial SST (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: `configurations.load("aquaplanet-slab")`, then one field of the initial carry is replaced before the run |
+| Custom initial SST, hand-written exchange (`01_basic/02_aquaplanet_customized_initial_condition.ipynb`) | notebook: direct construction of the same aquaplanet as 01 with the exchange written as a plain function in place of `default_exchangers`, then one field of the initial carry is replaced before the run |
 | Response to an SST bump (`01_basic/03_aquaplanet_response_to_SST_perturbation_using_gradient.ipynb`) | notebook: `configurations.load("aquaplanet-slab", seaice="none")`, then `jax.jvp` through the coupled trajectory |
 | Mixed grid (`01_basic/04_jcm_slabs_mixed_grid_aqua_planet.ipynb`) | notebook: direct construction of an all-ocean aquaplanet with the ocean and sea ice on a displaced-pole grid, with ESMF regridding, at SPEEDY's reference parameters; the same coupled structure as `python -m jem.main +configuration=aquaplanet-slab-mixed-grid`, which runs jax-gcm's calibrated SPEEDY |
 | Earth-like (`02_experimental/01_earth.ipynb`) | notebook: `configurations.load("earth-slab")`; equivalent to `python -m jem.main +configuration=earth-slab` |
@@ -41,16 +44,18 @@ drift the door exists to prevent.
 
 The `python -m jem.main` commands above remain exactly valid; the "How to run
 it" column says how each *notebook* gets to the same model, since none of
-them compose Hydra any more. The two directly-built notebooks (01, 04) build
-the same coupled structure as their configuration, `dt` included: a plain
+them compose Hydra any more. The three directly-built notebooks (01, 02, 04)
+build the same coupled structure as their configuration, `dt` included: a plain
 `jcm.model.Model(...)` takes SPEEDY T31L8's stable 30-minute step, which is the
 step the configurations run at.
-`tests/unit/test_notebook_equivalence.py` checks that structurally. They do
+`tests/unit/test_notebook_equivalence.py` checks that structurally, and that
+02's hand-written exchange gives the same two coupled steps as the standard
+table. They do
 not build the same atmosphere parameters. The SPEEDY configurations (all but the two `-echam`) run jax-gcm's SPEEDY parameters calibrated for coupled use
 (its `speedy-t31` bundle; jax-gcm's `docs/source/design/speedy_retune.md`),
 while a Python-built `Model(...)` runs SPEEDY's reference values. The
-notebooks that load a configuration (02, 03, `02_experimental/01_earth`) run
-the calibrated set; 01 and 04 are teaching builds of the wiring and make no
+notebooks that load a configuration (03, `02_experimental/01_earth`) run
+the calibrated set; 01, 02 and 04 are teaching builds of the wiring and make no
 claim to a calibrated or realistic climate. The calibration was a fit at T31
 against observations with prescribed SSTs, so a coupled run is not guaranteed
 drift-free, and it does not carry to the T106 command above.

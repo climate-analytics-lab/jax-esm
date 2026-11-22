@@ -132,10 +132,14 @@ explanation, not its plots. To see the plots, run the notebook yourself:
     jupyter lab examples/01_basic/01_aquaplanet.ipynb
     ./examples/run_notebooks.sh examples/01_basic/   # or execute them in place
 
-The notebooks reach their model in one of two ways: ``01_aquaplanet`` and
+The notebooks reach their model in one of two ways: ``01_aquaplanet``,
+``02_aquaplanet_customized_initial_condition`` and
 ``04_jcm_slabs_mixed_grid_aqua_planet`` *teach* how a coupled model is put
-together and construct their components directly (they are equivalent to
-``aquaplanet-slab`` and ``aquaplanet-slab-mixed-grid``); ``02`` and ``03``
+together and construct their components directly (they have the coupled
+structure of ``aquaplanet-slab`` and ``aquaplanet-slab-mixed-grid``). ``01``
+and ``04`` wire them with ``default_exchangers``; ``02`` writes the same
+exchange out as a plain function, the form to read first for what an exchanger
+is (:doc:`design/exchange`). ``03``
 and the Earth-like notebook *run* a named configuration to show something else
 and load it with ``configurations.load``; ``SpringSystem`` is the coupler with
 no climate in it at all. The geoscience notebooks share their plotting through

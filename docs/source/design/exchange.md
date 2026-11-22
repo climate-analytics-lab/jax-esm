@@ -29,6 +29,11 @@ The ocean takes `sea_total_heat_flux`, the flux over the sea part of the
 cell, rather than `total_heat_flux`, the grid-cell mean (see *Each surface
 takes the flux over its own part of the cell* below).
 
+`examples/01_basic/02_aquaplanet_customized_initial_condition.ipynb` runs an
+aquaplanet through an exchanger written this way, with the sea ice's two
+fields added, and `tests/unit/test_notebook_equivalence.py` holds it to the
+standard table.
+
 Two rules, both enforced by what `lax.scan` will accept:
 
 1. **Do not mutate in place.** The carries handed to an exchanger are the
