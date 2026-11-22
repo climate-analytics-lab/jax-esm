@@ -3195,7 +3195,9 @@ class Probe:
         return dict(carry, state=state), {"state": state}
 
 
-def probe_coupler(feeder_gain=1.0, gain=1.0, climatology=0.0, exchanger=None):
+def probe_coupler(
+    feeder_gain=1.0, gain=1.0, climatology=0.0, exchanger=None, workflow=None
+):
     components = {
         "feeder": Probe("feeder", feeder_gain), "probe": Probe("probe", gain, climatology),
     }
@@ -3204,9 +3206,21 @@ def probe_coupler(feeder_gain=1.0, gain=1.0, climatology=0.0, exchanger=None):
         or Exchange([ExchangeSpec("feeder.state.x", "probe.forcing.fed")])
     }
     return Coupler(
-        components, exchangers, coupling_timestep=COUPLING_TIMESTEP,
-        start_date=START_DATE,
+        components, exchangers, workflow=workflow,
+        coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
     )
+
+
+def hand_written_feed(components, time):
+    """Write the feeder's state into the probe's forcing, as a plain function."""
+    del time
+    probe = components["probe"]
+    fed = components["feeder"]["state"].x
+    return dict(components, probe=dict(probe, forcing=probe["forcing"].replace(fed=fed)))
+
+
+# The workflow of an uncoupled comparison run: every component, no exchanger.
+UNCOUPLED = ["feeder", "probe"]
 
 
 def test_an_initial_condition_takes_prescribed_forcing_but_not_exchanged_forcing(
@@ -3259,20 +3273,11 @@ def test_a_resume_reports_drifted_forcing_and_keeps_the_checkpoint(tmp_path, cap
 
 def test_a_hand_written_exchanger_leaves_forcing_restored_and_says_so(tmp_path, caplog):
     """Fields a function writes cannot be told from prescribed ones, so none is reset."""
-
-    def hand_written(components, time):
-        del time
-        probe = components["probe"]
-        fed = components["feeder"]["state"].x
-        return dict(
-            components, probe=dict(probe, forcing=probe["forcing"].replace(fed=fed))
-        )
-
     spun_up = tmp_path / "spun-up"
-    model = probe_coupler(climatology=1.0, exchanger=hand_written)
+    model = probe_coupler(climatology=1.0, exchanger=hand_written_feed)
     carry, _ = model.generate_trajectory_function(2)(model.initialize())
     model.save_carry(carry, spun_up)
-    experiment = probe_coupler(gain=2.0, climatology=5.0, exchanger=hand_written)
+    experiment = probe_coupler(gain=2.0, climatology=5.0, exchanger=hand_written_feed)
 
     with caplog.at_level(logging.INFO, logger="jem.driver"):
         loaded, _ = _load_initial_condition(experiment, spun_up)
@@ -3282,6 +3287,86 @@ def test_a_hand_written_exchanger_leaves_forcing_restored_and_says_so(tmp_path, 
     np.testing.assert_array_equal(probe["forcing"].prescribed, [1.0, 1.0])
     assert "probe: forcing restored whole" in caplog.text
     assert "not jem.exchangers.Exchange" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "exchanger", [None, hand_written_feed], ids=["a coupling table", "a function"]
+)
+def test_an_exchanger_the_workflow_does_not_run_leaves_every_forcing_prescribed(
+    tmp_path, caplog, exchanger
+):
+    """An uncoupled run from a coupled spin-up is forced by its own configuration.
+
+    The exchanger is registered and the workflow leaves it out, so nothing
+    writes ``fed``: it is as prescribed as ``prescribed`` is, and neither a
+    table's rows nor a function's opacity may keep the spin-up's values.
+    """
+    spun_up = tmp_path / "spun-up"
+    spinup_model = probe_coupler(climatology=1.0, exchanger=exchanger)
+    spun_carry, _ = spinup_model.generate_trajectory_function(3)(spinup_model.initialize())
+    spinup_model.save_carry(spun_carry, spun_up)
+    assert float(spun_carry.components["probe"]["forcing"].fed[0]) != 0.0
+    experiment = probe_coupler(
+        gain=2.0, climatology=5.0, exchanger=exchanger, workflow=UNCOUPLED
+    )
+    assert "feed" not in experiment.workflow
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        carry, _ = _load_initial_condition(experiment, spun_up)
+
+    probe = carry.components["probe"]
+    np.testing.assert_array_equal(probe["forcing"].prescribed, [5.0, 5.0])
+    np.testing.assert_array_equal(probe["forcing"].fed, [0.0, 0.0])
+    np.testing.assert_array_equal(
+        probe["state"].x, spun_carry.components["probe"]["state"].x
+    )
+    assert "forcing restored whole" not in caplog.text
+    assert "probe.forcing.fed" in caplog.text
+
+    # Two uncoupled steps integrate that forcing: x grows by gain * (fed +
+    # prescribed) = 2 * (0 + 5) a step, with nothing rewriting `fed`.
+    final, _ = experiment.generate_trajectory_function(2)(carry)
+    np.testing.assert_allclose(
+        final.components["probe"]["state"].x, probe["state"].x + 20.0
+    )
+    np.testing.assert_array_equal(final.components["probe"]["forcing"].fed, [0.0, 0.0])
+
+
+def test_an_outer_table_the_workflow_does_not_run_leaves_a_nested_coupler_readable(
+    tmp_path, caplog
+):
+    """A nested coupler is closed to the driver only by an outer table that runs."""
+
+    def nested(gain, climatology):
+        inner = Coupler(
+            {"feeder": Probe("feeder"), "probe": Probe("probe", gain, climatology)},
+            {"feed": Exchange([ExchangeSpec("feeder.state.x", "probe.forcing.fed")])},
+            coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE, name="inner",
+        )
+        # Registered, naming the inner coupler as its destination, and never
+        # run: the outer workflow is the inner coupler alone.
+        into_inner = Exchange([ExchangeSpec("inner.state.x", "inner.forcing.fed")])
+        return Coupler(
+            {"inner": inner}, {"into_inner": into_inner}, workflow=["inner"],
+            coupling_timestep=COUPLING_TIMESTEP, start_date=START_DATE,
+        )
+
+    spun_up = tmp_path / "spun-up"
+    model = nested(1.0, 1.0)
+    carry, _ = model.generate_trajectory_function(2)(model.initialize())
+    model.save_carry(carry, spun_up)
+
+    with caplog.at_level(logging.INFO, logger="jem.driver"):
+        loaded, _ = _load_initial_condition(nested(4.0, 6.0), spun_up)
+
+    probe = loaded.components["inner"].components["probe"]
+    np.testing.assert_array_equal(probe["forcing"].prescribed, [6.0, 6.0])
+    # The inner table runs, so what it wrote last is still the spin-up's.
+    np.testing.assert_array_equal(
+        probe["forcing"].fed,
+        carry.components["inner"].components["probe"]["forcing"].fed,
+    )
+    assert "forcing restored whole" not in caplog.text
 
 
 def test_a_nested_coupler_takes_its_components_configuration(tmp_path, caplog):

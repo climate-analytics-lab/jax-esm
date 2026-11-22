@@ -182,9 +182,14 @@ and integrates with the parameter it was configured with.
 (`jem.exchangers.exchanged_fields`) is configuration, such as the slab
 ocean's `q_flux` climatology or the atmosphere's boundary conditions, and a
 field an exchanger writes is the flux the component was last given, which is
-state. Where that cannot be read, the forcing is restored whole and the log
-says why: a hand-written exchanger (an arbitrary function) hides which fields
-it writes, so every `forcing` of that coupler (its `params` are still taken),
+state. Only the exchangers the workflow runs count, as they do when the
+atmosphere's exchanged forcing is declared: one that is registered and left
+out of `coupling.workflow` (an uncoupled comparison run) writes nothing, so
+every `forcing` field of such a run is prescribed and is the configured
+model's. Where the table cannot be read, the forcing is restored whole and the
+log says why: a hand-written exchanger (an arbitrary function) that the
+workflow runs hides which fields it writes, so every `forcing` of that coupler
+(its `params` are still taken),
 or a nested coupler that an outer table writes into; a component that
 checkpoints itself (Veros) is restored whole, since its carry layout is its
 own. A component that updates its own `forcing` inside `step` must keep that

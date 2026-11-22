@@ -1591,13 +1591,30 @@ def _named_leaves(tree: Any) -> list[tuple[str, np.ndarray]]:
     return [(jax.tree_util.keystr(path), np.asarray(leaf)) for path, leaf in flat]
 
 
-def _destination_components(coupler: "Coupler") -> set[str]:
-    """Return the names of the components a coupling table writes into."""
+def _active_exchangers(coupler: "Coupler") -> dict[str, Any]:
+    """Return the exchangers ``coupler``'s workflow runs, by name.
+
+    Only these write anything. An exchanger that is registered but that the
+    workflow never names -- ``coupling.workflow=[atm,ocn,seaice]``, the
+    supported way to step every component uncoupled for comparison with a
+    coupled run -- is as inert as one that was never built, which is how
+    :func:`jem.runners.declare_exchanged_forcing` reads the table too. Counting
+    it would make the fields it never writes look exchanged, and a hand-written
+    one would make every ``forcing`` look unreadable.
+    """
+    return {
+        name: exchanger for name, exchanger in coupler.exchangers.items()
+        if name in coupler.workflow
+    }
+
+
+def _destination_components(exchangers: Mapping[str, Any]) -> set[str]:
+    """Return the names of the components these coupling tables write into."""
     from jem.exchangers import Exchange
 
     return {
         spec.dst_parts[0]
-        for exchanger in coupler.exchangers.values()
+        for exchanger in exchangers.values()
         if isinstance(exchanger, Exchange)
         for spec in exchanger.specs
     }
@@ -1609,8 +1626,8 @@ def _adopt_configuration(
     """Return ``restored`` with its configuration leaves taken from ``coupler``.
 
     **What is configuration.** ``carry["params"]`` is, whole. In
-    ``carry["forcing"]``, a field that no exchanger of the coupling table
-    writes is a prescribed input (the slab ocean's ``q_flux`` climatology, the
+    ``carry["forcing"]``, a field that no exchanger the workflow runs writes
+    is a prescribed input (the slab ocean's ``q_flux`` climatology, the
     atmosphere's boundary conditions) and so is configuration in the same
     sense; a field an exchanger writes is lagged state -- the flux the
     component was last given -- and stays as restored. ``carry["state"]`` and
@@ -1626,10 +1643,14 @@ def _adopt_configuration(
     ``forcing`` field rests on the coupling table, which only
     :class:`~jem.exchangers.Exchange` exchangers expose: a hand-written
     exchanger is an arbitrary function, so a field it writes would look
-    prescribed and be wrongly reset. A coupler with one therefore has its
-    ``forcing`` sections left as restored (its ``params`` are still taken),
-    and so does a nested coupler that an outer table writes into, since the
-    outer table names the inner coupler and not its components. A component
+    prescribed and be wrongly reset. A coupler whose workflow runs one
+    therefore has its ``forcing`` sections left as restored (its ``params``
+    are still taken), and so does a nested coupler that an outer table writes
+    into, since the outer table names the inner coupler and not its
+    components. An exchanger the workflow never runs counts for nothing in
+    either rule (:func:`_active_exchangers`): in an uncoupled run every
+    ``forcing`` field is prescribed, so all of it is the configured model's. A
+    component
     that checkpoints itself (:class:`~jem.base.component.SupportsCheckpoint`:
     Veros) holds a carry whose layout only it knows and is not built here at
     all -- ``initialize()`` of an ocean GCM is not a cheap template -- so it
@@ -1669,12 +1690,13 @@ def _adopt(
     from jem.exchangers import Exchange, exchanged_fields
 
     report = _ConfigurationReport()
+    active = _active_exchangers(coupler)
     uninspectable = sorted(
-        name for name, exchanger in coupler.exchangers.items()
+        name for name, exchanger in active.items()
         if not isinstance(exchanger, Exchange)
     )
     inspectable = forcing_inspectable and not uninspectable
-    written_into = _destination_components(coupler)
+    written_into = _destination_components(active)
     components: dict[str, Any] = {}
     for name, component in coupler.components.items():
         where = f"{label}{name}"
@@ -1714,7 +1736,7 @@ def _adopt(
             if inspectable:
                 new["forcing"] = _adopt_forcing(
                     where, carry["forcing"], configured["forcing"],
-                    set(exchanged_fields(coupler.exchangers, name)), report,
+                    set(exchanged_fields(active, name)), report,
                 )
             else:
                 report.skipped.append(
