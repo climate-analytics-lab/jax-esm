@@ -72,6 +72,17 @@ def _group_override(group: str, option: str) -> str:
     return f"{group}={option}"
 
 
+#: Options that compose only beside something else, with what they need. The
+#: slab land reads the atmosphere's own boundary file
+#: (``${atmosphere.forcing.file}``), which the default aquaplanet does not have.
+OPTION_NEEDS = {("land", "slab"): ["+configuration=earth-slab"]}
+
+
+def _option_overrides(group: str, option: str) -> list[str]:
+    """Return the overrides under which ``option`` of ``group`` composes."""
+    return [*OPTION_NEEDS.get((group, option), []), _group_override(group, option)]
+
+
 def _atmosphere_groups() -> dict[str, str]:
     """Return the JCM groups `config.yaml` re-roots, as group -> package.
 
@@ -354,7 +365,7 @@ def _supplied_kwargs(node: DictConfig) -> dict:
 @pytest.mark.parametrize(
     "overrides",
     [[]]
-    + [[_group_override(g, o)] for g in _groups() if g != "configuration"
+    + [_option_overrides(g, o) for g in _groups() if g != "configuration"
        for o in _options(g)]
     + [[f"+configuration={name}"] for name in _options("configuration")],
     ids=lambda ov: "+".join(ov) or "defaults",

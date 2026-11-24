@@ -252,7 +252,12 @@ class VerosExchange:
     evaporation to the land, its soil water availability back to the
     atmosphere (list ``soilw_am`` in ``coupling.exchanged_forcing``, since
     this exchanger cannot be read off the way a table can), and its runoff to
-    the ocean.
+    the ocean. A land that evolves its own temperature (one whose forcing
+    has a ``total_heat_flux``, a
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel`) also takes
+    the land tile's heat flux and hands back its temperature and snow cover
+    (:data:`jem.exchangers.SLAB_LAND_EXCHANGES`; list ``stl_am`` and
+    ``snowc_am`` too).
 
     **A sea ice**, registered as ``"seaice"`` and on the ocean's grid, is
     coupled here too, with the rows of the declarative table
@@ -576,6 +581,13 @@ class VerosExchange:
         as a mass rate over its whole grid, to the ocean, which spreads it
         over its own wet surface. Sources are read from ``incoming``, so the
         result does not depend on what was written before.
+
+        A land whose forcing has a ``total_heat_flux`` evolves its own
+        temperature, and the rows of
+        :data:`jem.exchangers.SLAB_LAND_EXCHANGES` are made as well: the land
+        tile's heat flux to the land, its temperature and snow cover to the
+        atmosphere. Which case applies is read off the carry's structure,
+        which is static, as the sea ice's rows are chosen.
         """
         atm, lnd = incoming["atm"], incoming["lnd"]
 
@@ -583,17 +595,27 @@ class VerosExchange:
             return jnp.asarray(value, dtype=current.dtype)
 
         land_forcing = lnd["forcing"]
-        lnd = dict(lnd, forcing=land_forcing.replace(
-            precipitation=like(atm["derived"].precipitation,
-                               land_forcing.precipitation),
-            evaporation=like(atm["derived"].land_evaporation,
-                             land_forcing.evaporation),
-        ))
+        evolves_temperature = hasattr(land_forcing, "total_heat_flux")
+        to_land = {
+            "precipitation": like(atm["derived"].precipitation,
+                                  land_forcing.precipitation),
+            "evaporation": like(atm["derived"].land_evaporation,
+                                land_forcing.evaporation),
+        }
         atm_out, ocn_out = exchanged["atm"], exchanged["ocn"]
-        atm_out = dict(atm_out, forcing=atm_out["forcing"].replace(
-            soilw_am=like(incoming["lnd"]["derived"].soil_water_availability,
-                          atm_out["forcing"].soilw_am),
-        ))
+        to_atmosphere = {
+            "soilw_am": like(lnd["derived"].soil_water_availability,
+                             atm_out["forcing"].soilw_am),
+        }
+        if evolves_temperature:
+            to_land["total_heat_flux"] = like(
+                atm["derived"].land_total_heat_flux, land_forcing.total_heat_flux)
+            to_atmosphere["stl_am"] = like(
+                lnd["state"].land_surface_temperature, atm_out["forcing"].stl_am)
+            to_atmosphere["snowc_am"] = like(
+                lnd["state"].snow_cover, atm_out["forcing"].snowc_am)
+        lnd = dict(lnd, forcing=land_forcing.replace(**to_land))
+        atm_out = dict(atm_out, forcing=atm_out["forcing"].replace(**to_atmosphere))
         ocn_out = dict(ocn_out, forcing=ocn_out["forcing"].replace(
             runoff_mass_rate=like(incoming["lnd"]["derived"].runoff_mass_rate,
                                   ocn_out["forcing"].runoff_mass_rate),

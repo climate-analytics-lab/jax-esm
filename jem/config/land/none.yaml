@@ -1,4 +1,9 @@
 # @package _global_
-# No land component -- the default. See `ocean/none.yaml` for why the
-# `_global_` header is needed to make the key null rather than empty.
+# No land component -- the default. The land is then the atmosphere's own:
+# SPEEDY integrates its slab land inside its surface-flux term, forced by the
+# flux over the land part of each cell (ECHAM's land is prescribed, or SLIM).
+# `land=slab` hands the land's temperature to JEM's own land model instead,
+# and `land=bucket` keeps the atmosphere's temperature and evolves the soil
+# water. See `ocean/none.yaml` for why the `_global_` header is needed to make
+# the key null rather than empty.
 land: null

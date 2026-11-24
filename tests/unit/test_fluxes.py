@@ -623,6 +623,89 @@ def test_veros_exchange_couples_a_land_with_the_table_s_rows():
         components)
 
 
+@struct.dataclass
+class _ThermalLandForcing:
+    total_heat_flux: jnp.ndarray
+    precipitation: jnp.ndarray
+    evaporation: jnp.ndarray
+
+
+@struct.dataclass
+class _ThermalLandState:
+    land_surface_temperature: jnp.ndarray
+    snow_cover: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmThermalLandDerived:
+    sea_eastward_wind_stress: jnp.ndarray
+    sea_northward_wind_stress: jnp.ndarray
+    sea_total_heat_flux: jnp.ndarray
+    sea_total_freshwater_flux: jnp.ndarray
+    sea_fraction: jnp.ndarray
+    precipitation: jnp.ndarray
+    land_evaporation: jnp.ndarray
+    land_total_heat_flux: jnp.ndarray
+
+
+@struct.dataclass
+class _AtmThermalLandForcing:
+    sea_surface_temperature: jnp.ndarray
+    soilw_am: jnp.ndarray
+    stl_am: jnp.ndarray
+    snowc_am: jnp.ndarray
+
+
+def test_veros_exchange_couples_a_land_with_a_temperature_both_ways():
+    """A land whose forcing has a heat flux evolves its own temperature: the
+    exchanger hands it the land tile's flux and hands the atmosphere its
+    temperature and snow cover, the rows of `SLAB_LAND_EXCHANGES`, on top of
+    the soil-water rows every land gets. The ocean still takes the sea
+    tile's flux, so the two surfaces share the cell's flux between them.
+    """
+    shape = (4,)
+    components = {
+        "atm": {
+            "derived": _AtmThermalLandDerived(
+                jnp.zeros(shape), jnp.zeros(shape),
+                sea_total_heat_flux=jnp.full(shape, 40.0),
+                sea_total_freshwater_flux=jnp.zeros(shape),
+                sea_fraction=jnp.ones(shape),
+                precipitation=jnp.full(shape, 3e-5),
+                land_evaporation=jnp.full(shape, 1e-5),
+                land_total_heat_flux=jnp.full(shape, -25.0)),
+            "forcing": _AtmThermalLandForcing(
+                jnp.full(shape, 290.0), jnp.zeros(shape),
+                stl_am=jnp.full(shape, 280.0), snowc_am=jnp.zeros(shape)),
+        },
+        "ocn": {
+            "forcing": _OcnRunoffForcing(*(jnp.zeros(shape) for _ in range(4)),
+                                         runoff_mass_rate=jnp.zeros(())),
+            "derived": _OcnDerived(sea_surface_temperature=jnp.full(shape, 285.0),
+                                   sea_fraction=jnp.ones(shape)),
+        },
+        "lnd": {
+            "state": _ThermalLandState(
+                land_surface_temperature=jnp.full(shape, 301.5),
+                snow_cover=jnp.full(shape, 0.25)),
+            "forcing": _ThermalLandForcing(*(jnp.zeros(shape) for _ in range(3))),
+            "derived": _LandDerived(jnp.full(shape, 0.4), jnp.asarray(2.5e6)),
+        },
+    }
+    result = VerosExchange()(components, TIME)
+    np.testing.assert_allclose(result["lnd"]["forcing"].total_heat_flux, -25.0)
+    np.testing.assert_allclose(result["atm"]["forcing"].stl_am, 301.5)
+    np.testing.assert_allclose(result["atm"]["forcing"].snowc_am, 0.25)
+    # The rows every land gets, and the ocean's own, are made as well.
+    np.testing.assert_allclose(result["lnd"]["forcing"].precipitation, 3e-5)
+    np.testing.assert_allclose(result["lnd"]["forcing"].evaporation, 1e-5)
+    np.testing.assert_allclose(result["atm"]["forcing"].soilw_am, 0.4)
+    np.testing.assert_allclose(result["ocn"]["forcing"].heat_flux, 40.0)
+    np.testing.assert_allclose(result["ocn"]["forcing"].runoff_mass_rate, 2.5e6)
+    assert jax.tree_util.tree_structure(result) == jax.tree_util.tree_structure(
+        components)
+
+
 # ---------------------------------------------------------------------------
 # VerosExchange with a sea ice (jax-esm#160)
 # ---------------------------------------------------------------------------

@@ -674,6 +674,154 @@ def test_earth_slab_with_the_bucket_land_couples_the_soil_water():
     assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
 
 
+def test_earth_slab_with_the_slab_land_hands_the_land_temperature_to_jem(caplog):
+    """`land=slab` on `earth-slab` is one switch that sets two things: the
+    component, and the atmosphere's own land turned off. The atmosphere then
+    takes the land's temperature, snow cover and soil water availability from
+    the component (plain arrays, no longer the file's time series), the land
+    starts from the boundary file's climatology, the run says which land it
+    is, and a coupled step keeps the carry's structure.
+    """
+    from jcm.forcing import TimeSeries
+
+    from jem.components import SlabLandModel
+
+    with caplog.at_level(logging.INFO, logger="jem.runners"):
+        coupler = runners.build_coupler(composed(
+            ["+configuration=earth-slab", "land=slab"]))
+    atm, land = coupler.components["atm"], coupler.components["lnd"]
+    assert isinstance(land, SlabLandModel)
+    assert not atm.integrates_land_temperature
+    assert ("Land temperature: evolved by the land component (SlabLandModel)"
+            in caplog.text)
+    assert set(atm.exchanged_forcing) == {
+        "sea_surface_temperature", "sice_am", "soilw_am", "stl_am", "snowc_am",
+    }
+    carry = coupler.initialize()
+    forcing = carry.components["atm"]["forcing"]
+    for name in ("stl_am", "snowc_am", "soilw_am"):
+        assert not isinstance(getattr(forcing, name), TimeSeries), name
+
+    # The land starts from the file the atmosphere's own land relaxes to:
+    # realistic temperatures over land, and snow somewhere in January.
+    state = carry.components["lnd"]["state"]
+    on_land = np.asarray(land.grid.land_mask)
+    temperature = np.asarray(state.land_surface_temperature)[on_land]
+    assert 200.0 < temperature.min() < 250.0 < temperature.max() < 330.0
+    snow_cover = np.asarray(state.snow_cover)
+    assert snow_cover.max() == 1.0 and snow_cover.min() == 0.0
+    # Greenland and Antarctica are land ice, as they are for SPEEDY's own
+    # land: a minority of the land cells, with a glacier's heat capacity.
+    glacier = np.asarray(carry.components["lnd"]["params"].glacier_fraction)
+    assert glacier.shape == land.grid.shape
+    assert set(np.unique(glacier)) == {0.0, 1.0}
+    assert 0.1 < glacier[on_land].mean() < 0.5
+
+    final, _ = jax.eval_shape(coupler.generate_trajectory_function(1), carry)
+    assert jax.tree_util.tree_structure(final) == jax.tree_util.tree_structure(carry)
+    # The land's own carry, and the fields it writes into the atmosphere's,
+    # come out of a step with the shapes and dtypes they went in with.
+    land_before, land_after = carry.components["lnd"], final.components["lnd"]
+    for before, after in (
+            *((land_before[section], land_after[section])
+              for section in ("state", "forcing", "derived")),
+            *((getattr(forcing, name),
+               getattr(final.components["atm"]["forcing"], name))
+              for name in ("stl_am", "snowc_am", "soilw_am"))):
+        for leaf, final_leaf in zip(
+                jax.tree_util.tree_leaves(before), jax.tree_util.tree_leaves(after)):
+            assert (leaf.shape, leaf.dtype) == (final_leaf.shape, final_leaf.dtype)
+
+
+def test_earth_slab_by_default_leaves_the_land_to_the_atmosphere(caplog):
+    """With `land=none` the atmosphere integrates its own slab land, and the
+    run says so.
+    """
+    with caplog.at_level(logging.INFO, logger="jem.runners"):
+        coupler = runners.build_coupler(composed(["+configuration=earth-slab"]))
+    assert "lnd" not in coupler.components
+    assert coupler.components["atm"].integrates_land_temperature
+    assert ("Land temperature: evolved by the atmosphere's own land"
+            in caplog.text)
+
+
+def test_the_slab_land_over_the_atmospheres_own_land_is_refused():
+    """Undoing half of the `land=slab` switch leaves two slabs warmed by the
+    same flux, which the coupling refuses before anything is integrated.
+    """
+    cfg = composed([
+        "+configuration=earth-slab", "land=slab",
+        "atmosphere.physics.terms.speedy_surface_flux.land_model=slab",
+    ])
+    with pytest.raises(ValueError, match="Two lands would integrate"):
+        runners.build_coupler(cfg)
+
+
+@pytest.mark.slow
+def test_two_coupled_steps_with_the_slab_land_close_the_exchange():
+    """Two real coupled steps of `earth-slab land=slab`, at the seam.
+
+    The exchange is lagged, so what one step leaves in the carry is what the
+    next step's exchange hands over. Checked on the second step: the land was
+    forced by the heat flux the atmosphere published over its land tile in the
+    first, and the atmosphere read the temperature the land held after the
+    first. The land and sea tiles make up the grid-cell mean flux, so the
+    land's share and the ocean's leave nothing out and count nothing twice.
+    And the run is differentiable through the land: the final land
+    temperature responds to the slab's thermal depth.
+    """
+    coupler = runners.build_coupler(composed(
+        ["+configuration=earth-slab", "land=slab"]))
+    land = coupler.components["lnd"]
+    on_land = np.asarray(land.grid.land_mask)
+    carry = coupler.initialize()
+    one_step = coupler.generate_trajectory_function(1)
+    first, _ = one_step(carry)
+    second, _ = one_step(first)
+
+    published = np.asarray(first.components["atm"]["derived"].land_total_heat_flux)
+    received = np.asarray(second.components["lnd"]["forcing"].total_heat_flux)
+    np.testing.assert_array_equal(received, published)
+    assert np.abs(published[on_land]).max() > 1.0
+
+    held = np.asarray(first.components["lnd"]["state"].land_surface_temperature)
+    read_by_atmosphere = np.asarray(second.components["atm"]["forcing"].stl_am)
+    np.testing.assert_array_equal(read_by_atmosphere, held)
+    # The land moved, in both steps.
+    start = np.asarray(carry.components["lnd"]["state"].land_surface_temperature)
+    end = np.asarray(second.components["lnd"]["state"].land_surface_temperature)
+    assert np.abs(held - start)[on_land].max() > 0.0
+    assert np.abs(end - held)[on_land].max() > 0.0
+
+    derived = second.components["atm"]["derived"]
+    sea = np.asarray(derived.sea_fraction)
+    mean = np.asarray(derived.total_heat_flux)
+    shares = (sea * np.asarray(derived.sea_total_heat_flux)
+              + (1.0 - sea) * np.asarray(derived.land_total_heat_flux))
+    np.testing.assert_allclose(shares, mean, rtol=1e-4, atol=1e-3)
+
+    # Two steps in one scan are the two single steps.
+    trajectory = coupler.generate_trajectory_function(2)
+    final, _ = trajectory(carry)
+    np.testing.assert_allclose(
+        np.asarray(final.components["lnd"]["state"].land_surface_temperature),
+        end, rtol=1e-6)
+
+    def mean_land_temperature(depth):
+        components = dict(carry.components)
+        land_carry = dict(components["lnd"])
+        land_carry["params"] = land_carry["params"].replace(soil_thermal_depth=depth)
+        components["lnd"] = land_carry
+        end, _ = trajectory(dataclasses.replace(carry, components=components))
+        temperature = end.components["lnd"]["state"].land_surface_temperature
+        return jnp.sum(jnp.where(land.grid.land_mask, temperature, 0.0))
+
+    depth = jnp.asarray(carry.components["lnd"]["params"].soil_thermal_depth,
+                        dtype=float)
+    gradient = float(jax.grad(mean_land_temperature)(depth))
+    assert np.isfinite(gradient) and gradient != 0.0
+
+
 def test_earth_slab_winton_couples_the_ice_both_ways():
     """`+configuration=earth-slab-winton`: a clamping ocean, the Winton ice
     started from the observed cover, the atmosphere declared to take the

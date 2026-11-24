@@ -93,6 +93,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ATMOSPHERE_SEA_FRACTION",
     "DEFAULT_EXCHANGER_NAME",
+    "SLAB_LAND_EXCHANGES",
     "STANDARD_EXCHANGES",
     "VEROS_COMPONENT_MODULE",
     "VEROS_OCEAN_EXCHANGES",
@@ -107,6 +108,7 @@ __all__ = [
     "default_exchanges",
     "default_workflow",
     "exchanged_fields",
+    "land_temperature_source",
     "read_field",
     "regrid_weighted",
     "replace_field",
@@ -172,6 +174,11 @@ ATMOSPHERE_SEA_PREFIX = "atm.derived.sea_"
 #: component's soil supplies.
 ATMOSPHERE_LAND_EVAPORATION = "atm.derived.land_evaporation"
 
+#: The atmosphere's net surface heat flux over the land part of each cell
+#: (upward positive), which drives a land component that evolves its own
+#: temperature.
+ATMOSPHERE_LAND_HEAT_FLUX = "atm.derived.land_total_heat_flux"
+
 #: The sea part of each cell of a component on the ocean grid, with the
 #: component's name filled in: ``1 - fractional_mask`` for a slab ocean or sea
 #: ice, the wet mask for Veros. A regridded row from one of them onto the
@@ -206,11 +213,12 @@ STANDARD_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     ("ocn.state.sea_surface_temperature",
      "atm.forcing.sea_surface_temperature", "state"),
     ("seaice.derived.ice_fraction", "atm.forcing.sice_am", "flux"),
-    # The soil water of a land component (the bucket): the atmosphere's
-    # precipitation, one value per cell, and its evaporation over the land
-    # part, the land tile; the land hands back SPEEDY's soil water
-    # availability. All on the atmosphere's grid. The land's temperature is
-    # the atmosphere's own (SPEEDY's slab land), so no row carries it.
+    # The soil water of a land component: the atmosphere's precipitation,
+    # one value per cell, and its evaporation over the land part, the land
+    # tile; the land hands back SPEEDY's soil water availability. All on the
+    # atmosphere's grid. These three rows are all a bucket land has, since
+    # its temperature is the atmosphere's own (SPEEDY's slab land); a land
+    # that evolves its temperature adds SLAB_LAND_EXCHANGES.
     ("atm.derived.precipitation", "lnd.forcing.precipitation", "flux"),
     (ATMOSPHERE_LAND_EVAPORATION, "lnd.forcing.evaporation", "flux"),
     ("lnd.derived.soil_water_availability", "atm.forcing.soilw_am", "state"),
@@ -263,6 +271,27 @@ VEROS_OCEAN_EXCHANGES: tuple[tuple[str, str, str], ...] = (
     # over its own wet surface, so no regridding is involved and the water
     # the land loses is the water the ocean gains.
     ("lnd.derived.runoff_mass_rate", "ocn.forcing.runoff_mass_rate", "flux"),
+)
+
+#: What a :class:`~jem.components.slab.slab_land_model.SlabLandModel`
+#: registered as ``"lnd"`` adds to either table, slab or Veros. It evolves the
+#: land's temperature itself, so it takes the atmosphere's net heat flux over
+#: the land part of each cell, and hands the atmosphere the temperature and
+#: the snow cover its land tile reads (SPEEDY's ``stl_am`` and ``snowc_am``,
+#: the latter a cover the atmosphere caps at one). The land is on the
+#: atmosphere's grid, so no row is regridded. The sea part's flux goes to the
+#: ocean (``sea_total_heat_flux``), and the two parts make up the grid-cell
+#: mean, so no part of a cell's flux is applied twice or dropped.
+#:
+#: These rows are only right under an atmosphere whose own land is
+#: *prescribed*, which reads ``stl_am`` as the land's temperature. One that
+#: integrates its own slab land adds its anomaly on top of ``stl_am``, and
+#: two slabs would then both be warmed by the same flux;
+#: :func:`check_land_coupling` refuses that pairing.
+SLAB_LAND_EXCHANGES: tuple[tuple[str, str, str], ...] = (
+    (ATMOSPHERE_LAND_HEAT_FLUX, "lnd.forcing.total_heat_flux", "flux"),
+    ("lnd.state.land_surface_temperature", "atm.forcing.stl_am", "state"),
+    ("lnd.state.snow_cover", "atm.forcing.snowc_am", "state"),
 )
 
 #: What a :class:`~jem.components.slab.winton_seaice_model.WintonSeaiceModel`
@@ -362,6 +391,10 @@ ROW_WEIGHTS: Mapping[str, str] = types.MappingProxyType({
 #: in the process is a Winton model.
 WINTON_COMPONENT_MODULE = (
     "jem.components.slab.winton_seaice_model.winton_seaice_model")
+
+#: Module holding the slab land, looked up in ``sys.modules`` the same way.
+SLAB_LAND_COMPONENT_MODULE = (
+    "jem.components.slab.slab_land_model.slab_land_model")
 
 #: Module holding the ocean wrapper whose carry :data:`VEROS_OCEAN_EXCHANGES`
 #: describes. It is looked up in ``sys.modules`` rather than imported: Veros is
@@ -1095,6 +1128,19 @@ def default_exchanges(
     ``lnd.derived.soil_water_availability``     ``atm.forcing.soilw_am``
     ==========================================  =======================================
 
+    A land that evolves its own temperature, a
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel` registered as
+    ``"lnd"``, adds :data:`SLAB_LAND_EXCHANGES`:
+
+    ==========================================  =======================================
+    ``atm.derived.land_total_heat_flux``        ``lnd.forcing.total_heat_flux``
+    ``lnd.state.land_surface_temperature``      ``atm.forcing.stl_am``
+    ``lnd.state.snow_cover``                    ``atm.forcing.snowc_am``
+    ==========================================  =======================================
+
+    and is refused under an atmosphere that integrates its own land
+    temperature (:func:`check_land_coupling`).
+
     A row survives only if **both** its components are present, so an
     atmosphere/ocean pair gets two rows. The names are
     ``STANDARD_COMPONENT_NAMES``; a component registered under any other
@@ -1238,40 +1284,105 @@ def _check_land_is_forced_by_a_land_tile(
     components: Mapping[str, Component] | Iterable[str],
     specs: list[ExchangeSpec],
 ) -> None:
-    """Apply :func:`check_land_coupling` to a table with a land-evaporation row."""
-    if not any(spec.src == ATMOSPHERE_LAND_EVAPORATION for spec in specs):
+    """Apply :func:`check_land_coupling` to a table that forces a land."""
+    land_sources = {ATMOSPHERE_LAND_EVAPORATION, ATMOSPHERE_LAND_HEAT_FLUX}
+    if not any(spec.src in land_sources for spec in specs):
         return
     check_land_coupling(components)
+
+
+def _is_slab_land(components: Mapping[str, Component] | Iterable[str]) -> bool:
+    """Whether ``"lnd"`` evolves its own temperature (never, for a list of names)."""
+    if not isinstance(components, Mapping):
+        return False
+    module = sys.modules.get(SLAB_LAND_COMPONENT_MODULE)
+    return module is not None and isinstance(
+        components.get("lnd"), module.SlabLandModel)
 
 
 def check_land_coupling(
     components: Mapping[str, Component] | Iterable[str],
 ) -> None:
-    """Refuse a land component under an atmosphere with no land tile.
+    """Refuse a land component the atmosphere cannot be coupled to faithfully.
 
     One rule for every exchange that forces a land: the standard table
     (:func:`default_exchanges`) and :class:`jem.fluxes.VerosExchange` both
-    call it.
+    call it. Only a real atmosphere can be asked: one without the attributes
+    read here (a stand-in, or names alone) is not checked.
 
-    The land takes the atmosphere's evaporation over the land part of each
-    cell. A physics package that publishes no land flux tile (ECHAM delivers
-    its fluxes untiled) leaves ``land_evaporation`` at the grid-cell mean,
-    which would charge the soil with the sea's evaporation on every coastal
-    cell. Only a real atmosphere can be asked: one without
-    ``publishes_land_evaporation`` (a stand-in, or names alone) is not checked.
+    **It needs a land tile.** The land takes the atmosphere's evaporation
+    over the land part of each cell, and a land that evolves its temperature
+    the net heat flux over it. A physics package that publishes no land flux
+    tile (ECHAM delivers its fluxes untiled) leaves both at the grid-cell
+    mean, which would charge the land with the sea's share on every coastal
+    cell.
+
+    **One land integrates the temperature.** A
+    :class:`~jem.components.slab.slab_land_model.SlabLandModel` hands the
+    atmosphere its temperature as ``stl_am``. An atmosphere whose own land is
+    prescribed reads that as the land's temperature. One that integrates its
+    own slab land (SPEEDY's default) reads it as the climatology its anomaly
+    is added to, so the land the fluxes see would be the component's
+    temperature plus a second slab's response to the same flux. Which of the
+    two lands runs is therefore one choice made in two places, and this is
+    where they are held together.
     """
     if not isinstance(components, Mapping):
         return
-    if getattr(components.get("atm"), "publishes_land_evaporation", True):
-        return
-    raise ValueError(
-        "The land component takes the atmosphere's evaporation over the land "
-        f"part of each cell ({ATMOSPHERE_LAND_EVAPORATION}), but the "
-        "atmosphere's physics publishes no land flux tile -- ECHAM delivers its "
-        "fluxes untiled -- so the soil would be charged with the grid-cell "
-        "mean, the sea's evaporation included. Couple a land to SPEEDY "
-        "physics, or leave land=none."
-    )
+    atmosphere = components.get("atm")
+    if not getattr(atmosphere, "publishes_land_evaporation", True):
+        raise ValueError(
+            "The land component takes the atmosphere's fluxes over the land "
+            f"part of each cell ({ATMOSPHERE_LAND_EVAPORATION}, and "
+            f"{ATMOSPHERE_LAND_HEAT_FLUX} for a land with a temperature), but "
+            "the atmosphere's physics publishes no land flux tile -- ECHAM "
+            "delivers its fluxes untiled -- so the land would be charged with "
+            "the grid-cell mean, the sea's share included. Couple a land to "
+            "SPEEDY physics, or leave land=none."
+        )
+    if _is_slab_land(components) and getattr(
+            atmosphere, "integrates_land_temperature", False):
+        raise ValueError(
+            "Two lands would integrate the land temperature: the land "
+            f"component {type(components['lnd']).__name__} evolves it and hands "
+            "it to the atmosphere as stl_am, and the atmosphere's own physics "
+            "evolves a slab land on top of stl_am as well. Choose one. For the "
+            "component, build the atmosphere with its land prescribed -- "
+            "jcm.physics.speedy.speedy_terms.speedy_physics(land_model="
+            "\"prescribed\") in Python; land=slab does it on the command line "
+            "(atmosphere.physics.terms.speedy_surface_flux.land_model="
+            "prescribed). For the atmosphere's own land, leave land=none, or "
+            "land=bucket to evolve only its soil water."
+        )
+
+
+def land_temperature_source(
+    components: Mapping[str, Component] | Iterable[str],
+) -> str:
+    """Say, in a phrase, what the land's temperature is in this coupled model.
+
+    The answer depends on two things chosen in different places -- whether a
+    land component that evolves a temperature is present, and whether the
+    atmosphere's own physics integrates a land -- so it is stated in one
+    place, for a log line or a notebook, rather than left to be worked out.
+    A stand-in atmosphere that cannot be asked counts as having no land of
+    its own.
+    """
+    if not isinstance(components, Mapping):
+        return "unknown (component names only)"
+    atmosphere = components.get("atm")
+    own = getattr(atmosphere, "integrates_land_temperature", False)
+    if _is_slab_land(components):
+        land = type(components["lnd"]).__name__
+        if own:
+            return (f"evolved twice, by the land component ({land}) and by the "
+                    "atmosphere's own land -- a pairing the standard coupling refuses")
+        return (f"evolved by the land component ({land}); the atmosphere's own "
+                "land is prescribed and reads it")
+    if own:
+        return "evolved by the atmosphere's own land, inside its physics"
+    return ("prescribed: the atmosphere's boundary condition, which neither "
+            "its physics nor a land component evolves")
 
 
 #: Where a clamping ocean publishes the deficit its clamp removed.
@@ -1407,7 +1518,19 @@ def _exchange_table(
     :data:`WINTON_SEAICE_EXCHANGES`' (the slab table) or, over Veros, the
     heat and freshwater rows by :data:`VEROS_WINTON_SEAICE_EXCHANGES`'
     (:func:`check_winton_coupling` refuses an ocean that does not clamp).
+    With a :class:`~jem.components.slab.slab_land_model.SlabLandModel` either
+    table gains :data:`SLAB_LAND_EXCHANGES`.
     """
+    rows = _ocean_and_seaice_table(components)
+    if _is_slab_land(components):
+        return rows + SLAB_LAND_EXCHANGES
+    return rows
+
+
+def _ocean_and_seaice_table(
+    components: Mapping[str, Component] | Iterable[str],
+) -> tuple[tuple[str, str, str], ...]:
+    """Return the table the ocean and the sea ice select; see :func:`_exchange_table`."""
     winton = _is_winton(components)
     ocean = components.get("ocn") if isinstance(components, Mapping) else None
     if not _is_veros_ocean(ocean):

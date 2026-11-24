@@ -1,0 +1,76 @@
+# @package _global_
+# JEM's own slab land (`jem.components.SlabLandModel`) in place of the
+# atmosphere's built-in one: the land's temperature, snow, soil water,
+# vegetation and albedo live in a JEM component the coupler steps, forced by
+# the atmosphere's fluxes over the land part of each cell. The runner injects
+# `grid=` (the atmosphere's).
+#
+#   python -m jem.main +configuration=earth-slab land=slab
+#
+# Choosing it is ONE switch that sets two things, which is why this file is
+# packaged at the root and reaches into `atmosphere`:
+#
+#  - `land`: the component.
+#  - `atmosphere.physics.terms.speedy_surface_flux.land_model: prescribed`:
+#    SPEEDY's own slab land is turned off, so its land tile reads the
+#    temperature this component hands it (`stl_am`) instead of adding its own
+#    slab's anomaly to it. Left on, two slabs would be warmed by the same
+#    flux; the coupling refuses that pairing
+#    (`jem.exchangers.check_land_coupling`). The key exists only for SPEEDY
+#    physics, which is also the only package that publishes the land tile a
+#    land component needs.
+#
+# WHY each setting below (everything else is the component's Python default):
+#
+#  - `land_clim_file` is the atmosphere's own boundary file, so both lands
+#    are tied to the same observed climatology, read under jax-gcm's variable
+#    names (`stl`, `snowc`, `soilw_am`, `alb`). jax-gcm stores `snowc` as snow
+#    depth over its cover scale, hence `snow_depth_units_in_clim_file: cover`.
+#    The atmosphere therefore has to read its boundary conditions from a file
+#    (`forcing=from_file`), as every configuration with land does; beside one
+#    that does not, this option does not compose (the interpolation has
+#    nothing to read) until `land.land_clim_file=<file>` names one.
+#  - `land_surface_temperature_from_clim_file: true` is SPEEDY's scheme: the
+#    temperature anomaly about that climatology is forced by the land's heat
+#    flux and damped on `params.temperature_relaxation_timescale`. It is what
+#    makes this the like-for-like alternative to the built-in land; set it
+#    false for a slab that runs free of the climatology (and drifts).
+#  - `snow_depth_from_clim_file: true`: the model has no snow budget, so
+#    without the climatology the snow would stay at its start-date value all
+#    year.
+#  - `initialize_from_clim_file: true`: start at the start month's
+#    climatology (temperature, snow, soil water) instead of a uniform 15 degC
+#    with no snow.
+#  - `glacier_fraction_from_albedo: true`: land ice has about four times the
+#    heat capacity of soil, and jax-gcm's boundary files mark it only through
+#    their background albedo (`alb`), which is how SPEEDY's own land tells the
+#    two apart. Without it Greenland and Antarctica are soil, and in a 30-day
+#    January run they end 11 K warmer than under the built-in land.
+#
+# The soil water is NOT prescribed: the two-layer bucket evolves it and hands
+# the atmosphere the availability it diagnoses, as `land=bucket` does. Append
+# `+land.soil_water_availability_from_clim_file=true` to prescribe it as the
+# built-in land has it.
+#
+# A Veros configuration couples through `jem.fluxes.VerosExchange`, which
+# cannot be read off like a table: add `stl_am`, `snowc_am` and `soilw_am` to
+# its `coupling.exchanged_forcing` when composing `land=slab` into it.
+land:
+  _target_: jem.components.SlabLandModel
+  land_clim_file: ${atmosphere.forcing.file}
+  land_surface_temperature_varname_in_clim_file: stl
+  snow_depth_varname_in_clim_file: snowc
+  snow_depth_units_in_clim_file: cover
+  soil_water_availability_varname_in_clim_file: soilw_am
+  surface_albedo_varname_in_clim_file: alb
+  land_surface_temperature_from_clim_file: true
+  snow_depth_from_clim_file: true
+  initialize_from_clim_file: true
+  glacier_fraction_from_albedo: true
+  params:
+    _target_: jem.components.slab.SlabLandParameters
+atmosphere:
+  physics:
+    terms:
+      speedy_surface_flux:
+        land_model: prescribed

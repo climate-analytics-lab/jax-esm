@@ -52,6 +52,7 @@ from jem.exchangers import (
     Exchange,
     default_exchangers,
     exchanged_fields,
+    land_temperature_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -994,6 +995,10 @@ def build_coupler(cfg: DictConfig) -> Coupler:
     declare_exchanged_forcing(cfg, atm, exchangers, workflow=coupler.workflow)
     _validate_exchangers(coupler)
     logger.info("Built %r", coupler)
+    # Which land integrates the temperature follows from two settings made in
+    # different groups (`land` and the atmosphere's physics), so the run says
+    # which it is.
+    logger.info("Land temperature: %s.", land_temperature_source(components))
     return coupler
 
 
