@@ -11,7 +11,9 @@ import pytest
 from jem.components.slab.bucket_land_model import (
     BucketLandModel,
     BucketLandParameters,
+    initial_soil_water,
     soil_water_availability,
+    step_soil_water,
 )
 from tests.unit.slab_test_utils import (
     TIMESTEP,
@@ -237,7 +239,7 @@ def test_output_is_labelled(model):
     dataset = model.to_xarray(stacked, time_axis(2))
     assert dataset["soil_water_content"].dims == ("time", "lon", "lat", "soil_layer")
     assert dataset["runoff_mass_rate"].dims == ("time",)
-    assert dataset["forcing_evaporation"].attrs["jem_role"] == "forcing"
+    assert dataset["forcing_land_evaporation"].attrs["jem_role"] == "forcing"
     assert dataset["soil_water_availability"].attrs["jem_role"] == "derived"
 
 
@@ -269,3 +271,50 @@ def test_a_grid_without_cell_areas_is_refused():
     grid = dataclasses.replace(make_grid(LAND_FRACTION), cell_solid_angle=None)
     with pytest.raises(ValueError, match="cell areas"):
         BucketLandModel(grid)
+
+
+def test_the_extracted_step_is_the_models_step(model, grid):
+    """``BucketLandModel.step`` is ``step_soil_water`` with the uniform vegetation parameter."""
+    params = model.params
+    carry = _forced(model.initialize(), precipitation=3e-5, evaporation=2e-5)
+    stepped, _ = model.step(carry, coupling_time(0))
+    water, derived = step_soil_water(
+        carry["state"].soil_water_content, carry["forcing"].precipitation,
+        carry["forcing"].evaporation, TIMESTEP, params, params.vegetation_fraction, grid)
+    np.testing.assert_array_equal(
+        np.asarray(water), np.asarray(stepped["state"].soil_water_content))
+    for name in ("soil_water_availability", "deep_drainage", "soil_water_overflow",
+                 "runoff", "unmet_evaporation", "runoff_mass_rate"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(derived, name)),
+            np.asarray(getattr(stepped["derived"], name)), err_msg=name)
+
+
+def test_the_extracted_step_takes_the_vegetation_fraction_it_is_given(model, grid):
+    """A map of vegetation, not ``params.vegetation_fraction``, weights the deep layer."""
+    params = model.params
+    water = jnp.where(jnp.asarray(LAND_FRACTION > 0.0)[..., None],
+                      jnp.asarray([0.20, 0.25]), 0.0)
+    zeros = jnp.zeros(grid.shape)
+
+    def availability(vegetation):
+        _, derived = step_soil_water(water, zeros, zeros, TIMESTEP, params, vegetation, grid)
+        return np.asarray(derived.soil_water_availability)
+
+    land = LAND_FRACTION > 0.0
+    bare, leafy = availability(jnp.zeros(grid.shape)), availability(jnp.ones(grid.shape))
+    assert np.all(leafy[land] > bare[land])
+    np.testing.assert_array_equal(
+        availability(params.vegetation_fraction), availability(0.8 * jnp.ones(grid.shape)))
+
+
+def test_the_extracted_initial_condition_is_the_models(tmp_path, grid):
+    path = write_climatology(
+        tmp_path / "soilw.nc", "soilw_am", np.full((12, 3, 4), 0.3, dtype=np.float32))
+    for model in (BucketLandModel(grid), BucketLandModel(grid, soil_water_clim_file=path)):
+        params = model.params
+        water = initial_soil_water(
+            grid.land_mask, params, params.vegetation_fraction,
+            model.soil_water_climatology, model.start_year_fraction)
+        np.testing.assert_array_equal(
+            np.asarray(water), np.asarray(model.initialize()["state"].soil_water_content))

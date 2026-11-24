@@ -25,9 +25,11 @@ from jem.components.slab import (
     BucketLandModel,
     SlabAtmosphereModel,
     SlabGrid,
+    SlabLandModel,
     SlabOceanModel,
     SlabOceanParameters,
     SlabSeaiceModel,
+    WintonSeaiceModel,
 )
 from tests.unit.slab_test_utils import make_grid, run_steps, time_axis
 
@@ -57,6 +59,7 @@ def slab_models() -> dict:
         ),
         "seaice": SlabSeaiceModel(grid, name="seaice"),
         "lnd": BucketLandModel(grid),
+        "slab_lnd": SlabLandModel(grid, name="lnd"),
     }
 
 
@@ -115,7 +118,24 @@ def test_the_roles_are_the_ones_each_variable_actually_has(datasets):
             "unmet_evaporation": "derived",
             "runoff_mass_rate": "derived",
             "forcing_precipitation": "forcing",
-            "forcing_evaporation": "forcing",
+            "forcing_land_evaporation": "forcing",
+        },
+        "slab_lnd": {
+            "land_surface_temperature": "state",
+            "snow_depth": "state",
+            "snow_cover": "state",
+            "soil_water_content": "state",
+            "vegetation_fraction": "state",
+            "surface_albedo": "derived",
+            "soil_water_availability": "derived",
+            "deep_drainage": "derived",
+            "soil_water_overflow": "derived",
+            "runoff": "derived",
+            "unmet_evaporation": "derived",
+            "runoff_mass_rate": "derived",
+            "forcing_land_total_heat_flux": "forcing",
+            "forcing_precipitation": "forcing",
+            "forcing_land_evaporation": "forcing",
         },
     }
     for name, roles in expected.items():
@@ -147,9 +167,12 @@ def test_the_roles_survive_a_merge_of_all_the_slabs(datasets):
     of the merged file uses to tell the sea surface temperature the ocean
     computed from the copy another component was given.
     """
-    merged = xr.merge(datasets.values(), join="exact", compat="no_conflicts")
+    # The slab land is a second land under the same variable names as the
+    # bucket, so it is not one of the components of a single run.
+    run = {name: dataset for name, dataset in datasets.items() if name != "slab_lnd"}
+    merged = xr.merge(run.values(), join="exact", compat="no_conflicts")
 
-    for name, dataset in datasets.items():
+    for name, dataset in run.items():
         for variable_name, variable in dataset.data_vars.items():
             assert merged[variable_name].attrs[ROLE_ATTRIBUTE] == (
                 variable.attrs[ROLE_ATTRIBUTE]
@@ -161,11 +184,39 @@ def test_the_roles_survive_a_merge_of_all_the_slabs(datasets):
         "forcing_q_flux",
         "forcing_sea_surface_temperature",
         "forcing_precipitation",
-        "forcing_evaporation",
+        "forcing_land_evaporation",
     }
     assert "sea_surface_temperature" in map(
         str, merged.filter_by_attrs(**{ROLE_ATTRIBUTE: "state"})
     )
+
+
+@pytest.mark.parametrize("land_model", [BucketLandModel, SlabLandModel])
+def test_a_lands_output_merges_with_a_winton_sea_ices(land_model):
+    """A land and a Winton sea ice are forced by the same atmosphere fluxes
+    over different parts of the cell: the evaporation and (for a land with a
+    temperature) the net heat flux over the land part, and the same two over
+    the sea part. Their values differ, so the two datasets merge only because
+    the land writes its own under the land tile's names.
+    """
+    grid = half_land_grid()
+
+    def output(model, **forcing):
+        carry = model.initialize()
+        fields = {
+            name: jnp.full_like(getattr(carry["forcing"], name), value)
+            for name, value in forcing.items() if hasattr(carry["forcing"], name)
+        }
+        carry = dict(carry, forcing=carry["forcing"].replace(**fields))
+        _, diagnostics = run_steps(model, carry, N_STEPS)
+        return model.to_xarray(diagnostics, time_axis(N_STEPS))
+
+    land = output(land_model(grid), evaporation=1e-5, total_heat_flux=-30.0)
+    seaice = output(WintonSeaiceModel(grid), evaporation=2e-5, total_heat_flux=5.0)
+    shared = set(land.data_vars) & set(seaice.data_vars)
+    assert not shared
+    merged = xr.merge([land, seaice], join="exact", compat="no_conflicts")
+    assert "forcing_land_evaporation" in merged and "forcing_evaporation" in merged
 
 
 def test_role_attrs_returns_a_fresh_dict_each_time():
